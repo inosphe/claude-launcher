@@ -7483,6 +7483,15 @@ body.embed #main { width: 100%; }
    Hide and Remind are one decision — what to do with the card while the
    person thinks — so they sit together as one item of the actions row. */
 .gate-aside { display: inline-flex; gap: 8px; }
+/* Remind's waits are three exclusive presses, one per wait (claunch-gnlui),
+   drawn as one segmented group after a "Remind" caption so they read as a
+   choice of when rather than as three unrelated actions. */
+.gate-remind { display: inline-flex; align-items: center; gap: 0; }
+.gate-remind-label { color: #9da5b0; font-size: 11px; margin-right: 6px; }
+.gate-actions .gate-remind .wf-btn { padding: 3px 7px; border-radius: 0; }
+.gate-actions .gate-remind .wf-btn + .wf-btn { border-left-width: 0; }
+.gate-actions .gate-remind .wf-btn:first-of-type { border-radius: 4px 0 0 4px; }
+.gate-actions .gate-remind .wf-btn:last-of-type { border-radius: 0 4px 4px 0; }
 /* A session named on a gate card opens that session. Marked as a press the
    way the run list marks its own session line, so it reads as one before it
    is hovered: the card is read once and answered, and a link nobody can see

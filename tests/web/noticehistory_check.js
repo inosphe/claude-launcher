@@ -57,17 +57,17 @@
    this browser's other tabs; a request that leaves the pending set is
    forgotten, so a later one the daemon gives the same id is unread again.
 
-   Reminders (claunch-6scxn): Remind beside Hide puts a card aside and brings
-   it back at 1h, 6h and 24h, each step counted from the press rather than
-   from when the request arrived. The card that comes back carries the press
-   that continues the ladder — `since` stands and the card goes down until the
-   step the chip names, which is the only way 6h and 24h are ever seen — and
-   only a spent ladder starts a fresh hour. Every gate kind is put through the
-   pair and its own poll (s490-rev: one kind reverting to the old Hide path
-   used to leave this green). It is a state of its own — Hide clears a
-   reminder, Show card ends one, and a reminder whose request settles is
-   forgotten with it — and the one-second tick that carries it writes nothing
-   while no step is due, which is the cost contract claunch-qnq1c. */
+   Reminders (claunch-6scxn, claunch-gnlui): beside Hide sit three exclusive
+   waits, 1h, 6h and 24h. A pick puts the card aside and brings it back once,
+   that long after the press rather than after the request arrived; a second
+   pick replaces the first, and a fired reminder is gone. A record the staged
+   first cut saved is read as the one wait it was on. Every gate kind is put
+   through the presses and its own poll (s490-rev: one kind reverting to the
+   old Hide path used to leave this green). It is a state of its own — Hide
+   clears a reminder, Show card ends one, and a reminder whose request
+   settles is forgotten with it — and the one-second tick that carries it
+   writes nothing while nothing is due, which is the cost contract
+   claunch-qnq1c. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -300,7 +300,7 @@ function build(opts) {
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
     " gateRemind, gateRemindOf, gateRemindDown, gateRemindLabel, gateRemindClear," +
-    " noticeRemindPaint, gateCardAside, NOTICE_REMIND_STEPS, gateUnhide, gateHide," +
+    " noticeRemindPaint, gateCardAside, NOTICE_REMIND_CHOICES, gateUnhide, gateHide," +
     " railSkewOf, noteRailReconnect, openedOnThisClock," +
     " get railSkew() { return railClockSkew; }," +
     // The rail poll is outside this slice, so a check that needs the page's
@@ -1756,144 +1756,138 @@ function gotoRec(rec) {
           src.split("function noticeWaitOrder(").length - 1 === 0);
   }
 
-  /* --- Remind: the card goes and comes back at 1h, 6h, 24h ----------- */
-  /* (claunch-6scxn) A waiting request the reader does not want to answer
-     now, but does want back later. The press takes the card down and the
-     card comes back at 1h, 6h and 24h — each step counted from the press,
-     which is what the user asked for (「누른시간으로부터 재줘」), so a
-     request that already stood for hours still returns an hour after the
-     press. It is a state of its own: Hide says "I have dealt with this",
-     Remind says "show me again at 1h", and a set that held both would make
-     the panel's hidden line lie about whichever it did not mean. */
+  /* --- Remind: pick 1h, 6h or 24h; the card comes back once ---------- */
+  /* (claunch-6scxn, claunch-gnlui) A waiting request the reader does not
+     want to answer now, but does want back later. The card offers three
+     exclusive waits; the pick takes the card down and the card comes back
+     once, that long after the press — counted from the press, which is what
+     the user asked for (「누른시간으로부터 재줘」). It is a state of its own:
+     Hide says "I have dealt with this", Remind says "show me again at 6h",
+     and a set that held both would make the panel's hidden line lie about
+     whichever it did not mean. */
   {
     const w = build();
     w.gate.goto = [gotoRec()];
     await w.api.refreshGotoGate();
     check("the goto card is up before Remind", w.strip().length === 1, w.said());
-    const remind = w.press(w.nodes.notices, "Remind");
-    check("a gate card offers Remind beside Hide",
-          !!remind && !!w.press(w.nodes.notices, "Hide"),
-          w.api.mk ? w.said() : w.said());
-    remind.click();
-    check("Remind takes the card down", w.strip().length === 0, w.said());
+    const picks = ["1h", "6h", "24h"].map((l) => w.press(w.nodes.notices, l));
+    check("a gate card offers the three waits beside Hide",
+          picks.every((b) => !!b) && !!w.press(w.nodes.notices, "Hide"), w.said());
+    check("and no single Remind press that walks them all",
+          !w.press(w.nodes.notices, "Remind") ||
+            w.press(w.nodes.notices, "Remind").className.includes("gate-remind-label"),
+          w.said());
+    picks[1].click();
+    check("6h takes the card down", w.strip().length === 0, w.said());
     check("the request stays open on the daemon",
           w.api.gatePending.goto.length === 1, w.api.gatePending.goto);
     check("and it is a reminder, not a hide",
           w.api.gateRemindDown("goto", "g1") === true &&
             w.api.gateIsHidden("goto", "g1") === false,
           [w.api.gateRemindDown("goto", "g1"), w.api.gateIsHidden("goto", "g1")]);
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("the record waits 6h from the press",
+          rec.after === 6 * 3600e3 && rec.due === rec.since + 6 * 3600e3,
+          rec);
     // The poll that runs before the reminder comes due must not put it back:
     // the card is down because the reader asked for that, not because the
     // page lost track of it.
     await w.api.refreshGotoGate();
     check("a poll does not put a reminded card back", w.strip().length === 0, w.said());
 
-    // Nothing is due yet, and the second pass writes nothing: the tick runs
-    // once a second over every open page, so the cost of an idle reminder is
-    // the contract (claunch-qnq1c).
+    // Nothing is due at 1h, and the pass writes nothing: the tick runs once
+    // a second over every open page, so the cost of an idle reminder is the
+    // contract (claunch-qnq1c). A 6h pick is not a 1h step on the way.
     const callsBefore = w.apiCalls.length;
     const nodesBefore = w.nodes.notices.children.length;
-    w.clock.at += 59 * 60 * 1000;
+    w.clock.at = rec.since + 3600e3;
     w.api.noticeRemindPaint();
     await new Promise((r) => setImmediate(r));
-    check("a reminder that is not due refreshes nothing and touches no DOM",
+    check("at 1h a 6h reminder refreshes nothing and touches no DOM",
           w.apiCalls.length === callsBefore &&
-            w.nodes.notices.children.length === nodesBefore,
+            w.nodes.notices.children.length === nodesBefore &&
+            w.strip().length === 0,
           [w.apiCalls.length - callsBefore, w.nodes.notices.children.length]);
 
-    // 1h after the press: the card comes back, and the press now on it says
-    // which step comes next rather than starting the sequence over.
-    w.clock.at += 60 * 1000;
+    w.clock.at = rec.since + 6 * 3600e3;
     w.api.noticeRemindPaint();
     await new Promise((r) => setImmediate(r));
-    check("at 1h the card comes back", w.strip().length === 1, w.said());
-    check("and says which reminder is next", /remind 6h/.test(w.said()), w.said());
+    check("at 6h the card comes back", w.strip().length === 1, w.said());
+    check("and the reminder is gone rather than re-armed",
+          w.api.gateRemindOf("goto", "g1") === null, w.api.gateRemindOf("goto", "g1"));
+    check("the returned card offers the three waits again",
+          ["1h", "6h", "24h"].every((l) => !!w.press(w.strip()[0], l)), w.said());
 
-    // 6h after the press, then 24h: each step re-arms the next one.
-    w.clock.at += 5 * 60 * 60 * 1000;
+    // Nothing else is scheduled: a day later the card is where it was.
+    w.clock.at = rec.since + 48 * 3600e3;
     w.api.noticeRemindPaint();
-    await new Promise((r) => setImmediate(r));
-    check("at 6h the next step is the 24h one", /remind 24h/.test(w.said()), w.said());
-    w.clock.at += 18 * 60 * 60 * 1000;
-    w.api.noticeRemindPaint();
-    await new Promise((r) => setImmediate(r));
-    check("after the 24h step nothing is left to remind",
-          !/remind \d/.test(w.said()), w.said());
-    check("and the reminder is spent rather than dropped",
-          w.api.gateRemindOf("goto", "g1").due === null,
-          w.api.gateRemindOf("goto", "g1"));
-    check("the card is still up", w.strip().length === 1, w.said());
-
-    // A spent reminder is not a hide: the card is where the reader asked it
-    // to be, and the request is still waiting.
-    check("a spent reminder does not hide the card",
-          w.api.gateCardAside("goto", "g1") === false,
-          w.api.gateCardAside("goto", "g1"));
+    await w.api.refreshGotoGate();
+    check("a fired reminder does not hide the card later",
+          w.strip().length === 1 && w.api.gateCardAside("goto", "g1") === false,
+          w.said());
   }
 
-  /* --- the ladder goes on from the card it brought back ---------------- */
-  /* (s597-rev / s511-rev / s1236-rev2, claunch-6scxn) A card that is up
-     because a step fired is the only place the later steps can be asked
-     for, and its Remind press used to start over at 1h — so 6h and 24h were
-     printed but never seen: the card was already up when they fired, and
-     the one press that could put it down rewound the ladder. The press on a
-     returned card continues it instead: `since` stands and the card goes
-     down until the step the chip names. Only a spent ladder (24h behind it)
-     starts a fresh hour. */
+  /* --- each wait is its own choice ------------------------------------- */
+  /* (claunch-gnlui) The first cut had one Remind press walk 1h, 6h and 24h
+     in turn. Each button now files exactly its own wait, and a second pick
+     replaces the first instead of adding a step. */
   {
+    for (const [label, hours] of [["1h", 1], ["6h", 6], ["24h", 24]]) {
+      const w = build();
+      w.gate.goto = [gotoRec()];
+      await w.api.refreshGotoGate();
+      w.press(w.strip()[0], label).click();
+      const rec = w.api.gateRemindOf("goto", "g1");
+      check(`${label}: files a ${hours}h wait`,
+            !!rec && rec.after === hours * 3600e3 && rec.due === w.clock.at + hours * 3600e3,
+            rec);
+      w.clock.at += hours * 3600e3 - 1000;
+      w.api.noticeRemindPaint();
+      await new Promise((r) => setImmediate(r));
+      check(`${label}: still down a second before`, w.strip().length === 0, w.said());
+      w.clock.at += 1000;
+      w.api.noticeRemindPaint();
+      await new Promise((r) => setImmediate(r));
+      check(`${label}: back at ${hours}h, once`,
+            w.strip().length === 1 && w.api.gateRemindOf("goto", "g1") === null,
+            w.said());
+    }
+
+    // A second pick from the panel row replaces the first.
     const w = build();
     w.gate.goto = [gotoRec()];
     await w.api.refreshGotoGate();
-    w.press(w.strip()[0], "Remind").click();
-    const since = w.api.gateRemindOf("goto", "g1").since;
+    w.press(w.strip()[0], "24h").click();
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    w.clock.at += 60000;
+    w.press(row(), "1h").click();
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("a second pick replaces the first",
+          rec.after === 3600e3 && rec.due === w.clock.at + 3600e3, rec);
+    check("and the row names the new wait",
+          /remind 1h/.test(row().text()) && !/remind 24h/.test(row().text()),
+          row().text());
+  }
 
-    w.clock.at = since + 3600e3;
-    w.api.noticeRemindPaint();
-    await new Promise((r) => setImmediate(r));
-    check("the 1h step brings the card back", w.strip().length === 1, w.said());
-    let rec = w.api.gateRemindOf("goto", "g1");
-    check("and the record waits on 6h", rec.stage === 1 && rec.due === since + 6 * 3600e3,
-          [rec.stage, rec.due - since]);
-
-    w.clock.at = since + 3600e3 + 60000;
-    w.press(w.strip()[0], "Remind").click();
-    check("Remind on the returned card takes it down again", w.strip().length === 0, w.said());
-    rec = w.api.gateRemindOf("goto", "g1");
-    check("keeping the press it counts from", rec.since === since, [rec.since, since]);
-    check("and the 6h wait, not a fresh hour",
-          rec.stage === 1 && rec.due === since + 6 * 3600e3 && rec.down === true,
-          [rec.stage, rec.due - since, rec.down]);
-    await w.api.refreshGotoGate();
-    check("a poll leaves it down on the longer wait", w.strip().length === 0, w.said());
-
-    // 6h: back again, and the press now asks for 24h.
-    w.clock.at = since + 6 * 3600e3;
-    w.api.noticeRemindPaint();
-    await new Promise((r) => setImmediate(r));
-    check("the 6h step brings the card back", w.strip().length === 1, w.said());
-    check("naming the 24h wait", /remind 24h/.test(w.said()), w.said());
-    w.press(w.strip()[0], "Remind").click();
-    check("and Remind puts it down for 24h", w.strip().length === 0, w.said());
-    rec = w.api.gateRemindOf("goto", "g1");
-    check("the third step is still counted from the press",
-          rec.stage === 2 && rec.due === since + 24 * 3600e3 && rec.down === true,
-          [rec.stage, rec.due - since, rec.down]);
-
-    // 24h: the last step, after which the ladder is spent.
-    w.clock.at = since + 24 * 3600e3;
-    w.api.noticeRemindPaint();
-    await new Promise((r) => setImmediate(r));
-    check("the 24h step brings the card back for the last time",
-          w.strip().length === 1 && !/remind \d/.test(w.said()), w.said());
-    check("and nothing is left scheduled", w.api.gateRemindOf("goto", "g1").due === null,
-          w.api.gateRemindOf("goto", "g1"));
-    // A spent ladder is the one press that starts over, because there is no
-    // next step to continue to.
-    w.press(w.strip()[0], "Remind").click();
-    rec = w.api.gateRemindOf("goto", "g1");
-    check("after the last step Remind starts a fresh hour",
-          rec.stage === 0 && rec.due === w.clock.at + 3600e3 && rec.down === true,
-          [rec.stage, rec.due - w.clock.at]);
+  /* --- a reminder saved by the staged first cut ----------------------- */
+  /* A browser that pressed the old Remind kept {since, stage, due, down}.
+     Still down, it comes back when it was going to; already up, nothing is
+     left to wait for. */
+  {
+    const storage = memoryStorage();
+    storage.setItem("claunch.noticeRemind", JSON.stringify({
+      "goto:g1": { type: "goto", rid: "g1", since: BASE, stage: 1,
+                   due: BASE + 6 * 3600e3, down: true },
+      "goto:g2": { type: "goto", rid: "g2", since: BASE, stage: 1,
+                   due: BASE + 6 * 3600e3, down: false },
+    }));
+    const w = build({ storage });
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("an old record still down keeps its due time",
+          !!rec && rec.due === BASE + 6 * 3600e3 && rec.after === 6 * 3600e3, rec);
+    check("an old record already up is dropped",
+          w.api.gateRemindOf("goto", "g2") === null, w.api.gateRemindOf("goto", "g2"));
   }
 
   /* --- every gate kind carries both presses --------------------------- */
@@ -1952,11 +1946,11 @@ function gotoRec(rec) {
       check(`${type}: one card`, w.strip().length === 1, w.said());
       const card = w.strip()[0] || { text: () => "" };
       const hide = w.press(card, "Hide");
-      const remind = w.press(card, "Remind");
-      check(`${type}: the card offers Hide and Remind`, !!hide && !!remind, card.text());
+      const remind = w.press(card, "24h");
+      check(`${type}: the card offers Hide and the Remind waits`, !!hide && !!remind, card.text());
       if (!remind) continue;
       remind.click();
-      check(`${type}: Remind takes the card down`, w.strip().length === 0, w.said());
+      check(`${type}: 24h takes the card down`, w.strip().length === 0, w.said());
       await poll(w);
       check(`${type}: and its next poll leaves it down`, w.strip().length === 0, w.said());
       check(`${type}: as a reminder, not a hide`,
@@ -1975,7 +1969,7 @@ function gotoRec(rec) {
     await w.api.refreshGotoGate();
     w.api.gateHistoryOpened("goto", "g1", (BASE - 5 * 3600e3) / 1000);
     w.api.noticePanelPaint();
-    w.press(w.nodes.notices, "Remind").click();
+    w.press(w.nodes.notices, "1h").click();
     w.clock.at += 30 * 60 * 1000;
     w.api.noticeRemindPaint();
     await new Promise((r) => setImmediate(r));
@@ -1993,7 +1987,7 @@ function gotoRec(rec) {
     const w = build();
     w.gate.goto = [gotoRec()];
     await w.api.refreshGotoGate();
-    w.press(w.nodes.notices, "Remind").click();
+    w.press(w.nodes.notices, "1h").click();
     check("Remind alone puts the request in the reminder state",
           !!w.api.gateRemindOf("goto", "g1") &&
             w.api.gateIsHidden("goto", "g1") === false);
@@ -2015,7 +2009,7 @@ function gotoRec(rec) {
     const w = build();
     w.gate.goto = [gotoRec()];
     await w.api.refreshGotoGate();
-    w.press(w.nodes.notices, "Remind").click();
+    w.press(w.nodes.notices, "1h").click();
     // The request is answered elsewhere: its card must not come back at 1h.
     w.gate.goto = [];
     await w.api.refreshGotoGate();
@@ -2032,7 +2026,7 @@ function gotoRec(rec) {
     const w = build();
     w.gate.goto = [gotoRec()];
     await w.api.refreshGotoGate();
-    w.press(w.nodes.notices, "Remind").click();
+    w.press(w.nodes.notices, "1h").click();
     w.api.noticePanelToggle(true);
     const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
     check("the row of a reminded request says which step is coming",
@@ -2051,7 +2045,7 @@ function gotoRec(rec) {
     const a = build({ storage });
     a.gate.goto = [gotoRec()];
     await a.api.refreshGotoGate();
-    a.press(a.nodes.notices, "Remind").click();
+    a.press(a.nodes.notices, "1h").click();
     const saved = storage.getItem("claunch.noticeRemind") || "";
     check("the reminder is kept in this browser", /goto:g1/.test(saved), saved);
     check("and apart from the hidden set",
@@ -2079,18 +2073,18 @@ function gotoRec(rec) {
     // pressed here would file a `since` of its own — which is exactly what
     // the assertion below must see as different.
     t2.clock.at += 120000;
-    t1.press(t1.nodes.notices, "Remind").click();
+    t1.press(t1.nodes.notices, "1h").click();
     await hub.flush();
     check("a Remind in one tab puts the card down in the other",
           t2.api.gateRemindDown("goto", "g2") === true,
           t2.api.gateRemindOf("goto", "g2"));
-    // The ladder is a schedule, not a gesture: a tab that pressed from its
-    // own clock would run a different one, so the record the presser saved
-    // is the one both tabs run.
+    // The due time is the presser's: a tab that pressed from its own clock
+    // would bring the card back at a different moment, so the record the
+    // presser saved is the one both tabs run.
     const mine = t1.api.gateRemindOf("goto", "g2");
     const theirs = t2.api.gateRemindOf("goto", "g2");
-    check("and both tabs count the steps from the same press",
-          theirs.since === mine.since && theirs.stage === mine.stage &&
+    check("and both tabs count the wait from the same press",
+          theirs.since === mine.since && theirs.after === mine.after &&
             theirs.due === mine.due,
           [mine.since, theirs.since, mine.due, theirs.due]);
   }
