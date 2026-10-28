@@ -5113,11 +5113,20 @@ procedures:
                  (c) 확인 2가 지금 tip의 수치를 세웠다(또는 셀프 게이트 생략이
                      지금 tip에 대한 것이다) — 확인 2가 이미 요구하는 그 판정이다
                셋 중 하나라도 안 서면 escalate다. 「아마 고쳤다」는 판정이 아니다.
-               **tip의 자리는 정해져 있지 않다.** 마커의 `@ <tip>`을 줄 어디에서
-               찾든 마커의 tip이다 — `CHANGES REQUESTED: <무엇을> @ <tip>`
-               (이 런의 s162 판정이 그 형태다)과 `CHANGES REQUESTED @ <tip>:
-               <무엇을>`은 같은 판정이고, 판정은 오직 `@ <hex>`가 있는가와 그
-               해시뿐이다. 어느 쪽으로도 못 찾으면 escalate다.
+               **tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.** 마커 줄에서
+               tip으로 인정하는 `@ <hex>`는 다음 두 자리에 있는 것뿐이다:
+                 (i) 마커 낱말 **바로 뒤** — `CHANGES REQUESTED @ <tip>: <무엇을>`
+                 (ii) 그 줄의 **마지막 토큰** — `CHANGES REQUESTED: <무엇을> @
+                      <tip>` (이 런의 s162 판정이 그 형태다)
+               **줄 본문 안의 다른 `@ <hex>`는 tip이 아니다.** 상위 세션이
+               거절하며 근거로 인용한 해시(`이전 tip은 @ e6daa14b였다` 같은
+               형태)가 그 자리에 있으면, 그 줄은 tip 없는 마커다 — 리뷰 판정이
+               아니라 상위의 제동이므로 escalate다. 이 배제가 없던 동안 상위의
+               거절이 「재심 대기」로 분류됐다(claunch-eyz0s.2.2: 리더가 쓴
+               `CHANGES REQUESTED` 첫 줄 29건에 `@<hex>`가 있다).
+               (i)과 (ii)가 **서로 다른 해시**를 가리키면 그 줄은 판독 불가다 —
+               어느 쪽이 심사한 tip인지 정할 근거가 없으므로 escalate다. 같은
+               해시면 그 해시다. 어느 쪽으로도 못 찾으면 escalate다.
                재심 대기를 request로 읽는 것이 방어선을 지우지 않는 이유는
                순서다: `submit`은 `align`(리베이스) → `reviewer-ensure` →
                `peer-review`를 `integration-request` **앞에서** 돈다. 그래서
