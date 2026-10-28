@@ -123,7 +123,22 @@ def test_the_history_carries_the_daemon_clock(home):
             now = datetime.fromisoformat(doc["now"])
             copied_at = datetime.fromisoformat(doc["items"][0]["copied_at"])
             assert before <= copied_at <= now <= datetime.now(timezone.utc)
+            assert doc["epoch"] == app["clipboard"].epoch
         await mgr.shutdown_all()
+    asyncio.run(run())
+
+
+def test_a_new_history_counts_ids_in_a_new_epoch():
+    # A restarted daemon's History numbers its entries from one again; the
+    # epoch is what tells a watch that its held id is from the old run
+    # (claunch-tn5ba).
+    async def run():
+        first = clipboard.History(lambda: "copied")
+        second = clipboard.History(lambda: "copied")
+        await first.sample()
+        await second.sample()
+        assert first.items[0]["id"] == second.items[0]["id"] == "1"
+        assert first.epoch != second.epoch
     asyncio.run(run())
 
 

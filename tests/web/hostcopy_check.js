@@ -32,6 +32,7 @@ const notices = [];
 let gets = 0;
 let feed = [];          // successive /api/clipboard item lists; the last repeats
 let now = 1_000_000;
+let epoch = 'first';    // the history's epoch; a restarted daemon has a new one
 const ctx = vm.createContext({
   TextDecoder, Uint8Array,
   Date: { now: () => now, parse: (text) => Number(text) },
@@ -44,7 +45,7 @@ const ctx = vm.createContext({
     gets++;
     const items = feed.length > 1 ? feed.shift() : feed[0];
     // The stub's times are Date.now() numbers, so Date.parse is Number.
-    return { ok: true, json: async () => ({ items, now: String(now) }) };
+    return { ok: true, json: async () => ({ items, epoch, now: String(now) }) };
   },
   document: { body: {}, activeElement: null },
   $: (id) => (id === 'term-input' ? sessionLine : null),
@@ -77,7 +78,7 @@ const enter = { key: 'Enter' };
   await settle();
   assert.deepEqual(written, ['copied'], 'a first watch relays a copy already in its first response');
   assert.equal(vm.runInContext('hostCopyWatch', ctx), null, 'the watch ends at the first relayed copy');
-  assert.equal(vm.runInContext('hostCopySeen', ctx), 6, 'the newest id read is kept for the next key');
+  assert.equal(vm.runInContext('hostCopySeen.id', ctx), 6, 'the newest id read is kept for the next key');
   written.length = 0;
 
   // The daemon recorded the copy before the watch's first response (its own
@@ -131,6 +132,17 @@ const enter = { key: 'Enter' };
   assert.deepEqual(written, ['fresh'], 'an old entry an old baseline lets through is skipped');
   written.length = 0;
 
+  // The daemon restarted: its history counts from one again under a new
+  // epoch, so the id held from the old run (12) does not hide its copies.
+  epoch = 'second';
+  feed = [[host(1, 'after restart')]];
+  term.element.fire('keydown', enter);
+  await settle();
+  assert.deepEqual(written, ['after restart'], 'a restarted daemon\'s copy is relayed under the new epoch');
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(hostCopySeen)', ctx)), { epoch: 'second', id: 1 },
+    'the held id is the new epoch\'s');
+  written.length = 0;
+
   // A harness that copies through OSC 52 (Claude Code) is not watched.
   ctx.currentName = 'cl';
   gets = 0;
@@ -174,5 +186,5 @@ const enter = { key: 'Enter' };
   // The session terminal is wired; the CLI tab is not (it runs no harness).
   assert.match(source, /installOsc52\(term\);\s*\n\s*if \(typeof installHostCopyRelay === "function"\) installHostCopyRelay\(term\);/);
   assert.doesNotMatch(source, /installHostCopyRelay\(cliTerm\)/);
-  console.log('hostcopy: copy keys, harness gate, held baseline, raced copy, age guard, host-only entries, window, parked/switch guards, refusal notice passed');
+  console.log('hostcopy: copy keys, harness gate, held baseline, raced copy, age guard, restart epoch, host-only entries, window, parked/switch guards, refusal notice passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

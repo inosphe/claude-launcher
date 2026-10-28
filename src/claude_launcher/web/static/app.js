@@ -20752,12 +20752,15 @@ function installOsc52(t) {
    through, so an entry also has to be at most HOST_COPY_RECENT_MS older than
    the daemon's `now` in the same response: what someone copied at that
    machine minutes ago does not land on this computer's clipboard on the
-   next Enter. */
+   next Enter. The daemon numbers its history from one again when it
+   restarts, and the page reconnects without reloading, so the held id is
+   kept with the history's `epoch` and counts only against entries of that
+   epoch; a read from a new epoch is a first watch again. */
 const HOST_COPY_WATCH_MS = 4000;
 const HOST_COPY_POLL_MS = 400;
 const HOST_COPY_RECENT_MS = HOST_COPY_WATCH_MS + 1000;
 let hostCopyWatch = null;   // {session, until, baseline}
-let hostCopySeen = null;    // newest history id a watch has read
+let hostCopySeen = null;    // {epoch, id}: newest history id a watch has read
 
 function sessionCopiesToHost(name) {
   const rec = (sessionsCache || []).find((s) => s.name === name);
@@ -20779,8 +20782,9 @@ async function hostCopyItems() {
     const doc = await response.json();
     if (!Array.isArray(doc.items)) return null;
     const max = doc.items.reduce((m, item) => Math.max(m, Number(item.id) || 0), 0);
-    hostCopySeen = Math.max(hostCopySeen ?? 0, max);
-    return { items: doc.items, now: Date.parse(doc.now) };
+    const held = hostCopySeen && hostCopySeen.epoch === doc.epoch ? hostCopySeen.id : 0;
+    hostCopySeen = { epoch: doc.epoch, id: Math.max(held, max) };
+    return { items: doc.items, now: Date.parse(doc.now), epoch: doc.epoch };
   } catch {
     return null;
   }
@@ -20799,15 +20803,17 @@ async function watchHostCopy() {
     hostCopyWatch.until = until;
     return;
   }
-  const watch = { session: name, until, baseline: hostCopySeen ?? 0 };
+  const watch = { session: name, until, baseline: hostCopySeen };
   hostCopyWatch = watch;
   try {
     while (hostCopyWatch === watch && Date.now() <= watch.until) {
       const read = await hostCopyItems();
       if (hostCopyWatch !== watch || currentName !== name) return;
       if (read) {
+        const baseline = watch.baseline && watch.baseline.epoch === read.epoch
+          ? watch.baseline.id : 0;
         const fresh = read.items.find((item) => item.source === "host" &&
-          Number(item.id) > watch.baseline && typeof item.text === "string" &&
+          Number(item.id) > baseline && typeof item.text === "string" &&
           isRecentHostCopy(item, read.now));
         if (fresh) {
           const ok = await copyToBrowserClipboard(fresh.text, document.body);

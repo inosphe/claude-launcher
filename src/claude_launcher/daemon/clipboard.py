@@ -31,6 +31,7 @@ import contextlib
 import ctypes
 import os
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -437,6 +438,10 @@ class History:
         self.error = None
         self.lock = asyncio.Lock()
         self.serial = 0
+        # ``serial`` lives in memory and counts from one again in a new
+        # History, so an id means something only next to this ``epoch``: a
+        # host-copy watch compares ids within one epoch (claunch-tn5ba).
+        self.epoch = secrets.token_hex(8)
 
     async def sample(self):
         async with self.lock:
@@ -496,8 +501,10 @@ async def get_history(request):
     history = request.app["clipboard"]
     await history.sample()
     # ``now`` is this machine's clock, against which a host-copy watch ages
-    # ``copied_at`` (claunch-tn5ba).
+    # ``copied_at``; ``epoch`` says which run of the ids these are
+    # (claunch-tn5ba).
     return web.json_response({"items": history.items, "error": history.error,
+                              "epoch": history.epoch,
                               "now": datetime.now(timezone.utc).isoformat()},
                              headers={"Cache-Control": "no-store"})
 
