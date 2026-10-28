@@ -4820,9 +4820,11 @@ procedures:
       # 바뀌었을 수 있으므로 잰 시각을 함께 남긴다.
       - landing-target-evidence
       - id: landing-target-choice
+        # bind를 두지 않는다: try로 감싼 호출의 결과는 이 노드에 묶이지 않고,
+        # 이 결과를 읽는 자리도 없다(세 갈래가 전부 return으로 land를 끝낸다).
+        # 있었다면 선언만 남고 값은 영원히 null인 바인딩이 된다.
         try:
           call: ask-user
-          bind: landing_target
           with:
             # 근거 칸은 Router의 문장 그대로다 — 사용자가 「누가 왜 통과됐는지」를
             # 한 화면에서 보게 하는 것이 이 질문의 목적이다.
