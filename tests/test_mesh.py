@@ -181,6 +181,25 @@ def test_message_intents():
     assert "not a known intent" in mesh_mod.type_notice("worker")
 
 
+def test_a_nudge_is_a_known_intent_that_owes_no_reply():
+    """(claunch-5sqtt) The workflows' landing-nudge step tells a worker to send
+    its chaser as `--type nudge`. Unregistered, every one of those drew the
+    reply-all advisory and opened a fresh debt on the recipient for a request
+    that was already on the record."""
+    assert mesh_mod.expects_reply("nudge") is False
+    assert mesh_mod.expects_reply(" Nudge ") is False      # normalised on read
+    assert mesh_mod.type_notice("nudge") is None
+
+
+def test_the_advisory_names_every_known_intent():
+    """(claunch-5sqtt) The advisory listed a hand-written set that had already
+    dropped 'ping'; read off INTENT_TYPES it cannot drift again."""
+    notice = mesh_mod.type_notice("worker")
+    listed = notice.split("(")[1].split(")")[0].split("/")
+    assert sorted(listed) == sorted(mesh_mod.INTENT_TYPES)
+    assert "nudge" in listed and "ping" in listed
+
+
 def test_format_delivery_no_reply_batch():
     fyi_only = [
         {"from": "policy", "to": "leader", "type": "fyi", "body": "stall: w1"},
@@ -1058,6 +1077,12 @@ def test_owed_is_delivered_mail_nobody_answered(home, tmp_path):
         # fyi/ack were sent precisely to say nothing is owed
         await mm.send("owe", "a1", "worker_1", "for info", type="fyi")
         await mm.send("owe", "a1", "worker_1", "noted", type="ack")
+        _mark_delivered(mesh)
+        assert len(mesh.owed("worker_1")) == 1
+
+        # ...a nudge chases a request that is already on the ledger, so it
+        # opens no debt of its own (claunch-5sqtt)
+        await mm.send("owe", "a1", "worker_1", "chasing it", type="nudge")
         _mark_delivered(mesh)
         assert len(mesh.owed("worker_1")) == 1
 
