@@ -1397,12 +1397,24 @@ def test_every_test_module_that_names_the_tool_is_parsed():
     It used to ``ast.parse`` its own source and nothing else, so a call from
     another test file was outside the guard entirely -- not exempted, not
     seen (claunch-o5il6.3). This asserts the widening three ways: the list is
-    non-empty, it includes this module, and it is not the whole suite (a
-    thousand files parsed to find the same few mentions would be a cost with
-    no coverage behind it)."""
+    non-empty, it includes this module, and it includes at least one *other*
+    module, and it is not the whole suite (a thousand files parsed to find the
+    same few mentions would be a cost with no coverage behind it).
+
+    The sibling assertion is the one that makes this test about widening
+    rather than about parsing. Without it, a guard that reverted to
+    ``[_SELF]`` passed every other line here -- the list was non-empty, this
+    module was in it, and one file is still fewer than the whole suite. Only
+    "some file that is not me" separates the two."""
     sources = _every_test_source()
     assert sources, "no test module names the tool"
     assert _SELF in sources, [str(p) for p in sources]
+    siblings = [p for p in sources if p != _SELF]
+    assert siblings, (
+        "no other test module names the tool, so nothing exercises the widening "
+        "and this guard would pass while reading only itself -- either a sibling "
+        "does name it (and this assertion should pass) or the widening is dead"
+    )
     every_test = sorted((ROOT / "tests").rglob("*.py"))
     assert len(sources) < len(every_test), (len(sources), len(every_test))
 
