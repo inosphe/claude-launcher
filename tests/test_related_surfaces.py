@@ -753,11 +753,13 @@ def _cwd_of(call, default=_HERE):
 #: s597-rev). ``python_x`` is data, not an interpreter.
 #:
 #: The alternatives are the names a Windows argv actually uses: ``py`` and
-#: ``py.exe`` are the launcher, ``pythonw``/``pythonw.exe`` the windowless
-#: interpreter, and all of them carry a version suffix. Leaving the ``w`` out
-#: missed ``pythonw``, which master collects (s597-rev blocked on it, s648-rev
-#: recorded it, both measured).
-_INTERPRETER_NAME = re.compile(r"^(py|pythonw?)(\d+(\.\d+)*)?(\.exe)?$")
+#: ``py.exe`` are the console launcher, ``pyw``/``pyw.exe`` its windowless
+#: twin, ``pythonw``/``pythonw.exe`` the windowless interpreter, and all of
+#: them carry a version suffix. Leaving the ``w`` out of the first alternative
+#: missed ``pythonw``, and leaving ``pyw`` out of it missed ``pyw`` -- master
+#: ``b16cf017`` collects both (s597-rev blocked on the first, s648-rev recorded
+#: it, and s597-rev found the second on the next tip; all three measured).
+_INTERPRETER_NAME = re.compile(r"^(pyw?|pythonw?)(\d+(\.\d+)*)?(\.exe)?$")
 
 #: Runners that take a command and run *it*, so the program is further right.
 #: This is a **widening, not the discriminator**: a python interpreter anywhere
@@ -917,12 +919,15 @@ def _exec_position(items, from_this_file, names):
       interpreter. That is master's behaviour and the reason ``PY =
       sys.executable`` no longer goes silent; the cost is a false failure if
       someone writes ``MODE = "log"`` and ``[MODE, "-n", <tool>]``.
-    * ``py -3`` is read as the Windows launcher, as are ``py.exe``, ``pythonw``
-      and ``pythonw.exe``. One regex (``_INTERPRETER_NAME``) carries that whole
-      family, so there is no second name list to fall out of step with the
-      first. Master names none of them; this guard collects shapes master
-      misses, which is the direction that matters for a guard run under Git
-      Bash on Windows (s597-rev blocked on ``pythonw``, s648-rev found it
+    * ``py -3`` is read as the Windows launcher, as are ``py.exe``, ``pyw``,
+      ``pythonw`` and ``pythonw.exe``. One regex (``_INTERPRETER_NAME``)
+      carries that whole family, so there is no second name list to fall out
+      of step with the first. Master ``b16cf017`` collects every one of these
+      shapes as well -- it scans the whole argv for the tool, so it needs no
+      name list to do it. The list here exists because this guard reads
+      *positions* instead, and a positional rule has to say which names are
+      interpreters; leaving ``pythonw`` out of it was a real gap for a guard
+      run under Git Bash on Windows (s597-rev blocked on it, s648-rev found it
       independently).
     * ``bundle exec <tool>`` is **not** collected. ``bundle`` is a Ruby
       launcher that hands a script path to another program with no Python
@@ -1845,6 +1850,25 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
     claunch-o5il6.1.1.1). They are fixed by the python interpreter ahead of the
     tool, so `sudo -E pipenv run python3.11` collects on the same rule without
     any of those names being added anywhere."""
+    def _as_source(entry):
+        """A row as the Python source the guard reads.
+
+        A row is either an argv expression -- ``'["uv", "run", ...]'`` -- or a
+        whole snippet that already contains its own call, as the ``PY =
+        sys.executable`` rows do. That used to be decided by the row's first
+        characters (``startswith(("PY ", "PYBIN "))``), which classified
+        sentences by vocabulary: a row whose variable was spelled anything
+        else got wrapped into the expression branch and broke there. s1262-rev
+        raised it in two consecutive reviews. The parser answers instead --
+        an entry that parses in ``eval`` mode is an argv, anything else is a
+        snippet -- so a new row is classified by its shape.
+        """
+        try:
+            ast.parse(entry, mode="eval")
+        except SyntaxError:
+            return entry
+        return f"x = subprocess.run({entry}, cwd=str(ROOT))\n"
+
     for argv in (
         # The program is the first element.
         '["tools/related_surfaces.py", "--json"]',
@@ -1912,17 +1936,26 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
         'PY = sys.executable\nx = subprocess.run([PY, "-S", "tools/related_surfaces.py"], cwd=str(ROOT))\n',
         'PY = sys.executable\nx = subprocess.run([str(PY), "tools/related_surfaces.py"], cwd=str(ROOT))\n',
         'PYBIN = shutil.which("python3")\nx = subprocess.run([PYBIN, "tools/related_surfaces.py"], cwd=str(ROOT))\n',
+        # The same two shapes under names the old ``startswith(("PY ", "PYBIN "))``
+        # discriminator had never seen. Kept as a row because the discriminator
+        # is what would otherwise silently regress: with a prefix test, this
+        # entry is wrapped into an argv expression and fails on its own
+        # ``INTERP =`` prefix, which reads as a guard defect rather than a
+        # harness one (s1262-rev, twice).
+        'INTERP = sys.executable\nx = subprocess.run([INTERP, "tools/related_surfaces.py"], cwd=str(ROOT))\n',
+        'WHICH_PY = shutil.which("python3")\nx = subprocess.run([WHICH_PY, "-S", "tools/related_surfaces.py"], cwd=str(ROOT))\n',
         # The same lookup written inline reaches the fail-closed branch, which
         # is where it is collected -- `_bare_name` deliberately does not read
         # ``shutil.which`` itself, so this row is a trip-wire on that branch
         # rather than a pin on the deleted special case.
         '[shutil.which("python3"), "tools/related_surfaces.py", "--json"]',
-        # ... and the Windows launcher and windowless interpreter, which this
+        # ... and the Windows launchers and windowless interpreters, which this
         # repository meets under Git Bash there (s597-rev blocked on the gap,
         # s648-rev found the same shape independently; master b16cf017 collects
-        # all three).
+        # every one of these).
         '["py", "-3", "tools/related_surfaces.py"]',
         '["py.exe", "-3", "tools/related_surfaces.py"]',
+        '["pyw", "tools/related_surfaces.py"]',
         '["pythonw", "tools/related_surfaces.py"]',
         '["pythonw.exe", "tools/related_surfaces.py"]',
         # One residual shape has no interpreter to lean on: a launcher that
@@ -1931,7 +1964,7 @@ def test_the_tool_is_collected_in_every_position_that_runs_it():
         # still covers this case, and this row is what pins the entry.
         '["npx", "run", "tools/related_surfaces.py"]',
     ):
-        sample = argv if argv.lstrip().startswith(("PY ", "PYBIN ")) else f'x = subprocess.run({argv}, cwd=str(ROOT))\n'
+        sample = _as_source(argv)
         found = _tool_invocations(sample)
         assert len(found) == 1, (argv, found)
         assert found[0][1] in ([], ["--json"], ["--help"]), (argv, found)
