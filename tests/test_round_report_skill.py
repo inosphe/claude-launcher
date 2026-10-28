@@ -113,3 +113,35 @@ def test_skill_frontmatter_is_valid():
     meta = pyyaml.safe_load(front)
     assert meta["name"] == "round-report"
     assert "스킬" in meta["description"] or "skill" in meta["description"].lower()
+
+
+def test_the_skill_limits_the_product_to_what_is_already_recorded():
+    # claunch-igkbo.2: "a command's output" read as licence to re-run the
+    # harnesses; the product section quotes recorded bytes, it does not remake them
+    body = " ".join(report_spec.SKILL_MD.split())
+    assert "a command's output" not in body
+    assert "이미 기록된 출력" in body
+    assert "다시 만들지 말고 커밋이나 기록에서 잘라 싣는다" in body
+    # the code-only allowance stays: the section is not mandatory
+    assert "this section may be empty" in body
+
+
+def test_the_skill_keeps_verification_out_of_the_report():
+    body = " ".join(report_spec.SKILL_MD.split())
+    assert "산출물과 검증은 다른 절이다" in body
+    assert "테스트·스윕을 다시 돌리지 않고" in body
+    assert "원인을 조사하지 않는다" in body
+    assert "기록에 없으면 없다고 적는다" in body
+
+
+def test_the_v2_report_node_says_what_it_does_not_do():
+    text = _V2.read_text(encoding="utf-8")
+    node = text.split("\n  round-report:\n", 1)[1].split("\n    done_when:", 1)[0]
+    node = " ".join(node.split())
+    assert "기록에 없으면 없다고 적는다" in node
+    assert "기록에 없는 것을 기억이나 추측으로 채우지 않는다" not in node
+    assert "이 노드가 하지 않는 일: 검증" in node
+    assert "다시 돌리지 않고" in node
+    assert "이미 기록된 출력만" in node
+    assert "다시 만들지 말고 커밋이나 기록에서 잘라 싣는다" in node
+    assert "그 절을 비워 둔다" in node
