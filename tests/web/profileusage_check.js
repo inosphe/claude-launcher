@@ -151,6 +151,16 @@ const body = {
   assert.deepStrictEqual(T.shownWindows([used, spend]).map((w) => w.name),
     ['five_hour', 'monthly_spend']);
 
+  // The crosshair's viewBox x under the cursor (claunch-4mi9b): a box of the
+  // drawing's own ratio maps linearly; a box wider than the drawing (the svg
+  // capped by max-height) centres it, so its edges land on 0 and W.
+  assert.strictEqual(T.viewX(110, { left: 10, width: 640, height: 180 }, 640, 180), 100);
+  const wide = { left: 10, width: 1000, height: 220 };
+  const scale = 220 / 180, pad = (1000 - 640 * scale) / 2;
+  assert.ok(Math.abs(T.viewX(10 + pad, wide, 640, 180)) < 1e-9);
+  assert.ok(Math.abs(T.viewX(10 + pad + 640 * scale, wide, 640, 180) - 640) < 1e-9);
+  assert.ok(Math.abs(T.viewX(10 + pad + 36 * scale, wide, 640, 180) - 36) < 1e-9);
+
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],
     ['512 B', '2.0 KB', '3.0 MB']);

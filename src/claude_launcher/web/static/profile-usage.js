@@ -211,6 +211,15 @@
     return value;
   }
 
+  /* The viewBox x under a client x. The svg keeps its aspect ratio
+     (xMidYMid meet): once max-height caps it, the drawing is scaled to the
+     height and centred, so the box is wider than the drawing and a plain
+     width ratio puts the crosshair off the cursor (claunch-4mi9b). */
+  function viewX(clientX, rect, W, H) {
+    const scale = Math.min(rect.width / W, rect.height / H);
+    return (clientX - rect.left - (rect.width - W * scale) / 2) / scale;
+  }
+
   function stamp(at) {
     return new Date(at * 1000).toLocaleString([], {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -272,7 +281,7 @@
     const hit = svg("rect", { x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent" });
     hit.addEventListener("mousemove", (event) => {
       const rect = plot.getBoundingClientRect();
-      const at = x0 + ((event.clientX - rect.left) * W / rect.width - L) / (W - L - R) * (x1 - x0);
+      const at = x0 + (viewX(event.clientX, rect, W, H) - L) / (W - L - R) * (x1 - x0);
       let best = null;
       for (const sample of samples) {
         if (!best || Math.abs(sample.at - at) < Math.abs(best.at - at)) best = sample;
@@ -585,7 +594,7 @@
     open, stop,
     _test: {
       readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries,
-      dollarSeries, chartPlan, niceMax, windowLine, tick, state,
+      dollarSeries, chartPlan, niceMax, viewX, windowLine, tick, state,
     },
   };
 })();
