@@ -845,31 +845,53 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     the same upper (s29) carry no prefix and were therefore read as reviewer
     verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7),
     ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z) and a trailing
-    ``@ b606bc15`` (claunch-75kfl). The canon already said the ground is *who
-    wrote the line*; the discrimination has to actually be the author head
-    ``[sNNN] at <시각>`` that ``claunch beads comments`` prints, with the
-    prefix kept only as the fallback when the author cannot be read
-    (claunch-eyz0s.2.1.1)."""
+    ``@ b606bc15`` (claunch-75kfl). The ground is *who wrote the line*
+    (claunch-eyz0s.2.1.1).
+
+    The first implementation narrowed "upper" to the first
+    ``landing-review`` responder group and compared ``[sNNN]`` against the
+    roster's handle column. Both are wrong: ``resolves`` is a top-level
+    ``any(asks)``, the first group is the worker in a parent-worker
+    configuration (the leader is in none), and ``[sNNN]`` is a session name.
+    The default is therefore flipped — only the three review-verdict branches
+    are reviews; everything else is a brake; the prefix is the last fallback.
+    """
     path = (
         _bundled("improv-worker") if layer == "bundled"
         else PROJECT_OVERRIDES / "improv-worker.yaml"
     )
     text = " ".join(model.load(path).steps["landing"].select.prompt.split())
-    # the discrimination, stated first
-    assert "**판정 주체를 먼저 본다 — 그 줄을 쓴 세션이 상위인가 리뷰어인가.**" in text
-    # where the subject is read from
+    # the flipped default
+    assert "기본값은 「제동」이고, 리뷰어만 뺀다" in text
+    # where the subject is read from, and that it is a session name
     assert "`[sNNN] at <시각>` 꼴의 머리" in text
-    # the three subjects it splits into
-    assert "`claunch cflow responders landing-review --json`" in text
-    assert "메시 명부에서 role이 `reviewer`인 세션" in text
-    assert "`$CLAUNCH_SESSION`. 자기 코멘트는 판정이 아니다" in text
-    # the prefix survives only as the fallback
-    assert "**줄 머리 접두로 되돌아간다**" in text
-    assert "`PR-REVIEW #<번호>`로 시작하면 상위의 제동이고" in text
-    assert "접두는 주체를 못 읽었을 때의 대체일 뿐이다" in text
-    # bidirectional: subject beats prefix in both directions
-    assert "주체가 리뷰어라고 말하는 줄은 접두가 붙어 있어도" in text
-    assert "주체가 상위라고 말하는 줄은 접두가 없어도 제동이다" in text
+    assert "그 `[sNNN]`은 **세션 이름**이다" in text
+    # the roster comparison is the third column
+    assert "첫 열(핸들)이 아니라 셋째 열의 세션 이름" in text
+    for pair in ("`s404-rev`의 세션은 `s573`", "`s511-rev`는 `s523`",
+                 "`s5874-indep-leader`는 `s5878`"):
+        assert pair in text, pair
+    # the three review-verdict branches, tested before the brake default
+    assert "리뷰 판정 셋 중 하나에" in text and "먼저 걸리면" in text
+    assert "(a) 그 세션의 role이 `reviewer`다" in text
+    assert "`claunch cflow responders peer-review --json`" in text
+    assert "`groups[].asks`에 (핸들→세션 이름으로 옮겨) 들어 있다" in text
+    # (c) is a fallback only; a line form alone must not promote a brake
+    assert "는 **role과 응답자 여부를 읽지 못했을 때의 대체**다" in text
+    assert "꼴만으로는 리뷰 판정이라 하지 않는다" in text
+    # everything else is a brake, including a session absent from the roster
+    assert "**그 밖의 전부 — 상위의 제동이다.**" in text
+    assert "명부에 없는 세션" in text
+    # the `resolves` fact the first implementation got wrong
+    assert "`resolves`는 최상위에" in text
+    assert "그룹마다의 `resolves` 필드는 없다" in text
+    # the parent-worker anchor
+    assert "부모 워커가 답하는 편성에서 첫 그룹은 worker(ancestor)이고" in text
+    # the prefix survives only as the fallback, both directions stated
+    assert "**줄 머리 접두가 마지막 대체다**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면 제동이고" in text
+    assert "주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고" in text
+    assert "주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다" in text
     # the three measured lines and their measured author
     assert "claunch-o8pb7" in text and "claunch-u9m6z" in text and "claunch-75kfl" in text
     assert "셋 다 상위(s29)가 쓴 줄이다" in text

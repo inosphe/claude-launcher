@@ -261,33 +261,59 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7, the (i)
     position), ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z, (i) with
     the author named inline) and a trailing ``@ b606bc15`` (claunch-75kfl, the
-    (ii) position). The canon already said the ground is *who wrote the line*;
-    the discrimination has to actually be the author head ``[sNNN] at <시각>``
-    that ``claunch beads comments`` prints, with the prefix kept only as the
-    fallback when the author cannot be read (claunch-eyz0s.2.1.1)."""
+    (ii) position). The canon already said the ground is *who wrote the line*
+    (claunch-eyz0s.2.1.1).
+
+    The first implementation of this rewrite read the author head but then
+    narrowed "upper" to the first ``landing-review`` responder group, which
+    fails in a parent-worker configuration (the first group is worker; the
+    leader is in no group and is not a reviewer, so its lines fell back to the
+    prefix rule and became reviewer verdicts again). It also looked ``[sNNN]``
+    up in the mesh roster's *handle* column, though ``[sNNN]`` is a session
+    name. So the default is flipped: only the three review-verdict branches
+    are reviews, everything else is a brake, and the prefix is the last
+    fallback."""
     prompt = _words(_land_prompt())
-    # the discrimination, stated ahead of the position rules
-    assert "**판정 주체를 먼저 본다 — 그 줄을 쓴 세션이 상위인가 리뷰어인가.**" in prompt
-    # where the subject is read from
+    # the flipped default, stated as the rule
+    assert "기본값은 「제동」이고, 리뷰어만 뺀다" in prompt
+    # where the subject is read from, and that it is a session name
     assert "`[sNNN] at <시각>` 꼴의 머리" in prompt
-    # the three subjects it splits into
-    assert "`claunch cflow2 responders landing-review --json`" in prompt
-    assert "메시 명부에서 role이 `reviewer`인 세션" in prompt
-    assert "`$CLAUNCH_SESSION`. 자기 코멘트는 판정이 아니다" in prompt
-    # the prefix survives only as the fallback
-    assert "**줄 머리 접두로 되돌아간다**" in prompt
-    assert "`PR-REVIEW #<번호>`로 시작하면 상위의 제동이고" in prompt
-    assert "접두는 주체를 못 읽었을 때의 대체일 뿐이다" in prompt
-    # bidirectional: the subject wins over the prefix both ways. Drop either
-    # sentence and a prefix-only reader comes back.
-    assert "주체가 리뷰어라고 말하는 줄은 접두가 붙어 있어도" in prompt
-    assert "주체가 상위라고 말하는 줄은 접두가 없어도 제동이다" in prompt
-    # the three measured lines, their measured author, and the (i)/(ii)
-    # positions they occupy
+    assert "그 `[sNNN]`은 **세션 이름**이다" in prompt
+    # the roster comparison is the third column, and the two differ — pinning
+    # the concrete pairs keeps a handle-based lookup from coming back
+    assert "<핸들> <role> <데몬>/<세션>`" in prompt
+    assert "첫 열(핸들)이 아니라 셋째 열의 세션 이름" in prompt
+    for pair in ("`s404-rev`의 세션은 `s573`", "`s511-rev`는 `s523`",
+                 "`s5874-indep-leader`는 `s5878`"):
+        assert pair in prompt, pair
+    # the three review-verdict branches, and that review is tested first
+    assert "리뷰 판정 셋 중 하나에" in prompt and "먼저 걸리면" in prompt
+    assert "(a) 그 세션의 role이 `reviewer`다" in prompt
+    assert "`claunch cflow2 responders peer-review --json`" in prompt
+    assert "`groups[].asks`에 (핸들→세션 이름으로 옮겨) 들어 있다" in prompt
+    # (c) is a fallback, not a peer of (a)/(b) — a reviewer-shaped line form
+    # alone must not promote an upper's brake to a verdict
+    assert "는 **role과 응답자 여부를 읽지 못했을 때의 대체**다" in prompt
+    assert "상위의 제동 줄은 그 형태로 쓰이지 않으므로" in prompt
+    assert "꼴만으로는 리뷰 판정이라 하지 않는다" in prompt
+    # everything else is a brake, including a session absent from the roster
+    assert "**그 밖의 전부 — 상위의 제동이다.**" in prompt
+    assert "명부에 없는 세션" in prompt
+    # the `resolves` fact the first implementation got wrong: it is top-level
+    assert "`resolves`는 최상위에" in prompt
+    assert "그룹마다의 `resolves` 필드는 없다" in prompt
+    # the parent-worker anchor — a parentless stack makes the first group the
+    # leader (a sibling), which is why the first-group reading looked correct
+    assert "부모 워커가 답하는 편성에서 첫 그룹은 worker(ancestor)이고" in prompt
+    # the prefix survives only as the fallback, both directions stated
+    assert "**줄 머리 접두가 마지막 대체다**" in prompt
+    assert "`PR-REVIEW #<번호>`로 시작하면 제동이고" in prompt
+    assert "주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고" in prompt
+    assert "주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다" in prompt
+    # the three measured lines, their measured author
     assert "claunch-o8pb7" in prompt and "claunch-u9m6z" in prompt and "claunch-75kfl" in prompt
     assert "셋 다 상위(s29)가 쓴 줄이다" in prompt
-    # the ordering claim survives the rewrite — without it the next editor
-    # reads the two layers as peers and applies the position rules first
+    # the ordering claim survives the rewrite
     assert "이 규칙이 자리 규칙보다 앞선다" in prompt
     # the form that *was* caught by the prefix still sits in the canon
     assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in prompt
