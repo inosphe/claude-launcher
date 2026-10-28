@@ -592,6 +592,11 @@ class Session:
         #: shutdown (manager.ended_by_os): the exit is recorded, but the
         #: record stays one the next boot restores.
         self.ended_by_os = False
+        #: Set at the exit when the PTY host went away under the session (it
+        #: stopped, or its connection was lost) rather than the program
+        #: ending (claunch-hor3b.1). The manager relaunches it, as a restart
+        #: without the host would, instead of filing it as failed.
+        self.ended_by_host = False
         # Archiving is a retained record's lifecycle marker. A live session
         # always starts outside the archive; respawn therefore clears it by
         # constructing a new Session from the retained definition.
@@ -1222,6 +1227,7 @@ class Session:
             task.cancel()
         reap = getattr(self.pty, "reap", None)
         self.exit_code = reap() if reap is not None else self.pty.exit_code()
+        self.ended_by_host = bool(getattr(self.pty, "host_ended", False))
         self.exited_at = _utcnow()
         self._status = STATUS_EXITED
         # The last words of a session are the ones somebody reads afterwards,

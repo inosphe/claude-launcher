@@ -77,6 +77,11 @@ class RemotePty(PtyHandle):
         #: still running in the host. :meth:`read` has returned EOF, and
         #: nobody may treat that as the child's exit.
         self.detached = False
+        #: Set when the session ends because the host went away -- it said it
+        #: was stopping, or the connection was lost -- rather than because
+        #: its program exited (claunch-hor3b.1). The daemon relaunches such a
+        #: session the way a restart without the host would.
+        self.host_ended = False
         self._out: "queue.Queue[bytes]" = queue.Queue()
         self._exited = threading.Event()
         self._code: Optional[int] = None
@@ -360,6 +365,9 @@ class HostClient:
                         slot[2] = payload
                         slot[0].set()
                     continue
+                if op == "stopping":
+                    self._host_stopping(str(header.get("reason") or ""))
+                    continue
                 with self._ptys_lock:
                     handle = self._ptys.get(str(header.get("sid", "")))
                 if handle is None:
@@ -371,6 +379,16 @@ class HostClient:
         except (OSError, ProtocolError) as exc:
             why = f"the PTY host connection failed: {exc}"
         self._shutdown(why)
+
+    def _host_stopping(self, reason: str) -> None:
+        """The host said it is going: every session it holds ends with it,
+        and the exits that follow are the host's doing (claunch-hor3b.1)."""
+        with self._ptys_lock:
+            handles = list(self._ptys.values())
+        for handle in handles:
+            handle.host_ended = True
+        log.warning("the PTY host is stopping (%s); %d session(s) end with it",
+                    reason or "no reason given", len(handles))
 
     def _shutdown(self, why: str) -> None:
         if self.closed.is_set():
@@ -394,23 +412,23 @@ class HostClient:
         if handles:
             log.warning("%s; %d session(s) end with it", why, len(handles))
         for handle in handles:
+            handle.host_ended = True
             # Unknown code: the host was the only one who could collect it.
             handle._on_exit(None)
 
 
 def host_alive(directory: Path) -> Optional[int]:
-    """The pid in the host's pid file if that process exists, else None."""
+    """The pid in the host's pid file if that process exists, else None.
+
+    A host that died unannounced (SIGKILL) leaves its pid file behind, and
+    when this process started it, a zombie that kill(pid, 0) still finds;
+    both read as gone, so the host watch can start the next one
+    (claunch-hor3b.1)."""
     try:
         pid = int(pid_path(Path(directory)).read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError:
-        return pid
-    return pid
+    return None if _gone(pid) else pid
 
 
 #: How long :func:`stop_refusing_host` waits for a signalled host to exit.

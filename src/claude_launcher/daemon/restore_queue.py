@@ -112,8 +112,13 @@ class RestoreQueue:
     """Wakes :attr:`SessionManager.restore_queue` in :func:`rank` order."""
 
     def __init__(self, manager, *, interval: Optional[float] = None,
-                 roles_of: Optional[RolesOf] = None) -> None:
+                 roles_of: Optional[RolesOf] = None,
+                 names: Optional[Iterable[str]] = None) -> None:
         self.manager = manager
+        #: The delayed names this queue wakes: the boot's
+        #: :attr:`SessionManager.restore_queue` (read at :meth:`start`) unless
+        #: given -- a host relaunch passes its own pass's (claunch-hor3b.1).
+        self._names: Optional[List[str]] = None if names is None else list(names)
         self.interval = (manager.restore_stagger if interval is None
                          else max(0.0, float(interval)))
         self.roles_of = roles_of
@@ -131,10 +136,11 @@ class RestoreQueue:
         self._task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
-        if self._task is not None or not self.manager.restore_queue:
+        names = self.manager.restore_queue if self._names is None else self._names
+        if self._task is not None or not names:
             return
         self.order = rank(
-            self.manager, self.manager.restore_queue,
+            self.manager, names,
             roles_of=self.roles_of, busy=self.manager.resumed_busy,
         )
         log.info(
