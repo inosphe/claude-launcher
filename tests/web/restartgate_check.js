@@ -68,6 +68,18 @@ function build(opts) {
       // A card is connected while something still holds it.
       get isConnected() { return n.parentNode !== null; },
       appendChild: (c) => { c.parentNode = n; n.children.push(c); return c; },
+      // A card is placed among the others by its own stamp rather than always
+      // at the head (claunch-notice-card-order-animate-9znvg), so the stub
+      // models the two parent calls that reaches: the insert and the first
+      // child. Before that rule the insert only ran for a strip that already
+      // held a card, so a harness with one card never needed it.
+      insertBefore: (c, ref) => {
+        const i = n.children.indexOf(ref);
+        c.parentNode = n;
+        if (i < 0) n.children.push(c); else n.children.splice(i, 0, c);
+        return c;
+      },
+      get firstChild() { return n.children[0] || null; },
       removeChild: (c) => {
         const i = n.children.indexOf(c);
         if (i >= 0) n.children.splice(i, 1);
