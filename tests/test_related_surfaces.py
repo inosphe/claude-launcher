@@ -756,15 +756,20 @@ def _names_the_script(node, from_this_file=True, names=None):
     test file cannot write it. There the tool is named by its file, so any
     string spelling ``related_surfaces.py`` counts (claunch-o5il6.3).
 
-    ``names`` carries module-level names bound to the tool's path --
+    That is why the ``SCRIPT`` name is tested only ``from_this_file``. A
+    sibling is free to bind ``SCRIPT`` to some *other* tool -- ``changed_tests.py``
+    does exactly that, and it is one of the modules this guard scans. Reading
+    the name as this file's made
+    ``subprocess.run([sys.executable, str(SCRIPT), "--base", "auto"], cwd=str(ROOT))``
+    in that module a violation of this guard (s597-rev).
+
+    ``names`` carries the names bound to the tool's path in *this source* --
     ``TOOL = ROOT / "tools" / "related_surfaces.py"`` then
     ``subprocess.run([sys.executable, str(TOOL)])``. Not resolving those left
     a sibling's call invisible, which is the under-blocking direction this
     guard exists against (s404-rev on claunch-o5il6.1)."""
-    if any(isinstance(n, ast.Name) and n.id == "SCRIPT" for n in ast.walk(node)):
-        return True
     if from_this_file:
-        return False
+        return any(isinstance(n, ast.Name) and n.id == "SCRIPT" for n in ast.walk(node))
     if names and any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node)):
         return True
     return any(
@@ -776,12 +781,21 @@ def _names_the_script(node, from_this_file=True, names=None):
 
 
 def _tool_names_in(tree):
-    """Module-level names bound to a path naming the tool.
+    """Names bound anywhere in a source to a path naming the tool.
 
     ``TOOL = ROOT / "tools" / "related_surfaces.py"`` and its ``str(...)`` /
-    ``Path(...)`` spellings, plus a plain string. Only module-level
-    assignments: a local binding inside a function is a different scope and
-    resolving it here would be a guess about which one a call site sees."""
+    ``Path(...)`` spellings, plus a plain string.
+
+    Every assignment is read, not only module-level ones: ``ast.walk`` reaches
+    function bodies too, and a name bound inside a test function is resolved
+    the same way. That is deliberate -- the alternative is tracking scopes to
+    tell a local ``TOOL`` from a module-level one, and a false *negative* here
+    means an unchecked call, which is the direction this guard exists against.
+    The cost is the opposite error: a local ``TOOL`` bound to the tool in one
+    function makes a same-named local in another function count. Both names
+    would have to be spelled alike for that to mislead, and then the failure
+    names a real tool path. (s404-rev spotted the docstring claiming
+    module-level only while the code read every scope.)"""
     names = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -1161,6 +1175,8 @@ def test_the_parser_sees_both_spellings_of_the_script():
     happen to contain one: a guard whose branch is dead looks exactly like a
     guard that finds nothing wrong."""
     sample = """
+SCRIPT = ROOT / "tools" / "related_surfaces.py"
+
 def _run(*args, cwd=None):
     return subprocess.run([sys.executable, "tools/related_surfaces.py", *args], cwd=str(cwd or ROOT))
 
@@ -1182,19 +1198,23 @@ def test_e():
     calls = _tool_invocations(sample)
     by_line = {lineno: (argv, reads_here) for lineno, argv, reads_here in calls}
 
+    # The sample binds ``SCRIPT`` to the tool itself: a source handed to
+    # ``_tool_invocations`` is read as a sibling, where the bare name means
+    # nothing unless this source binds it (test_a_siblings_own_script_name_is_not_this_files).
+    #
     # _run's own body forwards *args, so it is not itself an invocation; its
     # three call-site shapes below are what the guard reads.
     assert len(calls) == 5, [(n, a, r) for n, a, r in calls]
 
-    bare_str = by_line[6]
+    bare_str = by_line[8]
     assert bare_str == (["--json"], True), bare_str
-    bare_name = by_line[9]
+    bare_name = by_line[11]
     assert bare_name == (["--limit", "5"], True), bare_name
-    via_run = by_line[12]
+    via_run = by_line[14]
     assert via_run[1] is False, via_run
-    in_process_root = by_line[15]
+    in_process_root = by_line[17]
     assert in_process_root == ([], True), in_process_root
-    in_process_fixture = by_line[18]
+    in_process_fixture = by_line[20]
     assert in_process_fixture == ([], False), in_process_fixture
 
 
@@ -1497,6 +1517,9 @@ def test_every_subprocess_entry_that_takes_an_argv_is_collected():
     to contain the shape; the live file has all three only if someone wrote
     them."""
     sample = """
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "tools" / "related_surfaces.py"
+
 def test_a():
     out = subprocess.run([sys.executable, str(SCRIPT), "--json"], cwd=str(ROOT))
 
@@ -1512,12 +1535,16 @@ def test_d():
     calls = _tool_invocations(sample)
     by_line = {n: (a, r) for n, a, r in calls}
 
+    # The sample binds ``SCRIPT`` itself: a source handed to
+    # ``_tool_invocations`` is read as a sibling, and there the name is not
+    # this module's -- only a binding that names the tool counts
+    # (test_a_siblings_own_script_name_is_not_this_files).
     assert len(calls) == 3, calls
-    assert by_line[3] == (["--json"], True), by_line[3]
-    assert by_line[6] == ([], True), by_line[6]
-    assert by_line[9] == (["--limit", "5"], True), by_line[9]
+    assert by_line[6] == (["--json"], True), by_line[6]
+    assert by_line[9] == ([], True), by_line[9]
+    assert by_line[12] == (["--limit", "5"], True), by_line[12]
     # The git call names no tool, so it is not an invocation at all.
-    assert 12 not in by_line, by_line
+    assert 15 not in by_line, by_line
 
 
 def test_the_tool_is_recognised_by_its_file_name_in_another_module():
@@ -1652,6 +1679,38 @@ def test_z():
     # An unrelated constant must not be mistaken for the tool.
     other = sample.replace("related_surfaces.py", "some_other_tool.py")
     assert _tool_invocations(other) == [], _tool_invocations(other)
+
+
+def test_a_siblings_own_script_name_is_not_this_files():
+    """``SCRIPT`` means this module's tool; in a sibling it means whatever it binds.
+
+    ``SCRIPT`` was accepted as the tool's name before the ``from_this_file``
+    check, so any module that bound ``SCRIPT`` to a *different* tool read as a
+    call into this one. ``tests/test_changed_tests.py`` does exactly that
+    (``SCRIPT = ROOT / "tools" / "changed_tests.py"``) and is one of the
+    modules this guard scans -- it passes today only because it has no
+    list-literal ``subprocess`` call yet (s597-rev, reproduced).
+
+    A guard that fails on a correct call gets switched off, so this pins both
+    directions: a sibling's own ``SCRIPT`` is silent, and a sibling that binds
+    ``SCRIPT`` to *this* tool is still collected."""
+    other_tool = """
+import subprocess, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "tools" / "changed_tests.py"
+
+def test_x():
+    subprocess.run([sys.executable, str(SCRIPT), "--base", "auto"], cwd=str(ROOT))
+"""
+    assert _tool_invocations(other_tool) == [], _tool_invocations(other_tool)
+
+    this_tool = other_tool.replace("changed_tests.py", "related_surfaces.py")
+    found = _tool_invocations(this_tool)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == ["--base", "auto"], argv
+    assert reads_here is True, reads_here
 
     # And what it finds in another module is actually checked: a sibling that
     # reads this repository with no window must fail, one that names its
