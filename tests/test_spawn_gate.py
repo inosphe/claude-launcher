@@ -253,6 +253,46 @@ def test_a_held_request_still_counts_against_the_asker(home, tmp_path):
     assert err.value.status == 409
 
 
+def test_a_form_stays_linkable_after_extend_restarts_the_clock(home, tmp_path):
+    """`+5 min` on a request whose form is open answers the CLOCK, not the
+    form. While it cleared the hold (claunch-uzo40) the two paths raced: the
+    link was refused 409 and the deadline went on to create a second session
+    beside the one the form made (claunch-uzo40.1)."""
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.manual(rid)
+        world.gate.extend(rid)
+        assert rid in world.gate._timers, "the countdown is running again"
+        linked = world.gate.link(rid, "hand-made")
+        await world.gate.cancel()
+        return world, rid, linked
+
+    world, rid, linked = asyncio.run(run())
+    assert linked["status"] == "approved" and linked["setup"] == "custom"
+    assert linked["created"] == "hand-made"
+    assert world.created == [], "the extension did not create a session either"
+    assert rid not in world.gate._timers, "the answer took the timer with it"
+    with pytest.raises(spawn_gate.GateRefused):
+        world.gate.link(rid, "again")
+
+
+def test_extend_does_not_make_a_request_linkable(home, tmp_path):
+    """The other direction: extend is not a take-over, so a request nobody
+    ever opened in a form is still refused (claunch-uzo40.1)."""
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.extend(rid)
+        with pytest.raises(spawn_gate.GateRefused) as err:
+            world.gate.link(rid, "hand-made")
+        await world.gate.cancel()
+        return err
+
+    err = asyncio.run(run())
+    assert err.value.status == 409
+
+
 def test_link_refuses_a_request_nobody_took_over(home, tmp_path):
     world = _World(tmp_path)
     rid = _spawn(world)["id"]
@@ -752,9 +792,11 @@ def test_card_facts_keep_what_the_spec_names(home, tmp_path):
     assert facts["profile"] == {"value": "p2", "inherited": False}
     # a named project with no directory starts in its default workspace
     assert facts["workspace"] == {"value": "hq", "inherited": False}
-    # a declined workflow and a missing role read as none
-    assert facts["workflow"] == {"value": "", "inherited": False}
-    assert facts["role"] == {"value": "", "inherited": False}
+    # a declined workflow and a missing role read as none — and the card says
+    # WHICH none, so a dash is not read as "the daemon lost it" (claunch-8fvr5)
+    assert facts["workflow"] == {"value": "", "inherited": False, "note": "no run"}
+    assert facts["role"] == {"value": "", "inherited": False,
+                             "note": "from the handle, else free-role"}
     named = spawn_gate.card_facts({"workspace": "hq"}, asker)["workspace"]
     assert named == {"value": "hq", "inherited": False}
 
@@ -773,9 +815,10 @@ def test_card_facts_show_the_workflow_a_child_inherits(home):
     assert named["workflow"] == {"value": "other", "inherited": False}
     declined = spawn_gate.card_facts({"workflow": "-"}, asker,
                                      paired_workflow="improv-worker-v2")
-    assert declined["workflow"] == {"value": "", "inherited": False}
+    assert declined["workflow"] == {"value": "", "inherited": False, "note": "no run"}
     # no pair: still none
-    assert spawn_gate.card_facts({}, asker)["workflow"] == {"value": "", "inherited": False}
+    assert spawn_gate.card_facts({}, asker)["workflow"] == {
+        "value": "", "inherited": False, "note": "no run"}
 
 
 def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monkeypatch):
@@ -813,7 +856,8 @@ def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monke
     assert by_id[kid]["facts"]["workflow"] == want
     assert got["request"]["facts"]["workflow"] == want
     # a declined pair is not looked up and reads as none
-    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False}
+    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False,
+                                                 "note": "no run"}
     assert set(asked) == {("op", "/w/op", "/w/op")}
 
 

@@ -51794,6 +51794,44 @@ function setNewFormDraftCheck(box, want) {
   return true;
 }
 
+/* The form as the page ships it, captured once before the draft is restored
+   onto it (claunch-130zs). A form opened for a spawn request starts from
+   these values, not from the browser's remembered ones: the person is
+   answering the agent's request, and a row the request did not name has to
+   read as its own default — the parent's profile, the project's directory,
+   the run's paired workflow — rather than as whatever the last New session
+   left behind. `null` until something captures it, so an opening that comes
+   first (a reload onto #/new) simply keeps the form's own value. */
+let newFormPristine = null;
+
+function captureNewFormPristine() {
+  const f = $("new-session");
+  if (!f || newFormPristine) return;
+  const snap = new Map();
+  for (const c of f.querySelectorAll("input, select, textarea")) {
+    if (!c.name) continue;
+    snap.set(c, c.type === "checkbox" || c.type === "radio" ? !!c.checked : c.value);
+  }
+  newFormPristine = snap;
+}
+
+/* Put the form back on those values, and drop the picks the restore parked
+   for a picker it could not fill yet — a parked answer is the draft's too,
+   and it would land after this reset. */
+function restoreNewFormPristine() {
+  const f = $("new-session");
+  if (!f || !newFormPristine) return;
+  for (const [c, value] of newFormPristine) {
+    if (!f.contains(c)) continue;
+    if (c.type === "checkbox" || c.type === "radio") c.checked = value;
+    else if (c.value !== value) c.value = value;
+  }
+  pendingNewMesh = "";
+  pendingWorktreeMode = "";
+  newWfPicked = false;
+  newSubroleTicks = new Set();
+}
+
 /* Once per page load, before the first route: the form is still the page's
    own, so whichever way it is opened next starts from these answers. Each
    row is set the way the operator would set it, with the work its own
@@ -51802,6 +51840,10 @@ async function restoreNewFormDraft() {
   if (newFormDraftRestored) return;
   newFormDraftRestored = true;
   const f = $("new-session");
+  // Before anything is written onto the form: this is what the page ships,
+  // and a form opened for a spawn REQUEST is the one opening that starts
+  // here rather than on the browser's last answers (claunch-130zs).
+  captureNewFormPristine();
   const d = readNewFormDraft();
   if (!f || !d || sessionFormView().mode !== "new") return;
   const fire = (target, type = "change") =>
@@ -52901,7 +52943,13 @@ async function openSessionModal(opts = {}) {
   // what a spawn request's Manual does — left every row the seed did not
   // name on whatever the page already held, so the request's own values
   // showed up as the browser's last ones.
-  applySessionModalRecall(f);
+  // An opening made FOR a request is the exception (claunch-130zs): the
+  // request is the whole subject of that form, so a row it did not name
+  // starts on the form's own default instead of on the browser's last
+  // answer. The draft is not consulted, and what the boot restore put on the
+  // rows is taken back off first.
+  if (opts.spawnRequest) restoreNewFormPristine();
+  else applySessionModalRecall(f);
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   refreshScoreGoalDefault(f);
   // The worktree list is not waited for. /api/git runs four git processes
@@ -62036,6 +62084,9 @@ function spawnGateFacts(rec, spec) {
     const fact = facts[key] || { value: own, inherited: false };
     box.appendChild(el("span", "gate-fact-key", key));
     const val = el("span", "gate-fact-val", fact.value || "—");
+    if (fact.note) {
+      val.appendChild(el("span", "gate-fact-from", ` (${fact.note})`));
+    }
     if (fact.inherited) {
       val.appendChild(el("span", "gate-fact-from", ` (inherited from ${rec.session || "the asker"})`));
     }
@@ -62127,9 +62178,10 @@ async function spawnGateManual(rec) {
 
 /* The request's spec as a form seed: EVERY answer the spec carries, not the
    handful the first version spelled out (claunch-8x6v2). A row this leaves
-   empty is one the request did not answer, and openSessionModal fills those
-   from what the browser remembers — the request's own values would then be
-   missing exactly where the person was looking. */
+   empty is one the request did not answer, and a form opened for a request
+   starts those rows on the form's own defaults rather than on the browser's
+   last answers (claunch-130zs) — the request is the whole subject of that
+   opening, so nothing about it should read as a leftover. */
 function spawnRequestSeed(spec, rec) {
   const seed = {};
   const put = (key, value) => {

@@ -33,6 +33,30 @@ description: 실제 일감을 맡길 에이전트는 claunch MCP spawn으로 만
    기다린다: 응답은 `pending`과 요청 id이고, 만들어진 세션 이름은 터미널에 오는
    `[claunch spawn-request <id>]` 블록에 있다. 그 블록을 받기 전에는 3·4를
    하지 않고 같은 일로 다시 spawn하지 않는다. 거절이면 자식 없이 진행한다.
+
+   생략이 정상인 필드에도 예외가 넷 있다. 잘못 채우는 자리는 대부분 여기다.
+
+   - **`workspace`를 바꾸면 보드도 바뀐다.** 자식의 보드는 그 자식이 실행할
+     디렉터리의 보드이고(`daemon/beads.py`가 `root_for(sdef.cwd)`로 찾는다),
+     `issue`는 그 보드에서 읽힌다. 내 보드의 이슈 id를 다른 워크스페이스로
+     보내는 자식에게 넘기면 보드에 없다는 이유로 요청이 거절된다.
+   - **`project`는 디렉터리를 따라가지 않는다.** 다른 프로젝트의 워크스페이스로
+     보내면서 `project`를 비우면 자식은 내 프로젝트에 편성되고 남의 체크아웃에서
+     일한다. 둘을 함께 준다.
+   - **reviewer 자식은 `workflow: '-'`가 필요하다.** 짝 워크플로
+     (`default_child_cflow`)는 `filter_roles`로 워커만 받으므로, 생략하면
+     리뷰어가 그 런을 시작하지 못한다. `workflow: '-'`는 런 없이 만든다.
+   - **`profile`은 정책이 열었을 때만 고를 수 있다.** 기본값
+     (`spawn.allow_profile: false`)에서 자식은 내 profile·하네스를 그대로
+     물려받고, 이름을 적으면 거절된다. 다른 profile이 필요하면 사용자에게
+     `~/.claude-launcher/.claunch.yaml`의 그 키를 열도록 요청한다.
+
+   `role`을 비우면 handle의 **첫 단어**로 역할이 추론된다(`worker_2`→worker,
+   `qa-1`→reviewer, `moderator`→leader). 어느 역할도 가리키지 않는 handle만
+   `free-role`로 떨어지고, handle을 세션 이름(`s1234`) 그대로 두면 그 경우다.
+   메시가 하나도 없어서 자식을 위해 새로 열리는 경우에도 그 mesh 요청과
+   무관하게 `free-role`로 들어간다(그때는 팀이 없어 자리를 받을 곳이 없고,
+   그 사실이 나에게 경고로 온다).
 3. 소통은 claunch MCP `send` 도구로 한다. 여러 자식에게 서로 다른 지시를 줄 때는
    `sections`로 한 번에 보낸다. 지시는 `say`/`ask`로 보내고, 상태 알림만
    `fyi`/`ack`로 보낸다.

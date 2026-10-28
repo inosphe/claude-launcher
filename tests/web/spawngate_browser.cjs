@@ -45,11 +45,18 @@ const childRec = () => ({ id: 'ccc333', kind: 'spawn', scope: 'child', session: 
   reason: 'Write the parser tests', deadline: soon(), extensions: 0, spec: CHILD, facts: CHILD_FACTS,
   basis: {}, requested_at: new Date().toISOString() });
 // A request the person took over by hand and whose form was closed without
-// creating anything (claunch-uzo40): still pending, clock paused.
+// creating anything (claunch-uzo40): still pending, clock paused. Its `facts`
+// carry the two empty rows the daemon now explains — an empty role is
+// free-role and an empty workflow is no run, so the card does not draw a bare
+// dash a person reads as "the daemon lost it" (claunch-8fvr5).
+const HELD_FACTS = { project: { value: 'alpha', inherited: true }, profile: { value: 'p', inherited: true },
+  workspace: { value: 'alpha', inherited: true }, worktree: { value: 'new (generated name)', inherited: false },
+  role: { value: '', inherited: false, note: 'from the handle, else free-role' },
+  workflow: { value: '', inherited: false, note: 'no run' } };
 const heldRec = () => ({ id: 'ddd444', kind: 'spawn', scope: 'root', session: 'op2', status: 'pending',
   hold: 'manual', held_by: 'web', held_at: new Date().toISOString(), setup: 'custom',
   created_as: 'root', reason: 'waiting for the form', deadline: soon(), extensions: 0,
-  spec: SPEC, basis: {}, requested_at: new Date().toISOString() });
+  spec: SPEC, facts: HELD_FACTS, basis: {}, requested_at: new Date().toISOString() });
 // The card's labelled rows, as [label, value] pairs.
 const factRows = card => card.locator('.gate-facts').evaluate(box => {
   const cells = [...box.children].map(n => n.textContent);
@@ -141,6 +148,10 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const heldText = await heldCard.innerText();
     assert.match(heldText, /taken by hand \(web\) — no clock: approve, reject, or \+5 min to start the countdown again/);
     assert.deepEqual(await buttons(heldCard), ['Approve', 'Open form', 'Reject', '+5 min', 'Hide']);
+    // An empty row says which empty it is (claunch-8fvr5)
+    const heldRows = Object.fromEntries(await factRows(heldCard));
+    assert.equal(heldRows.role, '— (from the handle, else free-role)');
+    assert.equal(heldRows.workflow, '— (no run)');
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-cards.png') });
     }
@@ -166,16 +177,24 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     // Manual: the New session tab, filled with the request. What the browser
     // remembered is standing on the form first (the draft/recall a page load
     // restores); the request's own answers have to land over it
-    // (claunch-8x6v2).
+    // (claunch-8x6v2) — and a row the request did NOT name must not keep the
+    // draft's value at all (claunch-130zs). `captureNewFormPristine` stands
+    // in for the boot that this harness cuts: it is what the page ships,
+    // before the draft goes on top.
     await page.evaluate(() => {
+      captureNewFormPristine();
       const f = $('new-session');
       f.project.appendChild(new Option('alpha', 'alpha'));
       f.profile.appendChild(new Option('p', 'p'));
       f.project.appendChild(new Option('beta', 'beta'));
       f.profile.appendChild(new Option('draft-p', 'draft-p'));
+      ensureOption(f.mesh, 'draft-mesh');
+      ensureOption(f.role, 'draft-role');
       f.task.value = "the browser's last task";
       f.project.value = 'beta';
       f.profile.value = 'draft-p';
+      f.mesh.value = 'draft-mesh';
+      f.role.value = 'draft-role';
     });
     await spawnCard.getByRole('button', { name: 'Manual' }).click();
     await page.waitForFunction(() => typeof sessionModal === 'object' && sessionModal
@@ -187,11 +206,13 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       parent: ($('new-session').parent || {}).value || '',
       project: $('new-session').project.value,
       profile: $('new-session').profile.value,
+      mesh: $('new-session').mesh.value,
+      role: $('new-session').role.value,
       worktree: $('new-session').worktree_mode.value,
       overlay: !$('modal-overlay').classList.contains('hidden'),
     }));
     assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha',
-      profile: 'p', worktree: 'new', overlay: true });
+      profile: 'p', mesh: '', role: '', worktree: 'new', overlay: true });
     await spawnCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
