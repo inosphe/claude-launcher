@@ -480,6 +480,52 @@ def test_a_record_replaced_while_the_screen_is_built_is_left_alone(
     asyncio.run(run())
 
 
+def test_a_host_lost_while_the_screen_is_built_is_relaunched_by_the_watch(
+    host, tmp_path, monkeypatch
+):
+    """The host connection is lost between the stage and the attach
+    (claunch-opirg.2): the adopted session ends with the host when it is
+    attached, and the watch the daemon starts after the boot's restore
+    relaunches it in a new host, as it does a session the host took down
+    later."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        c2 = _reconnect(monkeypatch)
+        mgr2 = _manager()
+        staged = await _restore_with_slow_build(
+            mgr2, monkeypatch, lambda _s: os.kill(c2.host_pid, signal.SIGKILL),
+        )
+        assert await _until_true(lambda: staged.exited)
+        assert staged.ended_by_host and getattr(staged, "failed_at", None) is None
+        assert mgr2.host_ended() == ["t1"]
+        assert _wait(lambda: not _pid_alive(pid))
+
+        passes = []
+        watcher = asyncio.create_task(host_watch.watch(
+            mgr2, lambda: hc.ensure_host(paths.ptyhost_dir(), idle_exit=2.0),
+            on_relaunch=passes.append, interval=0.05))
+        try:
+            assert await _until_true(lambda: bool(passes))
+            assert passes[0].relaunched == ["t1"]
+            s2 = mgr2.get("t1")
+            assert s2 is not staged and not s2.exited and s2.pid != pid
+            await _wait_screen(s2, "READY")
+        finally:
+            watcher.cancel()
+            await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
 def test_a_busy_adopted_session_joins_the_nudge_audience(host, tmp_path, monkeypatch):
     """``was_busy`` decides which resume-nudge list an adopted session
     lands on (claunch-slia4): a busy one joins ``resumed_busy`` the way a
