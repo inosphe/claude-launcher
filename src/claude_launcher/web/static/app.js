@@ -59112,6 +59112,11 @@ function gateSessionLink(name, onOpen) {
    taken from storage — every poll reads them from the daemon. */
 const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
 const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
+/* A request put aside until a chosen time comes back (claunch-6scxn). Its
+   own key, not NOTICE_HIDDEN_KEY: Hide means "I have dealt with this", a
+   reminder means "bring this back to me at 1h", and a set that mixes them
+   makes the panel's hidden line say the wrong thing about both. */
+const NOTICE_REMIND_KEY = "claunch.noticeRemind";
 const NOTICE_READ_KEY = "claunch.noticeRead";
 const NOTICE_SEEN_KEY = "claunch.noticeSeen";
 const NOTICE_FILTER_KEY = "claunch.noticeFilter";
@@ -59271,20 +59276,16 @@ function noticeEntryShown(entry) {
    head, so a rebuilt old card jumped above newer ones while its own bottom
    line still read "1h ago".
 
-   The panel's "Waiting on you" list is NOT ordered by this and does not
-   call it: that list is the queue of requests to answer, and
-   claunch-l9znm.1 orders it longest-waiting first so the request that has
-   stood longest is read first (noticeWaitOrder). */
+   The panel's "Waiting on you" list reads this rule too (claunch-x3feh):
+   the whole panel is newest first, so the request that just arrived is the
+   one at the top. claunch-l9znm.1 had it the other way — longest-waiting
+   first, so the most neglected request was read first — and the reader
+   asked for the reversal after seeing the panel: an old request sinking is
+   a cost they accept, and a second order for the same list is a rule to
+   drift against (the failure noticeWaitOrder was written beside it to
+   avoid). */
 function noticeNewerFirst(a, b) {
   return (b.at || 0) - (a.at || 0);
-}
-
-/* Which request the "Waiting on you" list puts first: the one that has
-   waited longest, on the same stamp the row shows as its age
-   (claunch-l9znm.1). Kept beside noticeNewerFirst so the two orders the
-   panel offers are both named here rather than one being implicit. */
-function noticeWaitOrder(a, b) {
-  return (a.at || 0) - (b.at || 0);
 }
 
 /* Whether this reader asked the page not to animate. A person who set
@@ -59413,6 +59414,176 @@ const gateReadIds = new Set(
    The stored values keep their names, so a filter saved before the relabel
    still applies. */
 const NOTICE_FILTERS = ["all", "marked", "unread"];
+
+/* Reminders (claunch-6scxn): a waiting request the reader does not want to
+   answer now, but does want back later. The press takes its card down and
+   puts it up again at 1h, 6h and 24h — counted from the press, not from when
+   the request arrived (the user's answer: 「누른시간으로부터 재줘」). A
+   request that had already stood for six hours therefore still comes back an
+   hour after the press, which is what the person pressing it asked for.
+
+   Kept apart from NOTICE_HIDDEN_KEY on purpose: Hide says "I have dealt with
+   this", a reminder says "show me again at 1h", and the panel's hidden line
+   counts the first meaning. One set holding both would make that line lie
+   about whichever meaning it did not pick.
+
+   `down` is the card's state now — true while the reminder is still ahead,
+   false from the moment it fires. It is a field rather than "due > now"
+   because after the first reminder fires this entry carries the time of the
+   NEXT one, and a due in the future must not put the card back down. */
+const NOTICE_REMIND_STEPS = [3600 * 1000, 6 * 3600 * 1000, 24 * 3600 * 1000];
+const NOTICE_REMIND_LABELS = ["1h", "6h", "24h"];
+
+/* "<type>:<request id>" -> {type, rid, since, stage, due, down}. `since` is
+   the press (the clock every step counts from), `stage` indexes
+   NOTICE_REMIND_STEPS, `due` is when the next reminder is and is null once
+   the last one has fired. */
+const gateRemindIds = new Map(
+  (() => {
+    const saved = noticeLoad(NOTICE_REMIND_KEY, {});
+    if (!saved || typeof saved !== "object") return [];
+    return Object.entries(saved).filter(
+      ([k, v]) => typeof k === "string" && v && typeof v === "object" &&
+        Number.isFinite(v.since) && Number.isFinite(v.stage)
+    );
+  })()
+);
+
+function gateRemindSave() {
+  noticeSave(NOTICE_REMIND_KEY, Object.fromEntries(gateRemindIds));
+}
+
+function gateRemindOf(type, rid) {
+  return gateRemindIds.get(`${type}:${rid}`) || null;
+}
+
+/* The card is down because a reminder is still ahead of it. */
+function gateRemindDown(type, rid) {
+  const rec = gateRemindOf(type, rid);
+  return !!rec && rec.down === true;
+}
+
+/* Which reminder this request is waiting on, as "1h"/"6h"/"24h", or null
+   when it has no reminder pending. The card and the panel row print it, so
+   a card that comes back reads as one the reader put aside rather than as a
+   request that just arrived. */
+function gateRemindLabel(type, rid) {
+  const rec = gateRemindOf(type, rid);
+  if (!rec || rec.due === null) return null;
+  return NOTICE_REMIND_LABELS[rec.stage] || null;
+}
+
+/* The chips on screen that say which reminder is next, kept so the page's
+   one-second tick can move their words when a step fires: the card they are
+   on is kept across a poll (noticePanelPlace / noticeCardAdd), so a chip
+   drawn once would go on naming the step that has already passed. */
+const noticeRemindChips = new Set();   // {node, type, rid}
+
+function gateRemindChipText(rec) {
+  const label = gateRemindLabel(rec.type, rec.rid);
+  return label ? `remind ${label}` : "";
+}
+
+function gateRemindChip(type, rid) {
+  const node = el("span", "notice-chip remind");
+  node.title =
+    "this card is put aside until the next reminder; the request stays " +
+    "open and still runs to its deadline";
+  const rec = { node, type, rid: String(rid) };
+  node.textContent = gateRemindChipText(rec);
+  noticeRemindChips.add(rec);
+  return node;
+}
+
+/* One pass over the chips: a chip whose reminder is spent or cleared leaves
+   the row, and one whose step moved says so. Nothing is written when neither
+   happened, which is every second but two per reminder. */
+function noticeRemindChipsPaint() {
+  for (const rec of [...noticeRemindChips]) {
+    if (rec.node.isConnected === false) { noticeRemindChips.delete(rec); continue; }
+    const text = gateRemindChipText(rec);
+    if (!text) {
+      if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
+      noticeRemindChips.delete(rec);
+      continue;
+    }
+    if (rec.node.textContent !== text) rec.node.textContent = text;
+  }
+}
+
+/* Remind: the card goes now and comes back at 1h, then 6h, then 24h, every
+   step counted from the press. A press on a card that is up because a step
+   fired continues the ladder rather than starting it over — that card is
+   the only place the later steps can be asked for, so restarting there
+   would leave 6h and 24h reachable only by never touching the card again
+   (s597-rev, claunch-6scxn). Once the last step has fired the ladder is
+   spent (due null) and the next press starts a fresh 1h. The request is
+   untouched — it waits on the daemon exactly as before. */
+function gateRemind(type, rid) {
+  const id = String(rid);
+  const now = Date.now();
+  const key = `${type}:${id}`;
+  const rec = gateRemindIds.get(key);
+  if (rec && rec.due !== null && rec.down !== true) {
+    // Back up because a step fired: put it down again for the step already
+    // scheduled. `since` and `stage` stand, so the wait is the 6h or 24h the
+    // chip named.
+    rec.down = true;
+  } else {
+    gateRemindIds.set(key, {
+      type, rid: id, since: now, stage: 0,
+      due: now + NOTICE_REMIND_STEPS[0], down: true,
+    });
+  }
+  gateRemindSave();
+  noticeTabsPost({ t: "gate-remind", type, rid: id });
+  noticeBellPaint();
+  noticePanelPaint();
+  noticeGateRefresh(type);
+}
+
+/* Takes the reminder off a request: the card stops being put aside. Pressing
+   Show card on a reminded row does this, and so does a reminder whose
+   request left the pending set. */
+function gateRemindClear(type, rid) {
+  if (!gateRemindIds.delete(`${type}:${rid}`)) return;
+  gateRemindSave();
+}
+
+/* The page's one-second tick over the reminders (claunch-6scxn). Nothing to
+   do is the common case and costs one `size` read: no timers of its own, no
+   DOM writes — the cost contract of claunch-qnq1c is about settled lists not
+   touching the page, and a reminder that is not due is a settled list. A
+   reminder that comes due takes its card's kind through the same refresh
+   its poll uses, so the card comes back built the one way every card is. */
+function noticeRemindPaint() {
+  if (gateRemindIds.size) {
+    const now = Date.now();
+    const fired = new Set();
+    for (const rec of gateRemindIds.values()) {
+      // A step fires whether or not the card is down. A card that is still
+      // up runs its clock on: letting the 1h appearance stand must not cost
+      // the 6h and 24h reminders, and the press that puts it back down
+      // (gateRemind) then names the longer wait instead of a fresh hour.
+      if (!Number.isFinite(rec.due) || rec.due > now) continue;
+      rec.down = false;
+      fired.add(rec.type);
+      if (rec.stage + 1 < NOTICE_REMIND_STEPS.length) {
+        rec.stage += 1;
+        rec.due = rec.since + NOTICE_REMIND_STEPS[rec.stage];
+      } else {
+        rec.due = null;
+      }
+    }
+    if (fired.size) {
+      gateRemindSave();
+      for (const type of fired) noticeGateRefresh(type);
+      noticeBellPaint();
+      noticePanelPaint();
+    }
+  }
+  noticeRemindChipsPaint();
+}
 
 function noticeFilterOf(value) {
   return NOTICE_FILTERS.includes(value) ? value : "all";
@@ -59707,7 +59878,29 @@ function noticeTabsApply(msg) {
         noticeGateRefresh(msg.type);
       }
     } else if (msg.t === "gate-unhide" && msg.type) {
-      if (gateIsHidden(msg.type, msg.rid)) gateUnhide(msg.type, String(msg.rid));
+      // "Show card" ends a reminder as well as a hide (gateUnhide), so a tab
+      // that has either state applies the same press.
+      if (gateIsHidden(msg.type, msg.rid) || gateRemindOf(msg.type, String(msg.rid))) {
+        gateUnhide(msg.type, String(msg.rid));
+      }
+    } else if (msg.t === "gate-remind" && msg.type) {
+      // Another tab put the card aside (claunch-6scxn). The ladder is a
+      // schedule, not a gesture: a tab that pressed from now would run a
+      // different one, and the two would disagree about which step is next.
+      // So the record the presser saved is adopted verbatim.
+      const key = `${msg.type}:${String(msg.rid)}`;
+      const saved = noticeLoad(NOTICE_REMIND_KEY, {});
+      const rec = saved && typeof saved === "object" ? saved[key] : null;
+      if (rec && typeof rec === "object" && Number.isFinite(rec.since)) {
+        gateRemindIds.set(key, rec);
+        gateRemindSave();
+        noticeBellPaint();
+        noticePanelPaint();
+        noticeGateRefresh(msg.type);
+      } else if (!gateRemindDown(msg.type, String(msg.rid))) {
+        gateRemind(msg.type, String(msg.rid));
+        noticeGateRefresh(msg.type);
+      }
     } else if (msg.t === "gate-read" && msg.type) {
       if (gateIsRead(msg.type, msg.rid) !== !!msg.read) {
         gateMarkRead(msg.type, String(msg.rid), !!msg.read);
@@ -59830,6 +60023,15 @@ function gateHistorySync(type, pending, all) {
     }
     if (ids.size !== before) noticeSave(key, [...ids]);
   }
+  // A reminder goes the same way (claunch-6scxn), and this one matters more:
+  // a reminder that outlived its request would fire (gateRemindPaint) and
+  // refresh a kind for a card that has nothing to draw, for as long as the
+  // entry survived.
+  let reminded = false;
+  for (const [id, rec] of [...gateRemindIds]) {
+    if (rec.type === type && !live.has(rec.rid)) { gateRemindIds.delete(id); reminded = true; }
+  }
+  if (reminded) gateRemindSave();
   noticeBellPaint();
   noticePanelPaint();
 }
@@ -59841,8 +60043,21 @@ function gateIsHidden(type, rid) {
   return gateHiddenIds.has(`${type}:${rid}`) || !noticeSourceShown(type);
 }
 
+/* Whether a card should be built at all: hidden by hand or by its kind, or
+   put aside by Remind until its next reminder comes (claunch-6scxn). The
+   gate refreshes ask this; the panel asks gateIsHidden for the "hidden"
+   chip, because a reminded request is not hidden — the reader asked for it
+   back, and the row says when. */
+function gateCardAside(type, rid) {
+  return gateIsHidden(type, rid) || gateRemindDown(type, rid);
+}
+
 function gateHide(type, rid) {
   gateHiddenIds.add(`${type}:${rid}`);
+  // Hide and a reminder are two answers to "what do I do with this card",
+  // not two states that stack: Hide means the reader is done with it, so a
+  // reminder still standing would bring it back over that decision.
+  gateRemindClear(type, String(rid));
   noticeTabsPost({ t: "gate-hide", type, rid: String(rid) });
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
@@ -59856,6 +60071,10 @@ function gateHide(type, rid) {
 
 function gateUnhide(type, rid) {
   gateHiddenIds.delete(`${type}:${rid}`);
+  // "Show card" also ends a reminder (claunch-6scxn): both presses mean "put
+  // this card back now", and a reminder left standing would take it down
+  // again at its next step, which is the opposite of what was asked.
+  gateRemindClear(type, String(rid));
   noticeTabsPost({ t: "gate-unhide", type, rid: String(rid) });
   if (noticePanelOpen()) gateShownInPanel.add(`${type}:${rid}`);
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
@@ -59901,6 +60120,40 @@ function gateHideButton(type, rid, key, title) {
     dismissNotice(key);
   });
   return btn;
+}
+
+/* The press beside Hide that answers nothing either, but asks for the card
+   back later (claunch-6scxn): it goes now and comes back at 1h, 6h and 24h,
+   counted from this press. Same shape as gateHideButton and for the same
+   reason — every gate kind draws its buttons through these, so a kind added
+   later gets both without its own author remembering. */
+function gateRemindButton(type, rid, key) {
+  const btn = el("button", "wf-btn gate-remind", "Remind");
+  btn.title =
+    "put this card aside and have it come back at 1h, 6h and 24h from now — " +
+    "nothing is answered, the request stays open and still runs to its deadline";
+  btn.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    gateRemind(type, String(typeof rid === "function" ? rid() : rid));
+    dismissNotice(key);
+  });
+  return btn;
+}
+
+/* Both card-side presses, in the order they are drawn. A gate's card builder
+   calls this once instead of reaching for each button: the pair is one
+   decision ("what do I do with this card while I think"), and a kind that
+   got one without the other would be a gap nothing catches. */
+function gateAsideActions(type, rid, key, hideTitle) {
+  const box = el("span", "gate-aside");
+  const id = String(typeof rid === "function" ? rid() : rid);
+  // The step the card's Remind press would wait for, printed where the press
+  // is: after a reminder has fired the card is back, and without this it
+  // reads as a card nobody put aside — or as one whose Remind press was lost.
+  if (gateRemindLabel(type, id)) box.appendChild(gateRemindChip(type, id));
+  box.appendChild(gateHideButton(type, rid, key, hideTitle));
+  box.appendChild(gateRemindButton(type, rid, key));
+  return box;
 }
 
 function noticeGateRefresh(type) {
@@ -60035,7 +60288,10 @@ function hideAllCards(opening) {
     let hid = false;
     for (const rec of gatePending[type]) {
       const rid = String(rec.id);
-      if (gateIsHidden(type, rid) || gateShownInPanel.has(`${type}:${rid}`)) continue;
+      // A reminded request's card is already down and will come back on its
+      // own (claunch-6scxn): hiding it too would turn the reminder into a
+      // Hide the reader never pressed.
+      if (gateCardAside(type, rid) || gateShownInPanel.has(`${type}:${rid}`)) continue;
       gateHide(type, rid);
       hid = true;
     }
@@ -60085,6 +60341,23 @@ function noticePanelGateRow(type, rec) {
     actions.appendChild(noticePanelButton(
       "Show card", "", "put this card back in the corner",
       () => gateUnhide(type, rid)
+    ));
+  }
+  // The reminder this request is waiting on, if any (claunch-6scxn): the row
+  // says which step comes next, and Show card — the press a hidden row
+  // already carries — brings it back now and ends the reminder with it.
+  if (!hidden && gateRemindLabel(type, rid)) {
+    head.appendChild(gateRemindChip(type, rid));
+    actions.appendChild(noticePanelButton(
+      "Show card", "", "bring this card back now and drop the reminder",
+      () => gateUnhide(type, rid)
+    ));
+  } else if (!hidden) {
+    // A request with no reminder can be given one from the panel too: the
+    // corner card's Remind press, in the row that answers for that card.
+    actions.appendChild(noticePanelButton(
+      "Remind", "", "put this card aside; it comes back at 1h, 6h and 24h",
+      () => gateRemind(type, rid)
     ));
   }
   head.appendChild(noticePanelButton(
@@ -60540,6 +60813,10 @@ function noticePanelState() {
     noticeHistory,
     [...gateHiddenIds],
     [...gateReadIds],
+    // The reminders are part of what the panel draws (claunch-6scxn): a row
+    // says which step it is waiting on, and a reminder that fires changes
+    // that without any other field moving.
+    [...gateRemindIds],
     [...noticeSourcesHidden],
     noticeFilter,
     runGateNudgeNotes,
@@ -60575,12 +60852,12 @@ function noticePanelPaint() {
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
   // back under the count (claunch-qqy2i).
-  // Every gate kind of NOTICE_SOURCES the reader shows, longest-waiting
-  // first (noticeWaitOrder): the request that has stood longest is the one
-  // to answer. The order is the same stamp the row shows as its age, so a
-  // row that says "1h ago" is above one that says "2m ago" — before
-  // claunch-l9znm.1 it was when this browser first saw them, which is the
-  // same order only when the page was open the whole time.
+  // Every gate kind of NOTICE_SOURCES the reader shows, newest first
+  // (noticeNewerFirst): the whole panel is one feed, so a request that just
+  // arrived is above one that has stood an hour (claunch-x3feh, which
+  // reverses claunch-l9znm.1's longest-waiting-first order). The order is
+  // the same stamp the row shows as its age, so the panel reads top to
+  // bottom as "newest first" the way the strip and History do.
   const waiting = [];
   for (const [type, recs] of Object.entries(gatePending)) {
     if (!noticeSourceShown(type)) continue;
@@ -60592,7 +60869,7 @@ function noticePanelPaint() {
     if (Number.isFinite(entry.opened)) return openedOnThisClock(entry.opened);
     return entry.at || 0;
   };
-  waiting.sort((a, b) => noticeWaitOrder({ at: openedAt(a) }, { at: openedAt(b) }));
+  waiting.sort((a, b) => noticeNewerFirst({ at: openedAt(a) }, { at: openedAt(b) }));
   // The rows this rebuild produces, in the order they go in. Each entry is
   // {key, build}; a kept node is reused as it is and only moved.
   const rows = [];
@@ -60609,7 +60886,7 @@ function noticePanelPaint() {
     keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
   }
   for (const [type, rec] of unread) {
-    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}`,
+    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
          () => noticePanelGateRow(type, rec));
   }
   if (read.length) {
@@ -60617,7 +60894,7 @@ function noticePanelPaint() {
       "h3", "notice-panel-section", `Read, still open (${read.length})`
     ));
     for (const [type, rec] of read) {
-      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}`,
+      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
            () => noticePanelGateRow(type, rec));
     }
   }
@@ -60718,6 +60995,16 @@ function noticeGateRowShape(rec) {
     rec.message, rec.target_session, rec.workflow, rec.profile, rec.model,
     rec.workspace, rec.role, rec.mesh, rec.handle, rec.machine,
   ]);
+}
+
+/* The reminder's half of a waiting row's key (claunch-6scxn): which step the
+   row says is coming next, and whether the card is down for it. A rebuild
+   that moves either must build a new row, or the kept node goes on saying
+   the step that has already fired. */
+function noticeGateRemindShape(type, rid) {
+  const rec = gateRemindOf(type, String(rid));
+  if (!rec) return "";
+  return `${rec.stage}:${rec.down === true ? "d" : "u"}:${rec.due === null ? "end" : "on"}`;
 }
 
 /* What one history row draws, as a short string: the flags noticePanelHistoryRow
@@ -61142,7 +61429,7 @@ async function refreshRestartGate() {
     rec ? [Object.assign({}, rec, { id: rid })] : []
   );
   restartGateRid = rid;
-  if (!pending || gateIsHidden("restart", rid)) {
+  if (!pending || gateCardAside("restart", rid)) {
     dismissNotice(NOTICE_GATE);
     return;
   }
@@ -61212,7 +61499,7 @@ async function refreshRestartGate() {
     actions.appendChild(keepStale);
     actions.appendChild(extend);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("restart", () => restartGateRid, NOTICE_GATE,
+    actions.appendChild(gateAsideActions("restart", () => restartGateRid, NOTICE_GATE,
       "close this card only — nothing is answered, the request stays open " +
         "and still auto-approves at its deadline. The bell beside the rail's " +
         "title keeps it, with its buttons, in the notification history"));
@@ -61315,7 +61602,7 @@ async function refreshGotoGate() {
       `${rec.session || "?"} asks to move ${rec.target_session || "?"} — ` +
         `${rec.from || "?"} → ${rec.step || "?"}: ${rec.reason || "(no reason given)"}`
     );
-    if (gateIsHidden("goto", rec.id)) continue;   // closed by hand, still open
+    if (gateCardAside("goto", rec.id)) continue;   // closed by hand, still open
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -61370,7 +61657,7 @@ async function refreshGotoGate() {
       actions.appendChild(approve);
       actions.appendChild(deny);
       /* The third press answers nothing, and says so (gateHideButton). */
-      actions.appendChild(gateHideButton("goto", rec.id, key,
+      actions.appendChild(gateAsideActions("goto", rec.id, key,
         "close this card only — nothing is answered, the request stays open " +
         "and still auto-approves at its deadline; the bell keeps it in the " +
         "notification history"));
@@ -61435,7 +61722,7 @@ async function refreshReposyncGate() {
       (rec.session ? `${rec.session} asks: ` : "") +
         ((rec.plan || {}).summary || (rec.plan || {}).action || "?")
     );
-    if (gateIsHidden("reposync", rec.id)) continue;
+    if (gateCardAside("reposync", rec.id)) continue;
     seen.add(key);
     const plan = rec.plan || {};
     let card = notices.get(key);
@@ -61492,7 +61779,7 @@ async function refreshReposyncGate() {
       });
       actions.appendChild(approve);
       actions.appendChild(reject);
-      actions.appendChild(gateHideButton("reposync", rec.id, key,
+      actions.appendChild(gateAsideActions("reposync", rec.id, key,
         "close this card only — the request stays open and expires as a " +
         "refusal at its deadline; the bell keeps it in the notification " +
         "history"));
@@ -61594,7 +61881,7 @@ async function refreshResumeGate() {
         (rec.reason || "(no reason given)"),
       { session: rec.session }
     );
-    if (gateIsHidden("resume", rec.id)) continue;
+    if (gateCardAside("resume", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -61622,7 +61909,7 @@ async function refreshResumeGate() {
     });
     actions.appendChild(approve);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("resume", rec.id, key,
+    actions.appendChild(gateAsideActions("resume", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(title);
@@ -61985,7 +62272,7 @@ async function refreshSpawnGate() {
       `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`,
       { session: rec.session }
     );
-    if (gateIsHidden("spawn", rec.id)) continue;
+    if (gateCardAside("spawn", rec.id)) continue;
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -61994,7 +62281,7 @@ async function refreshSpawnGate() {
       spawnGateBody(node, rec);
       const actions = el("div", "gate-actions");
       for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
-      actions.appendChild(gateHideButton("spawn", rec.id, key,
+      actions.appendChild(gateAsideActions("spawn", rec.id, key,
         rec.hold === "manual"
           ? "close this card only — the request stays open with its clock paused; " +
             "the bell keeps it in the notification history"
@@ -62128,7 +62415,7 @@ async function refreshKillGate() {
         (rec.reason || "(no reason given)"),
       { session: rec.session }
     );
-    if (gateIsHidden("kill", rec.id)) continue;
+    if (gateCardAside("kill", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -62156,7 +62443,7 @@ async function refreshKillGate() {
     });
     actions.appendChild(approve);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("kill", rec.id, key,
+    actions.appendChild(gateAsideActions("kill", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(title);
@@ -62256,7 +62543,7 @@ async function refreshMeshJoinGate() {
   for (const rec of pending) {
     const key = MESH_JOIN_PREFIX + rec.id;
     gateHistoryOpen("meshjoin", rec.id, meshJoinTitle(rec), meshJoinSub(rec).textContent, {});
-    if (gateIsHidden("meshjoin", rec.id)) continue;
+    if (gateCardAside("meshjoin", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -62275,7 +62562,7 @@ async function refreshMeshJoinGate() {
       });
       actions.appendChild(btn);
     }
-    actions.appendChild(gateHideButton("meshjoin", rec.id, key,
+    actions.appendChild(gateAsideActions("meshjoin", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
@@ -62445,7 +62732,7 @@ function applyRunGate(pending, settled) {
         && notices.get(key)) {
       noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened));
     }
-    if (gateIsHidden("ask", rec.id)) continue;
+    if (gateCardAside("ask", rec.id)) continue;
     seen.add(key);
     const note = runGateNudgeNotes[rec.session] || "";
     const card = notices.get(key);
@@ -62474,7 +62761,7 @@ function applyRunGate(pending, settled) {
     if (short) node.appendChild(el("div", "notice-sub", short));
     const actions = el("div", "gate-actions");
     for (const btn of runGateButtons(rec, () => dismissNotice(key))) actions.appendChild(btn);
-    actions.appendChild(gateHideButton("ask", rec.id, key,
+    actions.appendChild(gateAsideActions("ask", rec.id, key,
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
@@ -62634,7 +62921,7 @@ async function refreshNudgeGate() {
       `${rec.session} needs you: ${nudgeWhat(rec)}`,
       rec.message || "", { session: rec.session }
     );
-    if (gateIsHidden("nudge", rec.id)) continue;
+    if (gateCardAside("nudge", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) {
@@ -62663,7 +62950,7 @@ async function refreshNudgeGate() {
       nudgeGo(rec, key);
     });
     actions.appendChild(open);
-    actions.appendChild(gateHideButton("nudge", rec.id, key,
+    actions.appendChild(gateAsideActions("nudge", rec.id, key,
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
@@ -63537,7 +63824,7 @@ noticeSyncTick();
 // fetch nothing — a second's worth of subtraction over the few nodes
 // currently on screen — and the rows that need it are exactly the sticky
 // ones that can sit for an hour.
-setInterval(() => { noticeAgesPaint(); noticeClocksPaint(); }, 1000);
+setInterval(() => { noticeAgesPaint(); noticeClocksPaint(); noticeRemindPaint(); }, 1000);
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and
