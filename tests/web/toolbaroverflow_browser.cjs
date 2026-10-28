@@ -223,13 +223,13 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       await page.locator("#layout").evaluate((el, px) => { el.style.width = `${px}px`; }, w);
       await page.evaluate(({ id, cls }) => {
         for (const el of document.querySelectorAll(".has-resource, .has-news")) el.classList.remove("has-resource", "has-news");
-        if (id) document.getElementById(id).classList.add(cls);
+        for (const [i, c] of id ? (Array.isArray(id) ? id : [[id, cls]]) : []) document.getElementById(i).classList.add(c);
       }, { id, cls });
       await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(r)))));
       return page.evaluate((id) => {
         const more = document.getElementById("term-more");
         return {
-          inMenu: id ? document.getElementById(id).classList.contains("toolbar-overflow") : null,
+          inMenu: id ? (Array.isArray(id) ? id : [[id]]).every(([i]) => document.getElementById(i).classList.contains("toolbar-overflow")) : null,
           more: ["has-resource", "has-news"].filter(c => more.classList.contains(c)),
         };
       }, id);
@@ -242,7 +242,21 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     await page.keyboard.press("Escape");
     assert.deepEqual(await lit(180, "term-threadsbtn", "has-news"), { inMenu: true, more: ["has-news"] },
       "thread news in the menu lights ⋯ with the news colour");
+    assert.deepEqual(await lit(180, [["term-qabtn", "has-resource"], ["term-threadsbtn", "has-news"]]),
+      { inMenu: true, more: ["has-news"] }, "news and a resource both in the menu: ⋯ wears news alone");
     assert.deepEqual(await lit(180, null), { inMenu: null, more: [] }, "nothing lit, ⋯ unlit");
+    // The menu lists what it holds in row order, whatever order it was
+    // filled in: the plain buttons' proxies follow the buttons on the row.
+    await page.locator("#term-more").click();
+    const menuOrder = await page.evaluate(() => {
+      const label = el => el.getAttribute("aria-label") || el.textContent;
+      const row = [...document.querySelectorAll("#term-header button.toolbar-overflow")].map(label);
+      const proxies = [...document.querySelectorAll("#term-overflow-menu .term-btn")].map(label).filter(l => row.includes(l));
+      return { row, proxies };
+    });
+    await page.keyboard.press("Escape");
+    assert(menuOrder.row.length > 2, `several buttons in the menu at 180px: ${menuOrder.row}`);
+    assert.deepEqual(menuOrder.proxies, menuOrder.row, "the menu lists its buttons in row order");
     // At the widest column with a menu, the QA button is still on the row.
     const roomy = rows[firstMenu].at;
     const onRow = await lit(roomy, "term-qabtn", "has-resource");
