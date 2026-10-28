@@ -27,7 +27,7 @@ from contextlib import contextmanager
 # Bound apart from the module: tests stand a stub in for `time` (monotonic
 # only), and the restore timings must not depend on what that stub carries.
 from time import perf_counter as _perf_counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -180,6 +180,26 @@ def _brings_back(entry) -> bool:
         isinstance(entry, dict)
         and (entry.get("was_running") or entry.get("delayed_at"))
     )
+
+
+@dataclass
+class HostRelaunch:
+    """What :meth:`SessionManager.relaunch_host_ended` did, by name: the
+    pass's share of the lists a boot fills for its restore queue and resume
+    nudge (claunch-hor3b.1)."""
+
+    relaunched: List[str] = field(default_factory=list)
+    #: Filed delayed, for a restore queue to wake (``restore_stagger`` set).
+    delayed: List[str] = field(default_factory=list)
+    #: Relaunch raised: filed failed.
+    failed: List[str] = field(default_factory=list)
+    #: Its program outlived the host (an orphan the host's SIGKILL left):
+    #: not relaunched, as a boot does not relaunch a session still running
+    #: in a host it cannot reach -- a second copy of one conversation.
+    running: List[str] = field(default_factory=list)
+    busy: List[str] = field(default_factory=list)
+    idle: Dict[str, Optional[str]] = field(default_factory=dict)
+    blank: List[str] = field(default_factory=list)
 
 
 class SessionManager:
@@ -821,7 +841,9 @@ class SessionManager:
                 session.sdef.name, session.exit_code,
             )
         else:
-            self.events.record(session, "exit", "세션 프로세스 종료",
+            self.events.record(session, "exit",
+                               "PTY host 종료로 세션 프로세스 종료 (restore 꺼짐)"
+                               if self._host_took(session) else "세션 프로세스 종료",
                                exit_code=session.exit_code,
                                **_known(ended_by=getattr(session, "ended_by", None)))
         self.persist()
@@ -855,7 +877,7 @@ class SessionManager:
             return
         if id(session) in self._restarting:
             return
-        if self._ended_with_host(session):
+        if self._host_took(session):
             session.ended_by = actors.make(actors.DAEMON, reason="pty-host-ended")
             return
         if getattr(session, "kill_requested", False):
@@ -865,6 +887,14 @@ class SessionManager:
         session.ended_by = actors.make(actors.SELF)
 
     def _ended_with_host(self, session: Session) -> bool:
+        """Whether an exit is the PTY host's going (:meth:`_host_took`) and
+        the record is one a boot would bring back: ``restore`` on, as
+        :meth:`_restore_entry` asks. Such a record is kept for
+        :meth:`relaunch_host_ended`; one with ``restore`` off ends there,
+        as a restart without the host leaves it (claunch-hor3b.1)."""
+        return bool(session.sdef.restore) and self._host_took(session)
+
+    def _host_took(self, session: Session) -> bool:
         """Whether an exit is the PTY host's going rather than the
         program's (claunch-hor3b.1): the handle said so, and nothing --
         kill, pause, hold or relaunch -- asked for the ending."""
@@ -884,6 +914,10 @@ class SessionManager:
         if getattr(session, "kill_requested", False):
             return False
         if getattr(session, "paused_at", None) or id(session) in self._restarting:
+            return False
+        if self._host_took(session):
+            # Its terminal ended, not its program (claunch-hor3b.1): with
+            # restore off it is an ending, as at a restart, not a crash.
             return False
         code = session.exit_code
         return code is not None and code != 0
@@ -2592,32 +2626,101 @@ class SessionManager:
             if not s.exited and getattr(getattr(s, "pty", None), "_client", None) is client
         ]
 
-    async def relaunch_host_ended(self) -> List[str]:
-        """Relaunch every session the PTY host took down with it
-        (claunch-hor3b.1), the way the next boot's :meth:`restore_all` would:
-        :meth:`respawn_async` with ``restoring=True``, so the claude harness
-        resumes its conversation. Spaced by ``restore_stagger`` as at boot.
-        A record that does not come back is logged and stays one the next
-        boot restores. Returns the names relaunched."""
-        relaunched: List[str] = []
-        for i, name in enumerate(self.host_ended()):
+    async def relaunch_host_ended(self) -> "HostRelaunch":
+        """Bring back every session the PTY host took down with it
+        (claunch-hor3b.1), through the same judgement the next boot's
+        :meth:`restore_all` makes of it (:meth:`_restore_entry`): only a
+        ``restore`` definition comes back (:meth:`_ended_with_host`), a
+        resumable one is filed *delayed* for a restore queue when
+        ``restore_stagger`` is set, the rest relaunch now with their
+        conversation, and each lands on :attr:`resumed_busy` /
+        :attr:`resumed_idle` / :attr:`resumed_blank` as at boot.
+
+        Those lists and :attr:`restore_queue` belong to the boot's nudge and
+        queue, which have run by now; the returned :class:`HostRelaunch`
+        carries this pass's share of them, for the caller to start its own.
+        A relaunch that raises leaves the record *failed*, as a delayed
+        record whose wake raised is (:meth:`fail_delayed`)."""
+        out = HostRelaunch()
+        for name in self.host_ended():
             if self.shutting_down:
                 break
-            if i and self.restore_stagger > 0:
-                await asyncio.sleep(self.restore_stagger)
-            try:
-                session = await self.respawn_async(name)
-            except Exception:
-                log.exception("could not relaunch %r after the PTY host ended", name)
+            session = self._sessions.get(name)
+            if session is None or not session.exited or not self._ended_with_host(session):
                 continue
-            # Unattended, as restore_all's relaunch is: nobody asked for it.
-            session.resumed_by_human = False
-            self.events.record(session, "restore", "PTY host 종료 뒤 세션 복원")
-            relaunched.append(name)
-        if relaunched:
-            log.warning("relaunched %d session(s) the PTY host ended: %s",
-                        len(relaunched), ", ".join(relaunched))
-        return relaunched
+            if self._outlived_host(session):
+                # Its terminal is gone but its program is not (the host was
+                # killed and the child did not take the hangup). Relaunching
+                # would run the conversation twice; it is left an exited
+                # record a person respawns once the orphan is dealt with,
+                # as restore_all leaves one stranded in an unreachable host.
+                session.ended_by_host = False
+                log.warning(
+                    "session %r outlived the PTY host (pid %s still running); "
+                    "not relaunching it", name, session.pid,
+                )
+                self.events.record(
+                    session, "restore",
+                    "PTY host 종료 뒤에도 프로세스가 실행 중이라 재실행하지 않음",
+                    pid=session.pid,
+                )
+                self.persist()
+                out.running.append(name)
+                continue
+            entry = self._registry_entry(session)
+            queued, blanked = len(self.restore_queue), len(self.resumed_blank)
+            del self._sessions[name]
+            failed: List[str] = []
+            self._restore_entry(entry, {}, None, None, failed, why="PTY host 종료")
+            if failed:
+                self._host_relaunch_failed(name)
+                out.failed.append(name)
+            elif name in self.restore_queue[queued:]:
+                out.delayed.append(name)
+            else:
+                out.relaunched.append(name)
+            if name not in failed:
+                if entry.get("was_busy"):
+                    out.busy.append(name)
+                else:
+                    out.idle[name] = entry.get("last_output_at")
+                if name in self.resumed_blank[blanked:]:
+                    out.blank.append(name)
+            # As restore_all_async does: the loop answers between records.
+            await asyncio.sleep(0)
+        if out.relaunched or out.delayed or out.failed or out.running:
+            log.warning(
+                "after the PTY host ended: relaunched %d, delayed %d, failed %d, "
+                "still running %d (%s)",
+                len(out.relaunched), len(out.delayed), len(out.failed), len(out.running),
+                ", ".join(out.relaunched + out.delayed + out.failed + out.running),
+            )
+        return out
+
+    def outlived_host(self) -> List[str]:
+        """The :meth:`host_ended` records whose program is still running."""
+        return [n for n in self.host_ended() if self._outlived_host(self._sessions[n])]
+
+    @staticmethod
+    def _outlived_host(session: AnySession) -> bool:
+        from .window import pid_alive
+
+        pid = getattr(session, "pid", None)
+        return bool(pid) and pid_alive(int(pid))
+
+    def _host_relaunch_failed(self, name: str) -> None:
+        """A record :meth:`relaunch_host_ended` could not bring back.
+        :meth:`_restore_entry` retired it as a plain exit owed a boot sweep;
+        mid-run nobody collects that, so it is filed failed now and its
+        exit hooks run as a failure's do (the board sweep waits for the
+        person settling it)."""
+        dead = self._sessions[name]
+        if dead in self._retired_for_sweep:
+            self._retired_for_sweep.remove(dead)
+        dead.failed_at = _now_iso()
+        self.events.record(dead, "fail", "PTY host 종료 뒤 세션 복원 실패")
+        self.persist()
+        self._run_exit_hooks(dead)
 
     def _respawn_take(self, name: str) -> AnySession:
         session = self.get(name)
@@ -3329,6 +3432,96 @@ class SessionManager:
         self._persist_handle = None
         self.persist()
 
+    def _registry_entry(self, session: AnySession) -> dict:
+        """The record :meth:`persist` writes for ``session`` -- also what
+        :meth:`relaunch_host_ended` hands :meth:`_restore_entry`, so a
+        session the PTY host took down is judged as the next boot would."""
+        return {
+            "def": session.sdef.to_dict(),
+            # An exit Windows caused at a logoff or shutdown counts
+            # as running: the machine went down around it, and the
+            # next boot is what brings it back (see ended_by_os).
+            # The flag, not the exit code: a record retired at an
+            # earlier boot keeps its code and must stay retired.
+            "was_running": not session.exited
+            or (self._ended_by_shutdown.get(session.sdef.name) is session
+                and not session.archived_at)
+            or (
+                getattr(session, "ended_by_os", False)
+                and not session.archived_at
+            )
+            # Likewise an exit the PTY host's going caused
+            # (claunch-hor3b.1): until the host watch relaunches
+            # it, the next boot is what brings it back.
+            or (
+                self._ended_with_host(session)
+                and not session.archived_at
+            ),
+            # Whether an agent was mid-turn here. persist() runs
+            # first in shutdown_all, before anything is torn down,
+            # so at a restart this is what the session was doing in
+            # the last moment before the daemon went down — the one
+            # question a restored-but-idle terminal cannot answer
+            # about itself (see daemon/resume.py).
+            "was_busy": session.status() == STATUS_BUSY
+            or session.sdef.name in self._delayed_busy,
+            "exit_code": session.exit_code,
+            # carried across restarts so a retired record keeps
+            # answering like the session it was
+            "pid": session.pid,
+            "created_at": session.created_at,
+            "last_output_at": session.last_output_at,
+            # When a person last looked in and last typed. Kept across
+            # the restart because that is exactly when the question
+            # gets asked: the sessions worth finding after a daemon
+            # comes back are the ones nobody has been near.
+            "last_visited_at": session.last_visited_at,
+            "last_input_at": session.last_input_at,
+            "exited_at": session.exited_at,
+            # Archive retains the record and only changes which fleet
+            # view owns it. Kept outside SessionDef because it is
+            # lifecycle state, not a launch option.
+            "archived_at": session.archived_at,
+            # The pause marker, kept for the same reason: a paused
+            # record that came back from a restart as a plain kill
+            # would drop out of the bulk resume it was paused for.
+            "paused_at": getattr(session, "paused_at", None),
+            # The hold marker (claunch-5l35i): a held record that came
+            # back from a restart as a plain kill would lose its wake
+            # and owe a board sweep it must not make.
+            "held_at": getattr(session, "held_at", None),
+            # The restore queue's marker (claunch-0j6gb.2): a boot
+            # that finds it relaunches the record through the queue
+            # again rather than leaving it a plain hold.
+            "delayed_at": getattr(session, "delayed_at", None),
+            # The failure marker (claunch-0j6gb.1): a failed record
+            # that came back as a plain kill would owe the board
+            # sweep its failure put off.
+            "failed_at": getattr(session, "failed_at", None),
+            # Whether this ending's board sweep was made. Without it
+            # every boot swept every exited record again, and the one
+            # write a sweep makes that does not change state -- the
+            # ORPHANED FOLLOW-UP comment -- piled up once per restart
+            # (claunch-fh8u1.2: 29 copies on one issue).
+            "swept_at": getattr(session, "swept_at", None),
+            # Who ended this incarnation (claunch-o6xws): only the
+            # live object knew, and a record retired at the next boot
+            # must keep answering the rail's "killed by whom".
+            "ended_by": getattr(session, "ended_by", None),
+            # A person's standing "type nothing in here". Written
+            # here so it survives the restart that has nothing to do
+            # with them; an exited record always reports False (see
+            # DeadSession.set_delivery_hold), so retiring a held
+            # session does drop the pin — the record has no terminal
+            # left to hold mail out of.
+            "delivery_hold": session.delivery_held(),
+            # The PTY host session it runs in (claunch-xnnct.1): what
+            # the next daemon matches to adopt it instead of
+            # relaunching it. None for a local PTY or an exited one.
+            "pty": (session.pty_record()
+                    if callable(getattr(session, "pty_record", None)) else None),
+        }
+
     def persist(self) -> None:
         handle = self._persist_handle
         if handle is not None and _on_running_loop():
@@ -3345,95 +3538,7 @@ class SessionManager:
             self.reconcile_models()
         except Exception:
             log.warning("model reconciliation failed; persisting as-is", exc_info=True)
-        entries = []
-        for session in self._sessions.values():
-            entries.append(
-                {
-                    "def": session.sdef.to_dict(),
-                    # An exit Windows caused at a logoff or shutdown counts
-                    # as running: the machine went down around it, and the
-                    # next boot is what brings it back (see ended_by_os).
-                    # The flag, not the exit code: a record retired at an
-                    # earlier boot keeps its code and must stay retired.
-                    "was_running": not session.exited
-                    or (self._ended_by_shutdown.get(session.sdef.name) is session
-                        and not session.archived_at)
-                    or (
-                        getattr(session, "ended_by_os", False)
-                        and not session.archived_at
-                    )
-                    # Likewise an exit the PTY host's going caused
-                    # (claunch-hor3b.1): until the host watch relaunches
-                    # it, the next boot is what brings it back.
-                    or (
-                        self._ended_with_host(session)
-                        and not session.archived_at
-                    ),
-                    # Whether an agent was mid-turn here. persist() runs
-                    # first in shutdown_all, before anything is torn down,
-                    # so at a restart this is what the session was doing in
-                    # the last moment before the daemon went down — the one
-                    # question a restored-but-idle terminal cannot answer
-                    # about itself (see daemon/resume.py).
-                    "was_busy": session.status() == STATUS_BUSY
-                    or session.sdef.name in self._delayed_busy,
-                    "exit_code": session.exit_code,
-                    # carried across restarts so a retired record keeps
-                    # answering like the session it was
-                    "pid": session.pid,
-                    "created_at": session.created_at,
-                    "last_output_at": session.last_output_at,
-                    # When a person last looked in and last typed. Kept across
-                    # the restart because that is exactly when the question
-                    # gets asked: the sessions worth finding after a daemon
-                    # comes back are the ones nobody has been near.
-                    "last_visited_at": session.last_visited_at,
-                    "last_input_at": session.last_input_at,
-                    "exited_at": session.exited_at,
-                    # Archive retains the record and only changes which fleet
-                    # view owns it. Kept outside SessionDef because it is
-                    # lifecycle state, not a launch option.
-                    "archived_at": session.archived_at,
-                    # The pause marker, kept for the same reason: a paused
-                    # record that came back from a restart as a plain kill
-                    # would drop out of the bulk resume it was paused for.
-                    "paused_at": getattr(session, "paused_at", None),
-                    # The hold marker (claunch-5l35i): a held record that came
-                    # back from a restart as a plain kill would lose its wake
-                    # and owe a board sweep it must not make.
-                    "held_at": getattr(session, "held_at", None),
-                    # The restore queue's marker (claunch-0j6gb.2): a boot
-                    # that finds it relaunches the record through the queue
-                    # again rather than leaving it a plain hold.
-                    "delayed_at": getattr(session, "delayed_at", None),
-                    # The failure marker (claunch-0j6gb.1): a failed record
-                    # that came back as a plain kill would owe the board
-                    # sweep its failure put off.
-                    "failed_at": getattr(session, "failed_at", None),
-                    # Whether this ending's board sweep was made. Without it
-                    # every boot swept every exited record again, and the one
-                    # write a sweep makes that does not change state -- the
-                    # ORPHANED FOLLOW-UP comment -- piled up once per restart
-                    # (claunch-fh8u1.2: 29 copies on one issue).
-                    "swept_at": getattr(session, "swept_at", None),
-                    # Who ended this incarnation (claunch-o6xws): only the
-                    # live object knew, and a record retired at the next boot
-                    # must keep answering the rail's "killed by whom".
-                    "ended_by": getattr(session, "ended_by", None),
-                    # A person's standing "type nothing in here". Written
-                    # here so it survives the restart that has nothing to do
-                    # with them; an exited record always reports False (see
-                    # DeadSession.set_delivery_hold), so retiring a held
-                    # session does drop the pin — the record has no terminal
-                    # left to hold mail out of.
-                    "delivery_hold": session.delivery_held(),
-                    # The PTY host session it runs in (claunch-xnnct.1): what
-                    # the next daemon matches to adopt it instead of
-                    # relaunching it. None for a local PTY or an exited one.
-                    "pty": (session.pty_record()
-                            if callable(getattr(session, "pty_record", None)) else None),
-                }
-            )
+        entries = [self._registry_entry(session) for session in self._sessions.values()]
         try:
             # Prune only in steady state: while a restore is still filling the
             # set, deleting the records not loaded yet would be the very clobber
@@ -3612,7 +3717,8 @@ class SessionManager:
             )
 
     def _restore_entry(
-        self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str]
+        self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str],
+        *, why: str = "데몬 재시작",
     ) -> None:
         """One registry record, as :meth:`_restore_steps` walks them.
 
@@ -3665,7 +3771,7 @@ class SessionManager:
         # get, not left a plain hold.
         if sdef.restore and (entry.get("was_running") or entry.get("delayed_at")):
             if self.restore_stagger > 0 and self._resumable_def(sdef):
-                self._defer_restore(sdef, entry)
+                self._defer_restore(sdef, entry, why=why)
                 return
             # Asked before the relaunch, not after: the answer is about
             # the transcript the *previous* daemon left behind, and the
@@ -3684,7 +3790,7 @@ class SessionManager:
                     last_input_at=entry.get("last_input_at"),
                     delivery_hold=bool(entry.get("delivery_hold")),
                 )
-                self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
+                self.events.record(restored, "resume", f"{why} 후 세션 복원")
                 if entry.get("was_busy"):
                     self.resumed_busy.append(sdef.name)
                 else:
@@ -3826,7 +3932,8 @@ class SessionManager:
         except Exception:
             log.warning("could not end PTY host session %s", row.get("sid"), exc_info=True)
 
-    def _defer_restore(self, sdef: SessionDef, entry: dict) -> DeadSession:
+    def _defer_restore(self, sdef: SessionDef, entry: dict, *,
+                       why: str = "데몬 재시작") -> DeadSession:
         """File a session the boot owes a relaunch as *delayed* (a hold the
         restore queue owns, claunch-0j6gb.2) instead of relaunching it now.
 
@@ -3847,7 +3954,7 @@ class SessionManager:
             self._delayed_busy.add(sdef.name)
         else:
             self.resumed_idle[sdef.name] = entry.get("last_output_at")
-        self.events.record(dead, "delayed", "데몬 재시작 후 복원 대기열에 등록")
+        self.events.record(dead, "delayed", f"{why} 후 복원 대기열에 등록")
         return dead
 
     def _retire(self, sdef: SessionDef, entry: dict) -> DeadSession:

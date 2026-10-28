@@ -31,7 +31,8 @@ from claude_launcher.daemon import pty_backend, paths  # noqa: E402
 from claude_launcher.daemon import host_watch  # noqa: E402
 from claude_launcher.daemon import __main__ as daemon_main  # noqa: E402
 from claude_launcher.daemon.harness import SessionDef  # noqa: E402
-from claude_launcher.daemon.manager import SessionManager  # noqa: E402
+from claude_launcher.daemon.manager import HostRelaunch, SessionManager  # noqa: E402
+from claude_launcher.daemon import restore_queue  # noqa: E402
 from claude_launcher.daemon.ptyhost import client as hc  # noqa: E402
 from claude_launcher.daemon import session as session_mod  # noqa: E402
 from claude_launcher.daemon.session import DeadSession  # noqa: E402
@@ -519,9 +520,10 @@ def test_a_host_sigterm_relaunches_its_sessions_like_a_restart(host, tmp_path, m
         s = mgr.create(SessionDef(name="h1", harness="ph", cwd=str(tmp_path)))
         await _wait_screen(s, "READY")
         pid, host_pid = s.pid, host.host_pid
+        passes = []
         watcher = asyncio.create_task(host_watch.watch(
             mgr, lambda: hc.ensure_host(paths.ptyhost_dir(), idle_exit=2.0),
-            interval=0.05))
+            on_relaunch=passes.append, interval=0.05))
         try:
             os.kill(host_pid, signal.SIGTERM)
             assert await _until_true(lambda: mgr.get("h1") is not s and not mgr.get("h1").exited)
@@ -534,7 +536,12 @@ def test_a_host_sigterm_relaunches_its_sessions_like_a_restart(host, tmp_path, m
             assert new is not None and new.host_pid != host_pid
             assert s2.pid != pid
             await _wait_screen(s2, "READY")
-            assert "restore" in [e.get("kind") for e in mgr.events.rows(s2)]
+            # Through the boot's own judgement (_restore_entry), so it lands
+            # on the lists a boot hands its resume nudge -- this pass's share.
+            assert ("resume", "PTY host 종료 후 세션 복원") in [
+                (e.get("kind"), e.get("text")) for e in mgr.events.rows(s2)]
+            assert await _until_true(lambda: bool(passes))
+            assert passes[0].relaunched == ["h1"] and list(passes[0].idle) == ["h1"]
             log_text = (paths.ptyhost_dir() / "ptyhost.log").read_text(encoding="utf-8")
             assert "stopping (SIGTERM); ending 1 live session(s)" in log_text
         finally:
@@ -586,8 +593,134 @@ def test_a_kill_is_not_undone_by_the_host_going(host, tmp_path, monkeypatch):
         os.kill(host.host_pid, signal.SIGTERM)
         assert await _until_true(lambda: s.exited)
         assert s.ended_by_host and mgr.host_ended() == []
-        assert await mgr.relaunch_host_ended() == []
+        assert await mgr.relaunch_host_ended() == HostRelaunch()
         assert mgr.get("h3") is s
+
+    asyncio.run(run())
+
+
+def test_a_no_restore_session_ends_with_the_host_as_at_a_restart(host, tmp_path, monkeypatch):
+    """restore off: a restart would not bring it back, so neither does the
+    host's going (review of claunch-hor3b.1). It ends -- not failed, and its
+    exit hooks run, as for any ending."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        ended = []
+        mgr.exit_hooks.append(lambda sess: ended.append(sess.sdef.name))
+        s = mgr.create(SessionDef(name="h4", harness="ph", cwd=str(tmp_path), restore=False))
+        await _wait_screen(s, "READY")
+        os.kill(host.host_pid, signal.SIGTERM)
+        assert await _until_true(lambda: s.exited)
+        assert s.ended_by_host and getattr(s, "failed_at", None) is None
+        assert s.ended_by == {"kind": "daemon", "reason": "pty-host-ended"}
+        assert ended == ["h4"]
+        assert mgr.host_ended() == []
+        assert await mgr.relaunch_host_ended() == HostRelaunch()
+        assert mgr._registry_entry(s)["was_running"] is False
+        assert "PTY host 종료로 세션 프로세스 종료 (restore 꺼짐)" in [
+            e.get("text") for e in mgr.events.rows(s)]
+
+    asyncio.run(run())
+
+
+def test_a_resumable_session_the_host_took_waits_in_a_restore_queue(host, tmp_path, monkeypatch):
+    """With restore_stagger set, a boot files a resumable record delayed for
+    its restore queue instead of relaunching the fleet at once; the host's
+    going does the same, and a queue over that pass's names wakes it."""
+    _register()
+    monkeypatch.setattr(SessionManager, "_resumable_def", staticmethod(lambda sdef: True))
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True,
+                             restore_stagger=0.01)
+        s = mgr.create(SessionDef(name="h5", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        os.kill(host.host_pid, signal.SIGTERM)
+        assert await _until_true(lambda: s.exited)
+        monkeypatch.setattr(pty_backend, "_host",
+                            hc.ensure_host(paths.ptyhost_dir(), idle_exit=2.0))
+        out = await mgr.relaunch_host_ended()
+        assert out.delayed == ["h5"] and out.relaunched == [] and list(out.idle) == ["h5"]
+        dead = mgr.get("h5")
+        assert dead.exited and dead.delayed_at and not getattr(dead, "failed_at", None)
+        queue = restore_queue.RestoreQueue(mgr, interval=0.0, names=out.delayed)
+        queue.start()
+        assert await _until_true(lambda: not mgr.get("h5").exited)
+        assert queue.started == ["h5"]
+        await _wait_screen(mgr.get("h5"), "READY")
+        await queue.stop()
+        await mgr.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_a_program_that_outlived_the_host_is_not_run_twice(host, tmp_path, monkeypatch):
+    """A host killed outright can leave its child running (review of
+    claunch-hor3b.1). A relaunch would run the conversation a second time;
+    the record is left exited, as a boot leaves one stranded in a host it
+    cannot reach."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="h6", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        os.kill(host.host_pid, signal.SIGKILL)
+        assert await _until_true(lambda: s.exited)
+        monkeypatch.setattr(SessionManager, "_outlived_host", staticmethod(lambda sess: True))
+        assert mgr.outlived_host() == ["h6"]
+        out = await mgr.relaunch_host_ended()
+        assert out.running == ["h6"] and out.relaunched == []
+        assert mgr.get("h6") is s and mgr.host_ended() == []
+        assert mgr._registry_entry(s)["was_running"] is False
+
+    asyncio.run(run())
+
+
+def test_the_watch_stops_relaunching_a_host_that_keeps_going(monkeypatch):
+    """Host losses past max_losses inside the window: a new host is still
+    installed, but nothing is relaunched into it (review of
+    claunch-hor3b.1) -- the records are left for the next boot."""
+    import threading
+
+    class _Client:
+        def __init__(self, closed):
+            self.closed = threading.Event()
+            if closed:
+                self.closed.set()
+
+    installed = {"c": _Client(True)}
+    monkeypatch.setattr(pty_backend, "installed_host", lambda: installed["c"])
+    monkeypatch.setattr(pty_backend, "use_host", lambda c: installed.update(c=c))
+    # Two more lost hosts, then one that stays.
+    fresh = [_Client(True), _Client(True), _Client(False)]
+
+    class _Mgr:
+        shutting_down = False
+        relaunches = 0
+
+        def bound_to_host(self, client):
+            return []
+
+        def outlived_host(self):
+            return []
+
+        async def relaunch_host_ended(self):
+            self.relaunches += 1
+            return HostRelaunch()
+
+    mgr = _Mgr()
+
+    async def run():
+        task = asyncio.create_task(host_watch.watch(
+            mgr, lambda: fresh.pop(0), interval=0.01, settle=0.0,
+            max_losses=2, loss_window=60.0))
+        assert await _until_true(lambda: not fresh, timeout=5.0)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        assert mgr.relaunches == 2
 
     asyncio.run(run())
 

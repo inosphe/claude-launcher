@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from . import pty_backend
 
@@ -33,15 +33,27 @@ POLL_INTERVAL = 1.0
 #: Seconds to wait for the sessions of a lost connection to finish exiting
 #: before relaunching the ones that have.
 EXIT_SETTLE = 10.0
+#: Host losses within :data:`LOSS_WINDOW` seconds after which the watch
+#: stops relaunching: a host that keeps going down under a full fleet (memory
+#: pressure is the likely one) would otherwise bring the whole fleet back into
+#: the same condition each time. The records stay ones the next boot restores.
+MAX_LOSSES = 3
+LOSS_WINDOW = 600.0
 
 
 async def watch(manager, connect: Callable[[], Optional[object]], *,
-                interval: float = POLL_INTERVAL, settle: float = EXIT_SETTLE) -> None:
+                on_relaunch: Optional[Callable[[object], None]] = None,
+                interval: float = POLL_INTERVAL, settle: float = EXIT_SETTLE,
+                max_losses: int = MAX_LOSSES, loss_window: float = LOSS_WINDOW) -> None:
     """Run until the daemon shuts down or no host is installed.
 
     ``connect`` starts or reaches a host and installs nothing itself: it
-    returns the client, or None when no host could be had.
+    returns the client, or None when no host could be had. ``on_relaunch``
+    is handed each pass's :class:`~.manager.HostRelaunch` -- the boot's
+    restore queue and resume nudge have run, so the caller starts this
+    pass's own.
     """
+    losses: List[float] = []
     while True:
         client = pty_backend.installed_host()
         if client is None:
@@ -50,10 +62,21 @@ async def watch(manager, connect: Callable[[], Optional[object]], *,
             await asyncio.sleep(interval)
         if manager.shutting_down:
             return
-        log.warning("the PTY host connection closed under a running daemon; "
-                    "starting a new host and relaunching the sessions it ended")
+        now = time.monotonic()
+        losses = [t for t in losses if now - t < loss_window] + [now]
+        relaunch = len(losses) <= max_losses
+        if relaunch:
+            log.warning("the PTY host connection closed under a running daemon; "
+                        "starting a new host and relaunching the sessions it ended")
+        else:
+            log.error("the PTY host connection closed %d times in %.0fs; starting "
+                      "a new host but relaunching nothing -- the sessions it ended "
+                      "stay for the next boot's restore", len(losses), loss_window)
         deadline = time.monotonic() + settle
-        while manager.bound_to_host(client) and time.monotonic() < deadline:
+        # The handles of the lost connection, then the programs behind them:
+        # a child the hangup has not ended yet is not one to relaunch over.
+        while ((manager.bound_to_host(client) or manager.outlived_host())
+               and time.monotonic() < deadline):
             await asyncio.sleep(0.1)
         try:
             new = await asyncio.to_thread(connect)
@@ -67,4 +90,11 @@ async def watch(manager, connect: Callable[[], Optional[object]], *,
         pty_backend.use_host(new)
         if new is None:
             log.warning("no PTY host: the sessions relaunch in the daemon")
-        await manager.relaunch_host_ended()
+        if not relaunch:
+            continue
+        result = await manager.relaunch_host_ended()
+        if on_relaunch is not None:
+            try:
+                on_relaunch(result)
+            except Exception:
+                log.exception("starting the follow-ups of a host relaunch failed")

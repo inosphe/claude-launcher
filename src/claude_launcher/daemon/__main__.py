@@ -351,13 +351,6 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             "failed to restore %d session(s): %s",
             len(failed), ", ".join(failed),
         )
-    # A host that goes away from here on takes its sessions with it while
-    # this daemon stays up; the watch relaunches them as a restart without
-    # the host would (claunch-hor3b.1).
-    host_watch_task = (
-        asyncio.create_task(host_watch.watch(manager, lambda: _connect_pty_host(cfg)))
-        if pty_host is not None else None
-    )
     restored = [s.sdef.name for s in manager.list() if not s.exited]
     retired = [s.sdef.name for s in manager.list()
                if s.exited and s.sdef.name not in manager.restore_queue]
@@ -551,16 +544,51 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     manager.delayed_wake_hooks.append(_delayed_woken)
     # The sessions restore_all filed as delayed (claunch-0j6gb.2), started in
     # priority order a few seconds apart; any use starts one at once.
-    queue = restore_queue.RestoreQueue(
-        manager,
-        roles_of=lambda name: [
+    def _roles_of(name):
+        return [
             role for m in mesh_manager.meshes_for_session(name)
             for role in (m.get("roles") or [m.get("role")])
-        ],
-    )
+        ]
+
+    queue = restore_queue.RestoreQueue(manager, roles_of=_roles_of)
     queue.start()
     # The dashboard reads its progress off the session list (claunch-v4uyt).
     app["restore_queue"] = queue
+    # A host that goes away from here on takes its sessions with it while
+    # this daemon stays up; the watch relaunches them as a restart without
+    # the host would (claunch-hor3b.1), and each pass gets the restore queue
+    # and resume nudge a boot gives its restore -- the boot's own have run.
+    host_followups = []
+
+    def _after_host_relaunch(result) -> None:
+        if result.delayed:
+            again = restore_queue.RestoreQueue(
+                manager, roles_of=_roles_of, names=result.delayed,
+            )
+            again.start()
+            host_followups.append(again)
+            app["restore_queue"] = again
+        nudge = resume.ResumeNudge(
+            manager,
+            result.busy,
+            blank=result.blank,
+            recent=resume.recent_idle(result.idle),
+            operators=resume.operator_sessions(
+                [*result.busy, *result.idle, *result.blank],
+                operators=app.get("operators_v2"),
+                mesh_mgr=mesh_manager,
+            ),
+            mesh_mgr=mesh_manager,
+        )
+        nudge.start()
+        host_followups.append(nudge)
+
+    host_watch_task = (
+        asyncio.create_task(host_watch.watch(
+            manager, lambda: _connect_pty_host(cfg), on_relaunch=_after_host_relaunch,
+        ))
+        if pty_host is not None else None
+    )
     # Started alongside it, and deliberately not merged into it: the nudge is
     # allowed to give up on a session that is working again, and this is not
     # (see restart_notice's module docstring). Where both are owed, whichever
@@ -621,6 +649,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("hold_clock", hold_clock.stop())
         await teardown.step("restore_queue", queue.stop())
         await teardown.step("resume_nudge", resume_nudge.shutdown())
+        for followup in host_followups:
+            await teardown.step(
+                "host_relaunch",
+                followup.stop() if isinstance(followup, restore_queue.RestoreQueue)
+                else followup.shutdown(),
+            )
         # Undelivered debts stay on disk; shutdown only stops offering them.
         await teardown.step("restart_notice", restart_notice_task.shutdown())
         # Pending wind-downs are dropped, not finished: shutdown_all below
