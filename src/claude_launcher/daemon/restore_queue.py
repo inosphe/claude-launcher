@@ -29,7 +29,7 @@ import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from .manager import RESTORE_QUEUE, ManagerError
 
@@ -127,6 +127,13 @@ class RestoreQueue:
         #: Names this queue started (the rest were woken by use first, or
         #: had gone) — the tests' handle on the outcome.
         self.started: List[str] = []
+        #: Names :meth:`_run` has gone past, by any way. A name past is not
+        #: waiting here even if it is delayed again later -- a host relaunch
+        #: files it delayed for its own queue to start, and this one never
+        #: comes back to it (claunch-hor3b.2).
+        self._passed: Set[str] = set()
+        #: True once :meth:`_run` has walked its whole list.
+        self.finished = False
         #: Monotonic time of :meth:`start` and of the queue's last relaunch:
         #: what :meth:`status` paces its estimate by. The configured interval
         #: is a floor, not the pace -- a relaunch itself takes seconds, and on
@@ -153,8 +160,10 @@ class RestoreQueue:
     # ---- progress, for the dashboard (claunch-v4uyt) ----------------------- #
 
     def waiting(self) -> List[str]:
-        """The ranked names still delayed, next first."""
-        return [n for n in self.order if _delayed(self.manager, n)]
+        """The ranked names still delayed that this queue will still start,
+        next first."""
+        return [n for n in self.order
+                if n not in self._passed and _delayed(self.manager, n)]
 
     def pace(self, now: Optional[float] = None) -> float:
         """Seconds per relaunch as measured so far; the interval until the
@@ -221,24 +230,28 @@ class RestoreQueue:
     async def _run(self) -> None:
         first = True
         for name in self.order:
-            if not _delayed(self.manager, name):
-                continue  # woken by use, killed or removed: not ours any more
-            if not first and self.interval:
-                await asyncio.sleep(self.interval)
-                if not _delayed(self.manager, name):
-                    continue
-            first = False
             try:
-                await self.manager.wake_async(name, by=RESTORE_QUEUE)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 -- one must not stop the rest
-                log.exception("restore queue: relaunch of %r failed", name)
-                with contextlib.suppress(ManagerError):
-                    self.manager.fail_delayed(name, reason=str(exc))
-                continue
-            self.started.append(name)
-            self._last_start = time.monotonic()
+                if not _delayed(self.manager, name):
+                    continue  # woken by use, killed or removed: not ours any more
+                if not first and self.interval:
+                    await asyncio.sleep(self.interval)
+                    if not _delayed(self.manager, name):
+                        continue
+                first = False
+                try:
+                    await self.manager.wake_async(name, by=RESTORE_QUEUE)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- one must not stop the rest
+                    log.exception("restore queue: relaunch of %r failed", name)
+                    with contextlib.suppress(ManagerError):
+                        self.manager.fail_delayed(name, reason=str(exc))
+                    continue
+                self.started.append(name)
+                self._last_start = time.monotonic()
+            finally:
+                self._passed.add(name)
+        self.finished = True
         log.info("restore queue: done (%d started by the queue)", len(self.started))
 
 
@@ -256,6 +269,9 @@ class Queues:
         self.queues: List[RestoreQueue] = list(queues)
 
     def add(self, queue: RestoreQueue) -> None:
+        """Join ``queue``; queues that have walked their whole list leave,
+        so a long-lived daemon's host relaunches do not pile up here."""
+        self.queues = [q for q in self.queues if not getattr(q, "finished", False)]
         self.queues.append(queue)
 
     def status(self, now: Optional[float] = None) -> Optional[dict]:
