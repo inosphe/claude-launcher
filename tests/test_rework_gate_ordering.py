@@ -293,7 +293,7 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     # ``groups[].asks`` of this run carries s29 in ``leader (sibling)``, so a
     # membership reading would make every s29 line a review verdict again
     # (s511-rev, s597-rev re-review)
-    assert "질문에 **실제로 답한**" in prompt
+    assert "`peer-review` 질문에 **실제로 답한**" in prompt
     assert "`groups[].asks`로는 갈리지 않는다" in prompt
     assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가" in prompt
     assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in prompt
@@ -327,7 +327,31 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     assert "자기 코멘트가 제동 목록에 동시에 서지 않는다" in prompt
     # everything else is a brake, including a session absent from the roster
     assert "**그 밖의 전부 — 상위의 제동이다.**" in prompt
-    assert "**명부에 없는 세션**(종료한 세션은 명부에서 빠지므로" in prompt
+    # "absent from the roster" must mean absent under `--state all`, since
+    # that is the flag (a) tells the reader to use — `--state all` keeps
+    # closed sessions, so a finished reviewer is not "absent" (s404-rev,
+    # s511-rev, s648-rev)
+    assert "**명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로" in prompt
+    assert "`--state all`은 닫힌 세션의 role을 그대로" in prompt
+    # the roster query in the "absent" paragraph carries the same flag
+    assert "(a) role을 못 읽으므로" in prompt
+    assert "그 세션이 명부(`claunch mesh members <mesh> --state all`)에서" in prompt
+    # (b) is per LINE, not per session — a leader who once answered must not
+    # have every later brake line read as a review (s597-rev)
+    assert "판정은 세션이 아니라\n" in prompt or "판정은 세션이 아니라" in prompt
+    assert "**줄 단위**다" in prompt
+    assert "그 답이 **이 줄**을 낳았다" in prompt
+    # the comparison target is the line's author, not "$CLAUNCH_SESSION" —
+    # read as "this session" the branch can never stand (s597-rev, s511-rev,
+    # s1262-rev)
+    assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in prompt
+    assert "그 값이 같을 수 없어 (b)가 영구히 서지 않는다" in prompt
+    # and the journal is read for the whole run, not "this round" — the
+    # rework round reads the leader's earlier changes line (the s1262-rev
+    # case (b) exists for)
+    assert "이 런의 `peer-review` 질문에 **실제로 답한**" in prompt
+    assert "저널은 **런 전체**를 읽는다" in prompt
+    assert "`decision`이 `changes`이고" in prompt
     # the `resolves` fact the first implementation got wrong: it is top-level
     assert "`resolves`는 최상위에" in prompt
     assert "그룹마다의 `resolves` 필드는 없다" in prompt

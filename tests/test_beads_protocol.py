@@ -874,7 +874,7 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     # the three review-verdict branches, tested before the brake default
     assert "리뷰 판정 셋 중 하나에" in text and "먼저 걸리면" in text
     assert "(a) 그 세션의 role이 `reviewer`다" in text
-    assert "질문에 **실제로 답한**" in text
+    assert "`peer-review` 질문에 **실제로 답한**" in text
     assert "`groups[].asks`로는 갈리지 않는다" in text
     assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가 들어" in text
     assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in text
@@ -897,7 +897,15 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in text
     # everything else is a brake, including a session absent from the roster
     assert "**그 밖의 전부 — 상위의 제동이다.**" in text
-    assert "**명부에 없는 세션**(종료한 세션은 명부에서 빠지므로" in text
+    # "absent" means absent under `--state all`, the flag (a) names; that flag
+    # keeps closed sessions, so a finished reviewer is not absent
+    assert "**명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로" in text
+    assert "그 세션이 명부(`claunch mesh members <mesh> --state all`)에서" in text
+    # (b) is per line and per run, and compares against the line's author
+    assert "**줄 단위**다" in text
+    assert "그 답이 **이 줄**을 낳았다" in text
+    assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in text
+    assert "저널은 **런 전체**를 읽는다" in text
     # the `resolves` fact the first implementation got wrong
     assert "`resolves`는 최상위에" in text
     assert "그룹마다의 `resolves` 필드는 없다" in text
