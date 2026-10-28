@@ -213,6 +213,15 @@ const server = http.createServer((req, res) => {
     await view.locator('.cf2-row[data-node="root"]').first().dispatchEvent('click');
     await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="root"].selected'));
     assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'root pane has no step out');
+    await view.locator('.cf2-row[data-node="frame"]').first().dispatchEvent('click');
+    await page.waitForFunction(() => document.querySelector('#wf-view .cf2-row[data-node="frame"].selected'));
+    assert.deepEqual(await paneOut.locator('.cf2-press').evaluateAll(ns => ns.map(n => n.dataset.instance)),
+      ['frame@1'], 'frame pane offers its own live instance');
+    detail.run.status = 'done';
+    await page.evaluate(() => refreshWf());
+    await view.locator('.cf2-pane').filter({hasText: 'the run is finished'}).waitFor();
+    assert.equal(await view.locator('.cf2-pane .cf2-pane-stepout').count(), 0, 'finished run offers no step out');
+    detail.run.status = 'running';
     assert.deepEqual(errors, []);
     console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout, node pane stepout passed`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
