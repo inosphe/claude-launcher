@@ -55,7 +55,14 @@
    and countdown. Nothing is posted — the request stays pending on the daemon
    — and Mark unread counts it again. The flag survives a reload and reaches
    this browser's other tabs; a request that leaves the pending set is
-   forgotten, so a later one the daemon gives the same id is unread again. */
+   forgotten, so a later one the daemon gives the same id is unread again.
+
+   Reminders (claunch-6scxn): Remind beside Hide puts a card aside and brings
+   it back at 1h, 6h and 24h, each step counted from the press rather than
+   from when the request arrived. It is a state of its own — Hide clears a
+   reminder, Show card ends one, and a reminder whose request settles is
+   forgotten with it — and the one-second tick that carries it writes nothing
+   while no step is due, which is the cost contract claunch-qnq1c. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -280,6 +287,8 @@ function build(opts) {
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
+    " gateRemind, gateRemindOf, gateRemindDown, gateRemindLabel, gateRemindClear," +
+    " noticeRemindPaint, gateCardAside, NOTICE_REMIND_STEPS, gateUnhide, gateHide," +
     " railSkewOf, noteRailReconnect, openedOnThisClock," +
     " get railSkew() { return railClockSkew; }," +
     // The rail poll is outside this slice, so a check that needs the page's
@@ -1718,12 +1727,208 @@ function gotoRec(rec) {
     w.api.gateHistoryOpen("spawn", "s-new", "spawn new", "", {});
     w.api.noticePanelPaint();
     const rows = w.panelRows().filter((r) => r.classList.contains("pending"));
-    // Longest-waiting first (claunch-l9znm.1): the list is ordered by the
-    // same stamp the row shows as its age, so the request that has stood
-    // longest is the one to answer and reads its own age truthfully.
-    check("the waiting list has the longest-waiting request first, whatever its kind",
-          rows.length === 2 && /kill/i.test(rows[0].text()) && !/kill/i.test(rows[1].text()),
+    // Newest first (claunch-x3feh, which reverses claunch-l9znm.1): the
+    // request that just arrived is the one on top, whatever its kind. The
+    // list is ordered by the same stamp the row shows as its age, so the
+    // panel reads top to bottom as "newest first" the way the strip and
+    // History do.
+    check("the waiting list puts the request that just arrived first, whatever its kind",
+          rows.length === 2 && !/kill/i.test(rows[0].text()) && /kill/i.test(rows[1].text()),
           rows.map((r) => r.text()));
+    // And the order is the feed's own rule, not a second one written here:
+    // the function claunch-l9znm.1 kept beside it is gone, so the two
+    // surfaces cannot drift apart again.
+    check("the waiting list sorts by the feed's one rule",
+          /waiting\.sort\(\(a, b\) => noticeNewerFirst\(/.test(src));
+    check("and no second ordering rule is left for it",
+          src.split("function noticeWaitOrder(").length - 1 === 0);
+  }
+
+  /* --- Remind: the card goes and comes back at 1h, 6h, 24h ----------- */
+  /* (claunch-6scxn) A waiting request the reader does not want to answer
+     now, but does want back later. The press takes the card down and the
+     card comes back at 1h, 6h and 24h — each step counted from the press,
+     which is what the user asked for (「누른시간으로부터 재줘」), so a
+     request that already stood for hours still returns an hour after the
+     press. It is a state of its own: Hide says "I have dealt with this",
+     Remind says "show me again at 1h", and a set that held both would make
+     the panel's hidden line lie about whichever it did not mean. */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    check("the goto card is up before Remind", w.strip().length === 1, w.said());
+    const remind = w.press(w.nodes.notices, "Remind");
+    check("a gate card offers Remind beside Hide",
+          !!remind && !!w.press(w.nodes.notices, "Hide"),
+          w.api.mk ? w.said() : w.said());
+    remind.click();
+    check("Remind takes the card down", w.strip().length === 0, w.said());
+    check("the request stays open on the daemon",
+          w.api.gatePending.goto.length === 1, w.api.gatePending.goto);
+    check("and it is a reminder, not a hide",
+          w.api.gateRemindDown("goto", "g1") === true &&
+            w.api.gateIsHidden("goto", "g1") === false,
+          [w.api.gateRemindDown("goto", "g1"), w.api.gateIsHidden("goto", "g1")]);
+    // The poll that runs before the reminder comes due must not put it back:
+    // the card is down because the reader asked for that, not because the
+    // page lost track of it.
+    await w.api.refreshGotoGate();
+    check("a poll does not put a reminded card back", w.strip().length === 0, w.said());
+
+    // Nothing is due yet, and the second pass writes nothing: the tick runs
+    // once a second over every open page, so the cost of an idle reminder is
+    // the contract (claunch-qnq1c).
+    const callsBefore = w.apiCalls.length;
+    const nodesBefore = w.nodes.notices.children.length;
+    w.clock.at += 59 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("a reminder that is not due refreshes nothing and touches no DOM",
+          w.apiCalls.length === callsBefore &&
+            w.nodes.notices.children.length === nodesBefore,
+          [w.apiCalls.length - callsBefore, w.nodes.notices.children.length]);
+
+    // 1h after the press: the card comes back, and the press now on it says
+    // which step comes next rather than starting the sequence over.
+    w.clock.at += 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("at 1h the card comes back", w.strip().length === 1, w.said());
+    check("and says which reminder is next", /remind 6h/.test(w.said()), w.said());
+
+    // 6h after the press, then 24h: each step re-arms the next one.
+    w.clock.at += 5 * 60 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("at 6h the next step is the 24h one", /remind 24h/.test(w.said()), w.said());
+    w.clock.at += 18 * 60 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("after the 24h step nothing is left to remind",
+          !/remind \d/.test(w.said()), w.said());
+    check("and the reminder is spent rather than dropped",
+          w.api.gateRemindOf("goto", "g1").due === null,
+          w.api.gateRemindOf("goto", "g1"));
+    check("the card is still up", w.strip().length === 1, w.said());
+
+    // A spent reminder is not a hide: the card is where the reader asked it
+    // to be, and the request is still waiting.
+    check("a spent reminder does not hide the card",
+          w.api.gateCardAside("goto", "g1") === false,
+          w.api.gateCardAside("goto", "g1"));
+  }
+
+  /* --- the reminder counts from the press, not from the request -------- */
+  {
+    const w = build();
+    // A request that has already stood for five hours: its 1h reminder is
+    // still an hour away, because the reader pressed Remind now.
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.api.gateHistoryOpened("goto", "g1", (BASE - 5 * 3600e3) / 1000);
+    w.api.noticePanelPaint();
+    w.press(w.nodes.notices, "Remind").click();
+    w.clock.at += 30 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("half an hour after the press the card is still down",
+          w.strip().length === 0, w.said());
+    w.clock.at += 30 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("an hour after the press it comes back, however old the request",
+          w.strip().length === 1, w.said());
+  }
+
+  /* --- Hide and Remind are two answers, not two layers ---------------- */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "Remind").click();
+    check("Remind alone puts the request in the reminder state",
+          !!w.api.gateRemindOf("goto", "g1") &&
+            w.api.gateIsHidden("goto", "g1") === false);
+    // Hide is the reader saying they are done with the card: a reminder
+    // still standing would bring it back over that decision.
+    w.api.gateHide("goto", "g1");
+    check("Hide clears a reminder instead of stacking with it",
+          !w.api.gateRemindOf("goto", "g1") && w.api.gateIsHidden("goto", "g1") === true,
+          [w.api.gateRemindOf("goto", "g1"), w.api.gateIsHidden("goto", "g1")]);
+    w.api.gateUnhide("goto", "g1");
+    check("Show card on a reminded request ends the reminder",
+          (w.api.gateRemind("goto", "g1"), w.api.gateUnhide("goto", "g1"),
+           !w.api.gateRemindOf("goto", "g1")),
+          w.api.gateRemindOf("goto", "g1"));
+  }
+
+  /* --- a reminder does not outlive the request it is about ------------ */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "Remind").click();
+    // The request is answered elsewhere: its card must not come back at 1h.
+    w.gate.goto = [];
+    await w.api.refreshGotoGate();
+    check("a settled request's reminder is forgotten with it",
+          !w.api.gateRemindOf("goto", "g1"), w.api.gateRemindOf("goto", "g1"));
+    w.clock.at += 2 * 3600 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("and nothing comes back for it", w.strip().length === 0, w.said());
+  }
+
+  /* --- the panel row says what the card says about a reminder --------- */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "Remind").click();
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    check("the row of a reminded request says which step is coming",
+          !!row() && /remind 1h/.test(row().text()), row() && row().text());
+    check("and offers Show card to bring it back now",
+          !!w.press(row(), "Show card"), row().text());
+    check("without calling it hidden", !/hidden/.test(row().text()), row().text());
+    w.press(row(), "Show card").click();
+    check("Show card from the row drops the reminder",
+          !w.api.gateRemindOf("goto", "g1"), w.api.gateRemindOf("goto", "g1"));
+  }
+
+  /* --- a reminder outlives the page and reaches this browser's tabs ---- */
+  {
+    const storage = memoryStorage();
+    const a = build({ storage });
+    a.gate.goto = [gotoRec()];
+    await a.api.refreshGotoGate();
+    a.press(a.nodes.notices, "Remind").click();
+    const saved = storage.getItem("claunch.noticeRemind") || "";
+    check("the reminder is kept in this browser", /goto:g1/.test(saved), saved);
+    check("and apart from the hidden set",
+          !/goto:g1/.test(storage.getItem("claunch.noticeHidden") || "[]"),
+          storage.getItem("claunch.noticeHidden"));
+    const reloaded = build({ storage });
+    check("a reload reads the reminder back",
+          reloaded.api.gateRemindDown("goto", "g1") === true,
+          reloaded.api.gateRemindOf("goto", "g1"));
+
+    // Tabs: one tab's Remind press takes the card down in the other, since
+    // the card is drawn per tab from the same pending request.
+    const hub = tabHub();
+    const t1 = build({ hub });
+    const t2 = build({ hub });
+    t1.gate.goto = [gotoRec()];
+    await t1.api.refreshGotoGate();
+    t2.gate.goto = [gotoRec()];
+    await t2.api.refreshGotoGate();
+    t1.press(t1.nodes.notices, "Remind").click();
+    await hub.flush();
+    check("a Remind in one tab puts the card down in the other",
+          t2.api.gateRemindDown("goto", "g1") === true,
+          t2.api.gateRemindOf("goto", "g1"));
   }
 
   /* --- both surfaces put the newer notice above the older --------------- */
@@ -2413,13 +2618,13 @@ function gotoRec(rec) {
     w.api.runGateSync([rec("new", undefined), rec("old", undefined)], []);
     const order = () => w.panelRows().filter((r) => r.classList.contains("pending"))
       .map((r) => (r.text().match(/s-(new|old)/) || [])[1]);
-    check("without stamps the list falls back to arrival, longest-waiting first",
-          order().join(",") === "new,old", order());
+    check("without stamps the list falls back to arrival, newest first",
+          order().join(",") === "old,new", order());
 
     w.clock.at += 1000;
     w.api.runGateSync([rec("new", (BASE - 7200e3) / 1000), rec("old", (BASE - 60e3) / 1000)], []);
     check("a stamp that arrives late moves its row to where it now belongs",
-          order().join(",") === "new,old", order());
+          order().join(",") === "old,new", order());
   }
   /* --- the clock correction does not jitter every age ---------------
      (claunch-l9znm.1)

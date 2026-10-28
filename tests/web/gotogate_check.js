@@ -170,7 +170,12 @@ function build() {
              if (!card) return [];
              const row = card.children.find(
                (c) => c.className.includes("gate-actions"));
-             return row ? row.children : [];
+             if (!row) return [];
+             // Hide and Remind are one item of the row, a `.gate-aside`
+             // span (claunch-6scxn): the pair travels together so a gate
+             // kind cannot get one press without the other.
+             return row.children.flatMap((c) =>
+               c.className.includes("gate-aside") ? c.children : [c]);
            },
            /* The strip as one string. Runs of whitespace are collapsed:
               the card builds its lines out of several nodes (the session

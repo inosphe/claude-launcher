@@ -7475,6 +7475,10 @@ body.embed #main { width: 100%; }
 .gate-fact-from { color: #6e7681; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
+/* The two presses a gate card offers besides its answer (claunch-6scxn):
+   Hide and Remind are one decision — what to do with the card while the
+   person thinks — so they sit together as one item of the actions row. */
+.gate-aside { display: inline-flex; gap: 8px; }
 /* A session named on a gate card opens that session. Marked as a press the
    way the run list marks its own session line, so it reads as one before it
    is hovered: the card is read once and answered, and a link nobody can see
@@ -7631,6 +7635,10 @@ body.embed #main { width: 100%; }
   border: 1px solid #3c444d; color: #9da5b0;
 }
 .notice-chip.live { border-color: #d29922; color: #d29922; }
+/* A request put aside by Remind says which step brings it back
+   (claunch-6scxn). The same amber as `live`: the card is not answered and
+   not gone, and the reader asked for this one to return. */
+.notice-chip.remind { border-color: #d29922; color: #d29922; }
 /* A phone has no corner to spare: the strip spans the width under the
    mobile bar instead of floating over the session it is reporting on —
    and "under" is measured (--notices-top, claunch-lolft), because the
