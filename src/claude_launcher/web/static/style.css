@@ -6294,6 +6294,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* The hint under the label, on its own line: run together, "second" and
    "pinned to this session" read as one sentence about nothing. */
 .modal-choice small { display: block; color: #6b7280; margin-top: 2px; }
+/* The key picker's usage line (claunch-z881u), coloured by the key's peak
+   window the way the create form's pool rows are. */
+.modal-choice small.modal-choice-detail.mid { color: #d29922; }
+.modal-choice small.modal-choice-detail.high { color: #f85149; }
 #modal-actions { flex: none; display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 #modal-actions button {
   padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;

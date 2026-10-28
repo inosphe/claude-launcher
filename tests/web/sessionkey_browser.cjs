@@ -16,7 +16,9 @@
      4. Cancel sends nothing at all;
      5. confirming restarts the session on the key that was selected -- one
         POST of that key id -- and the row redraws on the new pin;
-     6. "no pin" sends `key_id: null` and the chip stops being lit.
+     6. "no pin" sends `key_id: null` and the chip stops being lit;
+     7. each key option carries that key's usage, read from /api/usage/keys
+        with refresh=auto (claunch-z881u).
 */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -44,6 +46,15 @@ const POOLS = {
   "solo:claude": { profile: "solo:claude", pooled: false, keys: [] },
 };
 const posts = [];
+const usageReads = [];
+const KEY_USAGE = {
+  keys: [
+    { id: "k-aaaaaa", usage: { key_id: "k-aaaaaa", error: null,
+      windows: [{ name: "five_hour", utilization: 42 }, { name: "seven_day", utilization: 91 }] } },
+    { id: "k-bbbbbb", usage: { key_id: "k-bbbbbb", error: "HTTP 401", windows: [] } },
+  ],
+  unmeasurable: null,
+};
 
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
 const server = http.createServer((req, res) => {
@@ -64,6 +75,10 @@ const server = http.createServer((req, res) => {
       if (route === "/api/daemon") data = { version: "fixture", boot_id: "test" };
       else if (route === "/api/sessions") data = { sessions: SESSIONS, llm_configured: false };
       else if (route.endsWith("/capture")) data = { lines: ["Session snapshot"] };
+      else if (route === "/api/usage/keys") {
+        usageReads.push(url.search);
+        data = KEY_USAGE;
+      }
       else if (/^\/api\/profiles\/[^/]+\/keys$/.test(route)) {
         const prof = route.slice("/api/profiles/".length, -"/keys".length);
         data = POOLS[prof] || { pooled: false, keys: [] };
@@ -140,7 +155,17 @@ const server = http.createServer((req, res) => {
     assert.equal(await options.count(), 3,
                  "two keys and, because the session is pinned, the no-pin answer");
     assert.match(await options.nth(0).innerText(), /^sk-A…BBBB/);
-    assert.match(await options.nth(1).locator("small").innerText(), /pinned to this session/);
+    assert.match(await options.nth(1).locator("small").first().innerText(), /pinned to this session/);
+    // 7. Each key's usage fills in under its hint.
+    const usageLine = (i) => options.nth(i).locator("small.modal-choice-detail");
+    await until(async () => /5h/.test(await usageLine(0).innerText()), "the usage line");
+    assert.equal(await usageLine(0).innerText(), "usage: 5h 42%  ·  7d 91%");
+    assert(await usageLine(0).evaluate((el) => el.classList.contains("high")),
+           "a key with a window at 91% is marked high");
+    assert.equal(await usageLine(1).innerText(), "usage: HTTP 401");
+    assert.equal(await options.nth(2).locator("small.modal-choice-detail").count(), 0,
+                 "the no-pin answer has no usage line");
+    assert.equal(usageReads[0], "?profile=work%3Aclaude&refresh=auto");
     assert.match(await options.nth(2).innerText(), /No pin/);
     assert.match(await page.locator("#modal-body").innerText(), /Switching restarts this session/);
     if (process.env.CLAUNCH_KEY_SCREENSHOT) {
