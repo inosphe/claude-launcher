@@ -708,8 +708,13 @@ def test_relation_wiring():
     assert rel["choices"] == ["stacked", "independent"] and rel["default"] == "stacked"
     req = next(n for n in worker.nodes.values() if n.label == "integration-request")
     pushes = [(t.get("when"), t["push"]["to"]) for t in req.get("triggers") if t.get("push")]
-    assert pushes == [("$data.inputs.relation != 'independent'", "parent:landing"),
-                      ("$data.inputs.relation == 'independent'", "leader:landing")]
+    # each also guards on $outcome so a blocked round raises no request
+    # (claunch-improver-integration-request-blocked-o6paj); the relation split
+    # is what this test is about, so it is read off the first clause.
+    assert [(w.split(" and $outcome == 'ok'")[0], to) for w, to in pushes] == [
+        ("$data.inputs.relation != 'independent'", "parent:landing"),
+        ("$data.inputs.relation == 'independent'", "leader:landing")]
+    assert all("$outcome == 'ok'" in w for w, _ in pushes), pushes
     rebase = next(n for n in worker.nodes.values() if n.label == "rebase" and n.get("prompt"))
     assert [d.get("item", {}).get("name") for d in rebase.get("do")] == ["'rebased'"]
     stack = runtime.load_definition("stack-v2")
