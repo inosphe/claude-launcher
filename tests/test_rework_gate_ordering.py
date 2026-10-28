@@ -289,16 +289,45 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     # the three review-verdict branches, and that review is tested first
     assert "리뷰 판정 셋 중 하나에" in prompt and "먼저 걸리면" in prompt
     assert "(a) 그 세션의 role이 `reviewer`다" in prompt
-    assert "`claunch cflow2 responders peer-review --json`" in prompt
-    assert "`groups[].asks`에 (핸들→세션 이름으로 옮겨) 들어 있다" in prompt
+    # (b) is the session that actually ANSWERED, not the candidate list —
+    # ``groups[].asks`` of this run carries s29 in ``leader (sibling)``, so a
+    # membership reading would make every s29 line a review verdict again
+    # (s511-rev, s597-rev re-review)
+    assert "질문에 **실제로 답한**" in prompt
+    assert "`groups[].asks`로는 갈리지 않는다" in prompt
+    assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가" in prompt
+    assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in prompt
+    # and the journal's `by` is a HANDLE, so it takes the same third-column
+    # mapping as (a) — s597-rev measured this, s511-rev is session s523
+    assert "다만 그 `by`는 **핸들**이다" in prompt
+    assert "`by: s511-rev`인데 그" in prompt
+    assert "저널을 읽을 수 없으면 (b)는 서지 않는다" in prompt
+    # the roster query must include closed sessions, or a finished parent
+    # reads as "absent from the roster" (s1262-rev)
+    assert "`claunch mesh members <mesh> --state all`" in prompt
+    assert "`--state all`로도 그 세션이 안 나오면" in prompt
     # (c) is a fallback, not a peer of (a)/(b) — a reviewer-shaped line form
     # alone must not promote an upper's brake to a verdict
-    assert "는 **role과 응답자 여부를 읽지 못했을 때의 대체**다" in prompt
+    assert "는 **role을 읽지 못했을 때의 대체**이고" in prompt
     assert "상위의 제동 줄은 그 형태로 쓰이지 않으므로" in prompt
     assert "꼴만으로는 리뷰 판정이라 하지 않는다" in prompt
+    # a session absent from the roster is a brake, one way only; the prefix
+    # fallback applies only when the head itself is missing (s490-rev)
+    assert "**명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**" in prompt
+    assert "명부를 못 읽은 것과 그 세션이 명부에 없는 것은 다르다" in prompt
+    assert "머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다" in prompt
+    # and the prefix fallback itself must not flip the brake default: an
+    # unreadable head with no PR-REVIEW prefix stays a brake
+    # (s648-rev, s1236-rev2)
+    assert "아니면 **여전히 제동이다**" in prompt
+    assert "머리가 없으면 셋 다 서지 않는다" in prompt
+    # its own comments are neither verdicts nor brakes — the ordering
+    # sentence is what keeps them out of both lists
+    assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in prompt
+    assert "자기 코멘트가 제동 목록에 동시에 서지 않는다" in prompt
     # everything else is a brake, including a session absent from the roster
     assert "**그 밖의 전부 — 상위의 제동이다.**" in prompt
-    assert "명부에 없는 세션" in prompt
+    assert "**명부에 없는 세션**(종료한 세션은 명부에서 빠지므로" in prompt
     # the `resolves` fact the first implementation got wrong: it is top-level
     assert "`resolves`는 최상위에" in prompt
     assert "그룹마다의 `resolves` 필드는 없다" in prompt

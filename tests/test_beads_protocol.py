@@ -874,14 +874,30 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     # the three review-verdict branches, tested before the brake default
     assert "리뷰 판정 셋 중 하나에" in text and "먼저 걸리면" in text
     assert "(a) 그 세션의 role이 `reviewer`다" in text
-    assert "`claunch cflow responders peer-review --json`" in text
-    assert "`groups[].asks`에 (핸들→세션 이름으로 옮겨) 들어 있다" in text
+    assert "질문에 **실제로 답한**" in text
+    assert "`groups[].asks`로는 갈리지 않는다" in text
+    assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가 들어" in text
+    assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in text
+    # the journal's `by` is a handle, so it takes the third-column mapping
+    assert "다만 그 `by`는 **핸들**이다" in text
+    assert "저널을 읽을 수 없으면 (b)는 서지 않는다" in text
+    # the roster query must include closed sessions
+    assert "**`--state all`로 읽는다**" in text
+    assert "`--state all`로도 그 세션이 안 나오면" in text
     # (c) is a fallback only; a line form alone must not promote a brake
-    assert "는 **role과 응답자 여부를 읽지 못했을 때의 대체**다" in text
+    assert "는 **role을 읽지 못했을 때의 대체**이고" in text
     assert "꼴만으로는 리뷰 판정이라 하지 않는다" in text
+    # a session absent from the roster is a brake, one way only
+    assert "**명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**" in text
+    assert "머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다" in text
+    # the prefix fallback must not flip the brake default either
+    assert "아니면 **여전히" in text and "제동이다**" in text
+    assert "머리가 없으면 셋 다 서지 않는다" in text
+    # own comments are neither: ordering keeps them out of both lists
+    assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in text
     # everything else is a brake, including a session absent from the roster
     assert "**그 밖의 전부 — 상위의 제동이다.**" in text
-    assert "명부에 없는 세션" in text
+    assert "**명부에 없는 세션**(종료한 세션은 명부에서 빠지므로" in text
     # the `resolves` fact the first implementation got wrong
     assert "`resolves`는 최상위에" in text
     assert "그룹마다의 `resolves` 필드는 없다" in text
