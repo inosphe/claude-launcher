@@ -7406,6 +7406,16 @@ body.embed #main { width: 100%; }
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 .notice:hover { border-color: #3c444d; }
+/* A card that a newer one pushed down slides to its new place instead of
+   jumping there (claunch-notice-card-order-animate-9znvg). The movement is
+   set from app.js (noticeFlipMove) as a transform, so the whole motion of
+   the feed lives in one place; this rule only says how a transform on a
+   card is eased. `will-change` is deliberately left out: a card is only
+   transformed during the 180ms it moves, and reserving a layer for every
+   card on the strip costs more than the move does. The reader who asked
+   for less motion gets none — the order still changes. */
+.notice { transition: transform 180ms ease; }
+@media (prefers-reduced-motion: reduce) { .notice { transition: none; } }
 /* × on a card: dismiss without following it (claunch-x76l8). */
 .notice-close {
   float: right; margin: -4px -6px 0 6px; padding: 0 4px;
@@ -7556,6 +7566,12 @@ body.embed #main { width: 100%; }
   background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
   border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
 }
+/* A history row that the list's order pushed down slides there rather than
+   jumping (claunch-notice-card-order-animate-9znvg), the same way a corner
+   card does. The transform is set from app.js (noticeFlipMove); this says
+   how it is eased, and the reduced-motion reader gets none. */
+.notice-row { transition: transform 180ms ease; }
+@media (prefers-reduced-motion: reduce) { .notice-row { transition: none; } }
 .notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
 .notice-row.bad { border-left-color: #ff7b72; }
 /* The history keeps a raised leader fault (claunch-9djny) after the card is
