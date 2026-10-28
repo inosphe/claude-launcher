@@ -252,14 +252,27 @@ def test_the_two_rework_consumers_read_a_blocked_result_as_no_rework():
         "read it as a rework round")
 
 
+def _the_ask() -> dict:
+    """The ``ask-user`` call in the gate's body, wherever it sits.
+
+    It is wrapped in a ``try`` whose ``catch`` handles ``reframe`` (an answer
+    that the three choices do not fit the problem), so the call is not a
+    direct child of the body any more. Located by what it is rather than by
+    its depth, so restructuring the wrapper does not silently make these
+    tests read nothing.
+    """
+    ask = _find(_doc()["procedures"]["landing-target-gate"]["body"], "call", "ask-user")
+    assert ask is not None, "the gate no longer asks anybody"
+    return ask
+
+
 def test_the_question_carries_the_routing_reason_verbatim():
     """The evidence field is the Router's own sentence, not the agent's
     summary of it: ``landing-target-evidence`` reports the gate's ``why``
     and the person's question takes it from there."""
     doc = _doc()
-    body = doc["procedures"]["landing-target-gate"]["body"]
-    ask = next(b for b in body if isinstance(b, dict) and b.get("call") == "ask-user")
-    assert ask["with"]["context"] == "$result['landing-target-evidence'].value.why"
+    assert _the_ask()["with"]["context"] == \
+        "$result['landing-target-evidence'].value.why"
     evidence = _words(doc["nodes"]["landing-target-evidence"]["prompt"])
     assert "claunch gate landing-target --json" in evidence
     assert "그대로" in evidence
@@ -270,10 +283,34 @@ def test_the_gate_asks_nobody_but_a_person():
     ``otherwise`` other than the human default: a worker that could answer
     this itself would be choosing its own landing path, which is the rule
     this workflow keeps everywhere else."""
-    body = _doc()["procedures"]["landing-target-gate"]["body"]
-    ask = next(b for b in body if isinstance(b, dict) and b.get("call") == "ask-user")
+    ask = _the_ask()
     assert "from" not in ask["with"], "the gate may not delegate this to a session"
     assert "otherwise" not in ask["with"]
+
+
+def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
+    """``ask-user`` can come back ``reframe`` -- the person says the choices
+    do not fit the problem, three times running.
+
+    Left undeclared, that outcome makes ``land`` *fail*, and ``land``'s
+    caller catches only rework/landed/held/blocked: the failure escapes the
+    round loop and skips ``queue-recheck`` -- the same accident ``blocked``
+    was introduced for (claunch-improver-integration-request-blocked-o6paj,
+    journal 02:33:08 on run 20261027-164135-3ad031). So this gate catches it
+    and ends the landing as ``blocked``: the person is deciding the path,
+    which is what the answer says.
+    """
+    proc = _doc()["procedures"]["landing-target-gate"]
+    # the outcome is declared, so the engine has a value shape for it...
+    assert set(proc["returns"]) == {"rework", "blocked", "held"}
+    # ...and the try's catch handles it
+    choice = _find(proc["body"], "id", "landing-target-choice")
+    assert choice is not None and "try" in choice, choice
+    caught = choice.get("catch") or {}
+    assert "reframe" in caught, f"reframe escapes: {sorted(caught)}"
+    assert caught["reframe"]["return"] == "blocked"
+    # a blocked round carries a reason and no rework flag (land's shape)
+    assert set(caught["reframe"]["value"]) == {"reason"}
 
 
 # --------------------------------------------------------------------------- #

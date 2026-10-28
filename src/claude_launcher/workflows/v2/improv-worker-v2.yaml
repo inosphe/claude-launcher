@@ -4801,48 +4801,67 @@ procedures:
       보드를 건드리지 않는다: in_review 전이도, LANDING REQUEST 코멘트도 없다.
       결과는 land의 셋 중 하나로 낸다: rework(메시를 고쳐 다시 올린다),
       blocked(사람이 직접 머지한다), held(동결하고 마감한다).
+
+      ``reframe``은 ask-user가 세 번 다시 물은 뒤에도 선택지가 문제에 맞지
+      않는다고 답한 경우다(ask-common). 이것을 선언하지 않으면 이 프로시저가
+      fail로 끝나고, land의 catch는 rework·landed·held·blocked만 받으므로
+      회차 루프를 탈출한다 — blocked를 만든 이유와 같은 사고다. 사람이
+      선택지 자체를 부정했다는 것은 「이번 착지는 사람이 정한다」와 같은
+      뜻이므로 ``blocked``로 마감한다(요청을 세우지 않고, 보드도 그대로).
     params:
       relation: {type: str, default: "", description: "이 런의 시작 입력 relation — 프로브가 어느 방향으로 재는지"}
+    returns:
+      rework: {reason: str, rework: bool}
+      blocked: {reason: str}
+      held: {reason: str, rework: bool}
     body:
       # 근거를 먼저 만든다. 질문을 여는 노드가 스스로 잰 값을 넘기는 것이
       # ask-common의 규약이고(ask-frame → ask-pose), 물어보는 사이에 명부가
       # 바뀌었을 수 있으므로 잰 시각을 함께 남긴다.
       - landing-target-evidence
       - id: landing-target-choice
-        call: ask-user
-        bind: landing_target
-        with:
-          # 근거 칸은 Router의 문장 그대로다 — 사용자가 「누가 왜 통과됐는지」를
-          # 한 화면에서 보게 하는 것이 이 질문의 목적이다.
-          context: "$result['landing-target-evidence'].value.why"
-          require_reason: true
-          topic: |
-            이 런의 착지 요청을 받을 세션이 아무도 없다는 것이 기계 판정으로
-            확인됐다(근거 칸의 사유가 데몬 라우팅 판정의 원문이다). 이 요청을
-            어떻게 할지 정한다. 워커는 이 선택을 스스로 하지 않는다 — 어느
-            쪽이든 머지 실행이나 메시 구성 변경이 사람의 몫이기 때문이다.
-            선택지 셋:
-            · rebase-and-repost — 메시를 고쳐(그 저장소의 착지 큐를 가진 세션을
-              메시에 넣거나, 워커를 그런 세션이 있는 메시에 조인시킨다) 이
-              브랜치를 다시 올린다. 워커는 배치 루프를 되감아 착지 절차를 처음부터
-              다시 하고, 여섯째 확인이 **새 명부로** 다시 선다. 대상이 생겼으면
-              평소의 착지 경로로 간다.
-            · merge-by-person — 대상이 없는 상태 그대로 두고 사람이 직접 머지한다
-              (착지 경로를 사람이 정한다). 워커는 요청을 세우지 않고 회차를
-              차단 상태로 마감한다. 머지 결과는 다음 회차나 사람이 확인한다.
-            · freeze-and-close — 브랜치를 동결하고 이 착지를 접는다. 워커는
-              추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
-            셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
-        cases:
-          rebase-and-repost:
-            return: rework
-            value: {reason: "착지 대상을 만들지 못했다 — 사람이 메시 구성을 고쳐 다시 올린다", rework: true}
-          merge-by-person:
+        try:
+          call: ask-user
+          bind: landing_target
+          with:
+            # 근거 칸은 Router의 문장 그대로다 — 사용자가 「누가 왜 통과됐는지」를
+            # 한 화면에서 보게 하는 것이 이 질문의 목적이다.
+            context: "$result['landing-target-evidence'].value.why"
+            require_reason: true
+            topic: |
+              이 런의 착지 요청을 받을 세션이 아무도 없다는 것이 기계 판정으로
+              확인됐다(근거 칸의 사유가 데몬 라우팅 판정의 원문이다). 이 요청을
+              어떻게 할지 정한다. 워커는 이 선택을 스스로 하지 않는다 — 어느
+              쪽이든 머지 실행이나 메시 구성 변경이 사람의 몫이기 때문이다.
+              선택지 셋:
+              · rebase-and-repost — 메시를 고쳐(그 저장소의 착지 큐를 가진 세션을
+                메시에 넣거나, 워커를 그런 세션이 있는 메시에 조인시킨다) 이
+                브랜치를 다시 올린다. 워커는 배치 루프를 되감아 착지 절차를 처음부터
+                다시 하고, 여섯째 확인이 **새 명부로** 다시 선다. 대상이 생겼으면
+                평소의 착지 경로로 간다.
+              · merge-by-person — 대상이 없는 상태 그대로 두고 사람이 직접 머지한다
+                (착지 경로를 사람이 정한다). 워커는 요청을 세우지 않고 회차를
+                차단 상태로 마감한다. 머지 결과는 다음 회차나 사람이 확인한다.
+              · freeze-and-close — 브랜치를 동결하고 이 착지를 접는다. 워커는
+                추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
+              셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
+          cases:
+            rebase-and-repost:
+              return: rework
+              value: {reason: "착지 대상을 만들지 못했다 — 사람이 메시 구성을 고쳐 다시 올린다", rework: true}
+            merge-by-person:
+              return: blocked
+              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다"}
+            freeze-and-close:
+              return: held
+              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false}
+        catch:
+          # 선택지 셋이 문제에 맞지 않는다는 답. 다시 물을 선택지가 이
+          # 프로시저에 없으므로 사람이 경로를 정하겠다는 뜻으로 읽고
+          # 마감한다 — fail로 새어 회차 루프를 탈출하는 것보다 낫다.
+          reframe:
             return: blocked
-            value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다"}
-          freeze-and-close:
-            return: held
-            value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false}
+            value: {reason: "사람이 이 질문의 선택지를 부정했다(reframe) — 착지 경로를 사람이 정한다"}
 
   cut-unreachable:
     description: >-
