@@ -2805,8 +2805,10 @@ nodes:
           보내면 `asks`로 열어 보고, 보드(`claunch beads comments <이슈>`)와
           브랜치(`git log/diff <base>..<tip>`)를 직접 읽어 판정한다 —
           목표 달성, 범위 이탈, 표적 테스트가 목표를 덮는가. 판정은 보드에
-          `REVIEWED: pass @ <tip>` 또는 `CHANGES REQUESTED: <무엇을>`으로
-          남기고 `answer`로 답한다. 코드 수정·커밋·머지·이슈 생성은 하지
+          `REVIEWED: pass @ <tip>` 또는 `CHANGES REQUESTED @ <tip>: <무엇을>`으로
+          남기고 `answer`로 답한다(둘 다 심사한 tip을 적는다 — tip 없는
+          CHANGES REQUESTED는 워커의 착지 확인 4가 재심 대기로 읽지 못한다).
+          코드 수정·커밋·머지·이슈 생성은 하지
           않는다; 테스트를 돌려야 하면 `$CLAUNCH_SCRATCH` 아래에 detached
           worktree를 만들어 거기서 돌린다. 질문이 없을 때는 기다린다 —
           같은 런의 다음 리뷰도 네게 온다.
@@ -2906,7 +2908,11 @@ nodes:
 
         판정은 이 답과 별개로 네가 보드에 남긴다:
         `claunch beads comments add <id> "REVIEWED: pass @ <tip>"` 또는
-        `claunch beads comments add <id> "CHANGES REQUESTED: <무엇을>"`.
+        `claunch beads comments add <id> "CHANGES REQUESTED @ <tip>: <무엇을>"`.
+        두 형태 모두 심사한 tip을 함께 적는다: `@ <tip>`이 없으면 그 판정이
+        어느 회차의 것인지 보드에서 갈리지 않고, 워커의 착지 확인 4가 그
+        마커를 재심 대기로 읽을 수 없다(읽지 못하면 escalate다 —
+        claunch-eyz0s.2). `REVIEWED`도 같은 이유로 tip을 적는다.
         **이슈마다 남긴다** — 주 이슈와 「함께 실린 이슈」의 각 id에 각각
         한 줄씩이다. 코멘트가 주 이슈에만 남으면 나머지 이슈는 판정 기록
         없이 in_review로 가고, 그 이슈를 맡을 다음 사람은 그 커밋이 심사된
@@ -3336,6 +3342,11 @@ nodes:
       무엇이 거절됐고 무엇을 고치라는 것인지 확정한다. 정본은 보드다:
       `claunch beads comments <id>`의 `CHANGES REQUESTED: <무엇을>` /
       `HOLD: <이유>` 마커가 그것이고, 메시지로만 왔으면 그 문면을 읽는다.
+      여기 오는 `CHANGES REQUESTED`는 리뷰 판정이 아니라 **상위의 거절**이다
+      (리뷰 판정은 `submit`의 `peer-review`가 `changes`로 답하며 끝나고, 그
+      갈래는 이 스텝을 지나지 않는다 — `peer-review-loop`가 곧장 rework다).
+      그래서 이 마커에는 `@ <tip>`을 붙이지 않는다: 착지 확인 4가 tip 없는
+      `CHANGES REQUESTED`를 상위의 제동으로 읽는 것이 이 구별에 기댄다.
       사유가 없거나 「무엇을 고치면 되는지」가 서지 않으면 여기서
       추측하지 말고 상위에게 한 줄로 되묻는다 — 근거 없는 재작업은 다음
       회차에서 같은 거절을 다시 받는다.
@@ -4952,14 +4963,50 @@ procedures:
                relation이 stacked이고 부모가 스택을 둔 워커면 그 스택 브랜치.
                independent면 언제나 master)
             4. 내 이슈에 열린 제동 마커가 없다 — `claunch beads comments <id>`
-               에 CHANGES REQUESTED / HOLD / BLOCKED 중 해소되지 않은 것이 없다
-               (배치 회차면 실린 이슈마다 본다 — 하나라도 있으면 escalate)
+               (배치 회차면 실린 이슈마다 본다). 마커는 셋이고, 푸는 자리도 셋이다:
+               · `BLOCKED @ <tip>:` — 이 세션이 「착지 요청 없음」으로 마감할 때
+                 남긴 마커다. 같은 tip의 `CLEARED: ... @ <tip>`가 풀고, 다른
+                 tip의 CLEARED는 풀지 않는다(integration-request의 blocked 절).
+                 낱말은 `UNBLOCKED`로 쓰지 않는다 — 확인 4가 `BLOCKED`를 찾는데
+                 그 낱말이 `UNBLOCKED` 안에 들어 있다.
+               · `HOLD:` — 상위 세션 또는 사람의 제동이다. 이 세션은 풀 수 없다.
+                 있으면 지금 escalate다.
+               · `CHANGES REQUESTED @ <tip>: <무엇을>` — 리뷰어의 판정이다.
+                 나중의 `REVIEWED: pass @ <tip2>`가 풀고, tip2가 그 마커보다
+                 뒤여야 한다. `@ <tip>`이 없는 `CHANGES REQUESTED`는 어느 회차의
+                 판정인지 보드에서 갈리지 않는다 — 그때는 escalate다(그 형태로
+                 오는 것은 상위 세션이 착지를 거절하며 남긴 문면일 수 있고,
+                 그것은 상위의 제동이라 워커가 스스로 풀 수 없다).
+               ── 재작업 회차: 「미해소」와 「재심 대기」를 가른다 ──
+               `CHANGES REQUESTED`는 이 회차가 스스로 풀 수 없는 유일한
+               마커다 — 그것을 푸는 세션(리뷰어)은 `submit`에서만 불리고,
+               `submit`은 이 게이트 **뒤**에 있다. 그래서 마커를 「아직 안
+               풀렸다」로만 읽으면 재작업 회차는 이 게이트를 통과할 수 없고,
+               지적을 고친 회차가 매번 escalate로 사람 앞에 선다(실측: 이 런이
+               그 자리에서 사흘 가까이 사람 결정을 기다렸다, claunch-eyz0s.2).
+               판정은 보드와 git의 출력으로 한다. 셋이 전부 참이면 그 마커는
+               **재심 대기**다 — 확인 4는 참이고 답은 request다:
+                 (a) 마커의 `@ <tip>`이 HEAD의 조상이다 —
+                     `git merge-base --is-ancestor <tip> HEAD` 종료 코드 0
+                 (b) 그 뒤로 커밋이 있다 — `git rev-list --count <tip>..HEAD` ≥ 1
+                 (c) 확인 2가 지금 tip의 수치를 세웠다(또는 셀프 게이트 생략이
+                     지금 tip에 대한 것이다) — 확인 2가 이미 요구하는 그 판정이다
+               셋 중 하나라도 안 서면 escalate다. 「아마 고쳤다」는 판정이 아니다.
+               재심 대기를 request로 읽는 것이 방어선을 지우지 않는 이유는
+               순서다: `submit`은 `align`(리베이스) → `reviewer-ensure` →
+               `peer-review`를 `integration-request` **앞에서** 돈다. 그래서
+               리뷰어의 새 판정(`REVIEWED: pass @ <tip>` 또는 새 `CHANGES
+               REQUESTED`)이 요청보다 먼저 보드에 서고, 새 판정이 다시
+               `changes`면 `peer-review-loop`가 rework로 되감아 요청이 나가지
+               않는다. 옛 마커가 그대로인 채로 보드에 요청이 실리는 경로는 없다.
+               reason에 마커의 tip, 그 뒤 커밋 수, 재심 대기로 읽었다는 것,
+               그 재심이 `submit`에서 요청 앞에 돈다는 것을 적는다.
             5. 상위가 걸어 둔 동결·정지 지시가 없다(메시로 온 freeze/hold 공지,
                리더가 승인한 예외 코멘트 포함)
 
             확인이 깨졌거나 — 미리 병합이 충돌한다, 통합 대상이 무엇인지 모르겠다,
-            마커가 있는데 해소됐는지 판단이 안 선다 — 내가 정할 수 없는 사정이면
-            escalate다. 모르는 것을 request로 밀지 않는다.
+            마커의 종류나 그 `@ <tip>`을 읽지 못해 위 셋 중 어디인지 안 선다 —
+            내가 정할 수 없는 사정이면 escalate다. 모르는 것을 request로 밀지 않는다.
             반대로 다섯이 다 참인데 「그래도 물어보는 편이 안전하지 않나」로
             escalate하지도 않는다: request는 상위의 통합 대기 표에 줄 서는 것일
             뿐이고 머지 실행도 배치 편성도 rebase 재요청도 여전히 상위의 것이다.
@@ -5061,8 +5108,10 @@ procedures:
                               메시로 직접 리뷰를 청했고, 보드에 그 리뷰어의
                               `REVIEWED: pass @ <tip>` 코멘트가 있다. reason에 그 코멘트의
                               리뷰어와 tip을 적는다.
-                            · direct-changes — 같은 직접 리뷰의 결과가 `CHANGES REQUESTED:`
-                              코멘트다. 작업으로 돌아간다.
+                            · direct-changes — 같은 직접 리뷰의 결과가 `CHANGES REQUESTED @ <tip>:`
+                              코멘트다. 작업으로 돌아간다. 직접 받은 판정도 tip을 함께
+                              적게 한다 — tip이 없으면 다음 회차의 착지 확인 4가 그
+                              마커를 재심 대기로 읽지 못하고 escalate한다.
                             · skip — 리뷰 없이 통합 요청으로 간다. 리뷰어가 없고 세울 수도
                               없을 때만 고른다. 이슈에 `REVIEW SKIPPED: <이유>` 코멘트를
                               남기고, 방어선은 상위의 통합 후 전체 스윕이다.
