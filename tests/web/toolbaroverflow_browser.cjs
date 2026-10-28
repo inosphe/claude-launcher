@@ -144,6 +144,46 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "the menu opens only once nothing left on the row can still turn into a glyph");
     assert.deepEqual(problems.slice(0, 10), [], `${problems.length} problems in the 1px sweep`);
 
+    // The order itself, pinned here and not read from toolbar.js, so a
+    // reordered MINIMIZE_ORDER fails until this list is changed with it.
+    // Every width must be one position on it: the controls that are glyphs
+    // or in the menu are a prefix of it (controls that never iconify, their
+    // glyph being no narrower than their label, left out), and the controls
+    // in the menu are a prefix of it without the details lane.
+    const ORDER = [
+      "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
+      "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
+      "term-zoom", "term-view", "term-life",
+      "term-chartbtn", "term-categorybtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+      "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
+      "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
+      "term-tps", "term-note", "term-handle", "term-status",
+    ];
+    const seen = Object.keys(full.row);
+    assert.deepEqual(seen.filter(k => !ORDER.includes(k)), [], "every control on the row has a place in the order");
+    const neverGlyph = new Set(seen.filter(k => rows.every(r => !r.row[k] || r.row[k].state !== "icon")
+      && lastRow.row[k] && lastRow.row[k].state === "label"));
+    const prefix = (list, on) => {
+      const flags = list.map(on);
+      const n = flags.indexOf(false);
+      return n < 0 || flags.slice(n).every(f => !f);
+    };
+    const orderProblems = [];
+    for (const r of rows) {
+      const present = ORDER.filter(k => r.row[k]);
+      const glyphs = present.filter(k => !neverGlyph.has(k));
+      if (!prefix(glyphs, k => r.row[k].state !== "label"))
+        orderProblems.push(`${r.at}px: glyphs ${glyphs.filter(k => r.row[k].state !== "label")} are not a prefix of the order`);
+      const leave = present.filter(k => k !== "term-details");
+      if (!prefix(leave, k => r.row[k].state === "menu"))
+        orderProblems.push(`${r.at}px: menu ${leave.filter(k => r.row[k].state === "menu")} is not a prefix of the order`);
+    }
+    assert.deepEqual(orderProblems.slice(0, 5), [], `${orderProblems.length} widths off the order`);
+    // And the first control to give up its label is the order's first one.
+    const firstGlyphRow = rows.find(r => states(r).includes("icon"));
+    assert.deepEqual(Object.keys(firstGlyphRow.row).filter(k => firstGlyphRow.row[k].state === "icon"),
+      [ORDER.filter(k => full.row[k] && !neverGlyph.has(k))[0]], "the first glyph is the first in the order");
+
     // Nothing here may feed itself: a held column must hold still, on both
     // sides of the first glyph and of the first menu item.
     const firstIcon = rows.find(r => states(r).includes("icon")).at;
