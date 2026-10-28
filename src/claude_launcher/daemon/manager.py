@@ -3822,7 +3822,18 @@ class SessionManager:
             self._adopt_finish(work)
         except Exception:
             self._adopt_failed(work.host, work.sdef, work.row)
-            self._relaunch_entry(work.sdef, entry, stranded, failed)
+            if work.session.kill_requested:
+                # Ended while its screen was built: the ending stands, and a
+                # relaunch would undo it.
+                ended = work.session
+                self._retire(work.sdef, {
+                    **work.entry, "exited_at": _now_iso(),
+                    "paused_at": getattr(ended, "paused_at", None),
+                    "held_at": getattr(ended, "held_at", None),
+                    "ended_by": getattr(ended, "ended_by", None),
+                })
+            else:
+                self._relaunch_entry(work.sdef, entry, stranded, failed)
 
     def _adopt_failed(self, host, sdef: SessionDef, row: dict) -> None:
         log.exception(
@@ -3994,6 +4005,9 @@ class SessionManager:
         handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
         if clock is not None:
             clock["attach"] += _perf_counter() - t0
+        # The loop runs while the screen is built: a persist keeps the host
+        # session, and a kill, pause or hold is owed to the attach.
+        session.adopting = dict(rec)
         return _Adoption(host, sdef, entry, row, session, handle, replay, reply, rec)
 
     def _adopt_finish(self, work: "_Adoption") -> None:
@@ -4002,6 +4016,12 @@ class SessionManager:
         clock = self._restore_clock if self._loading else None
         if clock is not None:
             clock["adopt"] += work.seconds
+        if self._sessions.get(session.sdef.name) is not session:
+            # Dropped or replaced while its screen was built (an archive, a
+            # redefine): nothing is left to hand the program to.
+            handle.close()
+            self._end_kept(work.host, work.row)
+            return
         t1 = _perf_counter()
         try:
             if work.error is not None:

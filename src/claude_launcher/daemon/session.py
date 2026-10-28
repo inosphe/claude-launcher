@@ -510,6 +510,16 @@ class Session:
         #: The PTY host record :meth:`detach` made (claunch-xnnct.1).
         self.detached_pty: Optional[dict] = None
         self._detaching = False
+        #: The saved PTY host record while the boot adopts this session
+        #: (claunch-opirg): staged, its screen being built off the loop, not
+        #: attached yet. The loop runs meanwhile, so a persist must still
+        #: find the host session (:meth:`pty_record`), and an ending asked
+        #: for has no PTY to signal yet -- it is owed (:attr:`_ending_owed`)
+        #: and :meth:`adopt` delivers it once attached.
+        self.adopting: Optional[dict] = None
+        #: ``force`` of an ending asked for while :attr:`adopting`; None when
+        #: none was.
+        self._ending_owed: Optional[bool] = None
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
@@ -868,7 +878,13 @@ class Session:
         self._saw_output = True
         self._input_ready = True
         self._last_output_mono = time.monotonic()
+        self.adopting = None
         self._attach(handle)
+        owed, self._ending_owed = self._ending_owed, None
+        if owed is not None:
+            # Asked for while the screen was being built: delivered now, so
+            # the exit reads as that kill, pause or hold.
+            self.pty.terminate(force=owed)
 
     def adopted_screen(
         self, replay: bytes, saved: dict, cols: int, rows: int, limit: int
@@ -879,6 +895,9 @@ class Session:
         Safe on a worker thread: it reads the log and fills a screen of its
         own, and touches nothing the loop holds (``cols``/``rows``/``limit``
         are read off the session's screen by the caller, on the loop). The
+        log it reads is not written meanwhile: the session is not attached
+        yet, so nothing reads its program, and :meth:`adopt` appends the
+        replay only after this returns. The
         pyte work is the boot's largest part -- 0.3s a session, 59.1s of a
         112.1s restore of 162 sessions on 2026-10-28 (claunch-opirg) -- and
         off the loop the loop serves everything else meanwhile.
@@ -944,6 +963,8 @@ class Session:
         detached = self.detached_pty
         if detached is not None:
             return detached
+        if self.adopting is not None:
+            return dict(self.adopting)
         pty = self.pty
         sid = getattr(pty, "sid", None)
         if self.exited or sid is None or not callable(getattr(pty, "detach", None)):
@@ -2308,12 +2329,25 @@ class Session:
             self.ended_by = dict(by)
 
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
-        if self.exited or self.pty is None:
+        if self.exited or not self._signallable():
             return
         if by:
             self.note_ender(by)
         self.kill_requested = True
-        self.pty.terminate(force=force)
+        self._terminate(force)
+
+    def _signallable(self) -> bool:
+        """Whether an ending asked for now reaches a program: one is
+        attached, or the boot is adopting one (:attr:`adopting`)."""
+        return self.pty is not None or self.adopting is not None
+
+    def _terminate(self, force: bool) -> None:
+        """Signal the program, or owe the signal to :meth:`adopt` while
+        there is no PTY to signal yet."""
+        if self.pty is not None:
+            self.pty.terminate(force=force)
+        else:
+            self._ending_owed = bool(self._ending_owed) or force
 
     def pause(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as paused rather than killed.
@@ -2325,7 +2359,7 @@ class Session:
         running with the marker set, which the rail draws as "pausing" — the
         same window a plain kill has, made visible.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not self._signallable():
             return
         self.paused_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2336,7 +2370,7 @@ class Session:
         Marker before signal, for the reason :meth:`pause` gives: the exit
         funnel reads it to decide that nothing has ended.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not self._signallable():
             return
         self.held_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2352,12 +2386,14 @@ class Session:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        if self.exited or self.pty is None:
+        if self.exited or not self._signallable():
             return
         # An asked-for ending like kill(): redefine, migrate, archive and
         # clear --running end sessions through here, not through kill().
         self.kill_requested = True
-        self.pty.terminate(force=False)
+        self._terminate(False)
+        if self.pty is None:
+            return
         deadline = time.monotonic() + grace
         while not self.exited and time.monotonic() < deadline:
             await asyncio.sleep(0.1)

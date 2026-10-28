@@ -246,6 +246,99 @@ def test_the_boot_adopts_with_the_screen_built_off_the_loop(host, tmp_path, monk
     asyncio.run(run())
 
 
+async def _restore_with_slow_build(mgr, monkeypatch, during):
+    """Run the boot's restore with every screen build held for a second,
+    and call ``during(session)`` on the loop while the first one is held:
+    the window a verb can reach a staged, not yet attached session."""
+    from claude_launcher.daemon import manager as manager_mod
+    real = manager_mod._Adoption.build
+
+    def slow(self):
+        time.sleep(1.0)
+        real(self)
+
+    monkeypatch.setattr(manager_mod._Adoption, "build", slow)
+    restore = asyncio.ensure_future(mgr.restore_all_async())
+    while True:
+        staged = mgr._sessions.get("t1")
+        if staged is not None and staged.pty is None and not staged.exited:
+            break
+        assert not restore.done(), "restore finished before the build was reached"
+        await asyncio.sleep(0.01)
+    during(staged)
+    assert await restore == []
+    return staged
+
+
+@pytest.mark.parametrize("verb", ["kill", "pause"])
+def test_an_ending_asked_while_the_screen_is_built_ends_the_program(
+    host, tmp_path, monkeypatch, verb
+):
+    """A kill or pause that reaches a session between its stage and its
+    attach -- the loop runs while the boot builds its screen off the loop
+    (claunch-opirg) -- is owed to the attach, not dropped: the program ends
+    and the record reads as that verb."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        staged = await _restore_with_slow_build(
+            mgr2, monkeypatch, lambda _s: getattr(mgr2, verb)("t1"),
+        )
+        assert mgr2.get("t1") is staged
+        for _ in range(100):
+            if staged.exited:
+                break
+            await asyncio.sleep(0.05)
+        assert staged.exited and staged.kill_requested
+        assert bool(getattr(staged, "paused_at", None)) is (verb == "pause")
+        assert _wait(lambda: not _pid_alive(pid))
+        await mgr2.shutdown_all(mode="stop")
+
+    asyncio.run(run())
+
+
+def test_a_persist_while_the_screen_is_built_keeps_the_host_session(
+    host, tmp_path, monkeypatch
+):
+    """A persist on the loop while the screen is built (any other session's
+    event writes the registry) still records where the kept program is:
+    the record the previous daemon left, so a daemon that goes down here
+    adopts it next time instead of relaunching it."""
+    _register()
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="t1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid = s.pid
+        await asyncio.sleep(0.5)
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        seen = {}
+        staged = await _restore_with_slow_build(
+            mgr2, monkeypatch, lambda st: seen.update(rec=st.pty_record()),
+        )
+        assert seen["rec"]["pid"] == pid and seen["rec"]["seq"] is not None
+        assert staged.adopting is None and staged.pid == pid
+        await mgr2.shutdown_all(mode="stop")
+        assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
 def test_a_busy_adopted_session_joins_the_nudge_audience(host, tmp_path, monkeypatch):
     """``was_busy`` decides which resume-nudge list an adopted session
     lands on (claunch-slia4): a busy one joins ``resumed_busy`` the way a
