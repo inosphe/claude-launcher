@@ -493,14 +493,15 @@ def test_a_host_relaunch_queue_does_not_hide_the_boot_queue():
          "b3": {"rank": 3, "total": 4, "ahead": 1, "eta_seconds": 10}},
     )
     host = _FakeQueue(
-        {"total": 2, "done": 0, "started_by_queue": 0, "remaining": 2, "next": "h1",
+        {"total": 3, "done": 1, "started_by_queue": 1, "remaining": 2, "next": "h1",
          "interval": 3.0, "pace_seconds": 3.0, "eta_seconds": 30},
-        {"h1": {"rank": 1, "total": 2, "ahead": 0, "eta_seconds": 3}},
+        {"h1": {"rank": 2, "total": 3, "ahead": 0, "eta_seconds": 3}},
     )
     view = restore_queue.Queues(boot)
     view.add(host)
     status = view.status()
-    assert (status["total"], status["done"], status["remaining"]) == (6, 1, 5)
+    assert (status["total"], status["done"], status["remaining"]) == (7, 2, 5)
+    assert status["started_by_queue"] == 2
     assert status["next"] == "b2" and status["eta_seconds"] == 30
     assert set(view.positions()) == {"b2", "b3", "h1"}
 
