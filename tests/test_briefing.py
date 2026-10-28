@@ -728,13 +728,15 @@ def test_build_prompt_carries_all_signals():
 
 
 def test_build_prompt_asks_for_the_work_not_names_or_ids():
-    """The summary fields describe the work itself (claunch-u1rew).
+    """The summary fields describe the work itself (claunch-u1rew, claunch-zyla3).
 
     The card already shows the session's name and its issue badges beside
     the one-line, so a summary that opens with "s173의 변경을…" or cites
     "claunch-4avda" repeats the row's label instead of saying what the work
     is. The prompt carries the name and the opening task (with its issue
     id), so the rule has to be stated, with the faq answers left out of it.
+    A short issue id with its board prefix dropped ("gds6-rbyq") is still an
+    id, so the rule names that form too.
     """
     prompt = briefing.build_prompt(
         SessionDef(name="s173", task="issue: claunch-4avda\nrebase onto master"),
@@ -743,9 +745,14 @@ def test_build_prompt_asks_for_the_work_not_names_or_ids():
     )
     for needle in (
         "작업 내용 자체를",
-        "세션 이름(이 세션과 다른 세션 모두",
-        "이슈 id",
+        "다른 항목을 id로 가리키지 않는다",
+        "세션 이름(이 세션과 다른 세션",
+        "접두사를 뗀 꼴과 하위 이슈 꼴",
+        "gds6-rbyq",
         "PR 번호",
+        "커밋 해시",
+        "one-line-job-description은 특히 id 없이 읽혀야 한다",
+        "다른 항목을 가리키는\nid는 아래 규칙에 따라 쓰지 않는다",
         "자기 지칭 없이",
         "그 식별자 대신 그 일의 내용을",
         "나쁜 예:",
@@ -754,6 +761,8 @@ def test_build_prompt_asks_for_the_work_not_names_or_ids():
         "이름: s173 (자료 식별용 — 요약 문장에 쓰지 않는다)",
     ):
         assert needle in prompt
+    # the field template no longer invites "...하는 세션" self-reference
+    assert "이 세션이 맡은 일을 한 줄로" not in prompt
 
 
 def test_gather_live_reads_the_same_state_as_the_session_rail():
