@@ -20797,7 +20797,7 @@ async function watchHostCopy() {
             notify(
               "Copy did not reach this computer's clipboard",
               "The browser refused it — the Clipboard menu's Copy can still take it.",
-              { key: "osc52" },
+              { source: "page", key: "osc52" },
             );
           }
           return;
