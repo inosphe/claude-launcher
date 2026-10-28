@@ -1031,6 +1031,170 @@ def test_insecure_tls_is_one_window_s_answer(home, monkeypatch):
     asyncio.run(run())
 
 
+def _refusing_browser():
+    """A fake browser whose set_insecure_tls raises, like a browser that does
+    not know the domain method. new_page still works, so a window can exist."""
+
+    class _Refusing(_FakeBrowser):
+        def __init__(self):
+            super().__init__()
+            self.refusals = []
+
+        async def set_insecure_tls(self, session_id, value):
+            self.refusals.append((session_id, bool(value)))
+            raise webdebug.WebDebugError(
+                502, "Security.setIgnoreCertificateErrors: wasn't found")
+
+    return _Refusing()
+
+
+def test_a_refused_answer_does_not_move_the_window_s_state(home, monkeypatch):
+    """(claunch-9a3k4) The top-bar switch records the answer only once the page
+    took it. A refusal leaves the window saying what it was saying, and the
+    refusal is reported -- otherwise a refused "off" would show checks-on while
+    the page keeps ignoring certificates, and a refused "on" the reverse."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _refusing_browser()
+        viewer = _Viewer()
+        try:
+            win = await hub.attach("w1", "s1", viewer, insecure=True)
+            # new_page in the fake does not go through set_insecure_tls, so the
+            # window starts where the page says it is.
+            before = win.insecure_tls
+            viewer.json.clear()
+            await webdebug._viewer_message(hub, win, {"type": "insecure", "insecure": not before})
+            assert hub.browser.refusals, "the answer was never attempted"
+            assert win.insecure_tls is before, "the window moved without the page"
+            errors = [m for m in viewer.json if m.get("type") == "error"]
+            assert errors, "the refusal was not reported to the viewer"
+            # the page's switch is optimistic, so it needs the state that says
+            # the refusal did not take -- sent before the error
+            kinds = [m.get("type") for m in viewer.json]
+            assert "state" in kinds, "the page was never told the truth to snap back to"
+            assert kinds.index("state") < kinds.index("error")
+            states = [m["insecure_tls"] for m in viewer.json if m.get("type") == "state"]
+            assert states == [before]
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_refused_answer_on_reattach_does_not_move_the_window_s_state(home, monkeypatch):
+    """(claunch-9a3k4) The same rule for Hub.attach's second path: a viewer that
+    states a different answer on an existing window must not leave that window
+    claiming a state the page never entered."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _refusing_browser()
+        try:
+            win = await hub.attach("w1", "s1", _Viewer(), insecure=True)
+            before = win.insecure_tls
+            joined = _Viewer()
+            await hub.attach("w1", "s1", joined, insecure=not before)
+            assert hub.browser.refusals, "the answer was never attempted"
+            assert win.insecure_tls is before, "the window moved without the page"
+            # the window still took the viewer, and still says what it is
+            assert joined in win.viewers
+            states = [m["insecure_tls"] for m in joined.json if m.get("type") == "state"]
+            assert states == [before]
+            # and the viewer that asked for the other answer is told it did not take
+            errors = [m for m in joined.json if m.get("type") == "error"]
+            assert errors, "the refusal was not reported to the joining viewer"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_viewer_that_dies_taking_the_refusal_note_leaves_no_leak(home, monkeypatch):
+    """(claunch-9a3k4) The refusal note is sent AFTER the viewer joined
+    win.viewers, so a write that fails there escapes Hub.attach before h_ws
+    reaches the try/finally that detaches it. A closing peer raises
+    ClientConnectionResetError, which is not a WebDebugError, so an unsuppressed
+    raise leaves the dead viewer registered and the window is never reaped.
+    The state message already carried the truth; the note is the extra."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    class _Closing(_Viewer):
+        """Takes the state, then dies the way aiohttp reports a closing peer."""
+
+        async def send_json(self, data):
+            if data.get("type") == "error":
+                raise ConnectionResetError("Cannot call write() after write_eof()")
+            await super().send_json(data)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _refusing_browser()
+        try:
+            first = _Viewer()
+            win = await hub.attach("w1", "s1", first, insecure=True)
+            before = win.insecure_tls
+            joining = _Closing()
+            # no exception may escape: h_ws would never reach its detach
+            joined = await hub.attach("w1", "s1", joining, insecure=not before)
+            assert joined is win
+            assert hub.browser.refusals, "the answer was never attempted"
+            # the truth still reached that viewer before the note was dropped
+            states = [m["insecure_tls"] for m in joining.json if m.get("type") == "state"]
+            assert states == [before], "the viewer never learned the window's real answer"
+            assert not [m for m in joining.json if m.get("type") == "error"]
+            assert win.insecure_tls is before, "the window moved without the page"
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
+def test_a_dead_viewer_does_not_keep_the_window_from_being_reaped(home, monkeypatch):
+    """(claunch-9a3k4) The leak's consequence, measured end to end. detach()
+    only starts a reaper when the LAST viewer leaves. If attach raises on the
+    refusal note, h_ws never reaches its finally, that dead viewer stays in
+    win.viewers forever, and detach keeps returning early for the real viewer
+    too -- so no reaper is ever started and the window and page live until
+    stop_all. With the note suppressed, both leaves land and the reaper runs."""
+    _no_env(monkeypatch)
+    monkeypatch.setattr(webdebug.os, "geteuid", lambda: 1000, raising=False)
+
+    class _Closing(_Viewer):
+        async def send_json(self, data):
+            if data.get("type") == "error":
+                raise ConnectionResetError("peer went away")
+            await super().send_json(data)
+
+    async def run():
+        hub = webdebug.Hub()
+        hub.browser = _refusing_browser()
+        try:
+            first = _Viewer()
+            win = await hub.attach("w1", "s1", first, insecure=True)
+            before = win.insecure_tls
+            joining = _Closing()
+            await hub.attach("w1", "s1", joining, insecure=not before)
+            # h_ws detaches each viewer in its finally; do the same for both.
+            await hub.detach(win, joining)
+            assert joining not in win.viewers, "the dead viewer stayed registered"
+            await hub.detach(win, first)
+            assert not win.viewers
+            assert win.id in hub._reapers, (
+                "no reaper was started: a viewer left behind by a failed "
+                "refusal note keeps detach() returning early forever")
+            assert win.insecure_tls is before
+        finally:
+            await hub.stop_all()
+
+    asyncio.run(run())
+
+
 def test_the_setting_route_reads_and_writes_the_three(home, monkeypatch):
     """(2) The Settings page's route: GET shows the stored values, the effective
     values and the environment that overrides them; PUT writes and null resets."""

@@ -677,6 +677,7 @@ class Hub:
         an existing one keeps what it had. Given, it sets THIS window's
         certificate answer and no other window's.
         """
+        refused = False
         async with self._lock:
             win = self.windows.get(window)
             reaper = self._reapers.pop(window, None)
@@ -698,9 +699,21 @@ class Hub:
                              insecure_tls=bool(page.get("insecure_tls", flag)))
                 self.windows[window] = win
             elif insecure is not None and bool(insecure) != win.insecure_tls:
-                win.insecure_tls = bool(insecure)
-                with contextlib.suppress(WebDebugError):
-                    await self.browser.set_insecure_tls(win.cdp_session, win.insecure_tls)
+                # Record the answer only once the page took it. Writing first
+                # would leave the window claiming a state the page never
+                # entered when the browser refuses (claunch-9a3k4), and the
+                # display would disagree with the page in both directions:
+                # a refused "on" reads as checks-off, a refused "off" reads
+                # as checks-on while the page keeps ignoring certificates.
+                try:
+                    await self.browser.set_insecure_tls(win.cdp_session, bool(insecure))
+                except WebDebugError as exc:
+                    refused = True
+                    log.warning("webdebug: this browser would not take the "
+                                "certificate answer for %s (%s); the window keeps %s",
+                                window, exc, win.insecure_tls)
+                else:
+                    win.insecure_tls = bool(insecure)
             win.viewers.append(ws)
             if session:
                 win.session = session
@@ -712,6 +725,23 @@ class Hub:
             with contextlib.suppress(Exception):
                 await ws.send_bytes(win.last_frame)
         await self.send_state(win)
+        if refused:
+            # The window says what it is, so the state above is honest; the
+            # viewer that asked for the other answer is told it did not take.
+            # This viewer is already in win.viewers, so a write that fails here
+            # escapes attach before h_ws reaches the try/finally that detaches
+            # it: a closing peer raises ClientConnectionResetError, which is not
+            # a WebDebugError, so the dead viewer would stay registered and the
+            # window would never be reaped (claunch-9a3k4). The state above has
+            # already carried the truth; this note is the extra, so it may be
+            # dropped -- like every other send in this class.
+            with contextlib.suppress(Exception):
+                await ws.send_json({
+                    "type": "error",
+                    "message": ("this browser would not change the certificate answer; "
+                                "the window is still "
+                                f"{'ignoring' if win.insecure_tls else 'checking'} certificates"),
+                })
         return win
 
     async def detach(self, win: Window, ws: web.WebSocketResponse) -> None:
@@ -1157,10 +1187,23 @@ async def _viewer_message(hub: Hub, win: Window, msg: dict) -> None:
         elif kind == "insecure":
             # This window's top-bar switch. It reaches this window's own page
             # and no other viewer's (claunch-o8pb7.2.1); the reply is send_state.
+            # The state is recorded only after the page accepts the answer
+            # (claunch-9a3k4): a refusal raises out to the handler below, which
+            # reports it, and the window keeps the answer it had rather than
+            # claiming one the page never entered.
             wanted = bool(msg.get("insecure"))
             if wanted != win.insecure_tls:
+                try:
+                    await hub.browser.set_insecure_tls(win.cdp_session, wanted)
+                except WebDebugError:
+                    # The switch in the page is optimistic: it flips as soon as
+                    # it is pressed and re-reads the truth from a state reply.
+                    # Send that state before re-raising, so a refusal snaps the
+                    # switch back instead of leaving it showing a state the
+                    # page is not in (claunch-9a3k4).
+                    await hub.send_state(win)
+                    raise
                 win.insecure_tls = wanted
-                await hub.browser.set_insecure_tls(win.cdp_session, wanted)
             await hub.send_state(win)
         elif kind == "reload":
             await hub.navigate(win, win.url or "about:blank")
