@@ -208,10 +208,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       window.setInterval = (fn, ms, ...args) => interval(fn, ms === 10000 ? 1000 : ms, ...args);
       // Chromium will not settle an action on an element whose box moves
       // between paints, so the page's own animations go off as well.
+      //
+      // The dashboard's notices go too. Under load a /api/health probe can
+      // outlast HEALTH_TIMEOUT_MS; the page then posts "daemon offline" and,
+      // on the next tick, "daemon back" into #notices -- a fixed card over the
+      // top right, the whole top band on a phone. That card took the click on
+      // "+ 새 operator" and the session line's row in the stepped-page probe
+      // (claunch-iu6z2.1.2, .1.3). Nothing here measures a notice.
       window.addEventListener("DOMContentLoaded", () => {
         const style = document.createElement("style");
         style.textContent = "*, *::before, *::after { animation: none !important;"
-          + " transition: none !important; scroll-behavior: auto !important; }";
+          + " transition: none !important; scroll-behavior: auto !important; }"
+          + " #notices { display: none !important; }";
         document.head.appendChild(style);
       });
     });
@@ -638,6 +646,11 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForSelector('#observer-operators .op-thread-row[data-thread="th-a"]', { state: "attached" });
     await page.click("#observer-operators .op-thread-back");
     await page.click('#observer-operators .op-thread-row[data-thread="th-a"]');
+    // One probe lost and the next answered, as a loaded run meets it: the
+    // "daemon back" card is posted and the page re-reads everything. The
+    // measure below still holds (claunch-iu6z2.1.2).
+    await page.evaluate(async () => { setDaemonOnline(false); await pollOnce(); });
+    assert.match(await page.evaluate(() => document.getElementById("notices").textContent), /daemon back/);
     await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "이전 대화"
       && document.querySelector("#observer-operators .op-entry"));
     const pageHead = await page.evaluate(() => {
@@ -691,7 +704,20 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       await page.evaluate(() => globalThis.ObserverOperators.refresh());
       await page.mouse.up();
       // The save closes the form; the press that never landed leaves it open.
-      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 });
+      // Under load this wait has timed out with an empty call log, 1 run in
+      // 96 (claunch-iu6z2.1.1, cause unknown), so a timeout says what the page
+      // held: whether the PATCH went out and what sat under the pointer.
+      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 })
+        .catch(async error => {
+          const state = await page.evaluate(({ x, y }) => {
+            const at = document.elementFromPoint(x, y);
+            return { form: !!document.querySelector("#observer-operators .op-form"),
+              under: at ? `${at.tagName.toLowerCase()}${at.id ? "#" + at.id : ""}.${[...at.classList].join(".")} ${at.textContent.trim().slice(0, 30)}` : null,
+              notices: document.getElementById("notices")?.textContent.slice(0, 80) || "" };
+          }, { x: saveBox.x + saveBox.width / 2, y: saveBox.y + saveBox.height / 2 });
+          state.patches = sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length - saves;
+          throw new Error(`${error.message}\nsave press state: ${JSON.stringify(state)}`);
+        });
       assert.equal(sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length, saves + 1,
         "the press lands although a poll ran between its down and its up");
     }
