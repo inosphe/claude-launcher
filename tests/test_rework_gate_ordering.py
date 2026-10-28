@@ -229,9 +229,68 @@ def test_the_gate_reads_a_tip_wherever_the_marker_puts_it():
     인정하면 고치려던 그 마커를 못 읽는다(s404-rev 지적). 두 형태를 같은
     판정으로 읽는다는 규칙이 정본에 있어야 한다."""
     prompt = _words(_land_prompt())
-    assert "**tip의 자리는 정해져 있지 않다.**" in prompt
+    assert "**tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.**" in prompt
     assert "`CHANGES REQUESTED: <무엇을> @ <tip>`" in prompt
-    assert "판정은 오직 `@ <hex>`가 있는가와 그 해시뿐이다" in prompt
+    assert "그 줄의 **마지막 토큰**" in prompt
+
+
+def test_the_gate_does_not_read_a_hash_quoted_inside_the_line():
+    """이 이슈(claunch-eyz0s.2.2)가 닫는 구멍: 「줄 어디에서 찾든 tip」이라는
+    판독은 상위 세션이 거절 문면에 근거로 인용한 해시를 그 마커의 tip으로
+    읽는다. 실측 — 리더가 쓴 ``CHANGES REQUESTED`` 첫 줄 29건에 ``@<hex>``가
+    있고, ``improv-leader-v2.yaml``에는 거절 마커의 꼴을 정한 문장이 없었다
+    (``grep -c`` → 0). 그러면 상위의 제동이 「재심 대기」로 통과한다.
+
+    판독을 둘(마커 낱말 바로 뒤, 줄의 마지막 토큰)로 좁히고 본문 안의
+    ``@ <hex>``를 배제한다. 이 테스트는 그 배제 문장이 정본에 있는지를
+    고정한다 — 배제를 지우면 상위 거절이 다시 리뷰 판정으로 분류된다."""
+    prompt = _words(_land_prompt())
+    # 본문 안의 해시는 tip이 아니다 — 이 문장이 규칙 그 자체다
+    assert "**줄 본문 안의 다른 `@ <hex>`는 tip이 아니다.**" in prompt
+    # 그리고 그 귀결: 그런 줄은 tip 없는 마커이므로 escalate
+    assert "그 줄은 tip 없는 마커다" in prompt
+    assert "리뷰 판정이 아니라 상위의 제동이므로 escalate다" in prompt
+    # 두 자리가 서로 다른 해시를 가리키면 판독 불가
+    assert "**서로 다른 해시**를 가리키면 그 줄은 판독 불가다" in prompt
+
+
+def test_an_uppers_pr_review_line_is_a_brake_whatever_its_hash_position():
+    """실측 문면이 (i) 자리에 해시를 두고 있어 자리 규칙만으로는 갈리지 않는다.
+
+    리더가 쓴 ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1
+    320행)는 해시가 마커 낱말 바로 뒤, 곧 판독 규칙 (i)에 그대로 걸린다 —
+    상위의 거절이 「재심 대기」로 통과한다(s597-rev·s1304 재심 지적,
+    claunch-eyz0s.2.2). 상위 판정 줄을 가르는 근거는 해시의 자리가 아니라 그
+    줄을 쓴 주체이므로, 정본은 자리 규칙보다 앞서는 규칙을 들고 있어야 한다."""
+    prompt = _words(_land_prompt())
+    # 규칙 자체 — 상위 판정 줄은 tip 유무와 무관하게 제동이다
+    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in prompt
+    assert "`PR-REVIEW #<번호>`로 시작하면" in prompt
+    assert "**어떤" in prompt and "`@ <hex>`가 있든**" in prompt
+    # 그 규칙이 자리 규칙보다 앞선다는 것 — 없으면 다음 편집자가 둘을 같은
+    # 층으로 읽고 자리 규칙 쪽을 먼저 적용한다
+    assert "자리 규칙보다 이 규칙이 앞선다" in prompt
+    # 실측 문면이 그대로 정본에 있어야 다음 사람이 같은 형태를 다시 만나도
+    # 무엇이 문제였는지 보드로 돌아가지 않고 읽는다
+    assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in prompt
+
+
+def test_the_leader_canon_names_the_declines_marker_form():
+    """워커의 판독이 tip으로 두 출처를 가르는 이상, 상위가 남기는 거절의
+    꼴도 리더 쪽 정본에 있어야 한다. 없으면 리더는 tip을 붙일 수도, 붙이지
+    말아야 한다는 것을 알 수도 없다 — 이 이슈 이전에 그 파일에는
+    ``CHANGES REQUESTED``가 0건이었다(claunch-eyz0s.2.2 실측)."""
+    leader = V2.parent / "improv-leader-v2.yaml"
+    text = _words(leader.read_text(encoding="utf-8"))
+    assert "`CHANGES REQUESTED: <무엇을>`" in text, text[:400]
+    assert "**그 코멘트에는 `@ <hash>`를 붙이지 않는다.**" in text
+    # 거절 사유에 해시를 인용해야 할 때의 꼴도 정해져 있어야 한다 —
+    # 그러지 않으면 리더가 다시 본문 안에 @ <hex>를 쓴다
+    assert "`tip: <hash>`" in text
+    # PR 절차 3번에도 같은 지시가 있어야 한다 — 실측 29건을 낳은 자리가
+    # 그 절차이고, 큐 거절 자리에만 지시가 있으면 리더는 그 줄에 해시를 쓴다
+    assert "**이 코멘트에도 판정 낱말 뒤에 `@ <hash>`를 붙이지 않는다**" in text
+    assert "PR-REVIEW #<번호> <판정>: <근거>" in text
 
 
 def test_the_order_claim_is_scoped_to_an_answered_review():
@@ -243,6 +302,32 @@ def test_the_order_claim_is_scoped_to_an_answered_review():
     assert "**다만 그 순서는 리뷰어가 답했을 때의 보장이다**" in prompt
     assert "otherwise: self:pass" in prompt
     assert "옛 마커가 그대로인 채로 보드에 요청이 실리는 경로는 없다" not in prompt
+
+
+def test_the_gate_pins_its_three_load_bearing_sentences():
+    """세 문장이 변이에서 살아남았다(s490-rev, claunch-eyz0s.2.1 재작업).
+
+    정본과 프로젝트 레이어를 같은 바이트로 변이해도 4모듈이 250 passed로
+    같았다 — 어느 테스트도 이 셋을 물지 않았다는 뜻이다.
+
+    1. tip 없는 `CHANGES REQUESTED`는 「보드에서 갈리지 않는다 — 그때는
+       escalate다」. 재심 대기로 뒤집으면 상위의 거절이 대기 판정이 된다.
+    2. `BLOCKED`는 **같은 tip**의 `CLEARED`만 푼다. 그 조건을 지우면 앞
+       tip의 낡은 해소가 지금 제동을 푼다.
+    3. 증거 묶음의 `미해소 마커: …` / `미해소 마커 없음` 줄. 지우면 상위가
+       심사 있음으로 읽는다.
+
+    단언은 문장 자체를 가리킨다 — 문장을 지우거나 뒤집는 변이가 여기서
+    죽는다."""
+    prompt = _words(_land_prompt())
+    # 1. tip 없는 마커 → escalate
+    assert "판정인지 보드에서 갈리지 않는다 — 그때는 escalate다" in prompt
+    # 2. CLEARED는 같은 tip만 푼다
+    assert "같은 tip의 `CLEARED: ... @ <tip>`가 풀고" in prompt
+    assert "다른 tip의 CLEARED는 풀지 않는다" in prompt
+    # 3. 묶음의 미해소 마커 줄 — 두 꼴 다
+    assert "`미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과|skip>`" in prompt
+    assert "`미해소 마커 없음`" in prompt
 
 
 def test_the_bundle_must_record_a_marker_the_rereview_did_not_clear():

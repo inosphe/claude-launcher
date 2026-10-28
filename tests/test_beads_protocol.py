@@ -774,3 +774,138 @@ def test_the_v1_peer_review_question_takes_the_issue_from_the_nudge(layer):
     assert "--status in_progress --status in_review --json" in prompt
     assert "후보가 둘 이상이면 추측하지 말고 abstain한다" in prompt
     assert "그대로 in_progress(재요청 회차면 in_review)" in prompt
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_landing_gate_separates_a_rereview_from_an_unresolved_marker(layer):
+    """claunch-eyz0s.2.1 — the port of the v2 ordering fix.
+
+    v1's ``landing`` check 4 asked only "is an unresolved CHANGES REQUESTED /
+    HOLD / BLOCKED on this issue". The one session that can clear a reviewer's
+    marker (``peer-review``) runs *after* ``landing``, so a rework round could
+    never pass the gate: it escalated to a person every time. v2 fixed this
+    (claunch-eyz0s.2, three days lost waiting on a person); this pins the port.
+
+    Three sentences carry the fix, and each is load-bearing:
+    · the marker types are separated, with where each one is cleared;
+    · a rework round's 「재심 대기」 is judged by three git/board outputs;
+    · the order that makes that safe is named, with its honest scope limit.
+    """
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+
+    # 1. the three markers and where each is cleared
+    assert "마커는 셋이고, 푸는 자리도 셋이다" in text
+    assert "`HOLD:` — 상위 세션 또는 사람의 제동이다" in text
+    assert "이 세션은 풀 수 없다" in text
+    # 2. 「미해소」와 「재심 대기」를 가르는 판정 — 명령의 출력 셋
+    assert "**재심 대기**" in text
+    assert "git merge-base --is-ancestor <tip> HEAD" in text
+    assert "git rev-list --count <tip>..HEAD" in text
+    assert "셋 중 하나라도 안 서면 escalate다" in text
+    # 3. 그 판정이 안전한 이유는 순서이고, 순서의 보장 범위도 적혀 있어야 한다
+    assert "`integration-request` **앞에서** 돈다" in text
+    assert "**다만 그 순서는 리뷰어가 답했을 때의 보장이다**" in text
+    # 순서를 재심 뒤로 옮기면 이 문장이 항변한다
+    assert "`peer-review`가 `integration-request` **앞에서**" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_the_narrowed_tip_reading(layer):
+    """The port carried the narrowed tip reading into v1, but nothing pinned it
+    there: replacing the paragraph with the old 「줄 어디에서 찾든 tip」 survived
+    every test (s511-rev·s1262-rev·s490-rev, each with its own mutation). The
+    rule is what keeps an upper session's quoted hash from being read as a
+    reviewer's tip, so v1 needs the same three assertions v2 has — body
+    exclusion, its escalate consequence, and the two-slot disagreement."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 좁힌 판독 — 두 자리만 tip이다
+    assert "**tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.**" in text
+    assert "그 줄의 마지막 토큰" in text
+    # 본문 안의 해시는 tip이 아니다 → tip 없는 마커 → escalate
+    assert "**줄 본문 안의 다른 `@ <hex>`는 tip이 아니다**" in text
+    assert "그 줄은 tip 없는 마커이므로 escalate다" in text
+    # 두 자리가 다른 해시를 가리키면 판독 불가
+    assert "서로 다른 해시를 가리키면 판독 불가라 escalate다" in text
+    # 옛 판독으로 되돌리면 이 문장이 항변한다
+    assert "줄 어디에서 찾든" not in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_reads_an_uppers_pr_review_line_as_a_brake(layer):
+    """The tip-position rule alone does not separate the upper's brake from a
+    reviewer's verdict on this board. The measured line is
+    ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1) — the
+    hash is right after the marker idiom, so position rule (i) accepts it and
+    the leader's rejection is classified as 「재심 대기」(s597-rev·s1304,
+    claunch-eyz0s.2.2). The rule that separates them is about who wrote the
+    line, so it must sit in the canon *ahead of* the position rules, and the
+    measured form must be quoted there (port of the same v2 fix)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면" in text
+    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
+    assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_its_three_load_bearing_sentences(layer):
+    """Three sentences of the v1 check 4 survived every mutation (s490-rev,
+    claunch-eyz0s.2.1 rework). Mutating the canon *and* the project layer to
+    the same bytes left all four modules at 250 passed, so none of them was
+    pinned:
+
+    1. a tip-less ``CHANGES REQUESTED`` "cannot be told apart on the board --
+       then it is escalate". Flip it to 「read as 재심 대기」 and the upper
+       session's decline becomes a waiting review.
+    2. ``BLOCKED`` is cleared only by a ``CLEARED`` naming the *same* tip.
+       Drop the same-tip condition and a stale lift from an earlier tip
+       clears a brake it never addressed.
+    3. the evidence bundle must carry ``미해소 마커: …`` or ``미해소 마커 없음``.
+       Delete that line and the upper session reads a round as reviewed when
+       the marker is still open.
+
+    Each assertion below names the sentence itself, so the mutation that
+    removes or inverts it fails here rather than passing silently."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 1. tip 없는 마커는 어느 회차의 판정인지 갈리지 않는다 → escalate
+    assert "판정인지 보드에서 갈리지 않는다 — 그때는 escalate다" in text
+    # 2. CLEARED는 같은 tip만 푼다
+    assert "같은 tip의 `CLEARED: ... @ <tip>`가 풀고" in text
+    assert "다른 tip의 CLEARED는 풀지 않는다" in text
+    # 3. 증거 묶음의 미해소 마커 줄
+    assert "`미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과>`" in text
+    assert "`미해소 마커 없음`" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_reviewer_writes_the_tip_it_judged(layer):
+    """The gate reads ``@ <tip>`` to tell a reviewer's verdict from the upper
+    session's decline, so the reviewer has to write it -- in both places that
+    instruct a reviewer (the spawned reviewer's task and the peer-review
+    question). One side only leaves the other path emitting tip-less markers,
+    which check 4 escalates (claunch-eyz0s.2.1, porting claunch-eyz0s.2)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    reviewer = " ".join(str(wf.steps["reviewer-ensure"].instructions or "").split())
+    question = " ".join(str(wf.steps["peer-review"].select.prompt or "").split())
+    for where, text in (("reviewer-ensure", reviewer), ("peer-review", question)):
+        assert "CHANGES REQUESTED @ <tip>: <무엇을>" in text, (where, text[:300])
