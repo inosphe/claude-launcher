@@ -139,7 +139,7 @@ def test_it_loads_on_the_standard_library_alone():
 # --------------------------------------------------------------------------- #
 # the Router's flag -- the reason the codes can be trusted
 # --------------------------------------------------------------------------- #
-def _blind_router(monkeypatch_src: str):
+def _blind_router():
     """A Router whose mesh raises where the walk reads membership."""
     from claude_launcher.daemon import landing_route
 
@@ -158,7 +158,7 @@ def test_an_unreadable_mesh_membership_sets_undecidable():
     """``Router.merger_role`` cannot read the worker's meshes, so it has not
     shown that anybody lacks the role. The flag is what tells the probe so;
     without it the walk would be a confident 'nobody'."""
-    router = _blind_router("")
+    router = _blind_router()
     found = router.stacked("/repo", "w1")
     assert found.holder is None
     assert found.undecidable is True
@@ -170,7 +170,7 @@ def test_the_independent_direction_flags_too():
     walk is the leader one. A flag set only in ``stacked`` would leave every
     independent run reading an unreadable roster as a definite nobody --
     the arrangement this issue was measured in."""
-    found = _blind_router("").independent("/repo", "w1")
+    found = _blind_router().independent("/repo", "w1")
     assert found.holder is None
     assert found.undecidable is True, found.why
 
