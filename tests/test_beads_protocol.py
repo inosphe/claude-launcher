@@ -860,6 +860,40 @@ def test_the_v1_gate_reads_an_uppers_pr_review_line_as_a_brake(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_its_three_load_bearing_sentences(layer):
+    """Three sentences of the v1 check 4 survived every mutation (s490-rev,
+    claunch-eyz0s.2.1 rework). Mutating the canon *and* the project layer to
+    the same bytes left all four modules at 250 passed, so none of them was
+    pinned:
+
+    1. a tip-less ``CHANGES REQUESTED`` "cannot be told apart on the board --
+       then it is escalate". Flip it to 「read as 재심 대기」 and the upper
+       session's decline becomes a waiting review.
+    2. ``BLOCKED`` is cleared only by a ``CLEARED`` naming the *same* tip.
+       Drop the same-tip condition and a stale lift from an earlier tip
+       clears a brake it never addressed.
+    3. the evidence bundle must carry ``미해소 마커: …`` or ``미해소 마커 없음``.
+       Delete that line and the upper session reads a round as reviewed when
+       the marker is still open.
+
+    Each assertion below names the sentence itself, so the mutation that
+    removes or inverts it fails here rather than passing silently."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 1. tip 없는 마커는 어느 회차의 판정인지 갈리지 않는다 → escalate
+    assert "판정인지 보드에서 갈리지 않는다 — 그때는 escalate다" in text
+    # 2. CLEARED는 같은 tip만 푼다
+    assert "같은 tip의 `CLEARED: ... @ <tip>`가 풀고" in text
+    assert "다른 tip의 CLEARED는 풀지 않는다" in text
+    # 3. 증거 묶음의 미해소 마커 줄
+    assert "`미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과>`" in text
+    assert "`미해소 마커 없음`" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_v1_reviewer_writes_the_tip_it_judged(layer):
     """The gate reads ``@ <tip>`` to tell a reviewer's verdict from the upper
     session's decline, so the reviewer has to write it -- in both places that

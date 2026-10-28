@@ -304,6 +304,32 @@ def test_the_order_claim_is_scoped_to_an_answered_review():
     assert "옛 마커가 그대로인 채로 보드에 요청이 실리는 경로는 없다" not in prompt
 
 
+def test_the_gate_pins_its_three_load_bearing_sentences():
+    """세 문장이 변이에서 살아남았다(s490-rev, claunch-eyz0s.2.1 재작업).
+
+    정본과 프로젝트 레이어를 같은 바이트로 변이해도 4모듈이 250 passed로
+    같았다 — 어느 테스트도 이 셋을 물지 않았다는 뜻이다.
+
+    1. tip 없는 `CHANGES REQUESTED`는 「보드에서 갈리지 않는다 — 그때는
+       escalate다」. 재심 대기로 뒤집으면 상위의 거절이 대기 판정이 된다.
+    2. `BLOCKED`는 **같은 tip**의 `CLEARED`만 푼다. 그 조건을 지우면 앞
+       tip의 낡은 해소가 지금 제동을 푼다.
+    3. 증거 묶음의 `미해소 마커: …` / `미해소 마커 없음` 줄. 지우면 상위가
+       심사 있음으로 읽는다.
+
+    단언은 문장 자체를 가리킨다 — 문장을 지우거나 뒤집는 변이가 여기서
+    죽는다."""
+    prompt = _words(_land_prompt())
+    # 1. tip 없는 마커 → escalate
+    assert "판정인지 보드에서 갈리지 않는다 — 그때는 escalate다" in prompt
+    # 2. CLEARED는 같은 tip만 푼다
+    assert "같은 tip의 `CLEARED: ... @ <tip>`가 풀고" in prompt
+    assert "다른 tip의 CLEARED는 풀지 않는다" in prompt
+    # 3. 묶음의 미해소 마커 줄 — 두 꼴 다
+    assert "`미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과|skip>`" in prompt
+    assert "`미해소 마커 없음`" in prompt
+
+
 def test_the_bundle_must_record_a_marker_the_rereview_did_not_clear():
     """무응답 통과·skip으로 요청이 나가는 경우, 남은 마커를 상위가 알 자리는
     증거 묶음의 한 줄뿐이다. 이 줄이 없으면 상위는 심사 있음으로 읽는다."""
