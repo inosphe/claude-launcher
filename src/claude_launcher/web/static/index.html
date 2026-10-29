@@ -1293,6 +1293,20 @@
           <textarea name="task" rows="8"
             placeholder="typed in once it has booted — what it is for"></textarea>
           <div id="new-task-prompter" class="hidden"></div>
+          <!-- Context items beside the task (gds6-bfu7): an error log, a spec
+               excerpt -- each its own title and text instead of being pasted
+               under the request. Sent as `opening_contexts`; the daemon keeps
+               each as a file in the session's state directory and ends the
+               opening with one "[claunch context] <n>. <title> ..." line per
+               item and how to read it (MCP context_read). -->
+          <div id="new-task-contexts" class="new-task-contexts">
+            <div class="new-task-contexts-head">
+              <span class="new-task-images-hint">Additional context: an error log, a spec excerpt — each kept as its own item beside the task</span>
+              <button type="button" class="wf-btn" id="new-task-contexts-add">+ Add context</button>
+            </div>
+            <ol class="new-task-contexts-list" id="new-task-contexts-list"></ol>
+            <p class="new-task-images-note hidden" id="new-task-contexts-note"></p>
+          </div>
           <!-- Images that go out with the opening (claunch-jmrmc): pasted into
                the task box, dropped on this area, or picked. Uploaded when the
                form is submitted; the daemon keeps them with the session and
