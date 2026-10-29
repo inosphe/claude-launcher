@@ -1518,3 +1518,224 @@ def test_fetch_of_a_local_only_target_cannot_tell(repo, capsys):
     code = _run(repo, "--branch", "clean-branch", "--target", "clean-target", "--fetch")
     assert code == merge_ready.CANNOT_TELL
     assert "not a remote-tracking branch" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# an advance the candidate's tests do not read (claunch-qwp1g)
+# --------------------------------------------------------------------------- #
+# A miniature of this repository's layout, so changed_tests.py's own rules do
+# the selecting: alpha and beta are read by their same-named tests, and hub
+# imports beta, so test_hub is one import hop from beta.
+_LAYOUT = {
+    "src/pkg/__init__.py": "",
+    "src/pkg/alpha.py": "A = 1\n" + "\n" * 6 + "Z = 0\n",
+    "src/pkg/beta.py": "B = 1\n",
+    "src/pkg/hub.py": "from . import beta\n",
+    "tests/test_alpha.py": "from pkg import alpha\n",
+    "tests/test_beta.py": "from pkg import beta\n",
+    "tests/test_hub.py": "from pkg import hub\n",
+    "notes/free.txt": "nobody reads this\n",
+}
+
+
+def _layout_repo(tmp_path, *, branch: dict, advance=None, receipt: bool = True):
+    """master advanced past a branch; a green receipt for the branch's tip.
+
+    ``advance`` edits the target after the fork: ``{path: text}`` writes,
+    ``{path: None}`` deletes. Returns ``(repo, tip)``.
+    """
+    repo = _fresh_repo(tmp_path, "layout")
+    for path, text in _LAYOUT.items():
+        _write(repo, path, text)
+    _commit(repo, "layout")
+    _git(repo, "checkout", "-q", "-b", "cand")
+    for path, text in branch.items():
+        _write(repo, path, text)
+    tip = _commit(repo, "candidate work")
+    _git(repo, "checkout", "-q", "master")
+    for path, text in (advance or {}).items():
+        if text is None:
+            _git(repo, "rm", "-q", path)
+        else:
+            _write(repo, path, text)
+    if advance:
+        _commit(repo, "target advance")
+    if receipt:
+        _file_tip_receipt(repo, tip)
+    return repo, tip
+
+
+def _file_tip_receipt(repo, tip, **fields):
+    """The worker's passing targeted receipt for ``tip``'s tree."""
+    ct = merge_ready._load_changed_tests()
+    tree = _git(repo, "rev-parse", f"{tip}^{{tree}}").strip()
+    merge_base = _git(repo, "merge-base", tip, "master").strip()
+    paths = _git(repo, "diff", "--name-only", merge_base, tip).split()
+    files = ct.select(repo, paths)
+    receipt = {"tree": tree, "selection": files, "deselected": [], "exit_code": 0,
+               "counts": {"passed": len(files)}, **fields}
+    path = ct.receipt_path(repo, tree, files)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def _advance_verdict(repo, capsys, *extra):
+    return _verdict(repo, capsys, "--branch", "cand", "--target", "master",
+                    "--allow-target-advance", *extra)
+
+
+def test_an_advance_no_selected_test_reads_skips_the_re_measurement(tmp_path, capsys):
+    repo, _ = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"}
+    )
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.READY, out
+    assert "target advance does not reach this candidate's tests" in out
+    # the evidence the skip stands on is printed with it
+    assert "advance " in out and "src/pkg/beta.py" in out
+    assert "candidate: 1 code path(s): src/pkg/alpha.py" in out
+    assert "measured: receipt " in out
+    assert "rule: " in out
+
+
+def test_without_the_flag_the_same_advance_still_re_measures(tmp_path, capsys):
+    repo, _ = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"}
+    )
+    code, out = _verdict(repo, capsys, "--branch", "cand", "--target", "master")
+    assert code == merge_ready.REMEASURE, out
+
+
+@pytest.mark.parametrize(
+    "branch, advance, why",
+    [
+        # both sides change the same file, in different places
+        ({"src/pkg/alpha.py": "A = 2\n" + "\n" * 6 + "Z = 0\n"},
+         {"src/pkg/alpha.py": "A = 1\n" + "\n" * 6 + "Z = 1\n"},
+         "both sides change src/pkg/alpha.py"),
+        # the advance rewrites a test module the candidate's selection runs
+        ({"src/pkg/alpha.py": "A = 2\n"}, {"tests/test_alpha.py": "from pkg import alpha\nX = 1\n"},
+         "includes advanced test module(s): tests/test_alpha.py"),
+        # a selected module imports the advanced one directly
+        ({"tests/test_beta.py": "from pkg import beta\nY = 1\n"}, {"src/pkg/beta.py": "B = 2\n"},
+         "read by selected module(s): tests/test_beta.py"),
+        # one import hop: test_hub -> hub -> beta
+        ({"src/pkg/hub.py": "from . import beta\nH = 1\n"}, {"src/pkg/beta.py": "B = 2\n"},
+         "one import hop from selected module(s): tests/test_hub.py"),
+    ],
+    ids=["same-path", "selected-test", "read-by-selected", "one-hop"],
+)
+def test_an_advance_that_reaches_the_candidate_re_measures(tmp_path, capsys, branch, advance, why):
+    repo, _ = _layout_repo(tmp_path, branch=branch, advance=advance)
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert f"advance check: overlap -- " in out and why in out, out
+
+
+@pytest.mark.parametrize(
+    "branch, advance, why",
+    [
+        ({"src/pkg/alpha.py": "A = 2\n"}, {"src/pkg/gamma.py": "G = 1\n"},
+         "adds, deletes or renames src/pkg/gamma.py"),
+        ({"src/pkg/alpha.py": "A = 2\n"}, {"notes/free.txt": None},
+         "adds, deletes or renames notes/free.txt"),
+        ({"src/pkg/alpha.py": "A = 2\n"}, {"notes/free.txt": "edited\n"},
+         "no rule maps notes/free.txt to a test"),
+        ({"src/pkg/alpha.py": "A = 2\n"}, {"pyproject.toml": "[project]\n"},
+         "adds, deletes or renames pyproject.toml"),
+        ({"notes/free.txt": "mine\n"}, {"src/pkg/beta.py": "B = 2\n"},
+         "the candidate selects no test module"),
+    ],
+    ids=["added", "deleted", "unmapped", "suite-wide-added", "empty-selection"],
+)
+def test_an_advance_the_rules_cannot_judge_re_measures(tmp_path, capsys, branch, advance, why):
+    repo, _ = _layout_repo(tmp_path, branch=branch, advance=advance)
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "advance check: unsure, re-measuring -- " in out and why in out, out
+
+
+def test_a_renamed_path_in_the_advance_re_measures(tmp_path, capsys):
+    repo, _ = _layout_repo(tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"})
+    _git(repo, "mv", "notes/free.txt", "notes/moved.txt")
+    _commit(repo, "rename")
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "adds, deletes or renames notes/free.txt, notes/moved.txt" in out
+
+
+def test_a_modified_suite_wide_file_re_measures(tmp_path, capsys):
+    repo = _fresh_repo(tmp_path, "layout")
+    for path, text in {**_LAYOUT, "tests/conftest.py": "X = 1\n"}.items():
+        _write(repo, path, text)
+    _commit(repo, "layout")
+    _git(repo, "checkout", "-q", "-b", "cand")
+    _write(repo, "src/pkg/alpha.py", "A = 2\n")
+    tip = _commit(repo, "candidate work")
+    _git(repo, "checkout", "-q", "master")
+    _write(repo, "tests/conftest.py", "X = 2\n")
+    _commit(repo, "conftest")
+    _file_tip_receipt(repo, tip)
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "tests/conftest.py reach(es) tests no rule names" in out
+
+
+def test_no_receipt_for_the_tip_re_measures(tmp_path, capsys):
+    repo, _ = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"},
+        receipt=False,
+    )
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "no passing receipt for the tip's tree" in out
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"exit_code": 1, "counts": {"failed": 1}}, {"deselected": ["tests/test_alpha.py::t"]},
+     {"selection": []}],
+    ids=["red", "deselected", "smaller-selection"],
+)
+def test_a_receipt_that_is_not_the_measurement_does_not_count(tmp_path, capsys, fields):
+    repo, tip = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"},
+        receipt=False,
+    )
+    _file_tip_receipt(repo, tip, **fields)
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "no passing receipt for the tip's tree" in out
+
+
+def test_a_preview_on_an_older_target_is_a_measurement_too(tmp_path, capsys, monkeypatch):
+    """The preview anchor: no receipt, and the advance is measured from the
+    preview's target, not from the fork point. The additive rule above would
+    accept this pair first, so it is switched off to reach the new one."""
+    monkeypatch.setattr(merge_ready, "_advanced_target_is_covered", lambda *a: None)
+    repo, tip = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"},
+        receipt=False,
+    )
+    ref = "refs/claunch/preview/cand"
+    _preview(repo, "cand", "master", ref)
+    _write(repo, "src/pkg/hub.py", "from . import beta\nH = 2\n")
+    _commit(repo, "advance after the preview")
+    code, out = _advance_verdict(repo, capsys, "--preview-ref", ref)
+    assert code == merge_ready.READY, out
+    assert "measured: preview refs/claunch/preview/cand" in out
+    assert "src/pkg/hub.py" in out and "src/pkg/beta.py" not in out.split("candidate:")[0]
+
+
+def test_the_selection_rules_failing_to_load_re_measures(tmp_path, capsys, monkeypatch):
+    repo, _ = _layout_repo(
+        tmp_path, branch={"src/pkg/alpha.py": "A = 2\n"}, advance={"src/pkg/beta.py": "B = 2\n"}
+    )
+
+    def broken():
+        raise ImportError("no changed_tests")
+
+    monkeypatch.setattr(merge_ready, "_load_changed_tests", broken)
+    code, out = _advance_verdict(repo, capsys)
+    assert code == merge_ready.REMEASURE, out
+    assert "the selection rules could not run (no changed_tests)" in out
