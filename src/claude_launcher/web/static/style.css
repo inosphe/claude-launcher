@@ -7552,16 +7552,22 @@ body.embed #main { width: 100%; }
 .gate-fact-key { color: #6e7681; }
 .gate-fact-val { color: #c9d1d9; overflow-wrap: anywhere; }
 .gate-fact-from { color: #6e7681; }
-.gate-actions { display: flex; gap: 8px; margin-top: 8px; }
-.gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
+/* A request's presses wrap onto the next line rather than run past the card
+   or squeeze a label over two lines (claunch-gnlui.2): a run's question has
+   up to five answers, and the card or panel row adds its own presses. */
+.gate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
 /* The two presses a gate card offers besides its answer (claunch-6scxn):
-   Hide and Remind are one decision — what to do with the card while the
-   person thinks — so they sit together as one item of the actions row. */
-.gate-aside { display: inline-flex; gap: 8px; }
+   Hide and Remind. The box leaves the layout to the actions row so Hide
+   wraps with the answers and Remind can take its own line. */
+.gate-aside { display: contents; }
 /* Remind's waits are three exclusive presses, one per wait (claunch-gnlui),
    drawn as one segmented group after a "Remind" caption so they read as a
-   choice of when rather than as three unrelated actions. */
+   choice of when rather than as three unrelated actions. The group is a line
+   of its own under every other press (claunch-gnlui.2), in the card and in
+   the panel row alike. */
 .gate-remind { display: inline-flex; align-items: center; gap: 0; }
+.gate-actions .gate-remind { order: 1; flex-basis: 100%; }
 .gate-remind-label { color: #9da5b0; font-size: 11px; margin-right: 6px; }
 .gate-actions .gate-remind .wf-btn { padding: 3px 7px; border-radius: 0; }
 .gate-actions .gate-remind .wf-btn + .wf-btn { border-left-width: 0; }
