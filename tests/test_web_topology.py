@@ -718,6 +718,7 @@ BROWSER_CHECKS = [
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
         "railreveal_browser.cjs",
+        "railorphan_browser.cjs",
     "quietpoll_browser.cjs",
         "chat_browser.cjs",
         "promptpacks_browser.cjs",
