@@ -320,12 +320,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       const list = document.querySelector("#opfab-view .op-thread-list");
       const listTop = list.getBoundingClientRect().top;
       view.scrollTop = view.scrollHeight;
+      // The list sizes to its rows (claunch-vxep1.1): no dead click band
+      // under the last row while the conversation column is taller.
+      // scrollHeight is clamped to the client height, so the band is
+      // measured from the rows' own boxes.
+      const rowsBottom = Math.max(...[...list.children].map(k => k.getBoundingClientRect().bottom - listTop));
       return { viewScrolls: view.scrollHeight > view.clientHeight + 1, scrolled: view.scrollTop > 0,
         listHeld: Math.abs(list.getBoundingClientRect().top - listTop) < 1 && list.scrollTop === 0,
-        gridScrolls: grid.scrollHeight > grid.clientHeight + 1 };
+        gridScrolls: grid.scrollHeight > grid.clientHeight + 1,
+        fitsRows: list.clientHeight - rowsBottom <= 1 };
     });
-    assert.deepEqual(pinnedList, { viewScrolls: true, scrolled: true, listHeld: true, gridScrolls: false },
-      "the conversation scrolls inside its column and the thread list stays put");
+    assert.deepEqual(pinnedList, { viewScrolls: true, scrolled: true, listHeld: true, gridScrolls: false, fitsRows: true },
+      "the conversation scrolls inside its column and the thread list stays put, sized to its rows");
     if (process.env.CLAUNCH_SCREENSHOT_WIDE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_WIDE });
     await page.locator(".opfab-grip-e").dblclick();
     assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });
