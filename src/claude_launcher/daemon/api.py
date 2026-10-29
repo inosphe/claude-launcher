@@ -12581,10 +12581,12 @@ async def h_stats_llm_usage(request: web.Request) -> web.Response:
         return json_error(
             400, f"window must be one of: {', '.join(llm_usage.WINDOWS)}")
     try:
+        table = _model_prices()
         payload = await asyncio.to_thread(
             llm_usage.overview, window,
             provider=request.query.get("provider", ""),
-            session=request.query.get("session", ""))
+            session=request.query.get("session", ""),
+            prices=table["prices"], currency=table["currency"])
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats llm usage: %s", exc, exc_info=True)
         return json_error(500, f"reading the daemon LLM ledger failed: {exc}")

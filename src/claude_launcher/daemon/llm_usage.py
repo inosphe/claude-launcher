@@ -261,7 +261,55 @@ def ledger_since() -> str:
 
 def _blank() -> dict:
     return {"calls": 0, "errors": 0, "unreported": 0, "total": 0,
-            **{k: 0 for k in PARTS}}
+            **{k: 0 for k in PARTS},
+            "cost": 0.0, "priced_tokens": 0, "unpriced_tokens": 0}
+
+
+def _rate_row(rates) -> Optional[dict]:
+    return rates if isinstance(rates, dict) and not any(
+        isinstance(v, dict) for v in rates.values()) else None
+
+
+def rate_for(prices, provider: str, model: str) -> Optional[dict]:
+    """The per-1M-token rates for ``model`` from the Settings price table
+    (``daemon.model_prices``), or ``None`` when the table has no row for it.
+
+    The same order as ``model_prices.rate_for`` (claunch-grs01.2 CONTRACT):
+    the provider's row (``{provider: {model: {input, ...}}}``), then the
+    ``'*'`` row, then a row keyed by model id at the top -- the older flat
+    form, which that contract reads as ``'*'``."""
+    if not isinstance(prices, dict) or not model:
+        return None
+    for key in ([provider] if provider else []) + ["*"]:
+        nested = prices.get(key)
+        if isinstance(nested, dict) and _rate_row(nested) is None:
+            row = _rate_row(nested.get(model))
+            if row is not None:
+                return row
+    return _rate_row(prices.get(model))
+
+
+def _rate(rates: dict, key: str) -> float:
+    try:
+        v = float(rates.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) and v >= 0 else 0.0
+
+
+def line_cost(line: dict, rates: Optional[dict]) -> Optional[float]:
+    """What one ledger line costs at ``rates``, the same sum as the
+    dashboard's ``readingCost``: a rate left unset counts as 0, except cache
+    write, which falls back to the input rate (most providers bill a cache
+    write as plain input)."""
+    if rates is None or not line.get("reported"):
+        return None
+    write = rates.get("cache_write")
+    write_rate = _rate(rates, "input") if write is None or write == "" else _rate(rates, "cache_write")
+    return (_rate(rates, "input") * int(line.get("input") or 0)
+            + _rate(rates, "cache_read") * int(line.get("cache_read") or 0)
+            + write_rate * int(line.get("cache_write") or 0)
+            + _rate(rates, "output") * int(line.get("output") or 0)) / 1e6
 
 
 def _add(acc: dict, line: dict, every: bool = False) -> None:
@@ -278,7 +326,14 @@ def _add(acc: dict, line: dict, every: bool = False) -> None:
         return
     for k in PARTS:
         acc[k] += int(line.get(k) or 0)
-    acc["total"] += int(line.get("total") or 0)
+    total = int(line.get("total") or 0)
+    acc["total"] += total
+    cost = line.get("cost")
+    if cost is None:
+        acc["unpriced_tokens"] += total
+    else:
+        acc["cost"] += cost
+        acc["priced_tokens"] += total
 
 
 def _grouped(lines: Iterable[dict], key: str, every: bool = False) -> Dict[str, dict]:
@@ -298,9 +353,20 @@ def _ordered(groups: Dict[str, dict], name: str, order=None) -> List[dict]:
     return rows
 
 
+def priced(lines: List[dict], prices) -> List[dict]:
+    """``lines`` with each one's ``cost`` at the Settings price table
+    (``None`` where its model has no row there, or it reported no tokens)."""
+    return [{**l, "cost": line_cost(l, rate_for(prices, str(l.get("provider") or ""),
+                                                str(l.get("model") or "")))}
+            for l in lines]
+
+
 def summarize(lines: List[dict], days: List[str], zone: Optional[tzinfo] = None) -> dict:
     """The window's sums: overall, per feature, per provider (with its
-    models), per session (with its features and providers) and per day."""
+    models), per session (with its features and providers) and per day.
+    A line carrying ``cost`` (:func:`priced`) adds it to every row it falls
+    in; ``priced_tokens``/``unpriced_tokens`` say how much of a row's total
+    the cost covers."""
     totals = _blank()
     for line in lines:
         _add(totals, line)
@@ -352,15 +418,18 @@ def window_bounds(window: str, now: Optional[float] = None,
 
 
 def overview(window: str = "today", *, provider: str = "", session: str = "",
-             now: Optional[float] = None, zone: Optional[tzinfo] = None) -> dict:
+             now: Optional[float] = None, zone: Optional[tzinfo] = None,
+             prices=None, currency: str = "$") -> dict:
     """The Stats page's embedded-LLM section for one window.
 
     ``provider`` / ``session`` narrow every figure to that provider's or that
     session's calls; ``all_providers`` keeps the unnarrowed provider list so
-    the page's strip still offers the others.
+    the page's strip still offers the others. ``prices`` is the Settings
+    price table (``daemon.model_prices``): each row's ``cost`` is estimated
+    from it, in ``currency``.
     """
     start, end, days = window_bounds(window, now, zone)
-    lines = load(start, end, zone)
+    lines = priced(load(start, end, zone), prices)
     every = _ordered(_grouped(lines, "provider"), "provider")
     if provider:
         lines = [l for l in lines if l.get("provider") == provider]
@@ -377,6 +446,7 @@ def overview(window: str = "today", *, provider: str = "", session: str = "",
         "until": datetime.fromtimestamp(end, zone).astimezone(zone).isoformat(timespec="seconds"),
         "zone": zone_name,
         "ledger_since": ledger_since(),
+        "currency": currency or "$",
         "all_providers": [{"provider": r["provider"], "total": r["total"],
                            "calls": r["calls"]} for r in every],
         **summarize(lines, days, zone),

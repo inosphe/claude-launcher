@@ -34348,9 +34348,60 @@ function statsLlmBar(r, peak) {
     td.appendChild(bar);
   }
   td.appendChild(statsLlmTokens(r));
-  td.title = `fresh input ${(r.input || 0).toLocaleString()}, cache read ` +
-    `${(r.cache_read || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
+  td.title = `read ${(r.input || 0).toLocaleString()}, cached read ` +
+    `${(r.cache_read || 0).toLocaleString()}, cache write ` +
+    `${(r.cache_write || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
   return td;
+}
+
+/* The token kinds a row splits its total into: read (fresh input), cached
+   read, output — and cache write only when the window holds any, so the
+   columns still add up to the total. */
+function statsLlmParts(t) {
+  const parts = [["input", "read"], ["cache_read", "cached read"]];
+  if (t.cache_write) parts.push(["cache_write", "cache write"]);
+  parts.push(["output", "output"]);
+  return parts;
+}
+
+/* A row's estimated cost at the Settings → Model prices table, computed per
+   call from the model that answered it (daemon/llm_usage.py). "—" where no
+   call in the row has a price row; a partial estimate says how many tokens
+   it leaves out. */
+function statsLlmCost(r, currency) {
+  const unpriced = r.unpriced_tokens || 0;
+  const priced = (r.priced_tokens || 0) || (r.cost || 0);
+  const td = el("td", "num stats-llm-cost" +
+    (priced && unpriced ? " stats-llm-cost-partial" : ""));
+  if (!priced) {
+    if (unpriced) {
+      td.appendChild(el("span", "stats-llm-unreported", "—"));
+      td.title = "no price row in Settings → Model prices for these calls' models";
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(r.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices, per call's model" +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens on models ` +
+      "with no price row are not in it" : "");
+  return td;
+}
+
+/* The figure columns every LLM table shares, after its own label columns. */
+function statsLlmFigureHeads(t) {
+  const heads = ["tokens", ...statsLlmParts(t).map(([, label]) => label)];
+  if (t.priced_tokens) heads.push("est. cost");
+  return [...heads, "calls"];
+}
+
+function statsLlmFigures(r, peak, t, currency) {
+  const cells = [statsLlmBar(r, peak)];
+  for (const [key] of statsLlmParts(t)) {
+    cells.push(el("td", "num stats-llm-part", usageShort(r[key] || 0)));
+  }
+  if (t.priced_tokens) cells.push(statsLlmCost(r, currency));
+  cells.push(statsLlmCalls(r));
+  return cells;
 }
 
 function statsLlmCalls(r) {
@@ -34371,7 +34422,9 @@ function statsLlmChips(list, key) {
     const chip = el("span", "stats-chip", name);
     if (typeof item !== "string") {
       chip.title = `${name}: ${(item.calls || 0).toLocaleString()} calls, ` +
-        `${usageShort(item.total || 0)} tokens`;
+        `${usageShort(item.total || 0)} tokens (read ${usageShort(item.input || 0)}, ` +
+        `cached read ${usageShort(item.cache_read || 0)}, output ` +
+        `${usageShort(item.output || 0)})`;
     }
     td.appendChild(chip);
   }
@@ -34454,9 +34507,21 @@ function statsLlmSection() {
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
     `${(t.calls || 0).toLocaleString()} calls`));
-  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
+  summary.appendChild(statsCard("Read", usageShort(t.input || 0),
+    t.cache_write ? `cache write ${usageShort(t.cache_write)}` : "fresh input"));
+  summary.appendChild(statsCard("Cached read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0)));
   summary.appendChild(statsCard("Output", usageShort(t.output || 0), ""));
+  const currency = d.currency || "$";
+  if (t.priced_tokens) {
+    summary.appendChild(statsCard("Est. cost", `≈ ${currency}${usageCost(t.cost || 0)}`,
+      t.unpriced_tokens
+        ? `${usageShort(t.unpriced_tokens)} tokens unpriced`
+        : "Settings → Model prices"));
+  } else if (t.total) {
+    summary.appendChild(statsCard("Est. cost", "—",
+      "no price row in Settings → Model prices"));
+  }
   summary.appendChild(statsCard("Failed", (t.errors || 0).toLocaleString(),
     `${(t.unreported || 0).toLocaleString()} without a token count`));
   body.appendChild(summary);
@@ -34473,26 +34538,26 @@ function statsLlmSection() {
   const features = d.features || [];
   body.appendChild(el("h4", "stats-llm-sub", "By feature"));
   body.appendChild(statsScroll(statsLlmTable(
-    ["feature", "purpose", "tokens", "calls"], features, (r, peak) => {
+    ["feature", "purpose", ...statsLlmFigureHeads(t)], features, (r, peak) => {
       const name = el("td", "stats-session-cell", r.feature);
       name.title = STATS_LLM_FEATURES[r.feature] || "";
-      return [name, statsLlmChips(r.purposes, "purpose"), statsLlmBar(r, peak),
-              statsLlmCalls(r)];
+      return [name, statsLlmChips(r.purposes, "purpose"),
+              ...statsLlmFigures(r, peak, t, currency)];
     })));
 
   body.appendChild(el("h4", "stats-llm-sub", "By provider"));
   body.appendChild(statsScroll(statsLlmTable(
-    ["provider", "model", "feature", "tokens", "calls"], d.providers || [],
+    ["provider", "model", "feature", ...statsLlmFigureHeads(t)], d.providers || [],
     (r, peak) => [el("td", "stats-session-cell", r.provider),
                   statsLlmChips(r.models, "model"),
                   statsLlmChips(r.features, "feature"),
-                  statsLlmBar(r, peak), statsLlmCalls(r)])));
+                  ...statsLlmFigures(r, peak, t, currency)])));
 
   const sessions = d.sessions || [];
   const today = (d.until || "").slice(0, 10);
   body.appendChild(el("h4", "stats-llm-sub", `By session (${sessions.length})`));
   body.appendChild(statsScroll(statsLlmTable(
-    ["session", "feature", "provider", "tokens", "calls", "last call"], sessions,
+    ["session", "feature", "provider", ...statsLlmFigureHeads(t), "last call"], sessions,
     (r, peak) => {
       const name = el("td", "stats-session-cell");
       if (r.session) {
@@ -34506,7 +34571,7 @@ function statsLlmSection() {
         name.appendChild(none);
       }
       return [name, statsLlmChips(r.features, "feature"),
-              statsLlmChips(r.providers), statsLlmBar(r, peak), statsLlmCalls(r),
+              statsLlmChips(r.providers), ...statsLlmFigures(r, peak, t, currency),
               el("td", "stats-last-cell", statsStamp(r.last_at, today))];
     })));
   return statsSection("Daemon LLM calls", t.calls, body);

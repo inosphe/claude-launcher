@@ -7968,6 +7968,9 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 /* The daemon's own LLM calls (claunch-60y0d): one day column per local date,
    stacked by feature, beside the per-feature/provider/session tables. */
 .stats-llm-sub { margin: 14px 0 6px; font-size: 12px; color: #8b949e; font-weight: 600; }
+.stats-llm-part { color: #8b949e; }
+.stats-llm-cost { white-space: nowrap; }
+.stats-llm-cost-partial::after { content: "*"; margin-left: 2px; color: #d29922; }
 .stats-llm-errors { margin-left: 6px; color: #ff7b72; border-color: #4a2a2a; }
 .stats-llm-days {
   display: flex; align-items: flex-end; gap: 3px; height: 96px;
