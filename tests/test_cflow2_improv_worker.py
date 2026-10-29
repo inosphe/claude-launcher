@@ -1857,6 +1857,8 @@ def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
     assert "`children`의 자식 행에는 role이 없다" in release
     assert "claunch mesh members <이 런의 메시> --state all" in release
     assert "`cflow_clock._reviewer_children`" in release
+    # the roster's third column is <daemon>/<session>: compare the part after '/'
+    assert "`/` 뒤의 세션 이름과 비교한다" in release
     new_task = _words(nodes["end-new-task"]["prompt"])
     assert "MCP `resume_session`" in new_task
     assert "REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>" in new_task
@@ -1865,6 +1867,10 @@ def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
     # still in settle would be reaped again by settle-reap
     assert "새 런이 선 **뒤에** 같은 턴에서 되살리기를 요청한다" in new_task
     assert "보고 전에 요청하지 않는다" in new_task
+    # a tie is broken by the name auto-release wrote, read before the new run
+    # replaces what cflow2 status shows
+    assert "`AUTO-RELEASE` 줄에 `reviewer: <이름>`으로 적은 이름을 고른다" in new_task
+    assert "끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다" in new_task
     assert "session.spawn" in nodes["end-new-task"]["effects"]
     ensure = _words(nodes["reviewer-ensure"]["prompt"])
     assert "REVIEWER RECYCLE:" in ensure

@@ -4158,8 +4158,10 @@ nodes:
          찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
          children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
          맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
-         메시> --state all`에서 role 열이 reviewer인 행의 셋째 열(세션 이름,
-         첫 열 핸들이 아니다)과 같은 것이 직속 자식 리뷰어이고, 살아 있는지는
+         메시> --state all`에서 role 열이 reviewer인 행의 셋째 열과 같은 것이
+         직속 자식 리뷰어다. 셋째 열은 `<데몬>/<세션>`(예:
+         `shared-daemon-main/s1011`)이므로 `/` 뒤의 세션 이름과 비교한다 —
+         첫 열 핸들과도, 셋째 열 전체와도 비교하지 않는다. 살아 있는지는
          `children` 행의 status로 읽는다. 데몬이 직속 리뷰어를 고르는 기준도
          같다(직속 자식 + 메시 role reviewer, `cflow_clock._reviewer_children`).
          명부를 읽지 못하면 추측하지 않고 `reviewer: 명부 없음`으로 적는다.
@@ -4300,9 +4302,10 @@ nodes:
          (`_finish_end`의 successor 갈래). 대상은 auto-release 5번과 같은
          방법(`children` 자식 이름 ∩ 메시 명부의 role reviewer 세션 이름)으로
          찾은 직속 자식 리뷰어 가운데 status가 exited인 것이다. 둘 이상이면 이
-         런의 reviewer-ensure가 보고한 리뷰어(`claunch cflow2 status --json`의
-         `result['reviewer-ensure'].value.reviewer`)와 같은 이름을 고르고, 그래도
-         하나로 좁혀지지 않으면 추측하지 않고 건너뛴다. 없으면 이 항목은
+         런의 auto-release 5번이 이슈의 `AUTO-RELEASE` 줄에 `reviewer: <이름>`으로
+         적은 이름을 고른다 — `claunch cflow2 status`는 2의 `flow_start` 뒤에는
+         새 런을 읽으므로 끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다.
+         그래도 하나로 좁혀지지 않으면 추측하지 않고 건너뛴다. 없으면 이 항목은
          건너뛰고 새 런의 reviewer-ensure가 지금처럼 새로 세운다. 그 세션에 MCP
          `resume_session`을 부른다 — reason에는 「<내 세션>의 새 런(이슈 <그
          id>)의 peer-review를 이전 런의 리뷰 맥락으로 맡길 리뷰어」를 적는다.
