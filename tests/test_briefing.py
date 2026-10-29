@@ -31,8 +31,10 @@ BEARER = {"Authorization": "Bearer sekrit"}
 @pytest.fixture(autouse=True)
 def _fresh_cache():
     briefing._cache.clear()
+    briefing._failures.clear()
     yield
     briefing._cache.clear()
+    briefing._failures.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -898,7 +900,7 @@ def test_briefing_cache_survives_daemon_restart(home):
         }, "raw": None,
     }
     briefing._cache["s1"] = (key, result)
-    briefing._persist_cache()
+    briefing._persist("s1")
 
     # A new daemon process starts with an empty in-memory cache.
     briefing._cache.clear()
@@ -907,6 +909,128 @@ def test_briefing_cache_survives_daemon_restart(home):
         "one_line": "작업", "state": "working",
         "goal": "목표", "now": "진행", "progress": "50%",
     }
+
+
+def _brief_row(one, at):
+    return {"key": ["k"], "result": {"session": "x", "generated_at": at,
+            "briefing": {"state": "idle", "one-line-job-description": one}}}
+
+
+def test_briefings_are_kept_one_file_per_session(home):
+    """Each session's briefing lives in its own directory, so writing one
+    rewrites one file (the fleet file was rewritten whole on every
+    composition, and one write emptied all 636, claunch-lluxq), and clearing
+    a session's directory takes its summary with it."""
+    for name in ("s1", "s2"):
+        briefing._cache[name] = (("k",), _brief_row(name, "t")["result"])
+        briefing._persist(name)
+    assert json.loads((paths.session_dir("s1") / "briefing.json").read_text(
+        encoding="utf-8"))["result"]["briefing"]["one-line-job-description"] == "s1"
+    assert not paths.briefings_json().exists()
+
+    # the directory goes (Clear exited with logs): so does the summary
+    import shutil
+    shutil.rmtree(paths.session_dir("s2"))
+    briefing._cache.clear()
+    briefing._loaded_cache_path = None
+    assert briefing.digest("s1")["one_line"] == "s1"
+    assert briefing.digest("s2") is None
+
+
+def test_the_fleet_file_is_split_into_session_files_once(home):
+    """An old daemon's ``briefings.json`` is moved into per-session files on
+    first read and renamed ``.migrated``. A session with no directory is not
+    brought back; one that already has its own file keeps the later of the
+    two (a restore written while the old daemon still ran is older than what
+    that daemon composed meanwhile)."""
+    for name in ("s1", "s2", "s3"):
+        paths.session_dir(name).mkdir(parents=True)
+    (paths.session_dir("s2") / "briefing.json").write_text(
+        json.dumps(_brief_row("restored", "2026-10-27T00:00:00+00:00")), encoding="utf-8")
+    (paths.session_dir("s3") / "briefing.json").write_text(
+        json.dumps(_brief_row("own newer", "2026-10-29T00:00:00+00:00")), encoding="utf-8")
+    legacy = paths.briefings_json()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        "s1": _brief_row("fleet", "2026-10-28T00:00:00+00:00"),
+        "s2": _brief_row("fleet newer", "2026-10-28T00:00:00+00:00"),
+        "s3": _brief_row("fleet older", "2026-10-28T00:00:00+00:00"),
+        "gone": _brief_row("cleared", "2026-10-28T00:00:00+00:00"),
+    }), encoding="utf-8")
+
+    briefing._loaded_cache_path = None
+    assert [briefing.digest(n)["one_line"] for n in ("s1", "s2", "s3")] == [
+        "fleet", "fleet newer", "own newer"]
+    assert briefing.digest("gone") is None
+    assert not paths.session_dir("gone").exists()
+    assert not legacy.exists()
+    assert legacy.with_name("briefings.json.migrated").is_file()
+
+
+def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
+    """A model change used to clear the whole cache, and the rail of 636
+    sessions lost every one-liner at once — exited sessions included, which
+    nothing recomposes (claunch-lluxq). Retiring keeps the text for the rail,
+    marks it stale, and makes the old key unmatchable so the next card or ⟳
+    composes with the new model. It survives a daemon restart, and a second
+    retire does not stack."""
+    key = ("s1", 2, (1, 2), None, "idle", None, None, ())
+    briefing._cache["s1"] = (key, {"session": "s1", "briefing": {
+        "goal": "g", "state": "idle", "one-line-job-description": "한 줄"}})
+    briefing.retire_all()
+    briefing.retire_all()
+
+    briefing._cache.clear()
+    briefing._loaded_cache_path = None
+    assert briefing.digest("s1") == {
+        "one_line": "한 줄", "state": "idle", "goal": "g", "stale": True,
+    }
+    assert briefing._cache["s1"][0] == (*key, "retired")
+    assert briefing._cache["s1"][0] != key
+    assert briefing.cached_result("s1") is None
+
+
+def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkeypatch):
+    """A failed composition is kept, per session and across a daemon restart,
+    so a row can tell "never asked" (no digest) from "asked and failed"
+    (``failed``). It sits beside the briefing it did not replace, and the
+    next success clears it."""
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(sdef=SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+    cfg = {"max_tokens": 100}
+
+    async def refuse(cfg, prompt, **kw):
+        raise briefing.BriefingError("HTTP 402: insufficient credits")
+
+    async def answer(cfg, prompt, **kw):
+        return briefing.LlmAnswer(
+            text=json.dumps({"goal": "g", "state": "idle",
+                             "one-line-job-description": "한 줄"}),
+            finish_reason="stop", completion_tokens=10,
+        )
+
+    assert briefing.digest("s1") is None
+    monkeypatch.setattr(briefing, "call_llm", refuse)
+    with pytest.raises(briefing.BriefingError):
+        asyncio.run(briefing.compose(session, cfg, refresh=True))
+
+    briefing._failures.clear()
+    briefing._loaded_cache_path = None
+    d = briefing.digest("s1")
+    assert d["one_line"] == "" and d["failed"]["error"] == "HTTP 402: insufficient credits"
+    assert d["failed"]["at"]
+
+    monkeypatch.setattr(briefing, "call_llm", answer)
+    asyncio.run(briefing.compose(session, cfg, refresh=True))
+    assert briefing.digest("s1") == {"one_line": "한 줄", "state": "idle", "goal": "g"}
+
+    # a failure after a success keeps the old text and says it failed
+    monkeypatch.setattr(briefing, "call_llm", refuse)
+    with pytest.raises(briefing.BriefingError):
+        asyncio.run(briefing.compose(session, cfg, refresh=True))
+    d = briefing.digest("s1")
+    assert d["one_line"] == "한 줄" and d["failed"]["error"].startswith("HTTP 402")
 
 
 def test_parse_briefing_bad_state_and_garbage():
@@ -1684,8 +1808,12 @@ def test_briefing_endpoint_502s_on_a_truncated_answer(home, tmp_path):
                     assert fragment in (await resp.json())["error"]
                 finally:
                     await llm.close()
-            # nothing was cached on the way out: the next good answer serves
-            assert briefing.digest("s1") is None
+            # nothing was cached on the way out: the next good answer serves.
+            # The failure itself is kept, so the row says "failed" rather
+            # than "not yet" (claunch-lluxq).
+            d = briefing.digest("s1")
+            assert d["one_line"] == "" and "empty content" in d["failed"]["error"]
+            assert briefing.cached_result("s1") is None
             await mgr.shutdown_all()
         finally:
             await client.close()
@@ -2162,7 +2290,7 @@ def test_briefing_llm_reports_a_pointer_at_a_preset_that_is_gone(home):
     asyncio.run(run())
 
 
-def test_briefing_llm_save_drops_cached_briefings_when_the_backend_changes(home):
+def test_briefing_llm_save_retires_cached_briefings_when_the_backend_changes(home):
     """A model change takes effect on the next card, not on the next commit.
 
     The cache key is a session's evidence, so a briefing written by the
@@ -2190,7 +2318,12 @@ def test_briefing_llm_save_drops_cached_briefings_when_the_backend_changes(home)
                 json={"profile": "brief", "model": "glm-small"},
             )
             assert resp.status == 200
-            assert briefing.digest("s1") is None
+            # retired, not dropped: the rail keeps the text, marked stale,
+            # and the card no longer serves it (claunch-lluxq)
+            assert briefing.digest("s1") == {
+                "one_line": "한 줄", "state": "working", "goal": "g", "stale": True,
+            }
+            assert briefing.cached_result("s1") is None
 
             seed()
             resp = await client.put(
@@ -2718,7 +2851,7 @@ def test_a_locked_index_does_not_turn_a_composed_briefing_into_a_500(
 ):
     """A locked index DB is a derived-store failure, not a compose failure.
 
-    ``compose`` caches the briefing and calls ``_persist_cache`` before it
+    ``compose`` caches the briefing and calls ``_persist`` before it
     mirrors the result into ``search_records``. That mirror opens SQLite, so
     the failure that arrives is ``sqlite3.OperationalError`` -- not an
     ``OSError``, and not a ``BriefingError`` -- and with no guard it left

@@ -1478,6 +1478,12 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   font-size: 11px; color: #8b949e; line-height: 1.45;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* A summary request that failed is told apart from one never made
+   (decorateBriefingRow, claunch-lluxq), in the colour the card uses for the
+   same failure (.sess-brief-note.error); a one-liner written by the previous
+   briefing model stays, set in italics until it is re-summarised. */
+#session-list .rail-brief.failed { color: #f85149; }
+#session-list .rail-brief.stale { font-style: italic; }
 /* The reader's own note for a session, on its rail row. Same line geometry as
    the briefing one-liner below it and the same reasons for `pre-wrap` and
    `anywhere`: it is prose the person typed, with the breaks they chose, and

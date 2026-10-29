@@ -183,6 +183,32 @@ const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
   ctx.decorate(s3, { name: "s3" });
   check("neither digest nor task recorded: no one-line at all", oneLine(s3), null);
 
+  /* "Not yet" and "failed" read differently (claunch-lluxq): a failure the
+     daemon recorded is said on the row, and a one-liner the previous
+     briefing model wrote stays, marked stale. */
+  const sFail = row("sfail");
+  ctx.decorate(sFail, { name: "sfail", briefing: {
+    one_line: "", state: "", failed: { at: ago(120), error: "HTTP 402: insufficient credits" } } });
+  check("a recorded failure with nothing composed is said on the row",
+        [oneLine(sFail).textContent, oneLine(sFail).className],
+        ["Summary failed · HTTP 402: insufficient credits", "rail-brief failed"]);
+  check("its tooltip says when it failed", oneLine(sFail).title.includes("failed 2m ago"), true);
+  ctx.decorate(sFail, { name: "sfail", briefing: { one_line: "새 요약", state: "idle" } });
+  check("the next success replaces the failure line",
+        [oneLine(sFail).textContent, oneLine(sFail).className], ["새 요약", "rail-brief"]);
+
+  const sStale = row("sstale");
+  ctx.decorate(sStale, { name: "sstale", briefing: {
+    one_line: "이전 모델 요약", state: "idle", stale: true,
+    failed: { at: ago(30), error: "timeout" } } });
+  check("a stale one-liner keeps its text, marked stale; a later failure " +
+        "does not hide it",
+        [oneLine(sStale).textContent, oneLine(sStale).className],
+        ["이전 모델 요약", "rail-brief stale"]);
+  check("the stale line's tooltip names the previous model and the failure",
+        [oneLine(sStale).title.includes("previous briefing model"),
+         oneLine(sStale).title.includes("timeout")], [true, true]);
+
   const sChecks = row("schecks");
   const testsReportedAt = ago(300);
   ctx.decorate(sChecks, { name: "schecks", status_checks: [
