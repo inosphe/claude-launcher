@@ -35,7 +35,7 @@ function slice(name) {
 const api = {};
 new Function(
   "exports", "el", "usageShort", "usageCost",
-  ["priceCurrency", "priceRateFor", "readingCost", "costText",
+  ["priceCurrency", "priceRateFor", "cacheWriteRate", "readingCost", "costText",
    "costBreakdown", "ctxTokensLine", "ctxCostDetailRow"].map(slice).join("\n") + `
 let modelPrices = null;
 exports.setPrices = (p) => { modelPrices = p; };
@@ -93,6 +93,16 @@ check("estimate is the bucket-by-bucket multiplication",
 check("a rate the row omits counts as 0",
       api.cost(READING, api.rateFor("partial-only") ??
                     { cache_read: 1.5 }), 0.225);
+check("an unset cache-write rate prices written tokens at the read rate",
+      api.cost(READING, { input: 15, cache_read: 1.5, output: 75 }),
+      (2000 * 15 + 150000 * 1.5 + 4000 * 15 + 3000 * 75) / 1e6);
+check("a cache-write rate set to 0 stays 0, not the read rate",
+      api.cost(READING, { input: 15, cache_read: 1.5, cache_write: 0,
+                          output: 75 }),
+      (2000 * 15 + 150000 * 1.5 + 3000 * 75) / 1e6);
+check("the tooltip names the read rate it fell back to",
+      api.breakdown(READING, { input: 15 }).includes(
+        "cache write 4,000 × $15/1M"), true);
 check("no rate row means no estimate, not a free one",
       api.cost(READING, null), null);
 check("an unpriced model has no rate row",

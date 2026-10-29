@@ -8784,6 +8784,15 @@ function priceRateFor(model) {
   return rates && typeof rates === "object" ? rates : null;
 }
 
+/* The cache-write rate is optional: most providers bill tokens written to
+   cache as plain (non-cached) input, so a row that leaves it unset prices
+   them at its read rate. A rate set to 0 stays 0. */
+function cacheWriteRate(rates) {
+  const v = rates.cache_write;
+  if (v === undefined || v === null || v === "") return +rates.input || 0;
+  return +v || 0;
+}
+
 /* What one billed request costs at the given per-1M-token rates. A rate the
    row does not set counts as 0: a person who prices only cache reads still
    gets an estimate, a partial one, and the tooltip says which parts went
@@ -8792,7 +8801,7 @@ function readingCost(c, rates) {
   if (!c || !rates) return null;
   const cost = ((+rates.input || 0) * (c.input || 0) +
                 (+rates.cache_read || 0) * (c.cache_read || 0) +
-                (+rates.cache_write || 0) * (c.cache_write || 0) +
+                cacheWriteRate(rates) * (c.cache_write || 0) +
                 (+rates.output || 0) * (c.output || 0)) / 1e6;
   return Number.isFinite(cost) ? cost : null;
 }
@@ -8814,7 +8823,7 @@ function costBreakdown(c, rates) {
   const lines = [
     row("read", c.input, +rates.input || 0),
     row("cached read", c.cache_read, +rates.cache_read || 0),
-    row("write", c.cache_write, +rates.cache_write || 0),
+    row("cache write", c.cache_write, cacheWriteRate(rates)),
     row("output", c.output, +rates.output || 0),
   ];
   const cost = readingCost(c, rates);
@@ -38242,7 +38251,8 @@ function modelPricesCard() {
     "the one in the gauge line's tooltip). Where a row exists, the session " +
     "card under the context gauge and the detail panel's last-request row " +
     "estimate the cost of the latest request from these rates. A rate left " +
-    "empty counts as 0; emptying every rate drops the row."
+    "empty counts as 0, except cache write, which is optional: left empty " +
+    "it takes the read rate. Emptying every rate drops the row."
   ));
   if (modelPricesError) card.appendChild(el("p", "error", modelPricesError));
   if (modelPricesNotice) card.appendChild(el("p", "wf-note", modelPricesNotice));
@@ -38270,7 +38280,7 @@ function modelPricesCard() {
   const table = el("div", "mp-table");
   const head = el("div", "mp-row mp-head");
   head.append(el("span", "mp-model-head", "model"),
-              ...["read", "cached read", "write", "output"].map(
+              ...["read", "cached read", "cache write", "output"].map(
                 (h) => el("span", "mp-rate-head", h)),
               el("span", "mp-rate-head", ""));
   table.appendChild(head);
@@ -38286,7 +38296,8 @@ function modelPricesCard() {
       inp.inputMode = "decimal";
       inp.className = "mp-rate";
       inp.value = rates[key];
-      inp.placeholder = "0";
+      inp.placeholder = key === "cache_write" ? "= read" : "0";
+      if (key === "cache_write") inp.title = "optional: empty uses the read rate";
       inp.addEventListener("input", () => { rates[key] = inp.value; });
       row.appendChild(inp);
     }
