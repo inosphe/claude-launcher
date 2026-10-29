@@ -1101,6 +1101,29 @@ def v2_position(payload: dict) -> tuple:
             tuple(delegations))
 
 
+#: How often a run stuck on a person re-raises its flow_nudge card
+#: (claunch-8myyt, user decision th-b02245): 20 minutes, no repeat cap, until
+#: the person answers. One constant; the line below carries it into every v2
+#: reminder, and the leader workflow's ``human-wait-nudge`` rule states the
+#: same figure (tests/test_human_wait_nudge_rule.py pins both).
+HUMAN_WAIT_NUDGE_INTERVAL = 1200
+
+#: Carried by the first and the short form alike: the short form quotes no
+#: task prompt or done_when, so a rule that lives only in a prompt is gone
+#: after the first reminder.
+_V2_NUDGE_LINE = (
+    "if the run is stuck on a decision only a person can make, do not just wait "
+    "or leave a terminal note. If the engine state waits on a person (a choice "
+    "whose chooser is the user, an ask that fell to a person, flow_request_move, "
+    "a loop limit, a halt), call flow_nudge with one or two lines -- the decision "
+    "and your recommendation. If it does not (an auto-mode classifier denial "
+    "inside an agent step; flow_nudge refuses with 'the run waits on no person "
+    "right now'), open thread_ask with kind approve instead. Repeat every "
+    f"{HUMAN_WAIT_NUDGE_INTERVAL // 60} minutes with no repeat limit until the "
+    "person answers: flow_nudge updates the same card, thread_ask writes to the "
+    "same thread.")
+
+
 def v2_reminder_block(payload: dict, interval: float,
                       stalled_for: Optional[float] = None) -> str:
     """What a stalled v2 run's driver hears (claunch-ccoof).
@@ -1141,6 +1164,7 @@ def v2_reminder_block(payload: dict, interval: float,
         "work you are on, keep going. If you have lost the thread, call "
         "flow_status, then finish the task with flow_report, or the choice "
         "with flow_select.")
+    lines.append(_V2_NUDGE_LINE)
     lines.append("---")
     return "\n".join(lines)
 
