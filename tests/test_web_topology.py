@@ -746,6 +746,7 @@ BROWSER_CHECKS = [
         "sessionkey_browser.cjs",
         "noticeplace_browser.cjs",
         "noticecost_browser.cjs",
+        "noticewrap_browser.cjs",
 ]
 
 

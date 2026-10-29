@@ -77,7 +77,10 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
   const browser = await chromium.launch({ headless: true,
     ...(process.env.PLAYWRIGHT_CHROMIUM_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL } : {}) });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    // Tall enough for the four cards stacked at once: the corner strip is
+    // fixed and does not scroll, and each card's Remind sits on its own line
+    // (claunch-gnlui.2), so at 900px the fourth card starts below the window.
+    const page = await browser.newPage({ viewport: { width: 1280, height: 1500 } });
     const errors = [];
     const posts = [];
     const bodies = [];
