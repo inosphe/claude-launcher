@@ -118,6 +118,15 @@ for a green receipt filed under that hash *and* this selection. If one is
 there it prints what it stood on and runs nothing; when it does run, it
 leaves the receipt behind.
 
+The file name carries those two. Two more elements of the key live in the
+receipt body (:data:`REUSE_FIELD`): the merge base the selection was derived
+from, and the interpreter and installed packages pytest runs under
+(:func:`environment_identity`). A receipt is reused only when all four are
+equal; a missing or unmeasurable element counts as different, and the refusal
+names the element (:func:`reuse_mismatch`). Receipts filed before these
+fields existed are not reused to skip a run, and ``--check`` still reads them
+with a note that they carry no base or environment.
+
 That is the largest measured waste in a worker's round, and it is not an
 estimate. s150 ran sixteen modules by hand in 578s and the same round's gate
 ran the same selection over the same tree again for 656s. s147 ran one
@@ -1478,6 +1487,114 @@ def find_receipt(
     return receipt if receipt_passes(receipt) else None
 
 
+#: The receipt field that holds the parts of the reuse key the file name does
+#: not carry. The name is ``<tree>-<selection_key>.json`` and stays that way:
+#: ``merge_ready`` and the tests read receipts by body, and a rename would
+#: strand every receipt already filed.
+REUSE_FIELD = "reuse"
+
+#: Printed by ``python -c`` under the interpreter pytest will use. Plain data,
+#: no repository imports, so it answers the same from any working directory.
+_ENVIRONMENT_PROBE = (
+    "import hashlib, json, sys, importlib.metadata as m\n"
+    "pk = sorted({'%s==%s' % (d.metadata['Name'].lower(), d.version)"
+    " for d in m.distributions() if d.metadata['Name']})\n"
+    "print(json.dumps({'python': sys.version.split()[0],"
+    " 'implementation': sys.implementation.name, 'platform': sys.platform,"
+    " 'packages': hashlib.sha1('\\n'.join(pk).encode()).hexdigest()[:12],"
+    " 'package_count': len(pk)}))\n"
+)
+
+
+def environment_identity(repo: Path) -> Optional[dict]:
+    """Which interpreter and installed packages the selection will run under.
+
+    The tree names what pytest reads from the repository. It does not name
+    what pytest runs *on*: ``pyproject.toml`` and ``uv.lock`` are in the tree,
+    but a ``.venv`` that was synced earlier, with another extra, or by hand,
+    is not. A green verdict under one interpreter or package set says nothing
+    about another (the same reasoning as ``interpreter_tag`` for base
+    verdicts, claunch-wuaup.1), so the identity is part of the reuse key.
+
+    Asked of the interpreter ``build_command`` will use (``uv run --no-sync``
+    in ``repo``), not of the one running this tool: ``python tools/...`` from
+    another venv would otherwise key the run by an environment pytest never
+    sees. None when it cannot be read -- the caller then neither reuses nor
+    claims a key, which costs one run and never the gate.
+    """
+    try:
+        done = subprocess.run(
+            ["uv", "run", "--no-sync", "python", "-I", "-c", _ENVIRONMENT_PROBE],
+            cwd=str(repo), capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        identity = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return identity if isinstance(identity, dict) else None
+
+
+def reuse_key(
+    tree: str,
+    base_commit: Optional[str],
+    files: List[str],
+    deselect: tuple,
+    environment: Optional[dict],
+) -> dict:
+    """Everything a verdict stood on, as the receipt records it.
+
+    ``key`` is one digest over the four parts so a reader can compare two
+    receipts at a glance; :func:`reuse_mismatch` compares the parts one by
+    one so a refusal can say which one moved.
+    """
+    parts = {
+        "tree": tree,
+        "base_commit": base_commit,
+        "selection": selection_key(files, deselect),
+        "environment": environment,
+    }
+    digest = hashlib.sha1(
+        json.dumps(parts, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    return {**parts, "key": digest}
+
+
+def reuse_mismatch(receipt: dict, wanted: dict) -> Optional[str]:
+    """Why ``receipt`` may not answer for ``wanted``, or None when it may.
+
+    An element the receipt does not record, or one that could not be
+    measured now, is a mismatch and not a pass: "unknown" is not "equal", and
+    the cost of the wrong answer is a verdict handed to code nobody ran.
+    Receipts filed before this field existed carry none and are reported as
+    such so the caller can decide what a read-only check does with them.
+    """
+    recorded = receipt.get(REUSE_FIELD)
+    if not isinstance(recorded, dict):
+        return LEGACY_RECEIPT
+    for name in ("tree", "base_commit", "selection", "environment"):
+        have, want = recorded.get(name), wanted.get(name)
+        if have is None or want is None:
+            return f"{name} is not known on one side (receipt: {have!r}, now: {want!r})"
+        if have != want:
+            return f"{name} differs (receipt: {_short(have)}, now: {_short(want)})"
+    return None
+
+
+#: What :func:`reuse_mismatch` answers for a receipt that has no reuse key.
+LEGACY_RECEIPT = "recorded before the reuse key existed (no base or environment on file)"
+
+
+def _short(value) -> str:
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in sorted(value.items()))
+    text = str(value)
+    return text[:12] if len(text) > 40 else text
+
+
 RECEIPT_STAMP = "%Y%m%dT%H%M%SZ"
 
 
@@ -1952,6 +2069,7 @@ def run_and_record(
     included: tuple = (),
     known_failures: Optional[str] = None,
     compare_at: Optional[str] = None,
+    reuse: Optional[dict] = None,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -2041,6 +2159,8 @@ def run_and_record(
         "known_failures": known_failures,
         # Which tests did not run, and why; ``counts`` only says how many.
         "skips": sweep.parse_skips(junit) if junit else None,
+        # What the file name does not say; see ``reuse_mismatch``.
+        REUSE_FIELD: reuse,
     }
     if comparison is not None:
         receipt.update(comparison)
@@ -2469,6 +2589,18 @@ def main(argv: Optional[list] = None) -> int:
         else None
     )
 
+    # The rest of the key: what the file name does not carry. Measured only
+    # when there is a tree to key (no tree, no receipt, nothing to compare).
+    # --list reads nothing and runs nothing, so it pays for nothing.
+    key_now: Optional[dict] = None
+    if tree is not None and not args.list_only:
+        key_now = reuse_key(
+            tree, merge_base(repo, base), files, deselect, environment_identity(repo)
+        )
+    refusal: Optional[str] = None
+    if found is not None and key_now is not None:
+        refusal = reuse_mismatch(found, key_now)
+
     if args.check:
         # The reviewer's door. A peer-review responder is a different session
         # past its own intake scan, so a confirming run of theirs is load no
@@ -2484,12 +2616,30 @@ def main(argv: Optional[list] = None) -> int:
                 f"counted."
             )
             return CANNOT_TELL
+        if refusal == LEGACY_RECEIPT:
+            # Read-only door, and what it has always answered: a receipt for
+            # this tree and selection. Said as such, not passed off as keyed.
+            print(f"NOTE: this receipt was {refusal}; it speaks for the tree and selection only.")
+        elif refusal is not None:
+            print(
+                f"a green receipt exists for tree {tree[:12]} but does not answer "
+                f"for this run: {refusal} -- abstain, or ask the author to run "
+                f"'python tools/changed_tests.py --base {args.base}'."
+            )
+            return CANNOT_TELL
         print(f"green receipt for tree {tree[:12]}: {describe(found)}")
         return 0
 
     if args.list_only:
         print(f"$ {' '.join(cmd)}", flush=True)
         return 0
+
+    if found is not None and refusal is not None:
+        # A green receipt at this tree and selection that may not answer for
+        # this run. Running is the safe side; saying why keeps it from
+        # looking like the reuse check was skipped.
+        print(f"not reusing the green receipt for tree {tree[:12]}: {refusal}")
+        found = None
 
     if found is not None and not args.no_reuse:
         # The measured waste this exists to remove: s150 ran these same
@@ -2577,6 +2727,7 @@ def main(argv: Optional[list] = None) -> int:
                 str(args.known_failures) if args.known_failures is not None else None
             ),
             compare_at=compare_at,
+            reuse=key_now,
         )
     finally:
         grant.release()
