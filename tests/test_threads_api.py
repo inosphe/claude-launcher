@@ -906,10 +906,13 @@ def test_a_user_message_is_resent_and_reverted(tmp_path):
         assert back["message"]["data"]["reverted_at"]
         assert len(back["message"]["data"]["resent_at"]) == 2
 
-        # A resend moves no read cursor: the owner's agent_read stays.
+        # A resend moves no read cursor: the owner's agent_read stays where a
+        # reader=s1 read put it.
         read = await req("GET", f"/api/threads/{tid}?reader=s1")
-        assert read["thread"]["agent_read"] == read["messages"][-1]["seq"] - 2 \
-            or read["thread"]["agent_read"] <= seq
+        assert read["thread"]["agent_read"] == seq
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        after = await req("GET", f"/api/threads/{tid}")
+        assert after["thread"]["agent_read"] == seq
 
         # Who may not, and what cannot be resent.
         await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {"session": "s1"}, status=403)
@@ -944,5 +947,46 @@ def test_a_resent_message_follows_its_mentions(tmp_path):
         assert len(mgr.sessions["s1"].delivered) == s1_before   # the resend takes the same route
         assert len(mgr.sessions["s2"].delivered) == 3
         assert "you are a guest of session s1 here" in mgr.sessions["s2"].delivered[-1]
+
+    run(tmp_path, scenario)
+
+
+def test_a_resend_to_an_exited_session_queues_its_own_notice(home, tmp_path):
+    """claunch-tpbqz (review): the notice journal dedupes on a record with the
+    id existing at all -- a settled one included -- so a resend rides its own
+    attempt id (<tid>:m<seq>:r<k>) and lands in the durable queue again after
+    the original notice failed or was sent. A target whose notice did not get
+    in says so in hold instead of calling it queued."""
+    from claude_launcher.daemon import thread_notices
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "first"})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        s1 = mgr.sessions["s1"]
+        s1.exited, s1.held_at = True, None
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "lost on the way"})
+        seq2 = res["message"]["seq"]
+        assert res["delivered"] is True and res["hold"] == "exited"
+        nid = f"{tid}:m{seq2}"
+        queued = thread_notices.pending("s1")
+        assert [q["notice"] for q in queued] == [nid] and "lost on the way" in queued[0]["text"]
+
+        # The original attempt settles failed; a resend must re-queue under
+        # its own attempt id, not be swallowed by the dedupe.
+        thread_notices._settle("s1", nid, "notice_failed", "failed", queued[0]["text"])
+        assert thread_notices.pending("s1") == []
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/resend", {})
+        assert again["delivered"] is True and again["hold"] == "exited"
+        rid = f"{tid}:m{seq2}:r1"
+        queued = thread_notices.pending("s1")
+        assert [q["notice"] for q in queued] == [rid] and "lost on the way" in queued[0]["text"]
+
+        # A sent notice is settled too -- the next attempt still gets its own id.
+        thread_notices._settle("s1", rid, "notice_sent", "sent", queued[0]["text"])
+        assert thread_notices.pending("s1") == []
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/revert", {})
+        assert [q["notice"] for q in thread_notices.pending("s1")] == [f"{tid}:m{seq2}:r2"]
+        assert "disregard the earlier copy" in thread_notices.pending("s1")[0]["text"]
+        assert again["message"]["data"]["reverted_at"]
 
     run(tmp_path, scenario)

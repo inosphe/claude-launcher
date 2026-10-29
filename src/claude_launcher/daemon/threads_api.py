@@ -577,19 +577,22 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if holds:
             res["guests_hold"] = holds
 
-    def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False, note: str = "") -> None:
+    def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False, note: str = "",
+                          notice: str = "") -> None:
         """Type a user message into the sessions it is meant for: the owner
         when the body names nobody, otherwise only the sessions it names
         (claunch-p9wes.1.1). ``guests_delivered`` says per named guest whether
         the message was accepted, and ``guests_hold`` why one that was
         accepted is not typed in yet -- the owner's ``hold`` for a guest.
         ``note`` rides the block for a resend after a revert
-        (claunch-tpbqz)."""
+        (claunch-tpbqz); ``notice`` overrides the id the exited-session
+        queue keys on -- a resend carries its own attempt id so the journal
+        dedupe cannot swallow it (claunch-tpbqz review)."""
         route = session_mentions(thread, res.get("message"), None)
         mention_fields(res, route)
         targets = set(route["targets"])
         qa_mentions = mentions_in(thread, res.get("message"))
-        notice = notice_id(thread, res.get("message"))
+        notice = notice or notice_id(thread, res.get("message"))
         if thread["session"] in targets:
             tell(res, thread["session"],
                  user_wrote_text(thread, res["message"], reopened=res.get("reopened", False),
@@ -1043,7 +1046,25 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return err
         await asyncio.to_thread(link, [t], t["session"])
         out = {"message": updated}
-        await asyncio.to_thread(tell_user_message, out, t, note=REVERT_NOTE if reverted else "")
+        # This attempt gets its own notice id: a resend to an exited session
+        # must land in the durable queue even when the original notice (or a
+        # previous attempt) already settled -- thread_notices.queue() dedupes
+        # on a record with the same id existing at all. The resent_at list
+        # grew above, so its length is unique per attempt.
+        nid = f"{tid}:m{seq}:r{len((updated.get('data') or {}).get('resent_at') or [])}"
+        await asyncio.to_thread(tell_user_message, out, t, note=REVERT_NOTE if reverted else "",
+                                notice=nid)
+
+        def queued(name: str) -> bool:
+            return any(r["notice"] == nid for r in thread_notices.pending(name))
+
+        # hold must not call a queue entry what the journal does not hold: an
+        # exited target whose notice did not get in says so.
+        if out.get("hold") == "exited" and not queued(t["session"]):
+            out["hold"] = "exited-unqueued"
+        for name, why in list((out.get("guests_hold") or {}).items()):
+            if why == "exited" and not queued(name):
+                out["guests_hold"][name] = "exited-unqueued"
         return web.json_response(out)
 
     async def h_resend(request):

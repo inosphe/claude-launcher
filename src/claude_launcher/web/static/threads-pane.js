@@ -628,6 +628,7 @@ globalThis.ThreadsPane = (() => {
       return guestHolds.map(([n, why]) => deliveryNotice({ hold: why }, "@" + n + " ")).join(" ");
     }
     if (res.delivered === false) return `${who} 세션에 전달하지 못했습니다. 메시지는 쓰레드에 남았습니다.`;
+    if (res.hold === "exited-unqueued") return `${who} 세션이 종료 상태인데 전달 대기열에도 들어가지 못했습니다. 다시 보내기를 시도해 주세요. 메시지는 쓰레드에 남아 있습니다.`;
     if (res.hold === "exited") return `${who} 세션이 종료 상태라 전달을 보류했습니다. 세션을 다시 시작(respawn/restore)하면 그때 전달됩니다. 메시지는 쓰레드에 남아 있습니다.`;
     if (res.hold === "draft") return `${who} 터미널 입력창에 보내지 않은 입력이 있어 전달 대기 중입니다. 그 입력을 보내거나(Enter) 지우면(Ctrl-C) 이어서 전달됩니다.`;
     if (res.hold === "typing") return `${who} 터미널에 키보드 입력이 이어지고 있어 전달 대기 중입니다. 입력이 멈추면 전달됩니다.`;
@@ -962,7 +963,11 @@ globalThis.ThreadsPane = (() => {
     const meta = node("div", "th-msg-meta");
     meta.append(node("span", "th-msg-who", who || (author === "agent" ? name : "나")));
     if (when) meta.append(node("span", "th-msg-at", when));
-    if (flag) meta.append(node("span", "th-msg-flag", flag));
+    if (flag) {
+      const f = node("span", "th-msg-flag", flag);
+      if (flag === "reverted") f.title = "사용자가 이 메시지를 revert함 — 이전 전달분은 무시하라는 안내와 함께 다시 보냈습니다";
+      meta.append(f);
+    }
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
     if (actions.length) {

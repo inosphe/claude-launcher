@@ -9927,7 +9927,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg-actions .th-act:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
 .th-msg-actions .th-act:disabled { opacity: 0.5; cursor: default; }
 .th-msg .th-msg-actions { visibility: hidden; }
-.th-msg:hover .th-msg-actions { visibility: visible; }
+.th-msg:hover .th-msg-actions, .th-msg:focus-within .th-msg-actions { visibility: visible; }
 .th-msg-body { overflow-wrap: anywhere; }
 .th-msg-body.plain { white-space: pre-wrap; }
 .th-msg-body > :first-child { margin-top: 0; }
