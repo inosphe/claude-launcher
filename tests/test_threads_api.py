@@ -879,3 +879,114 @@ def test_a_refused_fork_leaves_no_thread_and_forkable_says_why(tmp_path, monkeyp
         assert doc["ok"] is False and "no session" in doc["why"]
         await req("GET", "/api/threads/forkable", status=400)
     run(tmp_path, scenario, names=("s1",))
+
+
+def test_a_user_message_is_resent_and_reverted(tmp_path):
+    """claunch-tpbqz: the pane's resend re-types a stored user message into
+    the sessions its mentions name, down the same route as the post, and
+    records the mark on the message; a revert is that resend with the
+    message marked and a note in the block to disregard the earlier copy."""
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "잘 도착했나?"})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        assert len(mgr.sessions["s1"].delivered) == 1
+
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is True and again["hold"] is None
+        assert len(mgr.sessions["s1"].delivered) == 2
+        assert "wrote in this thread" in mgr.sessions["s1"].delivered[-1]
+        assert len(again["message"]["data"]["resent_at"]) == 1
+        assert "reverted_at" not in again["message"]["data"]
+
+        back = await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {})
+        assert back["delivered"] is True
+        assert len(mgr.sessions["s1"].delivered) == 3
+        assert "disregard the earlier copy" in mgr.sessions["s1"].delivered[-1]
+        assert back["message"]["data"]["reverted_at"]
+        assert len(back["message"]["data"]["resent_at"]) == 2
+
+        # A resend moves no read cursor: the owner's agent_read stays where a
+        # reader=s1 read put it.
+        read = await req("GET", f"/api/threads/{tid}?reader=s1")
+        assert read["thread"]["agent_read"] == seq
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        after = await req("GET", f"/api/threads/{tid}")
+        assert after["thread"]["agent_read"] == seq
+
+        # Who may not, and what cannot be resent.
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {"session": "s1"}, status=403)
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {"session": "s1"}, status=403)
+        await req("POST", f"/api/threads/{tid}/messages/9999/resend", {}, status=404)
+        await req("POST", f"/api/threads/{tid}/messages/abc/resend", {}, status=400)
+        reply = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "agent words"})
+        agent_seq = reply["message"]["seq"]
+        before = len(mgr.sessions["s1"].delivered)
+        await req("POST", f"/api/threads/{tid}/messages/{agent_seq}/resend", {}, status=403)
+        assert len(mgr.sessions["s1"].delivered) == before
+
+    run(tmp_path, scenario)
+
+
+def test_a_resent_message_follows_its_mentions(tmp_path):
+    """A message that named a guest is resent to the guest alone, the way it
+    was delivered the first time (claunch-p9wes.1.1, claunch-tpbqz)."""
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": " opener"})
+        tid = res["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        s1_before = len(mgr.sessions["s1"].delivered)
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 이것 좀 봐줘"})
+        seq = res["message"]["seq"]
+        assert res["guests_delivered"] == {"s2": True}
+        assert len(mgr.sessions["s1"].delivered) == s1_before   # the mention routed it to the guest alone
+        assert len(mgr.sessions["s2"].delivered) == 2           # the invite block, then the named message
+
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert len(mgr.sessions["s1"].delivered) == s1_before   # the resend takes the same route
+        assert len(mgr.sessions["s2"].delivered) == 3
+        assert "you are a guest of session s1 here" in mgr.sessions["s2"].delivered[-1]
+
+    run(tmp_path, scenario)
+
+
+def test_a_resend_to_an_exited_session_queues_its_own_notice(home, tmp_path):
+    """claunch-tpbqz (review): the notice journal dedupes on a record with the
+    id existing at all -- a settled one included -- so a resend rides its own
+    attempt id (<tid>:m<seq>:r<k>) and lands in the durable queue again after
+    the original notice failed or was sent. A target whose notice did not get
+    in says so in hold instead of calling it queued."""
+    from claude_launcher.daemon import thread_notices
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "first"})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        s1 = mgr.sessions["s1"]
+        s1.exited, s1.held_at = True, None
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "lost on the way"})
+        seq2 = res["message"]["seq"]
+        assert res["delivered"] is True and res["hold"] == "exited"
+        nid = f"{tid}:m{seq2}"
+        queued = thread_notices.pending("s1")
+        assert [q["notice"] for q in queued] == [nid] and "lost on the way" in queued[0]["text"]
+
+        # The original attempt settles failed; a resend must re-queue under
+        # its own attempt id, not be swallowed by the dedupe.
+        thread_notices._settle("s1", nid, "notice_failed", "failed", queued[0]["text"])
+        assert thread_notices.pending("s1") == []
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/resend", {})
+        assert again["delivered"] is True and again["hold"] == "exited"
+        rid = f"{tid}:m{seq2}:r1"
+        queued = thread_notices.pending("s1")
+        assert [q["notice"] for q in queued] == [rid] and "lost on the way" in queued[0]["text"]
+
+        # A sent notice is settled too -- the next attempt still gets its own id.
+        thread_notices._settle("s1", rid, "notice_sent", "sent", queued[0]["text"])
+        assert thread_notices.pending("s1") == []
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/revert", {})
+        assert [q["notice"] for q in thread_notices.pending("s1")] == [f"{tid}:m{seq2}:r2"]
+        assert "disregard the earlier copy" in thread_notices.pending("s1")[0]["text"]
+        assert again["message"]["data"]["reverted_at"]
+
+    run(tmp_path, scenario)

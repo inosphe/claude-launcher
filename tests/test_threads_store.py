@@ -25,6 +25,9 @@ T13 mentions (claunch-p9wes.1.1): the ``@``-tokens of a body, in order and
 T14 a forked thread (claunch-uaxp8): ``open(guest=...)`` writes the owner's
    thread and the origin's guest seat in one write, and ``delete_thread``
    takes back exactly the thread named when the fork is refused
+T15 a resend appends ``data.resent_at`` and a revert sets
+   ``data.reverted_at`` once (claunch-tpbqz); both refuse a message that
+   is not the user's
 """
 
 import pytest
@@ -625,3 +628,38 @@ def test_t14_a_forked_thread_seats_its_guest_in_the_same_write(st):
         st.get(tid)
     assert [t["id"] for t in st.list("s1-qf1")["threads"]] == [other]
     assert st.list("s1")["guest_threads"] == []
+
+
+def test_t15_a_resend_and_a_revert_mark_the_user_message(st, monkeypatch):
+    """claunch-tpbqz: ``record_delivery`` appends every resend's stamp to the
+    message's ``data.resent_at`` and sets ``data.reverted_at`` at the first
+    revert only; both refuse a message that is not the user's."""
+    res = st.open(S.USER, "s1", "Lost on the way", "전달이 유실됐다")
+    tid = res["thread"]["id"]
+    seq = res["message"]["seq"]
+    stamps = iter(["2026-10-29T11:00:00+00:00", "2026-10-29T11:01:00+00:00",
+                   "2026-10-29T11:02:00+00:00"])
+    monkeypatch.setattr(S, "_now", lambda: next(stamps, "2026-10-29T11:03:00+00:00"))
+
+    again = st.record_delivery("s1", seq, resent=True)
+    assert again["data"]["resent_at"] == ["2026-10-29T11:00:00+00:00"]
+    assert "reverted_at" not in again["data"]
+    # The thread counts the mark as activity: the page's stamp moves.
+    assert st.get(tid)["updated_at"] == "2026-10-29T11:00:00+00:00"
+
+    back = st.record_delivery("s1", seq, resent=True, reverted=True)
+    assert back["data"]["resent_at"] == ["2026-10-29T11:00:00+00:00",
+                                         "2026-10-29T11:01:00+00:00"]
+    assert back["data"]["reverted_at"] == "2026-10-29T11:01:00+00:00"
+    # Reverting twice does not move the mark; resends keep appending.
+    again2 = st.record_delivery("s1", seq, resent=True, reverted=True)
+    assert again2["data"]["reverted_at"] == "2026-10-29T11:01:00+00:00"
+    assert again2["data"]["resent_at"][-1] == "2026-10-29T11:02:00+00:00"
+
+    # Only a user's message can be resent or reverted.
+    st.post("s1", tid, "답장")
+    agent_seq = st.read(tid)["messages"][-1]["seq"]
+    with pytest.raises(S.Forbidden):
+        st.record_delivery("s1", agent_seq, resent=True)
+    with pytest.raises(S.NotFound):
+        st.record_delivery("s1", agent_seq + 1000, resent=True)
