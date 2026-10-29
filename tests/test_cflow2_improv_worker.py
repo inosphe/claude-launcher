@@ -1457,6 +1457,19 @@ def test_peer_review_question_says_how_to_read_an_unrendered_item_list(tmp_path,
 # -- claunch-0adj8: the slot the ask reads belongs to this round ------------
 
 
+def _batch_step(doc, step_id):
+    """The step ``step_id`` of the batch try in ``worker-round``, by id.
+
+    Looked up by id rather than position: the try also opens with
+    ``feasibility`` (claunch-101wi), and a guard pinned to an index breaks
+    on every step added in front of the one it means.
+    """
+    steps = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"]
+    found = [s for s in steps if isinstance(s, dict) and s.get("id") == step_id]
+    assert len(found) == 1, [s.get("id") if isinstance(s, dict) else s for s in steps]
+    return found[0]
+
+
 def _items_pass_chart(doc):
     """The real ``items-pass`` node from the canon, with its surroundings
     stubbed, called twice: ``full`` (a batch of one) then ``stack-only``."""
@@ -1464,8 +1477,7 @@ def _items_pass_chart(doc):
 
     from claude_launcher.cflow2 import frontend, runtime
 
-    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
-    assert ip["id"] == "items-pass"
+    ip = _batch_step(doc, "items-pass")
 
     def task_of(name, src):
         keeps = ("title", "returns", "effects")
@@ -1540,8 +1552,7 @@ def test_items_pass_completes_in_a_stack_only_round_with_an_empty_list():
     from claude_launcher.cflow2 import frontend
 
     doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
-    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
-    assert ip["id"] == "items-pass"
+    ip = _batch_step(doc, "items-pass")
     arms = ip["cond"]
     assert "if" in arms[0] and "then" in arms[0]
     assert list(arms[1]) == ["else"]
@@ -1671,7 +1682,10 @@ def test_the_landing_request_is_gated_on_a_bound_issue():
     seq = sequence_with_gate(doc["procedures"])
     assert seq is not None
     labels = [n.get("id") if isinstance(n, dict) else n for n in seq]
-    assert labels.index("issue-gate") + 1 == labels.index("integration-request")
+    # claunch-101wi: the landing-channel check stands between the issue gate
+    # and the request; nothing else may.
+    between = labels[labels.index("issue-gate") + 1:labels.index("integration-request")]
+    assert between == ["landing-channel"]
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
