@@ -8135,12 +8135,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .mp-currency { display: inline-flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
 .mp-currency input { width: 8ch; box-sizing: border-box; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .mp-table { display: grid; gap: 6px 8px; }
-.mp-row { display: grid; grid-template-columns: minmax(140px, 1fr) repeat(4, minmax(64px, 80px)) auto; gap: 6px 8px; align-items: center; }
+.mp-row { display: grid; grid-template-columns: minmax(90px, 140px) minmax(140px, 1fr) repeat(4, minmax(64px, 80px)) auto; gap: 6px 8px; align-items: center; }
 .mp-head { color: #8b949e; font-size: 11px; }
-.mp-model { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-model, .mp-provider { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-rate { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
-.mp-add { margin-top: 10px; grid-template-columns: minmax(140px, 1fr) auto auto; }
-.mp-add input { padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.mp-add { margin-top: 10px; grid-template-columns: minmax(90px, 140px) minmax(140px, 1fr) auto; }
+.mp-add input, .mp-add select { padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .model-prices-form .wf-btn { margin-top: 10px; }
 /* Read-only holds a value worth reading (the profile's endpoint), so it stays
    legible where :disabled greys out a field that is empty anyway. */

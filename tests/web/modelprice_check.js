@@ -13,7 +13,10 @@
    - The estimate is the multiplication the tooltip claims it is — checked
      against a hand-computed value.
    - The Settings card's save leaves an empty cache-write cell out of the
-     PUT body, so the read-rate fallback survives a save. */
+     PUT body, so the read-rate fallback survives a save.
+   - Rates are keyed by provider, then model: a session is priced under the
+     provider its profile (or its lender) resolves to, and a model that
+     provider does not price falls back to the "*" row. */
 
 const fs = require("fs");
 const path = require("path");
@@ -22,6 +25,13 @@ const src = fs.readFileSync(
             "app.js"),
   "utf8"
 );
+
+// A top-level `const NAME = ...;` line, copied as app.js has it.
+function constLine(name) {
+  const m = src.match(new RegExp(`^const ${name} = .*;$`, "m"));
+  if (!m) throw new Error(`cannot locate const ${name} in app.js`);
+  return m[0];
+}
 
 function slice(name) {
   let start = src.indexOf(`function ${name}(`);
@@ -38,11 +48,13 @@ function slice(name) {
 const api = {};
 new Function(
   "exports", "el", "usageShort", "usageCost",
-  ["priceCurrency", "priceRateFor", "cacheWriteRate", "readingCost", "costText",
+  ["priceCurrency", "priceAnyProvider", "sessionPriceProvider",
+   "priceRateFor", "cacheWriteRate", "readingCost", "costText",
    "costBreakdown", "ctxTokensLine", "ctxCostDetailRow"].map(slice).join("\n") + `
 let modelPrices = null;
 exports.setPrices = (p) => { modelPrices = p; };
 exports.rateFor = priceRateFor;
+exports.provider = sessionPriceProvider;
 exports.cost = readingCost;
 exports.text = costText;
 exports.breakdown = costBreakdown;
@@ -90,7 +102,7 @@ const RATES = { input: 15, cache_read: 1.5, cache_write: 18.75, output: 75 };
 const EXPECTED = 0.555;
 
 /* ---- the estimate's arithmetic ---- */
-api.setPrices({ prices: { "claude-opus-5": RATES }, currency: "$" });
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
 check("estimate is the bucket-by-bucket multiplication",
       api.cost(READING, api.rateFor(READING.model)), EXPECTED);
 check("a rate the row omits counts as 0",
@@ -113,6 +125,36 @@ check("an unpriced model has no rate row",
 check("the table keys on the recorded id, not the display form",
       api.rateFor("claude opus 5"), null);
 
+/* ---- the provider tier ---- */
+const DS = { input: 0.3, cache_read: 0.006, output: 1.2 };
+api.setPrices({
+  prices: { "*": { "claude-opus-5": RATES }, deepseek: { "claude-opus-5": DS } },
+  profiles: { ds4: "deepseek", sr: "default" }, any: "*", currency: "$",
+});
+check("a provider's own row wins over the * row",
+      api.rateFor("claude-opus-5", "deepseek"), DS);
+check("a provider without a row for the model takes the * row",
+      api.rateFor("claude-opus-5", "default"), RATES);
+check("no provider at all takes the * row",
+      api.rateFor("claude-opus-5", ""), RATES);
+check("a session is priced under the provider its profile resolves to",
+      api.provider({ profile: "ds4:claude" }), "deepseek");
+check("a borrowing session is priced under its lender's provider",
+      api.provider({ profile: "sr", borrow: "ds4" }), "deepseek");
+check("a profile the table does not know has no provider",
+      api.provider({ profile: "gone" }), "");
+check("the same reading costs what each provider charges",
+      [api.text(api.cost(READING, api.rateFor(READING.model,
+         api.provider({ profile: "ds4" })))),
+       api.text(api.cost(READING, api.rateFor(READING.model,
+         api.provider({ profile: "sr" }))))],
+      [api.text((2000 * 0.3 + 150000 * 0.006 + 4000 * 0.3 + 3000 * 1.2) / 1e6),
+       api.text(EXPECTED)]);
+check("the rail line prices the session under its provider",
+      texts(api.line({ name: "p", harness: "claude", profile: "ds4",
+                       context: READING })).slice(-1),
+      [api.text((2000 * 0.3 + 150000 * 0.006 + 4000 * 0.3 + 3000 * 1.2) / 1e6)]);
+
 /* ---- the text of it ---- */
 check("a sub-dollar estimate keeps four decimals",
       [api.text(0.0042), api.text(EXPECTED)],
@@ -128,7 +170,7 @@ check("no table at all falls back to $",
 function texts(line) {
   return line.kids.map((k) => k.textContent);
 }
-api.setPrices({ prices: { "claude-opus-5": RATES }, currency: "$" });
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
 const priced = api.line({ name: "a", harness: "claude", context: READING });
 check("priced line: the three buckets abbreviated, then the estimate",
       texts(priced),
@@ -160,7 +202,7 @@ function detailTexts(s) {
   api.detail(dl, s);
   return dl.kids.map((k) => `${k.tag}:${k.textContent}`);
 }
-api.setPrices({ prices: { "claude-opus-5": RATES }, currency: "$" });
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
 check("detail row priced", detailTexts({ context: READING }),
       ["dt:last request",
        `dd:read 2.00k · cached 150k · write 4.00k · ≈ $0.5550`]);
@@ -195,8 +237,10 @@ function node(tag, cls, text) {
 const card = {};
 new Function(
   "exports", "el", "document", "api", "renderWorkspaces",
-  ["modelPricesDraftValues", "modelPricesSave", "modelPricesCard"]
-    .map(slice).join("\n") + `
+  [constLine("MP_RATE_KEYS"),
+   ...["priceAnyProvider", "modelPricesProviderOptions",
+       "modelPricesDraftValues", "modelPricesSave", "modelPricesCard"]
+     .map(slice)].join("\n") + `
 let modelPrices = null, modelPricesKey = "", modelPricesError = "";
 let modelPricesDraft = null, modelPricesNotice = "", modelPricesBusy = false;
 let sessionsCache = [];
@@ -219,30 +263,50 @@ function findAll(n, pred, out = []) {
   return out;
 }
 
-card.load({ prices: { "m": { input: 0.3, cache_read: 0.006, output: 1.2 } },
-            currency: "$" });
+card.load({ prices: { "*": { "m": { input: 0.3, cache_read: 0.006, output: 1.2 } } },
+            profiles: { ds4: "deepseek" }, any: "*", currency: "$" });
+const drawn = card.card();
 check("the table header names the cache-write column",
-      findAll(card.card(), (n) => n.className === "mp-rate-head")
+      findAll(drawn, (n) => n.className === "mp-rate-head")
         .map((n) => n.textContent),
       ["read", "cached read", "cache write", "output", ""]);
+check("each row names its provider before its model",
+      findAll(drawn, (n) => n.className === "mp-provider" ||
+                            n.className === "mp-model")
+        .map((n) => n.textContent),
+      ["*", "m"]);
+check("the add row offers * first, then each profile's provider",
+      findAll(drawn, (n) => n.tag === "option" && n.value !== undefined &&
+                            n.textContent)
+        .map((n) => n.value),
+      ["*", "deepseek"]);
 
 async function saveChecks() {
   // A saved row without cache_write opens with that cell empty, and saving
   // it untouched must send no cache_write key: an empty cell sent as 0 would
   // turn the read-rate fallback off on the next reading.
-  card.load({ prices: { "m": { input: 0.3, cache_read: 0.006, output: 1.2 } },
+  card.load({ prices: { deepseek: { "m": { input: 0.3, cache_read: 0.006,
+                                           output: 1.2 } } },
               currency: "$" });
   check("an unset cache write opens as an empty cell",
-        card.draft().prices.m.cache_write, "");
+        card.draft().prices.deepseek.m.cache_write, "");
   await card.save();
   check("saving an empty cache-write cell sends no cache_write key",
-        card.sent, { currency: "$", prices: {
-          m: { input: 0.3, cache_read: 0.006, output: 1.2 } } });
+        card.sent, { currency: "$", prices: { deepseek: {
+          m: { input: 0.3, cache_read: 0.006, output: 1.2 } } } });
 
-  card.load({ prices: { "z": { input: 0.3, cache_write: 0 } }, currency: "$" });
+  card.load({ prices: { "*": { "z": { input: 0.3, cache_write: 0 } } },
+              currency: "$" });
   await card.save();
   check("a cache-write rate typed as 0 is sent as 0",
-        card.sent.prices.z, { input: 0.3, cache_write: 0 });
+        card.sent.prices["*"].z, { input: 0.3, cache_write: 0 });
+
+  card.load({ prices: { "*": { "a": { input: 1 } },
+                        deepseek: { "b": { input: 2 } } }, currency: "$" });
+  card.draft().prices.deepseek.b.input = "";
+  await card.save();
+  check("a provider whose every row was emptied is not sent",
+        card.sent.prices, { "*": { a: { input: 1 } } });
 }
 
 saveChecks().then(() => {
