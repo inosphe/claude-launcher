@@ -433,6 +433,12 @@
   /* Each column scrolls inside itself, so the thread head pins to the top of
      its own column; --op-scroll-pad is 0 there is no padding to pull over. */
   :is(#observer-operators, #opfab-view) .op-thread-list { overflow-y: auto; }
+  /* The list sizes to its rows (align-self: start): a short list no longer
+     leaves a dead click band under its last row, stretched to the
+     conversation column's height (claunch-vxep1.1). A long one still caps
+     at the row (max-height: 100%) and scrolls inside itself, so the list's
+     independent-scroll contract holds. */
+  :is(#observer-operators, #opfab-view) .op-thread-list { align-self: start; max-height: 100%; }
   :is(#observer-operators, #opfab-view) .op-thread-view { overflow-y: auto; }
 }
 :is(#observer-operators, #opfab-view) .op-thread-list { flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
