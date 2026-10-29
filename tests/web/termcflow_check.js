@@ -30,8 +30,13 @@ function slice(name) {
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
-    dataset: {}, title: "", type: "", href: "",
-    appendChild(c) { this.kids.push(c); return c; },
+    dataset: {}, title: "", type: "", href: "", parent: null,
+    appendChild(c) { this.kids.push(c); c.parent = this; return c; },
+    remove() { if (this.parent) this.parent.kids = this.parent.kids.filter((k) => k !== this); },
+    querySelector(sel) {
+      const cls = String(sel).replace(/^\./, "");
+      return walk(this).find((k) => k.classes.has(cls)) || null;
+    },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     fire(k, ev) { return Promise.all((this.handlers[k] || []).map((fn) => fn(ev))); },
     get textContent() { return this.text; },
@@ -92,15 +97,21 @@ function prompt(q) { asked.push(q); return promptAnswer; }
 `;
 
 const ctx = {};
+// What refreshGateSessionStates walks: the session links on the cards.
+let pageLinks = [];
+const document = {
+  querySelectorAll: (sel) => (sel === ".gate-session[data-session]" ? pageLinks : []),
+};
 new Function(
-  "exports", "$", "el",
+  "exports", "$", "el", "document",
   stubs
   + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "sessionCategory", "gateWakeNote",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
-     "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState"]
+     "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState",
+     "gateSessionLink", "gateSessionStateSet", "refreshGateSessionStates"]
     .map(slice).join("\n") + `
 let gateFed = null;
 function runGateSync(pending, settled) { gateFed = { pending, settled }; }
@@ -108,6 +119,8 @@ Object.assign(exports, {
   renderTermCflow,
   personGateRecords,
   gateSessionState,
+  gateSessionLink,
+  refreshGateSessionStates,
   runGateFeed,
   gateFed: () => gateFed,
   refits: () => refits,
@@ -123,7 +136,7 @@ Object.assign(exports, {
   setPrompt: (v) => { promptAnswer = v; },
   reset: () => { actions = []; asked = []; },
 });`
-)(ctx, $, el);
+)(ctx, $, el, document);
 
 /* ---- the run page, rendered for real (claunch-xxxsx.1) ------------------
    The wake note on the run page's presses was first checked by a source
@@ -889,8 +902,32 @@ const RUN = {
     check("state: both polls re-read the words on the cards",
           /cflow2RailCache = rows;[\s\S]{0,600}refreshGateSessionStates\(\)/.test(src) &&
             /reconcileKillUiState\(sessionsCache\);[\s\S]{0,200}refreshGateSessionStates\(\)/.test(src));
-    check("state: the session link draws the word",
-          /function gateSessionLink[\s\S]{0,400}gateSessionStateSet\(node, gateSessionState\(name\)\)/.test(src));
+    /* The word on the card itself (claunch-6vq2m.1): drawn into the link's
+       own state mark, rewritten in place by the poll's refresh (one mark,
+       never a second), and taken off when nobody knows the name any more.
+       A source regex stayed green with the refresh loop emptied. */
+    {
+      ctx.setSessions([{ name: "s40", status: "busy" }]);
+      const link = ctx.gateSessionLink("s40");
+      const marks = () => walk(link).filter((k) => k.classes.has("gate-session-state"));
+      check("state: the session link draws the word",
+            link.dataset.session === "s40" && marks().length === 1 &&
+              marks()[0].text === " · busy" && marks()[0].dataset.state === "busy",
+            marks().map((m) => [m.text, m.dataset.state]));
+      pageLinks = [link];
+      ctx.setSessions([{ name: "s40", status: "exited",
+                         archived_at: "2026-10-29T00:00:00+00:00" }]);
+      ctx.refreshGateSessionStates();
+      check("state: the refresh rewrites the word on a card already drawn",
+            marks().length === 1 && marks()[0].text === " · archived" &&
+              marks()[0].dataset.state === "archived",
+            marks().map((m) => [m.text, m.dataset.state]));
+      ctx.setSessions([]);
+      ctx.refreshGateSessionStates();
+      check("state: a session nobody knows any more loses the word",
+            marks().length === 0, marks().map((m) => m.text));
+      pageLinks = [];
+    }
     ctx.setSessions([]);
     ctx.setRuns([]);
     ctx.setRail({});

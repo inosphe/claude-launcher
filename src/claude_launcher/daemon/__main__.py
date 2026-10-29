@@ -463,6 +463,16 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # A session's side runs end with it (docs/cflow-v2.md 2.9).
         manager.exit_hooks.append(cflow2_clock.session_exited)
     app["cflow2_clock"] = cflow2_clock
+    # The gates already waiting on a person when the registry came in are
+    # recorded once (claunch-6vq2m.1); a registry that has done so skips it.
+    # Off the loop: it reads every unarchived session's run once.
+    gates = app.get("gates")
+    if gates is not None:
+        from . import gate_registry
+
+        app["gate_backfill"] = asyncio.create_task(
+            asyncio.to_thread(gate_registry.backfill, gates, list(manager.list()))
+        )
     # Report timers an agent set for itself (daemon/agent_timers.py). The
     # clock outlives the session's turns; the pause across this daemon's own
     # downtime is accounted for inside start(). A session's real ending drops

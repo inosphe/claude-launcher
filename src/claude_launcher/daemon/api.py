@@ -119,6 +119,7 @@ from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
+from . import gate_registry
 from . import ws as ws_mod
 from . import shadow as shadow_mod
 from . import session_opening
@@ -650,6 +651,21 @@ def build_app(
         _mesh_audience, manager, board
     )
     manager.exit_hooks.append(board.session_exited)
+    # The cflow v2 gates that wait on a person, recorded on disk as they open
+    # and close (claunch-6vq2m.1). The rail reads compare against it; an
+    # archived or removed session's gates close with the record.
+    gates = gate_registry.GateRegistry(gate_registry.default_path())
+    app["gates"] = gates
+    gate_registry.install(gates)
+    filed_hooks = getattr(manager, "filed_hooks", None)
+    if filed_hooks is not None:
+        filed_hooks.append(gate_registry.lifecycle_closer(gates))
+
+    async def _uninstall_gates(_app: web.Application) -> None:
+        if gate_registry.active() is gates:
+            gate_registry.install(None)
+
+    app.on_cleanup.append(_uninstall_gates)
     # A failed session's sweep waits for the person settling it
     # (claunch-0j6gb.1); test registries may not have the list.
     settle_hooks = getattr(manager, "settle_hooks", None)
@@ -1042,6 +1058,7 @@ def build_app(
     r.add_get("/api/cflow2/node", h_cflow2_node)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
     r.add_get("/api/cflow2/rail", h_cflow2_rail)
+    r.add_get("/api/gates", h_gates)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
@@ -7144,8 +7161,8 @@ def _operator_rail_fields(app, rows):
 
 async def h_cflow2_rail(request: web.Request) -> web.Response:
     """The session rail's v2 lines: ``{"rows": {session: entry}}`` for each
-    registered session whose own directory holds a v2 run under the session's own
-    name (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
+    session whose own directory holds a v2 run under the session's own name
+    (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
     ``/api/cflow`` or ``/api/cflow2/runs``: the rail asks one question per
     session, keyed by the session, not by the run slots on disk.
 
@@ -7155,32 +7172,87 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     page subtracts the difference before it counts. It sits here rather than
     in a row because the rows are cached per run file and this must not be.
 
+    Which sessions are read (claunch-6vq2m.1): the running ones, and the
+    ended ones the gate registry (``gate_registry``, ``app["gates"]``) still
+    holds an open gate for -- a killed or paused session's waiting run keeps
+    its card. Each read compares the run with the registry when its files
+    changed, and every answer carries its registry row as ``gate_id`` (and
+    the registry's ``opened_at`` where the run stamped none). An ended
+    session with nothing open is read once and then served from the cache
+    with no ``answers`` (``rail_entries``' ``settled``): its line still shows,
+    its files are not stat'ed on every poll. An archived session is served the
+    same way but never compared with the registry (``filed``): its gates were
+    closed when it was filed away, and its line still carries the run's
+    workflow and inputs ("Spawn same setup" seeds from it).
+
     Each row also carries its session's lifecycle (claunch-6vq2m):
     ``session_category`` is ``session.session_category`` (running, hold,
     delayed, failed, killed, paused, archived) and ``session_status`` the
-    live status word (busy, idle, starting) or ``exited``. Every registered
-    session is listed, archived ones too, so a run its archived session left
-    waiting on a person still has a row here; the dashboard reads the
-    category to raise no card for it, and the corner cards show the word
-    beside the session's name. Stamped per answer, not cached with the row:
-    the session moves without its run file changing."""
+    live status word (busy, idle, starting) or ``exited``; the corner cards
+    show the word beside the session's name. Stamped per answer, not cached
+    with the row: the session moves without its run file changing."""
     manager: SessionManager = request.app["manager"]
+    gates: Optional[gate_registry.GateRegistry] = request.app.get("gates")
+    held = (await asyncio.to_thread(gates.open_sessions)) if gates is not None else None
     pairs = []
+    settled = []
+    filed = []
     lifecycle = {}
     for session in manager.list():
+        name = session.sdef.name
+        category = session_mod.session_category(session)
         cwd = _session_cwd(session)
         if cwd:
-            name = session.sdef.name
-            pairs.append((name, cwd))
+            if held is not None and category == session_mod.CATEGORY_ARCHIVED:
+                filed.append((name, cwd))
+            elif held is not None and session.exited and name not in held:
+                settled.append((name, cwd))
+            else:
+                pairs.append((name, cwd))
             lifecycle[name] = {
-                "session_category": session_mod.session_category(session),
+                "session_category": category,
                 "session_status": "exited" if session.exited else session.status(),
             }
-    rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
+
+    def read() -> dict:
+        rows = cflow2_web.rail_entries(pairs, registry=gates, settled=settled,
+                                       filed=filed)
+        if gates is not None:
+            gate_registry.annotate(rows, gates)
+        return rows
+
+    rows = await asyncio.to_thread(read)
     for name, row in rows.items():
         row.update(lifecycle.get(name) or {})
     return json_response({"rows": _operator_rail_fields(request.app, rows),
                           "now": time.time()})
+
+
+async def h_gates(request: web.Request) -> web.Response:
+    """``GET /api/gates``: the gate registry's rows, newest first
+    (claunch-6vq2m.1). ``?state=open`` (default), ``closed`` or ``all``;
+    ``?session=`` narrows to one session; ``?limit=`` (default 500). Each
+    row: ``seq``, ``session``, ``cwd``, ``scope``, ``run_id``, ``workflow``,
+    ``kind``, ``item``, ``label``, ``card`` (the rail answer it was opened
+    from), ``opened_at``, ``recorded_at``, ``closed_at``, ``close_reason``.
+    ``backfill`` is the one-time backfill's record, null before it ran."""
+    gates: Optional[gate_registry.GateRegistry] = request.app.get("gates")
+    if gates is None:
+        return json_error(503, "the gate registry is not running in this daemon")
+    state = str(request.query.get("state") or "open")
+    if state not in ("open", "closed", "all"):
+        return json_error(400, "'state' must be open, closed or all")
+    try:
+        limit = int(request.query.get("limit") or 500)
+    except ValueError:
+        return json_error(400, "'limit' must be an integer")
+    session = str(request.query.get("session") or "").strip() or None
+
+    def read() -> dict:
+        return {"gates": gates.rows(state=state, session=session, limit=max(1, limit)),
+                "backfill": gates.meta(gate_registry.META_BACKFILLED)}
+
+    return json_response(await asyncio.to_thread(read))
 
 
 async def h_cflow2_definition(request: web.Request) -> web.Response:

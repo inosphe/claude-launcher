@@ -89,7 +89,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
@@ -485,6 +485,9 @@ class Cflow2Clock:
             except Exception:
                 log.exception("cflow2 clock could not end the side runs of %r", name)
             self._end_run_at_gate(name, cwd, now=now)
+            # An ending can settle a gate (the end gate above): the ended
+            # session's run is compared once more, since no pass drives it now.
+            self.sync_gates([name])
         return out
 
     def _end_run_at_gate(self, name: str, cwd: str, *, now: Optional[float] = None) -> None:
@@ -717,7 +720,40 @@ class Cflow2Clock:
                         log.exception("cflow2 clock failed on %s/%s", cwd, scope)
         finally:
             self._scanning = False
+        self.sync_gates()
         return notices
+
+    def sync_gates(self, names: Optional[Sequence[str]] = None) -> None:
+        """Compare the runs of the sessions this clock drives (live, held or
+        paused) -- or of ``names`` -- with the daemon's gate registry
+        (claunch-6vq2m.1), so a gate is recorded when it opens whether or not
+        a dashboard is polling. Each slot is read only when its files changed
+        since the last comparison (``cflow2_web.rail_entries``)."""
+        from . import cflow2_web, gate_registry
+
+        if gate_registry.active() is None:
+            return
+        pairs = []
+        try:
+            sessions = list(self.manager.list())
+        except Exception:  # noqa: BLE001
+            return
+        wanted = set(names) if names is not None else None
+        for session in sessions:
+            sdef = getattr(session, "sdef", None)
+            name = str(getattr(sdef, "name", "") or "")
+            cwd = str(getattr(sdef, "cwd", "") or "")
+            if not name or not cwd:
+                continue
+            if wanted is not None:
+                if name in wanted:
+                    pairs.append((name, cwd))
+            elif self.owns(name):
+                pairs.append((name, cwd))
+        try:
+            cflow2_web.rail_entries(pairs)
+        except Exception:  # noqa: BLE001 - the next pass compares again
+            log.exception("cflow2 clock could not compare the gate registry")
 
     # -- held drivers ------------------------------------------------------
     def _held(self, scope: str) -> bool:

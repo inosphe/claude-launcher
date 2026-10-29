@@ -389,6 +389,12 @@ class SessionManager:
         #: :attr:`exit_hooks`, and skips a failed session on the latter
         #: (claunch-0j6gb.1); every other exit hook already ran at the exit.
         self.settle_hooks: List[Callable[[AnySession], None]] = []
+        #: Called with ``(session, how)`` when a record leaves the working
+        #: fleet: ``how`` is ``archived`` (:meth:`archive`, the first time)
+        #: or ``removed`` (:meth:`remove`). The gate registry closes the
+        #: session's open gates here (claunch-6vq2m.1); an exit is not a
+        #: filing -- a killed or paused session's gates stay open.
+        self.filed_hooks: List[Callable[[AnySession, str], None]] = []
         #: Called with a session once its child is gone for good — whatever
         #: ended it. Registered by whoever has a stake in an ending (the
         #: board sweep, :mod:`claude_launcher.daemon.beads`); not called for
@@ -2384,6 +2390,7 @@ class SessionManager:
             )
         # Forgetting a held record is its real ending: settle what it owed.
         self.unhold(name)
+        dropped: List[AnySession] = []
         if children == "remove":
             below = self.descendants(name)
             running = [n for n in below if not self._sessions[n].exited]
@@ -2394,7 +2401,7 @@ class SessionManager:
                     f"{name!r} on its own and let them move up to its parent"
                 )
             for child in below:
-                del self._sessions[child]
+                dropped.append(self._sessions.pop(child))
                 line_sync.forget(child)
             self.progress.forget(below)
             touched = below
@@ -2410,6 +2417,8 @@ class SessionManager:
         # one persist prune the store to empty past the empty-snapshot guard.
         self._allow_empty_persist = True
         self.persist()
+        for gone in [session, *dropped]:
+            self._run_filed_hooks(gone, "removed")
         return session, touched
 
     def set_keep_alive(self, name: str, on: bool) -> AnySession:
@@ -2837,7 +2846,15 @@ class SessionManager:
             self.persist()
             self.events.record(session, "archive", "세션 보관",
                                **({"reason": reason} if reason else {}))
+            self._run_filed_hooks(session, "archived")
         return session
+
+    def _run_filed_hooks(self, session: AnySession, how: str) -> None:
+        for hook in list(self.filed_hooks):
+            try:
+                hook(session, how)
+            except Exception:  # noqa: BLE001 - a hook never breaks the verb
+                log.exception("filed hook %r failed for %s", hook, session.sdef.name)
 
     async def stop_and_archive(
         self, name: str, *, force: bool = False, by: Optional[dict] = None

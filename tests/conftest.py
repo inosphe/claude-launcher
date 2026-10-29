@@ -370,6 +370,18 @@ def cwd_restore():
 
 
 @pytest.fixture(autouse=True)
+def no_installed_gate_registry(monkeypatch):
+    """No test inherits the gate registry an earlier test's app installed.
+
+    ``build_app`` installs its ``gates.db`` process-wide
+    (``gate_registry.install``, claunch-6vq2m.1) and uninstalls it only when
+    the app is cleaned up; an app built and never served would leave the next
+    test's rail reads comparing against a registry under a removed tmp_path.
+    """
+    monkeypatch.setattr("claude_launcher.daemon.gate_registry._ACTIVE", None)
+
+
+@pytest.fixture(autouse=True)
 def no_linux_clipboard_reads(monkeypatch):
     """Keep the daemon's clipboard history off the developer's clipboard on Linux.
 
