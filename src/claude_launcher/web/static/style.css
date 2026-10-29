@@ -2950,10 +2950,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .term-actions { display: contents; }
 .term-btn { white-space: nowrap; }
 /* Reserve the session name before fitting controls. Only a name longer than
-   the column itself is clipped, leaving room for the overflow button. */
+   the column itself is clipped, leaving room for the overflow button and the
+   goto glyph, which never leaves the row (28px plus a 4px gap,
+   claunch-xbhbg.1). */
 #term-title {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  min-width: 0; flex-shrink: 0; max-width: calc(100% - 40px);
+  min-width: 0; flex-shrink: 0; max-width: calc(100% - 72px);
   cursor: copy; border-radius: 4px;
 }
 /* A click copies the name (app.js copyTermTitle). */
