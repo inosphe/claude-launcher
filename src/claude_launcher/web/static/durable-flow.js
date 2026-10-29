@@ -229,6 +229,36 @@
   }
   // run_end states that mean the run broke even when it carries no error.
   const RUN_END_BROKE = new Set(["failed", "error", "interrupted"]);
+  // Events a run logs after its own end, which stay with that run.
+  const RUN_TRAIL = new Set(["agent_end", "session_shutdown", "harness_closed"]);
+
+  /* One log can carry several runs one after another (claunch-papez): gds6's
+     scenarios v2 logs stage A, ends it ``proposed``, and logs stage B into
+     the same file when a person approves its tuples, hours later. A run
+     ends at ``run_end`` or ``done``; the next event that is not the ended
+     run's own trail (its agent_end, shutdown) opens the next run. ``step``
+     returns the run an event belongs to; a run is named by its
+     ``run_start``'s ``stage`` (``A 단계``), else counted (``실행 2``). */
+  function runSplitter() {
+    const runs = [];
+    let closed = true;
+    return {
+      runs,
+      step(ev) {
+        if (closed && !RUN_TRAIL.has(ev.event)) {
+          runs.push({ n: runs.length, stage: "", at: ev.at || null });
+          closed = false;
+        }
+        const run = runs[runs.length - 1] || null;
+        if (run && ev.event === "run_start" && ev.stage && !run.stage) run.stage = String(ev.stage);
+        if (ev.event === "run_end" || ev.event === "done") closed = true;
+        return run;
+      },
+      // Whether the runs are drawn apart: more than one, or a staged one.
+      named() { return runs.length > 1 || runs.some((r) => r.stage); },
+      label(run) { return run.stage ? run.stage + " 단계" : "실행 " + (run.n + 1); },
+    };
+  }
   const FOLD_OPEN = "클릭하면 시도마다 펼친다";
   const FOLD_CLOSE = "클릭하면 접는다";
 
@@ -243,31 +273,44 @@
     const byId = new Map();
     const seen = new Map(); // ask key -> times drawn (a resumed run asks again)
     let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
-    const units = new Map(); // unit id -> its node
-    const open = new Map();  // ask key -> [unit id | null] of starts not yet answered
+    // A later run may reuse a unit id (gds6 scenarios: B approved again for
+    // the same tuple); its unit is a node of its own in its own block. So
+    // ``units`` holds the current run's units, ``earlier`` the newest node
+    // of each id from the runs before, which ``after`` and a unit's history
+    // event (recheck) still reach.
+    const units = new Map(); // unit id -> its node, this run
+    const earlier = new Map(); // unit id -> its node in the newest earlier run
+    const groups = new Map(); // sim2 stage group -> its node, this run
+    let unitCount = 0;
+    const unitOf = (id) => units.get(id) || earlier.get(id);
+    const open = new Map();  // ask key -> [unit node | null] of starts not yet answered
     const keyUnit = new Map(); // ask key -> the unit its last ask_start named
     let running = 0, peak = 0, starts = 0;
     let plan = null;         // unit ids of the latest plan event
     const tries = [];        // one per session_start: {n, node, tag, failed, error, head, members}
     let attempt = null;      // the newest of them
+    const split = runSplitter();
+    let seg = 0;             // the run (of the log's runs) the current event is in
 
     // A phase entered again gets a new column -- except a grouped (sim2)
-    // stage, whose questions interleave: it keeps the column it opened.
+    // stage, whose questions interleave: it keeps the column it opened. A
+    // column belongs to one run: a later run of the log never lands in an
+    // earlier run's column, so each run reads as its own block.
     function column(phase, reuse) {
       if (reuse) {
-        const at = cols.findIndex((c) => c.phase === phase);
+        const at = cols.findIndex((c) => c.phase === phase && c.seg === seg);
         if (at >= 0) return at;
       }
       const last = cols[cols.length - 1];
-      if (last && last.phase === phase) return cols.length - 1;
-      cols.push({ phase, title: phaseTitle(phase), nodes: [] });
+      if (last && last.phase === phase && last.seg === seg) return cols.length - 1;
+      cols.push({ phase, title: phaseTitle(phase), nodes: [], seg });
       return cols.length - 1;
     }
     function add(phase, base, fields, reuse) {
       const c = column(phase, reuse);
       let id = base, n = 1;
       while (byId.has(id)) id = base + "#" + (++n);
-      const node = { id, col: c, row: cols[c].nodes.length, label: "", sub: "",
+      const node = { id, col: c, row: cols[c].nodes.length, seg, label: "", sub: "",
                      status: "done", tip: [], key: null, ...fields };
       cols[c].nodes.push(id);
       nodes.push(node);
@@ -276,7 +319,7 @@
     }
     // The newest node drawn for an ask key (or the newest whose key matches).
     function find(test) {
-      for (let i = nodes.length - 1; i >= 0; i--) {
+      for (let i = nodes.length - 1; i >= 0 && nodes[i].seg === seg; i--) {
         if (nodes[i].key !== null && test(nodes[i].key)) return nodes[i];
       }
       return null;
@@ -336,14 +379,18 @@
       return node;
     }
     // A unit's node: placed once, at the depth its start's ``after`` gives.
+    // A unit of an earlier run counts for neither: this run's block starts
+    // at its own first column.
     function unitNode(id, ev) {
       let node = units.get(id);
       if (node) return node;
-      const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => units.has(a));
-      const depth = after.reduce((d, a) => Math.max(d, units.get(a).depth + 1), 0);
-      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, label: id, count: 0, tok: 0,
+      const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => unitOf(a));
+      const from = after.map(unitOf);
+      const depth = from.filter((u) => u.seg === seg).reduce((d, u) => Math.max(d, u.depth + 1), 0);
+      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, from, label: id, count: 0, tok: 0,
                                                   running: 0, state: "start", status: "run", note: "" }, true);
       units.set(id, node);
+      unitCount += 1;
       return node;
     }
     // A planned unit that has not started yet becomes the unit itself.
@@ -402,7 +449,7 @@
         for (const u of pend) {
           if (unit !== undefined && u !== unit) { keep.push(u); continue; }
           running -= 1;
-          if (u !== null) { units.get(u).running -= 1; unitSub(units.get(u)); }
+          if (u !== null) { u.running -= 1; unitSub(u); }
         }
         if (keep.length) open.set(key, keep); else open.delete(key);
       }
@@ -421,6 +468,16 @@
       if (at && !first) first = at;
       if (at) lastAt = at;
       const when = at ? clock(at) : "";
+      const run = split.step(ev);
+      // A later run reopens the log: the earlier one's end is not the log's.
+      if (run && run.n !== seg) {
+        seg = run.n;
+        ended = null;
+        closeOpen();     // a run that ended without its run_end leaves no start pending
+        for (const [id, node] of units) earlier.set(id, node);
+        units.clear();
+        groups.clear();
+      }
       switch (ev.event) {
         case "session_start": {
           // attempt/attemptMax (gds6-gjkd.9): the launcher's retry count.
@@ -455,7 +512,7 @@
           const state = UNIT_STATUS[ev.state] ? ev.state : "start";
           node.state = state;
           node.status = node.cut && state === "done" ? "warn" : UNIT_STATUS[state];
-          if (state !== "start") closeOpen(id);
+          if (state !== "start") closeOpen(node);
           if (ev.label) node.label = String(ev.label);
           if (ev.note) node.note = String(ev.note);
           if (state === "start" && ev.phase) hint(node, ev.phase);
@@ -471,14 +528,14 @@
         case "ask_start": {
           const key = String(ev.key || "");
           const unit = ev.unit != null ? String(ev.unit) : null;
+          const node = unit !== null ? unitNode(unit, null) : null;
           if (!open.has(key)) open.set(key, []);
-          open.get(key).push(unit);
+          open.get(key).push(node);
           if (unit !== null) keyUnit.set(key, unit);
           starts += 1;
           running += 1;
           peak = Math.max(peak, running);
-          if (unit !== null) {
-            const node = unitNode(unit, null);
+          if (node) {
             wake(node);
             node.running += 1;
             unitSub(node);
@@ -490,19 +547,19 @@
           let unit = ev.unit != null ? String(ev.unit) : null;
           const failed = ev.error ? String(ev.error).split("\n")[0] : "";
           if (unit === null && keyUnit.has(String(ev.key || ""))) unit = keyUnit.get(String(ev.key || ""));
+          let started = null;
           if (pend && pend.length) {
             const from = pend.shift();
             if (!pend.length) open.delete(String(ev.key || ""));
             running -= 1;
             if (from !== null) {
-              const node = units.get(from);
-              node.running -= 1;
-              unitSub(node);
+              from.running -= 1;
+              unitSub(from);
             }
-            if (unit === null) unit = from;
+            if (unit === null) started = from;
           }
-          if (unit !== null) {
-            const node = unitNode(unit, null);
+          if (unit !== null || started) {
+            const node = started || unitNode(unit, null);
             wake(node);
             const u = ev.usage || {};
             tokensTotal += Number(u.totalTokens) || 0;
@@ -523,9 +580,10 @@
             const u = ev.usage || {};
             tokensTotal += Number(u.totalTokens) || 0;
             asks += 1;
-            let node = byId.get("grp:" + g.group);
+            let node = groups.get(g.group);
             if (!node) {
               node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done", grouped: true }, true);
+              groups.set(g.group, node);
             }
             node.count += 1;
             node.tok += Number(u.totalTokens) || 0;
@@ -680,7 +738,17 @@
           break;
         }
         default: {
-          const last = cols.length ? cols[cols.length - 1].phase : "other";
+          // An event about a unit already drawn (gds6's ``recheck``) is a
+          // line of that unit's history, not a node of its own.
+          const unit = ev.unit != null ? unitOf(String(ev.unit)) : null;
+          if (unit) {
+            unit.tip.push(when + " " + JSON.stringify(ev).slice(0, 200));
+            break;
+          }
+          // The event that opens a run (gds6's ``tuples_approved``) leads its
+          // start column; otherwise it joins the column on screen.
+          const lastCol = cols[cols.length - 1];
+          const last = !lastCol || lastCol.seg !== seg ? "start" : lastCol.phase;
           add(last.startsWith("unit:") ? "other" : last, "ev:" + ev.event,
               { label: String(ev.event || "?"), tip: [when, JSON.stringify(ev).slice(0, 300)] });
         }
@@ -692,6 +760,7 @@
     if (live && !ended) {
       const c = Math.max(0, cols.length - 1);
       pending = { id: "live", col: c, row: cols.length ? cols[c].nodes.length : 0,
+                  seg: cols.length ? cols[c].seg : 0,
                   label: "진행 중" + (progress && progress.stage ? " · " + progress.stage : ""),
                   sub: (progress && progress.text) || "", status: "live", tip: [] };
     }
@@ -713,10 +782,9 @@
       if (set) return set;
       set = new Set();
       reach.set(node, set);
-      for (const a of node.after) {
-        const u = units.get(a);
+      for (const u of node.from) {
         if (u.state === "gone") continue;
-        set.add(a);
+        set.add(u);
         for (const x of behind(u)) set.add(x);
       }
       return set;
@@ -730,12 +798,15 @@
         continue;
       }
       if (to.unit !== undefined) {
-        for (const a of to.after) {
-          const from = units.get(a);
+        for (const from of to.from) {
           const plan = from.state === "plan" || to.state === "plan";
           const gone = from.state === "gone" || to.state === "gone";
-          const reduced = to.after.some((b) => b !== a && units.get(b).state !== "gone" && behind(units.get(b)).has(a));
-          edges.push({ id: from.id + ">" + to.id, from, to, plan, gone, reduced });
+          const reduced = to.from.some((b) => b !== from && b.state !== "gone" && behind(b).has(from));
+          // A unit of an earlier run: one bus per unit across the whole
+          // next run would bury it. The runs' own chain joins them, and
+          // the unit's tip keeps the list.
+          const cross = from.seg !== to.seg;
+          edges.push({ id: from.id + ">" + to.id, from, to, plan, gone, reduced, cross });
         }
         crossed = true;
         continue;
@@ -753,9 +824,15 @@
       edges.push({ id: "live-edge", from: last, to: pending });
     }
     // done/total over the latest plan's units.
-    const planned = plan && { total: plan.length, done: plan.filter((id) => units.get(id).state === "done").length };
-    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt,
-             count: (events || []).length, running, peak, starts, units: units.size, plan: planned };
+    const planned = plan && { total: plan.length, done: plan.filter((id) => unitOf(id).state === "done").length };
+    // The log's runs as column ranges, when they are drawn apart.
+    const segs = split.named() ? split.runs.map((r) => ({
+      n: r.n, label: split.label(r), at: r.at,
+      from: cols.findIndex((c) => c.seg === r.n),
+      to: cols.length - 1 - [...cols].reverse().findIndex((c) => c.seg === r.n),
+    })).filter((s) => s.from >= 0) : [];
+    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt, segs,
+             count: (events || []).length, running, peak, starts, units: unitCount, plan: planned };
   }
 
   /* The state a unit's last event names, as a class the view paints. */
@@ -782,8 +859,10 @@
       const t = Date.parse((ev && ev.at) || "");
       return Number.isFinite(t) ? t : null;
     };
+    // byUnit/byGroup hold the current run's lanes: a later run that reuses a
+    // unit id or a stage gets a lane of its own (the tree's ``units`` rule).
     const lanes = [], byUnit = new Map(), byGroup = new Map(), open = new Map();
-    let t0 = null, t1 = null, no = 0, asks = 0, endedAt = null;
+    let t0 = null, t1 = null, no = 0, asks = 0, endedAt = null, runNo = 0;
     // Launcher attempts, as in the tree: an attempt that failed before its
     // first model call is a lane of its own, and a run of them is one lane
     // with an interval per attempt unless the reader opened it. ``work``
@@ -832,8 +911,14 @@
       if (t0 === null || t < t0) t0 = t;
       if (t1 === null || t > t1) t1 = t;
     };
-    function addLane(id, start, fields) {
-      const lane = { id, start, end: null, state: "run", asks: [], order: no++, ...fields };
+    // A lane id is kept for good: a later run's lane for the same unit or
+    // stage takes the next free one, as the tree's node ids do.
+    const laneIds = new Set();
+    function addLane(base, start, fields) {
+      let id = base, n = 1;
+      while (laneIds.has(id)) id = base + "#" + (++n);
+      laneIds.add(id);
+      const lane = { id, start, end: null, state: "run", asks: [], order: no++, run: runNo, ...fields };
       lanes.push(lane);
       touch(start);
       return lane;
@@ -881,10 +966,31 @@
       return { unit, lane, item };
     }
 
+    // The log's runs (runSplitter) and the clock span each covered: the
+    // view gives each run its own stretch of the axis, so the hours between
+    // two runs do not squeeze both to the edges.
+    const split = runSplitter();
+    const spans = [];
     for (const ev of events || []) {
       if (!ev || typeof ev !== "object") continue;
       const when = atOf(ev);
       touch(when);
+      const run = split.step(ev);
+      if (run && run.n !== runNo) {
+        // A question the earlier run left unanswered ends with that run: a
+        // later answer under the same key belongs to the later run's start.
+        const end = spans[runNo] ? spans[runNo].t1 : null;
+        for (const pend of open.values()) for (const x of pend) if (x.item.end === null) x.item.end = end;
+        open.clear();
+        runNo = run.n;
+        byUnit.clear();
+        byGroup.clear();
+      }
+      if (run && when !== null) {
+        const sp = spans[run.n] || (spans[run.n] = { t0: when, t1: when });
+        if (when < sp.t0) sp.t0 = when;
+        if (when > sp.t1) sp.t1 = when;
+      }
       // The events that draw a node of their own in the tree: after one of
       // them an attempt is not a failed start in either view.
       if (ev.event === "unit" || ev.event === "ask_start" || ev.event === "ask" || ev.event === "plan") work += 1;
@@ -992,6 +1098,11 @@
     }
     // A run that ended closes what was still open at its end; a live one
     // leaves it open, and the view draws it out to now.
+    // A lane of an earlier run still open closes where that run's events
+    // stop, not across the gap into the next one.
+    for (const lane of lanes) {
+      if (lane.end === null && lane.run !== runNo && spans[lane.run]) lane.end = spans[lane.run].t1;
+    }
     if (endedAt !== null) for (const lane of lanes) if (lane.end === null) lane.end = endedAt;
     for (const lane of lanes) {
       for (const a of lane.asks) if (a.end === null) a.end = lane.end;
@@ -1019,14 +1130,28 @@
     let running = 0, peak = 0;
     for (const [, d] of marks) { running += d; if (running > peak) peak = running; }
     const end = live ? now : (t1 === null ? now : t1);
+    const segs = split.named() ? split.runs.filter((r) => spans[r.n]).map((r) => ({
+      n: r.n, label: split.label(r), t0: spans[r.n].t0, t1: spans[r.n].t1,
+    })) : [];
+    // The newest run runs out to the axis's end (now, while it is live).
+    if (segs.length) segs[segs.length - 1].t1 = Math.max(segs[segs.length - 1].t1, end);
     return {
       lanes: shown, t0, t1: Math.max(end, t0 === null ? end : t0 + 1),
-      now: end, live: !!live, peak, hidden, total: lanes.length,
+      now: end, live: !!live, peak, hidden, total: lanes.length, segs,
     };
   }
 
-  function pos(n) {
-    return { x: PAD + n.col * (W + GAP_X), y: PAD + HEAD + n.row * (H + GAP_Y) };
+  /* Runs drawn apart (model's ``segs``) sit SEG_GAP further apart than two
+     columns of one run, each in a band headed by its name -- SEG_HEAD
+     taller than the column heads alone. */
+  const SEG_GAP = 32, SEG_HEAD = 20, SEG_PAD = 8;
+
+  function colX(col, seg) {
+    return PAD + col * (W + GAP_X) + (seg || 0) * SEG_GAP;
+  }
+
+  function pos(n, top = 0) {
+    return { x: colX(n.col, n.seg), y: PAD + HEAD + top + n.row * (H + GAP_Y) };
   }
 
   /* The runs a run continued from, laid out to sit left of the live run's
@@ -1044,9 +1169,11 @@
       if (!am.nodes.length) continue;
       const tag = "anc" + count + ":";
       const map = new Map();
-      for (const c of am.cols) cols.push({ phase: c.phase, title: c.title, cls: "anc", nodes: [] });
+      // An ancestor is drawn dimmed and whole, without run bands: its own
+      // runs keep no gap (seg 0), and the live run's bands start after it.
+      for (const c of am.cols) cols.push({ phase: c.phase, title: c.title, cls: "anc", nodes: [], seg: 0 });
       for (const n of am.nodes) {
-        const node = { ...n, id: tag + n.id, col: n.col + shift,
+        const node = { ...n, id: tag + n.id, col: n.col + shift, seg: 0,
                        cls: (n.cls ? n.cls + " " : "") + "anc" };
         cols[node.col].nodes.push(node.id);
         nodes.push(node);
@@ -1079,7 +1206,7 @@
     const nodes = layer.nodes.slice();
     const edges = layer.edges.slice();
     const map = new Map();
-    for (const c of m.cols) cols.push({ phase: c.phase, title: c.title, nodes: [] });
+    for (const c of m.cols) cols.push({ phase: c.phase, title: c.title, nodes: [], seg: c.seg });
     for (const n of m.nodes) {
       const node = { ...n, col: n.col + shift };
       cols[node.col].nodes.push(node.id);
@@ -1103,7 +1230,8 @@
       const c = cols[head.col];
       c.title = c.title + " · rev " + (layer.round ?? "?") + "에서 이어받음";
     }
-    return { ...m, cols, nodes, edges, pending };
+    const segs = (m.segs || []).map((s) => ({ ...s, from: s.from + shift, to: s.to + shift }));
+    return { ...m, cols, nodes, edges, pending, segs };
   }
 
   function withAncestors(m, ancestors) {
@@ -1118,14 +1246,16 @@
   // between the rows beside its target (above it, or below a first-row
   // target), runs along that gap, and turns in through the gap before the
   // target's column.
-  function edgePath(a, b) {
-    const p = pos(a), q = pos(b);
+  function edgePath(a, b, top = 0) {
+    const p = pos(a, top), q = pos(b, top);
     if (a.col === b.col) {
       const x = p.x + W / 2;
       return `M${x},${p.y + H} L${x},${q.y}`;
     }
     const lane = b.unit !== undefined ? ((a.row % 5) - 2) * 5 : 0;
-    const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x, y2 = q.y + H / 2, mx = x1 + GAP_X / 2 + lane;
+    // Into the next run: the elbow turns in the gap between the runs' bands.
+    const into = (b.seg || 0) > (a.seg || 0) ? SEG_GAP / 2 : 0;
+    const x1 = p.x + W, y1 = p.y + H / 2, x2 = q.x, y2 = q.y + H / 2, mx = x1 + GAP_X / 2 + into + lane;
     if (b.col > a.col + 1) {
       const gy = b.row ? q.y - GAP_Y / 2 : q.y + H + GAP_Y / 2, nx = x2 - GAP_X / 2 + lane;
       return `M${x1},${y1} L${mx},${y1} L${mx},${gy} L${nx},${gy} L${nx},${y2} L${x2},${y2}`;
@@ -1133,9 +1263,17 @@
     return `M${x1},${y1} L${mx},${y1} L${mx},${y2} L${x2},${y2}`;
   }
 
+  // Clips to n Latin-width characters. A Hangul or CJK character draws
+  // nearly twice as wide, so it counts 1.8: a Korean unit name clipped by
+  // length alone ran past its box (claunch-papez).
   function clip(s, n) {
     s = String(s || "");
-    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      w += s.charCodeAt(i) >= 0x1100 ? 1.8 : 1;
+      if (w > n) return s.slice(0, Math.max(0, i - 1)) + "…";
+    }
+    return s;
   }
 
   /* The view: one SVG, kept. ``draw(m)`` brings it to model ``m`` by adding
@@ -1145,12 +1283,14 @@
     const svg = doc.createElementNS(NS, "svg");
     svg.setAttribute("class", "dfl");
     svg.setAttribute("xmlns", NS);
+    const gBands = doc.createElementNS(NS, "g");
     const gHeads = doc.createElementNS(NS, "g");
     const gEdges = doc.createElementNS(NS, "g");
     const gNodes = doc.createElementNS(NS, "g");
-    svg.appendChild(gHeads); svg.appendChild(gEdges); svg.appendChild(gNodes);
+    svg.appendChild(gBands); svg.appendChild(gHeads); svg.appendChild(gEdges); svg.appendChild(gNodes);
     host.appendChild(svg);
-    const heads = new Map(), edges = new Map(), nodes = new Map();
+    const heads = new Map(), edges = new Map(), nodes = new Map(), bands = new Map();
+    let top = 0;   // SEG_HEAD while the runs are drawn apart
 
     function mk(tag, parent, attrs) {
       const e = doc.createElementNS(NS, tag);
@@ -1169,7 +1309,7 @@
 
     function drawNode(n) {
       let v = nodes.get(n.id);
-      const p = pos(n);
+      const p = pos(n, top);
       if (!v) {
         const g = mk("g", gNodes, {});
         const tip = mk("title", g, {});
@@ -1194,12 +1334,16 @@
     }
 
     function draw(m) {
+      const segs = m.segs || [];
+      top = segs.length ? SEG_HEAD : 0;
       m.cols.forEach((c, i) => {
         let t = heads.get(i);
         if (!t) {
-          t = mk("text", gHeads, { class: "dfl-head", x: PAD + i * (W + GAP_X), y: PAD + 12 });
+          t = mk("text", gHeads, { class: "dfl-head" });
           heads.set(i, t);
         }
+        set(t, "x", colX(i, c.seg));
+        set(t, "y", PAD + top + 12);
         set(t, "class", "dfl-head" + (c.cls ? " " + c.cls : ""));
         text(t, c.title);
       });
@@ -1210,9 +1354,9 @@
           edges.set(e.id, path);
         }
         set(path, "class", "dfl-edge" + (e.id === "live-edge" ? " live" : "") +
-                           (e.gone || e.reduced ? " gone" : e.plan ? " plan" : "") +
+                           (e.gone || e.reduced || e.cross ? " gone" : e.plan ? " plan" : "") +
                            (e.link ? " anc-link" : e.anc ? " anc" : ""));
-        set(path, "d", edgePath(e.from, e.to));
+        set(path, "d", edgePath(e.from, e.to, top));
       }
       for (const n of m.nodes) drawNode(n);
       if (m.pending) drawNode(m.pending);
@@ -1228,8 +1372,36 @@
       let rows = 1;
       for (const c of m.cols) rows = Math.max(rows, c.nodes.length);
       if (m.pending) rows = Math.max(rows, m.pending.row + 1);
-      const w = PAD * 2 + Math.max(1, m.cols.length) * (W + GAP_X) - GAP_X;
-      const h = PAD * 2 + HEAD + rows * (H + GAP_Y) - GAP_Y;
+      const lastCol = m.cols[m.cols.length - 1];
+      const w = PAD * 2 + Math.max(1, m.cols.length) * (W + GAP_X) - GAP_X +
+                (lastCol ? (lastCol.seg || 0) * SEG_GAP : 0);
+      const h = PAD * 2 + HEAD + top + rows * (H + GAP_Y) - GAP_Y;
+      // One band per run: its name and start over its columns, a frame
+      // around them, so where one run ends and the next begins is a line
+      // on screen rather than a guess from the column names.
+      const keep = new Set();
+      for (const s of segs) {
+        const key = "seg:" + s.n;
+        keep.add(key);
+        let b = bands.get(key);
+        if (!b) {
+          const g = mk("g", gBands, { class: "dfl-band" });
+          b = { g, rect: mk("rect", g, { rx: 8 }), label: mk("text", g, { class: "dfl-band-label" }) };
+          bands.set(key, b);
+        }
+        const from = m.cols[s.from], to = m.cols[s.to];
+        const x0 = colX(s.from, from.seg) - SEG_PAD, x1 = colX(s.to, to.seg) + W + SEG_PAD;
+        set(b.rect, "x", x0);
+        set(b.rect, "y", PAD - 4);
+        set(b.rect, "width", x1 - x0);
+        set(b.rect, "height", h - PAD * 2 + 8);
+        set(b.label, "x", x0 + SEG_PAD);
+        set(b.label, "y", PAD + 10);
+        text(b.label, s.label + (s.at ? " · " + clock(s.at) : ""));
+      }
+      for (const [key, b] of bands) {
+        if (!keep.has(key)) { b.g.remove(); bands.delete(key); }
+      }
       set(svg, "viewBox", `0 0 ${w} ${h}`);
       set(svg, "width", w);
       set(svg, "height", h);
@@ -1243,6 +1415,9 @@
      along the bottom. */
   const SEQ_W = 960, SEQ_PAD = 12, SEQ_LABEL = 210, SEQ_ROW = 20,
         SEQ_BAR = 9, SEQ_AXIS = 22, SEQ_LEGEND = 20;
+  /* Runs drawn apart (claunch-papez): a line for their names, the gap the
+     axis breaks over, and the least share of the axis a run keeps. */
+  const SEQ_SEG = 14, SEQ_BREAK = 24, SEQ_MIN_SHARE = 0.15;
 
   /* What the colours mean, in the pane and in a file: the lane's own state,
      then the thin mark a question leaves. The tree draws each node's state
@@ -1289,29 +1464,83 @@
       if (e.textContent !== v) e.textContent = v;
     }
 
-    function draw(m) {
+    /* ``width``: the room the pane has (its scroller's client width). The
+       drawing takes all of it, never less than SEQ_W -- a fixed width left
+       a wide pane half empty on the right. */
+    function draw(m, width) {
       const t0 = m.t0 === null || m.t0 === undefined ? m.t1 - 1 : m.t0;
       const t1 = Math.max(m.t1, t0 + 1);
       const lanes = m.lanes || [];
+      const segs = m.segs || [];
+      const W_ = Math.max(SEQ_W, Math.floor(Number(width) || 0));
+      // Runs drawn apart take a line above the clock for their names.
+      const axis = SEQ_AXIS + (segs.length ? SEQ_SEG : 0);
       const rowsH = Math.max(1, lanes.length) * SEQ_ROW;
-      const h = SEQ_PAD * 2 + SEQ_AXIS + rowsH + (m.hidden ? 12 : 0) + SEQ_LEGEND;
-      set(svg, "viewBox", `0 0 ${SEQ_W} ${h}`);
-      set(svg, "width", SEQ_W);
+      const h = SEQ_PAD * 2 + axis + rowsH + (m.hidden ? 12 : 0) + SEQ_LEGEND;
+      set(svg, "viewBox", `0 0 ${W_} ${h}`);
+      set(svg, "width", W_);
       set(svg, "height", h);
-      const x = (t) => SEQ_LABEL + (SEQ_W - SEQ_LABEL - SEQ_PAD) *
-        Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
-
-      // The axis: the run's span in clock time.
-      while (gAxis.firstChild) gAxis.removeChild(gAxis.firstChild);
-      for (let i = 0; i <= 5; i++) {
-        const at = t0 + ((t1 - t0) * i) / 5;
-        const px = x(at);
-        mk("line", gAxis, { class: "dfl-seq-tick", x1: px, x2: px,
-                            y1: SEQ_AXIS - 6, y2: SEQ_AXIS + rowsH });
-        const label = mk("text", gAxis, { class: "dfl-seq-axis",
-                                          x: Math.min(px, SEQ_W - 44), y: SEQ_AXIS - 9 });
-        label.textContent = clock(at);
+      // The axis in pieces: one per run, each as wide as its share of the
+      // time the runs took (at least SEQ_MIN_SHARE of it, so a short run
+      // stays readable), a SEQ_BREAK gap between. One run is one piece.
+      const span = W_ - SEQ_LABEL - SEQ_PAD;
+      const parts = [];
+      if (segs.length > 1) {
+        const room = span - SEQ_BREAK * (segs.length - 1);
+        const dur = segs.map((s) => Math.max(1, s.t1 - s.t0));
+        const sum = dur.reduce((a, b) => a + b, 0);
+        const share = dur.map((d) => Math.max(SEQ_MIN_SHARE, d / sum));
+        const total = share.reduce((a, b) => a + b, 0);
+        let off = SEQ_LABEL;
+        segs.forEach((s, i) => {
+          const w = (room * share[i]) / total;
+          parts.push({ t0: s.t0, t1: Math.max(s.t1, s.t0 + 1), x0: off, w, label: s.label });
+          off += w + SEQ_BREAK;
+        });
+      } else {
+        parts.push({ t0, t1, x0: SEQ_LABEL, w: span, label: segs.length ? segs[0].label : "" });
       }
+      const x = (t) => {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
+          if (t < p.t0) return i ? p.x0 - SEQ_BREAK / 2 : p.x0;   // between two runs: the break
+          if (t <= p.t1) return p.x0 + (p.w * (t - p.t0)) / (p.t1 - p.t0);
+        }
+        const p = parts[parts.length - 1];
+        return p.x0 + p.w;
+      };
+
+      // The axis: each run's span in clock time, its name over it.
+      while (gAxis.firstChild) gAxis.removeChild(gAxis.firstChild);
+      parts.forEach((p, i) => {
+        if (parts.length > 1) {
+          mk("rect", gAxis, { class: "dfl-seq-band", x: p.x0 - 2, y: axis - 6,
+                              width: p.w + 4, height: rowsH + 6 });
+        }
+        if (p.label) {
+          const name = mk("text", gAxis, { class: "dfl-seq-seg", x: p.x0, y: SEQ_SEG - 2 });
+          name.textContent = p.label;
+        }
+        const n = Math.max(1, Math.min(5, Math.floor(p.w / 150)));
+        for (let k = 0; k <= n; k++) {
+          const at = p.t0 + ((p.t1 - p.t0) * k) / n;
+          const px = x(at);
+          mk("line", gAxis, { class: "dfl-seq-tick", x1: px, x2: px,
+                              y1: axis - 6, y2: axis + rowsH });
+          // The last label of a piece ends at its tick, the others start there.
+          const label = mk("text", gAxis, { class: "dfl-seq-axis", y: axis - 9,
+                                            x: k === n && k ? px - 44 : px });
+          label.textContent = clock(at);
+        }
+        if (i) {
+          // The break: two slashes on the axis, and the time left out.
+          const bx = p.x0 - SEQ_BREAK / 2;
+          mk("path", gAxis, { class: "dfl-seq-break",
+                              d: `M${bx - 5},${axis - 1} L${bx - 1},${axis - 11} M${bx + 1},${axis - 1} L${bx + 5},${axis - 11}` });
+          const gap = mk("title", gAxis, {});
+          gap.textContent = `${parts[i - 1].label} 끝 ${clock(parts[i - 1].t1)} → ${p.label} 시작 ${clock(p.t0)}`;
+        }
+      });
       if (m.hidden) {
         const more = mk("text", gAxis, {
           class: "dfl-seq-axis", x: SEQ_PAD, y: h - SEQ_LEGEND - 4,
@@ -1341,7 +1570,7 @@
           const g = mk("g", gRows, { class: "dfl-seq-row" });
           g.setAttribute("data-id", lane.id);
           const line = mk("line", g, { class: "dfl-seq-rule", x1: SEQ_LABEL,
-                                       x2: SEQ_W - SEQ_PAD, y1: SEQ_ROW - 3, y2: SEQ_ROW - 3 });
+                                       y1: SEQ_ROW - 3, y2: SEQ_ROW - 3 });
           const label = mk("text", g, { class: "dfl-seq-label", x: SEQ_PAD, y: 13 });
           const tip = mk("title", g, {});
           const bar = mk("rect", g, { class: "dfl-seq-bar", rx: 3,
@@ -1354,7 +1583,8 @@
             if (key && opts.onToggle) opts.onToggle(key);
           });
         }
-        set(v.g, "transform", `translate(0,${SEQ_AXIS + SEQ_PAD + i * SEQ_ROW})`);
+        set(v.g, "transform", `translate(0,${axis + SEQ_PAD + i * SEQ_ROW})`);
+        set(v.line, "x2", W_ - SEQ_PAD);
         text(v.label, clip(lane.label, 30));
         const start = lane.start === null || lane.start === undefined ? t0 : lane.start;
         const end = lane.end === null || lane.end === undefined ? t1 : lane.end;
@@ -1429,10 +1659,15 @@
     ".dfl-head.anc{opacity:.5}",
     ".dfl-edge.anc{stroke-dasharray:3 3;opacity:.4}",
     ".dfl-edge.anc-link{stroke:#58a6ff;stroke-dasharray:5 3;opacity:.6}",
+    ".dfl-band rect{fill:rgba(88,166,255,.05);stroke:rgba(88,166,255,.4);stroke-width:1;stroke-dasharray:6 4}",
+    ".dfl-band-label{fill:#58a6ff;font-size:11px;font-weight:600}",
     ".dfl-seq-label{fill:#d8dbe0;font-size:11px}",
     ".dfl-seq-rule{stroke:#21262d;stroke-width:1}",
     ".dfl-seq-tick{stroke:#30363d;stroke-width:1}",
     ".dfl-seq-axis{fill:#7d8590;font-size:10px}",
+    ".dfl-seq-band{fill:rgba(88,166,255,.05);stroke:rgba(88,166,255,.3);stroke-width:1}",
+    ".dfl-seq-seg{fill:#58a6ff;font-size:11px;font-weight:600}",
+    ".dfl-seq-break{fill:none;stroke:#7d8590;stroke-width:1.4}",
     ".dfl-seq-bar{fill:#1b1e24;stroke:#30363d}",
     ".dfl-seq-bar.st-run{fill:#12304f;stroke:#58a6ff}",
     ".dfl-seq-bar.st-ok{fill:#12301f;stroke:#2f6f43}",
@@ -1699,10 +1934,21 @@
       }
       scroller.className = "dfl-scroll" + (mode === "sequence" ? " dfl-seq" : "");
     }
+    // The room the sequence view may fill: the scroller's inner width.
+    const seqWidth = () => Math.max(0, (Number(scroller.clientWidth) || 0) - 2);
     function drawShown() {
-      if (mode === "sequence") { if (seqView && lastSeq) seqView.draw(lastSeq); }
+      if (mode === "sequence") { if (seqView && lastSeq) seqView.draw(lastSeq, seqWidth()); }
       else if (view && lastTree) view.draw(lastTree);
     }
+    // A pane resized (the window, the split) redraws the sequence to its new
+    // width -- an ended run is not polled, so nothing else would.
+    let lastWidth = 0;
+    const Resize = globalThis.ResizeObserver;
+    const resized = typeof Resize === "function" ? new Resize(() => {
+      const w = seqWidth();
+      if (w !== lastWidth) { lastWidth = w; if (mode === "sequence") drawShown(); }
+    }) : null;
+    if (resized) resized.observe(scroller);
     function setMode(next) {
       mode = next === "sequence" ? "sequence" : "tree";
       rememberMode(mode);
@@ -1786,7 +2032,7 @@
       paintMode();
       const before = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
       const atEnd = scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 8;
-      if (mode === "sequence") seqView.draw(s); else view.draw(tree);
+      if (mode === "sequence") seqView.draw(s, seqWidth()); else view.draw(tree);
       // Follow the run while the reader is at its end.
       const after = shownSvg() ? String(shownSvg().getAttribute("width")) : "";
       if (atEnd && before !== after && (mode !== "sequence" || before !== "")) {
@@ -1803,7 +2049,12 @@
     refresh();
     return {
       refresh,
-      unmount() { gone = true; if (timer) timers.clearInterval(timer); timer = null; },
+      unmount() {
+        gone = true;
+        if (timer) timers.clearInterval(timer);
+        timer = null;
+        if (resized) resized.disconnect();
+      },
       get view() { return view; },
       get sequence() { return seqView; },
       get mode() { return mode; },
