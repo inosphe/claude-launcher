@@ -222,7 +222,8 @@ def _image_lines(message: dict, who: str = "The user") -> list[str]:
 
 
 def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopened: bool = False,
-                    ask_qa: bool = False, mentions: Optional[list[dict]] = None) -> str:
+                    ask_qa: bool = False, mentions: Optional[list[dict]] = None,
+                    note: str = "") -> str:
     tid = thread["id"]
     if opened:
         head = "The user opened a new thread with you:"
@@ -230,10 +231,14 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
         head = "The user reopened this thread and wrote:"
     else:
         head = "The user wrote in this thread:"
-    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}",
-             _body_lines(message),
-             *_image_lines(message), *_file_lines(message), *_subject_line(thread),
-             *_mention_lines(mentions or [])]
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}"]
+    # A resend after a revert says so up front: the earlier copy the session
+    # may hold is not to be acted on (claunch-tpbqz).
+    if note:
+        lines.append(note)
+    lines += [_body_lines(message),
+              *_image_lines(message), *_file_lines(message), *_subject_line(thread),
+              *_mention_lines(mentions or [])]
     if ask_qa:
         lines.append(
             "The user asks you to turn this thread into a QA question: file the decision it needs from them "
@@ -302,13 +307,16 @@ def owner_invited_text(thread: dict, guest: str) -> str:
             f"(@{guest}, or @all); otherwise it reads the thread.")
 
 
-def guest_user_wrote_text(thread: dict, message: dict, *, reopened: bool = False) -> str:
+def guest_user_wrote_text(thread: dict, message: dict, *, reopened: bool = False,
+                          note: str = "") -> str:
     tid = thread["id"]
     head = "The user reopened this thread and wrote:" if reopened else "The user wrote in this thread:"
-    return "\n".join([
-        f"{PREFIX} {tid} \"{thread['title']}\"] (you are a guest of session {thread['session']} here) {head}",
-        _body_lines(message), *_image_lines(message), *_file_lines(message),
-        _named_line(), _guest_role(tid, thread["session"])])
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] (you are a guest of session {thread['session']} here) {head}"]
+    if note:
+        lines.append(note)
+    lines += [_body_lines(message), *_image_lines(message), *_file_lines(message),
+              _named_line(), _guest_role(tid, thread["session"])]
+    return "\n".join(lines)
 
 
 def guest_wrote_text(thread: dict, message: dict, guest: str) -> str:
@@ -356,6 +364,12 @@ def ask_answered_text(thread: dict, message: dict) -> str:
     if answer.get("text"):
         lines.append(_quote(answer["text"]))
     return "\n".join(lines)
+
+
+#: Typed ahead of a message resent after a revert, so the session that holds
+#: the earlier copy is told explicitly which one counts (claunch-tpbqz).
+REVERT_NOTE = ("This message is sent again because the user reverted its earlier delivery: "
+               "disregard the earlier copy of it (if any) and act on this one.")
 
 
 def install(app, store: Optional[thread_store.ThreadStore] = None):
@@ -563,12 +577,14 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if holds:
             res["guests_hold"] = holds
 
-    def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False) -> None:
+    def tell_user_message(res: dict, thread: dict, *, ask_qa: bool = False, note: str = "") -> None:
         """Type a user message into the sessions it is meant for: the owner
         when the body names nobody, otherwise only the sessions it names
         (claunch-p9wes.1.1). ``guests_delivered`` says per named guest whether
         the message was accepted, and ``guests_hold`` why one that was
-        accepted is not typed in yet -- the owner's ``hold`` for a guest."""
+        accepted is not typed in yet -- the owner's ``hold`` for a guest.
+        ``note`` rides the block for a resend after a revert
+        (claunch-tpbqz)."""
         route = session_mentions(thread, res.get("message"), None)
         mention_fields(res, route)
         targets = set(route["targets"])
@@ -577,11 +593,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if thread["session"] in targets:
             tell(res, thread["session"],
                  user_wrote_text(thread, res["message"], reopened=res.get("reopened", False),
-                                 ask_qa=ask_qa, mentions=qa_mentions),
+                                 ask_qa=ask_qa, mentions=qa_mentions, note=note),
                  notice=notice, thread=thread["id"])
         images = (res.get("message") or {}).get("images")
         delivered = {g["session"]: deliver(g["session"], guest_user_wrote_text(thread, res["message"],
-                                                                              reopened=res.get("reopened", False)),
+                                                                              reopened=res.get("reopened", False),
+                                                                              note=note),
                                            images, notice=notice, thread=thread["id"])
                      for g in thread.get("guests") or [] if g["session"] in targets}
         if delivered:
@@ -985,6 +1002,56 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             await asyncio.to_thread(mention_delivery, res, t, actor, guest=False)
         return web.json_response(res)
 
+    async def resend_or_revert(request, *, reverted: bool):
+        """Re-type one user message into the sessions its mentions name
+        (claunch-tpbqz). The pane offers this for a message the daemon
+        accepted but whose typing never reached the harness (a hung process,
+        a daemon restart): acceptance happened, so the post's answer said
+        delivered, and the loss leaves no other trace. The block is rebuilt
+        from the stored message and delivered down the same route as the
+        original post. A revert marks the message ``reverted_at`` and rides
+        the resent block with a note telling the session to disregard the
+        earlier copy -- deleting words already typed into a context is not
+        possible, so the mark plus the note is the whole revert."""
+        body = await body_of(request)
+        actor = actor_of(body)
+        tid = request.match_info["id"]
+        err = await asyncio.to_thread(operator_thread, tid)
+        if err:
+            return err
+        if actor != thread_store.USER:
+            return web.json_response({"error": "only the user resends or reverts a message"}, status=403)
+        try:
+            seq = int(request.match_info["seq"])
+        except (TypeError, ValueError):
+            return web.json_response({"error": "seq must be an integer"}, status=400)
+        # reader=USER: a resend is not a read, and no cursor may move for it.
+        res, err = await call(threads.read, tid, after=seq - 1, limit=1, reader=thread_store.USER)
+        if err:
+            return err
+        msg = (res.get("messages") or [None])[0]
+        if not msg or msg["seq"] != seq:
+            return web.json_response({"error": f"thread {tid} has no message {seq}"}, status=404)
+        if msg["author"] != thread_store.USER:
+            return web.json_response(
+                {"error": f"message {seq} is {msg['author']}'s; only a user's message can be resent or reverted"},
+                status=403)
+        t = res["thread"]
+        # The mark lands first: a delivery that raises must not lose it.
+        updated, err = await call(threads.record_delivery, t["session"], seq, resent=True, reverted=reverted)
+        if err:
+            return err
+        await asyncio.to_thread(link, [t], t["session"])
+        out = {"message": updated}
+        await asyncio.to_thread(tell_user_message, out, t, note=REVERT_NOTE if reverted else "")
+        return web.json_response(out)
+
+    async def h_resend(request):
+        return await resend_or_revert(request, reverted=False)
+
+    async def h_revert(request):
+        return await resend_or_revert(request, reverted=True)
+
     def status_route(status: str):
         async def handler(request):
             body = await body_of(request)
@@ -1083,6 +1150,8 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_post("/api/threads", h_open)
     r.add_get("/api/threads/{id}", h_read)
     r.add_post("/api/threads/{id}/messages", h_post)
+    r.add_post("/api/threads/{id}/messages/{seq}/resend", h_resend)
+    r.add_post("/api/threads/{id}/messages/{seq}/revert", h_revert)
     r.add_post("/api/threads/{id}/asks", h_ask)
     r.add_post("/api/threads/{id}/asks/{seq}/answer", h_answer)
     r.add_post("/api/threads/{id}/close", status_route("closed"))

@@ -9917,6 +9917,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg-at { color: #7d8590; font-family: ui-monospace, monospace; }
 .th-msg-state { color: #d29922; }
 .th-msg.th-failed .th-msg-state { color: #f85149; }
+/* A user message's resend/revert (claunch-tpbqz): the mark sits in the meta
+   line, and the hover actions stay out of the way until the bubble is
+   hovered. */
+.th-msg-flag { color: #d29922; font-weight: 600; }
+.th-msg-actions { display: inline-flex; gap: 4px; }
+.th-msg-actions .th-act { padding: 0 6px; border: 1px solid #30363d; border-radius: 8px;
+  background: transparent; color: #9da5b0; font-size: 10px; cursor: pointer; }
+.th-msg-actions .th-act:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.th-msg-actions .th-act:disabled { opacity: 0.5; cursor: default; }
+.th-msg .th-msg-actions { visibility: hidden; }
+.th-msg:hover .th-msg-actions { visibility: visible; }
 .th-msg-body { overflow-wrap: anywhere; }
 .th-msg-body.plain { white-space: pre-wrap; }
 .th-msg-body > :first-child { margin-top: 0; }

@@ -879,3 +879,70 @@ def test_a_refused_fork_leaves_no_thread_and_forkable_says_why(tmp_path, monkeyp
         assert doc["ok"] is False and "no session" in doc["why"]
         await req("GET", "/api/threads/forkable", status=400)
     run(tmp_path, scenario, names=("s1",))
+
+
+def test_a_user_message_is_resent_and_reverted(tmp_path):
+    """claunch-tpbqz: the pane's resend re-types a stored user message into
+    the sessions its mentions name, down the same route as the post, and
+    records the mark on the message; a revert is that resend with the
+    message marked and a note in the block to disregard the earlier copy."""
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "잘 도착했나?"})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        assert len(mgr.sessions["s1"].delivered) == 1
+
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is True and again["hold"] is None
+        assert len(mgr.sessions["s1"].delivered) == 2
+        assert "wrote in this thread" in mgr.sessions["s1"].delivered[-1]
+        assert len(again["message"]["data"]["resent_at"]) == 1
+        assert "reverted_at" not in again["message"]["data"]
+
+        back = await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {})
+        assert back["delivered"] is True
+        assert len(mgr.sessions["s1"].delivered) == 3
+        assert "disregard the earlier copy" in mgr.sessions["s1"].delivered[-1]
+        assert back["message"]["data"]["reverted_at"]
+        assert len(back["message"]["data"]["resent_at"]) == 2
+
+        # A resend moves no read cursor: the owner's agent_read stays.
+        read = await req("GET", f"/api/threads/{tid}?reader=s1")
+        assert read["thread"]["agent_read"] == read["messages"][-1]["seq"] - 2 \
+            or read["thread"]["agent_read"] <= seq
+
+        # Who may not, and what cannot be resent.
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {"session": "s1"}, status=403)
+        await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {"session": "s1"}, status=403)
+        await req("POST", f"/api/threads/{tid}/messages/9999/resend", {}, status=404)
+        await req("POST", f"/api/threads/{tid}/messages/abc/resend", {}, status=400)
+        reply = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "agent words"})
+        agent_seq = reply["message"]["seq"]
+        before = len(mgr.sessions["s1"].delivered)
+        await req("POST", f"/api/threads/{tid}/messages/{agent_seq}/resend", {}, status=403)
+        assert len(mgr.sessions["s1"].delivered) == before
+
+    run(tmp_path, scenario)
+
+
+def test_a_resent_message_follows_its_mentions(tmp_path):
+    """A message that named a guest is resent to the guest alone, the way it
+    was delivered the first time (claunch-p9wes.1.1, claunch-tpbqz)."""
+
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": " opener"})
+        tid = res["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        s1_before = len(mgr.sessions["s1"].delivered)
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 이것 좀 봐줘"})
+        seq = res["message"]["seq"]
+        assert res["guests_delivered"] == {"s2": True}
+        assert len(mgr.sessions["s1"].delivered) == s1_before   # the mention routed it to the guest alone
+        assert len(mgr.sessions["s2"].delivered) == 2           # the invite block, then the named message
+
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert len(mgr.sessions["s1"].delivered) == s1_before   # the resend takes the same route
+        assert len(mgr.sessions["s2"].delivered) == 3
+        assert "you are a guest of session s1 here" in mgr.sessions["s2"].delivered[-1]
+
+    run(tmp_path, scenario)

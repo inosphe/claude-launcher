@@ -691,6 +691,26 @@ globalThis.ThreadsPane = (() => {
     return act(() => request(`/api/threads/${encodeURIComponent(tid)}/${verb}`, {}));
   }
 
+  /* A user message re-typed into the sessions its mentions name
+     (claunch-tpbqz). The pane offers this when the daemon accepted a
+     message but the harness never got it -- a hung process or a daemon
+     restart between acceptance and typing -- because the post's answer
+     said delivered and the loss leaves no other trace. revert is the same
+     resend with the message marked "reverted by the user": the words
+     already typed somewhere cannot be un-typed, so the mark plus a note in
+     the re-sent block (disregard the earlier copy) is the whole revert. */
+  function resendMessage(tid, seq, revert = false) {
+    const key = `${revert ? "revert" : "resend"}:${tid}:${seq}`;
+    return once(key, () => act(async () => {
+      const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages/${seq}/${revert ? "revert" : "resend"}`, {});
+      notice = (revert ? "메시지를 revert했습니다 — 이전 전달분은 무시하라고 안내하고 다시 보냈습니다. "
+                       : "메시지를 다시 보냈습니다. ")
+        + (deliveryNotice(res) || "");
+      convo = null;            // the resend/revert marks landed on the entry
+      convoCache.delete(tid);
+    }));
+  }
+
   const RENAME = "\u0000rename";   // drafts key of the title being edited
   const INVITE = "\u0000invite";   // drafts key of the guest being invited
 
@@ -901,14 +921,47 @@ globalThis.ThreadsPane = (() => {
     return box;
   }
 
-  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "") {
+  /* The hover actions and flag of one stored message (claunch-tpbqz).
+     A user message can be resent (re-typed into the sessions its mentions
+     name) and reverted (the same resend with the message marked reverted);
+     a reverted message shows its mark, a resent one the count. Anything
+     not the user's has neither: nobody is typed into a session for it. */
+  function msgFlag(m) {
+    const d = m.data || {};
+    if (d.reverted_at) return "reverted";
+    const n = (d.resent_at || []).length;
+    return n ? `재전송 ${n}회` : "";
+  }
+
+  function msgActions(tid, m) {
+    if (m.author !== "user") return [];
+    const again = node("button", "th-act", "재전송");
+    again.type = "button";
+    again.title = "이 메시지를 세션에 다시 전달합니다 — daemon에 도착했으나 하네스에 전달되지 못해 유실된 경우에 쓰세요.";
+    again.disabled = inflight.has(`resend:${tid}:${m.seq}`);
+    again.addEventListener("click", () => resendMessage(tid, m.seq));
+    const back = node("button", "th-act th-act-revert", "revert");
+    back.type = "button";
+    back.title = "이 메시지를 revert합니다 — 삭제 대신 「사용자가 revert함」을 기록하고, 이전 전달분은 무시하라고 안내해 다시 보냈습니다.";
+    back.disabled = !!((m.data || {}).reverted_at) || inflight.has(`revert:${tid}:${m.seq}`);
+    back.addEventListener("click", () => resendMessage(tid, m.seq, true));
+    return [again, back];
+  }
+
+  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "", actions = [], flag = "") {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
     meta.append(node("span", "th-msg-who", who || (author === "agent" ? name : "나")));
     if (when) meta.append(node("span", "th-msg-at", when));
+    if (flag) meta.append(node("span", "th-msg-flag", flag));
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
+    if (actions.length) {
+      const box = node("span", "th-msg-actions");
+      box.append(...actions);
+      meta.append(box);
+    }
     row.append(meta);
     if (text || !(images.length || files.length)) row.append(bodyOf(text));
     if (images.length) row.append(picturesOf(images));
@@ -937,12 +990,20 @@ globalThis.ThreadsPane = (() => {
     }));
   }
 
-  /* The answer state of a conversation's asks: part of what a kept message
-     list drew. An ask answered elsewhere changes it without a new message,
-     so a kept list with another signature is rebuilt (claunch-etw0s). */
-  function askSig(messages) {
-    return messages.filter((m) => m.kind === "ask")
-      .map((m) => `${m.seq}:${((m.data || {}).answer || {}).at || ""}`).join(",");
+  /* The in-place state of a conversation's entries: an ask's answer and a
+     message's resend/revert marks (claunch-etw0s, claunch-tpbqz). Both
+     land on existing entries without a new message, so a kept list whose
+     signature misses them would never redraw them. Plain new messages
+     contribute nothing -- the kept-list check already watches the count
+     and the last seq. */
+  function entrySig(messages) {
+    return messages.map((m) => {
+      const d = m.data || {};
+      if (m.kind === "ask") return `${m.seq}:${(d.answer || {}).at || ""}`;
+      if (d.reverted_at) return `${m.seq}:r:${d.reverted_at}`;
+      const n = (d.resent_at || []).length;
+      return n ? `${m.seq}:s:${n}` : "";
+    }).filter(Boolean).join(",");
   }
 
   function askBubble(t, m) {
@@ -1252,7 +1313,18 @@ globalThis.ThreadsPane = (() => {
     inv.type = "button";
     inv.title = "다른 세션을 이 쓰레드에 게스트로 초대합니다. 게스트는 리뷰와 조언만 하고 작업을 직접 하거나 QA 도구를 쓰지 않습니다.";
     inv.addEventListener("click", () => { inviting = inviting === t.id ? "" : t.id; drafts.delete(INVITE); render(); });
-    head.append(toggle, askQa, inv);
+    // The top-right resend (claunch-tpbqz): the thread's latest user message
+    // re-typed into the sessions it names. For the loss it exists for --
+    // accepted by the daemon, never typed into a hung or restarted harness --
+    // the lost one is almost always the last one; any older message gets
+    // the same action from its bubble's hover buttons.
+    const lastUserMsg = [...(convo.messages || [])].reverse().find((m) => m.author === "user");
+    const again = node("button", "term-btn th-resend", "재전송");
+    again.type = "button";
+    again.title = "마지막 사용자 메시지를 세션에 다시 전달합니다 — daemon에 도착했으나 하네스에 전달되지 못해 유실된 경우에 쓰세요.";
+    again.disabled = !lastUserMsg || inflight.has(`resend:${t.id}:${lastUserMsg.seq}`);
+    again.addEventListener("click", () => lastUserMsg && resendMessage(t.id, lastUserMsg.seq));
+    head.append(toggle, askQa, inv, again);
 
     let guests = null;
     if ((t.guests || []).length || inviting === t.id || t.session !== name) {
@@ -1332,10 +1404,10 @@ globalThis.ThreadsPane = (() => {
     // Reduced harnesses whose stub DOM cannot move a node rebuild as before.
     const kept = main.querySelector(".th-messages");
     const n = convo.messages.length;
-    const sig = askSig(convo.messages);
+    const sig = entrySig(convo.messages);
     const keep = !!kept && kept._thread === t.id && kept._drawn <= n
       && (!kept._drawn || convo.messages[kept._drawn - 1].seq === kept._lastSeq)
-      && kept._askSig === sig
+      && kept._entrySig === sig
       && typeof main.insertBefore === "function" && typeof kept.removeChild === "function";
     const msgs = keep ? kept : node("div", "th-messages");
     const from = keep ? kept._drawn : 0;
@@ -1344,12 +1416,12 @@ globalThis.ThreadsPane = (() => {
     for (const m of convo.messages.slice(from)) {
       if (m.kind === "ask") { msgs.append(askBubble(t, m)); continue; }
       msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
-                         m.files || [], t.id, speaker(m, t.session)));
+                         m.files || [], t.id, speaker(m, t.session), msgActions(t.id, m), msgFlag(m)));
     }
     msgs._thread = t.id;
     msgs._drawn = n;
     msgs._lastSeq = n ? convo.messages[n - 1].seq : null;
-    msgs._askSig = sig;
+    msgs._entrySig = sig;
     const out = pending.get(t.id);
     if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || [], out.files || []));
     if (!n && !out) {
@@ -1439,12 +1511,15 @@ globalThis.ThreadsPane = (() => {
     }
     const t = convo && convo.thread;
     const editing = !!convo && renaming === convo.id;
+    const lastUser = convo && [...convo.messages].reverse().find((m) => m.author === "user");
     const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], t.guests || [],
                                             inviting === convo.id, inflight.has(INVITE), convo.messages.length,
-                                            askSig(convo.messages),
+                                            entrySig(convo.messages),
                                             inflight.has(convo.id), pending.get(convo.id) || null,
                                             (attached.get(convo.id) || []).length,
-                                            editing, inflight.has(RENAME)] : null);
+                                            editing, inflight.has(RENAME),
+                                            lastUser ? inflight.has(`resend:${convo.id}:${lastUser.seq}`) : false]
+                                           : null);
     if (mainSig === drawn.main && main.firstChild) return;
     if (typingIn(main.querySelector(".th-guests"))) return;
     const oldTitleBox = main.querySelector(".th-rename-input");
