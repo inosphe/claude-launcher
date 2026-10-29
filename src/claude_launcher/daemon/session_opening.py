@@ -63,6 +63,7 @@ def _now() -> str:
 
 
 def record(name: str, text: str, *, images: int = 0,
+           image_names: Optional[List[str]] = None,
            files: Optional[List[dict]] = None, at: Optional[str] = None) -> bool:
     """Keep ``text`` as ``name``'s opening. False for an empty block.
 
@@ -71,7 +72,10 @@ def record(name: str, text: str, *, images: int = 0,
     create that fails after this still leaves the file, and a later create
     with the same name overwrites it. ``images`` is a count, not the images:
     they were staged files claimed by the opening, and what can be handed
-    over again is the text. ``files`` are the records (``{id, name, bytes}``)
+    over again is the text. ``image_names`` are the claimed images' file
+    names, so the panel lists this opening's images and no other's (a name
+    used again would otherwise show what an earlier session left in the
+    same state directory). ``files`` are the records (``{id, name, bytes}``)
     of the uploaded files the opening claimed: the session's uploads folder
     also takes files sent later from the session line, so the opening's own
     are named here rather than read off the folder.
@@ -84,6 +88,7 @@ def record(name: str, text: str, *, images: int = 0,
             "text": block,
             "at": at or _now(),
             "images": int(images or 0),
+            "image_names": [str(n) for n in image_names or []],
             "files": list(files or []),
             "chars": len(block),
         },
@@ -123,6 +128,9 @@ def read(name: str) -> Optional[dict]:
         "text": text,
         "at": raw.get("at") or "",
         "images": int(raw.get("images") or 0),
+        # None for a record written before the names were kept.
+        "image_names": ([str(n) for n in raw["image_names"]]
+                        if isinstance(raw.get("image_names"), list) else None),
         "files": [f for f in raw.get("files") or [] if isinstance(f, dict)],
         "chars": len(text),
     }
@@ -132,8 +140,10 @@ def attachments(name: str) -> dict:
     """What session ``name``'s opening carried besides its text, for the
     detail panel's Opening task section to show.
 
-    ``images`` are the image file names in the session's opening-images
-    folder (only an opening writes there, so the folder is the record).
+    ``images`` are the images the recorded opening names and that are still
+    on disk. A record written before the names were kept falls back to the
+    session's opening-images folder (a create empties it before claiming,
+    so it holds the latest opening's images).
     ``files`` are the uploads the recorded opening named, each with
     ``missing: true`` once its file is no longer on disk. A session with no
     recorded opening has no file list: its uploads folder cannot tell an
@@ -148,8 +158,19 @@ def attachments(name: str) -> dict:
             entry["missing"] = True
         files.append(entry)
     images = [{"name": img, "type": opening_images.media_type(img)}
-              for img in opening_images.claimed(name)]
+              for img in image_names(name, found)]
     return {"images": images, "files": files}
+
+
+def image_names(name: str, found: Optional[dict] = None) -> List[str]:
+    """The image file names session ``name``'s opening carried that are
+    still on disk -- what the panel lists and the image route serves."""
+    if found is None:
+        found = read(name) or {}
+    named = found.get("image_names")
+    if named is None:
+        return opening_images.claimed(name)
+    return [n for n in named if opening_images.claimed_path(name, n) is not None]
 
 
 def recompose(sdef) -> str:

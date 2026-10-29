@@ -216,6 +216,23 @@ def test_the_session_line_upload_goes_straight_into_the_session(home, tmp_path):
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
 
 
+def test_a_session_file_is_only_a_pair_this_module_writes(home):
+    """``session_file`` answers for ``<id>/<name>`` only, even when a file
+    sits at the path another id or name would reach (s597-rev @ 133b3281)."""
+    fid = "a" * 20
+    root = uploads.session_dir("w1")
+    (root / fid).mkdir(parents=True)
+    (root / fid / "ok.txt").write_text("x")
+    (root / "not-an-id").mkdir()
+    (root / "not-an-id" / "ok.txt").write_text("x")
+    (root / fid / "sub").mkdir()
+    (root / fid / "sub" / "deep.txt").write_text("x")
+    assert uploads.session_file("w1", fid, "ok.txt") == root / fid / "ok.txt"
+    assert uploads.session_file("w1", "not-an-id", "ok.txt") is None
+    assert uploads.session_file("w1", fid, "sub/deep.txt") is None
+    assert uploads.session_file("w1", fid, "gone.txt") is None
+
+
 def test_the_opening_attachments_are_listed_and_served(home, tmp_path):
     from claude_launcher.daemon import opening_images
 
@@ -229,6 +246,12 @@ def test_the_opening_attachments_are_listed_and_served(home, tmp_path):
         # An image claimed the way a create with opening_images claims it;
         # the paste route that hands it to the harness is not this test's.
         image = opening_images.claim([opening_images.stage([PNG], "image/png")], "u5")[0].path.name
+        # ...and named in the record, as the create names what it claimed.
+        from claude_launcher.daemon import session_opening
+        rec = session_opening.read("u5")
+        assert rec["image_names"] == []
+        session_opening.record("u5", rec["text"], images=1, image_names=[image],
+                               files=rec["files"])
         # A file sent later from the session line lands in the same folder
         # and is not the opening's.
         later = await (await client.post("/api/sessions/u5/uploads", params={"name": "later.txt"},

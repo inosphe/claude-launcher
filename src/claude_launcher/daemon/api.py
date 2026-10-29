@@ -11683,6 +11683,7 @@ async def _onboard_and_launch(
     # it costs the panel its re-inject, not the agent its job.
     try:
         session_opening.record(name, opening, images=len(images),
+                               image_names=[img.path.name for img in images],
                                files=[f.record() for f in files])
     except OSError:
         log.warning("could not record the opening of %r", name, exc_info=True)
@@ -15811,8 +15812,12 @@ async def h_session_opening_attachments(request: web.Request) -> web.Response:
 async def h_session_opening_image(request: web.Request) -> web.Response:
     """One image the opening carried, as an image the browser can draw."""
     session = _session(request)
+    name = session.sdef.name
     image = request.match_info["image"]
-    path = await asyncio.to_thread(opening_images.claimed_path, session.sdef.name, image)
+    # Only images this opening names: the folder may hold an earlier
+    # same-name session's (session_opening.image_names).
+    named = image in await asyncio.to_thread(session_opening.image_names, name)
+    path = (await asyncio.to_thread(opening_images.claimed_path, name, image)) if named else None
     if path is None:
         return json_response(
             {"error": f"{session.sdef.name}'s opening has no image {image}"}, status=404)

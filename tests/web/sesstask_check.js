@@ -106,6 +106,7 @@ new Function("exports", "document", "el", "refreshSession", "sessOpeningActions"
   slice("uploadSize") + `
 const sessTaskOpen = new Set();
 const sessOpeningAttach = new Map();
+const OPENING_ATTACH_RETRY_MS = 30000;
 Object.assign(exports, {
   task: sessTask, long: taskIsLong, open: sessTaskOpen, attach: sessOpeningAttach,
 });`)(ctx, document, el, () => { redraws++; }, sessOpeningActionsStub, api, url);
@@ -234,6 +235,11 @@ async function attachments() {
   check("the first draw asks the daemon", asked.filter((a) => a.includes("s300")),
         ["/api/sessions/s300/opening/attachments"]);
   check("...and draws nothing while it waits", box.find("sess-task-attach").length, 0);
+  // The panel is rebuilt every 2s; a rebuild before the answer lands must
+  // not ask again (s648-rev @ 133b3281: the "loading" mark went untested).
+  ctx.task({ name: "s300", task: SHORT });
+  check("a redraw while it waits does not ask again",
+        asked.filter((a) => a.includes("s300")).length, 1);
   await new Promise((r) => setTimeout(r, 0));
   check("the answer asks for a redraw", redraws - drawn, 1);
   box = ctx.task({ name: "s300", task: SHORT });
@@ -265,6 +271,23 @@ async function attachments() {
         ctx.task({ name: "s302", task: SHORT }).find("sess-task-attach").length, 0);
   check("an empty task still shows what the opening carried",
         ctx.task({ name: "s300" }).find("sess-task-attach").length, 1);
+  /* A name can be used again for a new session: the answer is held per
+     creation, so the new one asks for its own list. */
+  const n300 = asked.filter((a) => a.includes("s300")).length;
+  ctx.task({ name: "s300", task: SHORT, created_at: "2026-10-29T10:00:00Z" });
+  check("the same name created again asks again",
+        asked.filter((a) => a.includes("s300")).length - n300, 1);
+  /* A failed request is not held as "none" for the life of the page. */
+  const n302 = asked.filter((a) => a.includes("s302")).length;
+  ctx.task({ name: "s302", task: SHORT });
+  check("a failed answer is not asked again at once",
+        asked.filter((a) => a.includes("s302")).length - n302, 0);
+  ctx.attach.get("s302\n").retryAt = Date.now() - 1;
+  ctx.task({ name: "s302", task: SHORT });
+  check("...but is asked again once its retry time has passed",
+        asked.filter((a) => a.includes("s302")).length - n302, 1);
+  await new Promise((r) => setTimeout(r, 0));
+  check("an answered list is never asked again", ctx.attach.get("s301\n").retryAt, undefined);
   check("a nameless row asks nothing", (() => {
     const n = asked.length; ctx.task({ task: SHORT }); return asked.length - n;
   })(), 0);

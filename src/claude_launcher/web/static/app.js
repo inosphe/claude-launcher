@@ -48626,7 +48626,7 @@ function sessTask(s) {
     }
   }
   if (name) {
-    const attached = sessOpeningAttachments(name);
+    const attached = sessOpeningAttachments(s);
     if (attached) box.appendChild(attached);
   }
   // Guarded with typeof: harnesses that slice this section alone do not
@@ -48749,22 +48749,28 @@ function sessOpeningContexts(s) {
    The list comes from GET /api/sessions/<name>/opening/attachments, once per
    session: what an opening carried does not change after creation, and the
    panel is rebuilt every 2s, so the answer is held in a map outside it. The
+   key is the name AND its creation time, because a name can be used again
+   for a new session with a different opening. A request that failed is
+   asked again after OPENING_ATTACH_RETRY_MS rather than held as "none". The
    first draw asks and draws nothing; the answer redraws the panel. A
    session with no attachments draws nothing either -- most sessions have
    none, and an empty "attachments" line under every task would be noise. */
-const sessOpeningAttach = new Map();   // session name -> {images, files} | "loading"
+const sessOpeningAttach = new Map();   // name + created_at -> {images, files, retryAt?} | "loading"
+const OPENING_ATTACH_RETRY_MS = 30000;
 
-function sessOpeningAttachments(name) {
-  const got = sessOpeningAttach.get(name);
-  if (got === undefined) {
-    sessOpeningAttach.set(name, "loading");
+function sessOpeningAttachments(s) {
+  const name = s.name || "";
+  const key = `${name}\n${s.created_at || ""}`;
+  const got = sessOpeningAttach.get(key);
+  if (got === undefined || (got.retryAt && Date.now() >= got.retryAt)) {
+    sessOpeningAttach.set(key, "loading");
     api(`/api/sessions/${encodeURIComponent(name)}/opening/attachments`)
       .then((resp) => (resp.ok ? resp.json() : null))
       .catch(() => null)
       .then((doc) => {
-        sessOpeningAttach.set(name, {
-          images: (doc && doc.images) || [], files: (doc && doc.files) || [],
-        });
+        sessOpeningAttach.set(key, doc
+          ? { images: doc.images || [], files: doc.files || [] }
+          : { images: [], files: [], retryAt: Date.now() + OPENING_ATTACH_RETRY_MS });
         refreshSession();
       });
     return null;

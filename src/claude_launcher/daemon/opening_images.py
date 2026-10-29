@@ -135,10 +135,21 @@ def check_ids(raw, *, field: str = "opening_images",
 
 
 def claim(ids: List[str], name: str) -> List[Image]:
-    """Move staged images into session ``name``'s state directory, in order."""
+    """Move staged images into session ``name``'s state directory, in order.
+
+    The folder is emptied first, even when ``ids`` is empty: a session's
+    state directory outlives the session, and a person may create a new
+    session under a name they used before. Without this the new session's
+    opening would list (and serve) the old one's images as its own.
+    """
+    folder = session_dir(name)
+    for old in claimed(name):
+        try:
+            (folder / old).unlink()
+        except OSError:
+            pass  # gone already; claimed() lists only what is there
     if not ids:
         return []
-    folder = session_dir(name)
     folder.mkdir(parents=True, exist_ok=True)
     out: List[Image] = []
     for n, image_id in enumerate(ids, start=1):
@@ -151,8 +162,8 @@ def claim(ids: List[str], name: str) -> List[Image]:
 
 def claimed(name: str) -> List[str]:
     """The images session ``name``'s opening carried, by file name, in the
-    order they went in. Only :func:`claim` writes that folder, so what is in
-    it is the opening's and nothing else's."""
+    order they went in. Only :func:`claim` writes that folder, and it empties
+    it first, so what is in it is this opening's and nothing else's."""
     folder = session_dir(name)
     try:
         found = [p.name for p in folder.iterdir() if p.is_file() and _CLAIMED.match(p.name)]
