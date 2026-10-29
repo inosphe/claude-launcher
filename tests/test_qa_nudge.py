@@ -115,13 +115,14 @@ def on(home, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     store.set_daemon_field("qa_nudge", True)
     monkeypatch.setenv("TYPESAFE_API_KEY", "k-test")
-    state = {"records": list(ASKING), "calls": [], "answer": ("use_qa", 0.9)}
+    state = {"records": list(ASKING), "calls": [], "kw": [], "answer": ("use_qa", 0.9)}
 
     def page(name, sdef, *, before=None, limit=40):
         return {"records": state["records"], "source": f"/t/{name}.jsonl"}
 
-    async def system_one(cfg, st, questions, *, key=None, model=None):
+    async def system_one(cfg, st, questions, *, key=None, model=None, **kw):
         state["calls"].append((st, questions, key))
+        state["kw"].append(kw)
         choice, conf = state["answer"]
         return {"model": "jev-1.13.0", "usage": {"input_tokens": 300, "output_tokens": 20},
                 "answers": {"action": {"type": "choice", "choice": choice,
@@ -274,6 +275,8 @@ def test_use_qa_is_delivered_and_journaled(on):
     st, questions, key = on["calls"][0]
     assert key == "k-test"
     assert st["agent_final_message"].startswith("Two ways")
+    # the usage ledger charges the call to this feature and session (claunch-60y0d)
+    assert on["kw"][0] == {"feature": "qa_nudge", "session": "s1"}
     row = _journal()[-1]
     assert row["action"] == "use_qa" and row["delivered"] is True
     assert row["usage"]["input_tokens"] == 300
@@ -376,7 +379,7 @@ def test_no_nudge_into_a_session_that_moved_on(on, monkeypatch):
     clock = _clock(s)
     _turn(clock, s)
 
-    async def busy_meanwhile(cfg, st, questions, *, key=None, model=None):
+    async def busy_meanwhile(cfg, st, questions, *, key=None, model=None, **_kw):
         s.status_value = "busy"
         return {"answers": {"action": {"choice": "use_qa", "confidence": 0.9}}}
 
@@ -387,7 +390,7 @@ def test_no_nudge_into_a_session_that_moved_on(on, monkeypatch):
 
 
 def test_jev_error_is_journaled_not_raised(on, monkeypatch):
-    async def boom(cfg, st, questions, *, key=None, model=None):
+    async def boom(cfg, st, questions, *, key=None, model=None, **_kw):
         raise jev.JevError("Jev HTTP 422")
     monkeypatch.setattr(jev, "system_one", boom)
     s = _FakeSession("s1")

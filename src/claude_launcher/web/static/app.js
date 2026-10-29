@@ -33407,6 +33407,10 @@ let statsIncludeArchived = false; // archived rows in the table
 let statsOverview = null;     // the window payload
 let statsOverviewError = "";
 let statsProvider = "";       // "" every provider, else one label
+let statsLlm = null;          // GET /api/stats/llm-usage: the daemon's own LLM calls
+let statsLlmError = "";
+let statsLlmProvider = "";    // that section's own provider filter
+let statsLlmSeq = 0;
 /* The API's own cap (statscompare.MAX_SESSIONS). */
 const STATS_COMPARE_MAX = 12;
 
@@ -33471,7 +33475,9 @@ function statsSchedule(partial) {
 async function refreshStats() {
   if (!statsPageOpen) return;
   if (statsCompare) return refreshStatsCompare();
-  await refreshStatsOverview();
+  // The section's request goes out first so the overview's stays the last
+  // one sent: both are one round trip and neither waits on the other.
+  await Promise.all([refreshStatsLlm(), refreshStatsOverview()]);
   if (statsSession) await refreshStatsDetail();
   statsSchedule(!!(statsCache && statsCache.partial));
   if (statsPageOpen) renderStats();
@@ -33498,6 +33504,28 @@ async function refreshStatsOverview() {
       statsOverview = data;
       statsOverviewError = "";
     }
+  } catch { /* api() owns auth and recovery */ }
+}
+
+/* The daemon's own LLM calls (briefing, observer, search embedding/rerank,
+   Jev) for the same window. They never reach the routing shim, so the
+   overview's ledger does not hold them: daemon/llm_usage.py keeps its own. */
+async function refreshStatsLlm() {
+  const seq = ++statsLlmSeq;
+  const q = `window=${statsWindow}` +
+    (statsLlmProvider ? `&provider=${encodeURIComponent(statsLlmProvider)}` : "");
+  try {
+    const resp = await api(`/api/stats/llm-usage?${q}`);
+    if (seq !== statsLlmSeq) return;
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404 && !data.error) {
+      statsLlmError = "this daemon predates the daemon-LLM ledger — ask the " +
+        "operator to restart the daemon to pick up this version";
+      statsLlm = null;
+    } else if (!resp.ok) {
+      statsLlmError = data.error || `HTTP ${resp.status}`;
+      statsLlm = null;
+    } else { statsLlm = data; statsLlmError = ""; }
   } catch { /* api() owns auth and recovery */ }
 }
 
@@ -33796,6 +33824,7 @@ function statsWindowTabs() {
       if (statsWindow === key) return;
       statsWindow = key;
       statsOverview = null;
+      statsLlm = null;
       renderStats();
       refreshStats();
     });
@@ -34268,6 +34297,221 @@ const STATS_METHOD = [
     "the totals and are credited like the parent's.",
 ];
 
+/* ---- the daemon's own LLM calls ------------------------------------ */
+const STATS_LLM_FEATURES = {
+  briefing: "session briefing cards (and the Settings connection test)",
+  observer: "Observer passes over a session's records",
+  embedding: "search index and query embeddings",
+  rerank: "search result reranking",
+  jev: "Jev System One: QA nudge, megathread routing",
+};
+
+function setStatsLlmProvider(name) {
+  statsLlmProvider = name || "";
+  statsLlm = null;
+  renderStats();
+  refreshStatsLlm().then(() => { if (statsPageOpen) renderStats(); });
+}
+
+/* A row's token figure, or — when the provider reported no count for any of
+   its calls: "not reported" is not "spent nothing". */
+function statsLlmTokens(r) {
+  if (!r.total && r.unreported && r.unreported === r.calls) {
+    const dash = el("span", "stats-llm-unreported", "—");
+    dash.title = "the provider reported no token count for these calls";
+    return dash;
+  }
+  return el("span", "stats-rowvalue", usageShort(r.total || 0));
+}
+
+function statsLlmTable(heads, rows, cells) {
+  const table = el("table", "stats-table stats-llm-table");
+  const head = el("tr");
+  for (const h of heads) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  const peak = Math.max(1, ...rows.map((r) => r.total || 0));
+  for (const r of rows) {
+    const row = el("tr", "stats-llm-row");
+    for (const cell of cells(r, peak)) row.appendChild(cell);
+    table.appendChild(row);
+  }
+  return table;
+}
+
+function statsLlmBar(r, peak) {
+  const td = el("td", "num stats-tokens-cell");
+  if (r.total) {
+    const bar = el("span", "stats-rowbar stats-llm-rowbar");
+    const fill = el("span", "stats-llm-rowbar-fill");
+    fill.style.width = ((r.total / peak) * 100).toFixed(2) + "%";
+    bar.appendChild(fill);
+    td.appendChild(bar);
+  }
+  td.appendChild(statsLlmTokens(r));
+  td.title = `fresh input ${(r.input || 0).toLocaleString()}, cache read ` +
+    `${(r.cache_read || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
+  return td;
+}
+
+function statsLlmCalls(r) {
+  const td = el("td", "num", (r.calls || 0).toLocaleString());
+  if (r.errors) {
+    const err = el("span", "stats-badge stats-llm-errors", `${r.errors} failed`);
+    err.title = "calls that failed (HTTP error, transport error or an unusable answer)";
+    td.appendChild(err);
+  }
+  return td;
+}
+
+function statsLlmChips(list, key) {
+  const td = el("td", "stats-provider-cell");
+  for (const item of list || []) {
+    const name = typeof item === "string" ? item : item[key];
+    if (!name) continue;
+    const chip = el("span", "stats-chip", name);
+    if (typeof item !== "string") {
+      chip.title = `${name}: ${(item.calls || 0).toLocaleString()} calls, ` +
+        `${usageShort(item.total || 0)} tokens`;
+    }
+    td.appendChild(chip);
+  }
+  return td;
+}
+
+function statsLlmProviderStrip(d) {
+  const box = el("div", "stats-providers stats-llm-providers");
+  const all = el("button", "stats-llm-provider" + (statsLlmProvider ? "" : " active"));
+  all.type = "button";
+  all.dataset.llmProvider = "";
+  const every = d.all_providers || [];
+  all.append(el("span", "stats-provider-name", "All providers"),
+             el("span", "stats-provider-total",
+               usageShort(every.reduce((n, p) => n + (p.total || 0), 0))),
+             el("span", "stats-provider-sessions",
+               `${every.reduce((n, p) => n + (p.calls || 0), 0)} calls`));
+  all.addEventListener("click", () => setStatsLlmProvider(""));
+  box.appendChild(all);
+  for (const p of every) {
+    const on = statsLlmProvider === p.provider;
+    const b = el("button", "stats-llm-provider" + (on ? " active" : ""));
+    b.type = "button";
+    b.dataset.llmProvider = p.provider;
+    b.append(el("span", "stats-provider-name", p.provider),
+             el("span", "stats-provider-total", usageShort(p.total || 0)),
+             el("span", "stats-provider-sessions", `${p.calls} calls`));
+    b.addEventListener("click", () => setStatsLlmProvider(on ? "" : p.provider));
+    box.appendChild(b);
+  }
+  return box;
+}
+
+/* Calls per day, one bar per day split by feature. */
+function statsLlmDays(d) {
+  const days = d.days || [];
+  const peak = Math.max(1, ...days.map((x) => x.total || 0));
+  const box = el("div", "stats-llm-days");
+  for (const day of days) {
+    const col = el("div", "stats-llm-day");
+    const bar = el("div", "stats-llm-daybar");
+    for (const f of Object.keys(STATS_LLM_FEATURES)) {
+      const v = (day.features || {})[f] || 0;
+      if (!v) continue;
+      const seg = el("span", `stats-llm-seg llm-${f}`);
+      seg.style.height = ((v / peak) * 100).toFixed(2) + "%";
+      seg.title = `${day.day} · ${f}: ${usageShort(v)} tokens`;
+      bar.appendChild(seg);
+    }
+    col.title = `${day.day}: ${(day.calls || 0).toLocaleString()} calls, ` +
+      `${usageShort(day.total || 0)} tokens`;
+    col.append(bar, el("span", "stats-llm-daylabel", String(day.day).slice(5)));
+    box.appendChild(col);
+  }
+  const legend = el("div", "stats-llm-legend");
+  for (const f of Object.keys(STATS_LLM_FEATURES)) {
+    const item = el("span", "stats-llm-legend-item");
+    item.append(el("span", `stats-llm-swatch llm-${f}`), el("span", null, f));
+    legend.appendChild(item);
+  }
+  const wrap = el("div");
+  wrap.append(box, legend);
+  return wrap;
+}
+
+function statsLlmSection() {
+  const body = el("div", "stats-llm");
+  if (statsLlmError) body.appendChild(el("p", "wf-warning", statsLlmError));
+  const d = statsLlm;
+  if (!d) {
+    if (!statsLlmError) body.appendChild(el("p", "wf-note", "loading…"));
+    return statsSection("Daemon LLM calls", null, body);
+  }
+  const t = d.totals || {};
+  body.appendChild(el("p", "wf-note",
+    "Calls the daemon makes itself — briefing, Observer, search embedding and " +
+    "rerank, Jev. They do not go through the routing shim, so they are not " +
+    "in the session figures above."));
+  body.appendChild(statsLlmProviderStrip(d));
+  const summary = el("div", "window-summary");
+  summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
+    `${(t.calls || 0).toLocaleString()} calls`));
+  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
+    `cache read ${usageShort(t.cache_read || 0)}`));
+  summary.appendChild(statsCard("Output", usageShort(t.output || 0), ""));
+  summary.appendChild(statsCard("Failed", (t.errors || 0).toLocaleString(),
+    `${(t.unreported || 0).toLocaleString()} without a token count`));
+  body.appendChild(summary);
+  if (d.ledger_since && d.ledger_since > ((d.days || [])[0] || {}).day) {
+    body.appendChild(el("p", "wf-note stats-partial",
+      `this ledger starts ${d.ledger_since}: earlier calls were not recorded`));
+  }
+  if (!t.calls) {
+    body.appendChild(el("p", "wf-note", "no daemon LLM call in this window"));
+    return statsSection("Daemon LLM calls", 0, body);
+  }
+  body.appendChild(statsLlmDays(d));
+
+  const features = d.features || [];
+  body.appendChild(el("h4", "stats-llm-sub", "By feature"));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["feature", "purpose", "tokens", "calls"], features, (r, peak) => {
+      const name = el("td", "stats-session-cell", r.feature);
+      name.title = STATS_LLM_FEATURES[r.feature] || "";
+      return [name, statsLlmChips(r.purposes, "purpose"), statsLlmBar(r, peak),
+              statsLlmCalls(r)];
+    })));
+
+  body.appendChild(el("h4", "stats-llm-sub", "By provider"));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["provider", "model", "feature", "tokens", "calls"], d.providers || [],
+    (r, peak) => [el("td", "stats-session-cell", r.provider),
+                  statsLlmChips(r.models, "model"),
+                  statsLlmChips(r.features, "feature"),
+                  statsLlmBar(r, peak), statsLlmCalls(r)])));
+
+  const sessions = d.sessions || [];
+  const today = (d.until || "").slice(0, 10);
+  body.appendChild(el("h4", "stats-llm-sub", `By session (${sessions.length})`));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["session", "feature", "provider", "tokens", "calls", "last call"], sessions,
+    (r, peak) => {
+      const name = el("td", "stats-session-cell");
+      if (r.session) {
+        const link = el("a", null, r.session);
+        link.href = `#/stats/${encodeURIComponent(r.session)}`;
+        name.appendChild(link);
+      } else {
+        const none = el("span", "stats-llm-unreported", "(no session)");
+        none.title = "calls about no one session: an index pass over issues " +
+          "nobody owns, a search query, a connection test, megathread routing";
+        name.appendChild(none);
+      }
+      return [name, statsLlmChips(r.features, "feature"),
+              statsLlmChips(r.providers), statsLlmBar(r, peak), statsLlmCalls(r),
+              el("td", "stats-last-cell", statsStamp(r.last_at, today))];
+    })));
+  return statsSection("Daemon LLM calls", t.calls, body);
+}
+
 const STATS_WINDOW_METHOD = [
   "window figures: summed from the metering ledger, one line per API request " +
     "the routing shim forwarded. total = fresh input + cache read + cache " +
@@ -34284,6 +34528,15 @@ const STATS_WINDOW_METHOD = [
   "provider filter: a provider card narrows the summary and the table to that " +
     "provider's part of the window. A transcript row is filed under the " +
     "provider its profile declares; a row shown as — counts toward none.",
+  "daemon LLM calls: one count per request the daemon itself makes " +
+    "(daemon/llm_usage.py), with the provider's own token counts. An " +
+    "embedding request covering several sessions' documents is written as " +
+    "one ledger line per session, its tokens shared out by text length; the " +
+    "totals, feature and provider rows count that request once, while each " +
+    "session row counts every request it took part in, so the session rows " +
+    "can add up to more calls than the total (their tokens still add up). A " +
+    "call whose provider reported no count is counted as a call and shown " +
+    "as —, never as 0.",
 ];
 
 /* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
@@ -34624,6 +34877,8 @@ function renderStatsOverview(main) {
   main.appendChild(statsSection(`Sessions by usage`, rows.length,
     rows.length ? statsScroll(statsOverviewTable(d))
       : el("p", "wf-note", "no session worked in this window")));
+
+  main.appendChild(statsLlmSection());
 
   const notes = el("ul", "stats-method");
   for (const line of STATS_WINDOW_METHOD) notes.appendChild(el("li", null, line));

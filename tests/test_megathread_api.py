@@ -177,7 +177,7 @@ def test_t2_foreign_thread_and_unknown_session(tmp_path):
 
 
 def test_t3_auto_routes_to_one_member_only(tmp_path, monkeypatch):
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         title = state["thread"]["title"]
         return jev_answer(0.97 if title == "log format" else 0.02)
 
@@ -203,7 +203,7 @@ def test_t3_auto_routes_to_one_member_only(tmp_path, monkeypatch):
 
 
 def test_t4_choose_then_deliver_to_the_picks(tmp_path, monkeypatch):
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.9)
 
     monkeypatch.setattr(jev, "system_one", fake_system_one)
@@ -289,7 +289,7 @@ def test_t6_settings_report_and_partial_update(tmp_path, monkeypatch):
 
 
 def test_t7_none_delivers_nothing(tmp_path, monkeypatch):
-    async def low(cfg, state, questions, *, key=None, model=None):
+    async def low(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.2)
 
     monkeypatch.setattr(jev, "system_one", low)
@@ -308,7 +308,7 @@ def test_t7_none_delivers_nothing(tmp_path, monkeypatch):
 
 
 def test_t8_error_delivers_nothing_and_is_charged(tmp_path, monkeypatch):
-    async def boom(cfg, state, questions, *, key=None, model=None):
+    async def boom(cfg, state, questions, *, key=None, model=None, **_kw):
         raise jev.JevError("HTTP 500")
 
     monkeypatch.setattr(jev, "system_one", boom)
@@ -329,7 +329,7 @@ def test_t8_error_delivers_nothing_and_is_charged(tmp_path, monkeypatch):
 
 
 def test_t9_a_failed_call_beside_a_hit_offers_the_hit(tmp_path, monkeypatch):
-    async def half(cfg, state, questions, *, key=None, model=None):
+    async def half(cfg, state, questions, *, key=None, model=None, **_kw):
         if state["thread"]["title"] == "a":
             raise jev.JevError("HTTP 500")
         return jev_answer(0.97)
@@ -352,7 +352,7 @@ def test_t9_a_failed_call_beside_a_hit_offers_the_hit(tmp_path, monkeypatch):
 
 
 def test_t10_a_deleted_thread_is_a_member_error(tmp_path, monkeypatch):
-    async def high(cfg, state, questions, *, key=None, model=None):
+    async def high(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97)
 
     monkeypatch.setattr(jev, "system_one", high)
@@ -392,7 +392,7 @@ def test_t11_the_manual_path_writes_once_to_the_threads_it_names(tmp_path, monke
 
 
 def test_t12_the_budget_boundary_is_inclusive(tmp_path, monkeypatch):
-    async def ok(cfg, state, questions, *, key=None, model=None):
+    async def ok(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2, tokens=100)
 
     monkeypatch.setattr(jev, "system_one", ok)
@@ -449,7 +449,7 @@ def test_t14_a_non_finite_setting_is_refused(tmp_path, monkeypatch):
 
 
 def test_t15_concurrent_routings_share_one_budget_check(tmp_path, monkeypatch):
-    async def slow(cfg, state, questions, *, key=None, model=None):
+    async def slow(cfg, state, questions, *, key=None, model=None, **_kw):
         await asyncio.sleep(0.05)
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2, tokens=1000)
 
@@ -471,7 +471,7 @@ def test_t15_concurrent_routings_share_one_budget_check(tmp_path, monkeypatch):
 
 
 def test_t16_a_log_failure_does_not_undo_the_delivery(tmp_path, monkeypatch):
-    async def ok(cfg, state, questions, *, key=None, model=None):
+    async def ok(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
     monkeypatch.setattr(jev, "system_one", ok)
@@ -499,7 +499,7 @@ def test_t17_a_delivery_nobody_accepted_is_not_logged_as_delivered(tmp_path, mon
     terminal", so it stays false."""
     from claude_launcher.daemon import thread_notices
 
-    async def high(cfg, state, questions, *, key=None, model=None):
+    async def high(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
     monkeypatch.setattr(jev, "system_one", high)
@@ -523,7 +523,7 @@ def test_t17_a_delivery_nobody_accepted_is_not_logged_as_delivered(tmp_path, mon
 
 
 def test_t18_close_and_reopen(tmp_path, monkeypatch):
-    async def ok(cfg, state, questions, *, key=None, model=None):
+    async def ok(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
     monkeypatch.setattr(jev, "system_one", ok)
@@ -598,7 +598,7 @@ def test_t20_a_mention_that_names_only_a_guest_is_delivered_to_that_guest(tmp_pa
     mentions decide who is typed into. When the message names a guest and not
     the owner, the ledger row has to follow the guest -- otherwise the ring
     says "대기 중" about a message a session already received."""
-    async def high(cfg, state, questions, *, key=None, model=None):
+    async def high(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
     monkeypatch.setattr(jev, "system_one", high)
@@ -628,7 +628,7 @@ def test_t21_an_exited_guest_beside_a_live_owner_leaves_the_row_delivered(tmp_pa
     guest. If one guest is gone, that one block is queued for its next launch
     -- but the owner's terminal already has it, so the row (and the ring's
     "전달됨") must not read as queued for the whole message."""
-    async def high(cfg, state, questions, *, key=None, model=None):
+    async def high(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.97 if state["thread"]["title"] == "a" else 0.2)
 
     monkeypatch.setattr(jev, "system_one", high)
@@ -661,7 +661,7 @@ def test_t22_a_topic_preview_scores_the_fleet_and_writes_nothing(tmp_path, monke
     session, and its spend lands on the draft ledger."""
     seen = []
 
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         seen.append((questions, state["session"]["name"]))
         return jev_answer(0.95 if state["session"]["name"] == "s1" else 0.05)
 
@@ -697,7 +697,7 @@ def test_t22_a_topic_preview_scores_the_fleet_and_writes_nothing(tmp_path, monke
 def test_t23_the_preview_has_its_own_budget(tmp_path, monkeypatch):
     """A routing's spend must not close the preview, and a preview's must not
     close a routing: they are two ceilings over one ledger."""
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.9)
 
     monkeypatch.setattr(jev, "system_one", fake_system_one)
@@ -753,7 +753,7 @@ def test_t25_a_preview_does_not_close_a_routing(tmp_path, monkeypatch):
     to sum every ledger row, so a few previews spent the routing ceiling and
     a real message came back 429 while no routing had spent anything
     (claunch-vz96l review on d705569d)."""
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         return jev_answer(0.9, tokens=200)
 
     monkeypatch.setattr(jev, "system_one", fake_system_one)
@@ -805,7 +805,7 @@ class FakeBoard:
 def test_t24_the_preview_reads_each_sessions_issue_titles_from_the_board(tmp_path, monkeypatch):
     seen = {}
 
-    async def fake_system_one(cfg, state, questions, *, key=None, model=None):
+    async def fake_system_one(cfg, state, questions, *, key=None, model=None, **_kw):
         seen[state["session"]["name"]] = state
         return jev_answer(0.9)
 

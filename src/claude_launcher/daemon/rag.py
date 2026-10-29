@@ -86,7 +86,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTupl
 import aiohttp
 
 from .. import atomic, beads_db, cli_beads, routing, store
-from . import paths, pools, search_keywords
+from . import llm_usage, paths, pools, search_keywords
 
 try:
     import ssl as _ssl
@@ -279,18 +279,53 @@ class RagClient:
             timeout=aiohttp.ClientTimeout(total=self.timeout),
         )
 
-    async def _post(self, http: aiohttp.ClientSession, path: str, body: dict) -> Any:
+    async def _post(self, http: aiohttp.ClientSession, path: str, body: dict,
+                    meter: Optional[Callable[..., None]] = None) -> Any:
+        started = time.monotonic()
+
+        def done(data=None, error: str = "") -> None:
+            if meter is not None:
+                meter(usage=(data.get("usage") if isinstance(data, dict) else None),
+                      ok=not error, error=error, seconds=time.monotonic() - started)
+
         try:
             async with http.post(self.base + path, json=body) as resp:
                 if resp.status != 200:
                     snippet = (await resp.text())[:300]
+                    done(error=f"HTTP {resp.status}")
                     raise RagError(f"rag endpoint answered {resp.status} on {path}: {snippet}")
-                return await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    done(error="response is not JSON")
+                    raise RagError(f"rag response on {path} is not JSON: {exc}") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            done(error=type(exc).__name__)
             raise RagError(f"rag call failed on {path}: {exc}") from exc
+        done(data)
+        return data
 
-    async def embed(self, texts: List[str]) -> List[array]:
-        """One unit vector per text, in order; batched by ``batch``."""
+    def _meter(self, feature: str, model: str, purpose: str,
+               owners: Optional[List[str]] = None,
+               weights: Optional[List[int]] = None) -> Callable[..., None]:
+        """The ledger write for one request (claunch-60y0d): a request whose
+        inputs belong to several sessions is shared out over them by length."""
+        common = {"provider": str(self.cfg.get("provider") or ""), "endpoint": self.base,
+                  "model": model, "purpose": purpose}
+
+        def meter(usage=None, **kw) -> None:
+            if owners and weights:
+                llm_usage.record_shared(feature, owners, weights, usage, **common, **kw)
+            else:
+                llm_usage.record(feature, usage=usage, **common, **kw)
+        return meter
+
+    async def embed(self, texts: List[str], *, owners: Optional[List[str]] = None,
+                    purpose: str = "index") -> List[array]:
+        """One unit vector per text, in order; batched by ``batch``.
+
+        ``owners`` names, per text, the session it belongs to (``""`` for
+        none); the call's tokens are metered against them."""
         if not texts:
             return []
         out: List[array] = []
@@ -301,7 +336,11 @@ class RagClient:
                 dims = int(self.cfg.get("dimensions") or 0)
                 if dims > 0:
                     body["dimensions"] = dims
-                data = await self._post(http, "/embeddings", body)
+                meter = self._meter(
+                    "embedding", str(self.cfg["embedding_model"]), purpose,
+                    owners[start:start + self.batch] if owners else None,
+                    [len(t) for t in chunk])
+                data = await self._post(http, "/embeddings", body, meter)
                 try:
                     rows = sorted(data["data"], key=lambda r: int(r.get("index", 0)))
                     vecs = [unit(r["embedding"]) for r in rows]
@@ -324,8 +363,9 @@ class RagClient:
             "documents": documents,
             "top_n": max(1, min(top_n, len(documents))),
         }
+        meter = self._meter("rerank", str(self.cfg["rerank_model"]), "query")
         async with self._session() as http:
-            data = await self._post(http, "/rerank", body)
+            data = await self._post(http, "/rerank", body, meter)
         # Cohere and Jina answer in ``results``; Fireworks answers the same rows
         # in ``data`` (measured 2026-10-22, claunch-gm0b9).
         try:
@@ -345,6 +385,24 @@ class Doc(NamedTuple):
     hash: str
     chunks: List[str]
     meta: dict
+
+
+def doc_session(doc: Doc) -> str:
+    """The session a document is about, for metering its embedding.
+
+    A session document names it (``name``); a record or an issue lists the
+    sessions it belongs to (``sessions``) and the first is taken; an issue no
+    session matched falls back to its assignee. ``""`` when none applies.
+    """
+    meta = doc.meta if isinstance(doc.meta, dict) else {}
+    owners = meta.get("sessions")
+    if isinstance(owners, list):
+        for owner in owners:
+            if isinstance(owner, dict) and owner.get("name"):
+                return str(owner["name"])
+    if meta.get("kind") in (None, "session") and meta.get("name"):
+        return str(meta["name"])
+    return str(meta.get("assignee") or "")
 
 
 def content_hash(*parts: Optional[str]) -> str:
@@ -1270,7 +1328,8 @@ class RagService:
 
     async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress) -> None:
         texts = [c for d in group for c in d.chunks]
-        vecs = await client.embed(texts)
+        owners = [doc_session(d) for d in group for _ in d.chunks]
+        vecs = await client.embed(texts, owners=owners)
         await pools.background(self._put_group, index, group, vecs)
         prog.indexed += len(group)
         prog.pending = max(0, prog.pending - len(group))
@@ -1570,7 +1629,7 @@ class RagService:
         if hit is not None:
             self._qvecs.move_to_end(key)
             return hit, True
-        vec = (await client.embed([query]))[0]
+        vec = (await client.embed([query], purpose="query"))[0]
         self._qvecs[key] = vec
         while len(self._qvecs) > QUERY_CACHE:
             self._qvecs.popitem(last=False)
@@ -1905,7 +1964,8 @@ class RagService:
             if match is None:
                 return {"id": issue_id, "results": [], "index": prog.view(), "indexed": False}
             doc = issue_doc(match)
-            vecs = await self._client(cfg).embed(doc.chunks)
+            vecs = await self._client(cfg).embed(
+                doc.chunks, owners=[doc_session(doc)] * len(doc.chunks))
             index.put(doc, vecs)
             await index.save_soon()
         pairs = await asyncio.to_thread(index.neighbors, issue_id, limit)

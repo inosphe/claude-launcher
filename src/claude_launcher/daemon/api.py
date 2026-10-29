@@ -71,6 +71,7 @@ from . import pools
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
+from . import llm_usage
 from . import shared_reads, spawn_events, wallclock
 from . import worktree_inventory
 from . import work_checkout
@@ -1263,6 +1264,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/token-series", h_session_token_series)
     r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/stats/overview", h_stats_overview)
+    r.add_get("/api/stats/llm-usage", h_stats_llm_usage)
     r.add_get("/api/stats/series", h_stats_series)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
@@ -12564,6 +12566,28 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")
+    return json_response(payload)
+
+
+async def h_stats_llm_usage(request: web.Request) -> web.Response:
+    """The daemon's own LLM calls over one window -- briefing, observer,
+    search embedding/rerank, Jev -- for the Stats page's section beside the
+    session overview (``?window=today|week|month``, ``?provider=`` and
+    ``?session=`` to narrow it). These calls never reach the routing shim, so
+    the metering ledger the overview reads does not hold them; they are kept
+    in :mod:`llm_usage`'s own ledger (claunch-60y0d)."""
+    window = request.query.get("window", "today")
+    if window not in llm_usage.WINDOWS:
+        return json_error(
+            400, f"window must be one of: {', '.join(llm_usage.WINDOWS)}")
+    try:
+        payload = await asyncio.to_thread(
+            llm_usage.overview, window,
+            provider=request.query.get("provider", ""),
+            session=request.query.get("session", ""))
+    except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
+        log.warning("stats llm usage: %s", exc, exc_info=True)
+        return json_error(500, f"reading the daemon LLM ledger failed: {exc}")
     return json_response(payload)
 
 

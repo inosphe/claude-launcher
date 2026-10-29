@@ -81,7 +81,7 @@ from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
-from . import codex_sessions, paths
+from . import codex_sessions, llm_usage, paths
 
 #: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
 #: completion, and on a reasoning model the reasoning tokens are billed to it
@@ -946,7 +946,8 @@ def briefing_request_headers(cfg: dict) -> Dict[str, str]:
     return headers
 
 
-async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> LlmAnswer:
+async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT,
+                   session: str = "", purpose: str = "") -> LlmAnswer:
     """POST the prompt to the OpenAI-compatible endpoint, return the answer.
 
     Any transport or shape failure becomes :class:`BriefingError`; the message
@@ -970,6 +971,18 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
     }
     body.update(cfg.get("params") or {})
     headers = briefing_request_headers(cfg)
+    started = time.monotonic()
+
+    def meter(usage=None, error: str = "") -> None:
+        # Every call is metered, a failed one included: the endpoint may have
+        # spent the tokens before the answer turned out unusable
+        # (claunch-60y0d, daemon/llm_usage.py).
+        llm_usage.record(
+            "briefing", provider=str(cfg.get("provider") or ""),
+            endpoint=str(cfg.get("endpoint") or ""), model=str(cfg.get("model") or ""),
+            session=session, purpose=purpose, usage=usage, ok=not error,
+            error=error, seconds=time.monotonic() - started)
+
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         connector = (
@@ -983,21 +996,31 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
             async with http.post(cfg["endpoint"], json=body, headers=headers) as resp:
                 if resp.status != 200:
                     snippet = (await resp.text())[:300]
+                    meter(error=f"HTTP {resp.status}")
                     raise BriefingError(
                         f"llm endpoint answered {resp.status}: {snippet}"
                     )
-                data = await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    # A 200 whose body is not JSON (a proxy's HTML page): the
+                    # request was still sent, so it is metered as failed.
+                    meter(error="response is not JSON")
+                    raise BriefingError(f"llm response is not JSON: {exc}") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        meter(error=type(exc).__name__)
         raise BriefingError(f"llm call failed: {exc}") from exc
+    usage = data.get("usage") if isinstance(data, dict) else None
     try:
         choice = data["choices"][0]
         content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
+        meter(usage, error="no choices[0].message.content")
         raise BriefingError("llm response has no choices[0].message.content") from None
     finish = choice.get("finish_reason") if isinstance(choice, dict) else None
-    usage = data.get("usage") if isinstance(data, dict) else None
     spent = usage.get("completion_tokens") if isinstance(usage, dict) else None
     text = str(content or "")
+    meter(usage, error="" if text.strip() else f"empty content (finish_reason={finish})")
     if not text.strip():
         # Two different things arrive here, and telling them apart is the
         # whole point of reading finish_reason: "length" is OUR budget being
@@ -1083,6 +1106,12 @@ async def probe_llm(cfg: dict, *, timeout: float = CONNECTION_TIMEOUT) -> Connec
             seconds=round(time.monotonic() - started, 3),
         )
 
+    def meter(usage=None, error: str = "") -> None:
+        llm_usage.record(
+            "briefing", provider=provider, endpoint=endpoint, model=model,
+            purpose="probe", usage=usage, ok=not error, error=error,
+            seconds=time.monotonic() - started)
+
     missing = [
         name
         for name, value in (
@@ -1128,21 +1157,25 @@ async def probe_llm(cfg: dict, *, timeout: float = CONNECTION_TIMEOUT) -> Connec
                 status = resp.status
                 text = await resp.text()
                 if status != 200:
+                    meter(error=f"HTTP {status}")
                     return result(
                         False, status, f"answered {status}: {text[:300]}"
                     )
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        meter(error=type(exc).__name__)
         return result(False, None, f"could not reach {endpoint}: {exc}")
     try:
         data = json.loads(text)
         choice = data["choices"][0]
     except (ValueError, KeyError, IndexError, TypeError):
+        meter(error="no choices[0]")
         return result(
             False,
             status,
             f"answered {status} but not with a chat completion "
             f"(no choices[0]): {text[:300]}",
         )
+    meter(data.get("usage") if isinstance(data, dict) else None)
     finish = choice.get("finish_reason") if isinstance(choice, dict) else None
     content = ""
     if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
@@ -1386,7 +1419,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
     prompt = build_prompt(sdef, cflow_info, events, live_info, faq)
-    answer = await call_llm(cfg, prompt)
+    answer = await call_llm(cfg, prompt, session=name, purpose="card")
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":
         # Text arrived, but the endpoint says it was CUT at the budget — the

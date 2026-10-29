@@ -392,7 +392,7 @@ def install(app):
                     return web.json_response({"error": f"Profile connection unavailable: {cfg['profile_error']}", "stage": "config"}, status=400)
                 raise ValueError("API address, key and embedding model are required")
             client = service._client(cfg)
-            vectors = await client.embed(["search connection test"])
+            vectors = await client.embed(["search connection test"], purpose="probe")
             dimensions = len(vectors[0])
             if cfg.get("rerank_model"):
                 stage = "rerank"
