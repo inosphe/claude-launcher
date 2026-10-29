@@ -38,6 +38,7 @@ refused rather than silently applied to a run this agent has never read.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Dict, Optional
 
 from .. import mcp_rpc
@@ -778,9 +779,16 @@ def _v2_run_here(run: Optional[str]) -> bool:
         return False
 
 
+#: ``claunch mcp`` runs tool calls on worker threads (``mcp_rpc.Server.serve``).
+#: The fence above is a read-check-write on module state, so this server's
+#: calls still go one at a time.
+_lock = threading.Lock()
+
+
 def call_tool(name: str, args: dict) -> dict:
     try:
-        return _call_tool(name, args)
+        with _lock:
+            return _call_tool(name, args)
     except state_mod.StateError as exc:
         if "no active cflow run" not in str(exc) or not _v2_run_here(_run_arg(name, args)):
             raise
