@@ -201,14 +201,41 @@ setTimeout(() => {
   check("an empty queue hides the strip",
         host.find("cli-pane-suggest")[0].classList.contains("hidden"), true);
 
-  // Keystrokes go as binary frames; a control frame stays JSON.
-  const term = host.find("cli-pane-term")[0];
-  check("the terminal is mounted in the pane", !!term, true);
-  CliPane.unmount();
-  check("unmounting closes the socket", sockets[0].readyState, 3);
-  check("unmounting gives the frame's body back",
-        host.classList.contains("cli-pane-host"), false);
+  /* ---- the nudge (claunch-742jf) -----------------------------------------
+     The user's half of the read cursor: a button and an optional one-line
+     note, sent to the session's own nudge route. The session is told where
+     its unread output starts; nothing is typed into the shell. */
+  const input = host.find("cli-pane-nudge-input")[0];
+  const nudge = host.find("cli-pane-nudge-btn")[0];
+  check("the header has a nudge button", !!nudge, true);
+  check("the header has a one-line note input", !!input, true);
+  check("the note is optional", input.placeholder, "nudge (optional)");
+  input.value = "look at the build";
+  nudge.click();
+  setTimeout(() => {
+    const sent = calls.filter((c) => String(c[0]).endsWith("/nudge"));
+    check("nudge posts to this session's nudge route", sent[0] && sent[0][0],
+          "/api/sessions/s1/shell/nudge");
+    check("the note rides in the body", sent[0] && JSON.parse(sent[0][1].body),
+          {text: "look at the build"});
+    check("the note clears once it went", input.value, "");
+    // An empty nudge is still a nudge: the button works without typing.
+    nudge.click();
+    setTimeout(() => {
+      const all = calls.filter((c) => String(c[0]).endsWith("/nudge"));
+      check("an empty note is still sent", all[1] && JSON.parse(all[1][1].body),
+            {text: ""});
 
-  if (failures) process.exit(1);
-  console.log("sessioncli_check ok");
+      // Keystrokes go as binary frames; a control frame stays JSON.
+      const term = host.find("cli-pane-term")[0];
+      check("the terminal is mounted in the pane", !!term, true);
+      CliPane.unmount();
+      check("unmounting closes the socket", sockets[0].readyState, 3);
+      check("unmounting gives the frame's body back",
+            host.classList.contains("cli-pane-host"), false);
+
+      if (failures) process.exit(1);
+      console.log("sessioncli_check ok");
+    }, 0);
+  }, 0);
 }, 0);

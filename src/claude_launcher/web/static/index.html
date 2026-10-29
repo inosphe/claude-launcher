@@ -684,10 +684,12 @@
       <button id="term-chartbtn" class="term-btn split-btn hidden" type="button" aria-pressed="false"
               title="this pi-durable session's run as a flow chart">◇ chart</button>
       <!-- The same pane, showing this session's own shell (cli-pane.js,
-           daemon/session_shells.py): a PTY with the user's privileges, and
-           the input this session's agent proposes for the user to run or
-           dismiss. The CLI tab (#cli) is the user's own shell and takes no
-           agent input at all (claunch-jg8pt). -->
+           daemon/session_shells.py): a PTY with the user's privileges, the
+           input this session's agent proposes for the user to run or
+           dismiss, and the user's nudge button — it types a note into the
+           session's terminal saying where its unread output starts
+           (claunch-742jf). The CLI tab (#cli) is the user's own shell and
+           takes no agent input at all (claunch-jg8pt). -->
       <button id="term-clibtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's own shell and the input its agent proposes">❯ cli</button>
       <!-- The same pane, showing the questions this session put to the user
