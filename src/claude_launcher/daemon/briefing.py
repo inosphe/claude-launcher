@@ -1460,6 +1460,23 @@ def retire_all() -> None:
     _run_hooks()
 
 
+def forget(names) -> None:
+    """Drop the briefings of session records that were removed.
+
+    Called by the manager wherever a record goes (clear, remove, discard). The
+    cache is keyed by name and outlives the directory, so without this a
+    session created later under a removed one's name showed that session's
+    summary until the daemon restarted, and :func:`retire_all` wrote it into
+    the new session's directory (claunch-lluxq). The file goes too: a clear
+    without ``--logs`` keeps the directory, and the next restart would load it.
+    """
+    _restore_cache()
+    for name in names:
+        _cache.pop(name, None)
+        _failures.pop(name, None)
+        _write(name)
+
+
 def _record_failure(name: str, exc: BaseException) -> None:
     _failures[name] = {"at": _now_iso(), "error": _clip(str(exc) or exc.__class__.__name__, 300)}
     _persist(name)

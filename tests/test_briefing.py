@@ -980,7 +980,11 @@ def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     paths.session_dir("s1").mkdir(parents=True)
     briefing._cache["s1"] = (key, {"session": "s1", "briefing": {
         "goal": "g", "state": "idle", "one-line-job-description": "한 줄"}})
+    # The old backend's failure goes with it: the row must not keep saying
+    # "failed" about a model that is no longer asked.
+    briefing._failures["s1"] = {"at": "t", "error": "HTTP 402"}
     briefing.retire_all()
+    assert "s1" not in briefing._failures
     briefing.retire_all()
 
     briefing._cache.clear()
@@ -1007,6 +1011,64 @@ def test_retire_all_does_not_recreate_a_cleared_session(home):
 
     briefing.retire_all()
     assert not paths.session_dir("gone").exists()
+
+
+class _Ended:
+    """An exited record, enough for the manager's ``remove``/``clear``."""
+
+    exited = True
+    exit_code = 0
+    pid = None
+    created_at = 0.0
+    last_output_at = 0.0
+    last_visited_at = None
+    last_input_at = None
+    exited_at = None
+    archived_at = None
+
+    def __init__(self, name):
+        self.sdef = SessionDef(name=name, harness="py")
+
+    def status(self, threshold=None):
+        return "exited"
+
+    def delivery_held(self):
+        return False
+
+
+@pytest.mark.parametrize("how", ["clear", "clear-logs", "remove"])
+def test_a_removed_record_takes_its_briefing_along(home, how):
+    """The cache is keyed by name and outlives the record. Removing a record
+    while the daemon runs left its briefing in memory, so a session created
+    again under that name showed the old summary, and the next retire wrote
+    it into the new directory (claunch-lluxq). Removing it drops the entry,
+    the recorded failure and the file."""
+    import shutil
+
+    mgr = SessionManager(idle_threshold=1.0, scrollback=10, restore_default=False)
+    for name in ("gone", "kept"):
+        mgr._sessions[name] = _Ended(name)
+        paths.session_dir(name).mkdir(parents=True)
+        briefing._cache[name] = (("k",), _brief_row(name, "t")["result"])
+        briefing._failures[name] = {"at": "t", "error": "HTTP 402"}
+        briefing._persist(name)
+
+    if how == "remove":
+        mgr.remove("gone")
+    else:
+        mgr.clear(logs=how == "clear-logs", keep=["kept"])
+    assert briefing.digest("gone") is None
+    assert not (paths.session_dir("gone") / "briefing.json").exists()
+
+    shutil.rmtree(paths.session_dir("gone"), ignore_errors=True)
+    paths.session_dir("gone").mkdir(parents=True)
+    briefing.retire_all()
+    assert briefing.digest("gone") is None
+    assert not (paths.session_dir("gone") / "briefing.json").exists()
+    briefing._cache.clear()
+    briefing._loaded_cache_path = None
+    assert briefing.digest("gone") is None
+    assert briefing.digest("kept")["one_line"] == "kept"
 
 
 def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkeypatch):

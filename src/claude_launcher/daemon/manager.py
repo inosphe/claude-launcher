@@ -39,7 +39,7 @@ from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
-from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
+from . import actors, briefing, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
 from . import session_seq
@@ -1329,6 +1329,7 @@ class SessionManager:
         if session is not None and getattr(session, "pty", None) is None:
             self._sessions.pop(name, None)
             line_sync.forget(name)
+            briefing.forget([name])
 
     def _check_name(self, name: str) -> None:
         if not _NAME_RE.match(name):
@@ -2397,6 +2398,7 @@ class SessionManager:
                 del self._sessions[child]
                 line_sync.forget(child)
             self.progress.forget(below)
+            briefing.forget(below)
             touched = below
         else:
             touched = self.escalate_children(name)
@@ -2404,8 +2406,9 @@ class SessionManager:
         # The shared session line lives beside the record, not in it; a name
         # created again later must not open on the deleted session's line.
         line_sync.forget(name)
-        # Same for the progress it published.
+        # Same for the progress it published, and its briefing.
         self.progress.forget([name])
+        briefing.forget([name])
         # Removing the last record leaves the set empty on purpose, so let this
         # one persist prune the store to empty past the empty-snapshot guard.
         self._allow_empty_persist = True
@@ -2609,6 +2612,7 @@ class SessionManager:
         for name in sorted(names, key=self.depth):
             self.escalate_children(name)
         self.progress.forget(names)
+        briefing.forget(names)
         for name in names:
             del self._sessions[name]
             line_sync.forget(name)
