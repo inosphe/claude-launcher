@@ -55,11 +55,13 @@ new Function(
   "exports",
   constLine("sessionRowsKept")
   + slice("takeParsed") + slice("keepRowText") + slice("sessionRowStamp") + slice("sessionRowsTake")
+  + slice("statusCheckDefsStamp")
   + `
 Object.assign(exports, {
   take: sessionRowsTake,
   stamp: sessionRowStamp,
   parsed: takeParsed,
+  defsStamp: statusCheckDefsStamp,
 });`)(api);
 
 /* The filter the redraw signature uses, as refreshSessions writes it. Kept
@@ -226,6 +228,25 @@ check("...stamping every row from that text", stampedWhole.value.length, ROWS);
 const stampedWholeAgain = countWork(() => takenWhole.value.map((r) => api.stamp(r, unstamped)));
 check("...and the pass after that serialises nothing", stampedWholeAgain.strings, 0);
 check("...with the same signature", stampedWholeAgain.value, stampedWhole.value);
+
+/* The checks' names and questions are not in any row: a poll that renames a
+   check hands back the same row text, so the row stamps stand still and the
+   signature has to carry the defs itself or the rail keeps the old names
+   (claunch-hwbuc.2 review, s215-rev). */
+const DEFS = { "check-c": { name: "C", question: "커밋 되었는가?" } };
+const RENAMED = { "check-c": { name: "C", question: "커밋이 원격에 있는가?" } };
+check("the defs stamp moves when a check is renamed",
+      api.defsStamp(RENAMED) === api.defsStamp(DEFS), false);
+check("...and holds still when they are the same",
+      api.defsStamp({ ...DEFS }), api.defsStamp(DEFS));
+check("a poll without defs stamps as empty", api.defsStamp(null), "");
+check("refreshSessions puts the defs stamp in its signature",
+      /typeof keyPoolSignature === "function" \? keyPoolSignature\(\) : null,[\s\S]{0,300}defsStamp\]/.test(src),
+      true);
+check("...and reads it from the poll's own defs",
+      /pollDefs = data && data\.status_check_defs;/.test(src), true);
+check("...which the signature reads rather than the response block",
+      /statusCheckDefsStamp\(pollDefs\)/.test(src), true);
 
 console.log(`pollstamp_check: ${ROWS} rows — first poll ${taken1.calls} stringify calls ` +
             `(stamps ${stamped1.calls} + ${stamped1.value.length}), an unchanged poll ` +
