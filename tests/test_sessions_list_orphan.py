@@ -71,3 +71,22 @@ def test_a_live_parent_in_another_project_does_not_make_an_orphan(
     assert "orphan" not in lines["w1"]
     # the daemon's own record still reads through the narrowing
     assert lines["kid"].endswith("(orphan of gone)")
+
+
+def test_a_session_scoped_listing_reads_the_parent_off_the_whole_roster(
+        monkeypatch, capsys):
+    """Inside a managed session the list narrows to its own project after
+    reading every row, so the parent's existence is judged on all of them."""
+    from claude_launcher import projects
+
+    client = _Client([_row("lead", project="A"),
+                      _row("w1", parent="lead", project="B")])
+    monkeypatch.setattr(
+        daemon_client, "connect_with_diagnosis", lambda *a, **k: (client, None)
+    )
+    monkeypatch.setenv("CLAUNCH_SESSION", "w1")
+    monkeypatch.setenv(projects.SESSION_ENV, "B")
+    assert cli.main(["sessions"]) == 0
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if line.startswith("w1"))
+    assert "orphan" not in row
