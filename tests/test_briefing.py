@@ -899,6 +899,7 @@ def test_briefing_cache_survives_daemon_restart(home):
             "progress": "50%", "one-line-job-description": "작업",
         }, "raw": None,
     }
+    paths.session_dir("s1").mkdir(parents=True)
     briefing._cache["s1"] = (key, result)
     briefing._persist("s1")
 
@@ -922,6 +923,7 @@ def test_briefings_are_kept_one_file_per_session(home):
     composition, and one write emptied all 636, claunch-lluxq), and clearing
     a session's directory takes its summary with it."""
     for name in ("s1", "s2"):
+        paths.session_dir(name).mkdir(parents=True)
         briefing._cache[name] = (("k",), _brief_row(name, "t")["result"])
         briefing._persist(name)
     assert json.loads((paths.session_dir("s1") / "briefing.json").read_text(
@@ -975,6 +977,7 @@ def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     composes with the new model. It survives a daemon restart, and a second
     retire does not stack."""
     key = ("s1", 2, (1, 2), None, "idle", None, None, ())
+    paths.session_dir("s1").mkdir(parents=True)
     briefing._cache["s1"] = (key, {"session": "s1", "briefing": {
         "goal": "g", "state": "idle", "one-line-job-description": "한 줄"}})
     briefing.retire_all()
@@ -990,6 +993,22 @@ def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     assert briefing.cached_result("s1") is None
 
 
+def test_retire_all_does_not_recreate_a_cleared_session(home):
+    """"Clear exited" removes a session's directory while the daemon still
+    holds its briefing in memory. Retiring must not write that briefing back:
+    the directory would reappear, and a new session given the same name would
+    show the old session's summary."""
+    import shutil
+
+    paths.session_dir("gone").mkdir(parents=True)
+    briefing._cache["gone"] = (("k",), _brief_row("gone", "t")["result"])
+    briefing._persist("gone")
+    shutil.rmtree(paths.session_dir("gone"))
+
+    briefing.retire_all()
+    assert not paths.session_dir("gone").exists()
+
+
 def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkeypatch):
     """A failed composition is kept, per session and across a daemon restart,
     so a row can tell "never asked" (no digest) from "asked and failed"
@@ -999,6 +1018,7 @@ def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkey
 
     session = SimpleNamespace(sdef=SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
     cfg = {"max_tokens": 100}
+    paths.session_dir("s1").mkdir(parents=True)
 
     async def refuse(cfg, prompt, **kw):
         raise briefing.BriefingError("HTTP 402: insufficient credits")
@@ -1031,6 +1051,16 @@ def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkey
         asyncio.run(briefing.compose(session, cfg, refresh=True))
     d = briefing.digest("s1")
     assert d["one_line"] == "한 줄" and d["failed"]["error"].startswith("HTTP 402")
+
+    # an answer cut at the token budget is a failure too
+    async def truncated(cfg, prompt, **kw):
+        return briefing.LlmAnswer(text='{"goal": "g', finish_reason="length",
+                                  completion_tokens=100)
+
+    monkeypatch.setattr(briefing, "call_llm", truncated)
+    with pytest.raises(briefing.BriefingError):
+        asyncio.run(briefing.compose(session, cfg, refresh=True))
+    assert "truncated at max_tokens=100" in briefing.digest("s1")["failed"]["error"]
 
 
 def test_parse_briefing_bad_state_and_garbage():
@@ -1236,8 +1266,12 @@ def test_call_llm_http_error_and_bad_shape_raise(home):
     async def shapeless(request):
         return aioweb.json_response({"choices": []})
 
+    async def not_json(request):
+        return aioweb.Response(text="<html>proxy login</html>", content_type="text/html")
+
     async def run():
-        for handler, fragment in ((failing, "answered 500"), (shapeless, "choices")):
+        for handler, fragment in ((failing, "answered 500"), (shapeless, "choices"),
+                                  (not_json, "not JSON")):
             server = await _start_llm(handler)
             try:
                 cfg = {

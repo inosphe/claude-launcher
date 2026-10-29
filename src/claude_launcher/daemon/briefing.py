@@ -1375,8 +1375,13 @@ persist_hooks: List[Callable[[], None]] = []
 
 
 def _write_file(path: Path, row: dict) -> None:
+    # The session directory is the daemon's record of the session; a briefing
+    # never creates it. Without this guard, retiring every briefing after
+    # "Clear exited" removed a session's directory brought it back holding
+    # that briefing, and the next session given the same name inherited it.
+    if not path.parent.is_dir():
+        return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with atomic.scratch(path) as tmp:
             tmp.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
             atomic.replace(tmp, path)
