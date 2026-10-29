@@ -5742,6 +5742,8 @@ async function refreshSessions(options) {
     // Reduced embedded consumers execute this poll in isolation.  Keep that
     // contract while the full page reconciles the kill controls here.
     if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
+    // the state word beside each session named on a card (claunch-6vq2m)
+    if (typeof refreshGateSessionStates === "function") refreshGateSessionStates();
     briefingLLM = data.llm_configured !== false;
     ragConfigured = data.rag_configured === true;
     if (typeof renderRestoreQueueBanner === "function") renderRestoreQueueBanner(data.restore_queue);
@@ -7759,6 +7761,8 @@ async function refreshCflow2Rail() {
   // every person gate joins the notification channel, every poll
   // (claunch-whm4e.1; urgent asks only, before: claunch-x76l8.1)
   if (typeof runGateFeed === "function") runGateFeed();
+  // the rows carry each session's lifecycle (claunch-6vq2m)
+  if (typeof refreshGateSessionStates === "function") refreshGateSessionStates();
   if (sig === cflow2RailSig) return;
   cflow2RailSig = sig;
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
@@ -23528,6 +23532,8 @@ function personGateRecords() {
     if (!sessCflowGated(r) || r.status === "waiting_goto") continue;
     const session = scopeSession(r.scope, r.session);
     if (!session || (known.size && !known.has(session))) continue;
+    if (typeof gateSessionState === "function"
+        && gateSessionState(session) === "archived") continue;
     out.push({
       id: ["v1", r.cwd, r.scope, r.run, r.step_id, r.visit ?? "", r.status].join("|"),
       session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 1,
@@ -23543,7 +23549,12 @@ function personGateRecords() {
       settled.push({ id: String(u.id), status: u.status === "answered"
         ? `answered: ${u.decision || "?"}` + (u.by ? ` by ${u.by}` : "") : u.status });
     }
-    if (!r.gated) continue;
+    // The rail lists every registered session, archived ones too, and a run
+    // its session left waiting stays waiting on disk: an archived session's
+    // visit limit kept a card up for days after the operator put the session
+    // away (claunch-6vq2m). Archiving is the operator's "done with this", so
+    // its gates raise no card; the run page still answers them.
+    if (!r.gated || r.session_category === "archived") continue;
     for (const a of r.answers || []) {
       if (!a || !a.kind) continue;
       const slot = [r.run, a.instance || "", a.kind].join("|");
@@ -59155,12 +59166,69 @@ function gateSessionLink(name, onOpen) {
   if (!name) return el("span", null, "?");
   const node = el("span", "linkish gate-session", name);
   node.title = `open ${name}`;
+  if (node.dataset) node.dataset.session = name;
+  gateSessionStateSet(node, gateSessionState(name));
   node.addEventListener("click", (ev) => {
     ev.stopPropagation();
     if (onOpen) onOpen();
     location.hash = "#/s/" + encodeURIComponent(name);
   });
   return node;
+}
+
+/* The session's state beside its name on a card (claunch-6vq2m): a card
+   about a session that has ended said nothing of it, and a gate of an
+   archived session looked as live as any other. The word is the rail's
+   own: the live status (busy, idle, starting) for a running session, the
+   lifecycle category (hold, delayed, failed, killed, paused, archived)
+   otherwise. Read from the session poll's record, and failing that from
+   the v2 rail row, which lists archived sessions the "current" poll leaves
+   out. "" when neither knows the name (a spawn target not yet created): no
+   word is drawn rather than a guessed one. */
+function gateSessionState(name) {
+  if (!name) return "";
+  const recs = (typeof sessionsCache === "object" && Array.isArray(sessionsCache))
+    ? sessionsCache : [];
+  const rec = recs.find((s) => s && s.name === name);
+  if (rec && typeof sessionCategory === "function") {
+    const category = sessionCategory(rec);
+    return category === "running" ? String(rec.status || category) : category;
+  }
+  const row = (typeof cflow2RailCache === "object" && cflow2RailCache)
+    ? cflow2RailCache[name] : null;
+  if (!row || !row.session_category) return "";
+  return row.session_category === "running"
+    ? String(row.session_status || "running") : String(row.session_category);
+}
+
+/* Writes `state` into a session link's state mark, adding the mark the
+   first time and touching nothing when the word is unchanged — the poll
+   calls this for every card each tick (notice-render-cost). */
+function gateSessionStateSet(node, state) {
+  if (!node) return;
+  let mark = node.querySelector ? node.querySelector(".gate-session-state") : null;
+  if (!state) {
+    if (mark) mark.remove();
+    return;
+  }
+  if (!mark) {
+    mark = el("span", "gate-session-state");
+    node.appendChild(mark);
+  }
+  const text = ` · ${state}`;
+  if (mark.textContent !== text) mark.textContent = text;
+  if (mark.dataset && mark.dataset.state !== state) mark.dataset.state = state;
+}
+
+/* Re-reads the state of every session named on a card or a history row,
+   after either poll that can move it. A card is drawn once and stays up
+   while its gate waits, so the word drawn with it would otherwise go stale
+   the moment the session exits or is archived. */
+function refreshGateSessionStates() {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+  for (const node of document.querySelectorAll(".gate-session[data-session]")) {
+    gateSessionStateSet(node, gateSessionState(node.dataset.session));
+  }
 }
 
 /* ------------------------------------------------------------------ */

@@ -7149,14 +7149,32 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     (claunch-l9znm.1): a gate's ``opened_at`` is the daemon's stamp, and a
     page whose clock differs from it would otherwise show a wrong age. The
     page subtracts the difference before it counts. It sits here rather than
-    in a row because the rows are cached per run file and this must not be."""
+    in a row because the rows are cached per run file and this must not be.
+
+    Each row also carries its session's lifecycle (claunch-6vq2m):
+    ``session_category`` is ``session.session_category`` (running, hold,
+    delayed, failed, killed, paused, archived) and ``session_status`` the
+    live status word (busy, idle, starting) or ``exited``. Every registered
+    session is listed, archived ones too, so a run its archived session left
+    waiting on a person still has a row here; the dashboard reads the
+    category to raise no card for it, and the corner cards show the word
+    beside the session's name. Stamped per answer, not cached with the row:
+    the session moves without its run file changing."""
     manager: SessionManager = request.app["manager"]
     pairs = []
+    lifecycle = {}
     for session in manager.list():
         cwd = _session_cwd(session)
         if cwd:
-            pairs.append((session.sdef.name, cwd))
+            name = session.sdef.name
+            pairs.append((name, cwd))
+            lifecycle[name] = {
+                "session_category": session_mod.session_category(session),
+                "session_status": "exited" if session.exited else session.status(),
+            }
     rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
+    for name, row in rows.items():
+        row.update(lifecycle.get(name) or {})
     return json_response({"rows": _operator_rail_fields(request.app, rows),
                           "now": time.time()})
 
