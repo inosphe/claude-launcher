@@ -1300,6 +1300,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)
     r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
+    r.add_delete("/api/sessions/{name}/queued/{id}", h_session_queued_discard)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_post("/api/sessions/{name}/mcp-ready", h_session_mcp_ready)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
@@ -13124,6 +13125,31 @@ async def h_session_queued_flush(request: web.Request) -> web.Response:
     """
     session = _session(request)
     result = await _mesh_mgr(request).flush_session(session.sdef.name)
+    return json_response(
+        {**result, "queued": _session_queued(request, session)}
+    )
+
+
+async def h_session_queued_discard(request: web.Request) -> web.Response:
+    """Delete one held message from this session's backlog, because a human
+    said so: the per-row delete in the queued strip, the opposite answer to
+    :func:`h_session_queued_flush`. The message is never typed into this
+    terminal (see :meth:`MeshManager.discard_queued`); the mesh log and every
+    other recipient are left alone.
+
+    ``?mesh=`` and ``?handle=`` narrow the match to the row the button was
+    on. An id that is not queued for this session right now -- already
+    delivered, or never addressed here -- is a 400, not a silent success.
+    Answers with the deletion *and* the re-read backlog, like the flush, so
+    the strip redraws from one round trip.
+    """
+    session = _session(request)
+    result = _mesh_mgr(request).discard_queued(
+        session.sdef.name,
+        request.match_info["id"],
+        mesh_name=request.query.get("mesh") or None,
+        handle=request.query.get("handle") or None,
+    )
     return json_response(
         {**result, "queued": _session_queued(request, session)}
     )

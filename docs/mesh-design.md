@@ -927,6 +927,17 @@ fold-open for the bodies), worded as "held by YOUR typing" when this tab's
 keystrokes are the recent ones, and the session detail panel shows the same
 backlog under its send box. The payload also rides inside `/meta`.
 
+Each row of that backlog can be deleted (claunch-2onys):
+`DELETE /api/sessions/{name}/queued/{id}?mesh=&handle=` records the id in
+the member's `discarded` set (persisted in `cursors.json` next to
+`dismissed`), so `pending()` never hands it to delivery again — not on
+"deliver now", not on respawn, not after a daemon restart — and `owed()`
+does not count it once the cursor has passed it; the history annotation
+(`delivery_of`) does not list the member under `delivered` either. The set is
+kept while the member is, since the log is append-only. The log entry and every
+other recipient's copy stay. An id that is not in this session's backlog
+right now (already delivered, or never addressed here) is refused with 400.
+
 ## CLI (phase 1)
 
 ```
