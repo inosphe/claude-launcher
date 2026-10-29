@@ -1169,7 +1169,8 @@ def _rail_stamp(cwd: str, scope: str) -> Any:
 
 
 def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
-                 force: bool = False, now: Optional[float] = None) -> Dict[str, dict]:
+                 force: bool = False, now: Optional[float] = None,
+                 settled: Sequence[Tuple[str, str]] = ()) -> Dict[str, dict]:
     """``GET /api/cflow2/rail``: ``{session: rail_entry}`` for each
     ``(session, cwd)`` that drives a v2 run; sessions without one are left
     out.
@@ -1180,7 +1181,14 @@ def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
     a gate opening or closing exactly when the run's files say so, and an
     unchanged slot costs three ``stat`` calls and no write. A slot whose
     state file is gone closes the session's gates as ``run ended``. Without
-    one, the daemon's installed registry (:func:`.gate_registry.active`)."""
+    one, the daemon's installed registry (:func:`.gate_registry.active`).
+
+    ``settled`` are ``(session, cwd)`` of ended sessions that hold no open
+    gate (claunch-6vq2m.1): their line is still shown (the session list's
+    badge, "Spawn same setup", the chart page), but nobody drives their run,
+    so an entry read once is served from the cache without a ``stat`` on
+    later polls, and its ``answers`` are emptied -- what such a run still
+    owes raised no gate in the registry, so it raises no card either."""
     from . import gate_registry
 
     if registry is None:
@@ -1214,6 +1222,29 @@ def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
                     _RAIL.pop(key, None)
         if entry is not None:
             out[name] = dict(entry)
+    for name, cwd in settled:
+        if not name or not cwd:
+            continue
+        key = (cwd, name)
+        hit = _RAIL.get(key)
+        if hit is None:
+            try:
+                stamp = _rail_stamp(cwd, name)
+            except (OSError, ValueError):
+                continue
+            hit = (stamp, rail_entry(cwd, name) if stamp[0] is not None else None)
+            _RAIL[key] = hit
+            if registry is not None and hit[1] is not None:
+                # Read for the first time in this process: a gate it still
+                # owes is recorded (and the next poll reads it as held).
+                try:
+                    registry.sync(name, cwd, name, hit[1], now=now)
+                except Exception:  # noqa: BLE001 - the rail still answers
+                    log.exception("gate registry sync of %s/%s failed", cwd, name)
+        if hit[1] is not None:
+            row = dict(hit[1])
+            row["answers"] = []
+            out[name] = row
     return out
 
 

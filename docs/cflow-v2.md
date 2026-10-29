@@ -373,10 +373,11 @@ ask:
   일어나는 자리는 rail 폴, cflow2 clock의 패스(이 데몬이 모는 live·hold·paused 세션,
   대시보드가 열려 있지 않아도), 세션 종료 직후 한 번이다. 세션이 아카이브되거나
   레코드가 지워지면(`SessionManager.filed_hooks`) 그 세션의 열린 게이트가 닫힌다.
-  kill·fail·hold·pause로 끝난 세션의 게이트는 열린 채로 남는다. rail 폴은 살아 있는
-  세션과 열린 게이트가 있는 종료 세션만 읽는다 — 아카이브된 세션과 열린 게이트가
-  없는 종료 세션의 런 파일은 읽지 않는다. `answers[]` 항목은 `gate_id`(레지스트리
-  행의 `seq`)를 싣는다. 레지스트리가 처음 생길 때 이미 열려 있던 게이트는 데몬
+  kill·fail·hold·pause로 끝난 세션의 게이트는 열린 채로 남는다. rail 폴이 폴마다
+  stat하는 것은 살아 있는 세션과 열린 게이트가 있는 종료 세션의 런 파일뿐이다.
+  열린 게이트가 없는 종료 세션은 데몬 프로세스마다 한 번 읽어 캐시에서 내주고
+  (`answers`는 비운다 — 카드를 만들지 않는다), 아카이브된 세션은 행이 없다.
+  `answers[]` 항목은 `gate_id`(레지스트리 행의 `seq`)를 싣는다. 레지스트리가 처음 생길 때 이미 열려 있던 게이트는 데몬
   기동 시 한 번 기록된다(`gate_registry.backfill`, 아카이브되지 않은 세션만,
   멱등, 결과는 `meta`의 `backfilled_count`). `GET /api/gates?state=open|closed|all
   [&session=][&limit=]`가 행과 그 결과를 돌려준다.

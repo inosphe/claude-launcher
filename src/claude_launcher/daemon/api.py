@@ -7171,12 +7171,13 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     Which sessions are read (claunch-6vq2m.1): the running ones, and the
     ended ones the gate registry (``gate_registry``, ``app["gates"]``) still
     holds an open gate for -- a killed or paused session's waiting run keeps
-    its card. An archived session, and an ended one with nothing open, is
-    not read at all: its run files are not stat'ed on every poll, and its
-    gates were closed when it was filed away. Each read compares the run
-    with the registry when its files changed, and every answer carries its
-    registry row as ``gate_id`` (and the registry's ``opened_at`` where the
-    run stamped none).
+    its card. Each read compares the run with the registry when its files
+    changed, and every answer carries its registry row as ``gate_id`` (and
+    the registry's ``opened_at`` where the run stamped none). An ended
+    session with nothing open is read once and then served from the cache
+    with no ``answers`` (``rail_entries``' ``settled``): its line still shows,
+    its files are not stat'ed on every poll. An archived session is not
+    listed; its gates were closed when it was filed away.
 
     Each row also carries its session's lifecycle (claunch-6vq2m):
     ``session_category`` is ``session.session_category`` (running, hold,
@@ -7188,23 +7189,26 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     gates: Optional[gate_registry.GateRegistry] = request.app.get("gates")
     held = (await asyncio.to_thread(gates.open_sessions)) if gates is not None else None
     pairs = []
+    settled = []
     lifecycle = {}
     for session in manager.list():
         name = session.sdef.name
         category = session_mod.session_category(session)
-        if held is not None and (category == session_mod.CATEGORY_ARCHIVED
-                                 or (session.exited and name not in held)):
+        if held is not None and category == session_mod.CATEGORY_ARCHIVED:
             continue
         cwd = _session_cwd(session)
         if cwd:
-            pairs.append((name, cwd))
+            if held is not None and session.exited and name not in held:
+                settled.append((name, cwd))
+            else:
+                pairs.append((name, cwd))
             lifecycle[name] = {
                 "session_category": category,
                 "session_status": "exited" if session.exited else session.status(),
             }
 
     def read() -> dict:
-        rows = cflow2_web.rail_entries(pairs, registry=gates)
+        rows = cflow2_web.rail_entries(pairs, registry=gates, settled=settled)
         if gates is not None:
             gate_registry.annotate(rows, gates)
         return rows

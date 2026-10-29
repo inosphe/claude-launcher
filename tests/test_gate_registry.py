@@ -189,8 +189,9 @@ AUTH = {"Authorization": "Bearer sekrit"}
 
 def test_rail_reads_an_ended_session_only_while_it_holds_a_gate(proj, monkeypatch):
     """The rail poll no longer stats every registered session's run: an
-    ended session with nothing open, and an archived one, are skipped
-    without reading their run files."""
+    ended session with nothing open is read once and then served from the
+    cache (its line still shows, with no answers), and an archived one is
+    not listed at all."""
     cwd = str(proj)
     for name in ("live", "killed", "done", "filed"):
         _start(cwd, name)
@@ -207,7 +208,10 @@ def test_rail_reads_an_ended_session_only_while_it_holds_a_gate(proj, monkeypatc
                         lambda c, s: read.append(s) or real(c, s))
 
     async def backfill(app, client):
-        return gate_registry.backfill(app["gates"], sessions)
+        out = gate_registry.backfill(app["gates"], sessions)
+        # A fresh daemon: nothing read yet.
+        cflow2_web._RAIL.clear()
+        return out
 
     async def poll(app, client):
         read.clear()
@@ -224,21 +228,26 @@ def test_rail_reads_an_ended_session_only_while_it_holds_a_gate(proj, monkeypatc
     async def bad(app, client):
         return (await client.get("/api/gates?state=nope", headers=AUTH)).status
 
-    filled, (first_read, first), _, (second_read, second), (status, body), bad_status = \
-        _serve(sessions, monkeypatch,
-               [backfill, poll, answer_killed, poll, gates, bad])
+    (filled, (read1, first), (read2, second), _, (read3, third), (read4, fourth),
+     (status, body), bad_status) = _serve(
+        sessions, monkeypatch,
+        [backfill, poll, poll, answer_killed, poll, poll, gates, bad])
     assert filled["open"] == 2
-    assert first_read == ["killed", "live"]
-    assert set(first["rows"]) == {"live", "killed"}
+    # First poll: the settled session is read once; the archived one never.
+    assert read1 == ["done", "killed", "live"]
+    assert set(first["rows"]) == {"live", "killed", "done"}
+    assert first["rows"]["done"]["answers"] == []
     killed = first["rows"]["killed"]
     assert killed["session_category"] == "killed"
     assert isinstance(killed["answers"][0]["gate_id"], int)
+    # Second poll: the settled session comes from the cache, unread.
+    assert read2 == ["killed", "live"] and "done" in second["rows"]
 
     # Answered (from the CLI, say): the poll still reads the killed session,
-    # finds the gate gone and closes it; the next poll would skip it.
-    assert second_read == ["killed", "live"]
-    assert set(second["rows"]) == {"live", "killed"}
-    assert second["rows"]["killed"]["answers"] == []
+    # finds the gate gone and closes it; the poll after that no longer reads it.
+    assert read3 == ["killed", "live"]
+    assert third["rows"]["killed"]["answers"] == []
+    assert read4 == ["live"] and set(fourth["rows"]) == {"live", "killed", "done"}
 
     assert status == 200 and bad_status == 400
     by = {g["session"]: g for g in body["gates"]}
