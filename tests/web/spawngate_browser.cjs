@@ -13,6 +13,10 @@
    is created as asked, and its Manual opens the spawn child tab under the
    asker, filled with the request.
 
+   claunch-oaxni: the Manual form offers both tabs whatever the scope, so a
+   child request can be created top-level (and a top-level one under the
+   asker); the link back says which tab made it.
+
    claunch-uzo40: Manual pauses the clock and leaves the request pending.
    A held request keeps its card, says the clock is paused, answers Approve /
    Open form / Reject / +5 min, and Open form brings the same form back. */
@@ -34,6 +38,10 @@ const spawnRec = () => ({ id: 'aaa111', kind: 'spawn', scope: 'root', session: '
 const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status: 'pending', target: 'old1',
   reason: 'it did this work', deadline: soon(), extensions: 1, fallback: SPEC,
   basis: { operator_name: 'Alpha' }, requested_at: new Date().toISOString() });
+// What the rail knows: both askers, so the Spawn child tab finds its parent
+// after the rail is refreshed by a create.
+const SESSIONS = [{ name: 'w1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' },
+  { name: 'op1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' }];
 const CHILD = { task: 'Write the parser tests\nall of them', role: 'worker', name: 'kid',
   workflow: 'improv-worker-v2', project: 'alpha', worktree: 'kid-wt', beads: false };
 // The daemon's resolution of what the child spec leaves to its asker
@@ -72,15 +80,27 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     const posts = [];
+    const bodies = [];
+    const creates = [];
     let rows = [spawnRec(), resumeRec(), childRec(), heldRec()];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('http://gate.test/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname.startsWith('/api/')) {
         if (url.pathname === '/api/spawn-requests') return route.fulfill({ json: { requests: rows } });
+        // The form's own create (claunch-oaxni): the top-level endpoint
+        // answers with the session, the spawn one wraps it.
+        if (route.request().method() === 'POST' && (url.pathname === '/api/sessions'
+            || /^\/api\/sessions\/\w+\/children$/.test(url.pathname))) {
+          creates.push(url.pathname);
+          const made = { name: url.pathname === '/api/sessions' ? 'solo' : 'kid1', status: 'running' };
+          return route.fulfill({ json: url.pathname === '/api/sessions' ? made : { session: made } });
+        }
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: { sessions: SESSIONS } });
         const m = url.pathname.match(/^\/api\/spawn-requests\/(\w+)\/(\w+)$/);
         if (m && route.request().method() === 'POST') {
           posts.push([m[1], m[2]]);
+          if (m[2] === 'created') bodies.push([m[1], route.request().postDataJSON()]);
           const rec = rows.find(r => r.id === m[1]);
           if (m[2] === 'extend') {
             rec.extensions += 1;
@@ -238,6 +258,19 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     }));
     assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha',
       profile: 'p', mesh: '', role: '', worktree: 'new', overlay: true });
+    // Both tabs are offered (claunch-oaxni): the top-level request can be
+    // put under its asker from Spawn child, and back.
+    const tabs = () => page.evaluate(() => ['new-tab-new', 'new-tab-spawn']
+      .filter(id => !$(id).classList.contains('hidden')));
+    assert.deepEqual(await tabs(), ['new-tab-new', 'new-tab-spawn']);
+    await page.click('#new-tab-spawn');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['spawn', 'op1']);
+    assert.equal(await page.evaluate(() => $('new-session').task.value), SPEC.task,
+      'switching tabs keeps the request\'s answers');
+    await page.click('#new-tab-new');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['new', '']);
     await spawnCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
@@ -268,6 +301,25 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     }));
     assert.deepEqual(child, { tab: 'spawn', task: CHILD.task, name: 'kid', parent: 'w1',
       worktreeName: 'kid-wt', beads: 'none' });
+    // The child request made top-level instead (claunch-oaxni): the New
+    // session tab is offered, drops the parent, keeps the request's answers,
+    // and is told the asker's repository the way "Spawn same setup" is.
+    assert.deepEqual(await tabs(), ['new-tab-new', 'new-tab-spawn']);
+    assert.deepEqual(await page.evaluate(() => sessionFormView().newSeed), { cwd: '/repo/alpha' });
+    await page.click('#new-tab-new');
+    const asRoot = await page.evaluate(() => ({
+      tab: sessionFormView().mode,
+      parent: $('new-session').parent.value,
+      task: $('new-session').task.value,
+      name: $('new-session').name.value,
+      request: sessionModal.spawnRequest,
+      title: $('modal-title').textContent,
+    }));
+    assert.deepEqual(asRoot, { tab: 'new', parent: '', task: CHILD.task, name: 'kid',
+      request: 'ccc333', title: 'New session' });
+    await page.click('#new-tab-spawn');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['spawn', 'w1']);
     await childCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-child-manual.png') });
@@ -282,6 +334,36 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.equal(await page.evaluate(() => $('new-session').task.value), SPEC.task);
     assert.ok(await heldCard.isVisible(), 'the request stays on the card');
     await page.evaluate(() => sessionModalClose({ route: false }));
+
+    // The create reports the tab it was made from (claunch-oaxni): the form
+    // is submitted for real, and the link back names what the create did,
+    // whatever scope the request asked for. Without it the daemon keeps the
+    // scope's guess and tells a child's asker "as your child" for a
+    // session that was made top-level.
+    const made = async (rec, tab) => {
+      await page.evaluate(async r => {
+        sessionsCache = structuredClone(r.sessions);
+        await spawnGateManual(r.rec);
+      }, { rec, sessions: SESSIONS });
+      await page.waitForFunction(id => typeof sessionModal === 'object' && sessionModal
+        && sessionModal.spawnRequest === id, rec.id);
+      await page.click(`#new-tab-${tab}`);
+      const linked = bodies.length;
+      await page.evaluate(() => $('new-session').requestSubmit());
+      for (let i = 0; i < 50 && bodies.length === linked; i++) await page.waitForTimeout(50);
+      assert.equal(await page.evaluate(() => $('create-error').classList.contains('hidden')
+        ? '' : $('create-error').textContent), '', 'the create went out');
+      return [creates.at(-1), bodies.at(-1)];
+    };
+    assert.deepEqual(await made(childRec(), 'new'),
+      ['/api/sessions', ['ccc333', { session: 'solo', created_as: 'root' }]],
+      'a child request made from New session is reported top-level');
+    assert.deepEqual(await made(childRec(), 'spawn'),
+      ['/api/sessions/w1/children', ['ccc333', { session: 'kid1', created_as: 'child' }]],
+      'a child request made from Spawn child is reported as a child');
+    assert.deepEqual(await made(spawnRec(), 'spawn'),
+      ['/api/sessions/op1/children', ['aaa111', { session: 'kid1', created_as: 'child' }]],
+      'a top-level request made from Spawn child is reported as the asker\'s child');
     assert.deepEqual(errors, []);
     console.log('spawngate_browser: ok (root/child/resume/held cards, extend, panel row, manual forms)');
   } finally { await browser.close(); }

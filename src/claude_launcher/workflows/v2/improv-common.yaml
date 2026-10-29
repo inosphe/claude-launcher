@@ -220,7 +220,10 @@ rules:
       `[claunch spawn-request <id>]` 블록으로 온다. 승인, 5분 무응답(요청한
       그대로 생성), manual(사람이 폼에서 고쳐 만든다 — 이름·worktree가 바뀔
       수 있다)이면 블록이 만들어진 세션 이름을 적고, 거절이면 아무것도
-      만들어지지 않았다.
+      만들어지지 않았다. manual에서는 사람이 자식 대신 루트 세션으로 만들 수
+      있다(claunch-oaxni) — 블록이 「top-level, not as your child」라고 적으면
+      그 세션은 내 자식이 아니므로 `children`·`kill`의 대상이 아니고, 다른
+      세션처럼 메시와 보드로 따라간다.
       · 블록을 받기 전에는 그 자식에게 send·connect·kill을 하지 않고, 자식
         런 status를 조회하지 않으며, 보고·코멘트에 자식 세션 이름을 적지
         않는다. 블록을 받은 뒤 블록에 적힌 이름을 쓴다. 요청한 handle을

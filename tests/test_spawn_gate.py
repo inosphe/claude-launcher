@@ -534,9 +534,12 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
             rows = (await (await client.get("/api/spawn-requests", headers=AUTH)).json())["requests"]
             assert two in {r["id"] for r in rows if r["status"] == "pending"}
             resp = await client.post(f"/api/spawn-requests/{two}/created",
-                                     json={"session": "by-hand"}, headers=AUTH)
+                                     json={"session": "by-hand", "created_as": "child"},
+                                     headers=AUTH)
             linked = (await resp.json())["request"]
             assert linked["created"] == "by-hand"
+            # the form's tab, not the root scope it was asked as (claunch-oaxni)
+            assert linked["created_as"] == "child"
             assert linked["status"] == "approved" and linked["setup"] == "custom"
             assert "hold" not in linked
 
@@ -640,6 +643,47 @@ def test_a_child_ask_approved_or_taken_by_hand(home, tmp_path):
     two = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
     record = world.gate.manual(two)
     assert record["setup"] == "custom" and "spawn child form" in world.notes[-1][1]
+
+
+# claunch-oaxni: the Manual form offers both tabs whatever the request's
+# scope, and the link says which one the person created it from.
+def test_a_child_ask_taken_by_hand_can_be_made_top_level(home, tmp_path):
+    world = _World(tmp_path)
+    rid = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    assert world.gate.manual(rid)["created_as"] == "child"   # the scope's guess
+    linked = world.gate.link(rid, "solo", "root")
+    assert linked["status"] == "approved" and linked["setup"] == "custom"
+    assert linked["created_as"] == "root" and linked["scope"] == "child"
+    note = world.notes[-1][1]
+    assert "solo" in note and "top-level, not as your child" in note
+    assert world.created == [], "the form made it; the gate created nothing"
+
+
+def test_a_root_ask_taken_by_hand_can_be_put_under_the_asker(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    linked = world.gate.link(rid, "kid", "child")
+    assert linked["created_as"] == "child"
+    assert "as your child, not top-level" in world.notes[-1][1]
+
+
+def test_a_link_without_created_as_keeps_the_scopes_answer(home, tmp_path):
+    world = _World(tmp_path)
+    rid = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    world.gate.manual(rid)
+    assert world.gate.link(rid, "kid")["created_as"] == "child"
+    assert world.notes[-1][1].endswith("(web), as your child.")
+
+
+def test_a_link_refuses_an_unknown_created_as(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        world.gate.link(rid, "kid", "sideways")
+    assert err.value.status == 400
+    assert world.gate.get(rid)["status"] == "pending", "a refused link settles nothing"
 
 
 @pytest.mark.parametrize("kw", [{"scope": "sideways"}, {"child_spec": "x"}])
