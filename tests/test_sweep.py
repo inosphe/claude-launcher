@@ -701,6 +701,24 @@ def test_parse_skips_tells_no_report_from_nothing_skipped(tmp_path):
     assert sweep.parse_skips(tmp_path / "none.xml") == []
 
 
+def test_junit_env_asks_for_the_hundred_slowest_durations(tmp_path):
+    env = sweep.junit_env({}, tmp_path / "r.xml")
+    assert "--durations=100" in env["PYTEST_ADDOPTS"]
+
+
+def test_junit_summary_ranks_modules_by_summed_test_time():
+    xml = (b'<testsuites><testsuite>'
+           b'<testcase file="tests/test_a.py" classname="tests.test_a" name="t1" time="1.5"/>'
+           b'<testcase file="tests/test_a.py" classname="tests.test_a" name="t2" time="0.5"/>'
+           b'<testcase file="tests/test_b.py" classname="tests.test_b" name="t1" time="3.0"/>'
+           b'</testsuite></testsuites>')
+    assert sweep.junit_summary(xml) == {
+        "tests": 3, "sum_seconds": 5.0,
+        "top_modules": [{"module": "tests/test_b.py", "seconds": 3.0},
+                        {"module": "tests/test_a.py", "seconds": 2.0}]}
+    assert sweep.junit_summary(b"<testsuites><testsu") is None
+
+
 def test_junit_env_keeps_the_callers_addopts(tmp_path):
     env = sweep.junit_env({"PYTEST_ADDOPTS": "-x"}, tmp_path / "r.xml")
     assert env["PYTEST_ADDOPTS"].startswith("-x ")
@@ -728,10 +746,17 @@ def test_the_sweep_receipt_names_what_was_skipped(repo, receipts):
         sweep.receipt_path(repo, commit, receipts).read_text(encoding="utf-8")
     )
     assert receipt["skips"] == _SKIPS
-    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+    assert set(receipt) - _RECEIPT_KEYS == {"skips", "durations"}
     assert receipt["command"] == command, "the junit request rides in the environment"
     assert receipt["counts"] == {"passed": 1, "skipped": 4, "xfailed": 1}
     assert _check(repo, receipts) == 0
+    # The timed junit report is kept beside the receipt under a name the
+    # receipt glob (``*.json``) does not match.
+    durations = receipt["durations"]
+    kept = sweep.junit_path(repo, commit, receipts)
+    assert durations["file"] == kept.name and kept.is_file()
+    assert durations["tests"] == 6 and durations["top_modules"]
+    assert kept.suffix == ".gz" and kept not in set(kept.parent.glob("*.json"))
 
 
 def test_a_command_that_writes_no_report_files_skips_as_unknown(repo, receipts):

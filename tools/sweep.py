@@ -667,7 +667,7 @@ def _failure_lines(output: str, limit: Optional[int] = 40) -> list:
 def junit_env(env: dict, path: Path) -> dict:
     """``env`` with pytest asked to write its junit report to ``path``."""
     out = dict(env)
-    own = f'"--junit-xml={path.as_posix()}" -o junit_family=xunit1'
+    own = f'"--junit-xml={path.as_posix()}" -o junit_family=xunit1 --durations=100'
     out["PYTEST_ADDOPTS"] = f"{out.get('PYTEST_ADDOPTS', '')} {own}".strip()
     return out
 
@@ -707,6 +707,39 @@ def parse_skips(path: Path) -> Optional[list]:
             reason = found.group(1) if found else reason
         skips.append({"nodeid": nodeid, "reason": reason})
     return sorted(skips, key=lambda s: s["nodeid"])
+
+
+def junit_path(repo: Path, commit: str, override: Optional[Path] = None) -> Path:
+    """Where a run keeps the junit report that times its tests, gzipped.
+
+    Not ``.json``: :func:`_newest_green` globs ``*.json`` and would warn about
+    a file ``run`` itself wrote. ``tools/test_durations.py`` reads it."""
+    return receipts_dir(repo, override) / f"{commit}.junit.xml.gz"
+
+
+def junit_summary(report: bytes, top: int = 10) -> Optional[dict]:
+    """``{"tests", "sum_seconds", "top_modules"}`` for the junit report in
+    ``report``; ``None`` when it does not parse. ``sum_seconds`` adds every
+    test's own time (setup, call and teardown), so with ``-n`` workers it is
+    larger than the run's wall time."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(report)
+    except ET.ParseError:
+        return None
+    modules: dict = {}
+    count = 0
+    for case in root.iter("testcase"):
+        count += 1
+        module = case.get("file") or (case.get("classname") or "").rsplit(".", 1)[0]
+        modules[module] = modules.get(module, 0.0) + float(case.get("time") or 0.0)
+    ranked = sorted(modules.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    return {
+        "tests": count,
+        "sum_seconds": round(sum(modules.values()), 1),
+        "top_modules": [{"module": m, "seconds": round(t, 1)} for m, t in ranked],
+    }
 
 
 #: The cap on the suite output a red run parks beside its receipt, and how
@@ -924,6 +957,10 @@ def cmd_run(args) -> int:
             _report_window(grant, result_file, proc.returncode,
                            (proc.stdout or "") + (proc.stderr or ""), time.monotonic() - clock)
             skips = parse_skips(junit_file)
+            try:
+                junit_bytes = junit_file.read_bytes()
+            except OSError:
+                junit_bytes = None
         finally:
             grant.release()
             # Anything left here is a test that wrote to the launcher home it was
@@ -936,6 +973,7 @@ def cmd_run(args) -> int:
     else:
         command, proc, skips, started, window_receipt = _remote_run(remote)
         home_writes = []
+        junit_bytes = None
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
@@ -1095,6 +1133,22 @@ def cmd_run(args) -> int:
             )
         else:
             receipt["output"] = saved.name
+
+    # Added field only: readers of the receipt ignore keys they do not know.
+    # An attempt that parsed no counts timed nothing worth keeping, and one
+    # filed as ``.invalid`` must not replace the report of the standing verdict.
+    if junit_bytes and counts and standing is None:
+        summary = junit_summary(junit_bytes)
+        if summary is not None:
+            import gzip
+
+            kept = junit_path(repo, commit, args.receipts)
+            try:
+                kept.write_bytes(gzip.compress(junit_bytes))
+            except OSError as exc:
+                receipt["durations_error"] = f"{kept.name}: {exc}"
+            else:
+                receipt["durations"] = {"file": kept.name, **summary}
 
     dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
 
