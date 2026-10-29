@@ -34518,11 +34518,15 @@ const STATS_WINDOW_METHOD = [
   "provider filter: a provider card narrows the summary and the table to that " +
     "provider's part of the window. A transcript row is filed under the " +
     "provider its profile declares; a row shown as — counts toward none.",
-  "daemon LLM calls: one ledger line per call the daemon itself makes " +
+  "daemon LLM calls: one count per request the daemon itself makes " +
     "(daemon/llm_usage.py), with the provider's own token counts. An " +
-    "embedding request covering several sessions' documents is shared out " +
-    "over them by text length. A call whose provider reported no count is " +
-    "counted as a call and shown as —, never as 0.",
+    "embedding request covering several sessions' documents is written as " +
+    "one ledger line per session, its tokens shared out by text length; the " +
+    "totals, feature and provider rows count that request once, while each " +
+    "session row counts every request it took part in, so the session rows " +
+    "can add up to more calls than the total (their tokens still add up). A " +
+    "call whose provider reported no count is counted as a call and shown " +
+    "as —, never as 0.",
 ];
 
 /* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
