@@ -1028,3 +1028,87 @@ def test_a_resend_whose_notice_cannot_be_queued_reports_exited_unqueued(home, tm
         assert thread_notices.pending("s2") == []
 
     run(tmp_path, scenario)
+
+
+def test_a_resend_whose_notice_queue_refuses_reports_not_delivered(home, tmp_path, monkeypatch):
+    """claunch-tpbqz.1.1: queue() returning False -- the notice not recorded
+    at all -- is the other shape of 'the queue did not take it'. deliver()
+    passes that falseness through as delivered False and hold None, and the
+    pane reads delivered === false as its '전달하지 못했습니다' line
+    (web/static/threads-pane.js). The journal holds no record, so hold must
+    not name a queue state the journal does not have either."""
+    from claude_launcher.daemon import thread_notices
+    monkeypatch.setattr(thread_notices, "queue", lambda *a, **k: False)
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "first"}))["thread"]["id"]
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "lost on the way"})
+        seq = res["message"]["seq"]
+        s1 = mgr.sessions["s1"]
+        s1.exited, s1.held_at = True, None
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is False and again["hold"] is None
+        assert thread_notices.requests("s1") == []
+
+        # The same falseness names a guest whose notice did not get in.
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 도와줘"})
+        seq2 = res["message"]["seq"]
+        mgr.sessions["s2"].exited = True
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/resend", {})
+        assert again["guests_delivered"] == {"s2": False}
+        assert "guests_hold" not in again
+        assert thread_notices.requests("s2") == []
+
+    run(tmp_path, scenario)
+
+
+def test_a_resend_after_its_notice_settled_still_gets_its_own_queue_slot(home, tmp_path):
+    """claunch-tpbqz.1.1 (dedupe-swallow investigation): the settled-:r1
+    record the exited-unqueued test seeds by hand cannot arise on the product
+    path -- a resend's attempt id is minted from resent_at's length after
+    record_delivery appends, so ids grow monotonically and flush only settles
+    ids a queue() already wrote. The reachable loss-and-retry flow is: resend
+    queues :r1, a respawn flushes it (settled sent), the message is still
+    lost, the user resends -- and the retry must land in the queue under its
+    own :r2, never swallowed by the settled :r1. This pins that invariant so
+    a future id-scheme change cannot silently reopen the swallow."""
+    from claude_launcher.daemon import thread_notices
+
+    class Flushable:
+        def __init__(self, name):
+            self.sdef = SimpleNamespace(name=name)
+            self.exited = False
+            self.typed = []
+
+        async def deliver(self, text, *, wait_for_draft=False):
+            self.typed.append(text)
+            return True
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "first"}))["thread"]["id"]
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "lost on the way"})
+        seq = res["message"]["seq"]
+        s1 = mgr.sessions["s1"]
+        s1.exited, s1.held_at = True, None
+
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is True and again["hold"] == "exited"
+        assert [q["notice"] for q in thread_notices.pending("s1")] == [f"{tid}:m{seq}:r1"]
+
+        # A respawn flush types the notice and settles it -- the product path
+        # that produces a settled record for a resend attempt id.
+        s1.exited = False
+        assert await thread_notices.flush(Flushable("s1")) == 1
+        assert [(r["notice"], r["status"]) for r in thread_notices.requests("s1")] == [
+            (f"{tid}:m{seq}:r1", "sent")]
+        assert thread_notices.pending("s1") == []
+
+        # The message is still lost (the pane cannot know the harness took
+        # it), so the user resends: the settled :r1 must not swallow :r2.
+        s1.exited = True
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is True and again["hold"] == "exited"
+        assert [q["notice"] for q in thread_notices.pending("s1")] == [f"{tid}:m{seq}:r2"]
+
+    run(tmp_path, scenario)
