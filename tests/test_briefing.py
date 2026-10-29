@@ -1086,7 +1086,7 @@ def test_a_removed_record_takes_its_briefing_along(home, monkeypatch, how):
     assert briefing.digest("kept")["one_line"] == "kept"
 
 
-@pytest.mark.parametrize("outcome", ["answer", "failure"])
+@pytest.mark.parametrize("outcome", ["answer", "failure", "truncated"])
 def test_a_record_removed_during_composition_keeps_nothing(home, tmp_path, monkeypatch, outcome):
     """The LLM call takes up to a minute. A record removed while it is out
     must not get its summary (or a failure) back when the answer lands:
@@ -1100,6 +1100,9 @@ def test_a_record_removed_during_composition_keeps_nothing(home, tmp_path, monke
         briefing.forget(["s1"])
         if outcome == "failure":
             raise briefing.BriefingError("HTTP 402: insufficient credits")
+        if outcome == "truncated":
+            return briefing.LlmAnswer(text='{"goal": "cut', finish_reason="length",
+                                      completion_tokens=100)
         return briefing.LlmAnswer(
             text=json.dumps({"goal": "g", "state": "idle",
                              "one-line-job-description": "old"}),
@@ -1107,7 +1110,7 @@ def test_a_record_removed_during_composition_keeps_nothing(home, tmp_path, monke
         )
 
     monkeypatch.setattr(briefing, "call_llm", removed_meanwhile)
-    if outcome == "failure":
+    if outcome in ("failure", "truncated"):
         with pytest.raises(briefing.BriefingError):
             asyncio.run(briefing.compose(session, {"max_tokens": 100}, refresh=True))
     else:
