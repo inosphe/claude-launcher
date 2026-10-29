@@ -99,7 +99,11 @@ from your session automatically):
   finished sessions waiting to be ended included, and each spends a turn on
   it — so every `'*'` send comes back with a `BROADCAST` advisory. When the
   audience is a board state, name it: `@in_review` resolves to the members
-  whose issue is `in_review` on your board (the landing queue).
+  whose issue is `in_review` on your board (the landing queue). **A worker
+  may not send to `'*'` at all**: the daemon refuses it with the reason
+  (one worker's `'*'` reached 844 members and drew 76 response nudges,
+  claunch-v0h29). Name your parent, your reviewer or the peer instead; an
+  announcement for the whole mesh goes through the leader.
 - **Fan-out with per-peer instructions = ONE batch send**: shared preamble
   as the body plus `--section w1="..."` `--section w2="..."` — each peer is
   delivered only its own slice. A recipient you give no section still

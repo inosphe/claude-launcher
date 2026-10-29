@@ -78,7 +78,9 @@ TOOLS = [
         "description": (
             "Send a message to mesh members. '*' broadcasts to every other "
             "connected member (and the result carries a BROADCAST advisory: "
-            "each recipient spends a turn on it); '@in_review' addresses the "
+            "each recipient spends a turn on it) — a worker's '*' is refused "
+            "with the reason, so a worker names the handles it is for; "
+            "'@in_review' addresses the "
             "members whose issue is in_review on your board. Delivery types "
             "the message into each recipient's "
             "terminal (remote members receive it over the relay). The sender "

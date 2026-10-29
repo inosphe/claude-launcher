@@ -2525,6 +2525,48 @@ def test_every_agent_broadcast_carries_the_broadcast_advisory(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_worker_may_not_broadcast_and_is_told_why(home, tmp_path):
+    """A worker's '*' is refused with the reason and what to send instead,
+    and nothing is logged (claunch-v0h29.2). The leader's '*' and the human's
+    dashboard '*' still go out; a worker's named send is untouched."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mesh = mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "worker_1"), ("s3", "worker_2")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            await mm.join("b", n, handle=h)
+        assert mesh.members["worker_1"].role == "worker"
+        # the briefing a worker joins with no longer offers '*'
+        told = mm.briefing_block(mesh, mesh.members["worker_1"])
+        assert "<to|*>" not in told and "may not send to '*'" in told
+        assert "<to|*>" in mm.briefing_block(mesh, mesh.members["leader"])
+        before = len(mesh.messages)
+
+        with pytest.raises(MeshError) as refused:
+            await mm.send("b", "worker_1", "*", "please review my branch")
+        why = str(refused.value)
+        assert "may not send to '*'" in why
+        assert "claunch-v0h29" in why
+        assert "by handle" in why and "@in_review" in why
+        assert len(mesh.messages) == before
+
+        await mm.send("b", "worker_1", ["leader"], "please review")
+        assert mesh.messages[-1]["to"] == ["leader"]
+
+        led = await mm.send("b", "leader", "*", "master moved.", type="fyi")
+        assert led["notice"].startswith("BROADCAST")
+        human = await mm.send("b", "operator", "*", "hello all", external=True)
+        assert human["notice"] is None
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_in_review_selector_resolves_to_connected_assignees(home, tmp_path):
     """'@in_review' becomes the explicit handle list of the members whose
     session holds an in_review issue; the log records that list, never the

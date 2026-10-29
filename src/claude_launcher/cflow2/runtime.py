@@ -6299,6 +6299,23 @@ def _ask_escalate(r: Run, rec: Dict[str, Any], why: str) -> None:
     who = ", ".join(e.get("handle") or e.get("session") or "?" for e in rec.get("asked") or [])
     rec.setdefault("skipped", []).append(
         {"group": rec.get("group"), "candidate": who or "nobody", "reason": why})
+    if rec.get("single"):
+        # A single-responder group (asks.SINGLE_RESPONDER_ROLES) asked one
+        # member: the next untried member of the same group is asked before
+        # the question leaves it. Routing skips the group once nobody is left
+        # in it (claunch-v0h29.1).
+        group = int(rec.get("group") or 0)
+        passed = rec.get("passed") or {}
+        if passed.get("group") != group:
+            passed = {"group": group, "handles": []}
+        passed["handles"] = list(passed["handles"]) + [
+            e.get("handle") for e in rec.get("asked") or [] if e.get("handle")]
+        rec["passed"] = passed
+        rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+        rec["abstained"] = []
+        rec["resolution"] = RES_ROUTING
+        _ask_sync_approval(r, rec)
+        return
     rec["group"] = int(rec.get("group") or 0) + 1
     rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
     rec["abstained"] = []
@@ -6431,6 +6448,7 @@ def ask_apply_route(plans: List[Dict[str, Any]], *, cwd: Optional[str] = None,
                 rec["wired"] = list(plan["wired"])
             if plan.get("asked"):
                 rec["group"] = int(plan["group"])
+                rec["single"] = bool(plan.get("single"))
                 rec["asked"] = list(plan["asked"])
                 rec["mesh"] = plan.get("mesh") or rec.get("mesh")
                 rec["resolution"] = RES_ASKED
@@ -6624,7 +6642,8 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                    channel="responder")
             # one member's abstention leaves the question with the rest of
             # its group; it moves on when every member abstained (or the
-            # group's deadline passes)
+            # group's deadline passes) -- to the group's next untried member
+            # when the group asks one at a time, else to the next group
             rec.setdefault("abstained", []).append(session)
             asked = {e.get("session") for e in rec.get("asked") or []}
             if asked <= set(rec["abstained"]):
@@ -6632,7 +6651,7 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                               + (f" (last: {handle}: {reason})" if reason else ""))
                 receipt["moved"] = True
                 receipt["note"] = ("recorded as an abstention; everyone asked abstained, so "
-                                   "the question moved on to the next candidate group (or to "
+                                   "the question moved on to the next candidate (or to "
                                    "its fallback)")
             else:
                 receipt["moved"] = False

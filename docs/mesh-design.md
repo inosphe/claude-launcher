@@ -935,6 +935,7 @@ claunch mesh ls
 claunch mesh join <mesh> [--as HANDLE] [--role ROLE] [--session NAME]
 claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
+                                                # a worker's '*' is refused (claunch-v0h29.2)
 claunch mesh members <mesh> [--state STATE]      # default: current members
 claunch mesh history <mesh> [-n N]
 claunch mesh roles <mesh> [--yaml | --file ROLES.YAML | --reset]

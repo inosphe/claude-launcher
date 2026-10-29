@@ -56552,7 +56552,8 @@ function renderMesh(info, history, force, owed, historyPage) {
   view.appendChild(el(
     "p", "wf-desc",
     "messages are typed into recipients' terminals by the daemon — " +
-    "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\""
+    "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\"" +
+    " (a worker's '*' is refused: workers name the handles)"
   ));
 
   /* One filter decides what the graph, the wiring list and the roster below
