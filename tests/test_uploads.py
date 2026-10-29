@@ -210,6 +210,104 @@ def test_the_session_line_upload_goes_straight_into_the_session(home, tmp_path):
     _run(body)
 
 
+# -- the detail panel's Opening task section (claunch-5lro4) ----------------
+
+
+PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
+
+
+def test_a_session_file_is_only_a_pair_this_module_writes(home):
+    """``session_file`` answers for ``<id>/<name>`` only, even when a file
+    sits at the path another id or name would reach (s597-rev @ 133b3281)."""
+    fid = "a" * 20
+    root = uploads.session_dir("w1")
+    (root / fid).mkdir(parents=True)
+    (root / fid / "ok.txt").write_text("x")
+    (root / "not-an-id").mkdir()
+    (root / "not-an-id" / "ok.txt").write_text("x")
+    (root / fid / "sub").mkdir()
+    (root / fid / "sub" / "deep.txt").write_text("x")
+    assert uploads.session_file("w1", fid, "ok.txt") == root / fid / "ok.txt"
+    assert uploads.session_file("w1", "not-an-id", "ok.txt") is None
+    assert uploads.session_file("w1", fid, "sub/deep.txt") is None
+    assert uploads.session_file("w1", fid, "gone.txt") is None
+
+
+def test_the_opening_attachments_are_listed_and_served(home, tmp_path):
+    from claude_launcher.daemon import opening_images
+
+    async def body(client, mgr):
+        a = (await (await _upload(client, name="frame.utrace")).json())["id"]
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "u5", "profile": "py", "cwd": str(tmp_path),
+            "task": "find the slow frame", "beads": False, "opening_files": [a],
+        })
+        assert resp.status == 201, await resp.text()
+        # An image claimed the way a create with opening_images claims it;
+        # the paste route that hands it to the harness is not this test's.
+        image = opening_images.claim([opening_images.stage([PNG], "image/png")], "u5")[0].path.name
+        # ...and named in the record, as the create names what it claimed.
+        from claude_launcher.daemon import session_opening
+        rec = session_opening.read("u5")
+        assert rec["image_names"] == []
+        session_opening.record("u5", rec["text"], images=1, image_names=[image],
+                               files=rec["files"])
+        # A file sent later from the session line lands in the same folder
+        # and is not the opening's.
+        later = await (await client.post("/api/sessions/u5/uploads", params={"name": "later.txt"},
+                                          data=b"later", headers=BEARER)).json()
+
+        resp = await client.get("/api/sessions/u5/opening/attachments", headers=BEARER)
+        doc = await resp.json()
+        assert resp.status == 200, doc
+        assert doc["images"] == [{"name": image, "type": "image/png"}]
+        assert doc["files"] == [{"id": a, "name": "frame.utrace", "bytes": len(TRACE)}]
+
+        resp = await client.get(f"/api/sessions/u5/opening/images/{image}", headers=BEARER)
+        assert resp.status == 200 and await resp.read() == PNG
+        assert resp.headers["Content-Type"] == "image/png"
+
+        resp = await client.get(f"/api/sessions/u5/opening/files/{a}/frame.utrace", headers=BEARER)
+        assert resp.status == 200 and await resp.read() == TRACE
+        assert "attachment" in resp.headers["Content-Disposition"]
+
+        # Not the opening's, not a name this module writes, not there.
+        for path in (f"files/{later['id']}/later.txt", f"files/{a}/other.utrace",
+                     "images/..%2Fopening.json", "images/01-" + "0" * 20 + ".png"):
+            resp = await client.get(f"/api/sessions/u5/opening/{path}", headers=BEARER)
+            assert resp.status == 404, (path, await resp.text())
+
+        # An image on disk that this opening does not name (one an earlier
+        # same-name session left) is not served (s648-rev @ cdc3483a).
+        stray = "02-" + "f" * 20 + ".png"
+        (opening_images.session_dir("u5") / stray).write_bytes(PNG)
+        assert opening_images.claimed_path("u5", stray) is not None
+        resp = await client.get(f"/api/sessions/u5/opening/images/{stray}", headers=BEARER)
+        assert resp.status == 404, await resp.text()
+
+        # Once the file is gone the list says so rather than offering a link.
+        (uploads.session_dir("u5") / a / "frame.utrace").unlink()
+        doc = await (await client.get("/api/sessions/u5/opening/attachments", headers=BEARER)).json()
+        assert doc["files"][0]["missing"] is True
+
+        resp = await client.get("/api/sessions/ghost/opening/attachments", headers=BEARER)
+        assert resp.status == 400
+
+    _run(body)
+
+
+def test_an_opening_without_attachments_lists_none(home, tmp_path):
+    async def body(client, mgr):
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "u6", "profile": "py", "cwd": str(tmp_path), "task": "look", "beads": False,
+        })
+        assert resp.status == 201, await resp.text()
+        doc = await (await client.get("/api/sessions/u6/opening/attachments", headers=BEARER)).json()
+        assert doc["images"] == [] and doc["files"] == []
+
+    _run(body)
+
+
 # -- threads ----------------------------------------------------------------
 
 

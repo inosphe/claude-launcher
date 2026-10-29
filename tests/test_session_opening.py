@@ -100,6 +100,72 @@ def test_the_record_is_the_text_that_was_handed_over(home):
     assert view["text"] == block
 
 
+def test_the_record_names_the_files_the_opening_claimed(home):
+    rec = {"id": "a" * 20, "name": "frame.utrace", "bytes": 12}
+    session_opening.record("w1", "look\n[claunch attachment] ...", files=[rec])
+    assert session_opening.read("w1")["files"] == [rec]
+    # The file is not on disk here, and the list says so.
+    assert session_opening.attachments("w1") == {
+        "images": [], "files": [{**rec, "missing": True}]}
+
+
+def test_a_name_used_again_does_not_inherit_the_old_openings_images(home):
+    """A session's state directory outlives it and a person may reuse a
+    name; the new opening lists only its own images (s597-rev, @ 133b3281)."""
+    from claude_launcher.daemon import opening_images
+
+    png = bytes.fromhex("89504e470d0a1a0a") + b"old"
+    old = opening_images.claim([opening_images.stage([png], "image/png")], "w1")[0].path.name
+    assert [i["name"] for i in session_opening.attachments("w1")["images"]] == [old]
+
+    # Created again under the same name with no images: nothing listed or served.
+    assert opening_images.claim([], "w1") == []
+    assert session_opening.attachments("w1")["images"] == []
+    assert opening_images.claimed_path("w1", old) is None
+
+    # ...or with images of its own: only those.
+    new = opening_images.claim([opening_images.stage([png + b"new"], "image/png")], "w1")[0].path.name
+    assert new != old
+    assert [i["name"] for i in session_opening.attachments("w1")["images"]] == [new]
+
+
+def test_the_images_listed_are_the_ones_the_record_names(home):
+    """A record that names no image lists none, whatever the folder holds
+    (s648-rev, s1236-rev2 @ 133b3281: record images=1 then images=0)."""
+    from claude_launcher.daemon import opening_images
+
+    png = bytes.fromhex("89504e470d0a1a0a") + b"old"
+    old = opening_images.claim([opening_images.stage([png], "image/png")], "w1")[0].path.name
+    session_opening.record("w1", "old", images=1, image_names=[old])
+    assert session_opening.image_names("w1") == [old]
+
+    session_opening.record("w1", "new", images=0)
+    assert session_opening.read("w1")["image_names"] == []
+    assert session_opening.attachments("w1")["images"] == []
+    assert session_opening.image_names("w1") == []
+
+    # A name the record keeps but the disk lost is not listed.
+    session_opening.record("w1", "gone", images=1, image_names=["01-" + "0" * 20 + ".png"])
+    assert session_opening.attachments("w1")["images"] == []
+
+
+def test_a_record_from_before_the_names_were_kept_reads_the_folder(home):
+    import json
+    from claude_launcher.daemon import opening_images, paths
+
+    png = bytes.fromhex("89504e470d0a1a0a") + b"x"
+    img = opening_images.claim([opening_images.stage([png], "image/png")], "w1")[0].path.name
+    (paths.session_dir("w1") / "opening.json").write_text(
+        json.dumps({"text": "old", "images": 1}), encoding="utf-8")
+    assert session_opening.read("w1")["image_names"] is None
+    assert [i["name"] for i in session_opening.attachments("w1")["images"]] == [img]
+
+
+def test_a_session_without_a_record_lists_no_files(home):
+    # Its uploads folder cannot tell an opening's file from a later one.
+    assert session_opening.attachments("w1") == {"images": [], "files": []}
+
+
 def test_an_empty_opening_is_not_recorded(home):
     assert session_opening.record("w1", "   \n") is False
     assert session_opening.read("w1") is None

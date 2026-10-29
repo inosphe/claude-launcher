@@ -211,6 +211,10 @@ def test_images_are_moved_to_the_session_and_pasted_ahead_of_the_text(
         assert kept[0].read_bytes() == PNG
         assert not (opening_images.stage_dir() / a).exists()
         assert openings["o3"] == ""
+        # The create names what it claimed in the record, so the panel lists
+        # exactly these (s597-rev @ cdc3483a: dropping image_names= went unseen).
+        resp = await client.get("/api/sessions/o3/opening/attachments", headers=BEARER)
+        assert [i["name"] for i in (await resp.json())["images"]] == [p.name for p in kept]
 
         deadline = time.monotonic() + 15
         while not any(e[0] == "paste" for e in events):

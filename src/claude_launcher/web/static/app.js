@@ -48930,6 +48930,10 @@ function sessTask(s) {
       box.appendChild(more);
     }
   }
+  if (name) {
+    const attached = sessOpeningAttachments(s);
+    if (attached) box.appendChild(attached);
+  }
   // Guarded with typeof: harnesses that slice this section alone do not
   // carry the context items' binding.
   if (name && typeof sessOpeningContexts === "function") {
@@ -49036,6 +49040,98 @@ function sessOpeningContexts(s) {
   }
   box.appendChild(list);
   return box;
+}
+
+/* The images and files the opening carried (claunch-5lro4).
+
+   A create form can send images and uploaded files with the opening task
+   (daemon/opening_images.py, daemon/uploads.py); the session read them, and
+   until now the panel showed only the text, so "what was this session
+   given" had half its answer missing. They are listed under the text:
+   images as thumbnails that open full size, files as download links with
+   their size.
+
+   The list comes from GET /api/sessions/<name>/opening/attachments, once per
+   session: what an opening carried does not change after creation, and the
+   panel is rebuilt every 2s, so the answer is held in a map outside it. The
+   key is the name AND its creation time, because a name can be used again
+   for a new session with a different opening. A request that failed is
+   asked again after OPENING_ATTACH_RETRY_MS rather than held as "none". The
+   first draw asks and draws nothing; the answer redraws the panel. A
+   session with no attachments draws nothing either -- most sessions have
+   none, and an empty "attachments" line under every task would be noise. */
+const sessOpeningAttach = new Map();   // name + created_at -> {images, files, retryAt?} | "loading"
+const OPENING_ATTACH_RETRY_MS = 30000;
+
+function sessOpeningAttachments(s) {
+  const name = s.name || "";
+  const key = `${name}\n${s.created_at || ""}`;
+  const got = sessOpeningAttach.get(key);
+  if (got === undefined || (got.retryAt && Date.now() >= got.retryAt)) {
+    sessOpeningAttach.set(key, "loading");
+    api(`/api/sessions/${encodeURIComponent(name)}/opening/attachments`)
+      .then((resp) => (resp.ok ? resp.json() : null))
+      .catch(() => null)
+      .then((doc) => {
+        sessOpeningAttach.set(key, doc
+          ? { images: doc.images || [], files: doc.files || [] }
+          : { images: [], files: [], retryAt: Date.now() + OPENING_ATTACH_RETRY_MS });
+        refreshSession();
+      });
+    return null;
+  }
+  if (got === "loading") return null;
+  const images = got.images || [], files = got.files || [];
+  if (!images.length && !files.length) return null;
+  const base = `api/sessions/${encodeURIComponent(name)}/opening`;
+  const box = el("div", "sess-task-attach");
+  if (images.length) {
+    const row = el("div", "sess-task-images");
+    for (const img of images) {
+      const src = url(`${base}/images/${encodeURIComponent(img.name)}`);
+      const link = el("a", "sess-task-image");
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.title = "open the image the opening carried, full size";
+      const pic = el("img");
+      pic.src = src;
+      pic.alt = img.name;
+      pic.loading = "lazy";
+      link.appendChild(pic);
+      row.appendChild(link);
+    }
+    box.appendChild(row);
+  }
+  if (files.length) {
+    const list = el("ul", "sess-task-files");
+    for (const f of files) {
+      const item = el("li", "sess-task-file");
+      const size = ` (${uploadSize(f.bytes)})`;
+      if (f.missing) {
+        item.appendChild(el("span", "wf-note", `📎 ${f.name}${size} — no longer on disk`));
+      } else {
+        const link = el("a", null, `📎 ${f.name}`);
+        link.href = url(`${base}/files/${encodeURIComponent(f.id)}/${encodeURIComponent(f.name)}`);
+        link.download = f.name;
+        link.title = "download the file the opening carried";
+        item.append(link, el("span", "wf-note", size));
+      }
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+  }
+  return box;
+}
+
+/* A byte count for people (daemon/uploads.human_size). */
+function uploadSize(n) {
+  let size = Number(n) || 0;
+  for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+    if (size < 1024 || unit === "GiB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+    size /= 1024;
+  }
+  return `${n} B`;
 }
 
 /* ---- handing the opening over again ----------------------------------

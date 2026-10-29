@@ -26,7 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
@@ -1389,6 +1389,10 @@ def build_app(
     r.add_post("/api/sessions/{name}/opening", h_session_opening)
     r.add_get("/api/sessions/{name}/contexts", h_session_contexts)
     r.add_get("/api/sessions/{name}/contexts/{n}", h_session_context)
+    # The images and files the opening carried, for the Opening task section.
+    r.add_get("/api/sessions/{name}/opening/attachments", h_session_opening_attachments)
+    r.add_get("/api/sessions/{name}/opening/images/{image}", h_session_opening_image)
+    r.add_get("/api/sessions/{name}/opening/files/{fid}/{fname}", h_session_opening_file)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
     # (see SessionManager.repin_conversation).
@@ -11691,7 +11695,9 @@ async def _onboard_and_launch(
     # A record that cannot be written is not a reason to refuse the session —
     # it costs the panel its re-inject, not the agent its job.
     try:
-        session_opening.record(name, opening, images=len(images))
+        session_opening.record(name, opening, images=len(images),
+                               image_names=[img.path.name for img in images],
+                               files=[f.record() for f in files])
     except OSError:
         log.warning("could not record the opening of %r", name, exc_info=True)
     try:
@@ -15844,6 +15850,56 @@ async def h_session_opening(request: web.Request) -> web.Response:
     return json_response({
         **body, "ok": True, "delivered": bool(delivered),
         "reason": "" if delivered else "the session did not take it: it is not reading input",
+    })
+
+
+async def h_session_opening_attachments(request: web.Request) -> web.Response:
+    """The images and uploaded files this session's opening carried
+    (``session_opening.attachments``), so the detail panel can show them
+    under the opening task. Each entry is named, not served: the two routes
+    below serve the bytes."""
+    session = _session(request)
+    name = session.sdef.name
+    found = await asyncio.to_thread(session_opening.attachments, name)
+    return json_response({"session": name, **found})
+
+
+async def h_session_opening_image(request: web.Request) -> web.Response:
+    """One image the opening carried, as an image the browser can draw."""
+    session = _session(request)
+    name = session.sdef.name
+    image = request.match_info["image"]
+    # Only images this opening names: the folder may hold an earlier
+    # same-name session's (session_opening.image_names).
+    named = image in await asyncio.to_thread(session_opening.image_names, name)
+    path = (await asyncio.to_thread(opening_images.claimed_path, name, image)) if named else None
+    if path is None:
+        return json_response(
+            {"error": f"{session.sdef.name}'s opening has no image {image}"}, status=404)
+    return web.FileResponse(path, headers={
+        "Content-Type": opening_images.media_type(image),
+        # The name carries a random id and never names other bytes.
+        "Cache-Control": "private, max-age=31536000, immutable",
+    })
+
+
+async def h_session_opening_file(request: web.Request) -> web.Response:
+    """One uploaded file the opening carried, as a download. Only files the
+    recorded opening names: the session's uploads folder also holds files
+    sent later from the session line, and this route is the opening's."""
+    session = _session(request)
+    name = session.sdef.name
+    fid, fname = request.match_info["fid"], request.match_info["fname"]
+    found = await asyncio.to_thread(session_opening.read, name)
+    named = any(f.get("id") == fid and f.get("name") == fname
+                for f in (found or {}).get("files") or [])
+    path = (await asyncio.to_thread(uploads.session_file, name, fid, fname)) if named else None
+    if path is None:
+        return json_response(
+            {"error": f"{name}'s opening has no file {fid}/{fname}"}, status=404)
+    return web.FileResponse(path, headers={
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(fname),
     })
 
 
