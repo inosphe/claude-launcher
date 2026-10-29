@@ -332,7 +332,22 @@ class Queue:
                     # runner. The window still prevents concurrent sweeps.
                     background_running = True
                     continue
-                db.execute("UPDATE jobs SET status='retry',pid=0,detail='runner interrupted' WHERE id=?", (row["id"],))
+                # A runner that died without reporting is a failed attempt like any
+                # other: counted toward RETRY_LIMIT and backed off. Reset without
+                # counting, a runner that cannot start at all (claunch-jakfg: the
+                # daemon's PYTHON_GIL=0 killed it in preinit) was claimed again every
+                # tick, 2239 times, and the job never reached ``stuck`` -- its
+                # watching session waited for a verdict that could not come.
+                failures = row["failures"] + 1
+                if failures >= RETRY_LIMIT:
+                    db.execute("UPDATE jobs SET status='stuck',pid=0,available=0,notified=0,failures=?,"
+                               "detail=? WHERE id=?",
+                               (failures, f"no verdict after {failures} attempts; last: runner interrupted",
+                                row["id"]))
+                else:
+                    db.execute("UPDATE jobs SET status='retry',pid=0,available=?,failures=?,"
+                               "detail='runner interrupted' WHERE id=?",
+                               (time.time() + retry_delay(failures), failures, row["id"]))
             row = db.execute("""SELECT j.* FROM jobs j LEFT JOIN pauses p ON p.common=j.common
                 WHERE j.status IN ('queued','retry') AND j.available<=?
                 AND (j.priority>=0 OR ?)

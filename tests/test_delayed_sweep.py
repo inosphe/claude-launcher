@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -713,6 +714,24 @@ def test_runner_env_drops_the_daemons_manifest_bookkeeping(repo, tmp_path, monke
     assert env[test_window.WINDOW_REQUESTED_BY_ENV] == "leader"
 
 
+def test_runner_env_drops_the_daemons_interpreter_settings(repo, tmp_path, monkeypatch):
+    # The free-threading daemon runs with PYTHON_GIL=0; the job's venv python is a
+    # GIL build and dies in preinit if it inherits it (claunch-t9xko, claunch-jakfg).
+    q = mod.Queue()
+    enqueue(q, repo, "a")
+    for name in im.INTERPRETER_ONLY_ENV:
+        monkeypatch.setenv(name, "0")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    assert im.INTERPRETER_ONLY_ENV and seen
+    for name in im.INTERPRETER_ONLY_ENV:
+        assert name not in seen[0]["env"]
+
+
 def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
@@ -721,8 +740,38 @@ def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tm
     assert mod.Queue(q.database).claim() is None
     with q.connect() as db:
         db.execute("UPDATE jobs SET pid=0,available=0 WHERE id=?", (job["id"],))
+    # The dead runner is a failed attempt: counted and backed off like a reported retry.
+    assert mod.Queue(q.database).claim() is None
+    row = q.get(job["id"])
+    assert (row["status"], row["failures"], row["detail"]) == ("retry", 1, "runner interrupted")
+    assert row["available"] > time.time()
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
     assert mod.Queue(q.database).claim()["id"] == job["id"]
     assert q.get(job["id"])["attempts"] == 2
+
+
+def test_a_runner_that_never_starts_parks_the_job_as_stuck(repo, tmp_path):
+    # claunch-jakfg: the daemon's PYTHON_GIL=0 killed every runner in preinit. The
+    # reset did not count, so the job was claimed 2239 times and never reached a
+    # verdict its watching session could end on.
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    for attempt in range(1, mod.RETRY_LIMIT + 1):
+        assert q.claim()["id"] == job["id"]
+        q.spawned(job["id"], 0)
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
+        assert q.claim() is None
+        row = q.get(job["id"])
+        if attempt < mod.RETRY_LIMIT:
+            assert (row["status"], row["failures"]) == ("retry", attempt)
+            with q.connect() as db:
+                db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
+    assert row["status"] == "stuck" and row["failures"] == mod.RETRY_LIMIT
+    assert f"after {mod.RETRY_LIMIT} attempts" in row["detail"] and "runner interrupted" in row["detail"]
+    assert row["notified"] == 0
+    assert q.claim() is None
 
 
 def test_a_repair_can_join_the_window_while_a_background_runner_is_alive(repo, tmp_path, monkeypatch):

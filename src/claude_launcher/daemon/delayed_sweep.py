@@ -191,6 +191,11 @@ class Clock:
         logfile = scratch / ("delayed-sweep-" + job["id"] + ".log")
         script = Path(job["tool"]).with_name("delayed_sweep.py")
         env = dict(os.environ)
+        # The runner is the job's venv python, not the daemon's interpreter: a GIL
+        # build dies in preinit on the free-threading daemon's PYTHON_GIL=0
+        # (claunch-t9xko, claunch-jakfg).
+        for name in instance_manifest.INTERPRETER_ONLY_ENV:
+            env.pop(name, None)
         # A daemon-owned test must outlive its originating leader session.
         env.pop("CLAUNCH_SESSION", None)
         # ...but the Window page still names who it runs for (claunch-ersj2).
