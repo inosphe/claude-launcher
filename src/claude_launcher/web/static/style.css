@@ -8361,7 +8361,10 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 /* Chart (#/chart, chart-page.js): every session as a bar on one time axis.
    Columns: name, track, lifetime, cflow. The track is positioned inline by
    the page; every colour is here so the light theme derives it. */
-#chart-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 18px 26px 0; min-height: 0; }
+/* overflow-x: the timeline column keeps a minimum width (--chart-main-min,
+   below), so a narrow window scrolls the view sideways instead of squeezing
+   the bars under the sticky columns (claunch-p8f73.1). */
+#chart-view { --chart-main-min: 840px; flex: 1; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; padding: 18px 26px 0; min-height: 0; }
 #chart-view > .wf-head, #chart-view > .chart-toolbar, #chart-view > .chart-summary, #chart-view > .chart-error { flex: none; }
 #chart-view .wf-head { display: flex; align-items: baseline; gap: 12px; }
 .chart-muted { color: #8b949e; font-size: 12px; }
@@ -8392,8 +8395,13 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
    header, the name column and the cflow column stay in view while the bars
    scroll under them. */
 .chart-hint { margin: -4px 0 8px; }
-.chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 640px; }
-.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 78px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
+/* The bar column keeps at least 300px: min-width is the five columns'
+   minimums plus the four gaps. The name column and the three right columns
+   are sticky, so this alone does not keep the bars in view -- a column
+   narrower than the grid scrolls them under the sticky ones. The column
+   itself keeps --chart-main-min (.chart-split) for that. */
+.chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 822px; }
+.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(300px, 1fr) 64px 78px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
 .chart-row:not(.chart-axis) { cursor: pointer; }
 .chart-row:not(.chart-axis):hover { background: #161b22; }
 /* The token series row is a chart, not a pick: no pointer, no hover. */
@@ -8492,7 +8500,9 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-series-area.out { fill: #3fb950; }
 /* Two columns: the timeline (.chart-main) and the picked row's detail
    (.chart-detail), with a draggable divider whose place is --chart-left. */
-.chart-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, var(--chart-left, 64%)) 6px minmax(0, 1fr); }
+.chart-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(var(--chart-main-min), var(--chart-left, 64%)) 6px minmax(200px, 1fr); }
+/* No picked row: no detail column and no divider, the timeline takes the width. */
+.chart-split.solo { grid-template-columns: minmax(var(--chart-main-min), 1fr); }
 .chart-main { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 18px; }
 .chart-divider { cursor: col-resize; background: transparent; border-left: 1px solid #30363d; margin-left: 2px; touch-action: none; }
 .chart-divider:hover, .chart-divider.dragging, .chart-divider:focus-visible { border-left: 3px solid #388bfd; margin-left: 1px; outline: none; }
@@ -8517,7 +8527,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 @media (max-width: 760px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
   .chart-split { display: flex; flex-direction: column; flex: none; }
-  .chart-main { overflow-x: auto; overflow-y: visible; }
+  .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
   .chart-divider { display: none; }
   .chart-detail { padding: 12px 0 18px; border-top: 1px solid #30363d; overflow: visible; }
 }

@@ -509,7 +509,10 @@ card = C.rowTip(Object.assign({}, tipRow, { tokens: null, session: { name: 'a' }
   tipModel, am, null);
 assert.strictEqual(card.brief, '');
 tr = tipRows(card);
-assert.ok(tr['토큰(창)'].startsWith('계측 없음'));
+// It says why there is no record: the ledger only sees API-key providers, so
+// an OAuth session spends tokens and still has none (claunch-p8f73).
+assert.ok(tr['토큰(창)'].startsWith('계측 대상 아님'), tr['토큰(창)']);
+assert.ok(tr['토큰(창)'].includes('OAuth'), tr['토큰(창)']);
 assert.ok(!('활동 구간' in tr) && !('마지막 요청' in tr));
 // No part figures (the fixture's `a`): no breakdown line.
 assert.ok(!('구성' in tipRows(C.rowTip(tipRow, tipModel, am, null))));

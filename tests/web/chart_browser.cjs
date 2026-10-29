@@ -270,9 +270,18 @@ function assertTicksApart(ticks, where) {
     assert.equal(roles.alpha, "worker");
     assert.equal(roles.beta, "free-role");
 
-    // 7. A click highlights the row and shows its detail on the right.
+    // 7. A click highlights the row and shows its detail on the right. With
+    // no pick there is no detail column at all: the timeline takes the width
+    // (claunch-p8f73.1).
     const detailText = () => page.$eval("#chart-view .chart-detail", (d) => d.textContent);
-    assert.match(await detailText(), /클릭하면/);
+    const solo = () => page.$eval("#chart-view .chart-split", (s) => ({
+      solo: s.classList.contains("solo"),
+      side: !!s.querySelector(".chart-detail"),
+      divider: !!s.querySelector(".chart-divider"),
+      fill: Math.abs(s.querySelector(".chart-main").getBoundingClientRect().width -
+                     s.getBoundingClientRect().width) < 2,
+    }));
+    assert.deepEqual(await solo(), { solo: true, side: false, divider: false, fill: true });
     await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
     await page.waitForSelector("#chart-view .chart-row.selected[data-name='alpha']");
     assert.equal(await page.$$eval("#chart-view .chart-row.selected", (rs) => rs.length), 1);
@@ -293,9 +302,45 @@ function assertTicksApart(ticks, where) {
     assert.equal(await page.$eval("#chart-view .chart-row.selected", (r) => r.dataset.name), "alpha");
     await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
     assert.equal(await page.$$eval("#chart-view .chart-row.selected", (rs) => rs.length), 0);
-    assert.match(await detailText(), /클릭하면/);
+    assert.deepEqual(await solo(), { solo: true, side: false, divider: false, fill: true });
+
+    // 7b. However narrow the window, the bars keep a readable width between
+    // the sticky name column and the sticky right columns, and the view
+    // scrolls sideways instead (claunch-p8f73.1). Checked with and without
+    // the detail column, and under the narrow-screen layout.
+    const barRoom = () => page.evaluate(() => {
+      const row = document.querySelector("#chart-view .chart-row[data-name='alpha']");
+      const view = document.querySelector("#chart-view");
+      return {
+        room: row.querySelector(".chart-life").getBoundingClientRect().left -
+              row.querySelector(".chart-name").getBoundingClientRect().right,
+        scrolls: view.scrollWidth > view.clientWidth,
+      };
+    });
+    for (const [width, pick] of [[1000, true], [700, false], [700, true]]) {
+      await page.setViewportSize({ width, height: 900 });
+      if (pick) {
+        await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+        await page.waitForSelector("#chart-view .chart-detail");
+      }
+      await page.waitForTimeout(300);
+      const got = await barRoom();
+      assert.ok(got.room >= 290, `bars get ${got.room}px at ${width}px (pick ${pick})`);
+      assert.ok(got.scrolls, `the view scrolls sideways at ${width}px (pick ${pick})`);
+      if (pick) {
+        await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+        await page.waitForSelector("#chart-view .chart-split.solo");
+      }
+    }
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.waitForTimeout(300);
 
     // 8. Dragging the divider resizes the columns, and the split is kept.
+    // Wide enough that the timeline's minimum (--chart-main-min) does not
+    // bind at either end of the drag.
+    await page.setViewportSize({ width: 1800, height: 900 });
+    await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+    await page.waitForSelector("#chart-view .chart-divider");
     const width = () => page.$eval("#chart-view .chart-main", (m) => m.getBoundingClientRect().width);
     const before = await width();
     const d = await page.$eval("#chart-view .chart-divider", (e) => {
@@ -305,14 +350,18 @@ function assertTicksApart(ticks, where) {
     });
     await page.mouse.move(d.x, d.y);
     await page.mouse.down();
-    await page.mouse.move(d.left + d.w * 0.45, d.y, { steps: 5 });
+    await page.mouse.move(d.left + d.w * 0.75, d.y, { steps: 5 });
     await page.mouse.up();
     const after = await width();
-    assert.ok(Math.abs(after - d.w * 0.45) < 12, `main is ${after}px of ${d.w}px`);
-    assert.ok(after < before - 50);
+    assert.ok(Math.abs(after - d.w * 0.75) < 12, `main is ${after}px of ${d.w}px`);
+    assert.ok(after > before + 50);
     await page.reload();
     await page.waitForSelector("#chart-view .chart-main");
     assert.ok(Math.abs((await width()) - after) < 12, "split kept across a reload");
+    // Put the pick back the way step 7 left it: nothing picked.
+    await page.click("#chart-view .chart-row[data-name='alpha'] .chart-life");
+    await page.waitForSelector("#chart-view .chart-split.solo");
+    await page.setViewportSize({ width: 1400, height: 900 });
 
     // 9. The token usage block: the window's figures, the four parts named,
     // a series row drawn on the timeline's own axis, and the query the
@@ -493,7 +542,7 @@ function assertTicksApart(ticks, where) {
     const gb = await gname.boundingBox();
     await page.mouse.move(gb.x + 5, gb.y + gb.height / 2);
     await page.waitForFunction(() =>
-      document.querySelector(".chart-tip.shown")?.textContent.includes("계측 없음"),
+      document.querySelector(".chart-tip.shown")?.textContent.includes("계측 대상 아님"),
       null, { timeout: 5000 });
     if (process.env.CHART_TIP_SHOT) {
       await page.mouse.move(nb.x + 5, nb.y + nb.height / 2);
