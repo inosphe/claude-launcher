@@ -931,23 +931,27 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in text
     assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in text
     assert "내림도 올림도 쓰지 않는다" in text
-    # The JUSTIFICATION must be true. Overlap is the union of floor and ceil
-    # and is therefore the widest of the three — so "overlap sits between the
-    # two" was false, and so was "floor takes in the line just before the
-    # answer": floor MISSES the opening minute (s511-rev reproduction:
-    # window 10:05:30–10:29:08, head 10:05 → floor False, ceil True,
-    # overlap True). The measured asymmetry is pinned so the false
-    # justification cannot come back.
-    assert "**겹침은 그 둘의 합집합이고" in text
-    assert "셋 가운데 가장 넓다**(s511-rev 지적)" in text
+    # The JUSTIFICATION must be true. This sentence has now been wrong twice:
+    # first "overlap sits between floor and ceil" (it is the widest), then
+    # "overlap is their union" — which s597-rev disproved: with an ask that
+    # opens and closes inside one minute (10:05:10–10:05:40, head 10:05)
+    # floor and ceil are BOTH false and only overlap is true. Overlap is a
+    # strict superset of the union.
+    assert "**겹침이 셋 가운데 가장 넓다**" in text
     assert "내림은 여는 분의 줄을" in text
     assert "빠뜨리고(구간 10:05:30–10:29:08에서 머리 10:05는 내림 False·" in text
     assert "올림은 답한 분의 줄을 빠뜨린다(머리 10:29가" in text
+    assert "**포함하고 그보다 넓다**" in text
+    assert "10:05:10–10:05:40, 머리 10:05) 내림·올림이 둘 다 False인데" in text
+    assert "겹침만 True다(s597-rev 재심)" in text
+    assert "「둘의 합집합」이라고" in text
+    assert "적지 않는다" in text
     assert "**값을 치르는 자리도 적는다**" in text
     assert "ask가 열리기 **전** 같은" in text
     assert "경우 (b)가 **서는** 방향이다" in text
     # the false forms must not survive
     assert "내림하면 답 직전 1분의 앞 줄까지" not in text
+    assert "겹침은 그 둘의 합집합이고" not in text
     assert "겹침 판정이" not in text
     # board-write-first is a RULE the pairing stands on, not an observation,
     # and its enforcement point is named (claunch-nj5yq defect 3)
@@ -969,8 +973,16 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     # `by` only, the abstain emit also carries `by_session` (s597-rev
     # measured runtime.py:6622 @ bfece51f)
     assert "**`changes`·`pass` 답 emit" in text
-    assert "`abstain` emit(`:6622`)만" in text
+    assert "`abstain` emit(`:6622`" in text
     assert "`by_session`을 함께 싣는다**" in text
+    # no dangling reference: four reviewers caught this paragraph promising a
+    # fallback below that the canon does not carry (s648-rev, s490-rev,
+    # s1389-rev, s1236-rev2). The handle-to-session mapping lives in (a); the
+    # paragraph must point there and must not quote the dead phrase either,
+    # or the "phrase absent" check would pass on its own explanation.
+    assert "이 문단이 앞선 회차에 약속한 폴백은 v1 정본 어디에도" in text
+    assert "위 (a)이고 거기에 그 변환이 있다" in text
+    assert "아래 폴백" not in text
     # the names the v1 engine does not emit appear only to be ruled out —
     # the prose names them precisely so the next reader does not copy them
     # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
