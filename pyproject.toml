@@ -71,4 +71,12 @@ markers = [
     # -m "not slow_shim" while iterating on anything else; the merge and
     # config assertions in the same file stay in the fast set.
     "slow_shim: starts a real routing-shim subprocess",
+    # The browser harnesses (tests/web/*_browser.cjs) run through node and
+    # Playwright; they skip without Playwright and take seconds each with it.
+    "browser: runs a Playwright browser harness through node",
+    # Set by tests/conftest.py on every test carrying worktree, slow_shim or
+    # browser -- do not write it on a test. The targeted tiers (T0, T1) run
+    # with -m "not slow_tail"; the full sweep (T2) has no -m and runs it all.
+    # See CLAUDE.md, "테스트 계층".
+    "slow_tail: the slow tail left to the full sweep; set by conftest",
 ]

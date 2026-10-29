@@ -248,7 +248,7 @@ from typing import List, Optional, Tuple
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import pytest_basetemp, test_window
+from claude_launcher import pytest_basetemp, test_tiers, test_window
 
 
 def _load_sweep():
@@ -1717,10 +1717,17 @@ def build_command(
     basetemp: Optional[str] = None,
     workers: Optional[int] = None,
     deselect: tuple = (),
+    with_tail: bool = False,
 ) -> List[str]:
-    """pytest over exactly ``files``, parallel only when it pays."""
+    """pytest over exactly ``files``, parallel only when it pays.
+
+    The slow tail (``claude_launcher/test_tiers.py``) is left to the full
+    sweep unless ``with_tail``.
+    """
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     cmd = ["uv", "run", "--no-sync", "pytest", *files, "-q"]
+    if not with_tail:
+        cmd += ["-m", test_tiers.CORE_EXPR]
     if len(files) > 1:
         width = MAX_WORKERS if workers is None else max(1, workers)
         cmd += ["-n", str(min(width, len(files)))]
@@ -2055,6 +2062,53 @@ def foreign_pytest(repo: Path, cmd: List[str]) -> Optional[str]:
     )
 
 
+#: pytest's exit code for "no tests were collected".
+_PYTEST_NO_TESTS = 5
+
+
+def collect_without_core_filter(cmd: List[str]) -> List[str]:
+    """``cmd`` turned into a collection of the same selection, tail included.
+
+    Drops the ``-m`` core expression and the xdist width (collection needs no
+    workers) and keeps everything else -- paths and ``--deselect`` -- so what
+    it collects is what the tier would have run had it not left the tail out.
+    """
+    out: List[str] = []
+    skip = 0
+    for i, arg in enumerate(cmd):
+        if skip:
+            skip -= 1
+            continue
+        if arg == "-m" and cmd[i + 1:i + 2] == [test_tiers.CORE_EXPR]:
+            skip = 1
+        elif arg == "-n":
+            skip = 1
+        else:
+            out.append(arg)
+    return [*out, "--collect-only", "-q"]
+
+
+def selection_is_all_tail(
+    repo: Path, cmd: List[str], environment: Optional[dict[str, str]] = None
+) -> bool:
+    """True when ``cmd`` collected nothing only because the tail was left out.
+
+    Exit 5 under ``-m "not slow_tail"`` has two causes: every selected test is
+    in the tail (this tier's empty answer), or the selection holds no tests at
+    all (a deleted module, a ``--deselect`` that removed everything), which was
+    a failure before the tiers existed and stays one.
+    """
+    proc = subprocess.run(
+        collect_without_core_filter(cmd),
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        env=environment,
+    )
+    return proc.returncode == 0
+
+
 def run_and_record(
     repo: Path,
     files: List[str],
@@ -2107,6 +2161,18 @@ def run_and_record(
         sys.stdout.flush()
         lines.append(line)
     code = proc.wait()
+    tail_excluded = test_tiers.CORE_EXPR in cmd
+    if (
+        code == _PYTEST_NO_TESTS
+        and tail_excluded
+        and selection_is_all_tail(repo, cmd, environment)
+    ):
+        # Every selected test is in the slow tail, which this tier leaves to
+        # the full sweep: pytest reports "no tests collected" (5), and that is
+        # this tier's empty answer, not a failure. A selection that holds no
+        # tests even with the tail included stays exit 5.
+        print("every selected test is in the slow tail; none ran in this tier")
+        code = 0
     finished = datetime.now(timezone.utc)
     output = "".join(lines)
     write_run_summary(basetemp, {
@@ -2405,6 +2471,14 @@ def main(argv: Optional[list] = None) -> int:
         ),
     )
     ap.add_argument(
+        "--with-tail",
+        action="store_true",
+        help=(
+            "also run the slow tail (worktree, slow_shim, browser tests) in the "
+            "selected modules; by default it is left to the full sweep"
+        ),
+    )
+    ap.add_argument(
         "--no-compare-base",
         action="store_true",
         help=(
@@ -2549,7 +2623,9 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 0                          # a pass, for --check too: see below
 
-    cmd = build_command(files, basetemp=args.basetemp, deselect=deselect)
+    cmd = build_command(
+        files, basetemp=args.basetemp, deselect=deselect, with_tail=args.with_tail,
+    )
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
         f"vs {base}{_base_note(how)}:"
@@ -2583,9 +2659,12 @@ def main(argv: Optional[list] = None) -> int:
             file=sys.stderr,
         )
 
+    # A receipt does not record whether the tail ran, so --with-tail never
+    # stands on one: a green without the tail must not answer for a run that
+    # asks for it.
     found = (
         find_receipt(repo, tree, files, args.receipts, deselect)
-        if tree is not None
+        if tree is not None and not args.with_tail
         else None
     )
 
@@ -2706,7 +2785,10 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     cmd = apply_worker_advice(
-        build_command(files, basetemp=args.basetemp, deselect=deselect),
+        build_command(
+            files, basetemp=args.basetemp, deselect=deselect,
+            with_tail=args.with_tail,
+        ),
         grant.advisory_n,
     )
     compare_at = None if args.no_compare_base else merge_base(repo, base)

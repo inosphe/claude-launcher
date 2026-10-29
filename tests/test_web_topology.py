@@ -799,6 +799,7 @@ def test_every_harness_is_registered():
         )
 
 
+@pytest.mark.browser
 @pytest.mark.parametrize("script", BROWSER_CHECKS)
 def test_browser_harness(script):
     """Real scroll geometry and native touch input need a browser.

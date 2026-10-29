@@ -160,6 +160,54 @@
     그 자리였다. pytest 안의 같은 격리는 `tests/conftest.py`의 autouse `home`
     픽스처가 맡는다.
 
+## 테스트 계층 — T0·T1은 느린 꼬리를 제외하고 T2는 전부 실행한다
+
+- 세 계층의 정의(claunch-ov4zr):
+
+  | 계층 | 시점 | 명령 | 느린 꼬리 |
+  |---|---|---|---|
+  | T0 | 작업 중 | `tools/changed_tests.py` (변경 표적) | 제외 |
+  | T1 | 머지 전 프리뷰 | `tools/preview_land.py`가 병합 트리에서 실행하는 `tools/changed_tests.py` | 제외 |
+  | T2 | 머지 후 | `tools/sweep.py`의 `pytest tests` (`-m` 없음) | 포함 |
+
+  T0와 T1은 선택 규칙이 같고 실행 위치만 다르다. 허브 영역(변경 파일과 무관하게
+  T1에 더할 모듈)은 아직 정의하지 않았다. `--include`로 더하는 기존 경로만 있다.
+- 느린 꼬리는 마커 하나로 정의한다: `slow_tail`. 테스트에 직접 쓰지 않는다.
+  `tests/conftest.py`의 `pytest_collection_modifyitems`가 원천 마커
+  `worktree`, `slow_shim`, `browser` 중 하나를 가진 테스트에 `slow_tail`을 붙인다.
+  마커 목록과 `-m` 표현식은 `src/claude_launcher/test_tiers.py`가 한 곳에서 정한다.
+  T0·T1의 차이는 `-m "not slow_tail"` 한 줄이며, 필요하면
+  `tools/changed_tests.py --with-tail`로 꼬리를 포함해 실행한다.
+- 꼬리에 들어가는 테스트(`821da79b` 기준, 전체 수집 11,077건):
+
+  | 원천 마커 | 건수 | 위치 | 상태 |
+  |---|---|---|---|
+  | `worktree` | 116 | `test_worktree.py` 73, `test_worktree_create_hook.py` 21, `test_worktree_inventory.py` 19, `test_cli_beads.py` 2, `test_migrate_session.py` 1 | 기존 마커 |
+  | `slow_shim` | 31 | `test_routing.py` 21, `test_metering.py` 5, `test_routing_dynamic.py` 5 | 기존 마커 |
+  | `browser` | 57 | `test_web_topology.py::test_browser_harness` (`BROWSER_CHECKS`) | 신규 마커. Playwright가 없으면 모두 skip |
+
+  합계 204건이고 나머지 10,873건이 T0·T1 대상이다. 소요 시간 근거는 아직 없다.
+  `--durations` 데이터(claunch-ov4zr의 형제 작업 s29qf3-tc1)가 도착하기 전까지
+  위 세 마커 이외의 느린 테스트는 후보로만 두며 마커를 붙이지 않았다.
+- 누락이 없다는 확인은 `tests/test_test_tiers.py`가 한다: 수집된 모든 테스트가
+  `slow_tail`과 `not slow_tail` 중 정확히 하나에 속하고, 원천 마커를 가진 테스트는
+  모두 꼬리에 있고, `tools/sweep.py`의 명령에 `-m`이 없다. 그러므로 T2는 T0·T1에서
+  제외한 테스트를 포함해 전체를 실행한다.
+- 선택된 모듈의 테스트가 모두 꼬리여서 pytest가 exit 5(수집된 테스트 없음)를
+  내면 `changed_tests.py`는 이를 통과로 기록한다. 통과로 바꾸기 전에 같은 선택(경로와
+  `--deselect`)을 `-m` 없이 `--collect-only`로 한 번 더 수집하고, 1건 이상 수집될 때만
+  바꾼다(`selection_is_all_tail`). 꼬리를 포함해도 0건이면(삭제된 모듈, `--deselect`로
+  전부 빠진 선택) 이전처럼 실패로 기록한다. 영수증의 `command`에 `-m`이 있어
+  꼬리를 제외한 실행임을 확인할 수 있다. `--with-tail` 실행은 기존 영수증을
+  재사용하지 않는다.
+- `tests/test_test_tiers.py`는 `SOURCE_MARKERS`를 위 표의 세 마커
+  (`worktree`, `slow_shim`, `browser`)에 고정한다. 마커를 더하거나 빼려면 이 표와
+  테스트를 함께 바꾼다.
+- 수정 필요 항목: `worktree.py`나 `routing` 코드를 고친 라운드는 같은 이름의
+  테스트 모듈이 대부분 꼬리여서 T0에서 거의 아무것도 실행하지 않는다.
+  이 경우 `--with-tail`로 실행하거나 T2 결과를 기다려야 한다. 직접 대응하는
+  테스트 모듈을 변경한 경우 꼬리를 유지할지는 정책 결정이 필요하다.
+
 ## 브라우저 하네스는 기본으로 skip된다 — 켜는 방법은 `NODE_PATH`
 
 - `tests/web/*_browser.cjs` 59개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는

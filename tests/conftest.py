@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import config, provider_presets, pytest_venv, test_window
+from claude_launcher import config, provider_presets, pytest_venv, test_tiers, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -81,6 +81,17 @@ def _spend_only_the_grant(config, grant) -> None:
             f"({grant.cls} grant {grant.grant_id})",
             file=sys.stderr,
         )
+
+
+def pytest_collection_modifyitems(items):
+    """Put every test with a slow-tail source marker under the one tail marker.
+
+    ``-m "not slow_tail"`` is then the whole difference between the cheap
+    tiers and the full sweep (``claude_launcher/test_tiers.py``).
+    """
+    for item in items:
+        if test_tiers.is_tail(m.name for m in item.iter_markers()):
+            item.add_marker(getattr(pytest.mark, test_tiers.TAIL_MARKER))
 
 
 def pytest_sessionstart(session):
