@@ -498,9 +498,14 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     unauth, status, body = asyncio.run(run())
     assert unauth == 401 and status == 200
     if markers.get("archived_at"):
-        # An archived session is not read: its gates closed with the record
-        # (or, here, were never recorded by the backfill).
-        assert body["rows"] == {}
+        # An archived session's line still shows -- "Spawn same setup" seeds
+        # the workflow from it -- but its run raises no card: its gates closed
+        # with the record (here, the backfill never recorded them), and
+        # reading it does not open them again.
+        assert set(body["rows"]) == {"s1"}
+        assert body["rows"]["s1"]["workflow"] == "pick"
+        assert body["rows"]["s1"]["answers"] == []
+        assert body["rows"]["s1"]["session_category"] == "archived"
         return
     assert set(body["rows"]) == {"s1"}
     assert body["rows"]["s1"]["workflow"] == "pick"

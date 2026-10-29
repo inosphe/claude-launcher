@@ -137,6 +137,8 @@ class GateRegistry:
 
         at = time.time() if now is None else float(now)
         entry = entry or {}
+        if entry.get("status") == "error":
+            return 0, 0  # the run could not be read: its gates are unknown, not ended
         run_id = entry.get("run")
         live = entry.get("status") in runtime.LIVE_STATUSES
         answers = [a for a in entry.get("answers") or [] if isinstance(a, dict)] if live else []

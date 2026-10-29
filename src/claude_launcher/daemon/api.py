@@ -7176,8 +7176,10 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     the registry's ``opened_at`` where the run stamped none). An ended
     session with nothing open is read once and then served from the cache
     with no ``answers`` (``rail_entries``' ``settled``): its line still shows,
-    its files are not stat'ed on every poll. An archived session is not
-    listed; its gates were closed when it was filed away.
+    its files are not stat'ed on every poll. An archived session is served the
+    same way but never compared with the registry (``filed``): its gates were
+    closed when it was filed away, and its line still carries the run's
+    workflow and inputs ("Spawn same setup" seeds from it).
 
     Each row also carries its session's lifecycle (claunch-6vq2m):
     ``session_category`` is ``session.session_category`` (running, hold,
@@ -7190,15 +7192,16 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     held = (await asyncio.to_thread(gates.open_sessions)) if gates is not None else None
     pairs = []
     settled = []
+    filed = []
     lifecycle = {}
     for session in manager.list():
         name = session.sdef.name
         category = session_mod.session_category(session)
-        if held is not None and category == session_mod.CATEGORY_ARCHIVED:
-            continue
         cwd = _session_cwd(session)
         if cwd:
-            if held is not None and session.exited and name not in held:
+            if held is not None and category == session_mod.CATEGORY_ARCHIVED:
+                filed.append((name, cwd))
+            elif held is not None and session.exited and name not in held:
                 settled.append((name, cwd))
             else:
                 pairs.append((name, cwd))
@@ -7208,7 +7211,8 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
             }
 
     def read() -> dict:
-        rows = cflow2_web.rail_entries(pairs, registry=gates, settled=settled)
+        rows = cflow2_web.rail_entries(pairs, registry=gates, settled=settled,
+                                       filed=filed)
         if gates is not None:
             gate_registry.annotate(rows, gates)
         return rows

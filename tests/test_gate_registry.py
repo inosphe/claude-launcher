@@ -162,7 +162,32 @@ def test_the_clock_records_a_gate_without_a_dashboard(proj, reg):
     mgr = SimpleNamespace(list=lambda: [live], get=lambda n: live if n == "s1" else None)
     clock = cflow2_clock.Cflow2Clock(mgr, heartbeat=False, threaded=False,
                                      probe_runner=None)
-    clock.sync_gates()
+    # The clock's own pass records it -- no rail poll, no direct call.
+    clock.scan()
+    assert reg.open_sessions() == {"s1": 1}
+
+
+def test_a_sessions_exit_records_its_waiting_gate(proj, reg):
+    """The exit hook compares the ended session once more: a gate it left
+    standing is recorded though no clock pass drives that session now."""
+    cwd = str(proj)
+    _start(cwd)
+    ended = SimpleNamespace(sdef=SimpleNamespace(name="s1", cwd=cwd), exited=True)
+    mgr = SimpleNamespace(list=lambda: [ended], get=lambda n: ended if n == "s1" else None)
+    clock = cflow2_clock.Cflow2Clock(mgr, heartbeat=False, threaded=False,
+                                     probe_runner=None)
+    clock.session_exited(ended)
+    clock.end_sides()
+    assert reg.open_sessions() == {"s1": 1}
+
+
+def test_an_unreadable_run_leaves_its_gates_open(proj, reg):
+    """A rail entry that failed to read (``status: error``) says nothing about
+    the gates: they stay open until the run is read again."""
+    cwd = str(proj)
+    _start(cwd)
+    cflow2_web.rail_entries([("s1", cwd)])
+    assert reg.sync("s1", cwd, "s1", {"status": "error", "error": "boom"}) == (0, 0)
     assert reg.open_sessions() == {"s1": 1}
 
 
@@ -190,8 +215,9 @@ AUTH = {"Authorization": "Bearer sekrit"}
 def test_rail_reads_an_ended_session_only_while_it_holds_a_gate(proj, monkeypatch):
     """The rail poll no longer stats every registered session's run: an
     ended session with nothing open is read once and then served from the
-    cache (its line still shows, with no answers), and an archived one is
-    not listed at all."""
+    cache (its line still shows, with no answers). An archived one is served
+    the same way -- its line seeds "Spawn same setup" -- but its waiting run
+    opens no gate again and raises no card."""
     cwd = str(proj)
     for name in ("live", "killed", "done", "filed"):
         _start(cwd, name)
@@ -233,24 +259,30 @@ def test_rail_reads_an_ended_session_only_while_it_holds_a_gate(proj, monkeypatc
         sessions, monkeypatch,
         [backfill, poll, poll, answer_killed, poll, poll, gates, bad])
     assert filled["open"] == 2
-    # First poll: the settled session is read once; the archived one never.
-    assert read1 == ["done", "killed", "live"]
-    assert set(first["rows"]) == {"live", "killed", "done"}
+    # First poll: the settled and the archived session are read once.
+    assert read1 == ["done", "filed", "killed", "live"]
+    assert set(first["rows"]) == {"live", "killed", "done", "filed"}
     assert first["rows"]["done"]["answers"] == []
+    # The archived run still waits on its choice; its row keeps the workflow
+    # and shows no answer, and the registry does not open it again.
+    assert first["rows"]["filed"]["workflow"] == "pick"
+    assert first["rows"]["filed"]["answers"] == []
+    assert first["rows"]["filed"]["session_category"] == "archived"
     killed = first["rows"]["killed"]
     assert killed["session_category"] == "killed"
     assert isinstance(killed["answers"][0]["gate_id"], int)
     # Second poll: the settled session comes from the cache, unread.
-    assert read2 == ["killed", "live"] and "done" in second["rows"]
+    assert read2 == ["killed", "live"] and {"done", "filed"} <= set(second["rows"])
 
     # Answered (from the CLI, say): the poll still reads the killed session,
     # finds the gate gone and closes it; the poll after that no longer reads it.
     assert read3 == ["killed", "live"]
     assert third["rows"]["killed"]["answers"] == []
-    assert read4 == ["live"] and set(fourth["rows"]) == {"live", "killed", "done"}
+    assert read4 == ["live"] and set(fourth["rows"]) == {"live", "killed", "done", "filed"}
 
     assert status == 200 and bad_status == 400
     by = {g["session"]: g for g in body["gates"]}
     assert by["killed"]["close_reason"] == gate_registry.CLOSE_RESOLVED
     assert by["live"]["closed_at"] is None
+    assert "filed" not in by
     assert body["backfill"]["open"] == 2
