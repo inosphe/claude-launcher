@@ -542,7 +542,7 @@ function assertTicksApart(ticks, where) {
     const gb = await gname.boundingBox();
     await page.mouse.move(gb.x + 5, gb.y + gb.height / 2);
     await page.waitForFunction(() =>
-      document.querySelector(".chart-tip.shown")?.textContent.includes("계측 대상 아님"),
+      document.querySelector(".chart-tip.shown")?.textContent.includes("원장 기록 없음"),
       null, { timeout: 5000 });
     if (process.env.CHART_TIP_SHOT) {
       await page.mouse.move(nb.x + 5, nb.y + nb.height / 2);

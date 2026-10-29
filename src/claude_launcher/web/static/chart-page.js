@@ -28,13 +28,19 @@ globalThis.ChartPage = (() => {
     killed: "killed", archived: "archived",
   };
   const GROUPS = [["", "Off"], ["mesh", "Mesh"], ["workspace", "Workspace"]];
-  /* What a row with no ledger record says. The ledger is the metering
-     shim's (metering.py), which only API-key providers go through: a session
-     on an OAuth route (the Anthropic subscription, Codex's login) spends
-     tokens and still has no record, so "no record" alone read as a fault. */
-  const UNMETERED_TIP = "계측 대상 아님 (원장은 API 키 공급자 요청만 기록, OAuth 구독 세션은 제외)";
-  const UNMETERED_DETAIL = "계측 원장에 기록이 없다. 원장은 metering shim을 거치는 API 키 " +
-    "공급자의 요청만 기록하고, OAuth 경로(Anthropic 구독, Codex 로그인) 세션은 계측 대상이 아니다.";
+  /* What a row with no ledger record says. The page only knows the ledger
+     never saw the session (statsboard leaves it out of by_session), so the
+     fact leads and the reasons follow as candidates: the shim (metering.py)
+     only sees API-key providers, so an OAuth session (the Anthropic
+     subscription, Codex's login) never has a record -- but neither does an
+     API-key session before its first request, one whose records aged out,
+     or one on a provider with metering off (claunch-p8f73). */
+  const UNMETERED_TIP = "원장 기록 없음 (원장은 API 키 공급자 요청만 기록 — OAuth 구독 세션, " +
+    "첫 요청 전 세션, 보존 기간 밖 세션은 기록이 없다)";
+  const UNMETERED_DETAIL = "계측 원장에 이 세션의 기록이 없다. 원장은 metering shim을 거치는 " +
+    "API 키 공급자의 요청만 기록한다. 기록이 없는 경우: OAuth 경로(Anthropic 구독, Codex " +
+    "로그인) 세션, 아직 요청을 보내지 않은 세션, 기록이 보존 기간(31일) 밖에 있는 세션, " +
+    "metering을 끈 공급자의 세션.";
   const REDRAW_MS = 5000;
   const STORE_KEY = "claunch_chart_view";
   // The timeline column's share of the split, in percent.
@@ -874,7 +880,7 @@ globalThis.ChartPage = (() => {
     head.appendChild(node("span", "chart-muted",
       smodel
         ? `${formatBucketWidth(smodel.width)} 버킷 · 계측 세션 ${smodel.sessions}` +
-          (smodel.unmetered ? ` · 계측 없음 ${smodel.unmetered}` : "") +
+          (smodel.unmetered ? ` · 원장 기록 없음 ${smodel.unmetered}` : "") +
           // The ledger starts when metering was switched on: a window reaching
           // past that date is not a window the figures can cover, and saying
           // so is how "nobody measured" stays apart from "spent nothing".
@@ -1069,7 +1075,7 @@ globalThis.ChartPage = (() => {
       stat0.appendChild(node("span", "chart-stat-value",
         s.tokens.metered ? formatTokens(s.tokens.total) : "—"));
       stat0.appendChild(node("span", "chart-stat-label",
-        "토큰" + (s.tokens.unmetered ? ` · 계측 없음 ${s.tokens.unmetered}` : "")));
+        "토큰" + (s.tokens.unmetered ? ` · 원장 기록 없음 ${s.tokens.unmetered}` : "")));
       stat0.title = s.tokens.metered
         ? `이 창에서 이 행들이 쓴 토큰 ${s.tokens.total.toLocaleString()}` +
           ` · 요청 ${s.tokens.requests.toLocaleString()}` +
