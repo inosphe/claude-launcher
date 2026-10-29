@@ -98,7 +98,10 @@ check("neither poll spells a project filter any more",
       [/project=/.test(slice("refreshSessions")),
        /project=/.test(slice("refreshMeshList"))], [false, false]);
 check("the session poll can redraw from the cache alone",
-      /const cached = !!\(options && options\.cached\);\s*if \(!cached\) \{/.test(
+      // What this holds is the shape -- a cached flag and a request block it
+      // skips. Lines may sit between them (the defs a cached redraw needs to
+      // sign the same as the poll that drew the rail, claunch-hwbuc.2).
+      /const cached = !!\(options && options\.cached\);[\s\S]{0,600}?if \(!cached\) \{/.test(
         slice("refreshSessions")), true);
 check("...and the rail draws the narrowed list",
       /byLineage\(railList, visibleSessions\)/.test(slice("refreshSessions")), true);

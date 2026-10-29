@@ -5664,6 +5664,12 @@ async function refreshSessions(options) {
   // `cached`: redraw from the records already in hand, with no request --
   // what a project pick asks for, since every project is in the cache.
   const cached = !!(options && options.cached);
+  // A cached redraw sends no request, so it has no defs of its own. Signing
+  // "" there would differ from the poll that drew the rail, so every cached
+  // redraw would rebuild it -- and the poll after would rebuild it again --
+  // where nothing changed at all (claunch-hwbuc.2 review). The last poll's
+  // defs are kept on the function for exactly this path.
+  if (cached) pollDefs = refreshSessions._defs || null;
   if (!cached) {
     let data;
     // The row digests ride beside the read (claunch-4thlk.3); reduced
@@ -5696,6 +5702,7 @@ async function refreshSessions(options) {
     if (!incoming) return;
     if (typeof sessionRowsJoin === "function") sessionRowsJoin(incoming, data.status_check_defs);
     pollDefs = data && data.status_check_defs;
+    refreshSessions._defs = pollDefs;
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,
