@@ -14063,6 +14063,21 @@ async def h_session_handoff(request: web.Request) -> web.Response:
     try:
         if text is not None and str(text).strip():
             result = await handoffs.complete(manager, name, text=str(text), to=to, kind=kind)
+            # A merge moved the copy's live children under the target
+            # (claunch-dsqhp). They need the mesh edge to their new parent
+            # for the same reason an escalated or re-parented child does: a
+            # child that cannot reach its parent cannot report. No edge is
+            # opened when the pair share no mesh, and an open one is not
+            # reported again.
+            adopted = result.get("adopted") or []
+            above = result.get("target") or ""
+            mm = request.app.get("mesh")
+            if adopted and above and mm is not None:
+                opened: List[dict] = []
+                for child in adopted:
+                    opened.extend(await mm.link_lineage(child, above))
+                if opened:
+                    result["connected"] = opened
             # A merge with no live session above the copy is answered, not
             # refused: the wrap-up was saved and the copy kept (``note`` says
             # where), and ``completed`` is false because nothing landed.
