@@ -990,3 +990,41 @@ def test_a_resend_to_an_exited_session_queues_its_own_notice(home, tmp_path):
         assert again["message"]["data"]["reverted_at"]
 
     run(tmp_path, scenario)
+
+
+def test_a_resend_whose_notice_cannot_be_queued_reports_exited_unqueued(home, tmp_path):
+    """claunch-tpbqz.1: hold must not call a queue entry what the journal
+    does not hold. The reachable shape is the journal's dedupe swallow:
+    queue() returns True because a record with the attempt id already exists
+    -- a settled one -- without writing a queued record, so the response
+    says delivered but pending() is empty, and the exited target is
+    reported hold "exited-unqueued" (owner and named guest alike). A
+    queue() that outright returns False is a different shape: deliver()
+    passes that falseness through as delivered False and hold None."""
+    from claude_launcher.daemon import thread_notices
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "title": "T", "text": "first"}))["thread"]["id"]
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "lost on the way"})
+        seq = res["message"]["seq"]
+        s1 = mgr.sessions["s1"]
+        s1.exited, s1.held_at = True, None
+        # The first resend's attempt id (<tid>:m<seq>:r1) is consumed by a
+        # settled record: queue() will call it recorded while the durable
+        # queue stays empty.
+        thread_notices._settle("s1", f"{tid}:m{seq}:r1", "notice_sent", "sent", "lost on the way")
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        assert again["delivered"] is True and again["hold"] == "exited-unqueued"
+        assert thread_notices.pending("s1") == []
+
+        # The same downgrade names a guest whose notice did not get in.
+        await req("POST", f"/api/threads/{tid}/guests", {"guest": "s2"})
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "@s2 도와줘"})
+        seq2 = res["message"]["seq"]
+        mgr.sessions["s2"].exited = True
+        thread_notices._settle("s2", f"{tid}:m{seq2}:r1", "notice_sent", "sent", "@s2 도와줘")
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq2}/resend", {})
+        assert again["guests_hold"] == {"s2": "exited-unqueued"}
+        assert thread_notices.pending("s2") == []
+
+    run(tmp_path, scenario)
