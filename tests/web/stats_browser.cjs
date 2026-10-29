@@ -130,6 +130,41 @@ const reading = {
   compactions: 0,
 };
 
+/* The daemon's own LLM calls (claunch-60y0d): a provider narrows them. */
+const llmUsage = (url) => {
+  const only = url.searchParams.get("provider") || "";
+  const sessions = [
+    { session: "alpha", provider: "ds", calls: 6, errors: 1, unreported: 0, total: 5200,
+      features: [{ feature: "briefing", calls: 2, total: 1200 },
+                 { feature: "observer", calls: 4, total: 4000 }],
+      providers: ["ds"], last_at: iso(0.5) },
+    { session: "", provider: "fw", calls: 3, errors: 0, unreported: 1, total: 800,
+      features: [{ feature: "embedding", calls: 2, total: 800 },
+                 { feature: "rerank", calls: 1, total: 0 }],
+      providers: ["fw"], last_at: iso(1) },
+  ].filter((r) => !only || r.provider === only);
+  const sum = (k) => sessions.reduce((n, r) => n + (r[k] || 0), 0);
+  return {
+    window: url.searchParams.get("window") || "today", provider: only,
+    since: iso(10), until: iso(0), zone: "UTC", ledger_since: "",
+    all_providers: [{ provider: "ds", total: 5200, calls: 6 },
+                    { provider: "fw", total: 800, calls: 3 }],
+    totals: { calls: sum("calls"), errors: sum("errors"), unreported: sum("unreported"),
+              total: sum("total"), input: sum("total"), cache_read: 0,
+              cache_write: 0, output: 0 },
+    features: sessions.flatMap((r) => r.features.map((f) => ({
+      ...f, errors: 0, unreported: f.total ? 0 : f.calls,
+      purposes: [{ purpose: "pass", calls: f.calls, total: f.total }] }))),
+    providers: sessions.map((r) => ({ provider: r.provider, calls: r.calls,
+      errors: r.errors, unreported: r.unreported, total: r.total,
+      models: [{ model: r.provider + "-model", calls: r.calls, total: r.total }],
+      features: r.features })),
+    sessions,
+    days: [{ day: iso(0).slice(0, 10), calls: sum("calls"), total: sum("total"),
+             features: { briefing: 1200, observer: 4000, embedding: 800 } }],
+  };
+};
+
 const asked = [];
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
 const server = http.createServer((req, res) => {
@@ -142,6 +177,9 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === "/api/stats/overview") {
       return res.end(JSON.stringify(overview(url)));
+    }
+    if (url.pathname === "/api/stats/llm-usage") {
+      return res.end(JSON.stringify(llmUsage(url)));
     }
     if (/^\/api\/sessions\/[^/]+\/stats$/.test(url.pathname)) {
       return res.end(JSON.stringify({ ...reading,
@@ -186,6 +224,28 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
     const borrow = await page.$eval("#stats-view .stats-row[data-session='beta'] .stats-borrow",
       (e) => e.textContent);
     assert.equal(borrow, "borrow ds4");
+
+    // 1b. The daemon's own LLM calls, in their own section below the fleet.
+    await page.waitForFunction(() =>
+      document.querySelectorAll("#stats-view .stats-llm-row").length >= 4);
+    assert.ok(asked.some((u) => u === "/api/stats/llm-usage?window=today"), asked.join(" | "));
+    const llmSessions = await page.$$eval("#stats-view .stats-llm-row .stats-session-cell",
+      (els) => els.map((e) => e.textContent));
+    assert.ok(llmSessions.includes("alpha") && llmSessions.includes("(no session)"),
+      llmSessions.join(" | "));
+    if (process.env.STATS_LLM_SHOT) {
+      const box = await page.$("#stats-view .stats-llm");
+      await box.screenshot({ path: process.env.STATS_LLM_SHOT });
+    }
+    await page.click("#stats-view .stats-llm-provider[data-llm-provider='ds']");
+    await page.waitForFunction(() => {
+      const cells = Array.from(
+        document.querySelectorAll("#stats-view .stats-llm-row .stats-session-cell"));
+      return cells.length && cells.every((e) => e.textContent !== "(no session)");
+    });
+    assert.ok(asked.some((u) => u === "/api/stats/llm-usage?window=today&provider=ds"),
+      asked.join(" | "));
+    await page.click("#stats-view .stats-llm-provider[data-llm-provider='']");
 
     // 2. The killed session is held out until its own box is ticked.
     await page.check("#stats-view .stats-ended input[data-ended='killed']");

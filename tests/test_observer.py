@@ -39,7 +39,7 @@ def answer(source="transcript:1"):
 def test_prefix_restart_ack_and_no_new_evidence(setup, monkeypatch):
     service, session = setup
     calls = []
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         calls.append(copy.deepcopy(messages))
         return answer(f"transcript:{len(calls)}"), {"prompt_cache_hit_tokens": 123}
     monkeypatch.setattr(observer, "complete", fake)
@@ -67,7 +67,7 @@ def test_usage_meter_totals_every_call_and_every_local_day(setup, monkeypatch):
     days = iter(["2026-09-16", "2026-09-17", "2026-09-17"])
     monkeypatch.setattr(observer, "usage_date", lambda: next(days))
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         # A provider that reports a subset: the missing counter must read as
         # zero rather than poison the sum with None.
         return answer(), {"prompt_tokens": 100, "completion_tokens": 7, "prompt_cache_hit_tokens": 40}
@@ -93,12 +93,12 @@ def test_usage_meter_totals_every_call_and_every_local_day(setup, monkeypatch):
 def test_failed_call_does_not_advance_the_meter(setup, monkeypatch):
     service, session = setup
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
-    async def ok(cfg, messages):
+    async def ok(cfg, messages, session=""):
         return answer(), {"prompt_tokens": 100}
     monkeypatch.setattr(observer, "complete", ok)
     asyncio.run(service.observe(session, CFG))
     assert service.data["sessions"]["s1"]["usage_totals"]["calls"] == 1
-    async def fail(*args):
+    async def fail(*args, **_kw):
         raise ValueError("bad response")
     monkeypatch.setattr(observer, "complete", fail)
     with pytest.raises(ValueError):
@@ -147,7 +147,7 @@ def test_rolling_usage_counts_all_sessions_without_backfilling_daily(setup, monk
     assert service.snapshot()["usage_summary"]["windows"]["week"]["calls"] == 0
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
 
-    async def complete(*args):
+    async def complete(*args, **_kw):
         return answer(), {"prompt_tokens": 100, "completion_tokens": 7}
 
     monkeypatch.setattr(observer, "complete", complete)
@@ -156,7 +156,7 @@ def test_rolling_usage_counts_all_sessions_without_backfilling_daily(setup, monk
     asyncio.run(service.observe(session, CFG))
     assert service.snapshot()["usage_summary"]["windows"]["hour"]["total_tokens"] == 214
 
-    async def fail(*args):
+    async def fail(*args, **_kw):
         raise ValueError("failed call")
 
     monkeypatch.setattr(observer, "complete", fail)
@@ -170,7 +170,7 @@ def test_failure_does_not_consume_cursor(setup, monkeypatch):
     service.data["sessions"]["s1"] = {"cursor": 3, "summary": "old"}
     before = copy.deepcopy(service.data)
     monkeypatch.setattr(service, "evidence", lambda *args: evidence(4))
-    async def fail(*args):
+    async def fail(*args, **_kw):
         raise ValueError("bad response")
     monkeypatch.setattr(observer, "complete", fail)
     with pytest.raises(ValueError):
@@ -183,7 +183,7 @@ def test_source_validation_rotation_and_reset(setup, monkeypatch):
     service.data["sessions"]["s1"] = {"messages": [{"role": "user", "content": "x"*(observer.MAX_CONTEXT + 1)}],
         "summary": "previous", "events": [], "config": [CFG[k] for k in ("profile", "model", "endpoint")]}
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         assert len(json.dumps(messages)) < 10000
         response = answer()
         response["events"] += [{"kind":"test","source":["invalid"],"text":"bad"},
@@ -222,7 +222,7 @@ def test_communication_input_advances_cursor_without_call(setup, monkeypatch):
         "source": "path", "total": 2, "records": [{"seq": 2, "role": "assistant",
         "blocks": [{"type": "text", "text": "리더에게 메시지를 전달했습니다."}]}]})
     monkeypatch.setattr(observer.briefing, "gather_cflow", lambda *a: None)
-    async def unexpected(*a):
+    async def unexpected(*a, **_kw):
         pytest.fail("Communication alone must not call the model")
     monkeypatch.setattr(observer, "complete", unexpected)
     asyncio.run(service.observe(session, CFG))
@@ -236,7 +236,7 @@ def test_communication_output_and_legacy_display_filtered(setup, monkeypatch):
         "config": [CFG[k] for k in ("profile", "model", "endpoint")], "events": [
         {"id": "legacy", "text": "리더에게 메시지를 전달했습니다.", "at": "2026-09-18"}]}
     monkeypatch.setattr(service, "evidence", lambda *a: evidence())
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         assert messages[0]["content"] == observer.SYSTEM
         return {"summary": "응답 대기 중입니다.", "state": "waiting", "events": [
             {"kind": "result", "text": "리더에게 메시지를 전달했습니다.", "source": "transcript:1"},
@@ -354,7 +354,7 @@ def test_one_shot_refresh_observes_only_the_named_session(setup, monkeypatch):
         observed.append(session.sdef.name)
         return ["path", "c1"], 1, {"status": "busy"}, [{"id": "transcript:1", "content": "12 tests passed"}], False
     monkeypatch.setattr(service, "evidence", evidence_for)
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         return answer(), {"prompt_tokens": 10}
     monkeypatch.setattr(observer, "complete", fake)
     assert asyncio.run(service.refresh("s2")) == (200, {"called": True, "events": 1})
@@ -368,7 +368,7 @@ def test_one_shot_refresh_spends_no_call_when_nothing_is_new(setup, monkeypatch)
     service.data["enabled"] = True
     monkeypatch.setattr(observer, "configuration", lambda: CFG)
     monkeypatch.setattr(service, "evidence", lambda *args: (["path", "c1"], 5, {}, [], False))
-    async def unexpected(*args):
+    async def unexpected(*args, **_kw):
         pytest.fail("a pass with nothing new must not call the API")
     monkeypatch.setattr(observer, "complete", unexpected)
     assert asyncio.run(service.refresh("s1")) == (200, {"called": False, "events": 0})
@@ -384,7 +384,7 @@ def test_one_shot_refresh_runs_while_observation_is_off(setup, monkeypatch):
     service, _ = setup
     monkeypatch.setattr(observer, "configuration", lambda: CFG)
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         return answer(), {"prompt_tokens": 10}
     monkeypatch.setattr(observer, "complete", fake)
     assert service.data["enabled"] is False
@@ -415,7 +415,7 @@ def test_the_refresh_route_carries_the_pass_outcome(setup, monkeypatch):
         # zero events and say nothing about the switch this test is about.
         passes = []
         monkeypatch.setattr(app["observer"],"evidence",lambda *args: evidence(len(passes) + 1))
-        async def fake(cfg, messages):
+        async def fake(cfg, messages, session=""):
             passes.append(messages)
             return answer(f"transcript:{len(passes)}"), {"prompt_tokens": 10}
         monkeypatch.setattr(observer,"complete",fake)
@@ -460,7 +460,7 @@ def test_the_pinned_scope_spends_only_on_pinned_sessions(setup, monkeypatch):
         observed.append(session.sdef.name)
         return ["path", "c1"], 1, {"status": "busy"}, [{"id": "transcript:1", "content": "12 tests passed"}], False
     monkeypatch.setattr(service, "evidence", evidence_for)
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         return answer(), {"prompt_tokens": 10}
     monkeypatch.setattr(observer, "complete", fake)
     asyncio.run(service.pass_once(CFG))
@@ -558,7 +558,7 @@ def test_ignored_records_advance_without_api_call(setup, monkeypatch):
     service, session = setup
     service.data["sessions"]["s1"] = {"cursor": 10}
     monkeypatch.setattr(service, "evidence", lambda *args: (["path", "c1"], 50, {}, [], False))
-    async def unexpected(*args):
+    async def unexpected(*args, **_kw):
         pytest.fail("thinking-only evidence must not call the API")
     monkeypatch.setattr(observer, "complete", unexpected)
     asyncio.run(service.observe(session, CFG))
@@ -695,7 +695,7 @@ def test_direct_reports_survive_inflight_observation(setup, monkeypatch):
     monkeypatch.setattr(service,'evidence',lambda *args:evidence())
     async def check():
         entered=asyncio.Event();release=asyncio.Event()
-        async def complete(*args):
+        async def complete(*args, **_kw):
             entered.set();await release.wait();return answer(),{}
         monkeypatch.setattr(observer,'complete',complete)
         task=asyncio.create_task(service.observe(session,CFG))
@@ -725,7 +725,7 @@ def watching(service, session, monkeypatch, statuses, records=None):
     service.data["sessions"]["s1"] = {"identity": ["path", "c1"], "cursor": 1,
                                       "state_source": {"cflow": None, "status": "busy"}}
     sent = []
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         sent.append(json.loads(messages[-1]["content"]))
         return answer(), {}
     monkeypatch.setattr(observer, "complete", fake)
@@ -826,7 +826,7 @@ def test_context_rotates_at_the_ceiling_and_keeps_the_summary(setup, monkeypatch
         return msgs
 
     monkeypatch.setattr(service, "evidence", lambda *args: evidence())
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         return answer(), {}
     monkeypatch.setattr(observer, "complete", fake)
 
@@ -860,7 +860,7 @@ def test_observed_events_sit_at_the_time_of_the_record_they_cite(setup, monkeypa
             {"id": "daemon:state", "content": {"status": "busy"}}]
     monkeypatch.setattr(service, "evidence", lambda *args: (["path", "c1"], 2, {"status": "busy"}, rows, True))
 
-    async def fake(cfg, messages):
+    async def fake(cfg, messages, session=""):
         return {"summary": "s", "state": "working", "events": [
             {"kind": "test", "text": "late", "source": "transcript:2"},
             {"kind": "cflow", "text": "early", "source": "transcript:1", "pivot": True},

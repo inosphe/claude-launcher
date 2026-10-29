@@ -51,6 +51,14 @@ function constant(name) {
   return src.slice(start, start + end + 2);
 }
 
+/* A `const NAME = { ... };` object literal, the way constant() takes arrays. */
+function objectConstant(name) {
+  const start = src.indexOf(`const ${name} = {`);
+  if (start < 0) throw new Error(`constant ${name} not found in app.js`);
+  const end = src.slice(start).search(/\};\r?\n/);
+  return src.slice(start, start + end + 2) + "\n";
+}
+
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
@@ -108,6 +116,10 @@ let statsIncludeArchived = false;
 let statsOverview = null;
 let statsOverviewError = "";
 let statsProvider = "";
+let statsLlm = null;
+let statsLlmError = "";
+let statsLlmProvider = "";
+let statsLlmSeq = 0;
 const STATS_COMPARE_MAX = 12;
 const document = { createElementNS: (_ns, tag) => el(tag) };
 let currentName = "s1";
@@ -141,9 +153,13 @@ new Function(
   + constant("STATS_WINDOWS") + constant("STATS_CATEGORIES")
   + constant("STATS_METHOD") + constant("STATS_WINDOW_METHOD")
   + constant("STATS_PALETTE") + constant("STATS_SWITCH_KINDS")
+  + objectConstant("STATS_LLM_FEATURES") + slice("statsLlmTokens")
   + slice("usageShort") + slice("profileHarnessLabel")
   + ["openStatsPage", "stopStatsPoll", "statsSchedule",
      "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
+     "refreshStatsLlm", "setStatsLlmProvider", "statsLlmTable", "statsLlmBar",
+     "statsLlmCalls", "statsLlmChips", "statsLlmProviderStrip", "statsLlmDays",
+     "statsLlmSection",
      "statsPct", "statsBucketLabel", "statsStamp", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
@@ -277,9 +293,42 @@ const overview = {
   partial: false,
 };
 
+/* The daemon's own LLM calls (claunch-60y0d, daemon/llm_usage.py). */
+const llm = {
+  window: "today", since: "2026-10-29T00:00:00+09:00",
+  until: "2026-10-29T12:00:00+09:00", ledger_since: "2026-10-29",
+  all_providers: [{ provider: "ds", total: 900, calls: 3 },
+                  { provider: "fw", total: 0, calls: 1 }],
+  totals: { calls: 4, errors: 1, unreported: 1, total: 900, input: 500,
+            cache_read: 300, cache_write: 0, output: 100 },
+  features: [
+    { feature: "briefing", calls: 2, errors: 1, unreported: 0, total: 300,
+      purposes: [{ purpose: "card", calls: 2, total: 300 }] },
+    { feature: "observer", calls: 1, errors: 0, unreported: 0, total: 600,
+      purposes: [{ purpose: "pass", calls: 1, total: 600 }] },
+    { feature: "rerank", calls: 1, errors: 0, unreported: 1, total: 0,
+      purposes: [{ purpose: "query", calls: 1, total: 0 }] },
+  ],
+  providers: [{ provider: "ds", calls: 3, errors: 1, unreported: 0, total: 900,
+                models: [{ model: "deepseek-flash", calls: 3, total: 900 }],
+                features: [{ feature: "briefing", calls: 2, total: 300 }] }],
+  sessions: [
+    { session: "s1", calls: 3, errors: 1, unreported: 0, total: 900,
+      features: [{ feature: "observer", calls: 1, total: 600 }],
+      providers: ["ds"], last_at: "2026-10-29T11:00:00+09:00" },
+    { session: "", calls: 1, errors: 0, unreported: 1, total: 0,
+      features: [{ feature: "rerank", calls: 1, total: 0 }],
+      providers: ["fw"], last_at: "2026-10-29T10:00:00+09:00" },
+  ],
+  days: [{ day: "2026-10-29", calls: 4, total: 900,
+           features: { briefing: 300, observer: 600 } }],
+};
+
 const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   ? { ok: true, status: 200, body: { ...overview, ...(over || {}) } }
-  : { ok: true, status: 200, body: reading };
+  : url.includes("/api/stats/llm-usage")
+    ? { ok: true, status: 200, body: llm }
+    : { ok: true, status: 200, body: reading };
 
 (async () => {
   check("the rail has a Stats tab next to Window",
@@ -304,6 +353,35 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         !fetched.some((u) => u.includes("/stats?unit=")), fetched);
   check("a finished overview polls slowly",
         timers.length === 1 && timers[0].ms === 30000, timers.map((t) => t.ms));
+
+  // ---- the daemon's own LLM calls -------------------------------------
+  check("the daemon-LLM section is asked for the same window",
+        fetched.includes("/api/stats/llm-usage?window=today"), fetched);
+  const llmBox = withClass("stats-llm")[0];
+  check("the section draws per feature, per provider and per session",
+        llmBox && ["By feature", "By provider", "By session (2)", "briefing",
+                   "observer", "deepseek-flash", "(no session)"]
+          .every((w) => llmBox.words().includes(w)),
+        llmBox && llmBox.words());
+  check("a session row links to that session's stats",
+        llmBox.all().some((n) => n.tag === "a" && n.href === "#/stats/s1"));
+  check("a feature whose calls reported no count shows —, not 0",
+        withClass("stats-llm-table")[0].all().some(
+          (n) => classesOf(n).has("stats-llm-unreported") && n.text === "—"));
+  check("failed calls are marked",
+        llmBox.words().includes("1 failed"), llmBox.words());
+  check("one day column, split by feature",
+        withClass("stats-llm-day").length === 1 &&
+        withClass("stats-llm-seg").length === 2);
+  const llmChip = withClass("stats-llm-providers")[0].all()
+    .find((n) => n.dataset && n.dataset.llmProvider === "ds");
+  llmChip.handlers.click[0]();
+  await tick();
+  check("a provider card asks the section again, narrowed to it",
+        fetched.includes("/api/stats/llm-usage?window=today&provider=ds"), fetched);
+  withClass("stats-llm-providers")[0].all()
+    .find((n) => n.dataset && n.dataset.llmProvider === "").handlers.click[0]();
+  await tick();
 
   check("a window tab per unit of time, Today pressed",
         withClass("stats-window").length === 1 &&

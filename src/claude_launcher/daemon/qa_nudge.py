@@ -486,7 +486,8 @@ class QaNudgeClock:
         state, questions = build_request(turn.text, pol["max_chars"], self.actions)
         try:
             response = await jev.system_one(
-                cfg, state, questions, key=api_key, model=jev.model_for(cfg, "qa_nudge")
+                cfg, state, questions, key=api_key, model=jev.model_for(cfg, "qa_nudge"),
+                feature="qa_nudge", session=name,
             )
         except jev.JevError as exc:
             skip(f"jev_error: {exc}")

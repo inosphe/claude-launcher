@@ -220,7 +220,7 @@ def test_a_pass_that_fails_midway_keeps_what_it_embedded(tmp_path, repo):  # noq
             groups = {"n": 0}
             real_embed = rag.RagClient.embed
 
-            async def fail_on_the_third(self, texts):
+            async def fail_on_the_third(self, texts, **_kw):
                 groups["n"] += 1
                 if groups["n"] >= 3:
                     raise rag.RagError("the endpoint went away")

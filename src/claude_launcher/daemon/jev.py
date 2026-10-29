@@ -34,12 +34,13 @@ import asyncio
 import logging
 import os
 import ssl
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
-from . import paths
+from . import llm_usage, paths
 
 try:
     import truststore
@@ -150,6 +151,7 @@ async def _post(url: str, key: str, body: dict) -> Tuple[int, Any]:
 async def system_one(
     cfg: Dict[str, Any], state: Any, questions: Dict[str, dict], *,
     key: Optional[str] = None, model: Optional[str] = None,
+    feature: str = "", session: str = "",
 ) -> Dict[str, Any]:
     """One evaluation. Returns the response document (``model``, ``answers``,
     ``usage``). Raises :class:`JevError` on no key, a non-200 after the
@@ -157,6 +159,10 @@ async def system_one(
 
     ``model`` overrides the global ``jev_model`` for one caller; features
     that may pin their own pass ``model_for(cfg, <feature>)``.
+
+    Every attempt that reached the endpoint is metered in the daemon's LLM
+    ledger (claunch-60y0d) under ``feature`` (the caller: ``qa_nudge``,
+    ``megathread``) and the ``session`` the question was about.
     """
     if key is None:
         key, _ = resolve_key(cfg)
@@ -165,11 +171,22 @@ async def system_one(
     body = {"model": model or model_of(cfg), "state": state, "questions": questions}
     url = endpoint(cfg)
     status = 0
+    def meter(usage=None, error: str = "", answered=None) -> None:
+        llm_usage.record(
+            "jev", endpoint=url,
+            model=str((answered or {}).get("model") or body["model"]),
+            session=session, purpose=feature, usage=usage, ok=not error,
+            error=error, seconds=time.monotonic() - started)
+
     for attempt in range(RETRIES + 1):
+        started = time.monotonic()
         try:
             status, data = await _post(url, key, body)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            meter(error=type(exc).__name__)
             raise JevError(f"Jev request failed: {type(exc).__name__}") from None
+        answered = data if isinstance(data, dict) else None
+        meter((answered or {}).get("usage"), "" if status == 200 else f"HTTP {status}", answered)
         if status == 200:
             if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
                 raise JevError("Jev response has no answers")

@@ -49,6 +49,7 @@ import json
 import logging
 import sqlite3
 import ssl
+import time
 from datetime import datetime, timezone
 from typing import Dict
 
@@ -56,7 +57,7 @@ import aiohttp
 from aiohttp import web
 
 from .. import atomic, lineage, profile, provider_spec, providers, routing, store
-from . import briefing, paths, transcript_view, observer_reports, session_events, search_records
+from . import briefing, llm_usage, paths, transcript_view, observer_reports, session_events, search_records
 from .observer_filter import communication_only, visible
 
 try:
@@ -297,16 +298,29 @@ def request_headers(cfg: dict) -> Dict[str, str]:
     return headers
 
 
-async def complete(cfg, messages):
+async def complete(cfg, messages, session=""):
     body = {"model": cfg["model"], "messages": messages, "max_tokens": 4096,
             "response_format": {"type": "json_object"}}
     headers = request_headers(cfg)
+    started = time.monotonic()
+    data = None
+
+    def meter(error=""):
+        # One line per call in the daemon's LLM ledger (claunch-60y0d), a
+        # failed call included: the row meter below keeps successes only.
+        usage = data.get("usage") if isinstance(data, dict) else None
+        llm_usage.record("observer", provider=str(cfg.get("provider") or ""),
+                         endpoint=str(cfg.get("endpoint") or ""), model=str(cfg.get("model") or ""),
+                         session=session, purpose="pass", usage=usage, ok=not error,
+                         error=error, seconds=time.monotonic() - started)
+
     try:
         connector = aiohttp.TCPConnector(ssl=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)) if truststore else None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), connector=connector) as http:
             async with http.post(cfg["endpoint"], json=body, headers=headers) as response:
                 if response.status != 200:
                     # Provider bodies and exception URLs may echo credentials.
+                    meter(f"HTTP {response.status}")
                     raise ValueError(f"관찰 API HTTP {response.status}")
                 data = await response.json()
         choice = data["choices"][0]
@@ -319,10 +333,18 @@ async def complete(cfg, messages):
         if not isinstance(answer.get("summary"), str):
             raise ValueError("관찰 API 요약 형식 오류")
         usage = data.get("usage") or {}
+        meter()
         return answer, {k: usage.get(k) for k in USAGE_KEYS}
     except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, IndexError, TypeError,
             json.JSONDecodeError) as exc:
+        meter(type(exc).__name__)
         raise ValueError("관찰 API 연결 또는 응답 형식 오류") from exc
+    except ValueError as exc:
+        # The format refusals above; an HTTP refusal was metered where it
+        # was raised, before any body was read.
+        if data is not None:
+            meter(str(exc)[:80])
+        raise
 
 
 def _index(name, events):
@@ -666,7 +688,7 @@ class Observer:
             }, ensure_ascii=False)}]
             row["rotations"] = row.get("rotations", 0) + bool(old)
         messages = messages + [{"role": "user", "content": json.dumps(rows, ensure_ascii=False)}]
-        answer, usage = await complete(cfg, messages)
+        answer, usage = await complete(cfg, messages, session=name)
         events = [] if reset else row.get("events", [])
         evidence = {r["id"]: r for r in rows}
         added = 0
