@@ -62,3 +62,10 @@ def test_the_row_builder_draws_the_tag_only_at_the_top_level():
     text = APP.read_text(encoding="utf-8")
     assert "const orphan = !depth && typeof railOrphanOf === \"function\"" in text
     assert "head.append(label, ...(orphanTag ? [orphanTag] : []), keys," in text
+
+
+def test_the_rail_poll_carries_the_orphan_mark():
+    """A field left out of RAIL_FIELDS never reaches the dashboard."""
+    from claude_launcher.daemon import api
+
+    assert "orphan_of" in api.RAIL_FIELDS
