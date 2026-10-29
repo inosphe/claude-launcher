@@ -11,7 +11,9 @@
    - "Not priced" never reads as "costs nothing": no rate row means no
      estimate, and the counts still show.
    - The estimate is the multiplication the tooltip claims it is — checked
-     against a hand-computed value. */
+     against a hand-computed value.
+   - The Settings card's save leaves an empty cache-write cell out of the
+     PUT body, so the read-rate fallback survives a save. */
 
 const fs = require("fs");
 const path = require("path");
@@ -22,8 +24,9 @@ const src = fs.readFileSync(
 );
 
 function slice(name) {
-  const start = src.indexOf(`function ${name}(`);
+  let start = src.indexOf(`function ${name}(`);
   if (start < 0) throw new Error(`cannot locate ${name} in app.js`);
+  if (src.slice(start - 6, start) === "async ") start -= 6;
   let depth = 0;
   for (let j = src.indexOf("{", start); j < src.length; j++) {
     if (src[j] === "{") depth++;
@@ -176,8 +179,79 @@ check("the scale abbreviates at K and M as the task asks",
         .kids.map((k) => k.textContent).filter((_, i) => i % 2 === 0),
       ["read 999", "cached 1.00k", "write 1.50M"]);
 
-if (failures) {
-  console.error(`${failures} failure(s)`);
-  process.exit(1);
+/* ---- the Settings card: its header and what Save sends ---- */
+// A second sandbox for the card and its save, which reach for the DOM and
+// the daemon: el/document build plain nodes, api records the PUT body.
+function node(tag, cls, text) {
+  return {
+    tag, className: cls || "", textContent: text ?? "", title: "",
+    kids: [],
+    append(...cs) { cs.forEach((c) => this.kids.push(c)); },
+    appendChild(c) { this.kids.push(c); return c; },
+    addEventListener() {},
+    setAttribute() {},
+  };
 }
-console.log("modelprice_check: ok");
+const card = {};
+new Function(
+  "exports", "el", "document", "api", "renderWorkspaces",
+  ["modelPricesDraftValues", "modelPricesSave", "modelPricesCard"]
+    .map(slice).join("\n") + `
+let modelPrices = null, modelPricesKey = "", modelPricesError = "";
+let modelPricesDraft = null, modelPricesNotice = "", modelPricesBusy = false;
+let sessionsCache = [];
+exports.load = (p) => { modelPrices = p; modelPricesDraft = null; };
+exports.draft = modelPricesDraftValues;
+exports.save = modelPricesSave;
+exports.card = modelPricesCard;
+exports.error = () => modelPricesError;
+`
+)(card, node, { createElement: (tag) => node(tag) },
+  async (url, opts) => {
+    card.sent = JSON.parse(opts.body);
+    return { ok: true, json: async () => card.sent };
+  },
+  () => {});
+
+function findAll(n, pred, out = []) {
+  if (pred(n)) out.push(n);
+  (n.kids || []).forEach((k) => findAll(k, pred, out));
+  return out;
+}
+
+card.load({ prices: { "m": { input: 0.3, cache_read: 0.006, output: 1.2 } },
+            currency: "$" });
+check("the table header names the cache-write column",
+      findAll(card.card(), (n) => n.className === "mp-rate-head")
+        .map((n) => n.textContent),
+      ["read", "cached read", "cache write", "output", ""]);
+
+async function saveChecks() {
+  // A saved row without cache_write opens with that cell empty, and saving
+  // it untouched must send no cache_write key: an empty cell sent as 0 would
+  // turn the read-rate fallback off on the next reading.
+  card.load({ prices: { "m": { input: 0.3, cache_read: 0.006, output: 1.2 } },
+              currency: "$" });
+  check("an unset cache write opens as an empty cell",
+        card.draft().prices.m.cache_write, "");
+  await card.save();
+  check("saving an empty cache-write cell sends no cache_write key",
+        card.sent, { currency: "$", prices: {
+          m: { input: 0.3, cache_read: 0.006, output: 1.2 } } });
+
+  card.load({ prices: { "z": { input: 0.3, cache_write: 0 } }, currency: "$" });
+  await card.save();
+  check("a cache-write rate typed as 0 is sent as 0",
+        card.sent.prices.z, { input: 0.3, cache_write: 0 });
+}
+
+saveChecks().then(() => {
+  if (failures) {
+    console.error(`${failures} failure(s)`);
+    process.exit(1);
+  }
+  console.log("modelprice_check: ok");
+}, (err) => {
+  console.error(err);
+  process.exit(1);
+});
