@@ -114,14 +114,15 @@ def host_of(url: str) -> str:
 def record(feature: str, *, provider: str = "", endpoint: str = "", model: str = "",
            session: str = "", purpose: str = "", usage=None, ok: bool = True,
            error: str = "", seconds: Optional[float] = None,
-           at: Optional[float] = None) -> Optional[dict]:
+           at: Optional[float] = None, extra: bool = False) -> Optional[dict]:
     """Append one call to the ledger and return the line, never raising.
 
     ``provider`` is the provider name behind the profile the feature is
     configured with; a typed endpoint belongs to no provider, and its host
     names it instead. ``session`` is the session the call was about, empty
     when it was about none (an index pass over issues nobody owns, a
-    connection test).
+    connection test). ``extra`` marks a second or later share of one
+    request (``record_shared``): it carries tokens but is not another call.
     """
     try:
         at = time.time() if at is None else float(at)
@@ -137,6 +138,8 @@ def record(feature: str, *, provider: str = "", endpoint: str = "", model: str =
             "ok": bool(ok),
             "reported": parts is not None,
         }
+        if extra:
+            line["extra"] = True
         if parts is not None:
             line.update(parts)
             line["total"] = sum(parts.values())
@@ -191,14 +194,16 @@ def split_usage(usage, weights: List[int]) -> List[Optional[dict]]:
 def record_shared(feature: str, owners: List[str], weights: List[int], usage, **kw) -> None:
     """Record one request whose inputs belong to several sessions: one line
     per owner, carrying that owner's share of ``usage``. Inputs of the same
-    owner are summed first, so a request is at most one line per session."""
+    owner are summed first, so a request is at most one line per session.
+    Every line after the first is marked ``extra`` so the request still
+    counts as one call (and one error) everywhere but in its sessions' rows."""
     grouped: Dict[str, int] = {}
     for owner, w in zip(owners, weights):
         grouped[owner or ""] = grouped.get(owner or "", 0) + max(0, w)
     names = list(grouped)
     shares = split_usage(usage, [grouped[n] for n in names])
-    for name, share in zip(names, shares):
-        record(feature, session=name, usage=share, **kw)
+    for i, (name, share) in enumerate(zip(names, shares)):
+        record(feature, session=name, usage=share, extra=i > 0, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -256,22 +261,27 @@ def _blank() -> dict:
             **{k: 0 for k in PARTS}}
 
 
-def _add(acc: dict, line: dict) -> None:
-    acc["calls"] += 1
-    if not line.get("ok", True):
-        acc["errors"] += 1
+def _add(acc: dict, line: dict, every: bool = False) -> None:
+    """Add ``line`` to ``acc``. An ``extra`` share of a request adds its
+    tokens but not another call, unless ``every`` (a per-session row, where
+    each of the request's sessions took part in that one call)."""
+    if every or not line.get("extra"):
+        acc["calls"] += 1
+        if not line.get("ok", True):
+            acc["errors"] += 1
+        if not line.get("reported"):
+            acc["unreported"] += 1
     if not line.get("reported"):
-        acc["unreported"] += 1
         return
     for k in PARTS:
         acc[k] += int(line.get(k) or 0)
     acc["total"] += int(line.get("total") or 0)
 
 
-def _grouped(lines: Iterable[dict], key: str) -> Dict[str, dict]:
+def _grouped(lines: Iterable[dict], key: str, every: bool = False) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
     for line in lines:
-        _add(out.setdefault(str(line.get(key) or ""), _blank()), line)
+        _add(out.setdefault(str(line.get(key) or ""), _blank()), line, every)
     return out
 
 
@@ -300,10 +310,10 @@ def summarize(lines: List[dict], days: List[str], zone: Optional[tzinfo] = None)
         mine = [l for l in lines if l.get("provider") == row["provider"]]
         row["models"] = _ordered(_grouped(mine, "model"), "model")
         row["features"] = _ordered(_grouped(mine, "feature"), "feature", FEATURES)
-    sessions = _ordered(_grouped(lines, "session"), "session")
+    sessions = _ordered(_grouped(lines, "session", every=True), "session")
     for row in sessions:
         mine = [l for l in lines if (l.get("session") or "") == row["session"]]
-        row["features"] = _ordered(_grouped(mine, "feature"), "feature", FEATURES)
+        row["features"] = _ordered(_grouped(mine, "feature", every=True), "feature", FEATURES)
         row["providers"] = sorted({str(l.get("provider") or "") for l in mine})
         row["last_at"] = max((str(l.get("at") or "") for l in mine), default="")
     by_day: Dict[str, dict] = {d: {"day": d, **_blank(), "features": {}} for d in days}
@@ -352,7 +362,9 @@ def overview(window: str = "today", *, provider: str = "", session: str = "",
     if provider:
         lines = [l for l in lines if l.get("provider") == provider]
     if session:
-        lines = [l for l in lines if (l.get("session") or "") == session]
+        # One session's view: each shared request it took part in is a call.
+        lines = [{k: v for k, v in l.items() if k != "extra"} for l in lines
+                 if (l.get("session") or "") == session]
     zone_name = datetime.fromtimestamp(end, zone).astimezone(zone).tzname() or ""
     return {
         "window": window,

@@ -129,6 +129,32 @@ def test_record_shared_writes_one_line_per_owner():
     assert by == {"s1": 20, "s2": 10, "": 10}
 
 
+def test_a_shared_request_counts_as_one_call():
+    # Two embedding requests over three sessions' inputs, the second failed:
+    # two calls and one error overall, while each session row counts each
+    # request it took part in once (review of claunch-60y0d @ 038f589c).
+    llm_usage.record_shared("embedding", ["s1", "s2", "s3"], [1, 1, 1],
+                            {"prompt_tokens": 30}, model="e", purpose="index")
+    llm_usage.record_shared("embedding", ["s1", "s2", "s3"], [1, 1, 1],
+                            None, model="e", purpose="index", ok=False, error="HTTP 500")
+    out = llm_usage.overview("today")
+    assert out["totals"]["calls"] == 2
+    assert out["totals"]["errors"] == 1
+    assert out["totals"]["unreported"] == 1
+    assert out["totals"]["input"] == 30
+    (feature,) = [f for f in out["features"] if f["feature"] == "embedding"]
+    assert (feature["calls"], feature["errors"]) == (2, 1)
+    assert [(p["provider"], p["calls"]) for p in out["providers"]] == [("unknown", 2)]
+    assert sum(d["calls"] for d in out["days"]) == 2
+    rows = {s["session"]: (s["calls"], s["errors"], s["input"]) for s in out["sessions"]}
+    assert rows == {"s1": (2, 1, 10), "s2": (2, 1, 10), "s3": (2, 1, 10)}
+    # A provider-narrowed view keeps the same count; a session-narrowed view
+    # counts the requests that session took part in.
+    assert llm_usage.overview("today", provider="unknown")["totals"]["calls"] == 2
+    one = llm_usage.overview("today", session="s3")
+    assert (one["totals"]["calls"], one["totals"]["errors"], one["totals"]["input"]) == (2, 1, 10)
+
+
 # --------------------------------------------------------------------------- #
 # the call sites
 # --------------------------------------------------------------------------- #
