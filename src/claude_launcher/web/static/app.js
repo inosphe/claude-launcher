@@ -8922,15 +8922,39 @@ function priceCurrency() {
   return (modelPrices && modelPrices.currency) || "$";
 }
 
-/* The rate row for a model id, or null where the table has no row for it.
-   Keyed by the id the transcript records (`context.model`), not the
-   shortened display form — the table is written against what the harness
-   actually answered on. */
-function priceRateFor(model) {
+/* The provider row the table keys rates under when no provider has its own
+   row for a model ("*" — the daemon names it in `any`). */
+function priceAnyProvider() {
+  return (modelPrices && modelPrices.any) || "*";
+}
+
+/* The provider a session's requests are priced under: the one its profile
+   resolves to (Settings → Providers; own, inherited, or the global default),
+   and for a borrowing session the lender's, the profile whose backend it
+   runs on. "" when the profile is unknown to the table's read. */
+function sessionPriceProvider(s) {
+  const map = modelPrices && modelPrices.profiles;
+  const prof = s && (s.borrow || s.profile);
+  if (!map || !prof) return "";
+  return map[String(prof).split(":")[0]] || "";
+}
+
+/* The rate row for a model id served by a provider, or null where the table
+   prices neither that provider's model nor the same id under "*". Keyed by
+   the id the transcript records (`context.model`), not the shortened display
+   form — the table is written against what the harness actually answered
+   on. A row with no rates counts as absent (the daemon's rate_for reads it
+   the same way), so it neither hides the "*" row nor prices at 0. */
+function priceRateFor(model, provider) {
   const table = modelPrices && modelPrices.prices;
   if (!table || !model) return null;
-  const rates = table[model];
-  return rates && typeof rates === "object" ? rates : null;
+  for (const p of [provider, priceAnyProvider()]) {
+    const rates = p && table[p] && table[p][model];
+    if (rates && typeof rates === "object" && Object.keys(rates).length) {
+      return rates;
+    }
+  }
+  return null;
 }
 
 /* The cache-write rate is optional: most providers bill tokens written to
@@ -9213,7 +9237,8 @@ function ctxRailLine(s) {
 function ctxTokensLine(s) {
   const c = s && s.context;
   if (!c) return null;
-  const rates = priceRateFor(c.model);
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
   const cost = readingCost(c, rates);
   const line = el("span", "rail-ctx-tokens");
   line.append(
@@ -9232,8 +9257,8 @@ function ctxTokensLine(s) {
     `cached ${(c.cache_read || 0).toLocaleString()} replayed from cache · ` +
     `write ${(c.cache_write || 0).toLocaleString()} written to cache`,
     rates ? costBreakdown(c, rates)
-          : "no per-1M rates for this model — add them in Settings → " +
-            "Model prices to see an estimate",
+          : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
+            " — add them in Settings → Model prices to see an estimate",
   ].join("\n");
   return line;
 }
@@ -10506,7 +10531,8 @@ function usageRailLine(s) {
 function ctxCostDetailRow(dl, s) {
   const c = s && s.context;
   if (!c) return;
-  const rates = priceRateFor(c.model);
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
   const cost = readingCost(c, rates);
   dl.appendChild(el("dt", null, "last request"));
   const parts = [
@@ -10519,8 +10545,8 @@ function ctxCostDetailRow(dl, s) {
   const dd = el("dd", "ctx-cost-detail", parts.join(" · "));
   dd.title = rates
     ? costBreakdown(c, rates)
-    : "no per-1M rates for this model — set them in Settings → Model " +
-      "prices to see an estimate";
+    : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
+      " — set them in Settings → Model prices to see an estimate";
   dl.appendChild(dd);
 }
 
@@ -11354,7 +11380,8 @@ function refreshRailSeen(list) {
     // a reading lands.
     const tk = li.querySelector(".rail-ctx-tokens");
     if (tk && typeof ctxTokensLine === "function") {
-      const tkKey = JSON.stringify([s.context || null, modelPricesKey]);
+      const tkKey = JSON.stringify([s.context || null, s.profile || "",
+                                    s.borrow || "", modelPricesKey]);
       if (tk._railKey !== tkKey) {
         const fresh = ctxTokensLine(s);
         if (fresh) swap(tk, fresh)._railKey = tkKey;
@@ -38855,27 +38882,30 @@ function llmSettingsCard() {
   return card;
 }
 
-/* The per-model price table the cost estimates read (the bucket line under
-   the context gauge and the detail panel's "last request" row). One row per
-   model id — the id the transcript records, not the shortened display form —
-   with a per-1M-token rate for each billed bucket; a rate left empty counts
-   as 0, a row whose every rate is empty is dropped on save. The draft lives
+/* The price table the cost estimates read (the bucket line under the
+   context gauge and the detail panel's "last request" row), two tiers deep:
+   provider, then model id — the id the transcript records, not the shortened
+   display form — with a per-1M-token rate for each billed bucket. A session
+   is priced under the provider its profile resolves to, and falls back to
+   the "*" provider's row for the same model. A rate left empty counts as 0,
+   a row whose every rate is empty is dropped on save. The draft lives
    outside the DOM like llmDraft: this page re-renders on every poll. */
 let modelPricesDraft = null;
 let modelPricesNotice = "";
 let modelPricesBusy = false;
 
+const MP_RATE_KEYS = ["input", "cache_read", "cache_write", "output"];
+
 function modelPricesDraftValues() {
   if (modelPricesDraft) return modelPricesDraft;
   const saved = modelPrices || {};
   const prices = {};
-  for (const [model, rates] of Object.entries(saved.prices || {})) {
-    prices[model] = {
-      input: rates.input ?? "",
-      cache_read: rates.cache_read ?? "",
-      cache_write: rates.cache_write ?? "",
-      output: rates.output ?? "",
-    };
+  for (const [provider, rows] of Object.entries(saved.prices || {})) {
+    prices[provider] = {};
+    for (const [model, rates] of Object.entries(rows || {})) {
+      prices[provider][model] = Object.fromEntries(
+        MP_RATE_KEYS.map((k) => [k, rates[k] ?? ""]));
+    }
   }
   modelPricesDraft = { currency: saved.currency || "$", prices };
   return modelPricesDraft;
@@ -38884,23 +38914,28 @@ function modelPricesDraftValues() {
 async function modelPricesSave() {
   const draft = modelPricesDraftValues();
   const prices = {};
-  for (const model of Object.keys(draft.prices)) {
-    const row = {};
-    for (const key of ["input", "cache_read", "cache_write", "output"]) {
-      const v = String(draft.prices[model][key] ?? "").trim();
-      if (v === "") continue;
-      const n = Number(v);
-      if (!Number.isFinite(n) || n < 0) {
-        modelPricesError = `${model}: ${key} must be a non-negative number`;
-        renderWorkspaces();
-        return;
+  for (const provider of Object.keys(draft.prices)) {
+    for (const model of Object.keys(draft.prices[provider])) {
+      const row = {};
+      for (const key of MP_RATE_KEYS) {
+        const v = String(draft.prices[provider][model][key] ?? "").trim();
+        if (v === "") continue;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) {
+          modelPricesError =
+            `${provider}/${model}: ${key} must be a non-negative number`;
+          renderWorkspaces();
+          return;
+        }
+        row[key] = n;
       }
-      row[key] = n;
+      // A row whose every rate was emptied is a dropped row, not a free one:
+      // an empty object would come back truthy from priceRateFor and render
+      // "≈ $0.0000" — the very misreading this card's note promises against.
+      if (Object.keys(row).length) {
+        (prices[provider] = prices[provider] || {})[model] = row;
+      }
     }
-    // A row whose every rate was emptied is a dropped row, not a free one:
-    // an empty object would come back truthy from priceRateFor and render
-    // "≈ $0.0000" — the very misreading this card's note promises against.
-    if (Object.keys(row).length) prices[model] = row;
   }
   modelPricesBusy = true;
   modelPricesNotice = "";
@@ -38925,14 +38960,30 @@ async function modelPricesSave() {
   renderWorkspaces();
 }
 
+/* The providers the add row offers: "*" first, then every provider a
+   profile resolves to (what a session would be priced under), then any
+   provider already in the table. */
+function modelPricesProviderOptions(draft) {
+  const any = priceAnyProvider();
+  const named = new Set([
+    ...Object.values((modelPrices && modelPrices.profiles) || {}),
+    ...Object.keys(draft.prices),
+  ]);
+  named.delete(any);
+  return [any, ...[...named].filter(Boolean).sort()];
+}
+
 function modelPricesCard() {
   const card = el("section", "ws-add model-prices");
   card.appendChild(el("h3", null, "Model prices"));
   card.appendChild(el(
     "p", "wf-note",
-    "Per-1M-token rates for a model id (the id the transcript records — " +
-    "the one in the gauge line's tooltip). Where a row exists, the session " +
-    "card under the context gauge and the detail panel's last-request row " +
+    "Per-1M-token rates by provider and model id (the id the transcript " +
+    "records — the one in the gauge line's tooltip). A session is priced " +
+    "under the provider its profile resolves to (Settings → Providers; a " +
+    "borrowing session under its lender's), and a model with no row there " +
+    "takes the \"*\" provider's row. Where a row applies, the session card " +
+    "under the context gauge and the detail panel's last-request row " +
     "estimate the cost of the latest request from these rates. A rate left " +
     "empty counts as 0, except cache write, which is optional: left empty " +
     "it takes the read rate. Emptying every rate drops the row."
@@ -38960,49 +39011,70 @@ function modelPricesCard() {
   curLabel.appendChild(cur);
   form.appendChild(curLabel);
 
+  const any = priceAnyProvider();
   const table = el("div", "mp-table");
   const head = el("div", "mp-row mp-head");
-  head.append(el("span", "mp-model-head", "model"),
+  head.append(el("span", "mp-provider-head", "provider"),
+              el("span", "mp-model-head", "model"),
               ...["read", "cached read", "cache write", "output"].map(
                 (h) => el("span", "mp-rate-head", h)),
               el("span", "mp-rate-head", ""));
   table.appendChild(head);
-  for (const model of Object.keys(draft.prices).sort()) {
-    const rates = draft.prices[model];
-    const row = el("div", "mp-row");
-    const name = el("span", "mp-model", model);
-    name.title = model;
-    row.appendChild(name);
-    for (const key of ["input", "cache_read", "cache_write", "output"]) {
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.inputMode = "decimal";
-      inp.className = "mp-rate";
-      inp.value = rates[key];
-      inp.placeholder = key === "cache_write" ? "= read" : "0";
-      if (key === "cache_write") inp.title = "optional: empty uses the read rate";
-      inp.addEventListener("input", () => { rates[key] = inp.value; });
-      row.appendChild(inp);
+  // "*" first: it is the row every provider falls back to.
+  const providerOrder = Object.keys(draft.prices).sort(
+    (x, y) => (x === any ? -1 : y === any ? 1 : x.localeCompare(y)));
+  for (const provider of providerOrder) {
+    for (const model of Object.keys(draft.prices[provider]).sort()) {
+      const rates = draft.prices[provider][model];
+      const row = el("div", "mp-row");
+      const prov = el("span", "mp-provider", provider);
+      prov.title = provider === any
+        ? "any provider without its own row for this model" : provider;
+      const name = el("span", "mp-model", model);
+      name.title = model;
+      row.append(prov, name);
+      for (const key of MP_RATE_KEYS) {
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.inputMode = "decimal";
+        inp.className = "mp-rate";
+        inp.value = rates[key];
+        inp.placeholder = key === "cache_write" ? "= read" : "0";
+        if (key === "cache_write") inp.title = "optional: empty uses the read rate";
+        inp.addEventListener("input", () => { rates[key] = inp.value; });
+        row.appendChild(inp);
+      }
+      const drop = el("button", "wf-btn clear mp-drop", "✕");
+      drop.type = "button";
+      drop.title = "drop this row";
+      drop.addEventListener("click", () => {
+        delete draft.prices[provider][model];
+        if (!Object.keys(draft.prices[provider]).length) {
+          delete draft.prices[provider];
+        }
+        renderWorkspaces();
+      });
+      row.appendChild(drop);
+      table.appendChild(row);
     }
-    const drop = el("button", "wf-btn clear mp-drop", "✕");
-    drop.type = "button";
-    drop.title = "drop this row";
-    drop.addEventListener("click", () => {
-      delete draft.prices[model];
-      renderWorkspaces();
-    });
-    row.appendChild(drop);
-    table.appendChild(row);
   }
   form.appendChild(table);
 
-  // Adding a row: the id typed in, or one of the models the rail currently
-  // shows, offered by a datalist so a typo'd id does not silently estimate
-  // nothing.
+  // Adding a row: a provider (one a profile resolves to, or "*") and the
+  // model id typed in, or one of the models the rail currently shows,
+  // offered by a datalist so a typo'd id does not silently estimate nothing.
   const seen = [...new Set((sessionsCache || [])
     .map((s) => s && s.context && s.context.model)
     .filter(Boolean))].sort();
   const addRow = el("div", "mp-row mp-add");
+  const addProvider = document.createElement("select");
+  addProvider.id = "mp-add-provider";
+  for (const p of modelPricesProviderOptions(draft)) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p === any ? `${any} (any provider)` : p;
+    addProvider.appendChild(opt);
+  }
   const addName = document.createElement("input");
   addName.id = "mp-add-model";
   addName.type = "text";
@@ -39019,10 +39091,11 @@ function modelPricesCard() {
   addBtn.type = "button";
   const addModel = () => {
     const m = addName.value.trim();
+    const p = addProvider.value || any;
     if (!m) return;
-    if (!draft.prices[m]) {
-      draft.prices[m] = { input: "", cache_read: "", cache_write: "",
-                          output: "" };
+    const rows = draft.prices[p] = draft.prices[p] || {};
+    if (!rows[m]) {
+      rows[m] = { input: "", cache_read: "", cache_write: "", output: "" };
     }
     modelPricesDraft = draft;
     renderWorkspaces();
@@ -39031,7 +39104,7 @@ function modelPricesCard() {
   addName.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); addModel(); }
   });
-  addRow.append(addName, addList, addBtn);
+  addRow.append(addProvider, addName, addList, addBtn);
   form.appendChild(addRow);
 
   const submit = el("button", "wf-btn approve", "Save prices");

@@ -15,7 +15,6 @@ import functools
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -58,6 +57,7 @@ from .. import commit_detail, session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
 from .. import workspace_usage
+from .. import model_prices as model_prices_mod
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from .. import wsl_reg_stub
@@ -8017,17 +8017,23 @@ async def h_cflow_ping_defaults_set(request: web.Request) -> web.Response:
 
 
 def _model_prices() -> dict:
-    """The per-model price table, read live from the config file — the same
-    read the dashboard's cost estimate makes when it draws a rail row or the
-    detail panel, so what this reports is what the next poll will price
-    against. Keyed by the model id as the harness records it on the
-    transcript (``context.model``); each row holds per-1M-token rates."""
+    """The price table, read live from the config file — the same read the
+    dashboard's cost estimate makes when it draws a rail row or the detail
+    panel, so what this reports is what the next poll will price against.
+    Keyed by provider and then by the model id as the harness records it on
+    the transcript (``context.model``); each row holds per-1M-token rates
+    (:mod:`claude_launcher.model_prices`). ``profiles`` maps each profile to
+    the provider it resolves to: the dashboard knows a session's profile, and
+    this is how it finds the provider tier to price that session under."""
     cfg = store.daemon_config()
-    prices = cfg.get("model_prices")
-    if not isinstance(prices, dict):
-        prices = {}
+    prices = model_prices_mod.normalize(cfg.get("model_prices"))
     currency = str(cfg.get("model_price_currency") or "$")
-    return {"prices": prices, "currency": currency}
+    try:
+        profiles = model_prices_mod.profile_providers()
+    except store.StoreError:
+        profiles = {}
+    return {"prices": prices, "currency": currency, "profiles": profiles,
+            "any": model_prices_mod.ANY}
 
 
 async def h_model_prices(request: web.Request) -> web.Response:
@@ -8038,7 +8044,7 @@ async def h_model_prices(request: web.Request) -> web.Response:
 
 
 async def h_model_prices_set(request: web.Request) -> web.Response:
-    """Set the per-model price table the dashboard's cost estimates use.
+    """Set the price table the dashboard's cost estimates use.
 
     Written to the config file (``daemon.model_prices``) and read live, so
     a PUT is what the next dashboard poll prices against; the currency
@@ -8046,37 +8052,18 @@ async def h_model_prices_set(request: web.Request) -> web.Response:
     daemon config model_price_currency``. The table itself is replaced
     whole — the UI reads it back after the write; an empty table clears
     it, which turns the estimated-price display back off. Partial on
-    purpose: only the keys sent change.
+    purpose: only the keys sent change. Validation is
+    :func:`model_prices.clean` (provider → model → rates; a legacy row keyed
+    by model id alone is stored under ``"*"``).
     """
     body = await _json_body(request)
     prices_out = None
     currency_out = None
     if "prices" in body:
-        prices = body["prices"]
-        if prices is None:
-            prices = {}
-        if not isinstance(prices, dict):
-            return json_error(400, "'prices' must be an object keyed by model id")
-        clean: dict = {}
-        for model, rates in prices.items():
-            if not isinstance(model, str) or not model.strip():
-                return json_error(400, "price rows are keyed by a non-empty model id")
-            if not isinstance(rates, dict):
-                return json_error(400, f"prices for {model!r} must be an object")
-            row: dict = {}
-            for key in ("input", "cache_read", "cache_write", "output"):
-                v = rates.get(key)
-                if v is None:
-                    continue
-                try:
-                    v = float(v)
-                except (TypeError, ValueError):
-                    return json_error(400, f"price {key!r} for {model!r} must be a number")
-                if not math.isfinite(v) or v < 0:
-                    return json_error(400, f"price {key!r} for {model!r} must be a " "non-negative finite number")
-                row[key] = v
-            clean[model.strip()] = row
-        prices_out = clean or None
+        try:
+            prices_out = model_prices_mod.clean(body["prices"]) or None
+        except ValueError as exc:
+            return json_error(400, str(exc))
     if "currency" in body:
         currency = body["currency"]
         if currency is not None:
