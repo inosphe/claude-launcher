@@ -1154,6 +1154,11 @@ def _rail_opened(value: Any) -> Dict[str, Any]:
 #: an entry is recomputed only when its state or chart file changed.
 _RAIL: Dict[Tuple[str, str], Tuple[Any, Optional[dict]]] = {}
 
+#: The stamp an archived session's entry is cached under: it was never
+#: compared with the gate registry, so it matches no real stamp and a later
+#: compared read (a respawn) recomputes it and syncs.
+_UNCOMPARED = object()
+
 
 def _rail_stamp(cwd: str, scope: str) -> Any:
     st = store2.RunStore(cwd, scope)
@@ -1194,7 +1199,9 @@ def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
     ``filed`` are ``(session, cwd)`` of archived sessions: served the same way
     (read once, ``answers`` emptied), but never compared with the registry --
     their gates were closed when they were filed away, and reading their run
-    must not open them again."""
+    must not open them again. Their cache entry is marked uncompared, so a
+    respawn's first read recomputes it and the registry opens what the run
+    still owes."""
     from . import gate_registry
 
     if registry is None:
@@ -1238,13 +1245,13 @@ def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
             continue
         key = (cwd, name)
         hit = _RAIL.get(key)
-        if hit is None:
+        if hit is None or (compare and hit[0] is _UNCOMPARED):
             try:
                 stamp = _rail_stamp(cwd, name)
             except (OSError, ValueError):
                 continue
             hit = (stamp, rail_entry(cwd, name) if stamp[0] is not None else None)
-            _RAIL[key] = hit
+            _RAIL[key] = hit if compare else (_UNCOMPARED, hit[1])
             if compare and registry is not None and hit[1] is not None:
                 # Read for the first time in this process: a gate it still
                 # owes is recorded (and the next poll reads it as held).

@@ -124,6 +124,29 @@ def test_archive_and_remove_close_the_sessions_gates_and_a_respawn_reopens(proj,
     assert [g["closed_at"] is None for g in s1] == [True, False]
 
 
+@pytest.mark.parametrize("back", ["live", "ended"])
+def test_an_archived_read_does_not_hide_the_gate_from_a_respawn(proj, reg, back):
+    """An archived session's line is read without the registry; when the
+    session comes back (respawned live, or restored as an ended session) its
+    first read still compares, and the gate its run owes opens again."""
+    cwd = str(proj)
+    _start(cwd)
+    cflow2_web.rail_entries([("s1", cwd)])
+    reg.close_session("s1", gate_registry.CLOSE_ARCHIVED)
+    cflow2_web.forget_rail("s1")
+
+    filed = cflow2_web.rail_entries([], filed=[("s1", cwd)])
+    assert filed["s1"]["answers"] == [] and reg.open_sessions() == {}
+    cflow2_web.rail_entries([], filed=[("s1", cwd)])  # served from the cache
+    assert reg.open_sessions() == {}
+
+    if back == "live":
+        cflow2_web.rail_entries([("s1", cwd)])
+    else:
+        cflow2_web.rail_entries([], settled=[("s1", cwd)])
+    assert reg.open_sessions() == {"s1": 1}
+
+
 def test_backfill_records_the_open_gates_once(proj, reg):
     cwd = str(proj)
     for name in ("live", "killed", "filed", "idle"):
