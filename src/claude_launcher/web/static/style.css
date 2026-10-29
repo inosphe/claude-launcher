@@ -7502,6 +7502,17 @@ body.embed #main { width: 100%; }
 }
 .notice .gate-session:hover { color: #58a6ff; border-bottom-color: #58a6ff; }
 .notice-title .gate-session { color: #e6edf3; }
+/* The session's state beside its name (claunch-6vq2m): quieter than the
+   name, and an ended session's word in the colour the rail gives an ended
+   row, so a card about a session nobody is driving reads as such. */
+.gate-session .gate-session-state {
+  color: #8b949e; font-weight: normal; font-size: 0.9em;
+}
+.gate-session .gate-session-state[data-state="busy"] { color: #d29922; }
+.gate-session .gate-session-state[data-state="idle"] { color: #3fb950; }
+.gate-session .gate-session-state[data-state="killed"],
+.gate-session .gate-session-state[data-state="failed"],
+.gate-session .gate-session-state[data-state="archived"] { color: #f85149; }
 /* The countdown is its own line so the poll can rewrite it without touching
    the links beside it. */
 .notice .gate-clock { color: #8b949e; }

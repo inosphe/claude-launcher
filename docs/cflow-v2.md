@@ -355,6 +355,14 @@ ask:
   다시 시작한다. 데몬과의 연결이 끊겼다 돌아오면 그 값을 버리고 다음 응답에서
   다시 읽는다. `flow_status`의 `asks`·`choices`·`loop_limits`·`visit_limits` 항목도
   같은 `opened_at`을 싣는다.
+- 세션 상태(claunch-6vq2m): `/api/cflow2/rail`은 아카이브된 세션까지 등록된 세션을
+  전부 훑고, 세션이 남긴 런은 디스크에서 계속 사람을 기다린다. 그래서 행마다 그
+  세션의 `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
+  `paused`·`archived`, `session.session_category`)와 `session_status`(살아 있으면
+  `busy`·`idle`·`starting`, 끝났으면 `exited`)를 응답마다 싣는다. 대시보드는
+  `archived` 세션의 게이트로 코너 카드·「Waiting on you」 레코드를 만들지 않는다
+  (런 페이지에서는 여전히 답할 수 있다). 알림 카드와 기록 행의 세션 이름 옆에는 이
+  상태가 표시되고, 세션 폴과 rail 폴이 끝날 때마다 다시 읽힌다.
 - 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
   시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
   `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가

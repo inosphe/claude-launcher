@@ -100,13 +100,14 @@ new Function(
      "sessionCategory", "gateWakeNote",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
-     "personGateRecords", "railOpenedSecs", "runGateFeed"]
+     "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState"]
     .map(slice).join("\n") + `
 let gateFed = null;
 function runGateSync(pending, settled) { gateFed = { pending, settled }; }
 Object.assign(exports, {
   renderTermCflow,
   personGateRecords,
+  gateSessionState,
   runGateFeed,
   gateFed: () => gateFed,
   refits: () => refits,
@@ -835,6 +836,62 @@ const RUN = {
     ctx.runGateFeed();
     check("gates: the feed hands the channel the whole set",
           ctx.gateFed() && ctx.gateFed().pending.length === 4, ctx.gateFed());
+
+    /* An archived session's run raises no card (claunch-6vq2m): s1065's
+       visit limit stayed on the corner for days after it was archived,
+       because the rail lists every registered session and the run file
+       still waits. */
+    ctx.setRail({
+      s30: { ...R2, scope: "s30", gated: true, owed: ["visit_limit: watch.do"],
+        urgent_asks: [], session_category: "archived", session_status: "exited",
+        answers: [{ kind: "visit_limit", instance: "watch.do@9", label: "watch.do",
+          count: 201, max: 200 }] },
+      s31: { ...R2, scope: "s31", gated: true, owed: ["visit_limit: watch.do"],
+        urgent_asks: [], session_category: "killed", session_status: "exited",
+        answers: [{ kind: "visit_limit", instance: "watch.do@9", label: "watch.do",
+          count: 201, max: 200 }] },
+      s32: { ...R2, scope: "s32", gated: false, owed: [], answers: [],
+        session_category: "archived",
+        urgent_asks: [{ id: "ask2-09", status: "answered", decision: "approve", by: "web" }] },
+    });
+    {
+      const { pending: p2, settled: s2 } = ctx.personGateRecords();
+      check("gates: an archived session's v2 gate raises no record",
+            !p2.some((r) => r.session === "s30"), p2.map((r) => r.id));
+      check("gates: an exited but not archived session's gate still does",
+            p2.some((r) => r.session === "s31" && r.kind === "visit_limit"),
+            p2.map((r) => r.id));
+      check("gates: an archived session's settled urgent ask still reaches the history",
+            s2.some((s) => s.id === "ask2-09"), s2);
+    }
+    ctx.setSessions([{ name: "s20", status: "exited",
+                       archived_at: "2026-10-26T23:25:09+00:00" }]);
+    check("gates: a v1 run of an archived session raises no record",
+          !ctx.personGateRecords().pending.some((r) => r.session === "s20"),
+          ctx.personGateRecords().pending.map((r) => r.id));
+
+    /* The word a card shows beside the session's name (claunch-6vq2m). */
+    ctx.setSessions([{ name: "s40", status: "busy" },
+                     { name: "s41", status: "exited", paused_at: "2026-10-26T00:00:00+00:00" }]);
+    check("state: a running session reads its live status",
+          ctx.gateSessionState("s40") === "busy", ctx.gateSessionState("s40"));
+    check("state: an ended session reads its category",
+          ctx.gateSessionState("s41") === "paused", ctx.gateSessionState("s41"));
+    check("state: a session the poll leaves out reads the rail row's category",
+          ctx.gateSessionState("s30") === "archived", ctx.gateSessionState("s30"));
+    ctx.setRail({ s42: { ...R2, scope: "s42", session_category: "running",
+                         session_status: "idle" } });
+    check("state: a running rail row reads its live status",
+          ctx.gateSessionState("s42") === "idle", ctx.gateSessionState("s42"));
+    check("state: a name nobody knows reads nothing",
+          ctx.gateSessionState("nobody") === "" && ctx.gateSessionState("") === "",
+          ctx.gateSessionState("nobody"));
+    check("state: both polls re-read the words on the cards",
+          /cflow2RailCache = rows;[\s\S]{0,600}refreshGateSessionStates\(\)/.test(src) &&
+            /reconcileKillUiState\(sessionsCache\);[\s\S]{0,200}refreshGateSessionStates\(\)/.test(src));
+    check("state: the session link draws the word",
+          /function gateSessionLink[\s\S]{0,400}gateSessionStateSet\(node, gateSessionState\(name\)\)/.test(src));
+    ctx.setSessions([]);
     ctx.setRuns([]);
     ctx.setRail({});
   }

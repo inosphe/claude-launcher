@@ -473,7 +473,8 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
 
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
-    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c), **markers)
+    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c),
+                                status=lambda: "idle", **markers)
                 for n, c in (("s1", cwd), ("s2", cwd), ("s3", ""))]
 
     async def run():
@@ -501,6 +502,16 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     # file; this must not be.
     assert isinstance(body["now"], (int, float)) and body["now"] > 0
     assert isinstance(body["rows"]["s1"]["answers"][0]["opened_at"], float)
+    # Every row says what its session is now (claunch-6vq2m): an archived
+    # session's run still waits on disk and is still listed, and the
+    # dashboard raises no card for it and shows the word beside the name.
+    category = {(False, None): "running", (True, "held_at"): "hold",
+                (True, "paused_at"): "paused", (True, "archived_at"): "archived",
+                (True, None): "killed"}[
+        (markers["exited"], next((k for k in markers if k != "exited"), None))]
+    assert body["rows"]["s1"]["session_category"] == category
+    assert body["rows"]["s1"]["session_status"] == (
+        "exited" if markers["exited"] else "idle")
 
 
 def _live(name, cwd, exited=False):
