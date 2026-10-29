@@ -4158,8 +4158,10 @@ nodes:
          찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
          children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
          맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
-         메시> --state all`에서 role 열이 reviewer인 행의 셋째 열과 같은 것이
-         직속 자식 리뷰어다. 셋째 열은 `<데몬>/<세션>`(예:
+         메시> --state all`에서 role 열(둘째 열)에 reviewer가 든 행의 셋째
+         열과 같은 것이 직속 자식 리뷰어다. 역할이 여럿이면 그 열은
+         `worker+reviewer`처럼 `+`로 이어지므로 `+`로 나눈 조각 가운데
+         reviewer가 있는지 본다(데몬도 role·roles 중 하나가 reviewer면 고른다). 셋째 열은 `<데몬>/<세션>`(예:
          `shared-daemon-main/s1011`)이므로 `/` 뒤의 세션 이름과 비교한다 —
          첫 열 핸들과도, 셋째 열 전체와도 비교하지 않는다. 살아 있는지는
          `children` 행의 status로 읽는다. 데몬이 직속 리뷰어를 고르는 기준도

@@ -1859,6 +1859,7 @@ def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
     assert "`cflow_clock._reviewer_children`" in release
     # the roster's third column is <daemon>/<session>: compare the part after '/'
     assert "`/` 뒤의 세션 이름과 비교한다" in release
+    assert "`+`로 나눈 조각 가운데 reviewer가 있는지 본다" in release
     new_task = _words(nodes["end-new-task"]["prompt"])
     assert "MCP `resume_session`" in new_task
     assert "REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>" in new_task
