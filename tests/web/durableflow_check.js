@@ -669,6 +669,28 @@ console.log("durableflow_check: plan ok");
   assert.deepStrictEqual(plain(si.lanes.filter((l) => l.unit === "t1").map((l) => [l.start, l.end])),
     [[Date.parse(T("00:01")), Date.parse(T("00:02"))], [Date.parse(T("00:11")), Date.parse(T("00:12"))]]);
   stable(IR, "resumed run");
+
+  // A question the interrupted run left unanswered ends with that run; the
+  // resumed run's question under the same key is closed by its own answer
+  // (s162 on claunch-papez).
+  const IQ = [
+    { at: T("00:00"), event: "session_start", attempt: 1 },
+    { at: T("00:01"), event: "ask_start", key: "k", unit: "t1" },
+    { at: T("00:02"), event: "run_end", state: "interrupted", error: "killed" },
+    { at: T("00:10"), event: "session_start", attempt: 2 },
+    { at: T("00:11"), event: "ask_start", key: "k", unit: "t1" },
+    { at: T("00:12"), event: "ask", key: "k", unit: "t1", usage: { totalTokens: 10 } },
+    { at: T("00:13"), event: "run_end", state: "done" },
+  ];
+  const sq = DF.sequence(IQ, false, Date.parse(T("00:20")));
+  assert.deepStrictEqual(plain(sq.lanes.filter((l) => l.unit === "t1").map((l) => l.asks.map((a) => [a.start, a.end, a.status]))), [
+    [[Date.parse(T("00:01")), Date.parse(T("00:02")), "run"]],
+    [[Date.parse(T("00:11")), Date.parse(T("00:12")), "ok"]]], "each question stays in its run");
+  const mq = DF.model(IQ, false);
+  assert.deepStrictEqual(plain(mq.nodes.filter((n) => n.unit === "t1").map((n) => [n.seg, n.count, n.running])),
+    [[0, 0, 0], [1, 1, 0]], "the answer counts on the resumed run's t1");
+  assert.strictEqual(mq.running, 0);
+  stable(IQ, "unanswered across runs");
 }
 console.log("durableflow_check: runs ok");
 

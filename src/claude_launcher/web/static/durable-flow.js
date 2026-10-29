@@ -473,6 +473,7 @@
       if (run && run.n !== seg) {
         seg = run.n;
         ended = null;
+        closeOpen();     // a run that ended without its run_end leaves no start pending
         for (const [id, node] of units) earlier.set(id, node);
         units.clear();
         groups.clear();
@@ -975,7 +976,16 @@
       const when = atOf(ev);
       touch(when);
       const run = split.step(ev);
-      if (run && run.n !== runNo) { runNo = run.n; byUnit.clear(); byGroup.clear(); }
+      if (run && run.n !== runNo) {
+        // A question the earlier run left unanswered ends with that run: a
+        // later answer under the same key belongs to the later run's start.
+        const end = spans[runNo] ? spans[runNo].t1 : null;
+        for (const pend of open.values()) for (const x of pend) if (x.item.end === null) x.item.end = end;
+        open.clear();
+        runNo = run.n;
+        byUnit.clear();
+        byGroup.clear();
+      }
       if (run && when !== null) {
         const sp = spans[run.n] || (spans[run.n] = { t0: when, t1: when });
         if (when < sp.t0) sp.t0 = when;
