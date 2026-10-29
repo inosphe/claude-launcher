@@ -1168,10 +1168,23 @@ def _rail_stamp(cwd: str, scope: str) -> Any:
     return tuple(out)
 
 
-def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
+def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
+                 force: bool = False, now: Optional[float] = None) -> Dict[str, dict]:
     """``GET /api/cflow2/rail``: ``{session: rail_entry}`` for each
     ``(session, cwd)`` that drives a v2 run; sessions without one are left
-    out."""
+    out.
+
+    With a ``registry`` (:class:`.gate_registry.GateRegistry`) every entry
+    recomputed here -- its slot's files changed, or ``force`` -- is compared
+    with the session's recorded gates (claunch-6vq2m.1): the registry hears of
+    a gate opening or closing exactly when the run's files say so, and an
+    unchanged slot costs three ``stat`` calls and no write. A slot whose
+    state file is gone closes the session's gates as ``run ended``. Without
+    one, the daemon's installed registry (:func:`.gate_registry.active`)."""
+    from . import gate_registry
+
+    if registry is None:
+        registry = gate_registry.active()
     out: Dict[str, dict] = {}
     for name, cwd in sessions:
         if not name or not cwd:
@@ -1181,18 +1194,35 @@ def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
             stamp = _rail_stamp(cwd, name)
         except (OSError, ValueError):
             continue
+        hit = _RAIL.get(key)
         if stamp[0] is None:
             _RAIL.pop(key, None)
+            if registry is not None and (hit is not None or force):
+                registry.sync(name, cwd, name, None, now=now)
             continue
-        hit = _RAIL.get(key)
-        if hit is not None and hit[0] == stamp:
+        if hit is not None and hit[0] == stamp and not force:
             entry = hit[1]
         else:
             entry = rail_entry(cwd, name)
             _RAIL[key] = (stamp, entry)
+            if registry is not None:
+                try:
+                    registry.sync(name, cwd, name, entry, now=now)
+                except Exception:  # noqa: BLE001 - the rail still answers
+                    log.exception("gate registry sync of %s/%s failed", cwd, name)
+                    # Read again next time: the comparison is owed.
+                    _RAIL.pop(key, None)
         if entry is not None:
             out[name] = dict(entry)
     return out
+
+
+def forget_rail(name: str) -> None:
+    """Drop the cached rail entries of session ``name``, so the next read
+    recomputes them (and compares them with the gate registry again): a
+    lifecycle hook closed its gates without its run file changing."""
+    for key in [k for k in _RAIL if k[1] == name]:
+        _RAIL.pop(key, None)
 
 
 def _epoch(value: Any) -> Optional[float]:

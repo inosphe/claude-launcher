@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from claude_launcher.cflow2 import executors, layers, runtime
-from claude_launcher.daemon import api as api_mod, cflow2_approve, cflow2_web
+from claude_launcher.daemon import api as api_mod, cflow2_approve, cflow2_web, gate_registry
 from claude_launcher.daemon.manager import SessionManager
 
 PICK = """\
@@ -481,6 +481,10 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
         mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
         monkeypatch.setattr(mgr, "list", lambda *a, **k: sessions)
         app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
+        # The gates already open when the registry came in are recorded once
+        # at daemon start (claunch-6vq2m.1): an ended session is read only
+        # while it holds one.
+        gate_registry.backfill(app["gates"], sessions)
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -493,6 +497,11 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
 
     unauth, status, body = asyncio.run(run())
     assert unauth == 401 and status == 200
+    if markers.get("archived_at"):
+        # An archived session is not read: its gates closed with the record
+        # (or, here, were never recorded by the backfill).
+        assert body["rows"] == {}
+        return
     assert set(body["rows"]) == {"s1"}
     assert body["rows"]["s1"]["workflow"] == "pick"
     assert body["rows"]["s1"]["gated"] is True
@@ -502,12 +511,12 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     # file; this must not be.
     assert isinstance(body["now"], (int, float)) and body["now"] > 0
     assert isinstance(body["rows"]["s1"]["answers"][0]["opened_at"], float)
-    # Every row says what its session is now (claunch-6vq2m): an archived
-    # session's run still waits on disk and is still listed, and the
-    # dashboard raises no card for it and shows the word beside the name.
+    # Every row says what its session is now (claunch-6vq2m): a killed,
+    # held or paused session's waiting run keeps its row while the registry
+    # holds its gate, and the dashboard shows the word beside the name.
+    assert isinstance(body["rows"]["s1"]["answers"][0]["gate_id"], int)
     category = {(False, None): "running", (True, "held_at"): "hold",
-                (True, "paused_at"): "paused", (True, "archived_at"): "archived",
-                (True, None): "killed"}[
+                (True, "paused_at"): "paused", (True, None): "killed"}[
         (markers["exited"], next((k for k in markers if k != "exited"), None))]
     assert body["rows"]["s1"]["session_category"] == category
     assert body["rows"]["s1"]["session_status"] == (
