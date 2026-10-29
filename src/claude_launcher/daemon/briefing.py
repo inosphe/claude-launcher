@@ -1267,6 +1267,11 @@ _cache: Dict[str, Tuple[tuple, dict]] = {}
 #: only in the browser tab that asked, and a reload made it "No summary yet".
 #: Cleared by the next composition that succeeds.
 _failures: Dict[str, dict] = {}
+#: session name -> how many times :func:`forget` has dropped that name. A
+#: composition reads it before its LLM call and keeps nothing if it moved
+#: meanwhile: the record was removed while the answer was on its way, and
+#: storing it would put the removed session's summary back (claunch-lluxq).
+_forgotten: Dict[str, int] = {}
 _loaded_cache_path: Optional[Path] = None
 
 #: Appended to a retired entry's cache key so no composition matches it again.
@@ -1472,6 +1477,7 @@ def forget(names) -> None:
     """
     _restore_cache()
     for name in names:
+        _forgotten[name] = _forgotten.get(name, 0) + 1
         _cache.pop(name, None)
         _failures.pop(name, None)
         _write(name)
@@ -1563,11 +1569,16 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
     prompt = build_prompt(sdef, cflow_info, events, live_info, faq)
+    generation = _forgotten.get(name, 0)
     try:
         answer = await call_llm(cfg, prompt, session=name, purpose="card")
     except BriefingError as exc:
-        _record_failure(name, exc)
+        if _forgotten.get(name, 0) == generation:
+            _record_failure(name, exc)
         raise
+    # The record was removed while the call was out: answer the caller, keep
+    # nothing — no cache entry, no file, no failure, no index row.
+    kept = _forgotten.get(name, 0) == generation
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":
         # Text arrived, but the endpoint says it was CUT at the budget — the
@@ -1580,9 +1591,9 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             f"{len(answer.text)} chars, not parseable) — raise the token "
             "budget in Settings ▸ Briefing model (llm.max_tokens)"
         )
-        _record_failure(name, exc)
+        if kept:
+            _record_failure(name, exc)
         raise exc
-    _failures.pop(name, None)
     result = {
         "session": name,
         "generated_at": _now_iso(),
@@ -1591,9 +1602,11 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         "briefing": parsed,
         "raw": None if parsed is not None else answer.text,
     }
-    _cache[name] = (cache_key, result)
-    _persist(name)
-    _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
+    if kept:
+        _failures.pop(name, None)
+        _cache[name] = (cache_key, result)
+        _persist(name)
+        _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
     return result
 
 

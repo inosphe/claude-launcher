@@ -32,9 +32,11 @@ BEARER = {"Authorization": "Bearer sekrit"}
 def _fresh_cache():
     briefing._cache.clear()
     briefing._failures.clear()
+    briefing._forgotten.clear()
     yield
     briefing._cache.clear()
     briefing._failures.clear()
+    briefing._forgotten.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -1026,8 +1028,8 @@ class _Ended:
     exited_at = None
     archived_at = None
 
-    def __init__(self, name):
-        self.sdef = SessionDef(name=name, harness="py")
+    def __init__(self, name, parent=None):
+        self.sdef = SessionDef(name=name, harness="py", parent=parent)
 
     def status(self, threshold=None):
         return "exited"
@@ -1036,7 +1038,7 @@ class _Ended:
         return False
 
 
-@pytest.mark.parametrize("how", ["clear", "clear-logs", "remove"])
+@pytest.mark.parametrize("how", ["clear", "clear-logs", "remove", "remove-children", "discard"])
 def test_a_removed_record_takes_its_briefing_along(home, how):
     """The cache is keyed by name and outlives the record. Removing a record
     while the daemon runs left its briefing in memory, so a session created
@@ -1046,8 +1048,8 @@ def test_a_removed_record_takes_its_briefing_along(home, how):
     import shutil
 
     mgr = SessionManager(idle_threshold=1.0, scrollback=10, restore_default=False)
-    for name in ("gone", "kept"):
-        mgr._sessions[name] = _Ended(name)
+    for name in ("gone", "kid", "kept"):
+        mgr._sessions[name] = _Ended(name, parent="gone" if name == "kid" else None)
         paths.session_dir(name).mkdir(parents=True)
         briefing._cache[name] = (("k",), _brief_row(name, "t")["result"])
         briefing._failures[name] = {"at": "t", "error": "HTTP 402"}
@@ -1055,10 +1057,20 @@ def test_a_removed_record_takes_its_briefing_along(home, how):
 
     if how == "remove":
         mgr.remove("gone")
+    elif how == "remove-children":
+        mgr.remove("gone", children="remove")
+    elif how == "discard":
+        mgr.discard("gone")
     else:
-        mgr.clear(logs=how == "clear-logs", keep=["kept"])
+        mgr.clear(logs=how == "clear-logs", keep=["kept", "kid"])
     assert briefing.digest("gone") is None
     assert not (paths.session_dir("gone") / "briefing.json").exists()
+    # a removed child goes with its parent; an escalated one keeps its own
+    if how == "remove-children":
+        assert briefing.digest("kid") is None
+        assert not (paths.session_dir("kid") / "briefing.json").exists()
+    else:
+        assert briefing.digest("kid")["one_line"] == "kid"
 
     shutil.rmtree(paths.session_dir("gone"), ignore_errors=True)
     paths.session_dir("gone").mkdir(parents=True)
@@ -1069,6 +1081,38 @@ def test_a_removed_record_takes_its_briefing_along(home, how):
     briefing._loaded_cache_path = None
     assert briefing.digest("gone") is None
     assert briefing.digest("kept")["one_line"] == "kept"
+
+
+@pytest.mark.parametrize("outcome", ["answer", "failure"])
+def test_a_record_removed_during_composition_keeps_nothing(home, tmp_path, monkeypatch, outcome):
+    """The LLM call takes up to a minute. A record removed while it is out
+    must not get its summary (or a failure) back when the answer lands:
+    no cache entry, no file, no failure (claunch-lluxq)."""
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(sdef=SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+    paths.session_dir("s1").mkdir(parents=True)
+
+    async def removed_meanwhile(cfg, prompt, **kw):
+        briefing.forget(["s1"])
+        if outcome == "failure":
+            raise briefing.BriefingError("HTTP 402: insufficient credits")
+        return briefing.LlmAnswer(
+            text=json.dumps({"goal": "g", "state": "idle",
+                             "one-line-job-description": "old"}),
+            finish_reason="stop", completion_tokens=10,
+        )
+
+    monkeypatch.setattr(briefing, "call_llm", removed_meanwhile)
+    if outcome == "failure":
+        with pytest.raises(briefing.BriefingError):
+            asyncio.run(briefing.compose(session, {"max_tokens": 100}, refresh=True))
+    else:
+        result = asyncio.run(briefing.compose(session, {"max_tokens": 100}, refresh=True))
+        assert result["briefing"]["one-line-job-description"] == "old"
+    assert briefing.digest("s1") is None
+    assert "s1" not in briefing._failures
+    assert not (paths.session_dir("s1") / "briefing.json").exists()
 
 
 def test_compose_records_a_failure_until_the_next_success(home, tmp_path, monkeypatch):
