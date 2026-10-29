@@ -396,6 +396,16 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     assert "10:05:10–10:05:40, 머리 10:05) 내림·올림이 둘 다 False인데" in prompt
     assert "겹침만 True다(s597-rev 재심)" in prompt
     assert "「둘의 합집합」이라고" in prompt
+    # a bare pronoun does not say which values it means (s511-rev)
+    assert "**내림과 올림 둘 다를 덮고 그 둘을 합친 것보다도 넓다**" in prompt
+    assert "앞의 셋을 전부 덮는다" not in prompt
+    # the predicate itself is pinned whole, both bounds and both directions --
+    # a flipped operator (`<=` -> `<`, `>=` -> `>`) was measured green by three
+    # reviewers (s404-rev, s490-rev, s1236-rev2), so assert the sentence
+    assert (
+        "겹침의 술어는 `HH:MM:00 <= 답의 at` 이고 `HH:MM:59 >= ask_routed의 at` "
+        "둘 다인 것이고" in prompt
+    )
     # the price the decision pays, and which way it fails
     assert "**값을 치르는 자리도 적는다**" in prompt
     assert "ask가 열리기 **전** 같은" in prompt

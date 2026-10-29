@@ -946,6 +946,18 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "겹침만 True다(s597-rev 재심)" in text
     assert "「둘의 합집합」이라고" in text
     assert "적지 않는다" in text
+    # the sentence it replaces names the three it covers -- a bare pronoun
+    # ("앞의 셋") does not say which values it means (s511-rev)
+    assert "**내림과 올림 둘 다를 덮고 그 둘을 합친 것보다도 넓다**" in text
+    assert "앞의 셋을 전부 덮는다" not in text
+    # the predicate itself is pinned whole, both bounds and both directions:
+    # flipping either operator (`<=` -> `<`, `>=` -> `>`) changes nothing the
+    # other assertions see, so the sentence is asserted verbatim (s404-rev,
+    # s490-rev, s1236-rev2 -- each measured the flip green)
+    assert (
+        "겹침의 술어는 `HH:MM:00 <= 답의 at` 이고 `HH:MM:59 >= ask_opened의 at` "
+        "둘 다인 것이고" in text
+    )
     assert "**값을 치르는 자리도 적는다**" in text
     assert "ask가 열리기 **전** 같은" in text
     assert "경우 (b)가 **서는** 방향이다" in text
