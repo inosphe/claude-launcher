@@ -422,6 +422,27 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       return { scrolled: grid.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
     });
     assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the head covers the top of the scroller, padding included, and keeps 「← 목록」");
+    // A rebuild keeps the inner scroller's place (innerKeep in render(),
+    // claunch-vxep1.1): the grid scrolled to its end stays at its end, and
+    // one scrolled partway keeps its offset. Pressing the tab that is
+    // already selected redraws without a data change — refresh() alone
+    // skips the render while the read is unchanged — and render() replaces
+    // the nodes, so the grid is re-queried after each press.
+    const endTop = await page.evaluate(() => document.querySelector("#observer-operators .op-threads-grid").scrollTop);
+    await page.evaluate(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]').click());
+    const keptEnd = await page.evaluate(() => {
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      return { top: grid.scrollTop, atEnd: grid.scrollHeight - grid.scrollTop - grid.clientHeight < 24 };
+    });
+    assert.deepEqual(keptEnd, { top: endTop, atEnd: true }, "a rebuild leaves the grid at its end");
+    const midTop = await page.evaluate(() => {
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      grid.scrollTop = Math.min(50, grid.scrollHeight - grid.clientHeight);
+      return grid.scrollTop;
+    });
+    await page.evaluate(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]').click());
+    assert.equal(await page.evaluate(() => document.querySelector("#observer-operators .op-threads-grid").scrollTop), midTop,
+      "a rebuild keeps a mid-scroll offset");
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await visible(".op-thread-list"), true);
     assert.equal(await visible(".op-thread-view"), false);
