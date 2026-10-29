@@ -22774,7 +22774,33 @@ async function flushQueued(name, btn) {
   return { doc, note };
 }
 
-function queuedMsgRow(m) {
+/* Delete one held message so it is never typed into `name`'s terminal: the
+   per-row answer beside "deliver now". The row carries mesh and handle, so
+   a session with several handles loses only the copy that was on screen.
+   Resolves to "" on success, otherwise the reason it did not happen (most
+   often: it was delivered between the poll and the click). */
+async function discardQueued(name, m) {
+  const q = new URLSearchParams();
+  if (m.mesh) q.set("mesh", m.mesh);
+  if (m.handle) q.set("handle", m.handle);
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/queued/` +
+      `${encodeURIComponent(m.id)}?${q}`,
+      { method: "DELETE" }
+    );
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    return "could not reach the daemon — nothing was deleted";
+  }
+  if (!resp.ok) return (doc && doc.error) || `HTTP ${resp.status}`;
+  return "";
+}
+
+/* `name` (the session the backlog belongs to) turns on the delete button;
+   `after(note)` is called once a delete has been tried, to redraw. */
+function queuedMsgRow(m, name, after) {
   const row = el("div", "tq-msg");
   const meta = el(
     "div", "tq-msg-meta",
@@ -22784,7 +22810,26 @@ function queuedMsgRow(m) {
       ? ` · waiting ${fmtAge(m.held_for)}` : "")
   );
   if (m.id) meta.title = m.id;
-  row.appendChild(meta);
+  if (name && m.id) {
+    const del = el("button", "tq-msg-del", "delete");
+    del.type = "button";
+    del.title =
+      "remove this message from the queue — it is never typed into this " +
+      "terminal. The mesh history and its other recipients keep it";
+    del.addEventListener("click", async () => {
+      if (!confirm(`Delete this queued message from ${m.from}? ` +
+                   `It will not be delivered to ${name}.`)) return;
+      del.disabled = true;
+      const note = await discardQueued(name, m);
+      del.disabled = false;
+      if (after) after(note);
+    });
+    const head = el("div", "tq-msg-head");
+    head.append(meta, del);
+    row.appendChild(head);
+  } else {
+    row.appendChild(meta);
+  }
   row.appendChild(el("div", "tq-msg-body", m.body || ""));
   return row;
 }
@@ -22847,7 +22892,8 @@ function renderTermQueued(q) {
   box.appendChild(row);
   if (tqOpen) {
     const list = el("div", "tq-list");
-    for (const m of msgs) list.appendChild(queuedMsgRow(m));
+    const redraw = (note) => { tqNote = note; refreshTermQueued(); };
+    for (const m of msgs) list.appendChild(queuedMsgRow(m, currentName, redraw));
     box.appendChild(list);
   }
   // Loudest exactly when the reader is the reason: their own keystrokes are
@@ -51398,7 +51444,14 @@ function sessQueued(data) {
     box.appendChild(flush);
     box.appendChild(status);
   }
-  for (const m of q.messages) box.appendChild(queuedMsgRow(m));
+  const delStatus = el("p", "wf-note", "");
+  box.appendChild(delStatus);
+  const redraw = (note) => {
+    delStatus.textContent = note;
+    delStatus.className = note ? "wf-warning" : "wf-note";
+    if (!note) refreshSession();
+  };
+  for (const m of q.messages) box.appendChild(queuedMsgRow(m, s.name, redraw));
   return box;
 }
 

@@ -958,6 +958,13 @@ class Mesh:
         #: and not the member's reply. Persisted next to the cursors, since
         #: it is per-member delivery state of exactly that kind.
         self.dismissed: Dict[str, set] = {}
+        #: handle -> ids of QUEUED messages the operator deleted before they
+        #: were typed in (the queued strip's per-row delete). Excluded from
+        #: :meth:`pending`, so delivery never types them, and from
+        #: :meth:`owed_all`, because a message nobody showed the member is no
+        #: debt of its even after the cursor has moved past it. Persisted next
+        #: to the cursors; pruned by :meth:`prune_discarded`.
+        self.discarded: Dict[str, set] = {}
         #: Reply-expecting deliveries without a threaded ack/reply.  This is
         #: a delivery receipt, so it persists with cursors across restarts.
         self.response_watches: Dict[str, dict] = {}
@@ -1283,6 +1290,9 @@ class Mesh:
         anything the fast path parked in ``provisional``."""
         start = self.cursors.get(handle, 0)
         done = self.delivered_ids.get(handle) or frozenset()
+        dropped = self.discarded.get(handle)
+        if dropped:
+            done = done | dropped
         log = self.messages
         out = [
             m for m in (log[k] for k in self._indexed().candidates(handle, start))
@@ -1324,6 +1334,8 @@ class Mesh:
                 remote.append(handle)
                 continue
             done = self.delivered_ids.get(handle) or frozenset()
+            if mid in (self.discarded.get(handle) or ()):
+                continue  # deleted from the queue: never typed in
             if mid in done or (
                 index is not None and index < self.cursors.get(handle, 0)
             ):
@@ -1438,6 +1450,7 @@ class Mesh:
         # an entry sent to someone else can be neither owed nor, by the
         # message order the join floor relies on, the first to predate it.
         index = self._indexed()
+        gone = self.discarded.get(handle) or frozenset()
         walk = [(m, m.get("id") in done) for m in reversed(self.provisional)]
         stop = False
         for m, delivered in walk:
@@ -1449,9 +1462,9 @@ class Mesh:
                 if age is not None and age > joined_ago:
                     stop = True
                     break  # predates this member's join — never its debt
-            if delivered and self.addressed_to(m, handle) and expects_reply(
-                msg_type_for(m, handle)
-            ):
+            if delivered and m.get("id") not in gone and self.addressed_to(
+                m, handle
+            ) and expects_reply(msg_type_for(m, handle)):
                 out.append(m)
         if not stop:
             floor = index.last_from.get(handle, -1) + 1
@@ -1463,12 +1476,38 @@ class Mesh:
                         break  # predates this member's join — never its debt
                 if not (k < start or m.get("id") in done):
                     continue
+                if m.get("id") in gone:
+                    continue
                 if not self.addressed_to(m, handle):
                     continue
                 if expects_reply(msg_type_for(m, handle)):
                     out.append(m)
         out.reverse()
         return out
+
+    def prune_discarded(self, handle: str) -> None:
+        """Forget deleted ids that can no longer matter to ``handle``.
+
+        An id in :attr:`discarded` does work in two places: it keeps a message
+        out of :meth:`pending` while the message is ahead of the cursor, and
+        out of :meth:`owed_all` while it is after the member's own last send.
+        Once a message is behind both, nothing would read it either way, so
+        the set stays bounded by the live window instead of growing with the
+        log.
+        """
+        dropped = self.discarded.get(handle)
+        if not dropped:
+            self.discarded.pop(handle, None)
+            return
+        index = self._indexed()
+        floor = min(
+            self.cursors.get(handle, 0), index.last_from.get(handle, -1) + 1
+        )
+        live = {self.messages[k].get("id") for k in index.candidates(handle, floor)}
+        live.update(m.get("id") for m in self.provisional)
+        dropped &= live
+        if not dropped:
+            self.discarded.pop(handle, None)
 
     def _indexed(self) -> _LogIndex:
         """The address index, caught up with the log (see :class:`_LogIndex`)."""
@@ -2100,6 +2139,63 @@ class MeshManager:
                     flushed += went
                     handles.append(f"{handle}@{mesh.name}")
         return {"flushed": flushed, "handles": handles}
+
+    def discard_queued(
+        self,
+        session: str,
+        msg_id: str,
+        *,
+        mesh_name: Optional[str] = None,
+        handle: Optional[str] = None,
+    ) -> dict:
+        """Delete one held message from ``session``'s backlog, at a human's
+        say-so, so that it is never typed into the terminal.
+
+        The other answer to a row in the queued strip: "deliver now" types the
+        backlog in, this takes one message out of it. Only a message that is
+        in :meth:`queued_for_session` right now can be deleted — one that has
+        already gone in is the agent's to read, and an id that was never
+        queued for this session is refused rather than remembered, since it
+        would install a suppression nothing could ever clear. ``mesh_name``
+        and ``handle`` narrow the match when the session holds several
+        handles; without them every handle of the session holding that id is
+        cleared, which is what a person deleting "this message" means.
+
+        The log itself is untouched: the message stays in the mesh history
+        and is still delivered to every other recipient it was addressed to.
+        Returns ``{"discarded": [{mesh, handle, id}, ...]}``.
+        """
+        msg_id = str(msg_id)
+        hits: List[dict] = []
+        for mesh in self.list():
+            if mesh_name is not None and mesh.name != mesh_name:
+                continue
+            touched = False
+            for h in sorted(mesh.members):
+                if handle is not None and h != handle:
+                    continue
+                member = mesh.members[h]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                if not any(m.get("id") == msg_id for m in mesh.pending(h)):
+                    continue
+                mesh.discarded.setdefault(h, set()).add(msg_id)
+                mesh.prune_discarded(h)
+                if not mesh.pending(h):
+                    mesh._first_pending.pop(h, None)
+                hits.append({"mesh": mesh.name, "handle": h, "id": msg_id})
+                touched = True
+            if touched:
+                self._persist_cursors(mesh)
+        if not hits:
+            raise MeshError(
+                f"message {msg_id!r} is not queued for session {session!r}"
+            )
+        log.info(
+            "session %r: deleted queued message %r (%s)", session, msg_id,
+            ", ".join(f"{e['handle']}@{e['mesh']}" for e in hits),
+        )
+        return {"discarded": hits}
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -3599,6 +3695,7 @@ class MeshManager:
         # write-offs made against whoever wore it last — the same reason the
         # member edges below are pruned.
         mesh.dismissed.pop(handle, None)
+        mesh.discarded.pop(handle, None)
         mesh.stranded_told.pop(handle, None)
         for told in mesh.stranded_told.values():
             if handle in told:
@@ -8325,6 +8422,7 @@ class MeshManager:
                     mesh.cursors.pop(handle, None)
                     mesh._first_pending.pop(handle, None)
                     mesh.dismissed.pop(handle, None)
+                    mesh.discarded.pop(handle, None)
             mesh.members = adopted
             self._persist_def(mesh)
             self._persist_cursors(mesh)
@@ -9719,6 +9817,7 @@ class MeshManager:
         ahead = {m.get("id") for m in mesh.messages[mesh.cursors[member.handle]:]}
         ahead.update(m.get("id") for m in mesh.provisional)
         mesh.delivered_ids[member.handle] = delivered & ahead
+        mesh.prune_discarded(member.handle)
         mesh._first_pending.pop(member.handle, None)
         self._watch_delivered_responses(mesh, member.handle, pending)
         now = time.monotonic()
@@ -9923,6 +10022,11 @@ class MeshManager:
                         for k, v in (raw.get("dismissed") or {}).items()
                         if v
                     }
+                    mesh.discarded = {
+                        str(k): {str(i) for i in v}
+                        for k, v in (raw.get("discarded") or {}).items()
+                        if v
+                    }
                     mesh.response_watches = {
                         str(k): dict(v)
                         for k, v in (raw.get("response_watches") or {}).items()
@@ -9939,6 +10043,7 @@ class MeshManager:
                 mesh.cursors = {}
                 mesh.link_cursors = {}
                 mesh.dismissed = {}
+                mesh.discarded = {}
                 mesh.response_watches = {}
                 mesh.stranded_told = {}
         outbox_path = d / "outbox.jsonl"
@@ -10026,6 +10131,9 @@ class MeshManager:
             dismissed = {h: sorted(ids) for h, ids in mesh.dismissed.items() if ids}
             if dismissed:
                 doc["dismissed"] = dismissed
+            discarded = {h: sorted(ids) for h, ids in mesh.discarded.items() if ids}
+            if discarded:
+                doc["discarded"] = discarded
             if mesh.response_watches:
                 doc["response_watches"] = mesh.response_watches
             if mesh.stranded_told:

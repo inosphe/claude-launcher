@@ -3230,6 +3230,19 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   border: 1px solid #2a2e36; border-radius: 6px;
 }
 .tq-msg-meta { color: #7d8590; font-size: 11px; margin-bottom: 3px; }
+.tq-msg-head { display: flex; align-items: baseline; gap: 8px; }
+.tq-msg-head .tq-msg-meta { flex: 1; min-width: 0; }
+/* Per-row delete: quiet until hovered, red then — it drops a message for
+   good, so it must not read as the row's main action. */
+.tq-msg-del {
+  flex: none; padding: 1px 8px; background: none;
+  border: 1px solid #3d444d; border-radius: 6px; color: #7d8590;
+  font: inherit; font-size: 11px; cursor: pointer;
+}
+.tq-msg-del:hover:not(:disabled) {
+  border-color: #da3633; color: #ff7b72;
+}
+.tq-msg-del:disabled { opacity: 0.6; cursor: default; }
 .tq-msg-body {
   color: #c6cdd5; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 9em; overflow-y: auto; font-size: 12px;
