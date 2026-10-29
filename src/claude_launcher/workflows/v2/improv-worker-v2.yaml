@@ -4308,7 +4308,9 @@ nodes:
         루프의 상한(25회, 10분 간격)을 다 쓸 때까지 그 사실이 드러나지 않는다.
 
         필요한 조치(사용자): 두 세션을 같은 메시에서 잇는다 — `claunch mesh
-        connect <메시> <이 세션> <수신자>`, 또는 대기 중인 연결 요청을
+        connect <메시> <이 세션의 핸들> <수신자의 핸들>`(인자는 메시 핸들이다 —
+        `claunch mesh members <메시>` 첫 열; 셋째 열 `<데몬>/<세션>`이 세션
+        이름이다), 또는 대기 중인 연결 요청을
         `claunch mesh wire-requests <메시>`에서 승인한다. 수신자가 런의 메시에
         없으면 그 메시에 수신자를 넣거나 런의 메시를 수신자가 있는 메시로
         바꾼다(`claunch cflow2 mesh <메시>`).
@@ -4326,8 +4328,11 @@ nodes:
     prompt: |
       사용자가 착지 요청과 대기로 가는 것을 승인했다. 채널을 다시 점검한다 —
       landing-channel과 같은 명령이다(수신자: `claunch gate landing-target
-      --json`의 owner, 간선: `claunch mesh members <런의 메시>`의 connected
-      pairs에서 `<이 세션> <-> <수신자>` 또는 `<수신자> <-> <이 세션>` 줄).
+      --json`의 owner — 세션 이름이다. 핸들: `claunch mesh members <런의 메시>`
+      명부의 셋째 열 `<데몬>/<세션>`이 그 세션인 줄의 첫 열, 이 세션도 같다.
+      간선: 같은 출력의 connected pairs에서 `<내 핸들> <-> <수신자 핸들>` 또는
+      `<수신자 핸들> <-> <내 핸들>` 줄. pairs는 핸들로 적히므로 세션 이름으로
+      찾지 않는다).
       이 회차 이슈에 한 줄 남긴다:
           LANDING CHANNEL: <수신자> <connected|missing> — 사용자 승인
       missing이면 사용자가 조치 없이 진행을 승인한 것이다. 그 사실을 보고에
@@ -5677,16 +5682,23 @@ procedures:
                      부모 워커부터). 종료 코드 0이 아니면 수신자를 정하지 못한
                      것이다.
                   2. 런의 메시: `claunch cflow2 status --json`의 `mesh`.
-                  3. 간선: `claunch mesh members <런의 메시>`의 명부에 수신자가
-                     있고, connected pairs에 `<이 세션> <-> <수신자>` 또는
-                     `<수신자> <-> <이 세션>` 줄이 있다. 예:
-                     `claunch mesh members <메시> | grep -E "^\s+(<이 세션> <-> <수신자>|<수신자> <-> <이 세션>)\s*$"`.
-                  셋 다 서면 connected다. 하나라도 서지 않거나(수신자를 정하지
-                  못함, 명부에 없음, 간선 없음) 명령이 판정을 내지 못했으면
+                  3. 핸들: 1의 owner와 이 세션(`$CLAUNCH_SESSION`)은 **세션
+                     이름**이고, `claunch mesh members <런의 메시>`의 첫 열과
+                     connected pairs 줄은 **메시 핸들**이다 — 둘은 다를 수 있다
+                     (예: 핸들 s511-rev의 세션은 s523). 명부의 셋째 열
+                     `<데몬>/<세션>`에서 세션 이름이 1의 owner인 줄과 이
+                     세션인 줄을 찾아 그 첫 열(핸들)을 읽는다. 예:
+                     `claunch mesh members <메시> | awk '$3 ~ "/<세션 이름>$" {print $1}'`.
+                  4. 간선: connected pairs에 `<내 핸들> <-> <수신자 핸들>` 또는
+                     `<수신자 핸들> <-> <내 핸들>` 줄이 있다. 예:
+                     `claunch mesh members <메시> | grep -E "^\s+(<내 핸들> <-> <수신자 핸들>|<수신자 핸들> <-> <내 핸들>)\s*$"`.
+                  넷 다 서면 connected다. 하나라도 서지 않거나(수신자를 정하지
+                  못함, 명부에 그 세션 줄이 없음, 간선 없음) 명령이 판정을 내지 못했으면
                   no-channel이다 — 재지 못한 것은 이어졌다고 잰 것이 아니다.
-                  셋이 다 섰는데 「그래도 물어보는 편이 안전하다」로 no-channel을
-                  고르지 않는다. 실행한 명령과 수신자·메시·간선 줄(또는 없음)을
-                  reason에 적는다.
+                  넷이 다 섰는데 「그래도 물어보는 편이 안전하다」로 no-channel을
+                  고르지 않는다. 세션 이름을 그대로 pairs에서 찾지 않는다 — 핸들이
+                  다르면 간선이 있어도 0줄이 나온다. 실행한 명령과 수신자(세션·
+                  핸들)·메시·간선 줄(또는 없음)을 reason에 적는다.
                 options:
                   connected:
                     description: 수신자와 같은 메시에 간선이 있다 — 사람을 세우지 않고 착지 요청과 대기로 간다
@@ -6069,12 +6081,15 @@ procedures:
           do:
             try:
               # 착수 정당성 점검(claunch-101wi): 일감 처리(코딩 승인 게이트 포함)
-              # 앞에서 회차마다 한 번. 재작업으로 돌아온 패스(land_out.rework)와
-              # stack-only 회차는 착수가 이미 결정됐거나 이 세션의 구현이 없으므로
-              # 다시 재지 않는다. 정당하면 사람을 세우지 않는다.
+              # 앞에서 회차마다 한 번. 재작업으로 돌아온 패스와 stack-only 회차는
+              # 착수가 이미 결정됐거나 이 세션의 구현이 없으므로 다시 재지 않는다.
+              # 재작업 패스는 둘이다: land가 rework로 끝난 패스(land_out.rework)와
+              # sim-gate의 sim-recheck가 rework로 끝난 패스. 후자는 land_out을 쓰지
+              # 않고 data.sim에 rework 값을 묶으며, reason은 그 모양에만 있다
+              # (sim-check·sim-idle의 값에는 없다). 정당하면 사람을 세우지 않는다.
               - id: feasibility
                 cond:
-                  - if: "$params.mode == 'full' and $data.land_out.rework != true"
+                  - if: "$params.mode == 'full' and $data.land_out.rework != true and $data.sim.reason == null"
                     then:
                       id: feasibility-check
                       choose:

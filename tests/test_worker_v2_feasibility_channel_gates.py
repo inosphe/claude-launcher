@@ -22,6 +22,8 @@ stubbed, the pattern ``tests/test_cflow2_improv_worker.py`` uses for
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -111,6 +113,58 @@ def test_the_channel_check_names_its_commands():
     assert "claunch mesh connect" in gate and "claunch mesh wire-requests" in gate
 
 
+# The shape of `claunch mesh members` output: handle, role, <daemon>/<session>,
+# then "connected pairs" lines between handles. Here both handles differ from
+# their session names, as s511-rev (session s523) does on the live mesh.
+_ROSTER = """\
+lead-x           leader     shared-daemon-main/s29       [busy]
+w-feas           worker     shared-daemon-main/s5959     [busy]
+other            worker     shared-daemon-main/s77       [idle]
+connected pairs (2):
+  lead-x <-> w-feas
+  other <-> w-feas
+"""
+
+
+def _examples(prompt: str) -> tuple[str, str]:
+    """The awk (handle lookup) and grep (edge) examples in the channel check."""
+    flat = " ".join(prompt.split())
+    awk = flat.split("claunch mesh members <메시> | awk ")[1].split("`")[0]
+    grep = flat.split("claunch mesh members <메시> | grep -E ")[1].split("`")[0]
+    return awk, grep
+
+
+@pytest.mark.skipif(not (shutil.which("awk") and shutil.which("grep")),
+                    reason="needs awk and grep")
+def test_the_channel_check_maps_sessions_to_handles(tmp_path):
+    """owner and $CLAUNCH_SESSION are session names; pairs are handles.
+
+    Grepping pairs for session names finds nothing when a handle differs,
+    so a real edge would read as no-channel and stand a person needlessly.
+    """
+    prompt = _find(_doc()["procedures"]["land"]["body"],
+                   "landing-channel")["choose"]["prompt"]
+    awk, grep = _examples(prompt)
+    roster = tmp_path / "roster.txt"
+    roster.write_text(_ROSTER, encoding="utf-8")
+
+    def sh(cmd):
+        return subprocess.run(["bash", "-c", f"cat {roster} | {cmd}"],
+                              capture_output=True, text=True).stdout.strip()
+
+    handles = {s: sh("awk " + awk.replace("<세션 이름>", s)) for s in ("s29", "s5959")}
+    assert handles == {"s29": "lead-x", "s5959": "w-feas"}
+    edge = grep.replace("<내 핸들>", handles["s5959"]).replace("<수신자 핸들>", handles["s29"])
+    assert sh("grep -E " + edge) == "lead-x <-> w-feas"
+    # the same pattern filled with session names finds no edge
+    by_name = grep.replace("<내 핸들>", "s5959").replace("<수신자 핸들>", "s29")
+    assert sh("grep -E " + by_name) == ""
+    # the re-check in the gate and its fix command speak handles too
+    node = _doc()["nodes"]["landing-channel-gate"]
+    assert "<내 핸들> <-> <수신자 핸들>" in node["prompt"]
+    assert "<이 세션의 핸들> <수신자의 핸들>" in node["ask"]["prompt"]
+
+
 def test_the_channel_marker_is_not_a_brake_marker():
     """landing's fourth check greps BLOCKED / HOLD / CHANGES REQUESTED."""
     prompt = _doc()["nodes"]["landing-channel-gate"]["prompt"]
@@ -123,13 +177,14 @@ def test_the_channel_marker_is_not_a_brake_marker():
 # --------------------------------------------------------------------------- #
 # feasibility at runtime
 # --------------------------------------------------------------------------- #
-def _feasibility_run(kw, rework=False):
+def _feasibility_run(kw, rework=False, sim=None):
     doc = _doc()
     feas = _find(doc["procedures"]["worker-round"]["body"], "feasibility")
     flow = {
         "cflow": 2, "name": "feasibility-gate-run",
         "data": {"land_out": {"rework": True} if rework else {},
-                 "claim": {"issue": "X-1", "how": "claimed"}},
+                 "claim": {"issue": "X-1", "how": "claimed"},
+                 "sim": sim or {"sim_id": None, "findings": None, "limits": []}},
         "nodes": {
             "feasibility-gate": doc["nodes"]["feasibility-gate"],
             "feasibility-hold": doc["nodes"]["feasibility-hold"],
@@ -194,6 +249,13 @@ def test_unjustified_then_declined_holds_and_skips_the_items(kw):
 
 def test_a_rework_pass_does_not_judge_again(kw):
     st = _feasibility_run(kw, rework=True)
+    assert not st["choices"] and _labels(st) == ["items"]
+
+
+def test_a_sim_recheck_rework_pass_does_not_judge_again(kw):
+    """sim-gate's rework binds data.sim (with a reason) and leaves land_out."""
+    st = _feasibility_run(kw, sim={"reason": "rule R2 missed", "sim_id": "sim-1",
+                                   "findings": "open", "limits": []})
     assert not st["choices"] and _labels(st) == ["items"]
 
 
