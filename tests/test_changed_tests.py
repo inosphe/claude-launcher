@@ -1135,6 +1135,39 @@ def test_the_environment_probe_names_interpreter_and_packages():
     assert identity["package_count"] > 0 and len(identity["packages"]) == 12
 
 
+def test_the_probe_asks_the_interpreter_pytest_will_use(repo, monkeypatch):
+    """Not ``sys.executable``: ``python tools/...`` from another venv would key
+    the run by an environment pytest never sees (build_command runs
+    ``uv run --no-sync``)."""
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen["argv"], seen["cwd"] = argv, kwargs.get("cwd")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"python": "3.14.0"}\n', stderr="")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) == {"python": "3.14.0"}
+    assert seen["argv"][:5] == ["uv", "run", "--no-sync", "python", "-I"]
+    assert seen["cwd"] == str(repo)
+
+
+@pytest.mark.parametrize("stdout", ["", "not json\n", "[1, 2]\n"])
+def test_a_probe_that_fails_or_answers_badly_is_no_identity(repo, monkeypatch, stdout):
+    """A non-zero exit, or output that is not a JSON object, must not be read
+    as an environment: the run then happens instead of reusing."""
+    def fake(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout='{"python": "3.14.0"}\n', stderr="boom")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) is None, "exit 1 with a valid-looking body"
+
+    def fake_ok(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake_ok)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) is None
+
+
 def test_environment_identity_is_none_when_the_probe_cannot_run(repo, monkeypatch):
     def refuse(*a, **k):
         raise OSError("no uv")
