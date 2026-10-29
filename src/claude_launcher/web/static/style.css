@@ -5881,6 +5881,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   font-size: 11px; padding: 1px 7px; border-radius: 9px;
   background: #172947; color: #58a6ff;
 }
+/* A top-level rail row whose parent is gone (claunch-ikiys, railOrphanOf). */
+.rail-orphan {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #2d2308; color: #d29922;
+}
 .mesh-mirror-badge {
   font-size: 11px; padding: 2px 9px; border-radius: 9px; margin-left: 10px;
   background: #2d2308; color: #d29922; border: 1px solid #4d3c10;

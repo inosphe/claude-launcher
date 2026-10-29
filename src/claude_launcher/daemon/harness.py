@@ -154,8 +154,17 @@ class SessionDef:
     #: outlives neither the daemon nor necessarily the child: a parent that
     #: exited leaves its children running and still recorded, and a name is
     #: the only reference that survives that. Consumers must treat a parent
-    #: that no longer resolves as a root.
+    #: that no longer resolves as no parent: the tree walks stop there, and
+    #: the listings show the child as an orphan, not a root (see orphan_of).
     parent: Optional[str] = None
+    #: The parent this session lost when that parent's record was removed and
+    #: no session above it survived to take the child (claunch-ikiys). Such a
+    #: session has ``parent`` ``None`` like a root, but nobody started it as
+    #: one: it is an orphan, and the listings say so instead of showing it as
+    #: a session a human started. Kept as a name only — a session created
+    #: later under the same name is not its parent. Cleared by reparent and
+    #: detach, the two explicit moves that say where it belongs now.
+    orphan_of: Optional[str] = None
     #: Who this session *is*, decided at creation and true for its whole life:
     #: its mesh handle, the run it drives. Appended to Claude's system prompt;
     #: role stance follows the harness-independent opening/reminder path.
@@ -369,6 +378,8 @@ class SessionDef:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
             out["quick_fork_of"] = self.quick_fork_of
+        if self.orphan_of:
+            out["orphan_of"] = self.orphan_of
         if self.deep_think:
             out["deep_think"] = dict(self.deep_think)
         if self.self_merge_allowed:
@@ -419,6 +430,7 @@ class SessionDef:
             resume=_resume_field(data.get("resume")),
             fork_session=bool(data.get("fork_session")),
             parent=str(data.get("parent") or "").strip() or None,
+            orphan_of=str(data.get("orphan_of") or "").strip() or None,
             identity=str(data.get("identity") or "").strip() or None,
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),

@@ -1342,10 +1342,18 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         # same CLI, run for a different purpose.
         harness = s["harness"] + (f"/{s['kind']}" if s.get("kind") else "")
         brief = progress_brief(s.get("progress"))
+        # A top-level row whose parent is gone is an orphan, not a root a
+        # human started (claunch-ikiys) -- the same reading the rail gives.
+        lost = "" if depth else (
+            s.get("orphan_of")
+            or (s.get("parent") if s.get("parent") != s["name"] else "")
+            or ""
+        )
         print(
             f"{label:<16} [{state:<10}] {harness:<8} {prof:<12} {proj}"
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
             + (f"  | {brief}" if brief else "")
+            + (f"  (orphan of {lost})" if lost else "")
         )
     exited = [s for s in sessions if s["status"] == "exited"]
     asleep = [s["name"] for s in exited if s.get("held_at")]
