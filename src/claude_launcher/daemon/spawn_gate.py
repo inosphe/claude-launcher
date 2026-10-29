@@ -31,6 +31,9 @@ Two kinds of request:
   again). It ends only when the form's create reports its session back
   (:meth:`link`), the person rejects it, or the asker withdraws it —
   claunch-uzo40. ``+5 min`` on a held request restarts the countdown.
+  The form offers both tabs whatever the scope, so the person can make a
+  child request top-level (or the reverse); the link says which it made
+  (``created_as``) — claunch-oaxni.
 * **Rejected** -- nothing is created.
 * **Unanswered** -- after :data:`GATE_TIMEOUT` (plus every extension) a
   child request counts as approved (th-d9e343), and a root request creates
@@ -362,7 +365,19 @@ def outcome_message(record: dict) -> str:
                 f"{form}. The request stays open -- you are told when a session is "
                 "created for it, or when it is rejected or withdrawn.")
     elif status == APPROVED and record.get("setup") == SETUP_CUSTOM:
-        body = f"the person created session {created} by hand from your request ({by})."
+        # The form offers both tabs (claunch-oaxni), so where it was made is
+        # said outright: a child request can come back top-level, and then
+        # the session is not the asker's child to poll, message or kill.
+        if record.get("created_as") == ROOT and record.get("scope") == CHILD:
+            where = ("top-level, not as your child: it is not in your children, "
+                     "so follow it as any other session")
+        elif record.get("created_as") == CHILD and record.get("scope") == ROOT:
+            where = "as your child, not top-level"
+        elif record.get("created_as") == CHILD:
+            where = "as your child"
+        else:
+            where = "top-level"
+        body = f"the person created session {created} by hand from your request ({by}), {where}."
     elif status == APPROVED and record.get("setup") == SETUP_AGENT:
         if record.get("scope") == ROOT:
             body = (f"nobody answered: no top-level session was made; session {created} "
@@ -774,12 +789,18 @@ class SpawnGate:
             row["followup"] = follow["id"]
         return self._finish(row)
 
-    def link(self, rid: str, created: str) -> dict:
+    def link(self, rid: str, created: str, created_as: Optional[str] = None) -> dict:
         """The manual form created ``created`` for the request ``rid``.
 
         This is what ends a hold: the request settles ``approved`` with
         ``setup: custom`` and the asker learns the session's name. A request
         the person never took over cannot be linked.
+
+        ``created_as`` is the form tab the person created it from -- ``root``
+        (New session) or ``child`` (Spawn child, under the asker). The form
+        offers both whatever the request's ``scope`` (claunch-oaxni), so it
+        overrides the scope's guess :meth:`manual` wrote; omitted, that guess
+        stands.
 
         A form the person opened stays linkable after ``+5 min`` put the
         clock back on (:meth:`extend`): that button restarts the countdown,
@@ -796,8 +817,12 @@ class SpawnGate:
         created = str(created or "").strip()
         if not created:
             raise GateRefused(400, "session (the created session) is required")
+        if created_as is not None and created_as not in SCOPES:
+            raise GateRefused(400, f"created_as must be one of {', '.join(SCOPES)}")
         # An extended request has a live timer; the answer is here now.
         self._clear(rid)
+        if created_as is not None:
+            row["created_as"] = created_as
         row["created"] = created
         row["created_at"] = _stamp()
         row["setup"] = SETUP_CUSTOM

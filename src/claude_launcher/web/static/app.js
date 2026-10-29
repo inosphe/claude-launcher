@@ -17892,9 +17892,10 @@ $("new-session").addEventListener("submit", async (e) => {
     const made = info.session || info;
     // A Manual answer to an agent's spawn request (claunch-iw5i8.15/.16):
     // the request learns which session the person made from it, top-level
-    // or child.
+    // or child — the tab it was created from, which need not be the scope
+    // the agent asked for (claunch-oaxni).
     const spawnRid = sessionModal && sessionModal.spawnRequest;
-    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name);
+    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name, parent ? "child" : "root");
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
@@ -52934,9 +52935,12 @@ async function openSessionModal(opts = {}) {
   if (sessionModal) sessionModalClose({ route: false });
   const f = $("new-session");
   const tab = opts.tab || (opts.parent ? "spawn" : "new");
+  // A box that opens on New session but also offers Spawn child (a spawn
+  // request's Manual, claunch-oaxni) keeps the opener it names, so the
+  // Spawn child tab is pinned under it when the person switches.
   const parent = tab === "spawn"
     ? (opts.parent || (f.parent && f.parent.value) || "")
-    : "";
+    : (opts.modes || []).includes("spawn") ? (opts.parent || "") : "";
   const previousView = sessionFormView();
   const previousFields = Array.from(f.querySelectorAll("input[name], select[name], textarea[name]"))
     .map((control) => ({ control, value: control.value, checked: control.checked }));
@@ -62229,19 +62233,31 @@ async function spawnGatePost(rec, verb, btn, body) {
 /* Manual: the form, filled with the request's spec — every answer it
    carries, over what the browser remembers. A top-level request opens the
    New session tab; a child request opens the spawn child tab with the asker
-   as the parent. The person edits it from there and creates it. */
+   as the parent. The person edits it from there and creates it.
+
+   Both tabs are offered either way (claunch-oaxni): the scope the agent
+   asked for is where the form starts, not the person's only answer. A child
+   request can be made a top-level session from the New session tab, which
+   takes the asker's repository the way "Spawn same setup" does (a child
+   inherits the directory, a top-level session has to be told), and a
+   top-level request can be put under the asker from the Spawn child tab.
+   The create reports which one it made (spawnGateLink). */
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
   const seed = spawnRequestSeed(spec, rec);
+  const modes = ["new", "spawn"];
   if (rec.scope === "child") {
+    const asker = (sessionsCache || []).find((s) => s.name === rec.session);
+    const cwd = spec.cwd || (asker && asker.cwd ? spawnSameRoot(asker.cwd) : "");
     await openSessionModal({
       tab: "spawn", parent: rec.session, seed, spawnRequest: rec.id,
+      modes, newSeed: cwd ? { cwd } : null,
     });
     return;
   }
   await openSessionModal({
-    tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
-    spawnRequest: rec.id,
+    tab: "new", parent: rec.session, seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
+    spawnRequest: rec.id, modes,
   });
 }
 
@@ -62303,13 +62319,15 @@ function spawnRequestSeed(spec, rec) {
   return seed;
 }
 
-/* The form's create, reported back to the request it was made for. */
-async function spawnGateLink(rid, name) {
+/* The form's create, reported back to the request it was made for, with
+   whether it was made top-level ("root") or under the asker ("child"). */
+async function spawnGateLink(rid, name, createdAs) {
   try {
     await api(`/api/spawn-requests/${rid}/created`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: name }),
+      body: JSON.stringify(createdAs ? { session: name, created_as: createdAs }
+        : { session: name }),
     });
   } catch {
     // The session stands; only the asker's note about it is lost.
@@ -62346,8 +62364,10 @@ function spawnGateButtons(rec, done) {
           + "and its clock stays paused until you create it or reject it"
         : rec.scope === "child"
           ? `open the spawn child form under ${rec.session} filled with this request, ` +
-            "edit it and create it yourself"
-          : "open the New session form filled with this request, edit it and create it yourself",
+            "edit it and create it yourself — the New session tab makes it a top-level " +
+            "session instead"
+          : "open the New session form filled with this request, edit it and create it " +
+            `yourself — the Spawn child tab puts it under ${rec.session} instead`,
       async (btn) => {
         const settled = await spawnGatePost(rec, "manual", btn);
         if (settled) {

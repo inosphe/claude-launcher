@@ -9782,7 +9782,9 @@ async def h_spawn_request_settle(request: web.Request) -> web.Response:
         elif verb == "spawn":
             record = gate.spawn_instead(rid, decided_by="web")
         elif verb == "created":
-            record = gate.link(rid, str(body.get("session") or ""))
+            created_as = body.get("created_as")
+            record = gate.link(rid, str(body.get("session") or ""),
+                               str(created_as) if created_as else None)
         else:
             record = gate.withdraw(rid, session=str(body.get("session") or ""))
     except spawn_gate.GateRefused as exc:

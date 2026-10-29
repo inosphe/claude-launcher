@@ -13,6 +13,10 @@
    is created as asked, and its Manual opens the spawn child tab under the
    asker, filled with the request.
 
+   claunch-oaxni: the Manual form offers both tabs whatever the scope, so a
+   child request can be created top-level (and a top-level one under the
+   asker); the link back says which tab made it.
+
    claunch-uzo40: Manual pauses the clock and leaves the request pending.
    A held request keeps its card, says the clock is paused, answers Approve /
    Open form / Reject / +5 min, and Open form brings the same form back. */
@@ -72,6 +76,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     const posts = [];
+    const bodies = [];
     let rows = [spawnRec(), resumeRec(), childRec(), heldRec()];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('http://gate.test/**', async route => {
@@ -81,6 +86,7 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
         const m = url.pathname.match(/^\/api\/spawn-requests\/(\w+)\/(\w+)$/);
         if (m && route.request().method() === 'POST') {
           posts.push([m[1], m[2]]);
+          if (m[2] === 'created') bodies.push([m[1], route.request().postDataJSON()]);
           const rec = rows.find(r => r.id === m[1]);
           if (m[2] === 'extend') {
             rec.extensions += 1;
@@ -238,6 +244,19 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     }));
     assert.deepEqual(form, { tab: 'new', task: SPEC.task, parent: '', project: 'alpha',
       profile: 'p', mesh: '', role: '', worktree: 'new', overlay: true });
+    // Both tabs are offered (claunch-oaxni): the top-level request can be
+    // put under its asker from Spawn child, and back.
+    const tabs = () => page.evaluate(() => ['new-tab-new', 'new-tab-spawn']
+      .filter(id => !$(id).classList.contains('hidden')));
+    assert.deepEqual(await tabs(), ['new-tab-new', 'new-tab-spawn']);
+    await page.click('#new-tab-spawn');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['spawn', 'op1']);
+    assert.equal(await page.evaluate(() => $('new-session').task.value), SPEC.task,
+      'switching tabs keeps the request\'s answers');
+    await page.click('#new-tab-new');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['new', '']);
     await spawnCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-manual.png') });
@@ -268,6 +287,28 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     }));
     assert.deepEqual(child, { tab: 'spawn', task: CHILD.task, name: 'kid', parent: 'w1',
       worktreeName: 'kid-wt', beads: 'none' });
+    // The child request made top-level instead (claunch-oaxni): the New
+    // session tab is offered, drops the parent, keeps the request's answers,
+    // and is told the asker's repository the way "Spawn same setup" is.
+    assert.deepEqual(await tabs(), ['new-tab-new', 'new-tab-spawn']);
+    assert.deepEqual(await page.evaluate(() => sessionFormView().newSeed), { cwd: '/repo/alpha' });
+    await page.click('#new-tab-new');
+    const asRoot = await page.evaluate(() => ({
+      tab: sessionFormView().mode,
+      parent: $('new-session').parent.value,
+      task: $('new-session').task.value,
+      name: $('new-session').name.value,
+      request: sessionModal.spawnRequest,
+      title: $('modal-title').textContent,
+    }));
+    assert.deepEqual(asRoot, { tab: 'new', parent: '', task: CHILD.task, name: 'kid',
+      request: 'ccc333', title: 'New session' });
+    // The create reports which tab it came from.
+    await page.evaluate(() => spawnGateLink('ccc333', 'solo', 'root'));
+    assert.deepEqual(bodies.at(-1), ['ccc333', { session: 'solo', created_as: 'root' }]);
+    await page.click('#new-tab-spawn');
+    assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
+      ['spawn', 'w1']);
     await childCard.waitFor({ state: 'detached' });
     if (process.env.CLAUNCH_SCRATCH) {
       await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'spawngate-child-manual.png') });
