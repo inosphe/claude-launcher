@@ -227,6 +227,8 @@
     if (!Number.isInteger(n) || n < 1) return "";
     return n + (Number.isInteger(max) && max >= 1 ? "/" + max : "");
   }
+  // run_end states that mean the run broke even when it carries no error.
+  const RUN_END_BROKE = new Set(["failed", "error", "interrupted"]);
   const FOLD_OPEN = "클릭하면 시도마다 펼친다";
   const FOLD_CLOSE = "클릭하면 접는다";
 
@@ -623,15 +625,19 @@
           break;
         case "run_end": {
           closeOpen();
-          // done, stopped (asked to stop), or anything else (it broke).
+          // done, stopped (asked to stop), an error or a broken state (failed,
+          // interrupted, none at all), or any other state the run named
+          // without an error: it ended where a person picks it up (gds6
+          // scenarios v2 stage A ends 'proposed', tuples awaiting approval).
           const stopped = ev.state === "stopped" && !ev.error;
-          const failed = !stopped && (ev.state !== "done" || !!ev.error);
+          const failed = !stopped && (!!ev.error || !ev.state || RUN_END_BROKE.has(ev.state));
+          const waiting = !stopped && !failed && ev.state !== "done";
           ended = { failed, reason: String(ev.error || ev.state || "") };
           let sum = 0;
           for (const r of Object.values(ev.tally || {})) sum += Number(r && r.total) || 0;
-          add("end", "run_end", { label: failed ? "실패" : stopped ? "중단" : "끝",
+          add("end", "run_end", { label: failed ? "실패" : stopped ? "중단" : waiting ? "대기" : "끝",
                                   sub: String(ev.state || "") + (sum ? " · " + tokens(sum) + " tok" : ""),
-                                  status: failed ? "fail" : stopped ? "warn" : "ok",
+                                  status: failed ? "fail" : stopped || waiting ? "warn" : "ok",
                                   tip: [when, ev.error ? String(ev.error).slice(0, 400) : ""] });
           break;
         }
