@@ -11636,7 +11636,11 @@ function applyBriefingCards() {
     const one = fresh && fresh.phase === "ok" && fresh.data && fresh.data.briefing
       && fresh.data.briefing["one-line-job-description"];
     const oline = li.querySelector(".rail-brief");
-    if (one && oline) oline.textContent = one;
+    if (one && oline) {
+      oline.textContent = one;
+      oline.classList.toggle("failed", false);
+      oline.classList.toggle("stale", false);
+    }
     if (li.dataset.railMode !== "expanded") continue;
     // Rendering never starts a summary job. Only explicit controls request one.
     li.appendChild(renderBriefingCard(name, briefingCache.get(name), {
@@ -11980,14 +11984,29 @@ function openRailNoteEditor(li, name) {
    here on every row rebuild; the card is applyBriefingCards'. */
 function decorateBriefingRow(li, s) {
   const one = (s.briefing && s.briefing.one_line) || "";
+  // A summary that failed is said on the row; one never asked for is not
+  // (claunch-lluxq): without this, both read as an empty row.
+  const failed = (s.briefing && s.briefing.failed) || null;
   let oline = li.querySelector(".rail-brief");
-  if (one) {
+  if (one || failed) {
     if (!oline) {
       oline = el("div", "rail-brief");
-      oline.title = "one-line job description — pick the session for the full briefing";
       li.appendChild(oline);
     }
-    oline.textContent = one;
+    oline.textContent = one || `Summary failed · ${failed.error || "error"}`;
+    oline.classList.toggle("failed", !one);
+    oline.classList.toggle("stale", !!(one && s.briefing.stale));
+    const notes = [one
+      ? "one-line job description — pick the session for the full briefing"
+      : "the last summary request failed — ⟳ to retry"];
+    if (one && s.briefing.stale) {
+      notes.push("written by the previous briefing model — ⟳ re-summarises with the current one");
+    }
+    if (failed) {
+      const age = seenAgo(failed.at);
+      notes.push(`last summary request failed${age ? ` ${age.text} ago` : ""}: ${failed.error || "error"}`);
+    }
+    oline.title = notes.join("\n");
   } else if (oline) {
     oline.remove();
   }

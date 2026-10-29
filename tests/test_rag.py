@@ -867,7 +867,7 @@ def test_sessions_producers_follow_the_registry_and_briefing_cache(tmp_path):
                 await svc.drain()
                 assert "s2" in (await svc._index("sessions", None, cfg)).entries
                 before = svc._progress_of("sessions").runs
-                briefing._persist_cache()          # the briefing cache's hook
+                briefing._persist("s1")           # the briefing cache's hook
                 await svc.drain()
                 assert svc._progress_of("sessions").runs == before + 1
                 assert len(_embedded_docs(ep)) == 2  # s1, s2 — the last pass embedded nothing

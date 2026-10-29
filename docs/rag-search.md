@@ -137,8 +137,8 @@ write-up matches on any part.
 2. **Index.** `VectorIndex`: one JSON file per corpus under
    `<daemon dir>/rag/` (`beads-<root hash>.json`, `sessions.json`), float32
    vectors base64-encoded, model and width recorded so another model's file
-   is discarded rather than mixed. Machine-local derived data, like
-   `briefings.json`.
+   is discarded rather than mixed. Machine-local derived data, like the
+   per-session briefing cache (`sessions/<name>/briefing.json`).
 3. **Sync.** `RagService.ensure_sync` diffs documents against the index,
    drops what is gone, embeds what changed in batches, saves after every
    batch (an interrupted sync keeps what it did). One task per corpus; a

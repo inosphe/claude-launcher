@@ -163,7 +163,8 @@ def sessions_db() -> Path:
 
 
 def briefings_json() -> Path:
-    """Persisted LLM briefing cache, retained across daemon restarts."""
+    """The old fleet-wide briefing cache; read once to migrate it into
+    per-session ``sessions/<name>/briefing.json`` files (daemon.briefing)."""
     return daemon_dir() / "briefings.json"
 
 

@@ -5221,8 +5221,11 @@ spends a fixed small budget, not the token budget, and it saves nothing. The
 card writes the
 `llm:` block of `~/.claude-launcher/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
 `presets:` and `preset:` beside the four backend fields), which is
-still hand-editable; saving a different backend drops the cached briefings so
-the next card is written by the model just chosen. While endpoint, model and
+still hand-editable; saving a different backend retires the cached briefings
+so the next card is written by the model just chosen, while the rail keeps
+each old one-liner in italics until then. Each session's briefing is kept in
+its own directory (`sessions/<name>/briefing.json`), and a failed request is
+kept beside it so the row reads "Summary failed" instead of nothing. While endpoint, model and
 key are not all present the feature is off, and every briefing control says so
 and names this card. See [docs/briefing-model-presets.md](docs/briefing-model-presets.md)
 for the stored shape and the resolution rules.

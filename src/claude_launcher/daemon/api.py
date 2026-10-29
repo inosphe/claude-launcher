@@ -4908,9 +4908,10 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
 async def h_briefing_llm_save(request: web.Request) -> web.Response:
     """Write the ``llm`` block from the Settings card.
 
-    Cached briefings are dropped when the resolved backend changed, so the
+    Cached briefings are retired when the resolved backend changed, so the
     next card is composed by the model that was just chosen instead of
     showing the previous one's answer until the session's transcript moves.
+    Their text stays on the rail, marked stale, until then (claunch-lluxq).
     """
     body = await _json_body(request)
     doc = store.load()
@@ -4931,7 +4932,7 @@ async def h_briefing_llm_save(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
     after = briefing.llm_config(saved)
     if (after["endpoint"], after["model"]) != (before["endpoint"], before["model"]):
-        briefing.forget_all()
+        briefing.retire_all()
     return json_response(_llm_settings_payload(saved))
 
 

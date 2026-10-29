@@ -1258,30 +1258,111 @@ def parse_briefing(text: str) -> Optional[dict]:
 # composition and cache
 # --------------------------------------------------------------------------- #
 #: session name -> (cache key, last result). The key is everything that would
-#: change the answer; the dict is mirrored to the daemon instance directory.
+#: change the answer. Each session's entry is mirrored to its own directory
+#: (:data:`BRIEFING_FILE`), so writing one briefing rewrites one file.
 _cache: Dict[str, Tuple[tuple, dict]] = {}
+#: session name -> the last composition that failed, ``{"at", "error"}``.
+#: Kept beside the briefing it did not replace, so a row can tell "never
+#: composed" from "composing failed" (claunch-lluxq) — a failure used to live
+#: only in the browser tab that asked, and a reload made it "No summary yet".
+#: Cleared by the next composition that succeeds.
+_failures: Dict[str, dict] = {}
+#: session name -> how many times :func:`forget` has dropped that name. A
+#: composition reads it before its LLM call and keeps nothing if it moved
+#: meanwhile: the record was removed while the answer was on its way, and
+#: storing it would put the removed session's summary back (claunch-lluxq).
+_forgotten: Dict[str, int] = {}
 _loaded_cache_path: Optional[Path] = None
+
+#: Appended to a retired entry's cache key so no composition matches it again.
+_RETIRED = "retired"
+
+#: A session's briefing file, beside its ``meta.json``. Per session rather
+#: than one file for the fleet (claunch-lluxq): the fleet file was rewritten
+#: whole on every composition, so one write emptied every session's summary
+#: at once; and a session's directory is what "Clear exited" removes, so a
+#: reused name does not inherit the summary of the session it replaces.
+BRIEFING_FILE = "briefing.json"
+
+
+def _session_file(name: str) -> Path:
+    return paths.session_dir(name) / BRIEFING_FILE
+
+
+def _plain_name(name: str) -> bool:
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
+
+
+def _load_row(name: str, row) -> None:
+    if not isinstance(row, dict):
+        return
+    failure = row.get("failure")
+    if isinstance(failure, dict):
+        _failures[name] = failure
+    result = row.get("result")
+    if isinstance(row.get("key"), list) and isinstance(result, dict):
+        _cache[name] = (_tupleize(row["key"]), result)
+
+
+def _read_file(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _generated_at(row) -> str:
+    result = row.get("result") if isinstance(row, dict) else None
+    return str(result.get("generated_at") or "") if isinstance(result, dict) else ""
+
+
+def _migrate_fleet_file() -> None:
+    """Split the old fleet-wide ``briefings.json`` into per-session files.
+
+    Once: the old file is renamed ``briefings.json.migrated`` afterwards. A
+    session whose directory is gone (its record was cleared) is not brought
+    back. A session that already has its own file keeps it unless the old
+    file's briefing was generated later: the per-session files written while
+    a daemon still ran the fleet file (a restore, claunch-lluxq) are older
+    than what that daemon composed meanwhile.
+    """
+    legacy = paths.briefings_json()
+    if not legacy.is_file():
+        return
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for name, row in (data.items() if isinstance(data, dict) else ()):
+        name = str(name)
+        if not isinstance(row, dict) or not _plain_name(name):
+            continue
+        if not paths.session_dir(name).is_dir():
+            continue
+        target = _session_file(name)
+        if target.exists() and _generated_at(row) <= _generated_at(_read_file(target)):
+            continue
+        _write_file(target, row)
+    try:
+        legacy.replace(legacy.with_name(legacy.name + ".migrated"))
+    except OSError:
+        log.warning("briefing: could not retire %s after migrating it", legacy)
 
 
 def _restore_cache() -> None:
     """Load durable briefings once for the active daemon instance."""
     global _loaded_cache_path
-    path = paths.briefings_json()
-    if _loaded_cache_path == path:
+    root = paths.sessions_root()
+    if _loaded_cache_path == root:
         return
-    _loaded_cache_path = path
+    _loaded_cache_path = root
+    _migrate_fleet_file()
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, ValueError):
+        files = sorted(root.glob(f"*/{BRIEFING_FILE}"))
+    except OSError:
         return
-    if not isinstance(data, dict):
-        return
-    for name, row in data.items():
-        if not isinstance(row, dict) or not isinstance(row.get("key"), list):
-            continue
-        result = row.get("result")
-        if isinstance(result, dict):
-            _cache[str(name)] = (_tupleize(row["key"]), result)
+    for path in files:
+        _load_row(path.parent.name, _read_file(path))
 
 
 def _tupleize(value):
@@ -1298,24 +1379,54 @@ def _tupleize(value):
 persist_hooks: List[Callable[[], None]] = []
 
 
-def _persist_cache() -> None:
-    path = paths.briefings_json()
-    data = {
-        name: {"key": _jsonable(key), "result": result}
-        for name, (key, result) in _cache.items()
-    }
+def _write_file(path: Path, row: dict) -> None:
+    # The session directory is the daemon's record of the session; a briefing
+    # never creates it. Without this guard, retiring every briefing after
+    # "Clear exited" removed a session's directory brought it back holding
+    # that briefing, and the next session given the same name inherited it.
+    if not path.parent.is_dir():
+        return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with atomic.scratch(path) as tmp:
-            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
             atomic.replace(tmp, path)
     except OSError:
+        log.warning("briefing: could not write %s", path)
+
+
+def _write(name: str) -> None:
+    """Mirror ``name``'s entry to its own file; no entry removes the file."""
+    if not _plain_name(name):
+        return
+    row: dict = {}
+    if name in _cache:
+        key, result = _cache[name]
+        row.update(key=_jsonable(key), result=result)
+    if name in _failures:
+        row["failure"] = _failures[name]
+    path = _session_file(name)
+    if row:
+        _write_file(path, row)
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
         pass
+    except OSError:
+        log.warning("briefing: could not remove %s", path)
+
+
+def _run_hooks() -> None:
     for hook in list(persist_hooks):
         try:
             hook()
         except Exception:
             log.exception("briefing: persist hook %r failed", hook)
+
+
+def _persist(name: str) -> None:
+    _write(name)
+    _run_hooks()
 
 
 def _jsonable(value):
@@ -1324,18 +1435,62 @@ def _jsonable(value):
     return value
 
 
-def forget_all() -> None:
-    """Drop every cached briefing, persisted copy included.
+def retire_all() -> None:
+    """Mark every cached briefing as the previous backend's, keeping its text.
 
     Called when the backend behind the feature changes — a different profile,
     endpoint or model. The cache key is a session's *evidence* and not the
     model that read it, so without this a briefing written by the previous
     model would stay on the card until that session's transcript moved, and
     the change the operator just saved would look like it had done nothing.
+
+    The text is kept: this used to clear the cache, and one model switch
+    emptied the one-line of every session on the rail — 636 of them, exited
+    ones included, which nothing recomposes (claunch-lluxq). A retired entry
+    gets a key no composition can match, so the next card or ⟳ composes with
+    the new model, and it carries ``stale`` so the row can say whose answer
+    it is showing until then. Recorded failures belong to the old backend
+    too and are dropped.
     """
     _restore_cache()
-    _cache.clear()
-    _persist_cache()
+    changed = set(_failures)
+    for name, (key, result) in list(_cache.items()):
+        if key and key[-1] == _RETIRED:
+            continue
+        _cache[name] = ((*key, _RETIRED), {**result, "stale": True})
+        changed.add(name)
+    _failures.clear()
+    for name in sorted(changed):
+        _write(name)
+    _run_hooks()
+
+
+def forget(names) -> None:
+    """Drop the briefings of session records that were removed.
+
+    Called by the manager wherever a record goes (clear, remove, discard). The
+    cache is keyed by name and outlives the directory, so without this a
+    session created later under a removed one's name showed that session's
+    summary until the daemon restarted, and :func:`retire_all` wrote it into
+    the new session's directory (claunch-lluxq). The file goes too: a clear
+    without ``--logs`` keeps the directory, and the next restart would load it.
+    """
+    _restore_cache()
+    names = list(names)
+    for name in names:
+        _forgotten[name] = _forgotten.get(name, 0) + 1
+        _cache.pop(name, None)
+        _failures.pop(name, None)
+        _write(name)
+    # The fleet search corpus carries each session's summary; clear and remove
+    # also reach it through the registry's change hooks, discard does not.
+    if names:
+        _run_hooks()
+
+
+def _record_failure(name: str, exc: BaseException) -> None:
+    _failures[name] = {"at": _now_iso(), "error": _clip(str(exc) or exc.__class__.__name__, 300)}
+    _persist(name)
 
 
 def _now_iso() -> str:
@@ -1345,7 +1500,7 @@ def _now_iso() -> str:
 def _index_briefing(name: str, payload, at: str) -> None:
     """Mirror one composed briefing into the search index, never raising.
 
-    The index is a derived store and this runs *after* ``_persist_cache`` has
+    The index is a derived store and this runs *after* ``_persist`` has
     put the briefing on disk, so the answer the model wrote is already saved.
     Raising here does not become a ``BriefingError`` -- :func:`compose`'s
     callers catch that one and this is not one -- so it left the route as an
@@ -1419,19 +1574,31 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
     prompt = build_prompt(sdef, cflow_info, events, live_info, faq)
-    answer = await call_llm(cfg, prompt, session=name, purpose="card")
+    generation = _forgotten.get(name, 0)
+    try:
+        answer = await call_llm(cfg, prompt, session=name, purpose="card")
+    except BriefingError as exc:
+        if _forgotten.get(name, 0) == generation:
+            _record_failure(name, exc)
+        raise
+    # The record was removed while the call was out: answer the caller, keep
+    # nothing — no cache entry, no file, no failure, no index row.
+    kept = _forgotten.get(name, 0) == generation
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":
         # Text arrived, but the endpoint says it was CUT at the budget — the
         # JSON is half-written, not badly written. Serving it as ``raw`` would
         # put a torn-off sentence on the card and cache it there, so this is
         # the same failure as the empty answer and gets the same 502.
-        raise BriefingError(
+        exc = BriefingError(
             f"llm answer was truncated at max_tokens={cfg['max_tokens']} "
             f"(finish_reason='length', completion_tokens={answer.completion_tokens}, "
             f"{len(answer.text)} chars, not parseable) — raise the token "
             "budget in Settings ▸ Briefing model (llm.max_tokens)"
         )
+        if kept:
+            _record_failure(name, exc)
+        raise exc
     result = {
         "session": name,
         "generated_at": _now_iso(),
@@ -1440,9 +1607,11 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         "briefing": parsed,
         "raw": None if parsed is not None else answer.text,
     }
-    _cache[name] = (cache_key, result)
-    _persist_cache()
-    _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
+    if kept:
+        _failures.pop(name, None)
+        _cache[name] = (cache_key, result)
+        _persist(name)
+        _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
     return result
 
 
@@ -1455,10 +1624,17 @@ DIGEST_FIELD_CHARS = 240
 
 
 def cached_result(name: str) -> Optional[dict]:
-    """Read the last complete briefing without checking changing evidence."""
+    """Read the last complete briefing without checking changing evidence.
+
+    A retired one (:func:`retire_all`) is not served: opening a card after a
+    model change composes with the new model, as it did when the change
+    cleared the cache. The rail keeps showing the retired text meanwhile.
+    """
     _restore_cache()
     hit = _cache.get(name)
-    return {**hit[1], "cached": True} if hit is not None else None
+    if hit is None or (hit[0] and hit[0][-1] == _RETIRED):
+        return None
+    return {**hit[1], "cached": True}
 
 
 def digest(name: str) -> Optional[dict]:
@@ -1476,14 +1652,20 @@ def digest(name: str) -> Optional[dict]:
     ``goal``/``now``/``progress`` are present only when the summariser filled
     them, so a reader can tell an empty field from one the older response
     shape never had.
+
+    Two flags tell the row whose text it is (claunch-lluxq): ``stale`` when
+    the briefing was written by the backend before the last model change
+    (:func:`retire_all`), and ``failed`` (``{"at", "error"}``) when the last
+    composition since the last success failed. A failure with nothing
+    composed before it still yields a digest — empty fields and ``failed`` —
+    so the row says "failed" instead of "not yet".
     """
     _restore_cache()
+    failed = _failures.get(name)
     hit = _cache.get(name)
-    if hit is None:
-        return None
-    brief = (hit[1] or {}).get("briefing")
+    brief = (hit[1] or {}).get("briefing") if hit is not None else None
     if not isinstance(brief, dict):
-        return None
+        return {"one_line": "", "state": "", "failed": failed} if failed else None
     out = {
         "one_line": _clip(
             str(brief.get("one-line-job-description") or ""), DIGEST_FIELD_CHARS
@@ -1495,5 +1677,9 @@ def digest(name: str) -> Optional[dict]:
         if value:
             out[key] = value
     if not any(out.get(key) for key in ("one_line", "goal", "now", "progress")):
-        return None
+        return {"one_line": "", "state": "", "failed": failed} if failed else None
+    if hit[1].get("stale"):
+        out["stale"] = True
+    if failed:
+        out["failed"] = failed
     return out

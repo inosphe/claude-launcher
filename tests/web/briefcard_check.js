@@ -98,6 +98,20 @@ function mkel(tag) {
     get() { return text; },
     set(v) { text = v; node.children.length = 0; },
   });
+  /* applyBriefingCards clears the row line's failed/stale marks when a
+     refresh lands (claunch-lluxq); briefrow_check pins what they mean. */
+  Object.defineProperty(node, "classList", {
+    value: {
+      toggle(c, force) {
+        const has = node.className.split(" ").includes(c);
+        if (force === undefined) force = !has;
+        if (force && !has) node.className = (node.className + " " + c).trim();
+        else if (!force) node.className =
+          node.className.split(" ").filter((x) => x !== c).join(" ");
+        return force;
+      },
+    },
+  });
   return node;
 }
 
