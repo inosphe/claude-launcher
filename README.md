@@ -3584,6 +3584,18 @@ of their text. The detail panel lists them under the Opening task and opens
 one on a press; they are read-only once the session exists and live as long
 as its state directory.
 
+Under the task text the section also shows what the opening carried besides
+it (claunch-5lro4): images as thumbnails that open full size, uploaded files
+as download links with their size. The images are read off the session's
+`opening-images/` folder, which only a create request writes; the files are
+the ones `opening.json` names (`files: [{id, name, bytes}]`), because the
+session's `uploads/` folder also takes files sent later from the session line.
+A session recorded before that field existed shows its images and no files.
+Routes: `GET /api/sessions/{name}/opening/attachments` returns `{images:
+[{name, type}], files: [{id, name, bytes, missing?}]}`;
+`GET .../opening/images/{image}` and `GET .../opening/files/{fid}/{fname}`
+serve the bytes (404 for anything the opening did not carry).
+
 Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` under
 `prompt_packs`:
 
@@ -5451,6 +5463,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/POST | `/api/sessions/{name}/opening` | the block this session was created with: GET returns `{source, text, chars, images, recorded_at, transport}` (`recorded` = the text handed over at creation, `recomposed` = rebuilt from the definition for a session older than the record, `none`; `transport: "argv"` = the harness took it as an argument, so a re-inject is a second copy and the panel confirms first), POST types the same text in again with `force` and answers `{ok, delivered, source, chars, images, reason}` — the detail panel's **Re-inject opening** / **Copy opening** buttons (`daemon/session_opening.py`) |
 | GET    | `/api/sessions/{name}/contexts` | the context items this session was created with beside its task (gds6-bfu7): `{session, items: [{n, title, file, bytes, chars, lines, path, missing?}]}` — the detail panel's **Context items** list and MCP `context_list` (`daemon/opening_contexts.py`) |
 | GET    | `/api/sessions/{name}/contexts/{n}?offset=&max_chars=` | one item's text, a window at a time (default 60000 characters): `{…item, text, offset, total_chars, truncated, next_offset}`; 404 for an item that is not there — MCP `context_read` |
+| GET | `/api/sessions/{name}/opening/attachments`, `/api/sessions/{name}/opening/images/{image}`, `/api/sessions/{name}/opening/files/{fid}/{fname}` | what the opening carried besides its text: the list `{images: [{name, type}], files: [{id, name, bytes, missing?}]}`, then each image (inline) and file (download); only files `opening.json` names are served — the detail panel's Opening task section shows them under the task (claunch-5lro4) |
 | GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
 | POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
