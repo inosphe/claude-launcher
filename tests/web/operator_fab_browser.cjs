@@ -5,14 +5,15 @@
    whose scope holds that session; asks are answered and messages sent from
    the dialog; each operator keeps its own draft; Alt+O opens and closes it;
    management stays on the Observer page, which hides the segment; on a phone
-   the dialog takes the screen and its conversation is its one scroller.
-   Above the conversation a session line names the operator, its session and
-   that session's state and links to the session's page (claunch-iw5i8.13);
-   the dialog is resized from its edges about its centre and the size is kept
-   in localStorage (claunch-iw5i8.14). The conversation is threads
-   (claunch-iw5i8.12.1): at the default width the list and the selected
-   thread take turns, a message goes to the thread on screen, and a dialog
-   resized past 640px shows the two side by side.
+   the dialog takes the screen and the one visible pane scrolls inside the
+   threads grid. Above the conversation a session line names the operator,
+   its session and that session's state and links to the session's page
+   (claunch-iw5i8.13); the dialog is resized from its edges about its centre
+   and the size is kept in localStorage (claunch-iw5i8.14). The conversation
+   is threads (claunch-iw5i8.12.1): at the default width the list and the
+   selected thread take turns, a message goes to the thread on screen, and a
+   dialog resized past 640px shows the two side by side, the conversation
+   scrolling inside its column while the list holds (claunch-vxep1).
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/operator_fab_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -308,6 +309,23 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       return { both: l.width > 0 && v.width > 0, beside: l.right <= v.left, back: document.querySelector("#opfab-view .op-thread-back").getBoundingClientRect().width };
     });
     assert.deepEqual(side, { both: true, beside: true, back: 0 });
+    // Wide, with a long conversation (claunch-vxep1): the scrollbar belongs
+    // to the conversation column — it scrolls inside itself while the
+    // thread list holds, and the grid is not a scroller of its own.
+    for (let i = 0; i < 30; i++) ops.opB.feed.push({ id: `w${i}`, at: at(20 + i), kind: "post", role: "bot", text: `넓은 줄 ${i} `.repeat(12), level: "info", refs: [], thread: "th-main" });
+    await page.waitForSelector('#opfab-view .op-entry[data-entry="w29"]');
+    const pinnedList = await page.evaluate(() => {
+      const grid = document.querySelector("#opfab-view .op-threads-grid");
+      const view = document.querySelector("#opfab-view .op-thread-view");
+      const list = document.querySelector("#opfab-view .op-thread-list");
+      const listTop = list.getBoundingClientRect().top;
+      view.scrollTop = view.scrollHeight;
+      return { viewScrolls: view.scrollHeight > view.clientHeight + 1, scrolled: view.scrollTop > 0,
+        listHeld: Math.abs(list.getBoundingClientRect().top - listTop) < 1 && list.scrollTop === 0,
+        gridScrolls: grid.scrollHeight > grid.clientHeight + 1 };
+    });
+    assert.deepEqual(pinnedList, { viewScrolls: true, scrolled: true, listHeld: true, gridScrolls: false },
+      "the conversation scrolls inside its column and the thread list stays put");
     if (process.env.CLAUNCH_SCREENSHOT_WIDE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_WIDE });
     await page.locator(".opfab-grip-e").dblclick();
     assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });
@@ -324,38 +342,39 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.reload();
     await page.waitForSelector("#fab-dock .operator-fab");
 
-    // On a phone the dialog takes the screen; its conversation is the one
-    // scroller and nothing runs sideways.
+    // On a phone the dialog takes the screen; the one visible pane scrolls
+    // inside the threads grid and nothing runs sideways (claunch-vxep1).
     for (let i = 0; i < 30; i++) ops.opB.feed.push({ id: `q${i}`, at: at(10 + i), kind: "post", role: "bot", text: `줄 ${i} `.repeat(12), level: "info", refs: [], thread: "th-main" });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.click(".operator-fab");
     await page.waitForSelector('#opfab-view .op-entry[data-entry="q29"]');
     const fit = await page.evaluate(() => {
       const dialog = document.querySelector(".opfab-modal").getBoundingClientRect();
+      const grid = document.querySelector("#opfab-view .op-threads-grid");
       const area = document.querySelector("#opfab-view .op-area");
       const scrollers = [...document.querySelectorAll("#opfab-view *")].filter(e => {
         const cs = getComputedStyle(e);
         return (/auto|scroll/.test(cs.overflowY) && e.scrollHeight > e.clientHeight + 1) || (/auto|scroll/.test(cs.overflowX) && e.scrollWidth > e.clientWidth + 1);
       }).map(e => e.className || e.tagName.toLowerCase());
       const bar = document.querySelector("#opfab-view > .op-sessionbar").getBoundingClientRect();
-      return { width: Math.round(dialog.width), height: Math.round(dialog.height), scrollers, atEnd: area.scrollHeight - area.scrollTop - area.clientHeight < 24,
-        sideways: area.scrollWidth > area.clientWidth + 1, barShown: bar.height > 0 && bar.top >= 0 && bar.bottom <= area.getBoundingClientRect().top + 1,
+      return { width: Math.round(dialog.width), height: Math.round(dialog.height), scrollers, atEnd: grid.scrollHeight - grid.scrollTop - grid.clientHeight < 24,
+        sideways: grid.scrollWidth > grid.clientWidth + 1, barShown: bar.height > 0 && bar.top >= 0 && bar.bottom <= area.getBoundingClientRect().top + 1,
         grips: [...document.querySelectorAll(".opfab-grip")].filter(g => g.getBoundingClientRect().width > 0).length };
     });
-    assert.deepEqual(fit, { width: 390, height: 844, scrollers: ["op-area"], atEnd: true, sideways: false, barShown: true, grips: 0 });
+    assert.deepEqual(fit, { width: 390, height: 844, scrollers: ["op-threads-grid"], atEnd: true, sideways: false, barShown: true, grips: 0 });
     // The thread's head holds to the top of that one scroller however far the
     // conversation has scrolled (claunch-1ruqi).
     const pinnedHead = await page.evaluate(() => {
-      const area = document.querySelector("#opfab-view .op-area");
-      area.scrollTop = area.scrollHeight;
-      const box = area.getBoundingClientRect();
+      const grid = document.querySelector("#opfab-view .op-threads-grid");
+      grid.scrollTop = grid.scrollHeight;
+      const box = grid.getBoundingClientRect();
       const headBox = document.querySelector("#opfab-view .op-thread-head");
       const head = headBox.getBoundingClientRect();
       const back = document.querySelector("#opfab-view .op-thread-back").getBoundingClientRect();
-      // The row covers the scroller's top padding too: a point just under the
-      // scroller's own top edge lands in the head, not in an entry.
+      // The row covers the scroller's top edge: a point just under it lands
+      // in the head, not in an entry.
       const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
-      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
+      return { scrolled: grid.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
     });
     assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the thread head covers the top of the scroller, padding included, and keeps 「← 목록」");
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });

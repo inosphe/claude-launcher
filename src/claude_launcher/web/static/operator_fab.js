@@ -157,7 +157,15 @@ function sessionOnScreen() {
 }
 let mounted = false, timer = null;
 const mountView = () => { if (!mounted) { view.mount(root); mounted = true; } };
-const toEnd = () => { const area = root.querySelector(".op-area"); if (area) area.scrollTop = area.scrollHeight; };
+/* The scrollers live inside the area since the thread panes scroll
+   themselves (claunch-vxep1): the grid in the narrow layout, the
+   conversation column at 640px or more. */
+const toEnd = () => {
+  const area = root.querySelector(".op-area");
+  if (!area) return;
+  area.scrollTop = area.scrollHeight;
+  for (const el of area.querySelectorAll(".op-threads-grid, .op-thread-view")) el.scrollTop = el.scrollHeight;
+};
 /* The dialog opens on what the closed-dialog poll last read (tick, below),
    so it shows at once; the read for the session on screen follows. */
 async function openModal() {
