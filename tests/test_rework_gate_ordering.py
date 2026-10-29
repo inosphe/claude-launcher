@@ -254,24 +254,143 @@ def test_the_gate_does_not_read_a_hash_quoted_inside_the_line():
     assert "**서로 다른 해시**를 가리키면 그 줄은 판독 불가다" in prompt
 
 
-def test_an_uppers_pr_review_line_is_a_brake_whatever_its_hash_position():
-    """실측 문면이 (i) 자리에 해시를 두고 있어 자리 규칙만으로는 갈리지 않는다.
+def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
+    """The gate used to separate the upper's brake from a reviewer's verdict by
+    the line's *prefix* (``PR-REVIEW #<번호>``). Three measured lines written by
+    the same upper (s29) carry no prefix and were therefore read as reviewer
+    verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7, the (i)
+    position), ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z, (i) with
+    the author named inline) and a trailing ``@ b606bc15`` (claunch-75kfl, the
+    (ii) position). The canon already said the ground is *who wrote the line*
+    (claunch-eyz0s.2.1.1).
 
-    리더가 쓴 ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1
-    320행)는 해시가 마커 낱말 바로 뒤, 곧 판독 규칙 (i)에 그대로 걸린다 —
-    상위의 거절이 「재심 대기」로 통과한다(s597-rev·s1304 재심 지적,
-    claunch-eyz0s.2.2). 상위 판정 줄을 가르는 근거는 해시의 자리가 아니라 그
-    줄을 쓴 주체이므로, 정본은 자리 규칙보다 앞서는 규칙을 들고 있어야 한다."""
+    The first implementation of this rewrite read the author head but then
+    narrowed "upper" to the first ``landing-review`` responder group, which
+    fails in a parent-worker configuration (the first group is worker; the
+    leader is in no group and is not a reviewer, so its lines fell back to the
+    prefix rule and became reviewer verdicts again). It also looked ``[sNNN]``
+    up in the mesh roster's *handle* column, though ``[sNNN]`` is a session
+    name. So the default is flipped: only the three review-verdict branches
+    are reviews, everything else is a brake, and the prefix is the last
+    fallback."""
     prompt = _words(_land_prompt())
-    # 규칙 자체 — 상위 판정 줄은 tip 유무와 무관하게 제동이다
-    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in prompt
-    assert "`PR-REVIEW #<번호>`로 시작하면" in prompt
-    assert "**어떤" in prompt and "`@ <hex>`가 있든**" in prompt
-    # 그 규칙이 자리 규칙보다 앞선다는 것 — 없으면 다음 편집자가 둘을 같은
-    # 층으로 읽고 자리 규칙 쪽을 먼저 적용한다
-    assert "자리 규칙보다 이 규칙이 앞선다" in prompt
-    # 실측 문면이 그대로 정본에 있어야 다음 사람이 같은 형태를 다시 만나도
-    # 무엇이 문제였는지 보드로 돌아가지 않고 읽는다
+    # the flipped default, stated as the rule
+    assert "기본값은 「제동」이고, 리뷰어만 뺀다" in prompt
+    # where the subject is read from, and that it is a session name
+    assert "`[sNNN] at <시각>` 꼴의 머리" in prompt
+    assert "그 `[sNNN]`은 **세션 이름**이다" in prompt
+    # the roster comparison is the third column, and the two differ — pinning
+    # the concrete pairs keeps a handle-based lookup from coming back
+    assert "<핸들> <role> <데몬>/<세션>`" in prompt
+    assert "첫 열(핸들)이 아니라 셋째 열의 세션 이름" in prompt
+    for pair in ("`s404-rev`의 세션은 `s573`", "`s511-rev`는 `s523`",
+                 "`s5874-indep-leader`는 `s5878`"):
+        assert pair in prompt, pair
+    # the three review-verdict branches, and that review is tested first
+    assert "리뷰 판정 셋 중 하나에" in prompt and "먼저 걸리면" in prompt
+    assert "(a) 그 세션의 role이 `reviewer`다" in prompt
+    # (b) is the session that actually ANSWERED, not the candidate list —
+    # ``groups[].asks`` of this run carries s29 in ``leader (sibling)``, so a
+    # membership reading would make every s29 line a review verdict again
+    # (s511-rev, s597-rev re-review)
+    assert "`peer-review` 질문에 **실제로 답한**" in prompt
+    assert "`groups[].asks`로는 갈리지 않는다" in prompt
+    assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가" in prompt
+    assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in prompt
+    # and the journal's `by` is a HANDLE, so it takes the same third-column
+    # mapping as (a) — s597-rev measured this, s511-rev is session s523
+    assert "다만 그 `by`는 **핸들**이다" in prompt
+    assert "`by: s511-rev`인데 그" in prompt
+    assert "저널을 읽을 수 없으면 (b)는 서지 않는다" in prompt
+    # the roster query must include closed sessions, or a finished parent
+    # reads as "absent from the roster" (s1262-rev)
+    assert "`claunch mesh members <mesh> --state all`" in prompt
+    assert "`--state all`로도 그 세션이 안 나오면" in prompt
+    # (c) is a fallback, not a peer of (a)/(b) — a reviewer-shaped line form
+    # alone must not promote an upper's brake to a verdict
+    assert "는 **role을 읽지 못했을 때의 대체**이고" in prompt
+    assert "상위의 제동 줄은 그 형태로 쓰이지 않으므로" in prompt
+    assert "꼴만으로는 리뷰 판정이라 하지 않는다" in prompt
+    # a session absent from the roster is a brake, one way only; the prefix
+    # fallback applies only when the head itself is missing (s490-rev)
+    assert "**명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**" in prompt
+    assert "명부를 못 읽은 것과 그 세션이 명부에 없는 것은 다르다" in prompt
+    assert "머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다" in prompt
+    # and the prefix fallback itself must not flip the brake default: an
+    # unreadable head with no PR-REVIEW prefix stays a brake
+    # (s648-rev, s1236-rev2)
+    assert "아니면 **여전히 제동이다**" in prompt
+    assert "머리가 없으면 셋 다 서지 않는다" in prompt
+    # its own comments are neither verdicts nor brakes — the ordering
+    # sentence is what keeps them out of both lists
+    assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in prompt
+    assert "자기 코멘트가 제동 목록에 동시에 서지 않는다" in prompt
+    # everything else is a brake, including a session absent from the roster
+    assert "**그 밖의 전부 — 상위의 제동이다.**" in prompt
+    # "absent from the roster" must mean absent under `--state all`, since
+    # that is the flag (a) tells the reader to use — `--state all` keeps
+    # closed sessions, so a finished reviewer is not "absent" (s404-rev,
+    # s511-rev, s648-rev)
+    assert "**명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로" in prompt
+    assert "`--state all`은 닫힌 세션의 role을 그대로" in prompt
+    # the roster query in the "absent" paragraph carries the same flag
+    assert "(a) role을 못 읽으므로" in prompt
+    assert "그 세션이 명부(`claunch mesh members <mesh> --state all`)에서" in prompt
+    # (b) is per LINE, not per session — a leader who once answered must not
+    # have every later brake line read as a review (s597-rev)
+    assert "판정은 세션이 아니라\n" in prompt or "판정은 세션이 아니라" in prompt
+    assert "**줄 단위**다" in prompt
+    assert "그 답이 **이 줄**을 낳았다" in prompt
+    # the comparison target is the line's author, not "$CLAUNCH_SESSION" —
+    # read as "this session" the branch can never stand (s597-rev, s511-rev,
+    # s1262-rev)
+    assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in prompt
+    assert "그 값이 같을 수 없어 (b)가 영구히 서지 않는다" in prompt
+    # and the journal is read for the whole run, not "this round" — the
+    # rework round reads the leader's earlier changes line (the s1262-rev
+    # case (b) exists for)
+    assert "이 런의 `peer-review` 질문에 **실제로 답한**" in prompt
+    assert "저널은 **런 전체**를 읽는다" in prompt
+    assert "`decision`이 `changes`이고" in prompt
+    # the pairing value must be one the journal actually carries — an
+    # ask_answered has no tip field, so pairing on "the tip the answer
+    # judged" left (b) unstanding for 5 of 12 answers (s404-rev, s490-rev,
+    # s511-rev, s1236-rev2, s648-rev)
+    assert "는 tip이 없다" in prompt
+    assert "`ask`·`node`·`instance`·`decision`·" in prompt
+    # the count must not be pinned in the prose — the journal grows with
+    # every answer (s1262-rev: "14 lines" was already 17)
+    assert "수치는 저널이 자라므로" in prompt
+    assert "줄 수를 문면에 박지 않는다" in prompt
+    assert "그 줄이 그 답의" in prompt
+    # the pairing is the ask_routed..ask_answered time window, not a tip
+    assert "**`ask_routed`와" in prompt
+    assert "`ask_answered`의 시각이 그 ask의 `ask_routed` 시각과" in prompt
+    assert "peer-review@<N>`" in prompt
+    # the responder writes the board line BEFORE answering — the earlier
+    # "first line after the answer" had the direction backwards
+    assert "응답자는 보드에 **먼저 쓰고 답한다**" in prompt
+    assert "「답 이후 첫 줄」은 방향이" in prompt
+    # and the line's @tip is not the pairing key, with the reason given
+    assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in prompt
+    assert "저널에 대조할 tip 값이 없어서" in prompt
+    # the `resolves` fact the first implementation got wrong: it is top-level
+    assert "`resolves`는 최상위에" in prompt
+    assert "그룹마다의 `resolves` 필드는 없다" in prompt
+    # the parent-worker anchor — a parentless stack makes the first group the
+    # leader (a sibling), which is why the first-group reading looked correct
+    assert "부모 워커가 답하는 편성에서 첫 그룹은 worker(ancestor)이고" in prompt
+    # the prefix survives only as the fallback, both directions stated
+    assert "**줄 머리 접두가 마지막 대체다**" in prompt
+    assert "`PR-REVIEW #<번호>`로 시작하면 제동이고" in prompt
+    assert "주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고" in prompt
+    assert "주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다" in prompt
+    # the three measured lines, their measured author
+    assert "claunch-o8pb7" in prompt and "claunch-u9m6z" in prompt and "claunch-75kfl" in prompt
+    assert "셋 다 상위(s29)가 쓴 줄이다" in prompt
+    # the ordering claim survives the rewrite
+    assert "이 규칙이 자리 규칙보다 앞선다" in prompt
+    # the form that *was* caught by the prefix still sits in the canon
     assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in prompt
 
 

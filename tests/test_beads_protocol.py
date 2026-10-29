@@ -839,24 +839,109 @@ def test_the_v1_gate_pins_the_narrowed_tip_reading(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
-def test_the_v1_gate_reads_an_uppers_pr_review_line_as_a_brake(layer):
-    """The tip-position rule alone does not separate the upper's brake from a
-    reviewer's verdict on this board. The measured line is
-    ``PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b:`` (claunch-75kfl.1) — the
-    hash is right after the marker idiom, so position rule (i) accepts it and
-    the leader's rejection is classified as 「재심 대기」(s597-rev·s1304,
-    claunch-eyz0s.2.2). The rule that separates them is about who wrote the
-    line, so it must sit in the canon *ahead of* the position rules, and the
-    measured form must be quoted there (port of the same v2 fix)."""
+def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
+    """The gate used to separate the upper's brake from a reviewer's verdict by
+    the line's *prefix* (``PR-REVIEW #<번호>``). Three measured lines written by
+    the same upper (s29) carry no prefix and were therefore read as reviewer
+    verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7),
+    ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z) and a trailing
+    ``@ b606bc15`` (claunch-75kfl). The ground is *who wrote the line*
+    (claunch-eyz0s.2.1.1).
+
+    The first implementation narrowed "upper" to the first
+    ``landing-review`` responder group and compared ``[sNNN]`` against the
+    roster's handle column. Both are wrong: ``resolves`` is a top-level
+    ``any(asks)``, the first group is the worker in a parent-worker
+    configuration (the leader is in none), and ``[sNNN]`` is a session name.
+    The default is therefore flipped — only the three review-verdict branches
+    are reviews; everything else is a brake; the prefix is the last fallback.
+    """
     path = (
         _bundled("improv-worker") if layer == "bundled"
         else PROJECT_OVERRIDES / "improv-worker.yaml"
     )
     text = " ".join(model.load(path).steps["landing"].select.prompt.split())
-    assert "**상위가 쓴 판정 줄은 tip 유무와 무관하게 상위의 제동이다.**" in text
-    assert "`PR-REVIEW #<번호>`로 시작하면" in text
-    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
+    # the flipped default
+    assert "기본값은 「제동」이고, 리뷰어만 뺀다" in text
+    # where the subject is read from, and that it is a session name
+    assert "`[sNNN] at <시각>` 꼴의 머리" in text
+    assert "그 `[sNNN]`은 **세션 이름**이다" in text
+    # the roster comparison is the third column
+    assert "첫 열(핸들)이 아니라 셋째 열의 세션 이름" in text
+    for pair in ("`s404-rev`의 세션은 `s573`", "`s511-rev`는 `s523`",
+                 "`s5874-indep-leader`는 `s5878`"):
+        assert pair in text, pair
+    # the three review-verdict branches, tested before the brake default
+    assert "리뷰 판정 셋 중 하나에" in text and "먼저 걸리면" in text
+    assert "(a) 그 세션의 role이 `reviewer`다" in text
+    assert "`peer-review` 질문에 **실제로 답한**" in text
+    assert "`groups[].asks`로는 갈리지 않는다" in text
+    assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가 들어" in text
+    assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in text
+    # the journal's `by` is a handle, so it takes the third-column mapping
+    assert "다만 그 `by`는 **핸들**이다" in text
+    assert "저널을 읽을 수 없으면 (b)는 서지 않는다" in text
+    # the roster query must include closed sessions
+    assert "**`--state all`로 읽는다**" in text
+    assert "`--state all`로도 그 세션이 안 나오면" in text
+    # (c) is a fallback only; a line form alone must not promote a brake
+    assert "는 **role을 읽지 못했을 때의 대체**이고" in text
+    assert "꼴만으로는 리뷰 판정이라 하지 않는다" in text
+    # a session absent from the roster is a brake, one way only
+    assert "**명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**" in text
+    assert "머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다" in text
+    # the prefix fallback must not flip the brake default either
+    assert "아니면 **여전히" in text and "제동이다**" in text
+    assert "머리가 없으면 셋 다 서지 않는다" in text
+    # own comments are neither: ordering keeps them out of both lists
+    assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in text
+    # everything else is a brake, including a session absent from the roster
+    assert "**그 밖의 전부 — 상위의 제동이다.**" in text
+    # "absent" means absent under `--state all`, the flag (a) names; that flag
+    # keeps closed sessions, so a finished reviewer is not absent
+    assert "**명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로" in text
+    assert "그 세션이 명부(`claunch mesh members <mesh> --state all`)에서" in text
+    # (b) is per line and per run, and compares against the line's author
+    assert "**줄 단위**다" in text
+    assert "그 답이 **이 줄**을 낳았다" in text
+    assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in text
+    assert "저널은 **런 전체**를 읽는다" in text
+    # the pairing value is the ask_opened..ask_answered window — ask_answered
+    # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev).
+    # The v1 names must be the ones the v1 engine emits: `ask_opened`, not
+    # `ask_routed`; `step`/`visit`, not `instance`; `by_session` is always
+    # there (s648-rev, confirmed in cflow/engine.py by s1389-rev).
+    assert "`ask_answered`에는" in text
+    assert "`ask_opened`와 `ask_answered`의 시각" in text
+    assert "`ask_answered`의 `at`이 그 ask의 `ask_opened` `at`과" in text
+    assert "`step`이 `peer-review`이며" in text
+    assert "`by_session`에 그대로 있다" in text
+    # the names the v1 engine does not emit appear only to be ruled out —
+    # the prose names them precisely so the next reader does not copy them
+    # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
+    assert "v1에는 `ask_routed` 이벤트가 없고" in text
+    assert "`instance`도 `channel`도 없다" in text
+    assert "응답자는 보드에 **먼저 쓰고 답한다**" in text
+    assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in text
+    # the line count is never pinned in the prose — the journal grows
+    assert "줄 수를 문면에 박지 않는다" in text
+    # the `resolves` fact the first implementation got wrong
+    assert "`resolves`는 최상위에" in text
+    assert "그룹마다의 `resolves` 필드는 없다" in text
+    # the parent-worker anchor
+    assert "부모 워커가 답하는 편성에서 첫 그룹은 worker(ancestor)이고" in text
+    # the prefix survives only as the fallback, both directions stated
+    assert "**줄 머리 접두가 마지막 대체다**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면 제동이고" in text
+    assert "주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고" in text
+    assert "주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다" in text
+    # the three measured lines and their measured author
+    assert "claunch-o8pb7" in text and "claunch-u9m6z" in text and "claunch-75kfl" in text
+    assert "셋 다 상위(s29)가 쓴 줄이다" in text
+    # the prefix case that *was* caught still sits there as the fallback example
     assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in text
+    # the ordering claim survives the rewrite
+    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
