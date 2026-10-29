@@ -8794,13 +8794,16 @@ function sessionPriceProvider(s) {
    prices neither that provider's model nor the same id under "*". Keyed by
    the id the transcript records (`context.model`), not the shortened display
    form — the table is written against what the harness actually answered
-   on. */
+   on. A row with no rates counts as absent (the daemon's rate_for reads it
+   the same way), so it neither hides the "*" row nor prices at 0. */
 function priceRateFor(model, provider) {
   const table = modelPrices && modelPrices.prices;
   if (!table || !model) return null;
   for (const p of [provider, priceAnyProvider()]) {
     const rates = p && table[p] && table[p][model];
-    if (rates && typeof rates === "object") return rates;
+    if (rates && typeof rates === "object" && Object.keys(rates).length) {
+      return rates;
+    }
   }
   return null;
 }

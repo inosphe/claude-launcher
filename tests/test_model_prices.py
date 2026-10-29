@@ -209,6 +209,33 @@ def test_rate_for_prefers_the_provider_row_then_any():
     assert model_prices.rate_for(None, "deepseek", "m") is None
 
 
+def test_rate_for_skips_a_row_with_no_rates():
+    # Only a hand-edited config holds one (clean drops it); it must not hide
+    # the "*" row or price the model at 0.
+    table = {"*": {"m": {"input": 1.0}}, "deepseek": {"m": {}}}
+    assert model_prices.rate_for(table, "deepseek", "m") == {"input": 1.0}
+    assert model_prices.rate_for({"*": {"m": {}}}, "deepseek", "m") is None
+
+
+def test_clean_drops_a_model_whose_rates_are_all_unset():
+    got = model_prices.clean({
+        "deepseek": {"m": {"cache_write": None}, "n": {"input": 1}},
+        "*": {"m": {}},
+    })
+    assert got == {"deepseek": {"n": {"input": 1.0}}}
+
+
+def test_normalize_block_row_wins_over_legacy_row_for_the_same_model():
+    # Both orders: the outcome must not depend on which key the file lists first.
+    legacy, block = {"input": 1.0}, {"input": 2.0}
+    assert model_prices.normalize({"m": legacy, "*": {"m": block}}) == {
+        "*": {"m": block}}
+    assert model_prices.normalize({"*": {"m": block}, "m": legacy}) == {
+        "*": {"m": block}}
+    assert model_prices.normalize({"m": legacy, "*": {"n": block}}) == {
+        "*": {"m": legacy, "n": block}}
+
+
 def test_profile_providers_follow_the_profile_selection(home):
     from claude_launcher import profile as profile_mod
 

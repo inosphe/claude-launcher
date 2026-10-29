@@ -137,6 +137,16 @@ check("a provider without a row for the model takes the * row",
       api.rateFor("claude-opus-5", "default"), RATES);
 check("no provider at all takes the * row",
       api.rateFor("claude-opus-5", ""), RATES);
+api.setPrices({
+  prices: { "*": { "claude-opus-5": RATES }, deepseek: { "claude-opus-5": {} } },
+  profiles: { ds4: "deepseek", sr: "default" }, any: "*", currency: "$",
+});
+check("a provider row with no rates does not hide the * row",
+      api.rateFor("claude-opus-5", "deepseek"), RATES);
+api.setPrices({
+  prices: { "*": { "claude-opus-5": RATES }, deepseek: { "claude-opus-5": DS } },
+  profiles: { ds4: "deepseek", sr: "default" }, any: "*", currency: "$",
+});
 check("a session is priced under the provider its profile resolves to",
       api.provider({ profile: "ds4:claude" }), "deepseek");
 check("a borrowing session is priced under its lender's provider",
@@ -230,7 +240,8 @@ function node(tag, cls, text) {
     kids: [],
     append(...cs) { cs.forEach((c) => this.kids.push(c)); },
     appendChild(c) { this.kids.push(c); return c; },
-    addEventListener() {},
+    // Listeners are kept so a check can press a button the card drew.
+    addEventListener(type, fn) { (this.on = this.on || {})[type] = fn; },
     setAttribute() {},
   };
 }
@@ -309,7 +320,39 @@ async function saveChecks() {
         card.sent.prices, { "*": { a: { input: 1 } } });
 }
 
-saveChecks().then(() => {
+/* ---- the add row: the picked provider is the tier the row lands under ---- */
+// Draws the card, fills the add row's provider select and model input, and
+// presses "Add model" — the path the Settings page takes to make a new row.
+function addThroughCard(provider, model) {
+  const drawnCard = card.card();
+  const [sel] = findAll(drawnCard, (n) => n.id === "mp-add-provider");
+  const [inp] = findAll(drawnCard, (n) => n.id === "mp-add-model");
+  const [btn] = findAll(drawnCard, (n) => n.textContent === "Add model");
+  sel.value = provider;
+  inp.value = model;
+  btn.on.click();
+}
+
+async function addRowChecks() {
+  card.load({ prices: {}, profiles: { ds4: "deepseek" }, any: "*",
+              currency: "$" });
+  addThroughCard("deepseek", "deepseek-v4-pro");
+  check("adding under deepseek makes a deepseek row",
+        Object.keys(card.draft().prices.deepseek || {}), ["deepseek-v4-pro"]);
+  check("adding under deepseek leaves * without that row",
+        (card.draft().prices["*"] || {})["deepseek-v4-pro"], undefined);
+  addThroughCard("*", "claude-opus-5");
+  check("adding under * makes a * row",
+        Object.keys(card.draft().prices["*"] || {}), ["claude-opus-5"]);
+  card.draft().prices.deepseek["deepseek-v4-pro"].input = "0.3";
+  card.draft().prices["*"]["claude-opus-5"].input = "15";
+  await card.save();
+  check("the added rows are saved under the provider they were added to",
+        card.sent.prices, { deepseek: { "deepseek-v4-pro": { input: 0.3 } },
+                            "*": { "claude-opus-5": { input: 15 } } });
+}
+
+saveChecks().then(addRowChecks).then(() => {
   if (failures) {
     console.error(`${failures} failure(s)`);
     process.exit(1);

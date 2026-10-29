@@ -111,7 +111,8 @@ def clean(raw: object) -> Table:
                     raise ValueError(f"price {rk!r} for {provider}/{model} must be a "
                                      "non-negative finite number")
                 row[rk] = v
-            out.setdefault(provider, {})[model.strip()] = row
+            if row:
+                out.setdefault(provider, {})[model.strip()] = row
     return {p: rows for p, rows in out.items() if rows}
 
 
@@ -119,15 +120,17 @@ def rate_for(prices: object, provider: str, model: str) -> Optional[Rates]:
     """The rates for ``model`` served by ``provider``, or None if unpriced.
 
     The provider's own row first, then the ``"*"`` row. ``prices`` may be the
-    stored table in either shape. None means "not priced" — callers show no
-    estimate rather than a zero one.
+    stored table in either shape. A row with no rates (only a hand-edited
+    config holds one — :func:`clean` drops it) counts as absent, so it does
+    not hide the ``"*"`` row or price a model at 0. None means "not priced"
+    — callers show no estimate rather than a zero one.
     """
     if not model:
         return None
     table = normalize(prices)
     for p in ((provider, ANY) if provider and provider != ANY else (ANY,)):
         rates = table.get(p, {}).get(model)
-        if isinstance(rates, dict):
+        if isinstance(rates, dict) and rates:
             return rates
     return None
 
