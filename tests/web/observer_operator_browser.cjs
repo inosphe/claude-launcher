@@ -8,6 +8,7 @@
    the dock's narrow column, a row press and 「← 목록」 moving between them, a
    message going to the thread on screen, 「+ 새 thread」 opening one with a
    title and an attached image, and the dispatch card kept in its thread.
+   The pane on screen scrolls inside the threads grid (claunch-vxep1).
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/observer_operator_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -277,7 +278,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 20);
     await page.click("text=이전 대화 5건 펼치기");
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 25);
-    assert.deepEqual(await innerScrollers(page), ["div.op-area"], "the expanded conversation scrolls inside the dock, nothing else does");
+    assert.deepEqual(await innerScrollers(page), ["div.op-threads-grid"], "the expanded conversation scrolls inside the threads grid, nothing else does");
     assert.match(await page.locator('.op-entry[data-entry="d1"]').innerText(), /→ s1: 테스트 결과를 보고하십시오/);
     assert.equal(await page.locator('.op-entry[data-entry="p19"]').evaluate(e => e.classList.contains("op-reply")), true);
     assert.equal(await page.locator('.op-entry[data-entry="p19"] a.op-ref').getAttribute("href"), "#/observer/session/s1");
@@ -405,18 +406,20 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await visible(".op-thread-list"), false);
     assert.equal(await page.locator("#observer-operators .op-thread-title").innerText(), "이전 대화");
     // The thread's head holds to the top of the conversation as it scrolls
-    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it.
+    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it. The dock's
+    // column is the narrow layout, so the grid is the scroller
+    // (claunch-vxep1).
     const pinnedHead = await page.evaluate(() => {
-      const area = document.querySelector("#observer-operators .op-area");
-      area.scrollTop = area.scrollHeight;
-      const box = area.getBoundingClientRect();
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      grid.scrollTop = grid.scrollHeight;
+      const box = grid.getBoundingClientRect();
       const headBox = document.querySelector("#observer-operators .op-thread-head");
       const head = headBox.getBoundingClientRect();
       const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
-      // The row covers the scroller's top padding too: a point just under the
-      // scroller's own top edge lands in the head, not in an entry.
+      // The row covers the scroller's top edge: a point just under it lands
+      // in the head, not in an entry.
       const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
-      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
+      return { scrolled: grid.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
     });
     assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the head covers the top of the scroller, padding included, and keeps 「← 목록」");
     await page.click("#observer-operators .op-thread-back");

@@ -417,18 +417,25 @@
    where the view is 640px wide or more; narrower, one at a time, and the
    list shows only when the reader asked for it (.op-show-list). */
 :is(#observer-operators, #opfab-view) .op-threads { container-type: inline-size; margin-top: 8px; }
-:is(#observer-operators, #opfab-view) .op-threads-grid { display: block; }
+:is(#observer-operators, #opfab-view) .op-threads-grid { display: block; --op-scroll-pad: 0px; }
 :is(#observer-operators, #opfab-view) .op-threads-grid > .op-thread-list { display: none; }
 :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
 :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-view { display: none; }
 @container (min-width: 640px) {
-  :is(#observer-operators, #opfab-view) .op-threads-grid { display: grid; grid-template-columns: minmax(180px, 32%) minmax(0, 1fr); gap: 12px; align-items: start; }
+  /* The row fills the grid's height (align-items: start used to size each
+     column to its content): both columns are scrollers of their own, so the
+     thread list holds while the conversation scrolls (claunch-vxep1). */
+  :is(#observer-operators, #opfab-view) .op-threads-grid { display: grid; grid-template-columns: minmax(180px, 32%) minmax(0, 1fr); gap: 12px; align-items: stretch; grid-template-rows: minmax(0, 1fr); }
   :is(#observer-operators, #opfab-view) .op-threads-grid > .op-thread-list,
   :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
   :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-view { display: block; }
   :is(#observer-operators, #opfab-view) .op-thread-back { display: none; }
+  /* Each column scrolls inside itself, so the thread head pins to the top of
+     its own column; --op-scroll-pad is 0 there is no padding to pull over. */
+  :is(#observer-operators, #opfab-view) .op-thread-list { overflow-y: auto; }
+  :is(#observer-operators, #opfab-view) .op-thread-view { overflow-y: auto; }
 }
-:is(#observer-operators, #opfab-view) .op-thread-list { flex-direction: column; gap: 6px; min-width: 0; }
+:is(#observer-operators, #opfab-view) .op-thread-list { flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
 :is(#observer-operators, #opfab-view) .op-thread-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 :is(#observer-operators, #opfab-view) .op-thread-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; min-height: 44px; padding: 6px 10px; text-align: left; border-radius: 8px; box-sizing: border-box; }
 :is(#observer-operators, #opfab-view) .op-thread-row[aria-current="true"] { background: #1c2d42; border-color: #3b7cb0; }
@@ -439,7 +446,11 @@
 :is(#observer-operators, #opfab-view) .op-thread-pending { flex: none; min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #9e6a03; color: #fff; }
 :is(#observer-operators, #opfab-view) .op-thread-time { flex: none; color: #8b949e; }
 :is(#observer-operators, #opfab-view) .op-thread-last { color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-:is(#observer-operators, #opfab-view) .op-thread-view { min-width: 0; }
+/* The conversation column is a scroller of its own where the two columns
+   show; the thread head pins to its top. Narrower, the grid is the one
+   scroller and holds the head the same way (--op-scroll-pad: 0 on the grid
+   — it has no padding to pull the row over). */
+:is(#observer-operators, #opfab-view) .op-thread-view { min-width: 0; min-height: 0; --op-scroll-pad: 0px; }
 /* The thread's head -- 「← 목록」, the title and 닫기 -- holds to the top of the
    conversation however far the reader has scrolled (claunch-1ruqi), the way
    the session line above it does. It keeps the surface behind it so entries
@@ -506,7 +517,14 @@
   #observer-view.dock-open > .observer-layout { display: grid; grid-template-columns: minmax(0,1fr) clamp(320px,34%,560px); }
   #observer-view.dock-open #observer-dock { align-self: start; position: sticky; top: 0; height: var(--observer-viewport,100vh); display: flex; flex-direction: column; min-width: 0; box-sizing: border-box; border-left: 1px solid #2a2e36; background: #161b22; }
   #observer-view.dock-open #observer-operators { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; padding: 0; border: 0; border-radius: 0; }
-  #observer-view.dock-open #observer-operators .op-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; --op-scroll-pad: 10px; }
+  #observer-view.dock-open #observer-operators .op-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; --op-scroll-pad: 10px; display: flex; flex-direction: column; }
+  /* The threads region takes the area's leftover height, so the grid and the
+     conversation column scroll inside themselves: the thread list holds and
+     the scrollbar belongs to the conversation (claunch-vxep1). The area keeps
+     its own overflow for the operator form, taller than the dock on a short
+     screen. */
+  #observer-view.dock-open #observer-operators .op-threads { flex: 1; min-height: 160px; display: flex; flex-direction: column; }
+  #observer-view.dock-open #observer-operators .op-threads-grid { flex: 1; min-height: 0; overflow-y: auto; }
 }
 @media(max-width:820px) {
   #observer-view.dock-open #observer-dock { order: -1; margin: 8px 12px 0; }

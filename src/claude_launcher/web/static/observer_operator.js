@@ -627,6 +627,20 @@ function render() {
   // stays at the end, so a new entry in the view's own conversation shows.
   const page = opts.scroller?.(), top = page?.scrollTop;
   const atEnd = !!page && page.scrollHeight - page.scrollTop - page.clientHeight < 24;
+  /* Where the view's height is bounded (the page's dock on a wide screen, the
+     floating dialog) the conversation — or the one pane showing in the narrow
+     layout — scrolls inside itself (claunch-vxep1), so a rebuild replaces
+     those nodes too and their scroll with them. Keep each one's place the
+     way the page scroller is kept: the conversation jumps to its end on
+     news, the list only holds its place. A scroller that was not there
+     before (the first draw) shows its end, the way the empty page scroller
+     did. */
+  const innerKeep = new Map();
+  for(const el of area.querySelectorAll(".op-thread-view, .op-thread-list, .op-threads-grid")) {
+    if(!/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+    const key = el.classList.contains("op-thread-view") ? "view" : el.classList.contains("op-thread-list") ? "list" : "grid";
+    innerKeep.set(key, {top: el.scrollTop, atEnd: el.scrollHeight - el.scrollTop - el.clientHeight < 24});
+  }
   // A field being typed in keeps the caret. Not every redraw waits for the
   // reader (openForm's, once the projects and profiles arrive, does not), and
   // one that replaced the focused field dropped what came after: a name typed
@@ -645,6 +659,12 @@ function render() {
   }
   sessionBar(op);
   if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
+  for(const [key, kept] of innerKeep) {
+    const el = area.querySelector(key === "view" ? ".op-thread-view" : key === "list" ? ".op-thread-list" : ".op-threads-grid");
+    if(!el || !/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+    const jump = key !== "list" && opts.composer && (kept ? kept.atEnd : true);
+    el.scrollTop = jump ? el.scrollHeight : kept ? kept.top : 0;
+  }
   if(input) input.send.disabled = busy || !op;
 }
 /* The press that was held back: a redraw waits while a pointer is down, and
