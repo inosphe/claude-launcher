@@ -277,6 +277,14 @@ def test_the_opening_attachments_are_listed_and_served(home, tmp_path):
             resp = await client.get(f"/api/sessions/u5/opening/{path}", headers=BEARER)
             assert resp.status == 404, (path, await resp.text())
 
+        # An image on disk that this opening does not name (one an earlier
+        # same-name session left) is not served (s648-rev @ cdc3483a).
+        stray = "02-" + "f" * 20 + ".png"
+        (opening_images.session_dir("u5") / stray).write_bytes(PNG)
+        assert opening_images.claimed_path("u5", stray) is not None
+        resp = await client.get(f"/api/sessions/u5/opening/images/{stray}", headers=BEARER)
+        assert resp.status == 404, await resp.text()
+
         # Once the file is gone the list says so rather than offering a link.
         (uploads.session_dir("u5") / a / "frame.utrace").unlink()
         doc = await (await client.get("/api/sessions/u5/opening/attachments", headers=BEARER)).json()
