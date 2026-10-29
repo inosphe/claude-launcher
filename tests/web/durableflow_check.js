@@ -618,6 +618,58 @@ console.log("durableflow_check: plan ok");
   assert.ok(xb - xa < 1600 * 0.85, "B is not pushed to the right edge by the gap");
   assert.ok(xa > 0 && xb > xa);
 }
+// A later run that reuses a unit id -- B approved again for the same tuple,
+// or a resume after an interrupted end -- draws that unit again in its own
+// band, and its sequence lane does not reach across the gap (s157-rev,
+// s215-rev on claunch-papez).
+{
+  const T = (m) => `2026-10-29T${m}:00.000Z`;
+  const runB = (h) => [
+    { at: T(h + ":00"), event: "session_start", attempt: 1 },
+    { at: T(h + ":00"), event: "run_start", stage: "B" },
+    { at: T(h + ":01"), event: "unit", unit: "t1", state: "start" },
+    { at: T(h + ":01"), event: "ask_start", key: "t1:write", unit: "t1" },
+    { at: T(h + ":04"), event: "ask", key: "t1:write", unit: "t1", usage: { totalTokens: 100 } },
+    { at: T(h + ":05"), event: "unit", unit: "t1", state: "done" },
+    { at: T(h + ":05"), event: "run_end", state: "done" },
+  ];
+  const BB = [...runB("00"), ...runB("01")];
+  const m = DF.model(BB, false);
+  const t1 = m.nodes.filter((n) => n.unit === "t1");
+  assert.deepStrictEqual(plain(t1.map((n) => [n.id, n.seg, n.count, n.status])),
+    [["unit:t1", 0, 1, "ok"], ["unit:t1#2", 1, 1, "ok"]], "each run keeps its own t1");
+  assert.deepStrictEqual(plain(m.segs.map((g) => [g.label, g.from <= g.to])), [["B 단계", true], ["B 단계", true]]);
+  assert.ok(t1[1].col > m.segs[0].to, "the second t1 sits in the second band");
+  assert.strictEqual(m.units, 2);
+  assert.strictEqual(m.running, 0);
+  const s = DF.sequence(BB, false, Date.parse(T("02:00")));
+  const lanes = s.lanes.filter((l) => l.unit === "t1");
+  assert.deepStrictEqual(plain(lanes.map((l) => [l.id, l.start, l.end, l.asks.length])), [
+    ["u:t1", Date.parse(T("00:01")), Date.parse(T("00:05")), 1],
+    ["u:t1#2", Date.parse(T("01:01")), Date.parse(T("01:05")), 1]], "one lane per run, each within its run");
+  stable(BB, "same unit twice");
+
+  // An interrupted run resumed: the units finished on the second attempt
+  // land in the second run's band, not on the first attempt's nodes.
+  const IR = [
+    { at: T("00:00"), event: "session_start", attempt: 1 },
+    { at: T("00:00"), event: "run_start" },
+    { at: T("00:01"), event: "unit", unit: "t1", state: "start" },
+    { at: T("00:02"), event: "run_end", state: "interrupted", error: "killed" },
+    { at: T("00:10"), event: "session_start", attempt: 2 },
+    { at: T("00:10"), event: "run_start" },
+    { at: T("00:11"), event: "unit", unit: "t1", state: "start" },
+    { at: T("00:12"), event: "unit", unit: "t1", state: "done" },
+    { at: T("00:13"), event: "run_end", state: "done" },
+  ];
+  const mi = DF.model(IR, false);
+  assert.deepStrictEqual(plain(mi.nodes.filter((n) => n.unit === "t1").map((n) => [n.seg, n.status])),
+    [[0, "run"], [1, "ok"]], "the resumed run's t1 is its own, done; the first attempt's stays as it was left");
+  const si = DF.sequence(IR, false, Date.parse(T("00:20")));
+  assert.deepStrictEqual(plain(si.lanes.filter((l) => l.unit === "t1").map((l) => [l.start, l.end])),
+    [[Date.parse(T("00:01")), Date.parse(T("00:02"))], [Date.parse(T("00:11")), Date.parse(T("00:12"))]]);
+  stable(IR, "resumed run");
+}
 console.log("durableflow_check: runs ok");
 
 // (f) edges (claunch-nn4fx): only the transitive reduction of ``after`` is

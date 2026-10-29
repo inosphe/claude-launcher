@@ -273,8 +273,17 @@
     const byId = new Map();
     const seen = new Map(); // ask key -> times drawn (a resumed run asks again)
     let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
-    const units = new Map(); // unit id -> its node
-    const open = new Map();  // ask key -> [unit id | null] of starts not yet answered
+    // A later run may reuse a unit id (gds6 scenarios: B approved again for
+    // the same tuple); its unit is a node of its own in its own block. So
+    // ``units`` holds the current run's units, ``earlier`` the newest node
+    // of each id from the runs before, which ``after`` and a unit's history
+    // event (recheck) still reach.
+    const units = new Map(); // unit id -> its node, this run
+    const earlier = new Map(); // unit id -> its node in the newest earlier run
+    const groups = new Map(); // sim2 stage group -> its node, this run
+    let unitCount = 0;
+    const unitOf = (id) => units.get(id) || earlier.get(id);
+    const open = new Map();  // ask key -> [unit node | null] of starts not yet answered
     const keyUnit = new Map(); // ask key -> the unit its last ask_start named
     let running = 0, peak = 0, starts = 0;
     let plan = null;         // unit ids of the latest plan event
@@ -310,7 +319,7 @@
     }
     // The newest node drawn for an ask key (or the newest whose key matches).
     function find(test) {
-      for (let i = nodes.length - 1; i >= 0; i--) {
+      for (let i = nodes.length - 1; i >= 0 && nodes[i].seg === seg; i--) {
         if (nodes[i].key !== null && test(nodes[i].key)) return nodes[i];
       }
       return null;
@@ -375,12 +384,13 @@
     function unitNode(id, ev) {
       let node = units.get(id);
       if (node) return node;
-      const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => units.has(a));
-      const depth = after.filter((a) => units.get(a).seg === seg)
-        .reduce((d, a) => Math.max(d, units.get(a).depth + 1), 0);
-      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, label: id, count: 0, tok: 0,
+      const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => unitOf(a));
+      const from = after.map(unitOf);
+      const depth = from.filter((u) => u.seg === seg).reduce((d, u) => Math.max(d, u.depth + 1), 0);
+      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, from, label: id, count: 0, tok: 0,
                                                   running: 0, state: "start", status: "run", note: "" }, true);
       units.set(id, node);
+      unitCount += 1;
       return node;
     }
     // A planned unit that has not started yet becomes the unit itself.
@@ -439,7 +449,7 @@
         for (const u of pend) {
           if (unit !== undefined && u !== unit) { keep.push(u); continue; }
           running -= 1;
-          if (u !== null) { units.get(u).running -= 1; unitSub(units.get(u)); }
+          if (u !== null) { u.running -= 1; unitSub(u); }
         }
         if (keep.length) open.set(key, keep); else open.delete(key);
       }
@@ -460,7 +470,13 @@
       const when = at ? clock(at) : "";
       const run = split.step(ev);
       // A later run reopens the log: the earlier one's end is not the log's.
-      if (run && run.n !== seg) { seg = run.n; ended = null; }
+      if (run && run.n !== seg) {
+        seg = run.n;
+        ended = null;
+        for (const [id, node] of units) earlier.set(id, node);
+        units.clear();
+        groups.clear();
+      }
       switch (ev.event) {
         case "session_start": {
           // attempt/attemptMax (gds6-gjkd.9): the launcher's retry count.
@@ -495,7 +511,7 @@
           const state = UNIT_STATUS[ev.state] ? ev.state : "start";
           node.state = state;
           node.status = node.cut && state === "done" ? "warn" : UNIT_STATUS[state];
-          if (state !== "start") closeOpen(id);
+          if (state !== "start") closeOpen(node);
           if (ev.label) node.label = String(ev.label);
           if (ev.note) node.note = String(ev.note);
           if (state === "start" && ev.phase) hint(node, ev.phase);
@@ -511,14 +527,14 @@
         case "ask_start": {
           const key = String(ev.key || "");
           const unit = ev.unit != null ? String(ev.unit) : null;
+          const node = unit !== null ? unitNode(unit, null) : null;
           if (!open.has(key)) open.set(key, []);
-          open.get(key).push(unit);
+          open.get(key).push(node);
           if (unit !== null) keyUnit.set(key, unit);
           starts += 1;
           running += 1;
           peak = Math.max(peak, running);
-          if (unit !== null) {
-            const node = unitNode(unit, null);
+          if (node) {
             wake(node);
             node.running += 1;
             unitSub(node);
@@ -530,19 +546,19 @@
           let unit = ev.unit != null ? String(ev.unit) : null;
           const failed = ev.error ? String(ev.error).split("\n")[0] : "";
           if (unit === null && keyUnit.has(String(ev.key || ""))) unit = keyUnit.get(String(ev.key || ""));
+          let started = null;
           if (pend && pend.length) {
             const from = pend.shift();
             if (!pend.length) open.delete(String(ev.key || ""));
             running -= 1;
             if (from !== null) {
-              const node = units.get(from);
-              node.running -= 1;
-              unitSub(node);
+              from.running -= 1;
+              unitSub(from);
             }
-            if (unit === null) unit = from;
+            if (unit === null) started = from;
           }
-          if (unit !== null) {
-            const node = unitNode(unit, null);
+          if (unit !== null || started) {
+            const node = started || unitNode(unit, null);
             wake(node);
             const u = ev.usage || {};
             tokensTotal += Number(u.totalTokens) || 0;
@@ -563,9 +579,10 @@
             const u = ev.usage || {};
             tokensTotal += Number(u.totalTokens) || 0;
             asks += 1;
-            let node = byId.get("grp:" + g.group);
+            let node = groups.get(g.group);
             if (!node) {
               node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done", grouped: true }, true);
+              groups.set(g.group, node);
             }
             node.count += 1;
             node.tok += Number(u.totalTokens) || 0;
@@ -722,7 +739,7 @@
         default: {
           // An event about a unit already drawn (gds6's ``recheck``) is a
           // line of that unit's history, not a node of its own.
-          const unit = ev.unit != null ? units.get(String(ev.unit)) : null;
+          const unit = ev.unit != null ? unitOf(String(ev.unit)) : null;
           if (unit) {
             unit.tip.push(when + " " + JSON.stringify(ev).slice(0, 200));
             break;
@@ -764,10 +781,9 @@
       if (set) return set;
       set = new Set();
       reach.set(node, set);
-      for (const a of node.after) {
-        const u = units.get(a);
+      for (const u of node.from) {
         if (u.state === "gone") continue;
-        set.add(a);
+        set.add(u);
         for (const x of behind(u)) set.add(x);
       }
       return set;
@@ -781,11 +797,10 @@
         continue;
       }
       if (to.unit !== undefined) {
-        for (const a of to.after) {
-          const from = units.get(a);
+        for (const from of to.from) {
           const plan = from.state === "plan" || to.state === "plan";
           const gone = from.state === "gone" || to.state === "gone";
-          const reduced = to.after.some((b) => b !== a && units.get(b).state !== "gone" && behind(units.get(b)).has(a));
+          const reduced = to.from.some((b) => b !== from && b.state !== "gone" && behind(b).has(from));
           // A unit of an earlier run: one bus per unit across the whole
           // next run would bury it. The runs' own chain joins them, and
           // the unit's tip keeps the list.
@@ -808,7 +823,7 @@
       edges.push({ id: "live-edge", from: last, to: pending });
     }
     // done/total over the latest plan's units.
-    const planned = plan && { total: plan.length, done: plan.filter((id) => units.get(id).state === "done").length };
+    const planned = plan && { total: plan.length, done: plan.filter((id) => unitOf(id).state === "done").length };
     // The log's runs as column ranges, when they are drawn apart.
     const segs = split.named() ? split.runs.map((r) => ({
       n: r.n, label: split.label(r), at: r.at,
@@ -816,7 +831,7 @@
       to: cols.length - 1 - [...cols].reverse().findIndex((c) => c.seg === r.n),
     })).filter((s) => s.from >= 0) : [];
     return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt, segs,
-             count: (events || []).length, running, peak, starts, units: units.size, plan: planned };
+             count: (events || []).length, running, peak, starts, units: unitCount, plan: planned };
   }
 
   /* The state a unit's last event names, as a class the view paints. */
@@ -843,8 +858,10 @@
       const t = Date.parse((ev && ev.at) || "");
       return Number.isFinite(t) ? t : null;
     };
+    // byUnit/byGroup hold the current run's lanes: a later run that reuses a
+    // unit id or a stage gets a lane of its own (the tree's ``units`` rule).
     const lanes = [], byUnit = new Map(), byGroup = new Map(), open = new Map();
-    let t0 = null, t1 = null, no = 0, asks = 0, endedAt = null;
+    let t0 = null, t1 = null, no = 0, asks = 0, endedAt = null, runNo = 0;
     // Launcher attempts, as in the tree: an attempt that failed before its
     // first model call is a lane of its own, and a run of them is one lane
     // with an interval per attempt unless the reader opened it. ``work``
@@ -893,8 +910,14 @@
       if (t0 === null || t < t0) t0 = t;
       if (t1 === null || t > t1) t1 = t;
     };
-    function addLane(id, start, fields) {
-      const lane = { id, start, end: null, state: "run", asks: [], order: no++, ...fields };
+    // A lane id is kept for good: a later run's lane for the same unit or
+    // stage takes the next free one, as the tree's node ids do.
+    const laneIds = new Set();
+    function addLane(base, start, fields) {
+      let id = base, n = 1;
+      while (laneIds.has(id)) id = base + "#" + (++n);
+      laneIds.add(id);
+      const lane = { id, start, end: null, state: "run", asks: [], order: no++, run: runNo, ...fields };
       lanes.push(lane);
       touch(start);
       return lane;
@@ -952,6 +975,7 @@
       const when = atOf(ev);
       touch(when);
       const run = split.step(ev);
+      if (run && run.n !== runNo) { runNo = run.n; byUnit.clear(); byGroup.clear(); }
       if (run && when !== null) {
         const sp = spans[run.n] || (spans[run.n] = { t0: when, t1: when });
         if (when < sp.t0) sp.t0 = when;
@@ -1064,6 +1088,11 @@
     }
     // A run that ended closes what was still open at its end; a live one
     // leaves it open, and the view draws it out to now.
+    // A lane of an earlier run still open closes where that run's events
+    // stop, not across the gap into the next one.
+    for (const lane of lanes) {
+      if (lane.end === null && lane.run !== runNo && spans[lane.run]) lane.end = spans[lane.run].t1;
+    }
     if (endedAt !== null) for (const lane of lanes) if (lane.end === null) lane.end = endedAt;
     for (const lane of lanes) {
       for (const a of lane.asks) if (a.end === null) a.end = lane.end;
