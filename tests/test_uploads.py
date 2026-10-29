@@ -210,6 +210,73 @@ def test_the_session_line_upload_goes_straight_into_the_session(home, tmp_path):
     _run(body)
 
 
+# -- the detail panel's Opening task section (claunch-5lro4) ----------------
+
+
+PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
+
+
+def test_the_opening_attachments_are_listed_and_served(home, tmp_path):
+    from claude_launcher.daemon import opening_images
+
+    async def body(client, mgr):
+        a = (await (await _upload(client, name="frame.utrace")).json())["id"]
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "u5", "profile": "py", "cwd": str(tmp_path),
+            "task": "find the slow frame", "beads": False, "opening_files": [a],
+        })
+        assert resp.status == 201, await resp.text()
+        # An image claimed the way a create with opening_images claims it;
+        # the paste route that hands it to the harness is not this test's.
+        image = opening_images.claim([opening_images.stage([PNG], "image/png")], "u5")[0].path.name
+        # A file sent later from the session line lands in the same folder
+        # and is not the opening's.
+        later = await (await client.post("/api/sessions/u5/uploads", params={"name": "later.txt"},
+                                          data=b"later", headers=BEARER)).json()
+
+        resp = await client.get("/api/sessions/u5/opening/attachments", headers=BEARER)
+        doc = await resp.json()
+        assert resp.status == 200, doc
+        assert doc["images"] == [{"name": image, "type": "image/png"}]
+        assert doc["files"] == [{"id": a, "name": "frame.utrace", "bytes": len(TRACE)}]
+
+        resp = await client.get(f"/api/sessions/u5/opening/images/{image}", headers=BEARER)
+        assert resp.status == 200 and await resp.read() == PNG
+        assert resp.headers["Content-Type"] == "image/png"
+
+        resp = await client.get(f"/api/sessions/u5/opening/files/{a}/frame.utrace", headers=BEARER)
+        assert resp.status == 200 and await resp.read() == TRACE
+        assert "attachment" in resp.headers["Content-Disposition"]
+
+        # Not the opening's, not a name this module writes, not there.
+        for path in (f"files/{later['id']}/later.txt", f"files/{a}/other.utrace",
+                     "images/..%2Fopening.json", "images/01-" + "0" * 20 + ".png"):
+            resp = await client.get(f"/api/sessions/u5/opening/{path}", headers=BEARER)
+            assert resp.status == 404, (path, await resp.text())
+
+        # Once the file is gone the list says so rather than offering a link.
+        (uploads.session_dir("u5") / a / "frame.utrace").unlink()
+        doc = await (await client.get("/api/sessions/u5/opening/attachments", headers=BEARER)).json()
+        assert doc["files"][0]["missing"] is True
+
+        resp = await client.get("/api/sessions/ghost/opening/attachments", headers=BEARER)
+        assert resp.status == 400
+
+    _run(body)
+
+
+def test_an_opening_without_attachments_lists_none(home, tmp_path):
+    async def body(client, mgr):
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "u6", "profile": "py", "cwd": str(tmp_path), "task": "look", "beads": False,
+        })
+        assert resp.status == 201, await resp.text()
+        doc = await (await client.get("/api/sessions/u6/opening/attachments", headers=BEARER)).json()
+        assert doc["images"] == [] and doc["files"] == []
+
+    _run(body)
+
+
 # -- threads ----------------------------------------------------------------
 
 

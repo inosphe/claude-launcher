@@ -54,6 +54,7 @@ function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), title: "", listeners: {},
     appendChild(c) { this.kids.push(c); return c; },
+    append(...cs) { this.kids.push(...cs); },
     addEventListener(t, fn) { this.listeners[t] = fn; },
     click() { if (this.listeners.click) this.listeners.click(); },
     get textContent() { return this.text; },
@@ -86,12 +87,28 @@ let redraws = 0;
    what proves the call is guarded by the session name: a nameless row gets
    no marker here. */
 function sessOpeningActionsStub() { return el("div", "sess-opening-actions"); }
+/* The attachments list asks the daemon once per session. `answers` is what
+   the stub daemon says per session name; `asked` records each request. */
+const answers = {};
+const asked = [];
+function api(path) {
+  asked.push(path);
+  const name = decodeURIComponent(path.split("/")[3]);
+  const doc = answers[name];
+  return Promise.resolve(doc === undefined
+    ? { ok: false, json: () => Promise.resolve({}) }
+    : { ok: true, json: () => Promise.resolve(doc) });
+}
+const url = (path) => "/base/" + path;
 new Function("exports", "document", "el", "refreshSession", "sessOpeningActions",
-  slice("taskIsLong") + slice("sessTask") + `
+  "api", "url",
+  slice("taskIsLong") + slice("sessTask") + slice("sessOpeningAttachments") +
+  slice("uploadSize") + `
 const sessTaskOpen = new Set();
+const sessOpeningAttach = new Map();
 Object.assign(exports, {
-  task: sessTask, long: taskIsLong, open: sessTaskOpen,
-});`)(ctx, document, el, () => { redraws++; }, sessOpeningActionsStub);
+  task: sessTask, long: taskIsLong, open: sessTaskOpen, attach: sessOpeningAttach,
+});`)(ctx, document, el, () => { redraws++; }, sessOpeningActionsStub, api, url);
 
 let failures = 0;
 function check(what, got, want) {
@@ -200,6 +217,59 @@ check("...as the next rebuild draws",
       ctx.task({ name: "s209", task: LONG })
          .find("sess-task-text")[0].classes.has("clipped"), true);
 
+/* ---- what the opening carried besides its text (claunch-5lro4) -------- */
+/* Asked once per session, held outside the panel (the 2s rebuild would
+   otherwise ask every poll), drawn on the redraw the answer triggers. */
+async function attachments() {
+  answers.s300 = {
+    images: [{ name: "01-" + "a".repeat(20) + ".png", type: "image/png" }],
+    files: [{ id: "b".repeat(20), name: "frame trace.utrace", bytes: 2048 },
+            { id: "c".repeat(20), name: "gone.json", bytes: 5, missing: true }],
+  };
+  answers.s301 = { images: [], files: [] };
+  // The sessions drawn above asked too; let their answers land first.
+  await new Promise((r) => setTimeout(r, 0));
+  const drawn = redraws;
+  box = ctx.task({ name: "s300", task: SHORT });
+  check("the first draw asks the daemon", asked.filter((a) => a.includes("s300")),
+        ["/api/sessions/s300/opening/attachments"]);
+  check("...and draws nothing while it waits", box.find("sess-task-attach").length, 0);
+  await new Promise((r) => setTimeout(r, 0));
+  check("the answer asks for a redraw", redraws - drawn, 1);
+  box = ctx.task({ name: "s300", task: SHORT });
+  check("a rebuild does not ask again", asked.filter((a) => a.includes("s300")).length, 1);
+  const att = box.find("sess-task-attach");
+  check("the attachments are drawn", att.length, 1);
+  check("under the task text, ahead of the opening buttons",
+        box.kids.indexOf(att[0]) > box.kids.indexOf(box.find("sess-task-text")[0]) &&
+        box.kids.indexOf(att[0]) < box.kids.indexOf(box.find("sess-opening-actions")[0]), true);
+  const img = box.find("sess-task-image")[0];
+  const src = "/base/api/sessions/s300/opening/images/01-" + "a".repeat(20) + ".png";
+  check("an image is a thumbnail", img.kids[0].tag === "img" && img.kids[0].src, src);
+  check("...that opens full size", img.href, src);
+  const files = box.find("sess-task-file");
+  check("each file is listed", files.length, 2);
+  check("a file is a download link with its size",
+        [files[0].kids[0].tag, files[0].kids[0].href, files[0].words().includes("2.0 KiB")],
+        ["a", "/base/api/sessions/s300/opening/files/" + "b".repeat(20) + "/frame%20trace.utrace", true]);
+  check("a file no longer on disk is named, not linked",
+        [files[1].all().some((n) => n.tag === "a"), files[1].words().includes("no longer on disk")],
+        [false, true]);
+
+  ctx.task({ name: "s301", task: SHORT });
+  ctx.task({ name: "s302", task: SHORT });
+  await new Promise((r) => setTimeout(r, 0));
+  check("an opening without attachments draws nothing",
+        ctx.task({ name: "s301", task: SHORT }).find("sess-task-attach").length, 0);
+  check("nor does one the daemon could not answer for",
+        ctx.task({ name: "s302", task: SHORT }).find("sess-task-attach").length, 0);
+  check("an empty task still shows what the opening carried",
+        ctx.task({ name: "s300" }).find("sess-task-attach").length, 1);
+  check("a nameless row asks nothing", (() => {
+    const n = asked.length; ctx.task({ task: SHORT }); return asked.length - n;
+  })(), 0);
+}
+
 /* ---- where it sits in the panel ---------------------------------------- */
 /* Source order, for the reason in this file's header: renderSession's only
    harness stubs this section out, so nothing else pins that the call is
@@ -212,5 +282,7 @@ check("after the facts list", body.indexOf("appendChild(dl)") < body.indexOf("se
 check("and before the briefing that summarises it",
       body.indexOf("sessTask(s)") < body.indexOf("sessBriefSection("), true);
 
-if (failures) process.exit(1);
-console.log("sesstask_check ok");
+attachments().then(() => {
+  if (failures) process.exit(1);
+  console.log("sesstask_check ok");
+});

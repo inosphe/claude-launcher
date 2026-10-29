@@ -4395,6 +4395,16 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   mask-image: linear-gradient(#000 8.5em, transparent);
 }
 .sess-task-more { margin: 8px 0 0; }
+/* What the opening carried besides its text: image thumbnails in a wrapping
+   row (each opens full size), then the uploaded files as download links. */
+.sess-task-attach { margin-top: 8px; }
+.sess-task-images { display: flex; flex-wrap: wrap; gap: 6px; }
+.sess-task-image img {
+  display: block; max-width: 160px; max-height: 120px; border-radius: 4px;
+  border: 1px solid #30363d; object-fit: cover;
+}
+.sess-task-files { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
+.sess-task-file { overflow-wrap: anywhere; }
 /* Re-inject / Copy, under the task they hand over: one row of buttons and the
    outcome line beneath them. The line is the whole receipt — which text went
    out (the record or a reconstruction), how much of it, and what went wrong

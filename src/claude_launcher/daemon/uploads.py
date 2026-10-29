@@ -270,6 +270,15 @@ def thread_file(file_id: str, name: str) -> Optional[Path]:
     return path if path.is_file() else None
 
 
+def session_file(session: str, file_id: str, name: str) -> Optional[Path]:
+    """File ``file_id``/``name`` in session ``session``'s uploads, or None
+    when the pair is not one this module writes or the file is gone."""
+    if not _ID.match(str(file_id or "")) or safe_name(name) != name:
+        return None
+    path = session_dir(session) / file_id / name
+    return path if path.is_file() else None
+
+
 def sweep_thread_files(now: Optional[float] = None) -> List[str]:
     """Remove thread files older than :data:`THREAD_TTL_SECONDS`; their ids."""
     return _sweep(thread_dir(), THREAD_TTL_SECONDS, time.time() if now is None else now)

@@ -113,12 +113,15 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "navigator", "confirm", "sessOpeningNote",
   "sessOpeningBusy", "sessTaskOpen", "refreshSession",
+  // The attachments under the task are sesstask_check's subject; here the
+  // opening carried none, so the section asks the daemon nothing extra.
+  "sessOpeningAttachments",
   slice("openingSourceWord") + slice("sessOpeningActions") +
   slice("taskIsLong") + slice("sessTask") + `
 Object.assign(exports, { actions: sessOpeningActions, word: openingSourceWord,
                          task: sessTask });`
 )(ctx, document, el, api, navigator, confirm, sessOpeningNote, sessOpeningBusy,
-  sessTaskOpen, () => {});
+  sessTaskOpen, () => {}, () => null);
 
 let failures = 0;
 function check(what, got, want) {

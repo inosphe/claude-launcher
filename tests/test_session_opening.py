@@ -100,6 +100,20 @@ def test_the_record_is_the_text_that_was_handed_over(home):
     assert view["text"] == block
 
 
+def test_the_record_names_the_files_the_opening_claimed(home):
+    rec = {"id": "a" * 20, "name": "frame.utrace", "bytes": 12}
+    session_opening.record("w1", "look\n[claunch attachment] ...", files=[rec])
+    assert session_opening.read("w1")["files"] == [rec]
+    # The file is not on disk here, and the list says so.
+    assert session_opening.attachments("w1") == {
+        "images": [], "files": [{**rec, "missing": True}]}
+
+
+def test_a_session_without_a_record_lists_no_files(home):
+    # Its uploads folder cannot tell an opening's file from a later one.
+    assert session_opening.attachments("w1") == {"images": [], "files": []}
+
+
 def test_an_empty_opening_is_not_recorded(home):
     assert session_opening.record("w1", "   \n") is False
     assert session_opening.read("w1") is None

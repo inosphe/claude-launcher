@@ -30,7 +30,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from . import paths
 
@@ -55,6 +55,9 @@ MAX_IMAGES = 10
 STAGE_TTL_SECONDS = 24 * 3600
 
 _ID = re.compile(r"^[0-9a-f]{20}(\.(png|jpg|gif|webp))$")
+
+#: The name :func:`claim` gives an image in the session's folder.
+_CLAIMED = re.compile(r"^\d{2}-[0-9a-f]{20}\.(png|jpg|gif|webp)$")
 
 
 class OpeningImageError(ValueError):
@@ -144,3 +147,29 @@ def claim(ids: List[str], name: str) -> List[Image]:
         (stage_dir() / image_id).replace(target)
         out.append(Image(target, _EXT_TYPES[ext]))
     return out
+
+
+def claimed(name: str) -> List[str]:
+    """The images session ``name``'s opening carried, by file name, in the
+    order they went in. Only :func:`claim` writes that folder, so what is in
+    it is the opening's and nothing else's."""
+    folder = session_dir(name)
+    try:
+        found = [p.name for p in folder.iterdir() if p.is_file() and _CLAIMED.match(p.name)]
+    except OSError:
+        return []
+    return sorted(found)
+
+
+def claimed_path(name: str, image: str) -> Optional[Path]:
+    """Claimed image ``image`` of session ``name``, or None when the name is
+    not one :func:`claim` writes or the file is gone."""
+    if not _CLAIMED.match(str(image or "")):
+        return None
+    path = session_dir(name) / image
+    return path if path.is_file() else None
+
+
+def media_type(image: str) -> str:
+    """The media type of a stored image, from its extension."""
+    return _EXT_TYPES.get(Path(image).suffix, "application/octet-stream")
