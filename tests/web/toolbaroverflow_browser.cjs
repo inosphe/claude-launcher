@@ -149,7 +149,8 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     // Every width must be one position on it: the controls that are glyphs
     // or in the menu are a prefix of it (controls that never iconify, their
     // glyph being no narrower than their label, left out), and the controls
-    // in the menu are a prefix of it without the details lane.
+    // in the menu are a prefix of it without the details lane and the
+    // controls pinned to the row.
     const ORDER = [
       "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
       "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
@@ -159,6 +160,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
       "term-tps", "term-note", "term-handle", "term-status",
     ];
+    const ROW_PINNED = ["term-goto"];
     const seen = Object.keys(full.row);
     assert.deepEqual(seen.filter(k => !ORDER.includes(k)), [], "every control on the row has a place in the order");
     const neverGlyph = new Set(seen.filter(k => rows.every(r => !r.row[k] || r.row[k].state !== "icon")
@@ -174,11 +176,19 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       const glyphs = present.filter(k => !neverGlyph.has(k));
       if (!prefix(glyphs, k => r.row[k].state !== "label"))
         orderProblems.push(`${r.at}px: glyphs ${glyphs.filter(k => r.row[k].state !== "label")} are not a prefix of the order`);
-      const leave = present.filter(k => k !== "term-details");
+      const leave = present.filter(k => k !== "term-details" && !ROW_PINNED.includes(k));
       if (!prefix(leave, k => r.row[k].state === "menu"))
         orderProblems.push(`${r.at}px: menu ${leave.filter(k => r.row[k].state === "menu")} is not a prefix of the order`);
     }
     assert.deepEqual(orderProblems.slice(0, 5), [], `${orderProblems.length} widths off the order`);
+    // A pinned control stays on the row at every width, as a glyph once it
+    // has given up its label (claunch-xbhbg.1: goto vanished into the menu).
+    for (const k of ROW_PINNED) {
+      assert(full.row[k], `${k} is on the full row`);
+      const gone = rows.filter(r => !r.row[k] || r.row[k].state === "menu").map(r => r.at);
+      assert.deepEqual(gone.slice(0, 5), [], `${k} left the row at ${gone.length} widths`);
+      assert.equal(rows[rows.length - 1].row[k].state, "icon", `${k} is a glyph at the narrowest column`);
+    }
     // And the first control to give up its label is the order's first one.
     const firstGlyphRow = rows.find(r => states(r).includes("icon"));
     assert.deepEqual(Object.keys(firstGlyphRow.row).filter(k => firstGlyphRow.row[k].state === "icon"),
