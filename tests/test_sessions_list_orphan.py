@@ -80,7 +80,8 @@ def test_a_session_scoped_listing_reads_the_parent_off_the_whole_roster(
     from claude_launcher import projects
 
     client = _Client([_row("lead", project="A"),
-                      _row("w1", parent="lead", project="B")])
+                      _row("w1", parent="lead", project="B"),
+                      _row("w2", parent="ghost", project="B")])
     monkeypatch.setattr(
         daemon_client, "connect_with_diagnosis", lambda *a, **k: (client, None)
     )
@@ -88,5 +89,6 @@ def test_a_session_scoped_listing_reads_the_parent_off_the_whole_roster(
     monkeypatch.setenv(projects.SESSION_ENV, "B")
     assert cli.main(["sessions"]) == 0
     out = capsys.readouterr().out
-    row = next(line for line in out.splitlines() if line.startswith("w1"))
-    assert "orphan" not in row
+    rows = {line.split()[0]: line for line in out.splitlines() if line.startswith("w")}
+    assert "orphan" not in rows["w1"]
+    assert "(orphan of ghost)" in rows["w2"]
