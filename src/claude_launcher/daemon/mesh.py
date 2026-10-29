@@ -962,8 +962,12 @@ class Mesh:
         #: were typed in (the queued strip's per-row delete). Excluded from
         #: :meth:`pending`, so delivery never types them, and from
         #: :meth:`owed_all`, because a message nobody showed the member is no
-        #: debt of its even after the cursor has moved past it. Persisted next
-        #: to the cursors; pruned by :meth:`prune_discarded`.
+        #: debt of its even after the cursor has moved past it, and from
+        #: :meth:`delivery_of`, so the history never reads it as typed in.
+        #: Persisted next to the cursors and kept for as long as the member
+        #: is: the log is append-only, so the cursor passing a deleted id is
+        #: no sign that nothing reads it any more, and each entry is one
+        #: person's click.
         self.discarded: Dict[str, set] = {}
         #: Reply-expecting deliveries without a threaded ack/reply.  This is
         #: a delivery receipt, so it persists with cursors across restarts.
@@ -1484,30 +1488,6 @@ class Mesh:
                     out.append(m)
         out.reverse()
         return out
-
-    def prune_discarded(self, handle: str) -> None:
-        """Forget deleted ids that can no longer matter to ``handle``.
-
-        An id in :attr:`discarded` does work in two places: it keeps a message
-        out of :meth:`pending` while the message is ahead of the cursor, and
-        out of :meth:`owed_all` while it is after the member's own last send.
-        Once a message is behind both, nothing would read it either way, so
-        the set stays bounded by the live window instead of growing with the
-        log.
-        """
-        dropped = self.discarded.get(handle)
-        if not dropped:
-            self.discarded.pop(handle, None)
-            return
-        index = self._indexed()
-        floor = min(
-            self.cursors.get(handle, 0), index.last_from.get(handle, -1) + 1
-        )
-        live = {self.messages[k].get("id") for k in index.candidates(handle, floor)}
-        live.update(m.get("id") for m in self.provisional)
-        dropped &= live
-        if not dropped:
-            self.discarded.pop(handle, None)
 
     def _indexed(self) -> _LogIndex:
         """The address index, caught up with the log (see :class:`_LogIndex`)."""
@@ -2180,7 +2160,6 @@ class MeshManager:
                 if not any(m.get("id") == msg_id for m in mesh.pending(h)):
                     continue
                 mesh.discarded.setdefault(h, set()).add(msg_id)
-                mesh.prune_discarded(h)
                 if not mesh.pending(h):
                     mesh._first_pending.pop(h, None)
                 hits.append({"mesh": mesh.name, "handle": h, "id": msg_id})
@@ -9817,7 +9796,6 @@ class MeshManager:
         ahead = {m.get("id") for m in mesh.messages[mesh.cursors[member.handle]:]}
         ahead.update(m.get("id") for m in mesh.provisional)
         mesh.delivered_ids[member.handle] = delivered & ahead
-        mesh.prune_discarded(member.handle)
         mesh._first_pending.pop(member.handle, None)
         self._watch_delivered_responses(mesh, member.handle, pending)
         now = time.monotonic()
