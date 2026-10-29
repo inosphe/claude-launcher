@@ -213,7 +213,7 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   const view = DF.mount(host, "sim-998894-run1", { doc, api, timers, interval: 1000 });
   await new Promise((r) => setTimeout(r, 0));
   const svg = view.view.svg;
-  const nodesG = svg.children[2];
+  const nodesG = svg.children[3];   // bands, heads, edges, nodes
   assert.strictEqual(calls[0], "/api/sessions/sim-998894-run1/durable?since=0");
   assert.match(host.children[1].textContent, /진행: formalize — reading/);
   const firstNodes = nodesG.children.slice();
@@ -566,6 +566,59 @@ assert.strictEqual(DF.model([{ event: "plan", units: "nope" }], true).nodes.leng
   console.log("durableflow_check: plan headline ok");
 })().catch((e) => { console.error(e); process.exit(1); });
 console.log("durableflow_check: plan ok");
+
+// One log, two runs (gds6 scenarios v2: stage A proposes the tuples, B runs
+// them hours later). Each run gets its own named band and its own columns;
+// B's units start at depth 0 though they name A's unit as `after`, the edge
+// into the earlier run is not drawn, and an event that names a drawn unit is
+// a line in that unit, not a node of its own (claunch-papez).
+{
+  const T = (h, m) => `2026-10-2${h < 24 ? 8 : 9}T${String(h % 24).padStart(2, "0")}:${m}:00.000Z`;
+  const AB = [
+    { at: T(15, "39"), event: "session_start", attempt: 1 },
+    { at: T(15, "39"), event: "run_start", stage: "A" },
+    { at: T(15, "40"), event: "unit", unit: "features", state: "start" },
+    { at: T(15, "41"), event: "recheck", unit: "features", note: "tuple count" },
+    { at: T(15, "42"), event: "unit", unit: "features", state: "done" },
+    { at: T(15, "43"), event: "run_end", state: "proposed" },
+    { at: T(15, "43"), event: "agent_end" },
+    { at: T(15, "43"), event: "session_shutdown" },
+    { at: T(29, "19"), event: "tuples_approved", count: 2 },
+    { at: T(29, "19"), event: "session_start", attempt: 1 },
+    { at: T(29, "19"), event: "run_start", stage: "B" },
+    { at: T(29, "20"), event: "plan", units: [{ unit: "t1", after: ["features"] }, { unit: "t2", after: ["features"] }] },
+    { at: T(29, "20"), event: "unit", unit: "t1", state: "start" },
+    { at: T(29, "25"), event: "unit", unit: "t1", state: "done" },
+    { at: T(29, "26"), event: "unit", unit: "t2", state: "start" },
+  ];
+  const mab = DF.model(AB, true);
+  assert.deepStrictEqual(plain(mab.segs.map((g) => [g.label, g.from, g.to])), [["A 단계", 0, 2], ["B 단계", 3, 4]]);
+  const nab = Object.fromEntries(mab.nodes.map((n) => [n.id, n]));
+  assert.deepStrictEqual(plain(["unit:features", "unit:t1", "unit:t2"].map((id) => [nab[id].seg, nab[id].col])),
+    [[0, 1], [1, 4], [1, 4]], "B's units sit in B's own column, not after A's");
+  assert.ok(!mab.nodes.some((n) => /recheck/.test(n.id)), "a unit's recheck is no node of its own");
+  const eab = Object.fromEntries(mab.edges.map((e) => [e.id, e]));
+  assert.ok(eab["run_end>ev:tuples_approved"], "the approval follows A's end");
+  assert.strictEqual(eab["unit:features>unit:t1"].cross, true);
+  assert.deepStrictEqual(plain(DF.model(LOG, false).segs), [], "a single unnamed run has no bands");
+  assert.strictEqual(mab.ended, null, "A's end does not end the log while B runs");
+  assert.ok(mab.pending, "B, still running, shows its pending node");
+  const host = new El("div"), vw = DF.makeView(doc, host);
+  vw.draw(mab);
+  assert.match(vw.edges.get("unit:features>unit:t1").getAttribute("class"), /gone/);
+  assert.match(vw.svg.children[0].children.map((g) => g.children[1].textContent).join("|"), /^A 단계 · .*\|B 단계 · /);
+  // The sequence folds the night between the runs and fills the pane.
+  const sab = DF.sequence(AB, true, Date.parse(T(29, "30")));
+  assert.deepStrictEqual(plain(sab.segs.map((g) => g.label)), ["A 단계", "B 단계"]);
+  const sv = DF.makeSequenceView(doc);
+  sv.draw(sab, 1600);
+  assert.strictEqual(Number(sv.svg.getAttribute("width")), 1600);
+  const bar = (id) => sv.rows.get(id).g.children.find((c) => c.tag === "rect" && /dfl-seq-bar/.test(c.getAttribute("class") || ""));
+  const xa = Number(bar("u:features").getAttribute("x")), xb = Number(bar("u:t1").getAttribute("x"));
+  assert.ok(xb - xa < 1600 * 0.85, "B is not pushed to the right edge by the gap");
+  assert.ok(xa > 0 && xb > xa);
+}
+console.log("durableflow_check: runs ok");
 
 // (f) edges (claunch-nn4fx): only the transitive reduction of ``after`` is
 // drawn, and no edge runs across a box. The live run gds6 rules-v2

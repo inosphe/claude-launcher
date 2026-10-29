@@ -5314,6 +5314,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-head.anc { opacity: 0.5; }
 .dfl-edge.anc { stroke-dasharray: 3 3; opacity: 0.4; }
 .dfl-edge.anc-link { stroke: #58a6ff; stroke-dasharray: 5 3; opacity: 0.6; }
+/* A log that carries several runs (gds6 scenarios v2: stage A, then B hours
+   later) draws each in a band of its own, named, with a gap between
+   (claunch-papez). Translucent, so it reads on either theme. */
+.dfl-band rect { fill: rgba(88, 166, 255, 0.05); stroke: rgba(88, 166, 255, 0.4); stroke-width: 1; stroke-dasharray: 6 4; }
+.dfl-band-label { fill: #58a6ff; font-size: 11px; font-weight: 600; }
 @keyframes dfl-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dfl-march { to { stroke-dashoffset: -20; } }
 @media (prefers-reduced-motion: reduce) {
@@ -5361,6 +5366,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-seq-rule { stroke: #21262d; stroke-width: 1; }
 .dfl-seq-tick { stroke: #30363d; stroke-width: 1; }
 .dfl-seq-axis { fill: #7d8590; font-size: 10px; }
+.dfl-seq-band { fill: rgba(88, 166, 255, 0.05); stroke: rgba(88, 166, 255, 0.3); stroke-width: 1; }
+.dfl-seq-seg { fill: #58a6ff; font-size: 11px; font-weight: 600; }
+.dfl-seq-break { fill: none; stroke: #7d8590; stroke-width: 1.4; }
 .dfl-seq-bar { fill: #1b1e24; stroke: #30363d; }
 .dfl-seq-bar.st-run { fill: #12304f; stroke: #58a6ff; }
 .dfl-seq-bar.st-ok { fill: #12301f; stroke: #2f6f43; }
