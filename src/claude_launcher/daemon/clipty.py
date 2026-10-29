@@ -177,6 +177,15 @@ class ShellPty:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    def _session_env(self) -> Dict[str, str]:
+        """Env layered over the daemon's own for this shell's child.
+
+        The CLI tab's shell is the user's own terminal and nothing else: it
+        layers nothing. :class:`SessionShell` layers the template's common
+        env instead.
+        """
+        return {}
+
     def start_once(self) -> bool:
         """Spawn the child if this daemon never had one; report whether it
         is running now."""
@@ -207,14 +216,19 @@ class ShellPty:
         self._total = 0
         self.exited = False
         self.exit_code = None
-        # Same inheritance the session harness gets, and the same correction:
-        # this shell also draws into a terminal on the other end. The daemon's
-        # interpreter settings come out for the same reason as there -- a
-        # ``claunch`` typed into this tab cannot start with ``PYTHON_GIL=0``
-        # (see ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko).
+        # The daemon's own environment is the base, corrected the way a PTY
+        # child needs: the colour-answer family a parent leaves behind is
+        # wrong for a terminal (``pty_backend.strip_inherited_color_answers``),
+        # and the daemon's interpreter settings come out so a ``claunch``
+        # typed into this tab cannot start with ``PYTHON_GIL=0`` (see
+        # ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko). What the
+        # session harness adds on top of the same base -- the template's
+        # common env -- a SessionShell also layers here (``_session_env``);
+        # the CLI tab's shell layers nothing.
         env = pty_backend.strip_inherited_color_answers(dict(os.environ))
         for var in instance_manifest.INTERPRETER_ONLY_ENV:
             env.pop(var, None)
+        env.update(self._session_env())
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
@@ -430,6 +444,21 @@ class SessionShell(ShellPty):
         #: Input proposed by this session's agent, by suggestion id. A
         #: proposal is text and a reason; only the user's accept writes it.
         self._suggestions: Dict[str, dict] = {}
+
+    def _session_env(self) -> Dict[str, str]:
+        """The template's common env (``template.env``), re-read per spawn.
+
+        The lowest layer :func:`claude_launcher.runner.child_env` applies to
+        the session's own harness child; this pane is where the user runs git
+        by hand, and it needs the same GIT_CONFIG_GLOBAL for the same
+        identity (claunch-ol3w0). A config the store cannot read must not
+        cost the session its shell.
+        """
+        try:
+            return store.template_env()
+        except Exception:  # noqa: BLE001 -- a broken config, not a lost shell
+            log.warning("cannot read the template env for the session shell", exc_info=True)
+            return {}
 
     # ------------------------------------------------------------------ #
     # input proposals (the agent proposes, the user decides)
