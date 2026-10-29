@@ -135,10 +135,14 @@ const llmUsage = (url) => {
   const only = url.searchParams.get("provider") || "";
   const sessions = [
     { session: "alpha", provider: "ds", calls: 6, errors: 1, unreported: 0, total: 5200,
+      input: 1200, cache_read: 3600, cache_write: 0, output: 400,
+      cost: 0.0052, priced_tokens: 5200, unpriced_tokens: 0,
       features: [{ feature: "briefing", calls: 2, total: 1200 },
                  { feature: "observer", calls: 4, total: 4000 }],
       providers: ["ds"], last_at: iso(0.5) },
     { session: "", provider: "fw", calls: 3, errors: 0, unreported: 1, total: 800,
+      input: 800, cache_read: 0, cache_write: 0, output: 0,
+      cost: 0, priced_tokens: 0, unpriced_tokens: 800,
       features: [{ feature: "embedding", calls: 2, total: 800 },
                  { feature: "rerank", calls: 1, total: 0 }],
       providers: ["fw"], last_at: iso(1) },
@@ -150,8 +154,10 @@ const llmUsage = (url) => {
     all_providers: [{ provider: "ds", total: 5200, calls: 6 },
                     { provider: "fw", total: 800, calls: 3 }],
     totals: { calls: sum("calls"), errors: sum("errors"), unreported: sum("unreported"),
-              total: sum("total"), input: sum("total"), cache_read: 0,
-              cache_write: 0, output: 0 },
+              total: sum("total"), input: sum("input"), cache_read: sum("cache_read"),
+              cache_write: 0, output: sum("output"), cost: sum("cost"),
+              priced_tokens: sum("priced_tokens"), unpriced_tokens: sum("unpriced_tokens") },
+    currency: "$",
     features: sessions.flatMap((r) => r.features.map((f) => ({
       ...f, errors: 0, unreported: f.total ? 0 : f.calls,
       purposes: [{ purpose: "pass", calls: f.calls, total: f.total }] }))),
@@ -233,6 +239,9 @@ const names = (page) => page.$$eval("#stats-view .stats-row",
       (els) => els.map((e) => e.textContent));
     assert.ok(llmSessions.includes("alpha") && llmSessions.includes("(no session)"),
       llmSessions.join(" | "));
+    const llmCosts = await page.$$eval("#stats-view .stats-llm-cost",
+      (els) => els.map((e) => e.textContent));
+    assert.ok(llmCosts.includes("≈ $0.0052") && llmCosts.includes("—"), llmCosts.join(" | "));
     if (process.env.STATS_LLM_SHOT) {
       const box = await page.$("#stats-view .stats-llm");
       await box.screenshot({ path: process.env.STATS_LLM_SHOT });

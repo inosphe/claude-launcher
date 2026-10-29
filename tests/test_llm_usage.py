@@ -158,6 +158,86 @@ def test_a_shared_request_counts_as_one_call():
 
 
 # --------------------------------------------------------------------------- #
+# the cost estimate (claunch-60y0d.1)
+# --------------------------------------------------------------------------- #
+def test_overview_estimates_cost_from_the_price_table_per_model():
+    now = time.time()
+    # m1: 1000 read, 4000 cached read, 500 output; m2 has no price row.
+    llm_usage.record("briefing", provider="ds", model="m1", session="s1",
+                     usage={"prompt_tokens": 5000, "prompt_cache_hit_tokens": 4000,
+                            "completion_tokens": 500}, at=now - 3)
+    llm_usage.record("observer", provider="ds", model="m2", session="s1",
+                     usage={"prompt_tokens": 200, "completion_tokens": 10}, at=now - 2)
+    llm_usage.record("rerank", provider="fw", model="r", at=now - 1)   # no tokens
+    prices = {"m1": {"input": 2.0, "cache_read": 0.5, "output": 8.0}}
+    d = llm_usage.overview("today", now=now, prices=prices, currency="₩")
+    m1_cost = (2.0 * 1000 + 0.5 * 4000 + 8.0 * 500) / 1e6
+    t = d["totals"]
+    assert (t["input"], t["cache_read"], t["output"]) == (1200, 4000, 510)
+    assert abs(t["cost"] - m1_cost) < 1e-12
+    assert (t["priced_tokens"], t["unpriced_tokens"]) == (5500, 210)
+    assert d["currency"] == "₩"
+    features = {r["feature"]: r for r in d["features"]}
+    assert abs(features["briefing"]["cost"] - m1_cost) < 1e-12
+    assert features["observer"]["cost"] == 0 and features["observer"]["unpriced_tokens"] == 210
+    models = {m["model"]: m for m in d["providers"][0]["models"]}
+    assert models["m1"]["priced_tokens"] == 5500 and models["m2"]["priced_tokens"] == 0
+    assert abs(d["sessions"][0]["cost"] - m1_cost) < 1e-12
+    assert abs(d["days"][-1]["cost"] - m1_cost) < 1e-12
+    # No table: nothing is priced, every reported token is unpriced.
+    bare = llm_usage.overview("today", now=now)
+    assert bare["totals"]["cost"] == 0 and bare["totals"]["unpriced_tokens"] == 5710
+
+
+def test_rate_for_reads_a_flat_or_a_provider_keyed_table():
+    flat = {"m": {"input": 1.0}}
+    assert llm_usage.rate_for(flat, "ds", "m") == {"input": 1.0}
+    assert llm_usage.rate_for(flat, "ds", "other") is None
+    nested = {"ds": {"m": {"input": 3.0}}, "m": {"input": 1.0}}
+    assert llm_usage.rate_for(nested, "ds", "m") == {"input": 3.0}
+    assert llm_usage.rate_for(nested, "fw", "m") == {"input": 1.0}
+    star = {"ds": {"m": {"input": 3.0}}, "*": {"m": {"input": 2.0}}}
+    assert llm_usage.rate_for(star, "ds", "m") == {"input": 3.0}
+    assert llm_usage.rate_for(star, "fw", "m") == {"input": 2.0}
+    assert llm_usage.rate_for(star, "", "m") == {"input": 2.0}
+    assert llm_usage.rate_for(None, "ds", "m") is None
+    assert llm_usage.rate_for(flat, "ds", "") is None
+
+
+def test_cache_write_is_priced_at_the_input_rate_unless_set():
+    line = {"reported": True, "input": 0, "cache_read": 0, "cache_write": 1_000_000, "output": 0}
+    assert llm_usage.line_cost(line, {"input": 3.0}) == 3.0
+    assert llm_usage.line_cost(line, {"input": 3.0, "cache_write": 3.75}) == 3.75
+    assert llm_usage.line_cost(line, {"input": 3.0, "cache_write": 0}) == 0
+    assert llm_usage.line_cost({**line, "reported": False}, {"input": 3.0}) is None
+    assert llm_usage.line_cost(line, None) is None
+
+
+def test_a_shared_request_is_priced_once_overall_and_by_share_per_session():
+    llm_usage.record_shared("embedding", ["s1", "s2"], [1, 3], {"prompt_tokens": 400},
+                            provider="ds", model="e", purpose="index")
+    out = llm_usage.overview("today", prices={"e": {"input": 10.0}})
+    assert abs(out["totals"]["cost"] - 400 * 10.0 / 1e6) < 1e-12
+    rows = {s["session"]: s["cost"] for s in out["sessions"]}
+    assert abs(rows["s1"] - 100 * 10.0 / 1e6) < 1e-12
+    assert abs(rows["s2"] - 300 * 10.0 / 1e6) < 1e-12
+
+
+def test_route_prices_from_the_settings_table():
+    llm_usage.record("observer", provider="ds", model="m", session="s1",
+                     usage={"prompt_tokens": 1_000_000})
+    store.set_daemon_field("model_prices", {"m": {"input": 2.5}})
+    store.set_daemon_field("model_price_currency", "€")
+
+    async def run():
+        return await api.h_stats_llm_usage(make_mocked_request("GET", "/api/stats/llm-usage"))
+
+    import json
+    body = json.loads(asyncio.run(run()).text)
+    assert body["currency"] == "€" and body["totals"]["cost"] == 2.5
+
+
+# --------------------------------------------------------------------------- #
 # the call sites
 # --------------------------------------------------------------------------- #
 async def _serve(handler, path):

@@ -154,11 +154,13 @@ new Function(
   + constant("STATS_METHOD") + constant("STATS_WINDOW_METHOD")
   + constant("STATS_PALETTE") + constant("STATS_SWITCH_KINDS")
   + objectConstant("STATS_LLM_FEATURES") + slice("statsLlmTokens")
-  + slice("usageShort") + slice("profileHarnessLabel")
+  + slice("usageShort") + slice("usageCost") + slice("usageShare")
+  + slice("profileHarnessLabel")
   + ["openStatsPage", "stopStatsPoll", "statsSchedule",
      "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
      "refreshStatsLlm", "setStatsLlmProvider", "statsLlmTable", "statsLlmBar",
-     "statsLlmCalls", "statsLlmChips", "statsLlmProviderStrip", "statsLlmDays",
+     "statsLlmCalls", "statsLlmParts", "statsLlmCost", "statsLlmFigureHeads",
+     "statsLlmFigures", "statsLlmChips", "statsLlmProviderStrip", "statsLlmDays",
      "statsLlmSection",
      "statsPct", "statsBucketLabel", "statsStamp", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
@@ -299,12 +301,18 @@ const llm = {
   until: "2026-10-29T12:00:00+09:00", ledger_since: "2026-10-29",
   all_providers: [{ provider: "ds", total: 900, calls: 3 },
                   { provider: "fw", total: 0, calls: 1 }],
+  currency: "₩",
   totals: { calls: 4, errors: 1, unreported: 1, total: 900, input: 500,
-            cache_read: 300, cache_write: 0, output: 100 },
+            cache_read: 300, cache_write: 0, output: 100,
+            cost: 0.0012, priced_tokens: 600, unpriced_tokens: 300 },
   features: [
     { feature: "briefing", calls: 2, errors: 1, unreported: 0, total: 300,
+      input: 200, cache_read: 50, cache_write: 0, output: 50,
+      cost: 0, priced_tokens: 0, unpriced_tokens: 300,
       purposes: [{ purpose: "card", calls: 2, total: 300 }] },
     { feature: "observer", calls: 1, errors: 0, unreported: 0, total: 600,
+      input: 300, cache_read: 250, cache_write: 0, output: 50,
+      cost: 0.0012, priced_tokens: 600, unpriced_tokens: 0,
       purposes: [{ purpose: "pass", calls: 1, total: 600 }] },
     { feature: "rerank", calls: 1, errors: 0, unreported: 1, total: 0,
       purposes: [{ purpose: "query", calls: 1, total: 0 }] },
@@ -314,6 +322,8 @@ const llm = {
                 features: [{ feature: "briefing", calls: 2, total: 300 }] }],
   sessions: [
     { session: "s1", calls: 3, errors: 1, unreported: 0, total: 900,
+      input: 500, cache_read: 300, cache_write: 0, output: 100,
+      cost: 0.0012, priced_tokens: 600, unpriced_tokens: 300,
       features: [{ feature: "observer", calls: 1, total: 600 }],
       providers: ["ds"], last_at: "2026-10-29T11:00:00+09:00" },
     { session: "", calls: 1, errors: 0, unreported: 1, total: 0,
@@ -363,6 +373,27 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
                    "observer", "deepseek-flash", "(no session)"]
           .every((w) => llmBox.words().includes(w)),
         llmBox && llmBox.words());
+  const llmHeads = withClass("stats-llm-table")[0].all()
+    .filter((n) => n.tag === "th").map((n) => n.text);
+  check("the tables split tokens into read, cached read and output, then the cost",
+        JSON.stringify(llmHeads) === JSON.stringify(
+          ["feature", "purpose", "tokens", "read", "cached read", "output",
+           "est. cost", "calls"]), llmHeads);
+  check("no cache write column while the window holds no cache write",
+        !llmBox.words().includes("cache write |"), llmBox.words());
+  const costCells = withClass("stats-llm-cost");
+  check("a priced row shows its estimate in the table's currency",
+        costCells.some((n) => n.text === "≈ ₩0.0012"), costCells.map((n) => n.text));
+  check("a row with no price row shows —, not ₩0",
+        costCells.some((n) => n.all().some((k) => k.text === "—")),
+        costCells.map((n) => n.words()));
+  check("a partly priced row is marked and says what it leaves out",
+        costCells.some((n) => n.classes.has("stats-llm-cost-partial") &&
+                              n.title.includes("300 tokens")),
+        costCells.map((n) => [n.className, n.title]));
+  check("the summary carries an Est. cost card",
+        llmBox.words().includes("Est. cost") &&
+        llmBox.words().includes("Cached read"), llmBox.words());
   check("a session row links to that session's stats",
         llmBox.all().some((n) => n.tag === "a" && n.href === "#/stats/s1"));
   check("a feature whose calls reported no count shows —, not 0",
