@@ -28,6 +28,19 @@ globalThis.ChartPage = (() => {
     killed: "killed", archived: "archived",
   };
   const GROUPS = [["", "Off"], ["mesh", "Mesh"], ["workspace", "Workspace"]];
+  /* What a row with no ledger record says. The page only knows the ledger
+     never saw the session (statsboard leaves it out of by_session), so the
+     fact leads and the reasons follow as candidates: the shim (metering.py)
+     only sees API-key providers, so an OAuth session (the Anthropic
+     subscription, Codex's login) never has a record -- but neither does an
+     API-key session before its first request, one whose records aged out,
+     or one on a provider with metering off (claunch-p8f73). */
+  const UNMETERED_TIP = "원장 기록 없음 (원장은 API 키 공급자 요청만 기록 — OAuth 구독 세션, " +
+    "첫 요청 전 세션, 보존 기간 밖 세션은 기록이 없다)";
+  const UNMETERED_DETAIL = "계측 원장에 이 세션의 기록이 없다. 원장은 metering shim을 거치는 " +
+    "API 키 공급자의 요청만 기록한다. 기록이 없는 경우: OAuth 경로(Anthropic 구독, Codex " +
+    "로그인) 세션, 아직 요청을 보내지 않은 세션, 기록이 보존 기간(31일) 밖에 있는 세션, " +
+    "metering을 끈 공급자의 세션.";
   const REDRAW_MS = 5000;
   const STORE_KEY = "claunch_chart_view";
   // The timeline column's share of the split, in percent.
@@ -344,7 +357,7 @@ globalThis.ChartPage = (() => {
     rows.push(["종료", r.span.alive ? "(실행 중)" : formatTime(r.span.end)]);
     rows.push(["생존 시간", formatDuration(r.lifetime)]);
     if (r.tokens === null) {
-      rows.push(["토큰(창)", "계측 없음 (원장 기록 없음)"]);
+      rows.push(["토큰(창)", UNMETERED_TIP]);
     } else if (r.tokens) {
       rows.push(["토큰(창)", `${formatTokens(r.tokens.total)} · 요청 ` +
         `${(Number(r.tokens.requests) || 0).toLocaleString()}`]);
@@ -867,7 +880,7 @@ globalThis.ChartPage = (() => {
     head.appendChild(node("span", "chart-muted",
       smodel
         ? `${formatBucketWidth(smodel.width)} 버킷 · 계측 세션 ${smodel.sessions}` +
-          (smodel.unmetered ? ` · 계측 없음 ${smodel.unmetered}` : "") +
+          (smodel.unmetered ? ` · 원장 기록 없음 ${smodel.unmetered}` : "") +
           // The ledger starts when metering was switched on: a window reaching
           // past that date is not a window the figures can cover, and saying
           // so is how "nobody measured" stays apart from "spent nothing".
@@ -1062,7 +1075,7 @@ globalThis.ChartPage = (() => {
       stat0.appendChild(node("span", "chart-stat-value",
         s.tokens.metered ? formatTokens(s.tokens.total) : "—"));
       stat0.appendChild(node("span", "chart-stat-label",
-        "토큰" + (s.tokens.unmetered ? ` · 계측 없음 ${s.tokens.unmetered}` : "")));
+        "토큰" + (s.tokens.unmetered ? ` · 원장 기록 없음 ${s.tokens.unmetered}` : "")));
       stat0.title = s.tokens.metered
         ? `이 창에서 이 행들이 쓴 토큰 ${s.tokens.total.toLocaleString()}` +
           ` · 요청 ${s.tokens.requests.toLocaleString()}` +
@@ -1334,14 +1347,12 @@ globalThis.ChartPage = (() => {
      is looked up in every session the page holds, so a pick that the
      current filter hides still shows (with a note saying so). */
   function detail(model, sessions) {
+    // No pick, no column: the timeline takes the whole width rather than
+    // sharing it with an empty pane.
+    const name = state.selected;
+    if (!name) return null;
     const box = node("aside", "chart-detail");
     box.setAttribute("aria-label", "session detail");
-    const name = state.selected;
-    if (!name) {
-      box.appendChild(node("p", "chart-muted chart-detail-hint",
-        "왼쪽에서 세션 행을 클릭하면 상세 정보가 여기에 표시된다."));
-      return box;
-    }
     let r = model.rows.find((x) => x.name === name);
     const hidden = !r;
     if (!r) {
@@ -1406,7 +1417,7 @@ globalThis.ChartPage = (() => {
       if (parts.childElementCount) wrap.appendChild(parts);
       item("토큰(창)", wrap);
     } else if (tokens === null) {
-      item("토큰(창)", node("span", "chart-muted", "— 계측 원장에 기록이 없다"));
+      item("토큰(창)", node("span", "chart-muted", `— ${UNMETERED_DETAIL}`));
     }
     const act = activityStats(r.span, tokens, currentSeries(), model.now);
     if (act && act.covered) {
@@ -1577,15 +1588,19 @@ globalThis.ChartPage = (() => {
     // does not.
     main.appendChild(chart);
     split.appendChild(main);
-    split.appendChild(divider(split));
     const side = detail(model, sessions);
-    split.appendChild(side);
+    if (side) {
+      split.appendChild(divider(split));
+      split.appendChild(side);
+    } else {
+      split.classList.add("solo");
+    }
     root.appendChild(split);
     // The tick spacing is a question about pixels, so it waits for the column
     // to have a width.
     layoutTicks(main, model);
     main.scrollTop = tops[0];
-    side.scrollTop = tops[1];
+    if (side) side.scrollTop = tops[1];
     // Same axis width: the viewer keeps their place. A new width (range or
     // cap changed) opens on the newest time -- the right edge.
     const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);
