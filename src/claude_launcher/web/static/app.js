@@ -1710,6 +1710,28 @@ function byLineage(sessions, visibleSessions = sessions) {
   return out;
 }
 
+/* Whether a session drawn at the top of the rail is an orphan rather than a
+   root, and why (claunch-ikiys). A root is a session a human started; an
+   orphan is one whose parent is gone: removed with no surviving session above
+   it to take the child (the daemon keeps that name in ``orphan_of``), or a
+   parent named by the record that is not among the current sessions at all
+   (archived). ``known`` is the set of every current session's name, taken
+   before the project pick and the state filter narrow it: a live parent those
+   filters hide still holds its child, and the child is not an orphan.
+   Without ``known`` only ``orphan_of`` counts. Returns {parent, title} or
+   null. */
+function railOrphanOf(s, known) {
+  if (s.orphan_of) {
+    return { parent: s.orphan_of,
+             title: `orphan: parent ${s.orphan_of} was removed` };
+  }
+  if (known && s.parent && s.parent !== s.name && !known.has(s.parent)) {
+    return { parent: s.parent,
+             title: `orphan: parent ${s.parent} is not among the current sessions` };
+  }
+  return null;
+}
+
 /* The rail's bulk bar. Verbs that act on the working fleet, each labelled
    with the number it would touch and hidden when that number is zero — so
    the bar is a reading of the rail rather than a fixed row of controls, half
@@ -5940,6 +5962,9 @@ async function refreshSessions(options) {
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
   const visibleSessions = railList.filter((s) => sessionMatchesFilter(s));
+  // Every current record, before the project pick and the state filter: the
+  // orphan tag asks whether the parent exists, not whether it is drawn.
+  const railKnownNames = new Set(sessionsCache.map((s) => s.name));
   const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
@@ -6372,6 +6397,22 @@ async function refreshSessions(options) {
       li.dataset.railDepth = String(Math.min(depth, 4));
       li.title = `spawned by ${s.parent}`;
     }
+    // A top-level row that a session did not start at the top: its parent
+    // was removed (orphan_of), or is not among the current sessions at all
+    // (railOrphanOf). A parent the filters hide is not gone.
+    const orphan = !depth && typeof railOrphanOf === "function"
+      ? railOrphanOf(s, typeof railKnownNames !== "undefined" ? railKnownNames : null)
+      : null;
+    let orphanTag = null;
+    if (orphan) {
+      li.classList.add("orphan");
+      li.dataset.orphanOf = orphan.parent;
+      li.title = orphan.title;
+      orphanTag = document.createElement("span");
+      orphanTag.className = "rail-orphan";
+      orphanTag.textContent = "고아";
+      orphanTag.title = orphan.title;
+    }
     if (kin) {
       li.classList.add("kin-outside");
       li.title = `${li.title ? li.title + " · " : ""}shown for its lineage`
@@ -6648,7 +6689,8 @@ async function refreshSessions(options) {
     // alias first, then what the session is, then what it is doing right
     // now, then where it belongs — identity reads left, state after,
     // belonging last.
-    head.append(label, keys, ...(handleBox ? [handleBox] : []),
+    head.append(label, ...(orphanTag ? [orphanTag] : []), keys,
+                ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []),
                 ...(watchBox ? [watchBox] : []),

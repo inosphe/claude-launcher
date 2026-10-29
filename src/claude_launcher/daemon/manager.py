@@ -1890,7 +1890,7 @@ class SessionManager:
                 "(spawn.max_depth) — move fewer or shallower sessions"
             )
         previous = target.sdef.parent
-        target.sdef = replace(target.sdef, parent=parent)
+        target.sdef = replace(target.sdef, parent=parent, orphan_of=None)
         self.persist()
         return {
             "session": child,
@@ -1932,12 +1932,13 @@ class SessionManager:
                 f"session {child!r} cannot detach itself: a detach is done by "
                 "the session that commands it, or by an operator"
             )
-        previous = target.sdef.parent
+        previous = target.sdef.parent or target.sdef.orphan_of
         if not previous:
             raise ManagerError(f"session {child!r} has no parent to detach from")
         if actor:
             self.require_commands(actor, child)
-        target.sdef = replace(target.sdef, parent=None)
+        # An orphan's detach is how an operator says it is a root after all.
+        target.sdef = replace(target.sdef, parent=None, orphan_of=None)
         self.events.record(target, "detach", "부모-자식 관계 해제",
                            previous=previous, actor=actor or "operator")
         self.persist()
@@ -2335,8 +2336,9 @@ class SessionManager:
         it to be re-drawn by hand. The move is always *shallower*, so no depth
         check is needed, and the new parent is an ancestor of the children, so
         no cycle can be made. A grandparent that is itself gone (or absent —
-        ``name`` was a root) makes them roots, which is what they would have
-        become anyway.
+        ``name`` was a root) leaves them without a parent, but not as roots a
+        human started: each keeps ``name`` in ``orphan_of`` (claunch-ikiys),
+        so the listings show an orphan of ``name`` rather than a new root.
 
         Returns the children moved, oldest first. The mesh edge to the new
         parent is the caller's, exactly as it is for :meth:`reparent`
@@ -2349,7 +2351,8 @@ class SessionManager:
         moved = self.children(name)
         for child in moved:
             target = self._sessions[child]
-            target.sdef = replace(target.sdef, parent=above)
+            target.sdef = replace(
+                target.sdef, parent=above, orphan_of=None if above else name)
         return moved
 
     def remove(

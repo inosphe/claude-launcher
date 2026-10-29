@@ -10723,6 +10723,9 @@ def _watch_rows(session: str) -> List[dict]:
 RAIL_FIELDS = {
     "name", "harness", "profile", "cwd", "args", "model", "effort",
     "tools", "restore", "conversation_id", "role", "parent", "borrow",
+    # The parent a top-level row lost when its record was removed: the rail
+    # draws such a row as an orphan, not a root (railOrphanOf, claunch-ikiys).
+    "orphan_of",
     "null_token", "issue", "keep_alive", "reminder_paused", "note",
     # The pool key this session is pinned to, or absent. The rail draws the
     # key chip from it and the modal preselects it (claunch-wllke.1).

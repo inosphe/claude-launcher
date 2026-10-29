@@ -1314,6 +1314,11 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         if footer:
             print(footer)
         return 0
+    # Whether a parent still exists is read off the whole roster, not the
+    # project-narrowed rows: a live parent in another project still holds its
+    # child. When the daemon narrowed the answer (``?project=``) the roster is
+    # not whole, and only the daemon's own orphan record counts.
+    known = None if query else {s["name"] for s in everything}
     for s, depth in _by_lineage(sessions):
         state = s["status"]
         if state == "exited":
@@ -1342,10 +1347,20 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         # same CLI, run for a different purpose.
         harness = s["harness"] + (f"/{s['kind']}" if s.get("kind") else "")
         brief = progress_brief(s.get("progress"))
+        # A top-level row whose parent is gone is an orphan, not a root a
+        # human started (claunch-ikiys) -- the same reading the rail gives.
+        parent = s.get("parent")
+        lost = "" if depth else (
+            s.get("orphan_of")
+            or (parent if known is not None and parent and parent != s["name"]
+                and parent not in known else "")
+            or ""
+        )
         print(
             f"{label:<16} [{state:<10}] {harness:<8} {prof:<12} {proj}"
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
             + (f"  | {brief}" if brief else "")
+            + (f"  (orphan of {lost})" if lost else "")
         )
     exited = [s for s in sessions if s["status"] == "exited"]
     asleep = [s["name"] for s in exited if s.get("held_at")]
