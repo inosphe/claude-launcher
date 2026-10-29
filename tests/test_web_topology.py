@@ -459,6 +459,7 @@ CHECKS = [
         "createonboard_check.js",
         "formusage_check.js",
         "openingimages_check.js",
+        "openingcontexts_check.js",
         "meshattach_check.js",
         "reborrow_check.js",
         "sessionkey_check.js",

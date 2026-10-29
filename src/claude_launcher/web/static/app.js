@@ -16769,6 +16769,143 @@ async function uploadOpeningImages() {
   return ids;
 }
 
+/* ---- opening context items (gds6-bfu7) -----------------------------------
+   Separate pieces of context beside the opening task -- an error log, a spec
+   excerpt -- each with its own title and text, so the request and the
+   material it is about do not run together in one box. Held here (not as
+   named form fields: the count changes) and sent as `opening_contexts`; the
+   daemon writes each to a file in the session's state directory and ends the
+   opening with a "[claunch context]" line per item (daemon/opening_contexts.py).
+   The sizes mirror the daemon's ceilings, which keep the create request under
+   its body limit; a larger log goes in as a file. Cleared when a launch goes
+   through, like the task. */
+const OPENING_CONTEXTS_MAX = 20;                 // opening_contexts.MAX_ITEMS
+const OPENING_CONTEXT_MAX_BYTES = 256 * 1024;    // opening_contexts.MAX_ITEM_BYTES
+const OPENING_CONTEXTS_MAX_BYTES = 384 * 1024;   // opening_contexts.MAX_TOTAL_BYTES
+const openingContexts = [];      // [{title, text}]
+
+function utf8Bytes(text) {
+  return new TextEncoder().encode(String(text || "")).length;
+}
+
+function openingContextsNote(text) {
+  const note = $("new-task-contexts-note");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("hidden", !text);
+}
+
+/* The items worth sending: blank ones are dropped (an empty "+ Add context"
+   row is not an attachment), titles are trimmed. */
+function openingContextsPayload() {
+  return openingContexts
+    .filter((item) => String(item.text || "").trim())
+    .map((item) => ({ title: String(item.title || "").trim(), text: String(item.text) }));
+}
+
+/* What stops a submit, or "" -- the daemon's own checks, said before the
+   request is built, because a body over its limit is read as empty. */
+function openingContextsProblem(items) {
+  if (items.length > OPENING_CONTEXTS_MAX) {
+    return `an opening takes at most ${OPENING_CONTEXTS_MAX} context items`;
+  }
+  let total = 0;
+  for (let i = 0; i < items.length; i++) {
+    const size = utf8Bytes(items[i].text);
+    if (size > OPENING_CONTEXT_MAX_BYTES) {
+      return `context ${i + 1} (${items[i].title || "untitled"}) is ${humanSize(size)}; ` +
+        `an item is at most ${humanSize(OPENING_CONTEXT_MAX_BYTES)} — attach a larger log as a file`;
+    }
+    total += size;
+  }
+  if (total > OPENING_CONTEXTS_MAX_BYTES) {
+    return `the context items come to ${humanSize(total)}; together they are at most ` +
+      `${humanSize(OPENING_CONTEXTS_MAX_BYTES)} — attach larger logs as files`;
+  }
+  return "";
+}
+
+/* Rebuilt on add and remove only: typing updates the held item in place, so
+   the box being typed into keeps its focus and caret. */
+function renderOpeningContexts() {
+  const list = $("new-task-contexts-list");
+  if (!list) return;
+  list.innerHTML = "";
+  openingContexts.forEach((item, i) => {
+    const li = document.createElement("li");
+    li.className = "new-task-context";
+    const head = document.createElement("div");
+    head.className = "new-task-context-head";
+    const title = document.createElement("input");
+    title.type = "text";
+    title.className = "new-task-context-title";
+    title.placeholder = `context ${i + 1} — title (optional), e.g. pytest failure log`;
+    title.maxLength = 120;
+    title.value = item.title || "";
+    title.addEventListener("input", () => { item.title = title.value; });
+    const size = document.createElement("span");
+    size.className = "file-size";
+    const sized = () => { size.textContent = item.text ? humanSize(utf8Bytes(item.text)) : ""; };
+    sized();
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = "Remove this context item";
+    drop.addEventListener("click", () => {
+      openingContexts.splice(i, 1);
+      openingContextsNote("");
+      renderOpeningContexts();
+    });
+    head.append(title, size, drop);
+    const text = document.createElement("textarea");
+    text.className = "new-task-context-text";
+    text.rows = 6;
+    text.placeholder = "the context itself — a log, an excerpt, notes";
+    text.value = item.text || "";
+    text.addEventListener("input", () => { item.text = text.value; sized(); });
+    li.append(head, text);
+    list.appendChild(li);
+  });
+}
+
+function addOpeningContext(item) {
+  if (openingContexts.length >= OPENING_CONTEXTS_MAX) {
+    openingContextsNote(`an opening takes at most ${OPENING_CONTEXTS_MAX} context items`);
+    return false;
+  }
+  openingContexts.push({ title: (item && item.title) || "", text: (item && item.text) || "" });
+  openingContextsNote("");
+  renderOpeningContexts();
+  return true;
+}
+
+/* Replace the held items (a spawn request's spec opened with Manual). */
+function setOpeningContexts(items) {
+  openingContexts.splice(0);
+  for (const item of Array.isArray(items) ? items : []) {
+    if (openingContexts.length >= OPENING_CONTEXTS_MAX) break;
+    const entry = typeof item === "string" ? { text: item } : (item || {});
+    openingContexts.push({ title: String(entry.title || ""), text: String(entry.text || "") });
+  }
+  openingContextsNote("");
+  renderOpeningContexts();
+}
+
+function clearOpeningContexts() {
+  setOpeningContexts([]);
+}
+
+(() => {
+  const add = $("new-task-contexts-add");
+  if (!add) return;
+  add.addEventListener("click", () => {
+    if (!addOpeningContext()) return;
+    const boxes = document.querySelectorAll("#new-task-contexts-list .new-task-context-text");
+    const last = boxes[boxes.length - 1];
+    if (last) last.focus();
+  });
+})();
+
 /* ---- opening files (claunch-5gpcf) ----------------------------------------
    Files of any kind that go out with the opening: held here until the form is
    submitted, then uploaded one by one to /api/uploads and named by id in the
@@ -17766,6 +17903,9 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The context items beside the task (gds6-bfu7); blank rows are dropped.
+  const contextItems = openingContextsPayload();
+  if (contextItems.length) body.opening_contexts = contextItems;
   // The operator's note goes on the session record with the launch
   // (claunch-zy9yk); empty is left off, which is "no note".
   if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
@@ -17799,6 +17939,14 @@ $("new-session").addEventListener("submit", async (e) => {
     body.fork_session = f.fork.checked;
   }
   const err = $("create-error");
+  // Said here rather than by the daemon: a body over its request limit is
+  // read as empty, and the refusal would name a missing field instead.
+  const contextProblem = openingContextsProblem(contextItems);
+  if (contextProblem) {
+    err.textContent = contextProblem;
+    err.classList.remove("hidden");
+    return;
+  }
   const payload = sessionFormPayload(sessionFormView().mode, body);
   createBusy = true;
   setCreatePending(f, true, parent);
@@ -17871,6 +18019,7 @@ $("new-session").addEventListener("submit", async (e) => {
     // The opening's images and files went out with this launch, like its task.
     clearOpeningImages();
     clearOpeningFiles();
+    clearOpeningContexts();
     // Say which rows the launch just spent, so the restore in
     // sessionModalClose steps over them. Without this the five clears above
     // are undone four lines later — the modal puts back whatever the form
@@ -48429,7 +48578,111 @@ function sessTask(s) {
       box.appendChild(more);
     }
   }
+  // Guarded with typeof: harnesses that slice this section alone do not
+  // carry the context items' binding.
+  if (name && typeof sessOpeningContexts === "function") {
+    box.appendChild(sessOpeningContexts(s));
+  }
   if (name) box.appendChild(sessOpeningActions(s));
+  return box;
+}
+
+/* ---- the opening's context items, read-only (gds6-bfu7) ---------------
+
+   The items a session was created with beside its task, each its own file
+   in the session's state directory (daemon/opening_contexts.py). Listed
+   under the Opening task with title and size; a press shows one item's text
+   (GET /api/sessions/<name>/contexts/<n>). They never change after the
+   session starts, so a session's list is fetched once and kept; a failed
+   fetch is retried after a pause rather than on every 2s repaint. */
+const sessContexts = new Map();      // session name -> {items, error, retryAt, loading}
+const sessContextOpen = new Map();   // "<name>/<n>" -> {text, truncated, error, loading}
+
+function sessContextsLoad(name) {
+  const known = sessContexts.get(name);
+  if (known && (known.loading || known.items || Date.now() < (known.retryAt || 0))) return;
+  sessContexts.set(name, { loading: true });
+  (async () => {
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/contexts`);
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+      sessContexts.set(name, { items: Array.isArray(doc.items) ? doc.items : [] });
+    } catch (e) {
+      sessContexts.set(name, { error: e.message || String(e), retryAt: Date.now() + 30000 });
+    }
+    refreshSession();
+  })();
+}
+
+function sessContextToggle(name, n) {
+  const key = `${name}/${n}`;
+  if (sessContextOpen.has(key)) {
+    sessContextOpen.delete(key);
+    refreshSession();
+    return;
+  }
+  sessContextOpen.set(key, { loading: true });
+  refreshSession();
+  (async () => {
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/contexts/${n}`);
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+      if (sessContextOpen.has(key)) {
+        sessContextOpen.set(key, { text: String(doc.text || ""), truncated: !!doc.truncated,
+                                   total: doc.total_chars || 0 });
+      }
+    } catch (e) {
+      if (sessContextOpen.has(key)) sessContextOpen.set(key, { error: e.message || String(e) });
+    }
+    refreshSession();
+  })();
+}
+
+function sessOpeningContexts(s) {
+  const name = s.name || "";
+  const box = el("div", "sess-opening-contexts");
+  sessContextsLoad(name);
+  const known = sessContexts.get(name) || {};
+  const items = known.items || [];
+  if (known.error) {
+    box.appendChild(el("p", "wf-note", `context items could not be read: ${known.error}`));
+    return box;
+  }
+  if (!items.length) return box;
+  box.appendChild(el("h4", null, `Context items (${items.length})`));
+  const list = el("ol", "sess-opening-context-list");
+  for (const item of items) {
+    const li = el("li", "sess-opening-context");
+    const key = `${name}/${item.n}`;
+    const open = sessContextOpen.get(key);
+    const title = item.title || `context ${item.n}`;
+    const toggle = el("button", "wf-btn option sess-opening-context-toggle",
+                      open ? `Hide ${title}` : title);
+    toggle.type = "button";
+    toggle.title = item.missing
+      ? "its file is no longer on disk"
+      : `show it — ${humanSize(item.bytes)}, ${item.lines} lines, ${item.path}`;
+    toggle.disabled = !!item.missing;
+    toggle.addEventListener("click", () => sessContextToggle(name, item.n));
+    li.appendChild(toggle);
+    li.appendChild(el("span", "file-size",
+      item.missing ? "missing" : `${humanSize(item.bytes)} · ${item.lines} lines`));
+    if (open) {
+      if (open.loading) li.appendChild(el("p", "wf-note", "reading…"));
+      else if (open.error) li.appendChild(el("p", "wf-warning", open.error));
+      else {
+        li.appendChild(el("pre", "sess-task-text sess-opening-context-text", open.text));
+        if (open.truncated) {
+          li.appendChild(el("p", "wf-note",
+            `first ${open.text.length} of ${open.total} characters — the whole item is at ${item.path}`));
+        }
+      }
+    }
+    list.appendChild(li);
+  }
+  box.appendChild(list);
   return box;
 }
 
@@ -52596,7 +52849,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
@@ -52604,7 +52857,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
@@ -52722,6 +52975,11 @@ function applySessionModalSeed(f, seed) {
   }
   if (seed.task !== undefined && !answered(f.task)) {
     f.task.value = seed.task || "";
+  }
+  // The request's context items travel with its task (gds6-bfu7); held
+  // outside the named rows, so they are put back whole.
+  if (Array.isArray(seed.opening_contexts) && typeof setOpeningContexts === "function") {
+    setOpeningContexts(seed.opening_contexts);
   }
   // The mesh before the role: the role list is the mesh's. Held the way a
   // #/new/<mesh> link is, for a picker the mesh poll has not filled yet
@@ -62512,6 +62770,10 @@ async function spawnGatePost(rec, verb, btn, body) {
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
   const seed = spawnRequestSeed(spec, rec);
+  // The request is the whole subject of this opening: context items the
+  // form still holds from an unsent draft are not its (the seed puts back
+  // the request's own).
+  if (typeof clearOpeningContexts === "function") clearOpeningContexts();
   const modes = ["new", "spawn"];
   if (rec.scope === "child") {
     const asker = (sessionsCache || []).find((s) => s.name === rec.session);
@@ -62545,6 +62807,9 @@ function spawnRequestSeed(spec, rec) {
   // last session's answer, which is what the form would otherwise carry.
   seed.name = spec.name || "";
   seed.task = spec.task || "";
+  if (Array.isArray(spec.opening_contexts) && spec.opening_contexts.length) {
+    seed.opening_contexts = spec.opening_contexts;
+  }
   if (spec.context !== undefined) seed.context = spec.context || "";
   put("issue", spec.issue);
   put("issue_text", spec.issue_text);

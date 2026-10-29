@@ -63,7 +63,7 @@ from .. import worktree as worktree_mod
 from .. import wsl_reg_stub
 from . import actors, beads as beads_mod, channel, clipboard, connections
 from . import p2p
-from . import opening_images
+from . import opening_contexts, opening_images
 from . import uploads
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
@@ -1368,6 +1368,8 @@ def build_app(
     r.add_delete("/api/sessions/{name}/packs", h_session_packs)
     r.add_get("/api/sessions/{name}/opening", h_session_opening)
     r.add_post("/api/sessions/{name}/opening", h_session_opening)
+    r.add_get("/api/sessions/{name}/contexts", h_session_contexts)
+    r.add_get("/api/sessions/{name}/contexts/{n}", h_session_context)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
     # (see SessionManager.repin_conversation).
@@ -11177,6 +11179,9 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # session-definition copy (or a future SessionDef field could retain the
     # specification in the daemon's restart record).
     definition.pop("issue_text", None)
+    # The context items go to their own files (daemon/opening_contexts.py);
+    # the definition is the restart record and does not carry their text.
+    definition.pop("opening_contexts", None)
     definition.pop("prompt_packs", None)
     # v2 start inputs belong to the run (chart.json), not to the session.
     definition.pop("cflow_inputs", None)
@@ -11317,6 +11322,7 @@ async def _onboard_and_launch(
             raise onboard.OnboardError(str(exc)) from None
         image_ids = _opening_image_ids(body, session.sdef.harness)
         file_ids = _opening_file_ids(body)
+        context_items = _opening_contexts(body)
         # The operator's explicit "no workflow" on a session they create
         # (claunch-val3l.1): the CLI's --no-workflow, the form's cleared
         # role default. Taken out before preflight, which reads '-' as a
@@ -11578,6 +11584,12 @@ async def _onboard_and_launch(
         opening = score_goal.prompt(session.sdef) + (
             "\n\n" + opening if opening else ""
         )
+    contexts = opening_contexts.store(name, context_items)
+    if contexts:
+        # After the task they belong to and ahead of uploaded files: each item
+        # is its own file, and the opening says where and how to read it.
+        opening = (opening + "\n\n" if opening else "") + opening_contexts.block(contexts)
+        report["opening_contexts"] = [c["path"] for c in contexts]
     files = uploads.claim(file_ids, name)
     if files:
         # The paths ride at the end of the opening, after the task they
@@ -11777,7 +11789,7 @@ def spawn_gate_exempt(body: dict) -> bool:
 ROOT_SPEC_KEYS = (
     "name", "task", "workflow", "workflow_version", "workflow_params", "cflow_inputs",
     "context", "issue", "issue_text", "beads", "prompt_packs", "daemon_prompt",
-    "workspace_prompt",
+    "workspace_prompt", "opening_contexts",
 )
 
 
@@ -14619,6 +14631,14 @@ async def h_session_upload(request: web.Request) -> web.Response:
     }, status=201)
 
 
+def _opening_contexts(body: dict) -> List["opening_contexts.Item"]:
+    """``body["opening_contexts"]`` checked, as items to store (gds6-bfu7)."""
+    try:
+        return opening_contexts.check(body.get("opening_contexts"))
+    except opening_contexts.ContextError as exc:
+        raise onboard.OnboardError(str(exc)) from None
+
+
 def _opening_file_ids(body: dict) -> List[str]:
     """``body["opening_files"]`` checked, as staged ids."""
     try:
@@ -15596,6 +15616,37 @@ async def h_session_packs(request: web.Request) -> web.Response:
 #: grace (``FORCE_TYPING_GRACE``) and the paste; the bound exists so a harness
 #: that never reads answers the panel instead of holding the request open.
 OPENING_DELIVER_TIMEOUT = 90.0
+
+
+async def h_session_contexts(request: web.Request) -> web.Response:
+    """The context items this session was created with (gds6-bfu7): each
+    one's number, title, size and path, without the text. Read by the detail
+    panel's Opening task section and by the MCP ``context_list`` tool."""
+    session = _session(request)
+    name = session.sdef.name
+    items = await asyncio.to_thread(opening_contexts.listing, name)
+    return json_response({"session": name, "items": items})
+
+
+async def h_session_context(request: web.Request) -> web.Response:
+    """One context item's text, a window of it at a time: ``offset`` (in
+    characters) and ``max_chars`` page through an item larger than one
+    answer; ``next_offset`` says where the next window starts."""
+    session = _session(request)
+    name = session.sdef.name
+    try:
+        n = int(request.match_info["n"])
+        offset = int(request.query.get("offset") or 0)
+        raw_max = request.query.get("max_chars")
+        max_chars = int(raw_max) if raw_max not in (None, "") else None
+    except ValueError:
+        return json_error(400, "n, offset and max_chars must be whole numbers")
+    try:
+        item = await asyncio.to_thread(
+            opening_contexts.read, name, n, offset=offset, max_chars=max_chars)
+    except opening_contexts.ContextError as exc:
+        return json_error(404, str(exc))
+    return json_response({"session": name, **item})
 
 
 async def h_session_opening(request: web.Request) -> web.Response:

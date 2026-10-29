@@ -465,6 +465,26 @@ TOOLS = [
                         "has booted — what it is for, in its own words"
                     ),
                 },
+                "opening_contexts": {
+                    "type": "array",
+                    "description": (
+                        "separate context items for the child, kept apart "
+                        "from its task: an error log, a spec excerpt, notes. "
+                        "Each is stored as its own file in the child's state "
+                        "directory, and its opening lists them with how to "
+                        "read them (MCP context_read / context_list). At most "
+                        "20 items, 256 KiB each and 384 KiB together — attach "
+                        "anything larger by path in the task instead"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "a short name, e.g. 'pytest failure log'"},
+                            "text": {"type": "string", "description": "the item's content"},
+                        },
+                        "required": ["text"],
+                    },
+                },
                 "issue": {
                     "type": "string",
                     "description": (
@@ -1588,7 +1608,7 @@ def _await_connect(mesh: str, me: str, peer: str) -> dict:
 #: in the same honoured-not-offered group: it rides the ``args`` gate.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
-    "task", "issue", "issue_text", "harness", "workspace", "worktree",
+    "task", "opening_contexts", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
     # model/effort ride the allow_args gate (spawn._GATED_FIELDS); a workflow
     # delegating to a cheaper model preset names one (claunch-yl0to)
