@@ -926,20 +926,33 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     # the minute/second boundary rule — the board head is minute-granular,
     # the journal `at` is second-granular, so the head is widened to its whole
     # minute and the test is overlap (s490-rev, s597-rev; claunch-nj5yq
-    # defect 2). Floor and ceil are both named and rejected, so neither can
-    # come back as an "obvious" simplification.
+    # defect 2).
     assert "**분과 초의 경계는 머리 쪽을 그 분 전체로 펼쳐 정한다**" in text
     assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in text
     assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in text
     assert "내림도 올림도 쓰지 않는다" in text
-    assert "내림하면 답 직전 1분의 앞 줄까지" in text
-    assert "올림하면 같은 분에 쓴 줄이 전부 빠진다" in text
+    # The JUSTIFICATION must be true. Overlap is the union of floor and ceil
+    # and is therefore the widest of the three — so "overlap sits between the
+    # two" was false, and so was "floor takes in the line just before the
+    # answer": floor MISSES the opening minute (s511-rev reproduction:
+    # window 10:05:30–10:29:08, head 10:05 → floor False, ceil True,
+    # overlap True). The measured asymmetry is pinned so the false
+    # justification cannot come back.
+    assert "**겹침은 그 둘의 합집합이고" in text
+    assert "셋 가운데 가장 넓다**(s511-rev 지적)" in text
+    assert "내림은 여는 분의 줄을" in text
+    assert "빠뜨리고(구간 10:05:30–10:29:08에서 머리 10:05는 내림 False·" in text
+    assert "올림은 답한 분의 줄을 빠뜨린다(머리 10:29가" in text
+    assert "**값을 치르는 자리도 적는다**" in text
+    assert "ask가 열리기 **전** 같은" in text
+    assert "경우 (b)가 **서는** 방향이다" in text
+    # the false forms must not survive
+    assert "내림하면 답 직전 1분의 앞 줄까지" not in text
+    assert "겹침 판정이" not in text
     # board-write-first is a RULE the pairing stands on, not an observation,
     # and its enforcement point is named (claunch-nj5yq defect 3)
     assert "**이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙" in text
     assert "관측된 습관이 아니라 규칙이다" in text
-    assert "그 지시문이 이 규칙의 강제" in text
-    # and the rule's enforcement point is named
     assert "그 지시문이 이 규칙의 강제" in text
     # "v1 always emits by_session" was responder-only: the person-answer path
     # (cflow select/approve override) writes by_session None and no visit
@@ -948,8 +961,16 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     assert "**응답자 갈래에서만** 그 필드가 있다" in text
     assert "`cflow/engine.py:5398`" in text
     assert "`by_session`이 `None`이고 `visit`도 없다(`engine.py:1099-1106`)" in text
-    assert "v1은 그 필드를 **늘** 싣지 않는다" in text
+    # "늘 싣지 않는다" read as "never emits at all", contradicting the
+    # sentence right before it (s511-rev). The scope must be "not always".
+    assert "v1은 그 필드를 **늘 싣는 것은 아니다**" in text
     assert "「이 답은 응답자 갈래가 아니다」로 읽는다" in text
+    # the v2 runtime citation must be accurate: the changes/pass emit has
+    # `by` only, the abstain emit also carries `by_session` (s597-rev
+    # measured runtime.py:6622 @ bfece51f)
+    assert "**`changes`·`pass` 답 emit" in text
+    assert "`abstain` emit(`:6622`)만" in text
+    assert "`by_session`을 함께 싣는다**" in text
     # the names the v1 engine does not emit appear only to be ruled out —
     # the prose names them precisely so the next reader does not copy them
     # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
@@ -1028,3 +1049,31 @@ def test_the_v1_reviewer_writes_the_tip_it_judged(layer):
     question = " ".join(str(wf.steps["peer-review"].select.prompt or "").split())
     for where, text in (("reviewer-ensure", reviewer), ("peer-review", question)):
         assert "CHANGES REQUESTED @ <tip>: <무엇을>" in text, (where, text[:300])
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_peer_review_question_orders_the_board_line_before_the_answer(layer):
+    """Check 4 pairing (b) stands on "the responder writes the board line
+    BEFORE answering": the comment head's minute must not fall past the
+    journal's `at`. The gate prose calls this the rule's enforcement point,
+    so the enforcement point itself has to carry the rule -- in both layers,
+    or the prose names a place where nothing is enforced (s597-rev measured
+    this on the v1 side: rewriting the sentence to "이 코멘트는 답 뒤에
+    남겨도 된다" left the 3-module selection fully green)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    question = " ".join(str(wf.steps["peer-review"].select.prompt or "").split())
+    assert "**이 코멘트를 이 답보다 먼저 남긴다.**" in question
+    assert "코멘트 머리 시각이" in question
+    assert "답의 저널 `at`보다 앞서야" in question
+    assert "구간 밖으로 나가고 (b)는 그 줄을 놓쳐 제동으로" in question
+    # and the failure direction is stated, so the rule is not mistaken for a
+    # correctness gate
+    assert "escalate 방향이라 잘못된 통과는 아니다" in question
+    # a failed board write must not silently become "answer first"
+    assert "보드 쓰기가 실패하면 답하기 전에 그 사실을 밝히고" in question
+    # the opposite order must not survive
+    assert "답 뒤에 남겨도 된다" not in question

@@ -384,8 +384,22 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in prompt
     assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in prompt
     assert "내림도 올림도 쓰지 않는다" in prompt
-    assert "내림하면 답 직전 1분의 앞 줄까지" in prompt
-    assert "올림하면 같은 분에 쓴 줄이 전부 빠진다" in prompt
+    # The JUSTIFICATION must be true. Overlap is the union of floor and ceil
+    # and therefore the widest of the three — "overlap sits between the two"
+    # was false, and so was "floor takes in the line just before the answer":
+    # floor MISSES the opening minute (s511-rev reproduction: window
+    # 10:05:30–10:29:08, head 10:05 → floor False, ceil True, overlap True).
+    assert "**겹침은 그 둘의 합집합이고" in prompt
+    assert "셋 가운데 가장 넓다**(s511-rev 지적)" in prompt
+    assert "내림은 여는 분의 줄을" in prompt
+    assert "올림은 답한 분의 줄을 빠뜨린다(머리 10:29가" in prompt
+    # the price the decision pays, and which way it fails
+    assert "**값을 치르는 자리도 적는다**" in prompt
+    assert "ask가 열리기 **전** 같은" in prompt
+    assert "경우 (b)가 **서는** 방향이다" in prompt
+    # the false forms must not survive
+    assert "내림하면 답 직전 1분의 앞 줄까지" not in prompt
+    assert "겹침 판정이" not in prompt
     # board-write-first is a RULE the pairing stands on, not an observation,
     # and its enforcement point is named (claunch-nj5yq defect 3)
     assert "**이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙" in prompt
