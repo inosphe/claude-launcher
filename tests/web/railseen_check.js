@@ -162,6 +162,7 @@ new Function(
   + slice("cwdLine") + slice("railCwdLine") + slice("ctxRailLine")
   + slice("seenAgo") + slice("seenPair") + slice("railSeenLine")
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
+  + slice("statusCheckDefsStamp")
   + slice("refreshRailSeen")
   + `
 Object.assign(exports, {
@@ -506,6 +507,38 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
   await ctx.refresh();
   check("a change the row draws still rebuilds it",
         list.kids.some((k, i) => k === before[i]), false);
+
+  /* ---------------------------------------------------------------- */
+  /* a cached redraw does not change what the last poll signed          */
+  /* ---------------------------------------------------------------- */
+  /* A redraw that sends no request -- a project pick, a socket nudge --
+     reads the records already in hand, and those rows carry no status-check
+     defs: the names and questions ride beside the answer, not on the row.
+     Signing "" for such a redraw made its signature differ from the poll
+     that had just drawn the rail, so the rail was torn down on every cached
+     redraw and again on the poll after it, with nothing changed at all
+     (claunch-hwbuc.2 review). The last poll's defs are kept for that path. */
+  const DEFS = { c1: { name: "C", question: "committed?" } };
+  const fleet = [{ name: "w", status: "busy" }, { name: "p", status: "idle" }];
+  served = { sessions: fleet, status_check_defs: DEFS };
+  await ctx.refresh();
+  const polled = list.kids.slice();
+  check("the poll drew a row per session",
+        polled.filter((k) => k.dataset && k.dataset.name).length, fleet.length);
+  await ctx.refresh({ cached: true });
+  check("a cached redraw after a poll keeps the rows it drew",
+        list.kids.length === polled.length && list.kids.every((k, i) => k === polled[i]),
+        true);
+  await ctx.refresh();
+  check("...and the poll after that keeps them too",
+        list.kids.length === polled.length && list.kids.every((k, i) => k === polled[i]),
+        true);
+  /* The positive control: the defs are still part of what counts, so a
+     changed name rebuilds even though no row moved. */
+  served = { sessions: fleet, status_check_defs: { c1: { name: "C", question: "pushed?" } } };
+  await ctx.refresh();
+  check("a renamed check still rebuilds the rail",
+        list.kids.some((k, i) => k === polled[i]), false);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

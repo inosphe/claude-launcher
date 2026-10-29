@@ -5107,6 +5107,30 @@ function sessionRowDigests(state) {
   return out;
 }
 
+/* One parse per distinct row text, and a shallow copy per poll
+   (claunch-hwbuc.3): the parsed row is the cache, the copy is what callers
+   may write to. Nested values are shared, which is what they were before --
+   every caller that mutates a row assigns a new value. */
+function takeParsed(text) {
+  const memo = takeParsed._byText || (takeParsed._byText = new Map());
+  let row = memo.get(text);
+  if (row === undefined) {
+    row = JSON.parse(text);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, row);
+  }
+  return Object.assign({}, row);
+}
+
+/* The text a row was parsed from, carried on the row for the redraw stamp
+   (claunch-hwbuc.2). Non-enumerable: every reader that serialises a row --
+   the stamp itself, rowSignature, the poll's own text -- sees the row it
+   always saw. */
+function keepRowText(row, text) {
+  if (!row || typeof row !== "object" || typeof text !== "string") return;
+  Object.defineProperty(row, "_pollText", { value: text, configurable: true, enumerable: false });
+}
+
 /* The poll's rows, whole, from an answer that may carry only the changed
    ones. null when the answer names a row this page does not hold -- the
    keep is dropped, so the next poll sends no digests and gets every row. */
@@ -5115,6 +5139,7 @@ function sessionRowsTake(state, data) {
   if (!data.delta || !Array.isArray(data.names)) {
     // A whole answer without digests: HTTP, or an older daemon.
     sessionRowsKept.delete(state);
+    for (const row of rows) keepRowText(row, JSON.stringify(row));
     return rows;
   }
   const kept = sessionRowsKept.get(state) || new Map();
@@ -5125,7 +5150,9 @@ function sessionRowsTake(state, data) {
   for (const name of data.names) {
     const row = changed.get(name);
     if (row) {
-      fresh.set(name, { hash: digests[name], text: JSON.stringify(row) });
+      const text = JSON.stringify(row);
+      fresh.set(name, { hash: digests[name], text });
+      keepRowText(row, text);
       out.push(row);
       continue;
     }
@@ -5135,10 +5162,57 @@ function sessionRowsTake(state, data) {
       return null;
     }
     fresh.set(name, held);
-    out.push(JSON.parse(held.text));
+    // Parsing the same text again every poll was 2.1 ms of a working poll
+    // (Trace-20261021T194912, claunch-hwbuc.3). The parse is memoised by the
+    // text it came from and the poll hands back a fresh shallow copy, so a
+    // caller that writes to its row (sessionRowsJoin replaces status_checks)
+    // still writes to its own object and not to the next poll's.
+    const again = takeParsed(held.text);
+    keepRowText(again, held.text);
+    out.push(again);
   }
   sessionRowsKept.set(state, fresh);
   return out;
+}
+
+/* The redraw stamp of one poll row, memoised by the row's own text
+   (claunch-hwbuc.2).
+
+   `refreshSessions` used to stringify the whole cache every poll -- 6.0/4.7 ms
+   of the main thread on a working fleet (Trace-20261021T194912). A delta poll
+   hands back the rows the daemon called unchanged re-parsed from the text this
+   page kept, so the text is the row's identity: the stamp computed for a text
+   is the answer for every row that text produces, and a poll that changed
+   nothing stringifies nothing. The text itself is carried on the row
+   (`_pollText`, non-enumerable) by sessionRowsTake. */
+function sessionRowStamp(row, unstamped) {
+  const text = row && row._pollText;
+  if (typeof text !== "string") return JSON.stringify(row, unstamped);
+  const memo = sessionRowStamp._byText || (sessionRowStamp._byText = new Map());
+  let stamp = memo.get(text);
+  if (stamp === undefined) {
+    stamp = JSON.stringify(JSON.parse(text), unstamped);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, stamp);
+  }
+  return stamp;
+}
+
+/* The status-check names and questions reach the rail through
+   `status_check_defs`, not through the rows, and `sessionRowsJoin` puts them
+   back only after `sessionRowsTake` took the poll's text. So a poll that
+   renames a check moves no row text: the row stamps stand still and the
+   redraw signature has to carry the defs itself, or the rail keeps drawing
+   the old names until something else in the signature moves
+   (claunch-hwbuc.2 review, s215-rev).
+
+   No memo here, deliberately: the defs are one record per configured check
+   -- a handful, whatever the fleet size -- so serialising them every poll is
+   O(checks) and is exactly the part of the old signature the row stamps were
+   meant to replace. */
+function statusCheckDefsStamp(defs) {
+  if (!defs || typeof defs !== "object") return "";
+  return JSON.stringify(defs);
 }
 
 /* The rail list names each status check once (`status_check_defs`, id ->
@@ -5716,6 +5790,10 @@ async function refreshSessions(options) {
   // build a live xterm over a record the cache had never seen. Archived
   // records stay on demand: they are the one set that grows without bound.
   const state = (options && options.state) || "current";
+  // The poll's status-check names/questions, kept out here because the
+  // response is read inside a block and the signature is built after it
+  // (claunch-hwbuc.2).
+  let pollDefs = null;
   const matchesPollState = (session) => {
     if (state === "all") return true;
     if (state === "active") return session.status !== "exited";
@@ -5725,6 +5803,12 @@ async function refreshSessions(options) {
   // `cached`: redraw from the records already in hand, with no request --
   // what a project pick asks for, since every project is in the cache.
   const cached = !!(options && options.cached);
+  // A cached redraw sends no request, so it has no defs of its own. Signing
+  // "" there would differ from the poll that drew the rail, so every cached
+  // redraw would rebuild it -- and the poll after would rebuild it again --
+  // where nothing changed at all (claunch-hwbuc.2 review). The last poll's
+  // defs are kept on the function for exactly this path.
+  if (cached) pollDefs = refreshSessions._defs || null;
   if (!cached) {
     let data;
     // The row digests ride beside the read (claunch-4thlk.3); reduced
@@ -5756,6 +5840,8 @@ async function refreshSessions(options) {
     const incoming = rowKeep ? sessionRowsTake(state, data) : (data.sessions || []);
     if (!incoming) return;
     if (typeof sessionRowsJoin === "function") sessionRowsJoin(incoming, data.status_check_defs);
+    pollDefs = data && data.status_check_defs;
+    refreshSessions._defs = pollDefs;
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,
@@ -5821,10 +5907,23 @@ async function refreshSessions(options) {
     // flight; the tps line below is swapped in place for it.
     (key === "live" && value && typeof value === "object" && "bin_s" in value)
   ) ? undefined : value;
+  // A row's stamp comes from sessionRowStamp when the harness carries it (the
+  // poll path), and from the whole row otherwise -- a sliced refreshSessions
+  // alone still serialises what it used to (claunch-hwbuc.2).
+  const rowStamp = (row) => (typeof sessionRowStamp === "function"
+    ? sessionRowStamp(row, unstamped)
+    : JSON.stringify(row, unstamped));
+  // The rows carry only their answers, so a renamed status check moves no row
+  // stamp; the defs ride in the signature on their own (claunch-hwbuc.2).
+  // Guarded like rowStamp: a sliced refreshSessions without the helper keeps
+  // the shape it had.
+  const defsStamp = typeof statusCheckDefsStamp === "function"
+    ? statusCheckDefsStamp(pollDefs)
+    : null;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
-    [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
+    [[briefingLLM, sessionsCache.map(rowStamp), groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList,
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,
@@ -5834,7 +5933,10 @@ async function refreshSessions(options) {
      typeof sessionFilter === "undefined" ? null : sessionFilter,
      // The key pools the rows' chips are drawn from, read beside this poll
      // rather than in it (keyPoolSignature).
-     typeof keyPoolSignature === "function" ? keyPoolSignature() : null],
+     typeof keyPoolSignature === "function" ? keyPoolSignature() : null,
+     // The checks' names and questions, which no row carries
+     // (claunch-hwbuc.2 review).
+     defsStamp],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and

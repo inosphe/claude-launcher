@@ -563,6 +563,7 @@ CHECKS = [
         "usage_check.js",
         "railctx_check.js",
         "ctxpoll_check.js",
+        "pollstamp_check.js",
         "railmodel_check.js",
         "railcwd_check.js",
         "wfscroll_check.js",

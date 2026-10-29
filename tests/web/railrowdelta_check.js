@@ -34,7 +34,7 @@ function slice(name) {
 const ctx = new Function([
   "const sessionRowsKept = new Map();",
   slice("sessionRowDigests"),
-  slice("sessionRowsTake"),
+  slice("takeParsed") + slice("keepRowText") + slice("sessionRowsTake"),
   slice("sessionRowsJoin"),
   "return { take: sessionRowsTake, digests: sessionRowDigests, kept: sessionRowsKept,",
   "         join: sessionRowsJoin };",
