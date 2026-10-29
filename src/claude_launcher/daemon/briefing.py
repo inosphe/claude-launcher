@@ -1476,11 +1476,16 @@ def forget(names) -> None:
     without ``--logs`` keeps the directory, and the next restart would load it.
     """
     _restore_cache()
+    names = list(names)
     for name in names:
         _forgotten[name] = _forgotten.get(name, 0) + 1
         _cache.pop(name, None)
         _failures.pop(name, None)
         _write(name)
+    # The fleet search corpus carries each session's summary; clear and remove
+    # also reach it through the registry's change hooks, discard does not.
+    if names:
+        _run_hooks()
 
 
 def _record_failure(name: str, exc: BaseException) -> None:

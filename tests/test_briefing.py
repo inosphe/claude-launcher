@@ -1039,7 +1039,7 @@ class _Ended:
 
 
 @pytest.mark.parametrize("how", ["clear", "clear-logs", "remove", "remove-children", "discard"])
-def test_a_removed_record_takes_its_briefing_along(home, how):
+def test_a_removed_record_takes_its_briefing_along(home, monkeypatch, how):
     """The cache is keyed by name and outlives the record. Removing a record
     while the daemon runs left its briefing in memory, so a session created
     again under that name showed the old summary, and the next retire wrote
@@ -1055,6 +1055,8 @@ def test_a_removed_record_takes_its_briefing_along(home, how):
         briefing._failures[name] = {"at": "t", "error": "HTTP 402"}
         briefing._persist(name)
 
+    told = []
+    monkeypatch.setattr(briefing, "persist_hooks", [lambda: told.append(1)])
     if how == "remove":
         mgr.remove("gone")
     elif how == "remove-children":
@@ -1065,6 +1067,7 @@ def test_a_removed_record_takes_its_briefing_along(home, how):
         mgr.clear(logs=how == "clear-logs", keep=["kept", "kid"])
     assert briefing.digest("gone") is None
     assert not (paths.session_dir("gone") / "briefing.json").exists()
+    assert told, "the search index is told the summary went away"
     # a removed child goes with its parent; an escalated one keeps its own
     if how == "remove-children":
         assert briefing.digest("kid") is None
