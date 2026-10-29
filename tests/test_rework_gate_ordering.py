@@ -365,12 +365,73 @@ def test_the_gate_separates_the_upper_by_comment_author_not_by_prefix():
     assert "그 줄이 그 답의" in prompt
     # the pairing is the ask_routed..ask_answered time window, not a tip
     assert "**`ask_routed`와" in prompt
-    assert "`ask_answered`의 시각이 그 ask의 `ask_routed` 시각과" in prompt
-    assert "peer-review@<N>`" in prompt
+    assert "peer-review@<N>" in prompt
+    # the pairing must FILTER. "ask_answered's time lies between ask_routed's
+    # time and ask_answered's time" is the interval's own endpoint — true by
+    # definition, rejects nothing (s1262-rev; claunch-nj5yq defect 1). The
+    # predicates are the line head's time and `instance`, and the prose says so.
+    assert "거르는 값은 **머리 시각**과 **`instance`** 둘이다" in prompt
+    assert "정의상 늘 참이고 아무것도 거르지" in prompt
+    assert "정의상 늘 참이고 아무것도 거르지 않는다(s1262-rev 지적)" in prompt
+    assert "그 절은 조건이 아니라 판독 절차의" in prompt
+    assert "서술이므로 술어로 쓰지 않는다" in prompt
+    # the minute/second boundary rule: the board head is minute-granular, the
+    # journal `at` is second-granular, so the head is widened to its whole
+    # minute and the test is overlap (s490-rev, s597-rev; claunch-nj5yq
+    # defect 2). Both floor and ceil are named and rejected so neither can
+    # come back as an "obvious" simplification.
+    assert "**분과 초의 경계는 머리 쪽을 그 분 전체로 펼쳐 정한다**" in prompt
+    assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in prompt
+    assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in prompt
+    assert "내림도 올림도 쓰지 않는다" in prompt
+    # The JUSTIFICATION must be true. This sentence has now been wrong twice:
+    # first "overlap sits between floor and ceil" (it is the widest), then
+    # "overlap is their union" — disproved by s597-rev: an ask that opens and
+    # closes inside one minute (10:05:10–10:05:40, head 10:05) has floor AND
+    # ceil false while overlap is true. Overlap is a strict superset.
+    assert "**겹침이 셋 가운데 가장 넓다**" in prompt
+    assert "내림은 여는 분의 줄을" in prompt
+    assert "올림은 답한 분의 줄을 빠뜨린다(머리 10:29가" in prompt
+    assert "**포함하고 그보다 넓다**" in prompt
+    assert "10:05:10–10:05:40, 머리 10:05) 내림·올림이 둘 다 False인데" in prompt
+    assert "겹침만 True다(s597-rev 재심)" in prompt
+    assert "「둘의 합집합」이라고" in prompt
+    # a bare pronoun does not say which values it means (s511-rev)
+    assert "**내림과 올림 둘 다를 덮고 그 둘을 합친 것보다도 넓다**" in prompt
+    assert "앞의 셋을 전부 덮는다" not in prompt
+    # the predicate itself is pinned whole, both bounds and both directions --
+    # a flipped operator (`<=` -> `<`, `>=` -> `>`) was measured green by three
+    # reviewers (s404-rev, s490-rev, s1236-rev2), so assert the sentence
+    assert (
+        "겹침의 술어는 `HH:MM:00 <= 답의 at` 이고 `HH:MM:59 >= ask_routed의 at` "
+        "둘 다인 것이고" in prompt
+    )
+    # the price the decision pays, and which way it fails
+    assert "**값을 치르는 자리도 적는다**" in prompt
+    assert "ask가 열리기 **전** 같은" in prompt
+    assert "경우 (b)가 **서는** 방향이다" in prompt
+    # the false forms must not survive
+    assert "내림하면 답 직전 1분의 앞 줄까지" not in prompt
+    assert "겹침은 그 둘의 합집합이고" not in prompt
+    assert "겹침 판정이" not in prompt
+    # board-write-first is a RULE the pairing stands on, not an observation,
+    # and its enforcement point is named (claunch-nj5yq defect 3)
+    assert "**이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙" in prompt
+    assert "관측된 습관이 아니라 규칙이다" in prompt
+    assert "그 지시문이 이 규칙의 강제" in prompt
+    # the reviewer's own instruction carries it, or the rule has nowhere to be
+    # enforced — checked against the peer-review question itself, not the
+    # landing gate, since the gate reads the result the question tells the
+    # reviewer how to produce
+    question = " ".join(
+        str(yaml.safe_load(V2.read_text(encoding="utf-8"))
+            ["nodes"]["peer-review"]["ask"]["prompt"]).split())
+    assert "**이 코멘트를 이 답보다 먼저 남긴다.**" in question
+    assert "코멘트 머리 시각이" in question
+    assert "보드 쓰기가 실패하면 답하기 전에 그 사실을 밝히고" in question
     # the responder writes the board line BEFORE answering — the earlier
     # "first line after the answer" had the direction backwards
-    assert "응답자는 보드에 **먼저 쓰고 답한다**" in prompt
-    assert "「답 이후 첫 줄」은 방향이" in prompt
+    assert "「답 이후 첫 줄」은 방향이 반대다" in prompt
     # and the line's @tip is not the pairing key, with the reason given
     assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in prompt
     assert "저널에 대조할 tip 값이 없어서" in prompt
