@@ -1740,6 +1740,14 @@ Finding이다.
 바뀌었다. 원래 옵션의 설명은 `topic`에 「선택지:」 줄로 옮겼다.
 `workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
 선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
+같은 형태의 승인 둘이 뒤에 더해졌다(claunch-101wi). 둘 다 에이전트의 자체 판정
+(`chooser: agent`, `require_reason`)이 부정일 때만 서고, 거절(`decline`)은
+`on_decline` 결과로 끝나 감싸는 `try`가 받는다:
+`feasibility-gate`(worker-round의 `feasibility-check`가 `unjustified` — 일감과 코딩
+승인 앞; 거절은 `infeasible` → `feasibility-hold`가 `HOLD:`를 남기고 batch를 빠져
+wrapup으로)와 `landing-channel-gate`(land의 `landing-channel`이 `no-channel` —
+`integration-request`·`await-landing` 바로 앞; 거절은 `no-channel-declined` → land가
+`blocked`로 끝나고 보드는 `in_review`로 가지 않는다).
 `landing-review`·`peer-review`의 ask는 사용자가 아니라 다른 세션에 묻는 것이라
 대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
 바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
