@@ -4588,13 +4588,18 @@ function renderSessionGroupHeader(group, tab) {
     }
     head.appendChild(origins);
   }
-  if (group === "mesh" && tab.value !== "(no mesh)") {
+  /* The ⊕ opens the Create page with this mesh picked. It demands a
+     concrete project too: from "All projects" the form's Project row has
+     nothing to seed from, and sessions created that way keep arriving
+     misconfigured (claunch-teipq). */
+  if (group === "mesh" && tab.value !== "(no mesh)" && currentProject) {
     const add = document.createElement("button");
     add.className = "session-group-new";
     add.type = "button";
     add.textContent = "⊕";
     add.title = `create a new session in mesh ${tab.value}` +
-                " — the Create page with this mesh already picked";
+                ` (project ${currentProject})` +
+                " — the Create page with this mesh and project already picked";
     add.addEventListener("click", (e) => {
       e.stopPropagation();   // the row itself scrolls; this does not
       go(`#/new/${encodeURIComponent(tab.value)}`);
