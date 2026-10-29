@@ -1839,6 +1839,30 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
     assert node["returns"] == {"ok": {"issue": "str"}}
 
 
+def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
+    """claunch-phkt1: auto-release records the child reviewer the settle reap
+    already ended and asks to kill only one still alive; end-new-task asks to
+    resume that reviewer (a person's card, resume_gate) and leaves a
+    REVIEWER RECYCLE marker the next run's reviewer-ensure reads -- withdrawing
+    a still-pending request before it spawns, so two reviewers never stand."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    nodes = doc["nodes"]
+    release = _words(nodes["auto-release"]["prompt"])
+    assert "settle-reap" in release and "MCP `kill`" in release
+    assert "reviewer: <이름> exited" in release
+    assert "reviewer: <이름> kill-request <id>" in release
+    assert "session.kill" in nodes["auto-release"]["effects"]
+    new_task = _words(nodes["end-new-task"]["prompt"])
+    assert "MCP `resume_session`" in new_task
+    assert "REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>" in new_task
+    assert "operator의 경로이므로 쓰지 않는다" in new_task
+    assert "session.spawn" in nodes["end-new-task"]["effects"]
+    ensure = _words(nodes["reviewer-ensure"]["prompt"])
+    assert "REVIEWER RECYCLE:" in ensure
+    assert "`withdraw: true`로 요청을 거둔 뒤" in ensure
+    assert "rejected·failed·withdrawn·moot" in ensure
+
+
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
 #: The self-improve nodes are the library's own (self-improve-common).
 #: end-notice is not here: it runs before the gate, in settle (claunch-q4cqy.6).
