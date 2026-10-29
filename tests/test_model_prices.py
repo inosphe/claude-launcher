@@ -107,6 +107,22 @@ def test_missing_component_means_zero_rate(mgr):
     asyncio.run(_with_client(mgr, scenario))
 
 
+def test_unset_cache_write_stays_unset(mgr):
+    # cache_write is optional: the dashboard prices an unset one at the
+    # row's input rate (app.js cacheWriteRate), so a null must not be
+    # stored as 0 — 0 is a real rate that turns that fallback off.
+    async def scenario(client):
+        resp = await _put(client, {"prices": {
+            "m": {"input": 0.3, "cache_write": None},
+            "z": {"input": 0.3, "cache_write": 0},
+        }})
+        got = (await resp.json())["prices"]
+        assert got["m"] == {"input": 0.3}
+        assert got["z"] == {"input": 0.3, "cache_write": 0.0}
+
+    asyncio.run(_with_client(mgr, scenario))
+
+
 @pytest.mark.parametrize("bad", [
     {"prices": []},
     {"prices": {"": {"input": 1}}},
