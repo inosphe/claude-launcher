@@ -1949,6 +1949,49 @@ def foreign_pytest(repo: Path, cmd: List[str]) -> Optional[str]:
 _PYTEST_NO_TESTS = 5
 
 
+def collect_without_core_filter(cmd: List[str]) -> List[str]:
+    """``cmd`` turned into a collection of the same selection, tail included.
+
+    Drops the ``-m`` core expression and the xdist width (collection needs no
+    workers) and keeps everything else -- paths and ``--deselect`` -- so what
+    it collects is what the tier would have run had it not left the tail out.
+    """
+    out: List[str] = []
+    skip = 0
+    for i, arg in enumerate(cmd):
+        if skip:
+            skip -= 1
+            continue
+        if arg == "-m" and cmd[i + 1:i + 2] == [test_tiers.CORE_EXPR]:
+            skip = 1
+        elif arg == "-n":
+            skip = 1
+        else:
+            out.append(arg)
+    return [*out, "--collect-only", "-q"]
+
+
+def selection_is_all_tail(
+    repo: Path, cmd: List[str], environment: Optional[dict[str, str]] = None
+) -> bool:
+    """True when ``cmd`` collected nothing only because the tail was left out.
+
+    Exit 5 under ``-m "not slow_tail"`` has two causes: every selected test is
+    in the tail (this tier's empty answer), or the selection holds no tests at
+    all (a deleted module, a ``--deselect`` that removed everything), which was
+    a failure before the tiers existed and stays one.
+    """
+    proc = subprocess.run(
+        collect_without_core_filter(cmd),
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        env=environment,
+    )
+    return proc.returncode == 0
+
+
 def run_and_record(
     repo: Path,
     files: List[str],
@@ -2001,10 +2044,15 @@ def run_and_record(
         lines.append(line)
     code = proc.wait()
     tail_excluded = test_tiers.CORE_EXPR in cmd
-    if code == _PYTEST_NO_TESTS and tail_excluded:
+    if (
+        code == _PYTEST_NO_TESTS
+        and tail_excluded
+        and selection_is_all_tail(repo, cmd, environment)
+    ):
         # Every selected test is in the slow tail, which this tier leaves to
         # the full sweep: pytest reports "no tests collected" (5), and that is
-        # this tier's empty answer, not a failure.
+        # this tier's empty answer, not a failure. A selection that holds no
+        # tests even with the tail included stays exit 5.
         print("every selected test is in the slow tail; none ran in this tier")
         code = 0
     finished = datetime.now(timezone.utc)

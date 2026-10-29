@@ -194,9 +194,15 @@
   모두 꼬리에 있고, `tools/sweep.py`의 명령에 `-m`이 없다. 그러므로 T2는 T0·T1에서
   제외한 테스트를 포함해 전체를 실행한다.
 - 선택된 모듈의 테스트가 모두 꼬리여서 pytest가 exit 5(수집된 테스트 없음)를
-  내면 `changed_tests.py`는 이를 통과로 기록한다. 영수증의 `command`에 `-m`이 있어
+  내면 `changed_tests.py`는 이를 통과로 기록한다. 통과로 바꾸기 전에 같은 선택(경로와
+  `--deselect`)을 `-m` 없이 `--collect-only`로 한 번 더 수집하고, 1건 이상 수집될 때만
+  바꾼다(`selection_is_all_tail`). 꼬리를 포함해도 0건이면(삭제된 모듈, `--deselect`로
+  전부 빠진 선택) 이전처럼 실패로 기록한다. 영수증의 `command`에 `-m`이 있어
   꼬리를 제외한 실행임을 확인할 수 있다. `--with-tail` 실행은 기존 영수증을
   재사용하지 않는다.
+- `tests/test_test_tiers.py`는 `SOURCE_MARKERS`를 위 표의 세 마커
+  (`worktree`, `slow_shim`, `browser`)에 고정한다. 마커를 더하거나 빼려면 이 표와
+  테스트를 함께 바꾼다.
 - 수정 필요 항목: `worktree.py`나 `routing` 코드를 고친 라운드는 같은 이름의
   테스트 모듈이 대부분 꼬리여서 T0에서 거의 아무것도 실행하지 않는다.
   이 경우 `--with-tail`로 실행하거나 T2 결과를 기다려야 한다. 직접 대응하는

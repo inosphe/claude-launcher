@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from _pytest.mark.expression import Expression
@@ -80,3 +82,52 @@ def test_browser_harness_nodes_are_all_in_the_tail(request):
     assert all(test_tiers.is_tail(_names(i)) for i in harnesses)
     if harnesses:
         assert len(harnesses) == len(list((ROOT / "tests" / "web").glob("*_browser.cjs")))
+
+
+def test_the_source_markers_are_exactly_the_documented_three():
+    assert test_tiers.SOURCE_MARKERS == ("worktree", "slow_shim", "browser")
+    for marker in test_tiers.SOURCE_MARKERS:
+        assert test_tiers.is_tail([marker])
+    assert not test_tiers.is_tail(["unit", "asyncio"])
+
+
+def test_the_collection_command_keeps_the_selection_and_lifts_the_filter():
+    ct = _load("changed_tests")
+    cmd = ct.build_command(
+        ["tests/test_a.py", "tests/test_b.py"], basetemp="b", deselect=("tests/test_a.py::t",)
+    )
+    out = ct.collect_without_core_filter(cmd)
+    assert "-m" not in out and test_tiers.CORE_EXPR not in out and "-n" not in out
+    assert out[-2:] == ["--collect-only", "-q"]
+    assert {"tests/test_a.py", "tests/test_b.py", "--deselect", "tests/test_a.py::t"} <= set(out)
+
+
+def _run_tier(tmp_path, body: str, extra=()):
+    """run_and_record over a throwaway repo, with the tier's real ``-m`` filter.
+
+    It returns 0 for a pass and 1 for anything else, pytest's exit 5 included.
+    """
+    ct = _load("changed_tests")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nmarkers =\n    slow_tail\n", encoding="utf-8"
+    )
+    (tmp_path / "test_t.py").write_text(body, encoding="utf-8")
+    cmd = [sys.executable, "-m", "pytest", "test_t.py", "-q", "-p", "no:cacheprovider",
+           "-m", test_tiers.CORE_EXPR, *extra, f"--basetemp={tmp_path / 'bt'}"]
+    code = ct.run_and_record(tmp_path, ["test_t.py"], cmd, "t" * 40, "master", tmp_path / "r")
+    return code
+
+
+def test_a_selection_that_is_all_tail_is_this_tiers_empty_answer(tmp_path):
+    body = "import pytest\n@pytest.mark.slow_tail\ndef test_slow():\n    pass\n"
+    assert _run_tier(tmp_path, body) == 0
+
+
+def test_a_selection_with_no_tests_at_all_still_fails(tmp_path):
+    assert _run_tier(tmp_path, "x = 1\n") == 1
+
+
+def test_a_deselect_that_removes_every_core_test_still_fails(tmp_path):
+    body = "def test_core():\n    pass\n"
+    assert _run_tier(tmp_path, body, extra=("--deselect", "test_t.py::test_core")) == 1
