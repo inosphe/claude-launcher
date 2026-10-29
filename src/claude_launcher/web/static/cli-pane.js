@@ -16,6 +16,12 @@
    `run` goes to the accept route with no body, which is the same route the
    MCP tools are refused — an agent-shaped accept is a 403 there.
 
+   The header's `nudge` sends POST /api/sessions/<name>/shell/nudge: the
+   session's agent is told, in its own terminal, that this shell has output
+   it has not read and where that output starts (its last-read cursor), so
+   it reads the new lines instead of the whole ring. The one-line note is
+   optional; an empty nudge is a plain "look at your shell".
+
    The dashboard's CLI tab (#cli) is the user's own shell and has no agent
    frames at all; it is not this pane and this pane does not share it.
 
@@ -27,6 +33,7 @@ globalThis.CliPane = (() => {
   let name = "";            // the session whose shell is shown
   let term = null, fit = null, ws = null;
   let strip = null, status = null, act = null;
+  let note = null, nudge = null;   // the header's optional note and its button
   let rows = [];            // pending proposals, as the daemon last sent them
   let remoteResize = false, retry = 0, retryTimer = null, fitObserver = null;
 
@@ -113,6 +120,43 @@ globalThis.CliPane = (() => {
     } catch {
       if (row) row.classList.remove("busy");
     }
+  }
+
+  /* ---- the nudge ----
+
+     The user's half of the read cursor. The session cannot see this pane,
+     so the button types a block into the session's terminal through the
+     daemon's nudge route: "your shell has N unread bytes from offset M".
+     The note is optional and the request is sent either way. */
+  async function sendNudge() {
+    const btn = nudge;                 // the response may land after unmount
+    if (!btn) return;
+    const text = note ? String(note.value || "").trim() : "";
+    btn.disabled = true;
+    btn.textContent = "…";
+    let ok = false;
+    try {
+      const resp = await api(`${base()}/nudge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (resp && resp.ok) {
+        // "delivered: false" means the session was not there to take it —
+        // the route ran, so say failed rather than sent.
+        let data = null;
+        try {
+          data = typeof resp.json === "function" ? await resp.json() : null;
+        } catch { data = null; }
+        ok = data ? data.delivered !== false : true;
+      }
+    } catch {
+      ok = false;
+    }
+    if (ok && nudge === btn && note) note.value = "";
+    btn.disabled = false;
+    btn.textContent = ok ? "sent" : "failed";
+    setTimeout(() => { if (nudge === btn) btn.textContent = "nudge"; }, 1200);
   }
 
   /* ---- the socket ---- */
@@ -205,7 +249,20 @@ globalThis.CliPane = (() => {
     act = node("button", "term-btn cli-pane-act hidden");
     act.type = "button";
     act.addEventListener("click", actClick);
-    head.append(node("span", "cli-pane-title", "shell · " + session), status, act);
+    const box = node("span", "cli-pane-nudge");
+    note = node("input", "cli-pane-nudge-input");
+    note.type = "text";
+    note.placeholder = "nudge (optional)";
+    note.title = "a note for the session — it is told to read what you just did in its shell";
+    note.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); sendNudge(); }
+    });
+    nudge = node("button", "term-btn cli-pane-nudge-btn", "nudge");
+    nudge.type = "button";
+    nudge.title = "tell this session to read its shell from its last read";
+    nudge.addEventListener("click", sendNudge);
+    box.append(note, nudge);
+    head.append(node("span", "cli-pane-title", "shell · " + session), box, status, act);
     strip = node("div", "cli-suggest cli-pane-suggest hidden");
     strip.setAttribute("aria-live", "polite");
     const termHost = node("div", "cli-pane-term");
@@ -260,6 +317,7 @@ globalThis.CliPane = (() => {
     term = null;
     fit = null;
     strip = status = act = null;
+    note = nudge = null;
   }
 
   return { mount, unmount };

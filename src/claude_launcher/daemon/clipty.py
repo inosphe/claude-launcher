@@ -74,6 +74,11 @@ SUGGESTION_PENDING_PER_SESSION = 10
 SUGGESTION_PENDING_MAX = 50
 SUGGESTION_KEEP_DECIDED = 200
 
+#: A nudge's note: what the user attaches when telling a session to look at
+#: its shell. Long enough for a sentence about what changed, short enough
+#: that the block stays a line in the session's terminal.
+NUDGE_MAX_TEXT = 2000
+
 
 def _now() -> str:
     """UTC seconds, the timestamp shape the daemon's records use."""
@@ -418,6 +423,11 @@ class SessionShell(ShellPty):
     ``claunch shell accept``) calls — the MCP tools have no accept tool and
     the route refuses a session-shaped accept (``daemon/shell_api.py``).
 
+    Where that agent read to is kept here (``last_read``), so "show me only
+    what is new" survives the agent's context: a reader that lost its offset
+    reads forward from the cursor instead of starting over at the tail, and
+    a nudge (:meth:`nudge_text`) can say where to read.
+
     Every shell here belongs to exactly one session and dies with it
     (``daemon/session_shells.py``), which is what makes the boundary
     legible: a proposal can only be made to the shell of the session that
@@ -430,6 +440,79 @@ class SessionShell(ShellPty):
         #: Input proposed by this session's agent, by suggestion id. A
         #: proposal is text and a reason; only the user's accept writes it.
         self._suggestions: Dict[str, dict] = {}
+        #: Where this session's agent last read to, and the pid of the child
+        #: that numbering belongs to. The daemon keeps it because the offset
+        #: a read returns otherwise lives only in the reader's own context,
+        #: and a compacted context loses it — after which every read is a
+        #: tail again and the output in between is never looked at. The pid
+        #: is part of the cursor: a restarted shell numbers its bytes from 0
+        #: again, so an offset from the previous child points into the new
+        #: one's middle.
+        self.last_read = 0
+        self.last_read_pid: Optional[int] = None
+
+    # ------------------------------------------------------------------ #
+    # the session's read cursor (the daemon's memory of it)
+    # ------------------------------------------------------------------ #
+    @property
+    def read_cursor(self) -> int:
+        """Where this session's next default read starts.
+
+        ``0`` when the cursor belongs to a previous child (the shell was
+        restarted): its numbering began again, so nothing of the current
+        output has been read.
+        """
+        return self.last_read if self.last_read_pid == self.pid else 0
+
+    @property
+    def unread_bytes(self) -> int:
+        """Output this session's agent has not been handed yet."""
+        return max(0, self.total - self.read_cursor)
+
+    def read_output(self, after: Optional[int] = None, limit: int = READ_MAX) -> dict:
+        """:meth:`ShellPty.read_output`, and the read moves the cursor.
+
+        Every read by this session advances ``last_read`` to where the
+        returned slice ended, so the next default read continues from there
+        instead of asking the agent to carry an offset across turns.
+        """
+        out = super().read_output(after, limit)
+        self.last_read = int(out["offset"])
+        self.last_read_pid = out["pid"]
+        return out
+
+    def read_from_last(self, limit: int = READ_MAX) -> dict:
+        """Read forward from where this session last read.
+
+        The pane's and the MCP tool's default read (``daemon/shell_api.py``
+        passes no ``after`` when the request names no offset). An offset
+        from a restarted shell is not usable, so that case reads the new
+        child from its first byte.
+        """
+        return self.read_output(self.read_cursor, limit)
+
+    def nudge_text(self, text: str = "") -> str:
+        """The block the user's nudge types into this session's terminal.
+
+        The user's note (optional) and the one fact worth carrying: where
+        the unread output starts. ``shell_read`` with no offset reads from
+        exactly there, so the session does not have to remember a number.
+        """
+        # One line for the note: a block the session reads at a glance beats
+        # a paragraph that no longer looks like a nudge.
+        note = " ".join((text or "").split())
+        if "\x00" in note:
+            raise ValueError("text must not contain NUL")
+        if len(note) > NUDGE_MAX_TEXT:
+            raise ValueError(f"text is longer than {NUDGE_MAX_TEXT} characters")
+        after = self.read_cursor
+        unread = self.unread_bytes
+        lines = ["[claunch nudge]" + (f" {note}" if note else "")]
+        lines.append(
+            f"Your session's shell has {unread} unread bytes from offset "
+            f"{after}; shell_read with no offset reads from there."
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # input proposals (the agent proposes, the user decides)
