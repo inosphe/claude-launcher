@@ -1095,7 +1095,6 @@ globalThis.ThreadsPane = (() => {
       title.placeholder = "주제(선택) — 비우면 Thread #N, qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
       title.value = drafts.get("\u0000title") || "";
       title.addEventListener("input", () => drafts.set("\u0000title", title.value));
-      const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다. 이미지는 붙여넣기·끌어다 놓기");
       let about = null;
       if (composeQa) {
         about = node("div", "th-about");
@@ -1114,6 +1113,9 @@ globalThis.ThreadsPane = (() => {
         paintStart(go);   // off and 여는 중… while the post is out
       };
       go.addEventListener("click", submit);
+      // Enter sends and Shift+Enter/Ctrl+J break the line, as in a thread's
+      // own composer (claunch-3y0px).
+      const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다. 이미지는 붙여넣기·끌어다 놓기", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
       dropTarget(form, "");
       // One row for the form's buttons (claunch-o1wg6): the two attach

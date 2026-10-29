@@ -561,6 +561,29 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
   assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
 
+  // the form's first-message box takes the composer's keys too
+  // (claunch-3y0px): Enter starts the thread, Shift+Enter and Ctrl+J post
+  // nothing and break the line instead.
+  host.querySelector(".th-new").fire("click");
+  await settle();
+  const nbox = host.querySelector(".th-newform .th-text");
+  nbox.value = "line one";
+  nbox.fire("keydown", {key: "Enter", shiftKey: true});
+  nbox.fire("keydown", {key: "j", ctrlKey: true});
+  await settle();
+  assert.equal(calls.filter((c) => c[1] === "/api/threads").length, 1,
+               "Shift+Enter and Ctrl+J in the form post nothing");
+  assert.equal(nbox.value, "line one\n", "Ctrl+J breaks the line in the form");
+  calls.length = 0;
+  host.querySelector(".th-newform .th-title-input").value = "Keys";
+  const nbox2 = host.querySelector(".th-newform .th-text");
+  nbox2.value = "안녕";
+  nbox2.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.deepEqual(calls.filter((c) => c[1] === "/api/threads"),
+                   [["POST", "/api/threads", {to: "s1", title: "Keys", text: "안녕"}]],
+                   "Enter in the form starts the thread");
+
   // fork mode (claunch-uaxp8): the form asks whether a copy can be made, the
   // box is enabled only when it can, the post carries fork: true, and the pane
   // leaves for the copy that now owns the thread.
