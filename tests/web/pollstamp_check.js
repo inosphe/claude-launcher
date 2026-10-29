@@ -59,6 +59,7 @@ new Function(
 Object.assign(exports, {
   take: sessionRowsTake,
   stamp: sessionRowStamp,
+  parsed: takeParsed,
 });`)(api);
 
 /* The filter the redraw signature uses, as refreshSessions writes it. Kept
@@ -179,6 +180,52 @@ check("...and drops the volatile keys",
 /* A volatile-only move is not a redraw. */
 const volatile = { ...one[0], age_s: 900, viewers: 7 };
 check("a volatile-only move stamps the same", api.stamp(volatile, unstamped), whole);
+
+/* Both memos are bounded: they drop themselves at the cap rather than growing
+   with every row text the page ever sees. A long-lived tab polls a fleet that
+   churns, so this is the growth path a session never exercises on its own.
+   The cap is read off the source so the harness follows the constant. */
+const CAP = Number((src.match(/memo\.size >= (\d+)\) memo\.clear\(\)/) || [])[1]);
+check("the source holds a memo cap", Number.isFinite(CAP), true);
+const DISTINCT = CAP + 1000;
+const distinct = (i) => JSON.stringify({
+  name: `churn${i}`, status: "busy", context: { tokens: i, model: "opus" },
+});
+for (let i = 0; i < DISTINCT; i++) api.parsed(distinct(i));
+check("the parse memo stays at or below its cap",
+      api.parsed._byText.size <= CAP, true);
+check("...and still answers after the drop",
+      api.parsed(distinct(DISTINCT - 1)).name, `churn${DISTINCT - 1}`);
+
+for (let i = 0; i < DISTINCT; i++) api.stamp({ _pollText: distinct(i) }, unstamped);
+check("the stamp memo stays at or below its cap",
+      api.stamp._byText.size <= CAP, true);
+check("...and still answers after the drop",
+      api.stamp({ _pollText: distinct(DISTINCT - 1) }, unstamped),
+      JSON.stringify(JSON.parse(distinct(DISTINCT - 1)), unstamped));
+
+/* A whole answer -- no delta, no digests (HTTP, or an older daemon) -- takes
+   every row as it arrived. Those rows must carry their text too, or the
+   signature has to serialise the whole fleet on the next poll. */
+const wholeAnswer = fleet(154_706, 0);
+const takenWhole = countWork(() => api.take("s2", { delta: false, sessions: wholeAnswer }));
+check("a whole answer returns every row", takenWhole.value.length, ROWS);
+check("...and writes each row's text once", takenWhole.strings, ROWS);
+check("...and parses nothing (the rows arrive parsed)", takenWhole.parses, 0);
+check("every row of a whole answer carries its text",
+      takenWhole.value.every((r) => typeof r._pollText === "string"), true);
+check("...equal to its own serialisation",
+      takenWhole.value[0]._pollText, JSON.stringify(wholeAnswer[0]));
+/* The churn loop above cleared the stamp memo, so this pass pays one
+   serialisation per distinct text -- and the next pass pays none, which is
+   the property that matters. */
+const stampedWhole = countWork(() => takenWhole.value.map((r) => api.stamp(r, unstamped)));
+check("...and its signature pass pays one serialisation per text",
+      stampedWhole.strings, ROWS);
+check("...stamping every row from that text", stampedWhole.value.length, ROWS);
+const stampedWholeAgain = countWork(() => takenWhole.value.map((r) => api.stamp(r, unstamped)));
+check("...and the pass after that serialises nothing", stampedWholeAgain.strings, 0);
+check("...with the same signature", stampedWholeAgain.value, stampedWhole.value);
 
 console.log(`pollstamp_check: ${ROWS} rows — first poll ${taken1.calls} stringify calls ` +
             `(stamps ${stamped1.calls} + ${stamped1.value.length}), an unchanged poll ` +
