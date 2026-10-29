@@ -32,6 +32,14 @@
    of the session's question ids is linked by the daemon the same way
    (claunch-236ei).
 
+   Resend & revert (claunch-tpbqz): acceptance by the daemon is not
+   typing into the harness -- a message can be lost to a hung process
+   or a daemon restart between the two. The head\u2019s top-right 「재전송」
+   re-types the latest user message; each user bubble\u2019s hover actions
+   (\uc7ac전송\u00b7revert) do it for that message. revert marks the
+   message reverted and resends it with a note to disregard the earlier
+   copy; the marks render on the entries.
+
    Renaming (claunch-6st9p): the topic is edited in place -- a click on the
    conversation's title (or its ✎, or a double click on the thread in the
    list) turns the title into a box; Enter or 저장 posts it to
