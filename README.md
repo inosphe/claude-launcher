@@ -3562,6 +3562,28 @@ first); `POST` delivers the same block and answers `{ok, delivered, source,
 chars, images, reason}`, with `reason` saying why when it did not land (not
 running, or no delivery was confirmed within 90s).
 
+**Context items** (gds6-bfu7). The create form's Opening task (New session
+and Spawn child are one form) takes separate context items under the task box
+— **+ Add context** adds a title and a text box per item — so an error log or a
+spec excerpt is attached as its own piece instead of being pasted under the
+request. The agents' MCP `spawn` tool takes the same list as
+`opening_contexts: [{title, text}]`. The daemon checks them before anything is
+arranged (at most 20 items, 256 KiB each, 384 KiB together, none blank —
+larger logs go in as files), writes each to
+`<session dir>/contexts/NN-<slug>.txt` with an `index.json`, and ends the
+opening — after the task, ahead of uploaded files — with one line per item:
+
+```
+[claunch context] 1. pytest log (12.3 KiB, 240 lines) /…/sessions/<name>/contexts/01-pytest-log.txt
+```
+
+under a note that names the MCP tools `context_list` / `context_read`
+(`claude_launcher/contexts_mcp.py`), which read the items through the daemon
+for a harness that cannot open that path. The session definition keeps no copy
+of their text. The detail panel lists them under the Opening task and opens
+one on a press; they are read-only once the session exists and live as long
+as its state directory.
+
 Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` under
 `prompt_packs`:
 
@@ -5427,6 +5449,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/uploads?name=NAME` | the session line's 📎: the body IS a file, written straight into `<session dir>/uploads/<id>/`; answered with its `path` and the `line` the page puts in the session line. Nothing is typed into the session |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET/POST | `/api/sessions/{name}/opening` | the block this session was created with: GET returns `{source, text, chars, images, recorded_at, transport}` (`recorded` = the text handed over at creation, `recomposed` = rebuilt from the definition for a session older than the record, `none`; `transport: "argv"` = the harness took it as an argument, so a re-inject is a second copy and the panel confirms first), POST types the same text in again with `force` and answers `{ok, delivered, source, chars, images, reason}` — the detail panel's **Re-inject opening** / **Copy opening** buttons (`daemon/session_opening.py`) |
+| GET    | `/api/sessions/{name}/contexts` | the context items this session was created with beside its task (gds6-bfu7): `{session, items: [{n, title, file, bytes, chars, lines, path, missing?}]}` — the detail panel's **Context items** list and MCP `context_list` (`daemon/opening_contexts.py`) |
+| GET    | `/api/sessions/{name}/contexts/{n}?offset=&max_chars=` | one item's text, a window at a time (default 60000 characters): `{…item, text, offset, total_chars, truncated, next_offset}`; 404 for an item that is not there — MCP `context_read` |
 | GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
 | POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
