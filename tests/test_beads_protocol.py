@@ -909,19 +909,53 @@ def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
     # the pairing value is the ask_opened..ask_answered window — ask_answered
     # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev).
     # The v1 names must be the ones the v1 engine emits: `ask_opened`, not
-    # `ask_routed`; `step`/`visit`, not `instance`; `by_session` is always
-    # there (s648-rev, confirmed in cflow/engine.py by s1389-rev).
+    # `ask_routed`; `step`/`visit`, not `instance`; `by_session` is on the
+    # responder branch (s648-rev, confirmed in cflow/engine.py by s1389-rev).
     assert "`ask_answered`에는" in text
     assert "`ask_opened`와 `ask_answered`의 시각" in text
-    assert "`ask_answered`의 `at`이 그 ask의 `ask_opened` `at`과" in text
-    assert "`step`이 `peer-review`이며" in text
+    assert "`step`이 `peer-review`인" in text
     assert "`by_session`에 그대로 있다" in text
+    # the pairing must FILTER on something. The clause "ask_answered's `at`
+    # lies between ask_opened's `at` and ask_answered's `at`" is the interval's
+    # own endpoint, so it is true by definition and rejects nothing
+    # (s1262-rev). The predicate is the line head's time plus `step`
+    # (claunch-nj5yq defect 1).
+    assert "거르는 값은 **머리 시각**과" in text
+    assert "정의상 늘 참이고 아무것도 거르지 않는다(s1262-rev 지적)" in text
+    assert "그 절은 조건이 아니라 판독 절차의 서술이므로 술어로 쓰지 않는다" in text
+    # the minute/second boundary rule — the board head is minute-granular,
+    # the journal `at` is second-granular, so the head is widened to its whole
+    # minute and the test is overlap (s490-rev, s597-rev; claunch-nj5yq
+    # defect 2). Floor and ceil are both named and rejected, so neither can
+    # come back as an "obvious" simplification.
+    assert "**분과 초의 경계는 머리 쪽을 그 분 전체로 펼쳐 정한다**" in text
+    assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in text
+    assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in text
+    assert "내림도 올림도 쓰지 않는다" in text
+    assert "내림하면 답 직전 1분의 앞 줄까지" in text
+    assert "올림하면 같은 분에 쓴 줄이 전부 빠진다" in text
+    # board-write-first is a RULE the pairing stands on, not an observation,
+    # and its enforcement point is named (claunch-nj5yq defect 3)
+    assert "**이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙" in text
+    assert "관측된 습관이 아니라 규칙이다" in text
+    assert "그 지시문이 이 규칙의 강제" in text
+    # and the rule's enforcement point is named
+    assert "그 지시문이 이 규칙의 강제" in text
+    # "v1 always emits by_session" was responder-only: the person-answer path
+    # (cflow select/approve override) writes by_session None and no visit
+    # (engine.py:1099-1106) — s1262-rev, s511-rev, s404-rev; claunch-nj5yq
+    # defect 4. Pinning the code sites keeps the claim from widening again.
+    assert "**응답자 갈래에서만** 그 필드가 있다" in text
+    assert "`cflow/engine.py:5398`" in text
+    assert "`by_session`이 `None`이고 `visit`도 없다(`engine.py:1099-1106`)" in text
+    assert "v1은 그 필드를 **늘** 싣지 않는다" in text
+    assert "「이 답은 응답자 갈래가 아니다」로 읽는다" in text
     # the names the v1 engine does not emit appear only to be ruled out —
     # the prose names them precisely so the next reader does not copy them
     # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
     assert "v1에는 `ask_routed` 이벤트가 없고" in text
     assert "`instance`도 `channel`도 없다" in text
-    assert "응답자는 보드에 **먼저 쓰고 답한다**" in text
+    assert "「답 이후 첫 줄」은 방향이 반대다" in text
     assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in text
     # the line count is never pinned in the prose — the journal grows
     assert "줄 수를 문면에 박지 않는다" in text
