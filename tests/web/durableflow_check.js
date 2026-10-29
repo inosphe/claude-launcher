@@ -329,6 +329,16 @@ const stopped = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "stopp
 assert.deepStrictEqual([stopped.nodes.at(-1).label, stopped.nodes.at(-1).status], ["중단", "warn"]);
 const broke = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "failed", error: "Harness is closed" }], true);
 assert.deepStrictEqual([broke.nodes.at(-1).label, broke.nodes.at(-1).status], ["실패", "fail"]);
+// claunch-9a1sg: a state the run named without an error (gds6 scenarios v2
+// stage A ends 'proposed', tuples awaiting approval) is a wait, not a failure.
+const endOf = (end) => { const n = DF.model([...SIM2.slice(0, 4), { event: "run_end", ...end }], true).nodes.at(-1); return [n.label, n.status, n.sub]; };
+assert.deepStrictEqual(endOf({ state: "proposed", stage: "A", tally: { B: { total: 177697 } } }), ["대기", "warn", "proposed · 177.7k tok"]);
+assert.deepStrictEqual(endOf({ state: "proposed", error: "boom" }).slice(0, 2), ["실패", "fail"], "an error still fails");
+assert.deepStrictEqual(endOf({ state: "failed" }).slice(0, 2), ["실패", "fail"], "failed without an error");
+assert.deepStrictEqual(endOf({ state: "interrupted" }).slice(0, 2), ["실패", "fail"]);
+assert.deepStrictEqual(endOf({}).slice(0, 2), ["실패", "fail"], "no state at all");
+assert.deepStrictEqual(endOf({ state: "done" }).slice(0, 2), ["끝", "ok"]);
+assert.strictEqual(DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "proposed" }], true).ended.failed, false);
 assert.deepStrictEqual(JSON.parse(JSON.stringify(DF.sim2Group("B:combat-ranged|x:0"))),
   { phase: "model", group: "B:combat-ranged", label: "기능 combat-ranged" });
 console.log("durableflow_check: sim2 ok");
