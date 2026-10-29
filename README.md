@@ -3588,8 +3588,7 @@ Under the task text the section also shows what the opening carried besides
 it (claunch-5lro4): images as thumbnails that open full size, uploaded files
 as download links with their size. Both come from what `opening.json` names:
 the images are its `image_names` that are still in the session's
-`opening-images/` folder, because that folder can still hold an earlier
-same-name session's images; the files are its `files: [{id, name, bytes}]`,
+`opening-images/` folder; the files are its `files: [{id, name, bytes}]`,
 because the session's `uploads/` folder also takes files sent later from the
 session line. A record written before `image_names` was kept lists the
 `opening-images/` folder instead, and one written before `files` existed shows
