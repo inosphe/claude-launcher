@@ -42,6 +42,36 @@ collections:
   # 버리고 나머지를 다음 회차로 넘긴다(deferred -> requested).
   landing: {type: landing-queue, env: {TARGET: master}}
 
+rules:
+  human-wait-nudge:
+    text: |
+      ── 사람만 풀 수 있는 결정을 기다릴 때는 사용자에게 알림을 올린다 (claunch-8myyt) ──
+      런이 사람의 결정을 기다리며 움직이지 않으면 터미널 설명만 남기지 않고
+      사용자에게 알림을 올린다. 스레드와 터미널 출력은 그 자체로는 사용자에게
+      알림이 가지 않는다. 어느 도구를 쓰는지는 런이 사람을 기다리는 상태인지로 갈린다:
+      · 런이 사람을 기다린다(chooser가 user인 선택, 사람에게 간 ask,
+        flow_request_move, loop/visit 한도, halt): `flow_nudge`. message는 한두 줄 —
+        결정할 내용과 리더의 권고. 같은 결정이 이어지면 새 카드를 만들지 않고 같은
+        호출로 같은 카드의 message를 갱신한다.
+      · flow_nudge가 "the run waits on no person right now"로 거절되면(자동 모드
+        분류기 거절처럼 리더의 integrate 같은 단계에서 막혔지만 엔진 상태는 사람
+        대기가 아니다): `emergency_nudge`(MCP, 셸은 `claunch nudge emergency`)를 부른다.
+        런 상태와 무관하게 서고, message는 결정할 내용과 리더의 권고 한두 줄이다.
+        근거: r484(integrate@18)와 r485에서 분류기 거절로 멈췄을 때 flow_nudge가
+        거절됐고 스레드 질문은 사용자에게 알림이 가지 않았다.
+      · 사용자가 응답할 때까지 20분 간격으로, 반복 상한 없이 같은 호출을 다시 불러
+        같은 카드의 message를 갱신한다(새 알림 행을 쌓지 않는다. emergency_nudge는
+        세션당 1분에 한 번까지). 사용자 지시 th-b02245이고, 간격은
+        cflow_clock.HUMAN_WAIT_NUDGE_INTERVAL 하나다. 카드는 런이 움직이거나
+        사용자가 해소하면 닫힌다. 더 필요 없으면 `emergency_nudge`에 cancel을 준다.
+      · 결정이 풀리면 멈추고 일을 계속한다.
+      cflow2 reminder는 yaml의 이 문구를 싣지 않고, daemon/cflow_clock.py의
+      v2_reminder_block이 같은 지침을 protocol 줄에 싣는다(첫 알림과 짧은 형태 모두).
+    why: >-
+      라운드 484의 integrate@18이 PR #703 머지의 사용자 결정을 약 94분 기다렸다.
+      리더는 스레드 질문만 올렸고 flow_nudge는 쓰지 않았다(claunch-8myyt).
+    deliver: all
+
 fragments:
   remote-mesh: |
     먼저 대상 저장소의 PR-only 정책을 조회한다. 관리 대상이면 아래 ahead base

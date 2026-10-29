@@ -1178,6 +1178,7 @@ def build_app(
     # UI's notification card; settles itself when the run stops waiting.
     r.add_post("/api/flow-nudges", h_flow_nudge_file)
     r.add_get("/api/flow-nudges", h_flow_nudges_list)
+    r.add_post("/api/flow-nudges/{id}/resolve", h_flow_nudge_resolve)
     # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
     # the operator v2 agent routes, read and answered from the web UI's
     # notification card -- approve, reject, +5 min, manual (spawn) or a new
@@ -9651,12 +9652,35 @@ async def h_flow_nudge_file(request: web.Request) -> web.Response:
     if scope.split("@")[0].split("+")[0] != name:
         return json_error(403, f"scope {scope!r} is not {name}'s own run")
     try:
-        result = await asyncio.to_thread(
-            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
-            message=str(body.get("message") or ""))
+        if body.get("emergency") in (True, "1", "true", 1):
+            result = await asyncio.to_thread(
+                request.app["flow_nudge"].emergency, session=name, cwd=cwd, scope=scope,
+                message=str(body.get("message") or ""),
+                cancel=body.get("cancel") in (True, "1", "true", 1))
+        else:
+            result = await asyncio.to_thread(
+                request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
+                message=str(body.get("message") or ""))
     except flow_nudge.NudgeRefused as exc:
         return json_error(exc.status, str(exc))
     return json_response(result)
+
+
+async def h_flow_nudge_resolve(request: web.Request) -> web.Response:
+    """``POST /api/flow-nudges/{id}/resolve``: a person's answer to a nudge --
+    the card is closed as settled (claunch-8myyt). An agent cannot: the point
+    of the card is that a person releases it, and an agent that could close its
+    own would end the wait it raised. It withdraws an emergency nudge with
+    ``cancel`` on the filing route instead."""
+    if actors.from_request(request).get("kind") == actors.AGENT:
+        return json_error(403, "a nudge is resolved by a person; to withdraw your own "
+                               "emergency nudge call emergency_nudge with cancel")
+    try:
+        rec = await asyncio.to_thread(
+            request.app["flow_nudge"].resolve, request.match_info["id"])
+    except flow_nudge.NudgeRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response({"request": rec})
 
 
 async def h_flow_nudges_list(request: web.Request) -> web.Response:

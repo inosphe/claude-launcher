@@ -56,6 +56,14 @@ MESSAGE_MAX = 1200
 #: Settled requests kept for the notification history's status words.
 KEEP_SETTLED = 50
 
+#: An emergency nudge (claunch-8myyt) has no :func:`owed` list to name -- the
+#: run may not wait on anyone, or not exist -- so its one item is this word.
+EMERGENCY = "emergency"
+#: The shortest gap between two emergency calls of one session. A loop that
+#: calls the tool every turn would otherwise hammer the dashboard; the card is
+#: one per run slot either way, so the extra calls carried nothing.
+EMERGENCY_MIN_INTERVAL = 60.0
+
 PENDING = "pending"
 SETTLED = "settled"
 SUPERSEDED = "superseded"
@@ -294,14 +302,41 @@ def end_request_reply(target: str, decision: dict, result: dict) -> Dict[str, An
     }
 
 
+def position(cwd: str, scope: str) -> Optional[tuple]:
+    """Where the run in ``(cwd, scope)`` stands, as a comparable key, or None
+    when the slot holds no run. An emergency nudge settles when this changes:
+    the run moved, so whatever stopped it is no longer what the card says.
+    v2: the run, its status and the open tasks, choices and asks; v1: the run,
+    its status and its step."""
+    from ..cflow2 import runtime, store as store2
+
+    if store2.RunStore(cwd, scope).exists():
+        payload = runtime.status(cwd=cwd, scope=scope, tick=False)
+        inst = lambda rows: tuple(sorted(str(r.get("instance")) for r in rows or []))  # noqa: E731
+        return ("v2", payload.get("run"), payload.get("status"), inst(payload.get("tasks")),
+                inst(payload.get("choices")), inst(payload.get("asks")))
+    from ..cflow import engine, model, state as state_mod
+
+    try:
+        entry = engine.status(cwd, scope=scope)
+    except (engine.CflowError, model.WorkflowError, state_mod.StateError, OSError):
+        return None
+    if entry.get("status") == "idle":
+        return None
+    return ("v1", entry.get("run"), entry.get("status"), entry.get("step_id"))
+
+
 class NudgeBoard:
     """The daemon's nudge requests. ``read_owed`` is :func:`owed`, injectable
     for tests; ``alive`` answers whether a session is still registered."""
 
     def __init__(self, *, read_owed: Callable[[str, str], Optional[dict]] = owed,
                  alive: Optional[Callable[[str], bool]] = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 read_position: Callable[[str, str], Optional[tuple]] = position) -> None:
         self._read_owed = read_owed
+        self._read_position = read_position
+        self._emergency_at: Dict[str, float] = {}
         self._alive = alive
         self._clock = clock
         self._lock = threading.Lock()
@@ -311,9 +346,10 @@ class NudgeBoard:
     def _new_id(self) -> str:
         return f"nudge-{int(self._clock())}-{next(self._ids)}"
 
-    def _live_for(self, cwd: str, scope: str) -> Optional[dict]:
+    def _live_for(self, cwd: str, scope: str, kind: str = "flow") -> Optional[dict]:
         for rec in self._records.values():
-            if rec["status"] == PENDING and rec["cwd"] == cwd and rec["scope"] == scope:
+            if rec["status"] == PENDING and rec["cwd"] == cwd and rec["scope"] == scope \
+                    and rec.get("kind", "flow") == kind:
                 return rec
         return None
 
@@ -380,6 +416,91 @@ class NudgeBoard:
                          "names is no longer owed. Stop your turn and wait; the person's "
                          "answer moves the run")}
 
+    def emergency(self, *, session: str, cwd: str, scope: str, message: str = "",
+                  cancel: bool = False, by: Optional[str] = None) -> dict:
+        """File, update or withdraw ``session``'s emergency nudge
+        (claunch-8myyt). Unlike :meth:`submit` it asks nothing of the run:
+        the run may wait on no person (an auto-mode classifier denial stops
+        the agent inside a step) or not exist, and the person is still needed.
+
+        One card per run slot, kept apart from the ``flow_nudge`` card. A
+        second call changes the card's message and ``updated`` time and
+        nothing else, so the notification history gets no new row. It settles
+        when the run's position changes, the session ends, a person resolves
+        it (:meth:`resolve`) or the agent withdraws it (``cancel``). A
+        session's calls are spaced at least :data:`EMERGENCY_MIN_INTERVAL`
+        apart (429 inside it); a withdrawal is not limited."""
+        now = self._clock()
+        if cancel:
+            with self._lock:
+                live = self._live_for(cwd, scope, EMERGENCY)
+                if live is None:
+                    return {"raised": False, "request": None,
+                            "note": "no emergency nudge of yours is up"}
+                self._close(live, SETTLED, now)
+                live["withdrawn"] = True
+            return {"raised": False, "request": dict(live),
+                    "note": "the emergency nudge is withdrawn"}
+        message = " ".join(str(message or "").split())
+        if not message:
+            raise NudgeRefused("'message' is required: one or two lines telling the person "
+                               "what to decide and your recommendation", status=400)
+        if len(message) > MESSAGE_MAX:
+            message = message[:MESSAGE_MAX - 1] + "…"
+        with self._lock:
+            last = self._emergency_at.get(session)
+            if last is not None and now - last < EMERGENCY_MIN_INTERVAL:
+                wait = int(EMERGENCY_MIN_INTERVAL - (now - last)) + 1
+                raise NudgeRefused(
+                    f"an emergency nudge from {session} was sent {int(now - last)}s ago; "
+                    f"wait {wait}s. The card is already up -- repeating it sooner does not "
+                    f"reach the person sooner", status=429)
+        try:
+            where = self._read_position(cwd, scope)
+        except Exception:  # noqa: BLE001 - an unreadable run still gets its card
+            log.exception("emergency nudge: position unreadable for %s", scope)
+            where = None
+        with self._lock:
+            self._emergency_at[session] = now
+            live = self._live_for(cwd, scope, EMERGENCY)
+            if live is not None:
+                live["message"] = message
+                live["updated"] = now
+                live["asked"] = live.get("asked", 1) + 1
+                return {"raised": False, "request": dict(live),
+                        "note": (f"the emergency card is already up (since "
+                                 f"{int(now - live['opened'])}s ago); its message is updated "
+                                 f"and no new notification row is added. Call again about every "
+                                 f"20 minutes while the wait lasts")}
+            rec = {
+                "id": self._new_id(), "session": session, "cwd": cwd, "scope": scope,
+                "kind": EMERGENCY, "version": (where[0] == "v2" and 2 or 1) if where else None,
+                "run": where[1] if where else None, "workflow": None,
+                "items": [EMERGENCY], "position": where, "message": message,
+                "status": PENDING, "opened": now, "updated": now, "closed": None,
+                "asked": 1, "by": by or session,
+            }
+            self._records[rec["id"]] = rec
+            self._prune()
+        log.info("emergency nudge %s: %s asks a person for help", rec["id"], session)
+        return {"raised": True, "request": dict(rec),
+                "note": ("raised on the dashboard: a card, a row in the notification history "
+                         "and the bell's waiting count. It settles when the run moves, the "
+                         "person resolves it or you withdraw it (cancel). Stop your turn and "
+                         "wait; call again about every 20 minutes with the current message")}
+
+    def resolve(self, nudge_id: str) -> dict:
+        """A person's answer to a pending nudge: close it as settled."""
+        with self._lock:
+            rec = self._records.get(str(nudge_id))
+            if rec is None:
+                raise NudgeRefused(f"no nudge {nudge_id!r}", status=404)
+            if rec["status"] != PENDING:
+                raise NudgeRefused(f"nudge {nudge_id} is already {rec['status']}", status=409)
+            self._close(rec, SETTLED, self._clock())
+            rec["resolved"] = True
+            return dict(rec)
+
     def list(self) -> List[dict]:
         """Every request, newest first, the pending ones re-checked against
         their run (call off the event loop: it reads run files)."""
@@ -391,6 +512,12 @@ class NudgeBoard:
                 verdicts[rec["id"]] = ENDED
                 continue
             try:
+                if rec.get("kind") == EMERGENCY:
+                    moved = rec.get("position") is not None \
+                        and self._read_position(rec["cwd"], rec["scope"]) != rec["position"]
+                    if moved:
+                        verdicts[rec["id"]] = SETTLED
+                    continue
                 found = self._read_owed(rec["cwd"], rec["scope"])
             except Exception:  # noqa: BLE001 - an unreadable run keeps its card
                 log.exception("nudge %s: re-check failed", rec["id"])
