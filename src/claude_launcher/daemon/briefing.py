@@ -1000,7 +1000,13 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT,
                     raise BriefingError(
                         f"llm endpoint answered {resp.status}: {snippet}"
                     )
-                data = await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    # A 200 whose body is not JSON (a proxy's HTML page): the
+                    # request was still sent, so it is metered as failed.
+                    meter(error="response is not JSON")
+                    raise BriefingError(f"llm response is not JSON: {exc}") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         meter(error=type(exc).__name__)
         raise BriefingError(f"llm call failed: {exc}") from exc

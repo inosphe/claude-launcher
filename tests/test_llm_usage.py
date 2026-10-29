@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from aiohttp import web as aioweb
 from aiohttp.test_utils import TestServer, make_mocked_request
 
 from claude_launcher import store
-from claude_launcher.daemon import api, briefing, jev, llm_usage, observer, rag
+from claude_launcher.daemon import api, briefing, jev, llm_usage, megathread_route, observer, rag
 
 
 def _lines():
@@ -251,6 +253,40 @@ def test_embedding_is_shared_over_the_documents_sessions():
     assert query["session"] == "" and query["input"] == 30
 
 
+def test_rerank_meters_its_model_and_a_bad_body():
+    async def run():
+        state = {"body": None}
+
+        async def rr(request):
+            if state["body"] is not None:
+                return aioweb.Response(text=state["body"], status=200)
+            return aioweb.json_response({"results": [{"index": 0, "relevance_score": 0.5}],
+                                         "usage": {"total_tokens": 7}})
+
+        server = await _serve(rr, "/v1/rerank")
+        cfg = dict(store.RAG_DEFAULTS)
+        cfg.update({"base_url": str(server.make_url("/v1")), "api_key": "k",
+                    "rerank_model": "rr-1"})
+        try:
+            client = rag.RagClient(cfg)
+            assert await client.rerank("q", ["d"], 1) == [(0, 0.5)]
+            state["body"] = "<html>"
+            try:
+                await client.rerank("q", ["d"], 1)
+            except rag.RagError:
+                pass
+            else:
+                raise AssertionError("a non-JSON body must raise")
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    good, bad = _lines()
+    assert good["feature"] == "rerank" and good["purpose"] == "query"
+    assert good["model"] == "rr-1" and good["ok"]
+    assert bad["ok"] is False and bad["error"] == "response is not JSON"
+
+
 def test_doc_session_reads_who_a_document_is_about():
     doc = rag.Doc("event:s1:e:0", "h", ["t"], {"kind": "observer", "sessions": [{"name": "s1"}]})
     assert rag.doc_session(doc) == "s1"
@@ -279,6 +315,92 @@ def test_jev_call_meters_feature_and_session():
     assert line["feature"] == "jev" and line["purpose"] == "qa_nudge"
     assert line["session"] == "s3" and line["model"] == "jev-1.13.0"
     assert line["total"] == 9
+
+
+def test_briefing_call_meters_a_200_whose_body_is_not_json():
+    async def run():
+        async def chat(request):
+            return aioweb.Response(text="<html>gateway</html>", status=200)
+
+        server = await _serve(chat, "/v1/chat/completions")
+        cfg = {"endpoint": str(server.make_url("/v1/chat/completions")), "model": "bm",
+               "api_key": "k", "max_tokens": 64, "params": {}, "provider": ""}
+        try:
+            await briefing.call_llm(cfg, "p", session="s7", purpose="card")
+        except briefing.BriefingError as exc:
+            assert "not JSON" in str(exc)
+        else:
+            raise AssertionError("a non-JSON body must raise")
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    [line] = _lines()
+    assert line["session"] == "s7" and line["ok"] is False
+    assert line["error"] == "response is not JSON"
+
+
+# --------------------------------------------------------------------------- #
+# the call sites pass who a call is for (claunch-60y0d)
+# --------------------------------------------------------------------------- #
+def test_briefing_compose_charges_the_session_it_briefs(monkeypatch):
+    seen = {}
+
+    async def fake_call(cfg, prompt, **kw):
+        seen.update(kw)
+        raise briefing.BriefingError("stop here")
+
+    monkeypatch.setattr(briefing, "gather_live", lambda session: None)
+    monkeypatch.setattr(briefing, "gather_faq", lambda: [])
+    monkeypatch.setattr(briefing, "gather_cflow", lambda cwd, name: None)
+    monkeypatch.setattr(briefing, "locate_transcript", lambda sdef: None)
+    monkeypatch.setattr(briefing, "build_prompt", lambda *a: "p")
+    monkeypatch.setattr(briefing, "call_llm", fake_call)
+    session = SimpleNamespace(sdef=SimpleNamespace(name="s8", cwd=""))
+    try:
+        asyncio.run(briefing.compose(session, {}, refresh=True))
+    except briefing.BriefingError:
+        pass
+    assert seen == {"session": "s8", "purpose": "card"}
+
+
+class _Client:
+    def __init__(self):
+        self.calls = []
+
+    async def embed(self, texts, **kw):
+        self.calls.append((list(texts), kw))
+        return [[1.0, 0.0] for _ in texts]
+
+
+def test_rag_index_charges_each_chunk_to_its_documents_session():
+    group = [rag.Doc("s1", "h", ["a", "b"], {"name": "s1"}),
+             rag.Doc("beads:x:i-1:0", "h", ["c"], {"kind": "beads", "assignee": "s5"})]
+    client = _Client()
+    svc = SimpleNamespace(_put_group=lambda index, group, vecs: None)
+    asyncio.run(rag.RagService._embed_group(svc, client, None, group, rag.Progress()))
+    [(texts, kw)] = client.calls
+    assert texts == ["a", "b", "c"]
+    assert kw == {"owners": ["s1", "s1", "s5"]}
+
+
+def test_rag_query_embedding_is_marked_as_a_query():
+    client = _Client()
+    svc = SimpleNamespace(_qvecs=OrderedDict())
+    asyncio.run(rag.RagService._query_vector(svc, client, {}, "find me"))
+    assert client.calls == [(["find me"], {"purpose": "query"})]
+
+
+def test_megathread_routing_charges_the_megathread_feature(monkeypatch):
+    seen = {}
+
+    async def fake(cfg, state, qs, **kw):
+        seen.update(kw)
+        return {}
+
+    monkeypatch.setattr(jev, "system_one", fake)
+    asyncio.run(megathread_route.default_ask({}, {}, {}, "m"))
+    assert seen == {"model": "m", "feature": "megathread"}
 
 
 # --------------------------------------------------------------------------- #

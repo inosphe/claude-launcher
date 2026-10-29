@@ -294,7 +294,11 @@ class RagClient:
                     snippet = (await resp.text())[:300]
                     done(error=f"HTTP {resp.status}")
                     raise RagError(f"rag endpoint answered {resp.status} on {path}: {snippet}")
-                data = await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    done(error="response is not JSON")
+                    raise RagError(f"rag response on {path} is not JSON: {exc}") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             done(error=type(exc).__name__)
             raise RagError(f"rag call failed on {path}: {exc}") from exc

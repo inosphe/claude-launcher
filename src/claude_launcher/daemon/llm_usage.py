@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, tzinfo
@@ -128,7 +129,9 @@ def record(feature: str, *, provider: str = "", endpoint: str = "", model: str =
         at = time.time() if at is None else float(at)
         parts = parts_of(usage)
         line = {
-            "ts": round(at, 3),
+            # Floored: a rounded-up stamp could land after a "now" read a
+            # moment later and fall outside a window that should hold it.
+            "ts": math.floor(at * 1000) / 1000,
             "at": datetime.fromtimestamp(at).astimezone().isoformat(timespec="seconds"),
             "feature": str(feature),
             "purpose": str(purpose or ""),
