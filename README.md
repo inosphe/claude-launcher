@@ -3586,11 +3586,14 @@ as its state directory.
 
 Under the task text the section also shows what the opening carried besides
 it (claunch-5lro4): images as thumbnails that open full size, uploaded files
-as download links with their size. The images are read off the session's
-`opening-images/` folder, which only a create request writes; the files are
-the ones `opening.json` names (`files: [{id, name, bytes}]`), because the
-session's `uploads/` folder also takes files sent later from the session line.
-A session recorded before that field existed shows its images and no files.
+as download links with their size. Both come from what `opening.json` names:
+the images are its `image_names` that are still in the session's
+`opening-images/` folder, because that folder can still hold an earlier
+same-name session's images; the files are its `files: [{id, name, bytes}]`,
+because the session's `uploads/` folder also takes files sent later from the
+session line. A record written before `image_names` was kept lists the
+`opening-images/` folder instead, and one written before `files` existed shows
+no files.
 Routes: `GET /api/sessions/{name}/opening/attachments` returns `{images:
 [{name, type}], files: [{id, name, bytes, missing?}]}`;
 `GET .../opening/images/{image}` and `GET .../opening/files/{fid}/{fname}`
