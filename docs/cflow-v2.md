@@ -355,14 +355,31 @@ ask:
   다시 시작한다. 데몬과의 연결이 끊겼다 돌아오면 그 값을 버리고 다음 응답에서
   다시 읽는다. `flow_status`의 `asks`·`choices`·`loop_limits`·`visit_limits` 항목도
   같은 `opened_at`을 싣는다.
-- 세션 상태(claunch-6vq2m): `/api/cflow2/rail`은 아카이브된 세션까지 등록된 세션을
-  전부 훑고, 세션이 남긴 런은 디스크에서 계속 사람을 기다린다. 그래서 행마다 그
-  세션의 `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
+- 세션 상태(claunch-6vq2m): 세션이 끝나도 그 세션이 남긴 런은 디스크에서 계속
+  사람을 기다린다. 그래서 `/api/cflow2/rail`의 행마다 그 세션의
+  `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
   `paused`·`archived`, `session.session_category`)와 `session_status`(살아 있으면
   `busy`·`idle`·`starting`, 끝났으면 `exited`)를 응답마다 싣는다. 대시보드는
   `archived` 세션의 게이트로 코너 카드·「Waiting on you」 레코드를 만들지 않는다
   (런 페이지에서는 여전히 답할 수 있다). 알림 카드와 기록 행의 세션 이름 옆에는 이
   상태가 표시되고, 세션 폴과 rail 폴이 끝날 때마다 다시 읽힌다.
+- 게이트 레지스트리(claunch-6vq2m.1, `daemon/gate_registry.py`): 사람을 기다리는
+  게이트(위 `answers[]`의 항목)는 데몬 디렉터리의 `gates.db`에 한 번 열리고 한 번
+  닫히는 행으로 기록된다. 열 때는 `opened_at`(런의 시각, 없으면 처음 기록한 시각)을,
+  닫을 때는 `closed_at`과 사유(`resolved` 답함·런 진행, `run ended` 런 종료·abort·
+  아카이브, `session archived`, `session removed`)를 남긴다. 쓰는 쪽은 데몬
+  하나다 — 원천은 계속 런의 `state.json`이고, 데몬은 슬롯 파일의 stamp가 바뀐
+  경우에만 런을 다시 읽어 레지스트리와 비교한다(`cflow2_web.rail_entries`). 비교가
+  일어나는 자리는 rail 폴, cflow2 clock의 패스(이 데몬이 모는 live·hold·paused 세션,
+  대시보드가 열려 있지 않아도), 세션 종료 직후 한 번이다. 세션이 아카이브되거나
+  레코드가 지워지면(`SessionManager.filed_hooks`) 그 세션의 열린 게이트가 닫힌다.
+  kill·fail·hold·pause로 끝난 세션의 게이트는 열린 채로 남는다. rail 폴은 살아 있는
+  세션과 열린 게이트가 있는 종료 세션만 읽는다 — 아카이브된 세션과 열린 게이트가
+  없는 종료 세션의 런 파일은 읽지 않는다. `answers[]` 항목은 `gate_id`(레지스트리
+  행의 `seq`)를 싣는다. 레지스트리가 처음 생길 때 이미 열려 있던 게이트는 데몬
+  기동 시 한 번 기록된다(`gate_registry.backfill`, 아카이브되지 않은 세션만,
+  멱등, 결과는 `meta`의 `backfilled_count`). `GET /api/gates?state=open|closed|all
+  [&session=][&limit=]`가 행과 그 결과를 돌려준다.
 - 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
   시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
   `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가
