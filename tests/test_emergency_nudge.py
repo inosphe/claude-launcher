@@ -187,3 +187,29 @@ def test_the_routes_file_and_resolve(home, tmp_path):
 
     bad, missing = asyncio.run(run())
     assert bad == 404 and missing == 404
+
+
+def test_resolve_is_a_persons_answer_an_agent_actor_is_refused(home):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
+        app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
+        board, _ = _board()
+        app["flow_nudge"] = board
+        rec_id = _call(board)["request"]["id"]
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        agent = {**bearer, "X-Claunch-Actor": "agent:s1"}
+        try:
+            refused = await client.post(f"/api/flow-nudges/{rec_id}/resolve", headers=agent)
+            still = [r["status"] for r in board.list()]
+            ok = await client.post(f"/api/flow-nudges/{rec_id}/resolve", headers=bearer)
+            return refused.status, still, ok.status, [r["status"] for r in board.list()]
+        finally:
+            await client.close()
+
+    refused, still, ok, after = asyncio.run(run())
+    assert refused == 403 and still == ["pending"]
+    assert ok == 200 and after == ["settled"]
