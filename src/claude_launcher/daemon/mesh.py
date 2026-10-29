@@ -354,6 +354,29 @@ def broadcast_notice(recipients: List[str]) -> str:
     )
 
 
+#: The role whose ``'*'`` sends the daemon refuses (claunch-v0h29.2).
+WORKER_ROLE = "worker"
+
+
+def worker_broadcast_refusal(handle: str) -> str:
+    """Why a worker's ``'*'`` is refused, and what to send instead.
+
+    A worker's message is for its parent, its reviewer or a peer it shares a
+    file with, never every member. Measured on claunch-v0h29: one worker's
+    peer-review nudge sent to ``'*'`` was typed into 844 terminals and came
+    back as 76 response nudges.
+    """
+    return (
+        f"{handle!r} is a worker, and a worker may not send to '*': it would "
+        "be typed into every connected terminal, and each of them spends a "
+        "turn on it (claunch-v0h29: one worker '*' reached 844 members and "
+        "drew 76 response nudges). Address the members it is for by handle "
+        "— your parent, your reviewer, a peer — or an audience selector ("
+        + ", ".join(sorted(AUDIENCE_SELECTORS))
+        + "). An announcement for the whole mesh goes through your leader."
+    )
+
+
 #: What ``exited`` and ``missing`` mean to a sender, and what to do about
 #: each. Split because the two need opposite actions: an exited session is
 #: waiting to be respawned, a missing one has had its record cleared and
@@ -3446,8 +3469,13 @@ class MeshManager:
             + (
                 f"note: {hidden} other member(s) exist that you are not "
                 "connected to and cannot message\n" if hidden > 0 else ""
-            ) +
-            f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            ) + (
+                f"send: claunch mesh send {mesh.name} <to> \"...\" — a worker "
+                "may not send to '*' (the daemon refuses it); name the "
+                "handles it is for\n"
+                if member.role == WORKER_ROLE
+                else f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            )
             + self._stance_lines(mesh, member, inline=inline_stance) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
             "load the member protocol; if you have no such skill, run "
@@ -4101,7 +4129,9 @@ class MeshManager:
         # dashboard is not warned: the advisory is about agents spending
         # other agents' turns.
         broadcast = to == "*" and not external
-        recipients = self._resolve_recipients(mesh, from_handle, to)
+        if broadcast and member is not None and member.role == WORKER_ROLE:
+            raise MeshError(worker_broadcast_refusal(from_handle))
+        recipients =self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
             raise MeshError(self._nobody_to_deliver_to(mesh, from_handle))
         norm_sections = _normalize_sections(sections, recipients, from_handle)

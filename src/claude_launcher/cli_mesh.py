@@ -206,7 +206,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
         f"(role: {_role_label(member)}, session: {member['session']})"
     )
     print(
-        f"send: claunch mesh send {local} '*' \"...\"  |  "
+        f"send: claunch mesh send {local} <handle> \"...\"  |  "
         f"members: claunch mesh members {local}"
     )
     _print_relay(client.get("/api/daemon").get("relay"))
@@ -1507,7 +1507,8 @@ def register(sub) -> None:
     p.add_argument("mesh")
     p.add_argument(
         "to",
-        help="'*' (every connected member -- warned), '@in_review' (members "
+        help="'*' (every connected member -- warned; refused for a worker), "
+        "'@in_review' (members "
         "whose issue is in_review on your board), or a handle",
     )
     p.add_argument("text", nargs="+", help="message text ('-' reads stdin)")
