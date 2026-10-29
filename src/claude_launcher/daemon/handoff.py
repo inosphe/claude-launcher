@@ -397,8 +397,32 @@ def compose_report(
     return "\n".join(head) + "\n" + text.strip()
 
 
-def _with_adoption_note(block: str, *, source: str, adopted: list) -> str:
-    """Add the line that tells the merge target its new children.
+def _adoption_line(*, source: str, adopted: list) -> str:
+    names = ", ".join(adopted)
+    return (
+        f"adopted: {len(adopted)} live session(s) that {source} spawned are "
+        f"now this session's children: {names}. Their reports and requests "
+        "come here from now on (their parent moved with the merge)."
+    )
+
+
+def _kept_line(*, source: str, kept: list, why: str) -> str:
+    """The line for children the merge could not move (claunch-dsqhp).
+
+    They stay under the copy, which is about to end, so the target is told
+    who they are and why: it is the session that can re-draw the tree, and
+    nothing else reports that these sessions now answer to an ended one.
+    """
+    names = ", ".join(kept)
+    return (
+        f"not adopted: {len(kept)} live session(s) that {source} spawned "
+        f"stay under {source}, which has ended: {names}. The move was "
+        f"refused ({why}); re-parent them if this session should command them."
+    )
+
+
+def _with_adoption_note(block: str, line: str) -> str:
+    """Add the line that tells the merge target what happened to the tree.
 
     The line goes inside the block's fence, before the closing ``---``, so
     it reads as the daemon's words with the rest of the block. A registered
@@ -407,12 +431,6 @@ def _with_adoption_note(block: str, *, source: str, adopted: list) -> str:
     reader who has to be told what happened to the tree is better served by
     a slightly informal block than by a missing sentence.
     """
-    names = ", ".join(adopted)
-    line = (
-        f"adopted: {len(adopted)} live session(s) that {source} spawned are "
-        f"now this session's children: {names}. Their reports and requests "
-        "come here from now on (their parent moved with the merge)."
-    )
     trailing = block[len(block.rstrip("\n")):]
     lines = block.rstrip("\n").split("\n")
     if lines and lines[0].strip() == "---":
@@ -757,9 +775,16 @@ class Handoffs:
         # Read before the block is written, so the target is told the list in
         # the same delivery that brings the wrap-up; moved only after it
         # lands, since a delivery that fails keeps the copy and its tree.
-        adopted = (
-            manager.live_children(source) if settled["kind"] == MERGE else []
-        )
+        # The move's own checks run here too, so the block never names a
+        # child the move would refuse -- a refused list is told as kept.
+        adopted: List[str] = []
+        kept: List[str] = []
+        kept_why = ""
+        if settled["kind"] == MERGE:
+            try:
+                adopted = manager.adoptable_children(source, settled["target"])
+            except Exception as exc:
+                kept, kept_why = manager.live_children(source), str(exc)
         block = None
         for compose in self.composers:
             block = compose(manager, source, settled, body, marker)
@@ -772,7 +797,11 @@ class Handoffs:
                 origin=settled.get("origin", ""),
             )
         if adopted:
-            block = _with_adoption_note(block, source=source, adopted=adopted)
+            block = _with_adoption_note(
+                block, _adoption_line(source=source, adopted=adopted))
+        elif kept:
+            block = _with_adoption_note(
+                block, _kept_line(source=source, kept=kept, why=kept_why))
         target = manager.get(settled["target"])
         if timeout is None:
             cfg = store.daemon_config()
@@ -799,20 +828,32 @@ class Handoffs:
             )
         self.pending.pop(source, None)
         # The report landed, so the target now carries this copy's work --
-        # and the sessions the copy spawned with it. A move that fails is
-        # logged; the report must still reach the target's hooks and the
-        # source must still end, and leaving the children where they are is
-        # the state they were in before the merge.
+        # and the sessions the copy spawned with it. The checks passed when
+        # the block was written; one that fails now (the tree changed while
+        # the report was being typed) is told to the target in a second
+        # line, since the first one already said they were its children.
+        # The report must still reach the target's hooks and the source must
+        # still end, and leaving the children where they are is the state
+        # they were in before the merge.
         moved: List[str] = []
         if adopted:
             try:
                 moved = manager.escalate_children(source, to=settled["target"])
                 manager.persist()
-            except Exception:
+            except Exception as exc:
                 log.exception(
                     "handoff: %r merged into %r but its children could not be "
                     "moved there", source, settled["target"],
                 )
+                kept, kept_why = adopted, str(exc)
+                try:
+                    await target.deliver(
+                        "---\n# claunch quick-fork: correction\n"
+                        + _kept_line(source=source, kept=kept, why=kept_why)
+                        + "\n---"
+                    )
+                except Exception:
+                    log.exception("handoff: correction to %r failed", settled["target"])
         for hook in self.completed_hooks:
             try:
                 hook(manager, source, settled, body)
@@ -828,7 +869,9 @@ class Handoffs:
             log.warning("handoff: %r reported to %r but could not be ended: %s", source, settled["target"], exc)
         return {
             **settled, "marker": marker, "delivered": True, "ended": ended,
-            "adopted": moved, "completed_at": _utcnow(),
+            "adopted": moved,
+            **({"not_adopted": kept, "not_adopted_why": kept_why} if kept else {}),
+            "completed_at": _utcnow(),
         }
 
     def _undelivered(self, manager, source: str, body: str, exc: "NoLiveAncestor") -> dict:

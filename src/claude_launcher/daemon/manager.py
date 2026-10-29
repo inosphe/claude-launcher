@@ -2319,6 +2319,56 @@ class SessionManager:
         task.add_done_callback(self._wake_tasks.discard)
         return True
 
+    def adoptable_children(self, name: str, to: str) -> List[str]:
+        """The live children of ``name`` that :meth:`escalate_children` with
+        ``to`` would move, or :class:`ManagerError` saying why it would not.
+
+        Nothing is changed. The merge path (claunch-dsqhp) asks this before
+        it writes the report, so the block names only children the move
+        will take; the move itself runs after the delivery and asks again.
+        The checks are those of :meth:`reparent`: a live target, no cycle,
+        ``spawn.max_depth``.
+        """
+        if to == name:
+            raise ManagerError(
+                f"session {name!r} cannot take its own children: a "
+                "session cannot be its own parent"
+            )
+        target = self.get(to)
+        if target.exited:
+            raise ManagerError(
+                f"session {to!r} has exited — an exited session cannot "
+                "take children"
+            )
+        if name in self._sessions and to in self.descendants(name):
+            raise ManagerError(
+                f"session {to!r} is under {name!r}: taking its children "
+                "would make a cycle"
+            )
+        moved = self.live_children(name)
+        if moved:
+            policy = spawn_mod.SpawnPolicy.load()
+            # Levels below the deepest moved child, which lands at
+            # ``depth(to) + 1`` itself -- the same arithmetic as
+            # :meth:`reparent`, measured from each child rather than
+            # from ``name``.
+            below = max(
+                (
+                    self.depth(d) - self.depth(child)
+                    for child in moved
+                    for d in self.descendants(child)
+                ),
+                default=0,
+            )
+            deepest = self.depth(to) + 1 + below
+            if deepest > policy.max_depth:
+                raise ManagerError(
+                    f"moving {name!r}'s children under {to!r} would put "
+                    f"one {deepest} level(s) deep and the limit is "
+                    f"{policy.max_depth} (spawn.max_depth)"
+                )
+        return moved
+
     def escalate_children(
         self, name: str, *, to: Optional[str] = None
     ) -> List[str]:
@@ -2357,47 +2407,13 @@ class SessionManager:
         (:meth:`MeshManager.link_lineage`); this class knows nothing of meshes.
         """
         if to is not None:
-            if to == name:
-                raise ManagerError(
-                    f"session {name!r} cannot take its own children: a "
-                    "session cannot be its own parent"
-                )
-            target = self.get(to)
-            if target.exited:
-                raise ManagerError(
-                    f"session {to!r} has exited — an exited session cannot "
-                    "take children"
-                )
-            if name in self._sessions and to in self.descendants(name):
-                raise ManagerError(
-                    f"session {to!r} is under {name!r}: taking its children "
-                    "would make a cycle"
-                )
-            moved = self.live_children(name)
-            if moved:
-                policy = spawn_mod.SpawnPolicy.load()
-                # Levels below the deepest moved child, which lands at
-                # ``depth(to) + 1`` itself -- the same arithmetic as
-                # :meth:`reparent`, measured from each child rather than
-                # from ``name``.
-                below = max(
-                    (
-                        self.depth(d) - self.depth(child)
-                        for child in moved
-                        for d in self.descendants(child)
-                    ),
-                    default=0,
-                )
-                deepest = self.depth(to) + 1 + below
-                if deepest > policy.max_depth:
-                    raise ManagerError(
-                        f"moving {name!r}'s children under {to!r} would put "
-                        f"one {deepest} level(s) deep and the limit is "
-                        f"{policy.max_depth} (spawn.max_depth)"
-                    )
+            moved = self.adoptable_children(name, to)
             for child in moved:
+                # A child of a live copy is no orphan, but the move is the
+                # same re-drawing :meth:`reparent` does, so it clears the
+                # mark the same way (claunch-ikiys).
                 self._sessions[child].sdef = replace(
-                    self._sessions[child].sdef, parent=to
+                    self._sessions[child].sdef, parent=to, orphan_of=None
                 )
             return moved
         session = self._sessions.get(name)

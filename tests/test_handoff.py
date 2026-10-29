@@ -24,7 +24,7 @@ from claude_launcher import lineage, profile, spawn as spawn_mod, store
 from claude_launcher.daemon import db, handoff as handoff_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
-from claude_launcher.daemon.manager import SessionManager
+from claude_launcher.daemon.manager import ManagerError, SessionManager
 from claude_launcher.daemon.mesh import MeshManager
 from claude_launcher.daemon.session import Session
 
@@ -510,6 +510,91 @@ def test_a_sibling_forks_children_follow_the_work_to_the_origin(
             assert resp.status == 200, doc
             assert doc["target"] == "a" and doc["adopted"] == ["c"]
             assert mgr.get("c").sdef.parent == "a"
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_refused_move_is_told_as_kept_and_moves_nothing(
+    home, tmp_path, forkable, typed, monkeypatch
+):
+    """claunch-dsqhp: the block names only children the move will take. When
+    the move's checks refuse (here: the depth limit), the target is told the
+    children stay under the ended copy and why, and the answer says so."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            assert (await client.post("/api/sessions/a/quick-fork", headers=BEARER)).status == 201
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path), parent="a-qf1"))
+
+            def refuse(name, to):
+                raise ManagerError("too deep (spawn.max_depth)")
+
+            monkeypatch.setattr(mgr, "adoptable_children", refuse)
+            await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            resp = await client.post(
+                "/api/sessions/a-qf1/handoff", json={"text": "wrap"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["adopted"] == [] and doc["not_adopted"] == ["c"]
+            assert "spawn.max_depth" in doc["not_adopted_why"]
+            assert mgr.get("c").sdef.parent == "a-qf1"
+            report = [t for n, t in typed if n == "a"][-1]
+            assert "adopted: " not in report.replace("not adopted: ", "")
+            assert (
+                "not adopted: 1 live session(s) that a-qf1 spawned stay under "
+                "a-qf1, which has ended: c." in report
+            )
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_move_that_fails_after_the_report_is_corrected(
+    home, tmp_path, forkable, typed, monkeypatch
+):
+    """The checks passed when the block was written, then the move failed:
+    the target already read that the children are its own, so a second
+    delivery takes that back."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            assert (await client.post("/api/sessions/a/quick-fork", headers=BEARER)).status == 201
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path), parent="a-qf1"))
+
+            def fail(name, *, to=None):
+                raise ManagerError("the tree changed")
+
+            monkeypatch.setattr(mgr, "escalate_children", fail)
+            await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            resp = await client.post(
+                "/api/sessions/a-qf1/handoff", json={"text": "wrap"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["ended"] is True
+            assert doc["adopted"] == [] and doc["not_adopted"] == ["c"]
+            assert mgr.get("c").sdef.parent == "a-qf1"
+            to_a = [t for n, t in typed if n == "a"]
+            assert "adopted: 1 live session(s)" in to_a[-2]
+            assert to_a[-1].startswith("---\n# claunch quick-fork: correction\n")
+            assert "not adopted: 1 live session(s)" in to_a[-1]
+            assert "(the tree changed)" in to_a[-1]
             await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
             await mgr.shutdown_all()
         finally:
