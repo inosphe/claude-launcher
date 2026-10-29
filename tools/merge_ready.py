@@ -157,8 +157,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
+import json
+import os
 import subprocess
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -498,6 +503,232 @@ def _advanced_target_is_covered(
     if ours is None or theirs is None or ours != theirs:
         return None
     return preview
+
+
+#: Paths whose change reaches tests that no import, name or guard table points
+#: at: the environment every test runs in, and the helpers beside them. An
+#: advance touching one of these is never judged disjoint from anything.
+SUITE_WIDE = frozenset(
+    {"pyproject.toml", "uv.lock", "setup.cfg", "setup.py", "pytest.ini", "tox.ini",
+     ".python-version"}
+)
+
+#: The three answers of :func:`_disjoint_advance`. Only ``SKIP`` changes the
+#: verdict; the other two keep the re-measurement and say why.
+SKIP, OVERLAP, UNSURE = "skip", "overlap", "unsure"
+
+
+def _suite_wide(path: str) -> bool:
+    p = Path(path)
+    if path in SUITE_WIDE or p.name == "conftest.py":
+        return True
+    return p.parts[:1] == ("tests",) and p.suffix == ".py" and not p.name.startswith("test_")
+
+
+def _load_changed_tests():
+    """``tools/changed_tests.py``, by path, for its selection rules.
+
+    Loaded on demand rather than at import: it is only asked by
+    ``--allow-target-advance``, and a module that fails to load must turn
+    into "could not tell" for that one question, not break the gate.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "changed_tests", Path(__file__).resolve().parent / "changed_tests.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _code_paths(repo: Path, before: str, after: str) -> Optional[List[Tuple[str, List[str]]]]:
+    """``(status letter, paths)`` per entry of ``before..after``, board removed."""
+    proc = _git(repo, "diff", "--no-ext-diff", "--name-status", "-M", before, after)
+    if proc.returncode:
+        return None
+    out = []
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2 or not fields[0]:
+            return None
+        paths = [p for p in fields[1:] if p.split("/", 1)[0] not in sweep.NON_CODE_ENTRIES]
+        if paths:
+            out.append((fields[0][0], paths))
+    return out
+
+
+def _extract(repo: Path, tree: str, dest: Path) -> bool:
+    """Write ``tree``'s ``tests/test_*.py`` and ``src/**.py`` under ``dest``.
+
+    Everything the selection rules read, and nothing else: the gate runs in
+    whatever checkout the leader stands in, so the files of the tree being
+    judged have to come from the object database, not the working tree.
+    """
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", "--format=tar", tree, "--",
+         ":(glob)tests/test_*.py", ":(glob)src/**/*.py"],
+        capture_output=True,
+    )
+    if archive.returncode:
+        return False
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(dest, filter="data")
+    return (dest / "tests").is_dir()
+
+
+def _candidate_receipt(ct, repo: Path, tree: str, needed: set) -> Optional[Path]:
+    """A passing targeted receipt for ``tree`` that ran at least ``needed``.
+
+    The worker's own measurement of its tip. Exact tree, nothing deselected,
+    and a selection that covers what the rules select on the landing tree --
+    a smaller run is not the measurement being carried over (claunch-p5n).
+    """
+    directory = ct.receipts_dir(repo)
+    for path in sorted(directory.glob(f"{tree}-*.json")):
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if receipt.get("tree") != tree or receipt.get("deselected"):
+            continue
+        if not needed <= set(receipt.get("selection") or ()):
+            continue
+        if ct.receipt_passes(receipt):
+            return path
+    return None
+
+
+def _disjoint_advance(
+    repo: Path, ref: str, tip: str, target_tip: str
+) -> Tuple[str, List[str]]:
+    """Does the target's advance reach nothing this candidate's tests read?
+
+    The re-measurement this gate asks for re-runs the candidate's own
+    selection on the landing tree. When the commits the target gained since
+    that selection was measured change no path the candidate changed, no
+    module the selection runs, and no file any of those modules reads by the
+    rules ``changed_tests.py`` selects with (rules 1-3, plus one import hop),
+    the run would read the same files it read when it was green, and the
+    re-measurement is skipped.
+
+    The measurement it stands on is one of two, both of exactly this tip: the
+    preview at ``ref`` (merged onto an older target), or else the worker's
+    own passing receipt for the tip's tree, measured on its merge base.
+
+    Conservative by construction -- every answer that is not proved is
+    ``UNSURE``, which keeps the re-measurement:
+
+    * an advance that adds, deletes, renames or retypes a path. A test that
+      lists a directory reads such a file by no name; that is the ``s130``
+      case in this file's docstring, a new gate under ``tools/`` breaking a
+      test that walked them all.
+    * an advance touching :data:`SUITE_WIDE` paths or test helpers.
+    * an advance path no rule maps to a test. Selecting nothing is the
+      ``changed_tests.py`` lesson: an empty answer must be able to say "I
+      could not tell" (``daemon/cflow_clock.py``, selected by nothing, read by
+      ten modules).
+    * an empty candidate selection: there is no measurement to carry over.
+
+    Returns ``(SKIP | OVERLAP | UNSURE, lines)``; the lines are the evidence
+    -- advance paths, candidate paths, the rule that decided -- and are
+    printed either way.
+    """
+    preview = _resolve(repo, ref)
+    parents: List[str] = []
+    if preview is not None:
+        proc = _git(repo, "rev-list", "--parents", "--max-count=1", preview)
+        parents = proc.stdout.split()[1:] if proc.returncode == 0 else []
+    if len(parents) == 2 and tip in parents:
+        base = next(p for p in parents if p != tip)
+        measured = _tree(repo, preview)
+        anchor = f"preview {ref} ({preview[:12]}) on {base[:12]}"
+    else:
+        proc = _git(repo, "merge-base", tip, target_tip)
+        base = proc.stdout.strip() if proc.returncode == 0 else ""
+        measured = _tree(repo, tip)
+        anchor = None
+    if not base or measured is None:
+        return UNSURE, ["advance check: cannot find what the candidate was measured on"]
+    if _git(repo, "merge-base", "--is-ancestor", base, target_tip).returncode != 0:
+        return UNSURE, [
+            f"advance check: {base[:12]} is not an ancestor of the target "
+            f"{target_tip[:12]}, so there is no advance to read"
+        ]
+    advance = _code_paths(repo, base, target_tip)
+    candidate = _code_paths(repo, base, measured)
+    landing, _ = _landing_tree(repo, tip, target_tip)
+    if advance is None or candidate is None or landing is None:
+        return UNSURE, ["advance check: git could not list the two diffs"]
+    adv = sorted({p for _, paths in advance for p in paths})
+    cand = sorted({p for _, paths in candidate for p in paths})
+    lines = [
+        f"advance {base[:12]}..{target_tip[:12]}: {len(adv)} code path(s): "
+        f"{', '.join(adv) or '-'}",
+        f"candidate: {len(cand)} code path(s): {', '.join(cand) or '-'}",
+    ]
+
+    def unsure(why: str) -> Tuple[str, List[str]]:
+        return UNSURE, lines + [f"advance check: unsure, re-measuring -- {why}"]
+
+    def overlap(why: str) -> Tuple[str, List[str]]:
+        return OVERLAP, lines + [f"advance check: overlap -- {why}"]
+
+    structural = sorted(p for status, paths in advance if status != "M" for p in paths)
+    if structural:
+        return unsure(
+            f"the advance adds, deletes or renames {', '.join(structural)}; a "
+            f"test that lists a directory reads such a path by no name"
+        )
+    wide = [p for p in adv if _suite_wide(p)]
+    if wide:
+        return unsure(f"{', '.join(wide)} reach(es) tests no rule names")
+    shared = sorted(set(adv) & set(cand))
+    if shared:
+        return overlap(f"both sides change {', '.join(shared)}")
+
+    try:
+        ct = _load_changed_tests()
+        tmp_parent = os.environ.get("CLAUNCH_SCRATCH") or None
+        with tempfile.TemporaryDirectory(prefix="advance-", dir=tmp_parent) as tmp:
+            root = Path(tmp)
+            if not _extract(repo, landing, root):
+                return unsure(f"could not read the landing tree {landing[:12]}")
+            cand_sel = set(ct.select(root, cand))
+            adv_map = {p: set(ct.map_one(root, p)) for p in adv}
+            adv_sel = set().union(*adv_map.values()) if adv_map else set()
+            hop = {name for name, _, _ in ct.reached_indirectly(root, adv, adv_sel)}
+    except Exception as exc:  # the rules are a bonus answer; never break the gate
+        return unsure(f"the selection rules could not run ({exc})")
+    lines.append(
+        f"candidate selection on the landing tree {landing[:12]}: "
+        f"{len(cand_sel)} module(s)"
+    )
+    if not cand_sel:
+        return unsure("the candidate selects no test module, so there is no measurement to carry over")
+    unmapped = sorted(p for p, picked in adv_map.items() if not picked)
+    if unmapped:
+        return unsure(f"no rule maps {', '.join(unmapped)} to a test, so who reads it is unknown")
+    for label, names in (
+        ("the candidate's selection includes advanced test module(s)", set(adv) & cand_sel),
+        ("advanced paths are read by selected module(s)", adv_sel & cand_sel),
+        ("advanced paths are one import hop from selected module(s)", hop & cand_sel),
+    ):
+        if names:
+            return overlap(f"{label}: {', '.join(sorted(names))}")
+    if anchor is None:
+        receipt = _candidate_receipt(ct, repo, measured, cand_sel)
+        if receipt is None:
+            return unsure(
+                f"no preview at {ref} and no passing receipt for the tip's tree "
+                f"{measured[:12]} that ran these {len(cand_sel)} module(s)"
+            )
+        anchor = f"receipt {receipt.name} for the tip's tree, measured on {base[:12]}"
+    lines.append(f"measured: {anchor}")
+    lines.append(
+        f"rule: no advanced path is a candidate path, a selected module, read by "
+        f"one ({len(adv_sel)} module(s) read the advance), or one import hop "
+        f"from one ({len(hop)})"
+    )
+    return SKIP, lines
 
 
 def _landing_tree(repo: Path, tip: str, target_tip: str) -> Tuple[Optional[str], str]:
@@ -1033,7 +1264,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=(
             "accept a moved target when --preview-ref is a preview of this "
             "tip and the new landing has the same paths and stable patch id "
-            "as the target's intervening diff"
+            "as the target's intervening diff; or when the target's advance "
+            "since this tip was measured (that preview, or the tip's own "
+            "passing changed_tests receipt) only modifies paths that no "
+            "candidate path, selected test module, or module they read is "
+            "-- anything the rules cannot judge keeps the re-measurement"
         ),
     )
     parser.add_argument(
@@ -1225,6 +1460,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"-- {where} [{asked_by}]"
             )
             return _ready(repo, args.checkout, branch_name, target, tip)
+        verdict, advance_lines = _disjoint_advance(repo, ref, tip, target_tip)
+        if verdict == SKIP:
+            print(
+                f"ready: target advance does not reach this candidate's tests "
+                f"-- {where} [{asked_by}]"
+            )
+            for line in advance_lines:
+                print(f"  {line}")
+            return _ready(repo, args.checkout, branch_name, target, tip)
+    else:
+        advance_lines = []
 
     swept, note = _swept_green(repo, tip, target_tip)
     if swept is not None:
@@ -1258,6 +1504,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if note:
         print(f"  {note}")
+    for line in advance_lines:
+        print(f"  {line}")
     print(_recipe(branch_name, target, ref))
     _checkout_note(repo, args.checkout, branch_name, target, tip)
     return REMEASURE
