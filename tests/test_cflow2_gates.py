@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from claude_launcher import install
+from claude_launcher.cflow import model as cflow_model
 from claude_launcher.cflow import responders
 from claude_launcher.cflow2 import asks, executors, frontend, runtime
 from claude_launcher.cflow2 import mcp as cflow2_mcp
@@ -566,6 +567,113 @@ def test_unreadable_roster_defers_instead_of_spending_groups(tmp_path):
     assert _route(d, pool=silent) == []  # not before retry_at
     _route(d, now=T0 + runtime.ROSTER_RETRY + 1)
     assert d.status(T0 + 31)["asks"][0]["asked"] == ["rev"]
+
+
+# -- a reviewer group asks one member (claunch-v0h29.1) -------------------------
+
+
+def _reviewers():
+    def rev(handle, state):
+        return responders.Responder(session=f"s-{handle}", handle=handle, role="reviewer",
+                                    local=True, reachability=state)
+    return {"lead": _member("lead", "leader"), "r1": rev("r1", "busy"),
+            "r2": rev("r2", "idle"), "r3": rev("r3", "idle"), "r4": rev("r4", "busy")}
+
+
+class _Wiring(responders.Pool):
+    def _wire_to(self, matched):
+        self.wired.extend(m.handle for m in matched)
+        return list(matched), []
+
+
+def test_a_reviewer_group_asks_one_member_picked_mechanically(tmp_path):
+    d = Drv(tmp_path, DELEGATED)
+    out = Outbox()
+    # r2 and r3 are idle; r3 is wired to this run already, r2 is not
+    pool = _pool(members=_reviewers(), reachable={"lead", "r1", "r3", "r4"},
+                 siblings={"r1", "r2", "r3", "r4"})
+    _route(d, pool=pool, out=out)
+    (a,) = d.status()["asks"]
+    assert a["asked"] == ["r3"]
+    assert d.events("ask_routed")[0]["to"] == ["r3"]
+    assert len(out.sent) == 1
+    assert asks.pending_for("s-r1") == [] and asks.pending_for("s-r2") == []
+
+
+def test_the_reviewer_pick_is_repeatable_and_prefers_wired_then_idle():
+    pool = responders.Pool(mesh="m", me="w1", members=_reviewers(),
+                           reachable={"r1", "r4"}, siblings={"r1", "r2", "r3", "r4"})
+    cand = cflow_model.Candidate(role="reviewer", scope="sibling")
+    # wired beats idle: r2/r3 are idle but unwired, r1/r4 wired and busy
+    assert [m.handle for m in pool.match(cand, one=True)[0]] == ["r1"]
+    assert [m.handle for m in pool.match(cand, one=True)[0]] == ["r1"]
+    # nothing wired: the first idle member in the group's order
+    pool = responders.Pool(mesh="m", me="w1", members=_reviewers(),
+                           reachable=set(), siblings={"r1", "r2", "r3", "r4"})
+    found, reason = pool.match(cflow_model.Candidate(role="reviewer", scope="sibling",
+                                                    connect=True), autowire=False, one=True)
+    assert found == [] and "r2 holds it" in reason
+
+
+def test_connect_wires_only_the_picked_reviewer(tmp_path):
+    d = Drv(tmp_path, REVIEW.replace("body: [w, review]", "body: [review]"))
+    seen = {}
+
+    def pool_fn(**_):
+        p = _Wiring(mesh="m", me="w1", members=_reviewers(), reachable={"lead"},
+                    ancestors=["lead"], siblings={"r1", "r2", "r3", "r4"})
+        seen["pool"] = p
+        return p
+    _route(d, pool=pool_fn)
+    (a,) = d.status()["asks"]
+    assert a["asked"] == ["r2"]
+    assert seen["pool"].wired == ["r2"]
+
+
+def test_a_reviewer_who_abstains_or_times_out_passes_to_the_next_in_the_group(tmp_path):
+    d = Drv(tmp_path, DELEGATED)
+    out = Outbox()
+    pool = _pool(members=_reviewers(), reachable={"lead", "r1", "r2", "r3", "r4"},
+                 siblings={"r1", "r2", "r3", "r4"})
+    _route(d, pool=pool, out=out)
+    assert d.status()["asks"][0]["asked"] == ["r2"]  # wired and idle, first in order
+    rec = next(iter(d.state()["asks"].values()))
+    receipt = asks.answer_by_id(rec["id"], "abstain", "not my area", by_session="s-r2",
+                                now=T0, pool_fn=pool, deliver_fn=out,
+                                nudge_fn=lambda *a: [])
+    assert receipt["moved"] is True
+    a = d.status()["asks"][0]
+    assert a["asked"] == ["r3"] and a["resolution"] == "asked"
+    # r3 stays silent past the group's deadline: the next one, still this group
+    asks.tick(cwd=d.cwd, scope=d.scope, now=T0 + 61, pool_fn=pool, deliver_fn=out)
+    assert d.status(T0 + 61)["asks"][0]["asked"] == ["r1"]
+    asks.tick(cwd=d.cwd, scope=d.scope, now=T0 + 122, pool_fn=pool, deliver_fn=out)
+    assert d.status(T0 + 122)["asks"][0]["asked"] == ["r4"]
+    # every reviewer was asked in turn: only now the next group (the leader)
+    asks.tick(cwd=d.cwd, scope=d.scope, now=T0 + 183, pool_fn=pool, deliver_fn=out)
+    a = d.status(T0 + 183)["asks"][0]
+    assert a["asked"] == ["lead"]
+    assert [rec["asked"][0]["handle"] for rec, _ in out.sent] == ["r2", "r3", "r1", "r4",
+                                                                  "lead"]
+    assert [e["to"] for e in d.events("ask_routed")] == [["r2"], ["r3"], ["r1"], ["r4"],
+                                                        ["lead"]]
+    assert any("asked in turn" in str(e.get("cause")) for e in d.events("fallback"))
+
+
+def test_a_leader_group_still_asks_every_member(tmp_path):
+    d = Drv(tmp_path, DELEGATED)
+    members = {"lead": _member("lead", "leader"), "lead2": _member("lead2", "leader")}
+    _route(d, pool=_pool(members=members, reachable={"lead", "lead2"},
+                         ancestors=["lead", "lead2"], siblings=set()))
+    assert d.status()["asks"][0]["asked"] == ["lead", "lead2"]
+
+
+def test_the_preview_names_the_one_reviewer_it_would_ask(tmp_path):
+    d = Drv(tmp_path, REVIEW)
+    out = asks.who_answers("review", cwd=d.cwd, scope=d.scope, pool_fn=_preview_pool(
+        members=_reviewers(), reachable={"lead", "r4"}, siblings={"r1", "r2", "r3", "r4"}))
+    _desc, sib, _lead = out["groups"]
+    assert sib["asks"] == ["r4"]
 
 
 # -- responders preview (claunch-3va8h) -----------------------------------------
