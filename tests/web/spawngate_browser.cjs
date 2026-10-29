@@ -38,6 +38,10 @@ const spawnRec = () => ({ id: 'aaa111', kind: 'spawn', scope: 'root', session: '
 const resumeRec = () => ({ id: 'bbb222', kind: 'resume', session: 'op1', status: 'pending', target: 'old1',
   reason: 'it did this work', deadline: soon(), extensions: 1, fallback: SPEC,
   basis: { operator_name: 'Alpha' }, requested_at: new Date().toISOString() });
+// What the rail knows: both askers, so the Spawn child tab finds its parent
+// after the rail is refreshed by a create.
+const SESSIONS = [{ name: 'w1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' },
+  { name: 'op1', status: 'idle', harness: 'claude', profile: 'p', cwd: '/repo/alpha' }];
 const CHILD = { task: 'Write the parser tests\nall of them', role: 'worker', name: 'kid',
   workflow: 'improv-worker-v2', project: 'alpha', worktree: 'kid-wt', beads: false };
 // The daemon's resolution of what the child spec leaves to its asker
@@ -77,12 +81,22 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const errors = [];
     const posts = [];
     const bodies = [];
+    const creates = [];
     let rows = [spawnRec(), resumeRec(), childRec(), heldRec()];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('http://gate.test/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname.startsWith('/api/')) {
         if (url.pathname === '/api/spawn-requests') return route.fulfill({ json: { requests: rows } });
+        // The form's own create (claunch-oaxni): the top-level endpoint
+        // answers with the session, the spawn one wraps it.
+        if (route.request().method() === 'POST' && (url.pathname === '/api/sessions'
+            || /^\/api\/sessions\/\w+\/children$/.test(url.pathname))) {
+          creates.push(url.pathname);
+          const made = { name: url.pathname === '/api/sessions' ? 'solo' : 'kid1', status: 'running' };
+          return route.fulfill({ json: url.pathname === '/api/sessions' ? made : { session: made } });
+        }
+        if (url.pathname === '/api/sessions') return route.fulfill({ json: { sessions: SESSIONS } });
         const m = url.pathname.match(/^\/api\/spawn-requests\/(\w+)\/(\w+)$/);
         if (m && route.request().method() === 'POST') {
           posts.push([m[1], m[2]]);
@@ -303,9 +317,6 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     }));
     assert.deepEqual(asRoot, { tab: 'new', parent: '', task: CHILD.task, name: 'kid',
       request: 'ccc333', title: 'New session' });
-    // The create reports which tab it came from.
-    await page.evaluate(() => spawnGateLink('ccc333', 'solo', 'root'));
-    assert.deepEqual(bodies.at(-1), ['ccc333', { session: 'solo', created_as: 'root' }]);
     await page.click('#new-tab-spawn');
     assert.deepEqual(await page.evaluate(() => [sessionFormView().mode, $('new-session').parent.value]),
       ['spawn', 'w1']);
@@ -323,6 +334,36 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     assert.equal(await page.evaluate(() => $('new-session').task.value), SPEC.task);
     assert.ok(await heldCard.isVisible(), 'the request stays on the card');
     await page.evaluate(() => sessionModalClose({ route: false }));
+
+    // The create reports the tab it was made from (claunch-oaxni): the form
+    // is submitted for real, and the link back names what the create did,
+    // whatever scope the request asked for. Without it the daemon keeps the
+    // scope's guess and tells a child's asker "as your child" for a
+    // session that was made top-level.
+    const made = async (rec, tab) => {
+      await page.evaluate(async r => {
+        sessionsCache = structuredClone(r.sessions);
+        await spawnGateManual(r.rec);
+      }, { rec, sessions: SESSIONS });
+      await page.waitForFunction(id => typeof sessionModal === 'object' && sessionModal
+        && sessionModal.spawnRequest === id, rec.id);
+      await page.click(`#new-tab-${tab}`);
+      const linked = bodies.length;
+      await page.evaluate(() => $('new-session').requestSubmit());
+      for (let i = 0; i < 50 && bodies.length === linked; i++) await page.waitForTimeout(50);
+      assert.equal(await page.evaluate(() => $('create-error').classList.contains('hidden')
+        ? '' : $('create-error').textContent), '', 'the create went out');
+      return [creates.at(-1), bodies.at(-1)];
+    };
+    assert.deepEqual(await made(childRec(), 'new'),
+      ['/api/sessions', ['ccc333', { session: 'solo', created_as: 'root' }]],
+      'a child request made from New session is reported top-level');
+    assert.deepEqual(await made(childRec(), 'spawn'),
+      ['/api/sessions/w1/children', ['ccc333', { session: 'kid1', created_as: 'child' }]],
+      'a child request made from Spawn child is reported as a child');
+    assert.deepEqual(await made(spawnRec(), 'spawn'),
+      ['/api/sessions/op1/children', ['aaa111', { session: 'kid1', created_as: 'child' }]],
+      'a top-level request made from Spawn child is reported as the asker\'s child');
     assert.deepEqual(errors, []);
     console.log('spawngate_browser: ok (root/child/resume/held cards, extend, panel row, manual forms)');
   } finally { await browser.close(); }
