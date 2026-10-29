@@ -50,7 +50,7 @@ def test_orphan_rows_name_the_parent_they_lost():
     ])
     assert removed == {"parent": "gone", "title": "orphan: parent gone was removed"}
     assert hidden["parent"] == "archived"
-    assert "not on this list" in hidden["title"]
+    assert "not among the current sessions" in hidden["title"]
     assert root is None
     assert under is None
     assert self_parent is None
@@ -61,6 +61,8 @@ def test_orphan_rows_name_the_parent_they_lost():
 def test_the_row_builder_draws_the_tag_only_at_the_top_level():
     text = APP.read_text(encoding="utf-8")
     assert "const orphan = !depth && typeof railOrphanOf === \"function\"" in text
+    # existence is read off every current record, not the filtered rail
+    assert "const railKnownNames = new Set(sessionsCache.map((s) => s.name));" in text
     assert "head.append(label, ...(orphanTag ? [orphanTag] : []), keys," in text
 
 

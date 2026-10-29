@@ -22,19 +22,22 @@ class _Client:
 
     def get(self, path, **_kw):
         if path.startswith("/api/sessions"):
-            return {"sessions": self.rows}
+            # The daemon narrows ``?project=`` itself, as the real route does.
+            want = path.partition("?project=")[2]
+            return {"sessions": [r for r in self.rows
+                                 if not want or r.get("project") == want]}
         if path == "/api/daemon":
             return {"relay": None}
         raise AssertionError(path)
 
 
-def _lines(monkeypatch, capsys, rows):
+def _lines(monkeypatch, capsys, rows, project="all"):
     client = _Client(rows)
     monkeypatch.setattr(
         daemon_client, "connect_with_diagnosis", lambda *a, **k: (client, None)
     )
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
-    assert cli.main(["sessions", "--project", "all"]) == 0
+    assert cli.main(["sessions", "--project", project]) == 0
     return {
         line.split()[0]: line for line in capsys.readouterr().out.splitlines()
         if line.strip() and not line.startswith(" ")
@@ -57,3 +60,14 @@ def test_a_dangling_parent_reads_as_an_orphan_too(monkeypatch, capsys):
 def test_a_child_under_its_parent_is_not_marked(monkeypatch, capsys):
     out = _lines(monkeypatch, capsys, [_row("lead"), _row("w1", parent="lead")])
     assert "orphan" not in "".join(out.values())
+
+
+def test_a_live_parent_in_another_project_does_not_make_an_orphan(
+        monkeypatch, capsys):
+    """Narrowing to one project hides the parent's row, not the parent."""
+    rows = [_row("lead", project="A"), _row("w1", parent="lead", project="B"),
+            _row("kid", orphan_of="gone", project="B")]
+    lines = _lines(monkeypatch, capsys, rows, project="B")
+    assert "orphan" not in lines["w1"]
+    # the daemon's own record still reads through the narrowing
+    assert lines["kid"].endswith("(orphan of gone)")

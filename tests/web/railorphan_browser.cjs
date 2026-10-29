@@ -8,7 +8,10 @@
    person started. This drives the shipped UI against a fixture daemon and
    asserts what the row builder in refreshSessions draws: the orphan rows carry
    the `orphan` class, `data-orphan-of` and a "고아" tag naming the lost parent
-   in its title; a root and a child shown under its parent carry none of it. */
+   in its title; a root and a child shown under its parent carry none of it.
+   Whether the parent exists is read off every current record: a live parent
+   the state filter hides (held, with the rail showing running only) leaves its
+   child drawn at the top level but not tagged as an orphan. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -23,7 +26,10 @@ const sessions = [
   { ...base, name: "kid", orphan_of: "gone" },
   { ...base, name: "stray", parent: "archived-one" },
   { ...base, name: "solo" },
+  { ...base, name: "sleeper", status: "exited", held_at: "2026-10-29T00:00:00Z" },
+  { ...base, name: "awake", parent: "sleeper" },
 ];
+const drawn = sessions.filter((s) => s.name !== "sleeper").map((s) => s.name);
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.startsWith("/api/")) {
@@ -52,6 +58,7 @@ const server = http.createServer((req, res) => {
     page.on("pageerror", e => errors.push(String(e)));
     await page.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
+      localStorage.setItem("claunch_session_filter:/", JSON.stringify(["running"]));
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.locator('#session-list li.sess-card[data-name="solo"]').waitFor();
@@ -67,7 +74,8 @@ const server = http.createServer((req, res) => {
           tagTitle: tags[0] ? tags[0].title : null,
         }];
       })));
-    assert.deepEqual(Object.keys(rows).sort(), sessions.map((s) => s.name).sort());
+    assert.deepEqual(Object.keys(rows).sort(), drawn.sort(),
+      "the held parent is filtered off the rail");
 
     assert.deepEqual(rows.kid, {
       orphan: true, child: false, orphanOf: "gone", tags: 1, tagText: "고아",
@@ -75,9 +83,9 @@ const server = http.createServer((req, res) => {
     }, "the daemon's orphan record is drawn as an orphan");
     assert.deepEqual(rows.stray, {
       orphan: true, child: false, orphanOf: "archived-one", tags: 1, tagText: "고아",
-      tagTitle: "orphan: parent archived-one is not on this list",
+      tagTitle: "orphan: parent archived-one is not among the current sessions",
     }, "a parent missing from the rail leaves its child drawn as an orphan");
-    for (const name of ["lead", "solo", "w1"]) {
+    for (const name of ["lead", "solo", "w1", "awake"]) {
       assert.equal(rows[name].orphan, false, `${name} is not marked as an orphan`);
       assert.equal(rows[name].orphanOf, null, `${name} carries no data-orphan-of`);
       assert.equal(rows[name].tags, 0, `${name} has no orphan tag`);

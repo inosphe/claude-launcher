@@ -1714,17 +1714,20 @@ function byLineage(sessions, visibleSessions = sessions) {
    root, and why (claunch-ikiys). A root is a session a human started; an
    orphan is one whose parent is gone: removed with no surviving session above
    it to take the child (the daemon keeps that name in ``orphan_of``), or a
-   parent still on record that this rail does not show (archived, filtered
-   out, cleared from this listing). Returns {parent, title} or null. ``shown``
-   is the set of names on the rail; without it only ``orphan_of`` counts. */
-function railOrphanOf(s, shown) {
+   parent named by the record that is not among the current sessions at all
+   (archived). ``known`` is the set of every current session's name, taken
+   before the project pick and the state filter narrow it: a live parent those
+   filters hide still holds its child, and the child is not an orphan.
+   Without ``known`` only ``orphan_of`` counts. Returns {parent, title} or
+   null. */
+function railOrphanOf(s, known) {
   if (s.orphan_of) {
     return { parent: s.orphan_of,
              title: `orphan: parent ${s.orphan_of} was removed` };
   }
-  if (shown && s.parent && s.parent !== s.name && !shown.has(s.parent)) {
+  if (known && s.parent && s.parent !== s.name && !known.has(s.parent)) {
     return { parent: s.parent,
-             title: `orphan: parent ${s.parent} is not on this list` };
+             title: `orphan: parent ${s.parent} is not among the current sessions` };
   }
   return null;
 }
@@ -5959,7 +5962,9 @@ async function refreshSessions(options) {
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
   const visibleSessions = railList.filter((s) => sessionMatchesFilter(s));
-  const railShownNames = new Set(visibleSessions.map((s) => s.name));
+  // Every current record, before the project pick and the state filter: the
+  // orphan tag asks whether the parent exists, not whether it is drawn.
+  const railKnownNames = new Set(sessionsCache.map((s) => s.name));
   const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
@@ -6393,9 +6398,10 @@ async function refreshSessions(options) {
       li.title = `spawned by ${s.parent}`;
     }
     // A top-level row that a session did not start at the top: its parent
-    // was removed (orphan_of), or is not on this rail (railOrphanOf).
+    // was removed (orphan_of), or is not among the current sessions at all
+    // (railOrphanOf). A parent the filters hide is not gone.
     const orphan = !depth && typeof railOrphanOf === "function"
-      ? railOrphanOf(s, typeof railShownNames !== "undefined" ? railShownNames : null)
+      ? railOrphanOf(s, typeof railKnownNames !== "undefined" ? railKnownNames : null)
       : null;
     let orphanTag = null;
     if (orphan) {
