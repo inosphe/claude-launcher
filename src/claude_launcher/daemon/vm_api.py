@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_frames, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -337,6 +338,42 @@ def _materialize(vm_id: str, result: dict) -> dict:
     return {**result, "content": content}
 
 
+PAGE_FILE = Path(__file__).resolve().parent.parent / "web" / "static" / "vm.html"
+
+
+async def h_frame(request: web.Request) -> web.Response:
+    """The newest screen frame (JPEG). ``?since=<seq>`` waits for a newer one;
+    304 when there is none. A session sees it only with a view grant."""
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        actor = _caller(request)
+        if actor.get("kind") in (actors.AGENT, actors.CFLOW):
+            session = _as_session(request, {"session": request.query.get("session", "")})
+            if vmhub.VIEW not in reg.get(vm_id).grants.get(session, []):
+                raise VmError("vm_no_grant", f"{session} has no view grant on {vm_id}")
+        try:
+            since = int(request.query.get("since") or 0)
+        except ValueError:
+            since = 0
+        frame = await request.app["vm_frames"].get(vm_id, since)
+    except VmError as exc:
+        return _err(exc)
+    headers = {"Cache-Control": "no-store", "X-Frame-Seq": str(frame.seq)}
+    if frame.seq <= since:
+        return web.Response(status=304, headers=headers)
+    if not frame.data:
+        return web.json_response({"ok": False, "code": "vm_no_frame", "error": frame.error or
+                                  "no frame yet", "seq": frame.seq}, status=503, headers=headers)
+    return web.Response(body=frame.data, content_type="image/jpeg", headers=headers)
+
+
+async def h_page(_request: web.Request) -> web.StreamResponse:
+    if PAGE_FILE is None or not PAGE_FILE.is_file():
+        return web.Response(status=404, text="the VM page assets are missing")
+    return web.FileResponse(PAGE_FILE, headers={"Cache-Control": "no-cache"})
+
+
 async def h_call(request: web.Request) -> web.Response:
     """A session's cua call, through the daemon's one channel."""
     reg, _ = _hub(request)
@@ -441,12 +478,14 @@ async def _background(app: web.Application):
     task = asyncio.create_task(hand_back())
     yield
     task.cancel()
+    await app["vm_frames"].stop_all()
     await app["vm_channels"].drop_all()
 
 
 def install(app: web.Application, registry: Optional[Registry] = None,
             manager: Optional[vm_tart.Manager] = None,
-            channels: Optional[vm_channel.Hub] = None) -> None:
+            channels: Optional[vm_channel.Hub] = None,
+            frames: Optional[vm_frames.Frames] = None) -> None:
     cfg = store.daemon_config()
     reg = registry or Registry(paths.vm_json(), slot_limit=int(cfg.get("vm_slot_limit", 2)))
     app["vm_registry"] = reg
@@ -457,6 +496,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     )
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")
+    app["vm_frames"] = frames or vm_frames.Frames(reg)
     app.cleanup_ctx.append(_background)
     r = app.router
     r.add_get("/api/vm", h_list)
@@ -476,3 +516,5 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/call", h_call)
     r.add_post("/api/vm/{id}/exec", h_exec)
     r.add_get("/api/vm/{id}/tools", h_tools)
+    r.add_get("/api/vm/{id}/frame", h_frame)
+    r.add_get("/vm", h_page)
