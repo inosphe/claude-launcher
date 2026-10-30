@@ -84,6 +84,10 @@ class Vm:
     tart_name: str
     state: str = "stopped"
     ip: str = ""
+    #: How the daemon reaches the guest. The key is a path to a file only the
+    #: daemon reads; no key or password is ever stored here.
+    ssh_user: str = "admin"
+    ssh_key: str = ""
     #: Boot readiness, set by the layer that watches the guest. ``running``
     #: only means tart reports the VM up; a session may acquire it once all
     #: three are true.
@@ -112,7 +116,8 @@ class Vm:
     def to_dict(self) -> dict:
         return {
             "id": self.id, "tart_name": self.tart_name, "state": self.state,
-            "ip": self.ip, "ssh_ready": self.ssh_ready, "gui_ready": self.gui_ready,
+            "ip": self.ip, "ssh_user": self.ssh_user, "ssh_key": self.ssh_key,
+            "ssh_ready": self.ssh_ready, "gui_ready": self.gui_ready,
             "cua_ready": self.cua_ready, "fault_reason": self.fault_reason,
             "controller": self.controller,
             "extra_controllers": dict(self.extra_controllers),
@@ -126,6 +131,8 @@ class Vm:
         vm = cls(id=str(raw["id"]), tart_name=str(raw.get("tart_name") or raw["id"]))
         vm.state = raw.get("state") if raw.get("state") in STATES else "stopped"
         vm.ip = str(raw.get("ip") or "")
+        vm.ssh_user = str(raw.get("ssh_user") or "admin")
+        vm.ssh_key = str(raw.get("ssh_key") or "")
         vm.fault_reason = str(raw.get("fault_reason") or "")
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
@@ -192,6 +199,11 @@ class Registry:
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
             atomic.replace(tmp, self.path)
 
+    def note(self, vm: str, what: str, **extra) -> None:
+        """An audit row from the layers above (forced stop, adoption)."""
+        with self._lock:
+            self._log(vm, "", what, **extra)
+
     def _log(self, vm: str, session: str, what: str, **extra) -> None:
         # The record never carries screen contents or command text: who did
         # what, when, under which epoch, and how it ended.
@@ -202,11 +214,13 @@ class Registry:
             self._audit_sink(row)
 
     # ---- records ------------------------------------------------------- #
-    def add(self, vm_id: str, tart_name: str = "") -> Vm:
+    def add(self, vm_id: str, tart_name: str = "", *, ssh_user: str = "admin",
+            ssh_key: str = "") -> Vm:
         with self._lock:
             if vm_id in self._vms:
                 raise VmError("vm_exists", f"{vm_id} is already registered")
-            vm = Vm(id=vm_id, tart_name=tart_name or vm_id)
+            vm = Vm(id=vm_id, tart_name=tart_name or vm_id, ssh_user=ssh_user,
+                    ssh_key=ssh_key)
             self._vms[vm_id] = vm
             self._save()
             return vm
@@ -271,6 +285,28 @@ class Registry:
             self._drop_control(vm, why=f"vm {state}")
         self._log(vm.id, "", "state", frm=old, to=state, reason=reason)
         self._save()
+
+    def adopt(self, vm_id: str, state: str) -> Vm:
+        """Set the state tart reports, whatever the record said. For the
+        layer that reconciles after a daemon restart; every other move goes
+        through :meth:`set_state`."""
+        with self._lock:
+            vm = self.get(vm_id)
+            if state not in STATES or state == "fault":
+                raise VmError("vm_bad_state", f"cannot adopt {state!r}")
+            if state in OCCUPIED:
+                held = self.holders(except_id=vm_id)
+                if vm.state not in OCCUPIED and len(held) >= self.slot_limit:
+                    raise VmError("vm_slots_full", "more VMs run than the slot limit",
+                                  holders=held)
+            old, vm.state = vm.state, state
+            vm.fault_reason = ""
+            vm.ssh_ready = vm.gui_ready = vm.cua_ready = False
+            if state != "running":
+                self._drop_control(vm, why=f"adopted {state}")
+            self._log(vm_id, "", "adopt", frm=old, to=state)
+            self._save()
+            return vm
 
     def set_ready(self, vm_id: str, *, ssh=None, gui=None, cua=None, ip: str = "") -> Vm:
         with self._lock:
