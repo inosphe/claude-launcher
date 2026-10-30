@@ -595,6 +595,21 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _natural_name(name: str) -> tuple:
+    """Sort key that reads digit runs as numbers, so ``s9`` precedes ``s10``.
+
+    Session names are auto-generated with a counter, so a plain string sort
+    files the tenth session between the first and the second — which is how
+    the rail's shadow rows read once a fleet passes nine. Same key shape as
+    ``wizard._natural`` (a type tag first, so a digit run never meets a
+    letter run in one comparison).
+    """
+    return tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part)
+        for part in re.split(r"(\d+)", name) if part
+    )
+
+
 #: The role that leads a mesh, and the subrole every leader holds with it
 #: (claunch-lhgfx): a leader is always one who may merge.
 LEADER_ROLE = "leader"
@@ -8127,6 +8142,12 @@ class MeshManager:
         here (the default spelled out, as the mesh list spells it): a remote
         session has no project on this daemon, so the meshes it sits in are
         what decide which project's rail shows it.
+
+        The rows come back sorted by machine and then by session name with
+        its digit runs read as numbers (``_natural_name``): the rail draws
+        them in this order (``shadowLineage`` keeps it and lays a spawned
+        session under the one that spawned it), and a string sort would file
+        ``s100`` between ``s10`` and ``s11``.
         """
         rows: Dict[Tuple[str, str], dict] = {}
         for mesh in self.list():
@@ -8148,7 +8169,10 @@ class MeshManager:
                     "roles": list(member.roles),
                     "linked": host in mesh.links,
                 })
-        return [rows[k] for k in sorted(rows)]
+        return [
+            rows[k]
+            for k in sorted(rows, key=lambda k: (k[0], _natural_name(k[1])))
+        ]
 
     def shadow_route(self, machine: str, session: str) -> Tuple[Mesh, Member]:
         """The mesh (and member row) to reach ``machine``'s ``session`` through.
