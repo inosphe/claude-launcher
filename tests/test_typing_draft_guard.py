@@ -104,6 +104,16 @@ def _fake_session(*, bracketed: bool = True):
         (b"\x1b[200~hi\x1b[201~", True),  # a paste fills the composer
         (b"ab\rcd", True),                # sent, then started again
         (b"ab\r", False),                 # ...and the other way round
+        # the terminal's own replies carry printable payloads nobody typed
+        (b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\", None),  # OSC colour reply
+        (b"\x1b]10;rgb:ffff/ffff/ffff\x07", None),      # ...BEL-terminated
+        (b"\x1bP>|xterm.js(5.5.0)\x1b\\", None),       # DCS XTVERSION
+        (b"\x1b[M #!", None),             # X10 mouse press: three raw bytes
+        (b"\x1b[<0;12;5M\x1b[<0;12;5m", None),  # SGR mouse click
+        (b"\x1b[I", None),                # focus in
+        (b"\x1b[?62;22c", None),          # DA1 reply
+        (b"\x1b]11;rgb:0/0/0\x07hi", True),  # a reply, then real typing
+        (b"hi\x1b[M #!\r", False),         # typing, a click, then Enter
     ],
 )
 def test_draft_state_is_read_from_the_keystrokes(data, expected):
@@ -111,6 +121,45 @@ def test_draft_state_is_read_from_the_keystrokes(data, expected):
     about the composer must LEAVE a draft open. An arrow key pressed inside
     a half-written prompt is still a half-written prompt."""
     assert session_mod.draft_state_from_bytes(data) is expected
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        (b"\x1b]11;rgb:0000/0000/0000\x1b\\", True),
+        (b"\x1b[M #!\x1b[<35;10;4M", True),
+        (b"\x1b[O\x1b[I", True),
+        (b"\x1b[24;80R", True),
+        (b"\x1b[A", False),               # an arrow is a key a person pressed
+        (b"\x1b", False),
+        (b"x", False),
+        (b"\x1b[<0;1;1Mx", False),
+        (b"", False),
+    ],
+)
+def test_terminal_reports_are_told_apart_from_keys(data, expected):
+    assert session_mod.is_terminal_report(data) is expected
+
+
+def test_terminal_reports_neither_open_nor_prolong_a_draft(monkeypatch):
+    """claunch-s5tjq: the web terminal sends xterm's own replies and mouse
+    reports down the same socket as keys. An OSC colour reply or an X10
+    click opened a draft over an empty composer, and every later mouse
+    motion or focus report restarted its clock, so thread messages stayed
+    held behind a line nobody had typed."""
+    monkeypatch.setattr(session_mod, "DRAFT_GUARD", 0.1)
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"\x1b]11;rgb:0/0/0\x1b\\")
+    s.note_human_input(at_terminal=True, data=b"\x1b[M #!")
+    assert s.draft_open() is False
+    assert s.keyboard_busy(terminal_only=True) is False
+    # a real draft still lapses on its cap while the mouse keeps moving
+    s.note_human_input(at_terminal=True, data=b"x")
+    assert s.draft_open() is True
+    time.sleep(0.06)
+    s.note_human_input(at_terminal=True, data=b"\x1b[<35;10;4M")
+    time.sleep(0.06)
+    assert s.draft_open() is False
 
 
 def test_submitted_line_tracker_handles_split_input_editing_and_paste():
