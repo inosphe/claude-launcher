@@ -60087,10 +60087,13 @@ function notify(title, sub, opts) {
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
-  // `dismissable: false` is for the alert that has to stay read (a leader
-  // the harness stopped, claunch-9djny): it has no ×, and a click opens the
-  // session without taking the card down. The poll that raised it is the
-  // only thing that puts it away, when the condition it reports is gone.
+  // `dismissable: false` is for a card that has to stay read even when it is
+  // pressed: it has no ×, and a click follows the card without taking it
+  // down. The poll that raised such a card is then the only thing that puts
+  // it away, when the condition it reports is gone. No caller uses it today —
+  // the leader-stopped card it was written for carries the × now
+  // (claunch-8vl1s) — and it stays as the one way to say that, for a card
+  // that needs it again.
   const dismissable = o.dismissable !== false;
   if (dismissable) {
     const close = el("button", "notice-close", "×");
@@ -63912,13 +63915,18 @@ function applyRunGate(pending, settled) {
    (GET /api/leader-faults, daemon/leader_fault.py — claunch-9djny). The
    daemon decides who counts (leader role on a mesh; category running or
    hold; an active fault) and this poll only draws it: one fatal card per
-   session, sticky and without ×, because the point is that it cannot be
-   swiped away while the leader is still stopped. The card comes down when
-   the daemon stops listing the row — the fault cleared, or the session was
-   paused, killed or archived and the project is no longer waiting on it.
-   The card is re-raised only when what it says changed (kind, message,
-   until, category), so a two-second poll does not fill the history with
-   copies of one event. */
+   session, sticky — it never times out, so it is still there for a reader
+   who was away. It used to carry no × at all, so that it could not be
+   swiped away while the leader was still stopped (claunch-9djny); the
+   operator asked for the × the other cards carry (claunch-8vl1s) after a
+   card stayed on screen once the session was no longer stopped. The poll
+   is what ends it: the card comes down when the daemon stops listing the
+   row — the fault cleared, or the session was paused, killed or archived
+   and the project is no longer waiting on it. The card is re-raised only
+   when what it says changed (kind, message, until, category), so a
+   two-second poll does not fill the history with copies of one event — and
+   a card the reader put away with × stays away until what it says changes
+   too. */
 const LEADER_FAULT_PREFIX = "leader-fault-";
 const leaderFaultRaised = new Map();   // card key -> the signature raised
 
@@ -63972,15 +63980,27 @@ async function refreshLeaderFaults() {
     // reason is retried the same way.
     if (noticePanelOpen()) continue;
     const drawn = notify(`leader stopped: ${a.handle || session}`, leaderFaultSub(a), {
-      source: "fault", key, kind: "fatal", sticky: true, dismissable: false,
+      source: "fault", key, kind: "fatal", sticky: true,
       session,
     });
     if (!drawn) continue;
     leaderFaultRaised.set(key, sig);
   }
+  // Two records name a leader-fault card that is up: the signature this poll
+  // recorded, and the card `notify` actually drew (its entry in `notices`).
+  // The sweep reads both, so a card whose signature was lost — a draw that
+  // raced a page-level reset, or a key some other path took down — still comes
+  // down on the next poll instead of standing there with nothing left to
+  // remove it (claunch-8vl1s). A card the reader put away with × is already
+  // gone from `notices`; its signature stays, so nothing is drawn again until
+  // what the alert says changes.
   for (const key of [...leaderFaultRaised.keys()]) {
     if (live.has(key)) continue;
     leaderFaultRaised.delete(key);
+    dismissNotice(key);
+  }
+  for (const key of [...notices.keys()]) {
+    if (!key.startsWith(LEADER_FAULT_PREFIX) || live.has(key)) continue;
     dismissNotice(key);
   }
 }
