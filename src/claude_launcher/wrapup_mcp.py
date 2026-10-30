@@ -14,13 +14,6 @@ import urllib.parse
 
 from . import daemon_client, mcp_rpc
 
-INSTRUCTIONS = """\
-Wrap-up drafts (wrapup_* tools): glossary terms, category placements and
-knowledge records go to the user as drafts in your session's wrap-up pane;
-they reach the workspace only when the user confirms them. What the user
-does to a draft arrives as a "[claunch wrapup]" block.
-"""
-
 _ID = {"id": {"type": "string", "description": "draft id (wd-xxxxxxxx)"}}
 _REV = {"revision": {"type": "integer", "description": "the draft's revision as you last read it"}}
 _PAYLOAD = {
@@ -36,7 +29,8 @@ TOOLS = [
     {"name": "wrapup_draft",
      "description": "File a wrap-up draft for the user to confirm: a glossary term, a category placement or "
                     "a knowledge record. Nothing reaches the workspace store until the user confirms it in "
-                    "your wrap-up pane. Returns the draft (id, revision).",
+                    "your wrap-up pane; what the user does to it (edit, delete, confirm) arrives as a "
+                    "\"[claunch wrapup]\" block. Returns the draft (id, revision).",
      "inputSchema": {"type": "object", "properties": {
          "kind": {"type": "string", "enum": ["glossary", "category", "knowledge"]},
          "payload": _PAYLOAD,
@@ -126,5 +120,4 @@ SERVER = mcp_rpc.Server(
     tools=tuple(TOOLS),
     dispatch=call_tool,
     errors=(WrapupMcpError, daemon_client.DaemonClientError),
-    instructions=INSTRUCTIONS,
 )
