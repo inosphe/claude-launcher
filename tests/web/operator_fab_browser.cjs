@@ -332,6 +332,30 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     });
     assert.deepEqual(pinnedList, { viewScrolls: true, scrolled: true, listHeld: true, gridScrolls: false, fitsRows: true },
       "the conversation scrolls inside its column and the thread list stays put, sized to its rows");
+    // A long list exercises the other half of the contract (claunch-vxep1.1.1):
+    // still capped at the row's height, it scrolls inside its own column and
+    // holds while the conversation scrolls. Old timestamps keep th-main (the
+    // long conversation above) the selected thread.
+    for (let i = 0; i < 30; i++) ops.opB.feed.push({ id: `tl${i}`, at: at(1), kind: "post", role: "bot", text: `항목 ${i}`, level: "info", refs: [], thread: `tl${i}` });
+    await page.waitForSelector('#opfab-view .op-thread-row[data-thread="tl29"]');
+    const longList = await page.evaluate(() => {
+      const grid = document.querySelector("#opfab-view .op-threads-grid");
+      const view = document.querySelector("#opfab-view .op-thread-view");
+      const list = document.querySelector("#opfab-view .op-thread-list");
+      // The cap is what max-height: 100% promises; without it the list
+      // grows with the grid and is no longer a scroller of its own (the
+      // discriminating mutation for this assertion).
+      const cap = list.getBoundingClientRect().bottom - grid.getBoundingClientRect().bottom <= 1;
+      const scrolls = list.scrollHeight > list.clientHeight + 1;
+      const listTop = list.getBoundingClientRect().top;
+      view.scrollTop = view.scrollHeight;
+      const held = Math.abs(list.getBoundingClientRect().top - listTop) < 1;
+      list.scrollTop = list.scrollHeight;
+      return { cap, scrolls, held, scrolled: list.scrollTop > 0,
+        viewScrolls: view.scrollHeight > view.clientHeight + 1 };
+    });
+    assert.deepEqual(longList, { cap: true, scrolls: true, held: true, scrolled: true, viewScrolls: true },
+      "a long thread list caps at the row, scrolls inside its column, and holds while the conversation scrolls");
     if (process.env.CLAUNCH_SCREENSHOT_WIDE) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT_WIDE });
     await page.locator(".opfab-grip-e").dblclick();
     assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });

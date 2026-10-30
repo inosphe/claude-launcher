@@ -422,9 +422,10 @@
 :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
 :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-view { display: none; }
 @container (min-width: 640px) {
-  /* The row fills the grid's height (align-items: start used to size each
-     column to its content): both columns are scrollers of their own, so the
-     thread list holds while the conversation scrolls (claunch-vxep1). */
+  /* The row fills the grid's height: the conversation column stretches to
+     it (align-items: stretch below), the thread list opts out of the
+     stretch with align-self: start on its own rule and sizes to its rows
+     instead (claunch-vxep1, claunch-vxep1.1). */
   :is(#observer-operators, #opfab-view) .op-threads-grid { display: grid; grid-template-columns: minmax(180px, 32%) minmax(0, 1fr); gap: 12px; align-items: stretch; grid-template-rows: minmax(0, 1fr); }
   :is(#observer-operators, #opfab-view) .op-threads-grid > .op-thread-list,
   :is(#observer-operators, #opfab-view) .op-threads-grid.op-show-list > .op-thread-list { display: flex; }
@@ -433,11 +434,12 @@
   /* Each column scrolls inside itself, so the thread head pins to the top of
      its own column; --op-scroll-pad is 0 there is no padding to pull over. */
   :is(#observer-operators, #opfab-view) .op-thread-list { overflow-y: auto; }
-  /* The list sizes to its rows (align-self: start): a short list no longer
-     leaves a dead click band under its last row, stretched to the
-     conversation column's height (claunch-vxep1.1). A long one still caps
-     at the row (max-height: 100%) and scrolls inside itself, so the list's
-     independent-scroll contract holds. */
+  /* align-self: start overrides the grid's align-items: stretch above: a
+     short list ends at its last row instead of leaving a dead click band
+     stretched to the conversation column's height (claunch-vxep1.1).
+     max-height: 100% is the other half of the same opt-out — a long list
+     caps at the row's height and scrolls inside itself, so the list's
+     independent-scroll contract holds either way (claunch-vxep1). */
   :is(#observer-operators, #opfab-view) .op-thread-list { align-self: start; max-height: 100%; }
   :is(#observer-operators, #opfab-view) .op-thread-view { overflow-y: auto; }
 }
