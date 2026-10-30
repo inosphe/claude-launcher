@@ -692,6 +692,12 @@
            takes no agent input at all (claunch-jg8pt). -->
       <button id="term-clibtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's own shell and the input its agent proposes">❯ cli</button>
+      <!-- The same pane, showing the glossary, category and knowledge
+           entries this session filed as drafts (wrapup-pane.js,
+           daemon/wrapup_api.py, claunch-ar8jn); lit while one waits on the
+           user. Nothing reaches the workspace until it is confirmed here. -->
+      <button id="term-wrapupbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="this session's wrap-up drafts">✎ wrap-up</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
            and opened by itself when the session changes a question. This
@@ -1800,6 +1806,7 @@
 <script src="static/megathread-page.js"></script>
 <script src="static/split-frame.js"></script>
 <script src="static/cli-pane.js"></script>
+<script src="static/wrapup-pane.js"></script>
 <script src="static/talk-pane.js"></script>
 <script src="static/glossary-composer.js"></script>
 <script src="static/operator_fab.js"></script>

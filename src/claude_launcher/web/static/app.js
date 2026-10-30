@@ -7680,6 +7680,7 @@ function syncSessionResourceButtons() {
     "term-chartbtn": isPiDurable(name),
     "term-qabtn": qaDoor && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
     "term-threadsbtn": !operator && !!name && (threadsRailCache[name]?.open || 0) > 0,
+    "term-wrapupbtn": !!name && (wrapupRailCache[name]?.unresolved || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
@@ -7825,6 +7826,31 @@ async function refreshQaRail() {
     if (isTalkPane(splitKind)) globalThis.TalkPane?.refreshQa();
   }
   maybeOpenQaPane();
+}
+
+/* Wrap-up drafts (wrapup-pane.js, daemon/wrapup_api.py, claunch-ar8jn): per
+   session with drafts, how many wait on the user by kind, whether the
+   session still runs and when it ended. Lights ✎ wrap-up, and a session
+   that ended with drafts waiting puts up a card (wrapupNoticeSync). */
+let wrapupRailCache = {};
+let wrapupRailSig = null;
+
+async function refreshWrapupRail() {
+  let data;
+  try {
+    const resp = await api("/api/wrapup/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === wrapupRailSig) return;
+  wrapupRailSig = sig;
+  wrapupRailCache = rows;
+  wrapupNoticeSync(rows);
+  syncSessionResourceButtons();
 }
 
 /* Session-card labels for what waits on the reader in the talk panes
@@ -24595,6 +24621,14 @@ const SPLIT_PANES = {
     on: "close this session's shell pane — the terminal takes the column back",
     off: "this session's own shell under the terminal — type in it, and run or dismiss what the session's agent proposes",
   },
+  // The glossary, category and knowledge entries this session filed as
+  // drafts (wrapup-pane.js, daemon/wrapup_api.py, claunch-ar8jn): they reach
+  // the workspace stores only when the user confirms them here.
+  wrapup: {
+    btn: "term-wrapupbtn", title: "✎ wrap-up",
+    on: "close the wrap-up pane — the terminal takes the column back",
+    off: "this session's wrap-up drafts (glossary, category, knowledge) — edit, delete or confirm them",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -24607,7 +24641,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "cli", "wrapup", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27605,7 +27639,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "category", "chart", "packs", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "wrapup", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -27677,6 +27711,9 @@ function openSplit(name, kind = "run") {
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
+  // And the session's wrap-up drafts (wrapup-pane.js). A write there moves
+  // the header's light at once rather than at the next dashboard poll.
+  if (kind === "wrapup") { globalThis.WrapupPane?.mount(splitBody, name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -27708,6 +27745,7 @@ function closeSplit() {
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
+  if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -27804,6 +27842,7 @@ $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
 $("term-clibtn").addEventListener("click", () => toggleSplitPane("cli"));
+$("term-wrapupbtn").addEventListener("click", () => toggleSplitPane("wrapup"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
 
@@ -60704,6 +60743,7 @@ const NOTICE_SOURCES = [
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
   { id: "fault", label: "leader faults (harness stopped) and usage-limit resets" },
   { id: "qa", label: "QA questions" },
+  { id: "wrapup", label: "ended sessions with unconfirmed wrap-up drafts" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
   { id: "daemon", label: "daemon connection" },
@@ -62612,6 +62652,50 @@ function qaNoticeSync(rows) {
   }
   qaNoticed = live;
   noticeSave(QA_NOTICED_KEY, [...live]);
+}
+
+/* ------------------------------------------------------------------ */
+/* ended sessions with wrap-up drafts waiting (claunch-ar8jn)          */
+/* ------------------------------------------------------------------ */
+/* A session that was killed (or ended any other way but a hold or pause)
+   while drafts it filed still wait on the user puts up one sticky card: the
+   entries would otherwise sit unconfirmed with nobody to remind the user.
+   Keyed by the session and its end, so a session resumed and ended again
+   announces again; the card goes down once its drafts are all settled. As
+   with QA, a browser's first poll announces nothing. */
+const WRAPUP_NOTICED_KEY = "claunch.wrapupNoticed";
+let wrapupNoticed = null;
+
+function wrapupNoticeOpen(session) {
+  try { setSessLayout(session, { split: true, pane: "wrapup" }); } catch { /* storage off */ }
+  location.hash = "#/s/" + encodeURIComponent(session);
+}
+
+function wrapupNoticeSync(rows) {
+  const saved = noticeLoad(WRAPUP_NOTICED_KEY, null);
+  const first = wrapupNoticed === null && !Array.isArray(saved);
+  const known = new Set(wrapupNoticed || []);
+  if (Array.isArray(saved)) for (const k of saved) known.add(k);
+  const live = new Set();
+  for (const [session, row] of Object.entries(rows || {})) {
+    if (!row || row.alive || !row.ended_at || !(row.unresolved > 0)) continue;
+    const key = `${session}@${row.ended_at}`;
+    live.add(key);
+    if (first || known.has(key)) continue;
+    const c = row.counts || {};
+    notify(`${session} ended with ${row.unresolved} unconfirmed wrap-up draft(s)`,
+      `glossary ${c.glossary || 0} · category ${c.category || 0} · knowledge ${c.knowledge || 0} — confirm or delete them`,
+      {
+        source: "wrapup", key: `wrapup-${session}`, sticky: true, session,
+        sync: `wrapup:${key}`,
+        open: () => wrapupNoticeOpen(session),
+      });
+  }
+  for (const key of known) {
+    if (!live.has(key)) dismissNotice(`wrapup-${key.split("@")[0]}`);
+  }
+  wrapupNoticed = live;
+  noticeSave(WRAPUP_NOTICED_KEY, [...live]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -64642,6 +64726,7 @@ async function boot() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshWrapupRail(),
     refreshThreadsRail(),
     refreshModelPrices(),
   ]);
@@ -65319,6 +65404,7 @@ async function pollOnce() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshWrapupRail(),
     refreshThreadsRail(),
     refreshTermQueued(),
     refreshTermWindow(),
