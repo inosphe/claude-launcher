@@ -7627,12 +7627,14 @@ async def h_cflow2_landing_target(request: web.Request) -> web.Response:
     branch on -- not an argument. A caller outside a run may pass
     ``relation`` to ask the question for a run it has no scope for.
 
-    Answers ``{owner, holder, why, passed, refused, undecidable}``:
+    Answers ``{owner, holder, why, passed, refused, undecidable, demoted}``:
     ``holder`` null with ``undecidable`` false is the definite "nobody",
     and with it true is "this could not be read". The probe
     (``claunch gate landing-target``) turns those into exit 1 and 2.
     ``refused`` is ``why`` split on ``"; "`` for a reader that wants the
     sentences one at a time; the sentences are the Router's own.
+    ``demoted`` is non-empty when a stacked run's request goes to the mesh
+    leader's queue as an independent one would (``Target.demoted``).
 
     The answer is a prediction, not a reservation: the set of directories
     and the rosters can change between this call and the push. That race is
@@ -7693,6 +7695,7 @@ def _landing_target(manager: Any, mesh: Any, cwds: Sequence[str], cwd: str,
         "passed": list(found.passed),
         "refused": [s for s in found.why.split("; ") if s],
         "undecidable": found.undecidable,
+        "demoted": found.demoted,
         "relation": relation,
     }
 

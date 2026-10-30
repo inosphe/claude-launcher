@@ -717,6 +717,96 @@ def test_a_leader_of_another_repository_is_skipped_by_name_and_the_same_repo_lea
     assert "leader 'lead' has no run in this repository" in found.why
 
 
+# --------------------------------------------------------------------------- #
+# a stacked request with nobody above it to merge is demoted, and says so
+# (claunch-0ka8c)
+# --------------------------------------------------------------------------- #
+def _demotion_router(monkeypatch, sessions, roles, queues, repos=None):
+    """A Router over plain sessions. ``queues`` maps a session to the
+    checkout its landing queue run lives in; every checkout is one repository
+    unless ``repos`` says otherwise."""
+    repos = repos or {}
+    holders_of = {n: [landing_route.Holder(c, None, True)] for n, c in queues.items()}
+
+    def holders(name, repo):
+        return [h for h in holders_of.get(name, [])
+                if repo is None or repos.get(h.cwd, "/repo/a") == repo]
+
+    monkeypatch.setattr(landing_route.cflow_landing, "common_dir",
+                        lambda c: repos.get(c, "/repo/a"))
+    return landing_route.Router(_Manager(sessions), _Mesh(roles), holders)
+
+
+@pytest.mark.parametrize("case", ["no-parent", "parent-cannot-merge", "parent-is-leader"])
+def test_a_stacked_request_with_no_merging_ancestor_goes_to_the_leader_as_independent(
+    monkeypatch, case
+):
+    """The three arrangements the issue names. Each lands on the leader's
+    queue -- the same target ``independent`` picks -- and carries the reason
+    in ``demoted`` and in the note the push detail (the run's journal)
+    keeps, instead of stopping on "no target"."""
+    lead = _Session("lead", "/l")
+    if case == "no-parent":
+        sessions = [_Session("w1", "/w"), lead]
+        roles = {"w1": ["worker"], "lead": ["leader"]}
+        reason = "this session has no parent session"
+    elif case == "parent-cannot-merge":
+        # a worker parent with no stack (no landing queue run) beside the
+        # root leader
+        sessions = [_Session("w1", "/w", parent="p"), _Session("p", "/p"), lead]
+        roles = {"w1": ["worker"], "p": ["worker"], "lead": ["leader"]}
+        reason = "no direct ancestor can take the landing"
+    else:
+        sessions = [_Session("w1", "/w", parent="lead"), lead]
+        roles = {"w1": ["worker"], "lead": ["leader"]}
+        reason = "parent 'lead' is the mesh leader"
+    router = _demotion_router(monkeypatch, sessions, roles, {"lead": "/l"})
+    found = router.stacked("/w", "w1")
+    assert found.owner == "lead", found.why
+    assert found.demoted == landing_route.demotion("lead", reason)
+    assert "stacked demoted to independent" in found.demoted
+    assert found.note().startswith(found.demoted), found.note()
+    # the same target the independent route picks
+    assert router.independent("/w", "w1").owner == "lead"
+
+
+def test_a_parent_worker_that_merges_is_not_a_demotion(monkeypatch):
+    """A stack parent that takes the request is the stacked route proper."""
+    sessions = [_Session("w1", "/w", parent="p"), _Session("p", "/p"), _Session("lead", "/l")]
+    roles = {"w1": ["worker"], "p": ["worker", "merger"], "lead": ["leader"]}
+    router = _demotion_router(monkeypatch, sessions, roles, {"p": "/p", "lead": "/l"})
+    found = router.stacked("/w", "w1")
+    assert found.owner == "p"
+    assert found.demoted == "" and found.note() == ""
+
+
+def test_a_grandparent_that_merges_is_a_fallback_not_a_demotion(monkeypatch):
+    """Passing a parent for a merging worker ancestor stays stacked: the
+    request still folds up the tree, so only the fallback note is written."""
+    sessions = [_Session("w1", "/w", parent="p"), _Session("p", "/p", parent="g"),
+                _Session("g", "/g"), _Session("lead", "/l")]
+    roles = {"w1": ["worker"], "p": ["worker"], "g": ["worker", "merger"], "lead": ["leader"]}
+    router = _demotion_router(monkeypatch, sessions, roles, {"g": "/g", "lead": "/l"})
+    found = router.stacked("/w", "w1")
+    assert found.owner == "g"
+    assert found.demoted == ""
+    assert "fell back to 'g'" in found.note()
+
+
+def test_a_leader_of_another_repository_stays_no_target_for_stacked_too(monkeypatch):
+    """Out of the issue's scope on purpose: when the only leader takes
+    landings for another repository, the demotion has nowhere to go and the
+    answer is the plain "no target" -- what s6087 met (leader s15, gds6)."""
+    sessions = [_Session("w1", "/w"), _Session("s15", "/g")]
+    roles = {"w1": ["worker"], "s15": ["leader"]}
+    router = _demotion_router(monkeypatch, sessions, roles, {"s15": "/g"},
+                              repos={"/w": "/repo/a", "/g": "/repo/gds6"})
+    found = router.stacked("/w", "w1")
+    assert found.holder is None and found.demoted == ""
+    assert "takes landings for another repository (/repo/gds6)" in found.why
+    assert router.independent("/w", "w1").holder is None
+
+
 def test_a_main_run_is_picked_before_an_earlier_side_run():
     side = landing_route.Holder("a", "stack", False)
     main = landing_route.Holder("b", None, True)

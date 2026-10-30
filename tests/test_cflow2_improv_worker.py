@@ -1285,6 +1285,30 @@ def test_landing_leaders_third_group_is_the_mesh_root():
     )
 
 
+def test_stacked_landing_review_reaches_the_leader_like_independent():
+    """claunch-0ka8c: a stacked round with nobody in its parent chain to merge
+    has its request demoted to the leader's queue, so the question about that
+    request must reach the same leaders ``landing-review-leader`` asks --
+    after the worker parent, which stays first for a real stack."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    stacked = doc["nodes"]["landing-review"]["ask"]["from"]
+    leader = doc["nodes"]["landing-review-leader"]["ask"]["from"]
+    assert stacked[0] == {"role": "worker", "scope": "ancestor"}
+    assert stacked[1:] == leader
+    assert doc["nodes"]["landing-review"]["ask"]["otherwise"] == "human"
+
+
+def test_the_sixth_check_reads_a_demotion_as_request():
+    """A stacked gate answer of 0 with ``demoted`` set is the leader route,
+    not an error: the landing prompt says so and the bundle carries it."""
+    text = V2.read_text(encoding="utf-8")
+    assert "`demoted`가 비어 있지 않으면" in text
+    assert "강등은 에러가 아니다" in text
+    assert "stacked였으나 <demoted의\n        사유>로 리더 큐로 라우팅" in text
+
+
 def test_landing_leader_ask_wires_an_unwired_root_leader(monkeypatch):
     """claunch-u7nu3: an independent child under another worker is wired to
     its parent only, so the root leader is outside its reachable set. The

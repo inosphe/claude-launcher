@@ -104,6 +104,17 @@ def test_the_target_line_names_who_was_passed_over():
     assert "passed over" in line
 
 
+def test_the_target_line_says_a_stacked_request_was_demoted():
+    """claunch-0ka8c: the one-line verdict names the demotion, so the round
+    that reads it knows its stacked request is going to the leader's queue."""
+    from claude_launcher.daemon import landing_route
+
+    demoted = landing_route.demotion("lead1", "this session has no parent session")
+    line = gate._render(_target(demoted=demoted), gate.TARGET)
+    assert demoted in line
+    assert gate.verdict(_target(demoted=demoted)) == gate.TARGET
+
+
 # --------------------------------------------------------------------------- #
 # the wiring: the workflow's command is this gate
 # --------------------------------------------------------------------------- #
