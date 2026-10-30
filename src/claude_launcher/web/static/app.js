@@ -18214,6 +18214,9 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The context items beside the task (gds6-bfu7); blank rows are dropped.
+  const contextItems = openingContextsPayload();
+  if (contextItems.length) body.opening_contexts = contextItems;
   // The key the operator picked in the Runs-as block, when they picked one:
   // the choice there makes the profile's strategy manual with that key AND
   // pins this session to it, so the session runs on exactly that key from its
@@ -18221,9 +18224,6 @@ $("new-session").addEventListener("submit", async (e) => {
   // session (claunch-i985h). Absent unless pressed; the daemon refuses an id
   // the profile's pool does not hold.
   if (newSessionKeyId) body.key_id = newSessionKeyId;
-  // The context items beside the task (gds6-bfu7); blank rows are dropped.
-  const contextItems = openingContextsPayload();
-  if (contextItems.length) body.opening_contexts = contextItems;
   // The operator's note goes on the session record with the launch
   // (claunch-zy9yk); empty is left off, which is "no note".
   if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
