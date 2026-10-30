@@ -34,7 +34,7 @@ _STATUS = {
     "vm_not_controller": 403, "vm_stop_timeout": 504, "vm_boot_timeout": 504,
     "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
-    "vm_bad_scope": 400, "vm_bad_request": 400,
+    "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -47,12 +47,20 @@ VIEW_TOOLS = frozenset({
     "list_windows", "get_accessibility_tree", "get_cursor_position",
     "get_agent_cursor_state", "get_config", "get_guide", "health_report",
     "check_permissions", "verify_state", "zoom", "get_recording_state",
+    "get_session", "list_sessions", "get_session_state", "parse_visual_regions",
 })
 
 #: cua tools that change the guest beyond what is on its screen -- software
-#: installed, the driver's own configuration rewritten -- and so need the
-#: exec grant, as a shell would.
-EXEC_TOOLS = frozenset({"install_extension", "install_ffmpeg", "set_config"})
+#: installed, the driver's own configuration rewritten, files written to a
+#: path the caller names, local files handed to a web page -- and so need the
+#: exec grant, as a shell would. run_script is not here: its description says
+#: the script runs in a sandbox with no filesystem, network, process or
+#: environment, and its only API is the app-driving one that run_steps and
+#: the single-action tools have.
+EXEC_TOOLS = frozenset({
+    "install_extension", "install_ffmpeg", "set_config", "start_recording",
+    "browser_download", "browser_set_input_files",
+})
 
 
 def tool_scope(tool: str) -> str:
@@ -235,10 +243,16 @@ async def h_revoke_controller(request: web.Request) -> web.Response:
 
 
 async def h_extra(request: web.Request) -> web.Response:
+    """Duplicate control is not offered yet: two controllers need the one
+    command queue per VM (vm-setup-8s6), which is not built. The registry
+    supports it; this route does not."""
     if (refused := _user_only(request)) is not None:
         return refused
     reg, _ = _hub(request)
     try:
+        raise VmError("vm_duplicate_unavailable",
+                      "two sessions driving one VM waits for the per-VM command queue; "
+                      "hand control over with revoke-control instead")
         body = await _body(request)
         reg.add_extra_controller(request.match_info["id"], str(body.get("session") or ""),
                                  str(body.get("reason") or ""))

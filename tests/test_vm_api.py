@@ -288,3 +288,39 @@ def test_every_cua_tool_that_installs_or_configures_needs_exec():
     for name in ("install_extension", "install_ffmpeg", "set_config"):
         assert vm_api.tool_scope(name) == "exec"
     assert not (vm_api.VIEW_TOOLS & vm_api.EXEC_TOOLS)
+
+
+@scenario
+async def test_duplicate_control_is_refused_until_the_command_queue_exists(api):
+    await _up(api)
+    for who in ("s1", "s2"):
+        await api.post("/api/vm/a/grant", json={"session": who, "scopes": ["control"]})
+    await api.post("/api/vm/a/acquire", json={"session": "s1"}, headers=AGENT)
+    resp = await api.post("/api/vm/a/extra_controller", json={"session": "s2", "reason": "pair"})
+    assert resp.status == 501 and (await resp.json())["code"] == "vm_duplicate_unavailable"
+    assert api.reg.get("a").extra_controllers == {}
+
+
+def test_the_cua_tool_scopes_hold_for_the_whole_driver_list():
+    """Every tool of cua-driver 0.38.0 (62) has a scope, and the ones that
+    write files, install or reconfigure are exec."""
+    names = """bring_to_front browser_click browser_dialog browser_download browser_navigate
+        browser_pointer browser_prepare browser_select browser_set_input_files browser_type
+        check_for_update check_permissions click clipboard_read clipboard_write double_click drag
+        end_session escalate_session get_accessibility_tree get_agent_cursor_state
+        get_browser_state get_config get_cursor_position get_desktop_state get_guide
+        get_recording_state get_screen_size get_session get_session_state get_window_state
+        health_report hotkey install_extension install_ffmpeg invoke_menu kill_app launch_app
+        list_apps list_sessions list_windows move_cursor page parse_visual_regions press_key
+        replay_trajectory right_click run_script run_steps scroll set_agent_cursor_enabled
+        set_agent_cursor_motion set_agent_cursor_theme set_config set_value set_window_frame
+        start_recording start_session stop_recording type_text verify_state zoom""".split()
+    assert len(names) == 62 == len(set(names))
+    by = {n: vm_api.tool_scope(n) for n in names}
+    assert {n for n, s in by.items() if s == "exec"} == {
+        "install_extension", "install_ffmpeg", "set_config", "start_recording",
+        "browser_download", "browser_set_input_files"}
+    for n in ("run_script", "run_steps", "replay_trajectory", "kill_app", "clipboard_read",
+              "get_browser_state", "launch_app", "page", "check_for_update"):
+        assert by[n] == "control", n
+    assert sum(1 for s in by.values() if s == "view") == len(vm_api.VIEW_TOOLS)
