@@ -665,6 +665,13 @@ DAEMON_DEFAULTS = {
     # keep_alive sessions and those that would come back blank are never
     # held.
     "hold_idle_minutes": 60.0,
+    # Fault pause (daemon/fault_pause.py, claunch-ijot0): an idle session
+    # whose harness painted a usage limit (session fault kind usage_limit,
+    # active until its reset) is paused by the daemon, so typed notices stop
+    # reaching it and a leader's "leader stopped" card comes down. A session
+    # resumed by a person before the reset is not paused again for the same
+    # limit. Read live on every pass.
+    "fault_auto_pause": True,
     # Staggered restore (daemon/restore_queue.py, claunch-0j6gb.2): at a
     # daemon start, the sessions to bring back are not all launched at once.
     # Each one that would come back with its conversation is filed

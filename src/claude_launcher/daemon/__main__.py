@@ -24,7 +24,7 @@ from . import host_watch
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
-from . import hold as hold_mod, instance_manifest, open_files, operator_keepalive, restore_queue, session_procs, session_reminder
+from . import fault_pause, hold as hold_mod, instance_manifest, open_files, operator_keepalive, restore_queue, session_procs, session_reminder
 from .api import build_app, close_websockets, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -627,6 +627,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     _operator_keepalive()
     hold_clock = hold_mod.HoldClock(manager, before=_operator_keepalive)
     hold_clock.start()
+    # A session stopped on a usage limit is paused (claunch-ijot0).
+    fault_pause_clock = fault_pause.FaultPauseClock(manager)
+    fault_pause_clock.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -658,6 +661,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         except (asyncio.CancelledError, Exception):
             pass
         await teardown.step("hold_clock", hold_clock.stop())
+        await teardown.step("fault_pause_clock", fault_pause_clock.stop())
         await teardown.step("restore_queue", queue.stop())
         await teardown.step("resume_nudge", resume_nudge.shutdown())
         for followup in host_followups:

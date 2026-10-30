@@ -666,11 +666,11 @@ def build_app(
             gate_registry.install(None)
 
     app.on_cleanup.append(_uninstall_gates)
-    # A failed session's sweep waits for the person settling it
-    # (claunch-0j6gb.1); test registries may not have the list.
+    # A failed or paused session's sweep waits for the person settling it
+    # (claunch-0j6gb.1, claunch-ijot0); test registries may not have the list.
     settle_hooks = getattr(manager, "settle_hooks", None)
     if settle_hooks is not None:
-        settle_hooks.append(board.session_exited)
+        settle_hooks.append(board.session_settled)
     # A finished sweep stamps ``swept_at`` on the session; persisting right
     # after is what keeps the next restart from sweeping that ending again.
     # Tests hand in registries without persist.
@@ -738,8 +738,11 @@ def build_app(
     # Leader faults (daemon/leader_fault.py, claunch-9djny): a fault on a
     # session that holds a mesh's leader role, while its state still owes the
     # project work. The dashboard raises a fatal notification from this.
-    from . import leader_fault
+    from . import fault_pause, leader_fault
     leader_fault.install(app)
+    # Usage-limit pauses whose stated reset has passed (daemon/fault_pause.py,
+    # claunch-ijot0): the dashboard tells the person a resume is theirs to make.
+    fault_pause.install(app)
     from . import spec_api
     spec_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
@@ -13349,8 +13352,11 @@ async def h_session_pause(request: web.Request) -> web.Response:
     and the bulk resume brings back as a set. No wind-down because the
     reason to pause is a session misbehaving — looping, racing another on
     the same checkout — and typing a settle-your-issues request into it is
-    the thing being stopped. Its board issues get the same ``SESSION ENDED``
-    sweep a kill's do; that is the daemon's exit path, unchanged.
+    the thing being stopped. Its board issues are left in_progress, as a
+    hold's are (claunch-ijot0): the pause is meant to be resumed. The
+    ``SESSION ENDED`` sweep runs when the pause becomes an ending -- the kill
+    route on the paused record, an archive or a removal
+    (``SessionManager.settle_pause``).
 
     On an exited session the reply says ``already_exited``, as the kill
     route does; the record keeps whichever marker it has.

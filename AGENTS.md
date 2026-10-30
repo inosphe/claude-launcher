@@ -95,8 +95,10 @@
   끝나기(또는 유예 `beads_winddown_grace`초)를 기다렸다가 종료한다 — 두 번째
   kill이나 `--force`는 즉시. (3) exit: 어떤 이유로든 프로세스가 사라지면 그
   세션이 in_progress로 쥐고 있던 이슈는 `SESSION ENDED` 코멘트와 함께 open으로
-  돌아가고, 데몬이 만들었는데 손도 안 댄 자리표시 이슈는 닫힌다. 데몬 재기동은
-  exit가 아니라서 아무것도 쓸지 않는다. 설정 키는 `daemon.beads_auto_issue` /
+  돌아가고, 데몬이 만들었는데 손도 안 댄 자리표시 이슈는 닫힌다. hold·pause·
+  실패(failed)로 끝난 프로세스는 예외다 — 이슈는 in_progress로 남고, 그
+  기록이 kill·archive·remove로 종료될 때 같은 정리가 돈다(claunch-ijot0).
+  데몬 재기동은 exit가 아니라서 아무것도 쓸지 않는다. 설정 키는 `daemon.beads_auto_issue` /
   `beads_winddown` / `beads_winddown_grace`(store.DAEMON_DEFAULTS). 웹 UI의
   Beads 탭과 세션 레일의 Beads 블록이 이 매치(링크·assignee·created_by·task의
   `issue:` 참조)를 그대로 보여 준다.

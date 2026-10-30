@@ -511,6 +511,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "leaderfault_check.js",
+        "faultreset_check.js",
         "restartgate_check.js",
         "ptyhostbadge_check.js",
         "statusline_check.js",

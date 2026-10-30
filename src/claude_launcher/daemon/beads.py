@@ -2999,16 +2999,22 @@ class Board:
 
         A *failed* session (claunch-0j6gb.1) is not swept here: its issue
         stays in_progress for the respawn, and the sweep comes through
-        ``SessionManager.settle_hooks`` once a person settles the record."""
-        if getattr(session, "failed_at", None):
+        ``SessionManager.settle_hooks`` once a person settles the record.
+        Neither is a *paused* one (claunch-ijot0): a pause is a stop the
+        operator (or the daemon, on a usage limit) means to undo with a
+        resume, as a hold is, and the issue stays in_progress for it. Its
+        sweep comes the same way, when the pause is filed as a kill or the
+        record is archived or removed (:meth:`session_settled`)."""
+        if getattr(session, "failed_at", None) or getattr(session, "paused_at", None):
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        task = loop.create_task(self.sweep(session))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        _schedule_sweep(self, session)
+
+    def session_settled(self, session) -> None:
+        """The manager's settle hook: the sweep a failed or paused record
+        put off, owed now that a person ended it for good. Unlike
+        :meth:`session_exited` it does not read the markers -- an archived
+        pause keeps ``paused_at``, and it is still an ending."""
+        _schedule_sweep(self, session)
 
     def sessions_exited(self, sessions) -> None:
         """:meth:`session_exited` for many sessions at once -- the records a
@@ -3135,6 +3141,18 @@ class Board:
         if done:
             log.info("beads: swept %d issue write(s) for exited %r", len(done), name)
         return done, len(done) == len(plan)
+
+
+def _schedule_sweep(board, session) -> None:
+    """Start ``board.sweep(session)`` on the running loop, tracked in
+    ``board._tasks``; nothing without a loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(board.sweep(session))
+    board._tasks.add(task)
+    task.add_done_callback(board._tasks.discard)
 
 
 def _mirror(by_id: Dict[str, dict], writes: Sequence[List[str]]) -> List[str]:

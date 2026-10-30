@@ -60369,7 +60369,7 @@ const NOTICE_SOURCES = [
     refresh: () => runGateSync(runGateLast.pending, runGateLast.settled), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
-  { id: "fault", label: "leader faults (harness stopped)" },
+  { id: "fault", label: "leader faults (harness stopped) and usage-limit resets" },
   { id: "qa", label: "QA questions" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
@@ -63995,6 +63995,75 @@ async function refreshLeaderFaults() {
 }
 
 /* ------------------------------------------------------------------ */
+/* fault resets: a usage-limit pause whose stated reset has passed     */
+/* ------------------------------------------------------------------ */
+/* The daemon pauses a session the harness stopped on a usage limit and does
+   not resume it: spending the new plan is the person's decision
+   (GET /api/fault-resets, daemon/fault_pause.py — claunch-ijot0). This poll
+   says when that decision is due: one card per session, sticky with ×, once
+   per reset (the signature is session + until). A click opens the session,
+   where Resume is. The card comes down when the row goes — the session was
+   resumed, killed or archived. */
+const FAULT_RESET_PREFIX = "fault-reset-";
+const faultResetRaised = new Map();   // card key -> the signature raised
+
+function faultResetSub(r) {
+  const f = r.fault || {};
+  const lines = [];
+  const facts = [f.label || f.kind || "usage limit", f.harness].filter(Boolean).join(" / ");
+  if (facts) lines.push(facts);
+  if (f.until) {
+    const at = new Date(f.until);
+    if (!isNaN(at)) lines.push(`reset ${at.toLocaleString()}`);
+  }
+  lines.push("paused by the daemon — resume it if you want it back");
+  return lines.join(" · ");
+}
+
+async function refreshFaultResets() {
+  let body;
+  try {
+    const resp = await api("/api/fault-resets");
+    if (!resp.ok) return;
+    body = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = body && Array.isArray(body.resets) ? body.resets : [];
+  const live = new Set();
+  for (const r of rows) {
+    const session = String((r && r.session) || "");
+    if (!session) continue;
+    const key = FAULT_RESET_PREFIX + session;
+    live.add(key);
+    if (!noticeSourceShown("fault")) continue;
+    const sig = String((r.fault || {}).until || "");
+    if (faultResetRaised.get(key) === sig) continue;
+    // Put away in another browser (or before a reload): settled, and not
+    // offered to notify, which would add a history row on every poll.
+    const sync = `fault-reset:${session}:${sig}`;
+    const remote = noticeSync.remote.get(sync);
+    if (remote && remote.dismissed) {
+      faultResetRaised.set(key, sig);
+      continue;
+    }
+    // As for the leader card: record the signature only for a card that went
+    // up, so an open history panel does not swallow it.
+    if (noticePanelOpen()) continue;
+    const drawn = notify(`usage limit reset: ${session}`, faultResetSub(r), {
+      source: "fault", key, sticky: true, session, sync,
+    });
+    if (!drawn) continue;
+    faultResetRaised.set(key, sig);
+  }
+  for (const key of [...faultResetRaised.keys()]) {
+    if (live.has(key)) continue;
+    faultResetRaised.delete(key);
+    dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* nudges: a driver asking its person to act on its cflow run          */
 /* ------------------------------------------------------------------ */
 /* An agent whose run stops on something only a person releases -- a
@@ -64925,6 +64994,9 @@ async function pollOnce() {
     // A stopped leader is the one fault the operator cannot wait to read off
     // the rail; the daemon decides which rows count (claunch-9djny).
     refreshLeaderFaults(),
+    // A usage-limit pause whose reset has passed: resuming is the person's
+    // call, and this says it is due (claunch-ijot0).
+    refreshFaultResets(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
