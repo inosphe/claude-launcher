@@ -12,6 +12,8 @@ from claude_launcher import store
 from claude_launcher.daemon import actors, vm_api, vm_tart
 from claude_launcher.daemon.vmhub import Registry
 
+from claude_launcher.daemon import vm_channel
+from test_vm_channel import World
 from test_vm_tart import Fake
 
 AGENT = {actors.HEADER: "agent:s1"}
@@ -24,10 +26,16 @@ async def _api(tmp_path):
     reg = Registry()
     mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn,
                           sleep=lambda s: None, stop_wait=0.05, boot_wait=0.5)
+    world = World()
+
+    async def no_sleep(_):
+        await asyncio.sleep(0)
+
+    hub = vm_channel.Hub(reg, log_dir=tmp_path, opener=world.opener, sleep=no_sleep)
     app = web.Application()
-    vm_api.install(app, reg, mgr)
+    vm_api.install(app, reg, mgr, hub)
     async with TestClient(TestServer(app)) as client:
-        client.fake, client.reg = fake, reg
+        client.fake, client.reg, client.hub, client.world = fake, reg, hub, world
         yield client
 
 
@@ -52,7 +60,7 @@ async def _up(api, vm_id="a"):
     """Registered, started, the guest channel marked ready (step 4's job)."""
     await _register(api, vm_id)
     assert (await api.post(f"/api/vm/{vm_id}/start")).status == 200
-    api.reg.set_ready(vm_id, cua=True)
+    assert await api.hub.channels[vm_id].wait_up(2)
 
 
 @scenario
@@ -163,3 +171,15 @@ def test_the_settings_have_defaults():
     cfg = store.DAEMON_DEFAULTS
     assert cfg["vm_slot_limit"] == 2 and cfg["vm_human_idle"] == 15
     assert cfg["vm_stop_wait"] == 120 and cfg["vm_graphics"] is True
+
+
+@scenario
+async def test_start_opens_the_guest_channel_and_stop_closes_it_first(api):
+    await _up(api)
+    got = await (await api.get("/api/vm/a")).json()
+    assert got["channel"] == "up" and got["cua_ready"] and got["ready"]
+    assert len(api.world.opened) == 1
+    assert (await api.post("/api/vm/a/stop")).status == 200
+    got = await (await api.get("/api/vm/a")).json()
+    assert got["state"] == "stopped" and got["channel"] == "idle" and not got["cua_ready"]
+    assert "a" not in api.hub.channels

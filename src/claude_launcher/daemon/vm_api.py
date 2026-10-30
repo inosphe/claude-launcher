@@ -24,7 +24,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -138,8 +138,15 @@ def _lifecycle_route(action: str):
         vm_id = request.match_info["id"]
         try:
             reg.get(vm_id)
+            channels: vm_channel.Hub = request.app["vm_channels"]
+            if action != "start":
+                # The channel goes first: it would otherwise reconnect to a
+                # guest that is shutting down.
+                await channels.drop(vm_id)
             # tart and ssh block: keep them off the event loop.
             await asyncio.to_thread(getattr(mgr, action), vm_id)
+            if action == "start":
+                channels.ensure(vm_id)
             return web.json_response(reg.view(vm_id))
         except VmError as exc:
             return _err(exc)
@@ -271,6 +278,7 @@ async def _background(app: web.Application):
         if vm.state == "running":
             try:
                 await mgr.reprobe(vm.id)
+                app["vm_channels"].ensure(vm.id)
             except VmError:
                 pass
 
@@ -285,10 +293,12 @@ async def _background(app: web.Application):
     task = asyncio.create_task(hand_back())
     yield
     task.cancel()
+    await app["vm_channels"].drop_all()
 
 
 def install(app: web.Application, registry: Optional[Registry] = None,
-            manager: Optional[vm_tart.Manager] = None) -> None:
+            manager: Optional[vm_tart.Manager] = None,
+            channels: Optional[vm_channel.Hub] = None) -> None:
     cfg = store.daemon_config()
     reg = registry or Registry(paths.vm_json(), slot_limit=int(cfg.get("vm_slot_limit", 2)))
     app["vm_registry"] = reg
@@ -297,6 +307,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
         graphics=bool(cfg.get("vm_graphics", True)),
         stop_wait=float(cfg.get("vm_stop_wait", 120)),
     )
+    app["vm_channels"] = channels or vm_channel.Hub(
+        reg, log_dir=paths.daemon_dir() / "vm")
     app.cleanup_ctx.append(_background)
     r = app.router
     r.add_get("/api/vm", h_list)

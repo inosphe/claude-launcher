@@ -1,0 +1,264 @@
+"""The guest channel (vm-setup-8s6, step 4) against a scripted MCP server
+that stands in for ``ssh ... cua-driver mcp``: no VM, no ssh."""
+from __future__ import annotations
+
+import asyncio
+import json
+
+from claude_launcher.daemon import vm_channel
+from claude_launcher.daemon.vmhub import Registry, VmError
+
+
+class _Stdin:
+    def __init__(self, proc):
+        self.proc = proc
+
+    def write(self, data):
+        if self.proc.closed:
+            raise ConnectionResetError("closed")
+        for line in data.decode().splitlines():
+            self.proc.received.append(json.loads(line))
+            self.proc.on_message(json.loads(line))
+
+    async def drain(self):
+        if self.proc.closed:
+            raise ConnectionResetError("closed")
+
+    def close(self):
+        pass
+
+
+class FakeProc:
+    """An MCP server: answers initialize, the probe and tools/call; can be
+    told to go silent or to close."""
+
+    def __init__(self, behaviour):
+        self.stdout = asyncio.StreamReader()
+        self.stdin = _Stdin(self)
+        self.received = []
+        self.closed = False
+        self.behaviour = behaviour
+
+    def reply(self, ident, result):
+        self.stdout.feed_data((json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}) + "\n").encode())
+
+    def die(self):
+        self.closed = True
+        self.stdout.feed_eof()
+
+    def on_message(self, msg):
+        if "id" not in msg:
+            return
+        method = msg["method"]
+        if method == "initialize":
+            if self.behaviour.get("silent_hello"):
+                return
+            self.reply(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {}})
+        elif method == "tools/list":
+            self.reply(msg["id"], {"tools": [{"name": "get_screen_size"}]})
+        elif method == "tools/call":
+            name = msg["params"]["name"]
+            if name == "hang":
+                return
+            if name == "get_screen_size" and self.behaviour.get("probe_error"):
+                self.stdout.feed_data((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -1, "message": "no daemon"}}) + "\n").encode())
+                return
+            self.reply(msg["id"], {"content": [{"type": "text", "text": name}], "isError": False})
+
+    def terminate(self):
+        self.die()
+
+    kill = terminate
+
+    async def wait(self):
+        return 0
+
+
+class World:
+    def __init__(self, behaviours=None):
+        self.opened = []
+        self.behaviours = list(behaviours or [{}])
+
+    async def opener(self, argv, log):
+        behaviour = self.behaviours[min(len(self.opened), len(self.behaviours) - 1)]
+        if behaviour.get("refuse"):
+            self.opened.append(None)
+            raise OSError("connection refused")
+        proc = FakeProc(behaviour)
+        self.opened.append((list(argv), proc))
+        return proc
+
+
+async def _no_sleep(_):
+    await asyncio.sleep(0)
+
+
+def _channel(tmp_path, world, **kw):
+    reg = Registry()
+    reg.add("a", ssh_user="admin", ssh_key="/keys/k")
+    reg.claim_slot("a")
+    reg.set_state("a", "running")
+    reg.set_ready("a", ssh=True, gui=True, ip="192.168.64.2")
+    kw.setdefault("sleep", _no_sleep)
+    return reg, vm_channel.Channel(reg, "a", log_dir=tmp_path, opener=world.opener, **kw)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_the_command_runs_the_guests_cua_driver_by_absolute_path(tmp_path):
+    reg, _ = _channel(tmp_path, World())
+    argv = vm_channel.ssh_argv(reg.get("a"))
+    assert argv[-2:] == ["/Users/admin/.local/bin/cua-driver", "mcp"]
+    assert "admin@192.168.64.2" in argv and "BatchMode=yes" in argv
+    assert argv[argv.index("-i") + 1] == "/keys/k"
+
+
+def test_up_means_a_call_went_through_and_cua_is_ready_then(tmp_path):
+    async def go():
+        world = World()
+        reg, ch = _channel(tmp_path, world)
+        ch.start()
+        assert await ch.wait_up(2)
+        vm = reg.get("a")
+        assert vm.channel == "up" and vm.cua_ready and vm.ready
+        methods = [m["method"] for m in world.opened[0][1].received]
+        assert methods == ["initialize", "notifications/initialized", "tools/call"]
+        out = await ch.call("click", {"x": 1})
+        assert out["content"][0]["text"] == "click"
+        await ch.stop()
+        assert not reg.get("a").cua_ready and reg.get("a").channel == "idle"
+    run(go())
+
+
+def test_a_dropped_ssh_is_reconnected_and_a_pending_call_fails_loudly(tmp_path):
+    async def go():
+        world = World()
+        reg, ch = _channel(tmp_path, world)
+        ch.start()
+        await ch.wait_up(2)
+        first = world.opened[0][1]
+        pending = asyncio.create_task(ch.call("hang", timeout=5))
+        await asyncio.sleep(0.01)
+        first.die()
+        try:
+            await pending
+        except VmError as exc:
+            assert exc.code == "vm_unavailable" and exc.extra["outcome_unknown"]
+        else:
+            raise AssertionError("a call lost with the connection must raise")
+        for _ in range(100):
+            if len(world.opened) > 1 and reg.get("a").channel == "up":
+                break
+            await asyncio.sleep(0.01)
+        assert len(world.opened) == 2 and reg.get("a").cua_ready
+        await ch.stop()
+    run(go())
+
+
+def test_a_call_while_down_is_refused_with_retry_after_not_hung(tmp_path):
+    async def go():
+        world = World([{"refuse": True}])
+        reg, ch = _channel(tmp_path, world, backoff=(0.0,) * 50)
+        try:
+            await ch.call("click")
+        except VmError as exc:
+            assert exc.code == "vm_unavailable" and exc.extra["retry_after"] == 5
+        else:
+            raise AssertionError("no channel, no answer")
+    run(go())
+
+
+def test_retries_are_finite_and_the_failure_is_reported(tmp_path):
+    async def go():
+        world = World([{"refuse": True}])
+        failed = []
+        reg, ch = _channel(tmp_path, world, backoff=(0.0, 0.0, 0.0),
+                           on_failed=lambda vm, why: failed.append((vm, why)))
+        ch.start()
+        await ch._task
+        vm = reg.get("a")
+        assert vm.channel == "failed" and not vm.cua_ready
+        assert "3 attempts" in vm.channel_error
+        assert len(world.opened) == 3 and failed and failed[0][0] == "a"
+        assert vm.state == "running"  # the VM is fine; its channel is not
+    run(go())
+
+
+def test_a_probe_the_guest_cannot_answer_is_not_up(tmp_path):
+    async def go():
+        world = World([{"probe_error": True}])
+        reg, ch = _channel(tmp_path, world, backoff=(0.0, 0.0))
+        ch.start()
+        await ch._task
+        assert reg.get("a").channel == "failed" and not reg.get("a").cua_ready
+        assert "no daemon" in reg.get("a").channel_error
+    run(go())
+
+
+def test_a_silent_guest_times_out_the_handshake(tmp_path):
+    async def go():
+        world = World([{"silent_hello": True}])
+        reg, ch = _channel(tmp_path, world, backoff=(0.0,), hello_timeout=0.05)
+        ch.start()
+        await ch._task
+        assert reg.get("a").channel == "failed"
+    run(go())
+
+
+def test_a_connection_that_keeps_dropping_at_once_still_runs_out_of_retries(tmp_path):
+    async def go():
+        class Quick(FakeProc):
+            def on_message(self, msg):
+                super().on_message(msg)
+                if msg.get("method") == "tools/call":
+                    asyncio.get_running_loop().call_soon(self.die)
+
+        world = World()
+
+        async def opener(argv, log):
+            proc = Quick({})
+            world.opened.append((list(argv), proc))
+            return proc
+
+        reg = Registry()
+        reg.add("a")
+        reg.claim_slot("a")
+        reg.set_state("a", "running")
+        reg.set_ready("a", ssh=True, ip="1.2.3.4")
+        ch = vm_channel.Channel(reg, "a", log_dir=tmp_path, opener=opener,
+                                backoff=(0.0, 0.0, 0.0), sleep=_no_sleep)
+        ch.start()
+        await asyncio.wait_for(ch._task, 5)
+        assert reg.get("a").channel == "failed" and len(world.opened) == 3
+    run(go())
+
+
+def test_a_channel_for_a_vm_that_is_not_running_stays_idle(tmp_path):
+    async def go():
+        world = World()
+        reg = Registry()
+        reg.add("a")
+        ch = vm_channel.Channel(reg, "a", log_dir=tmp_path, opener=world.opener, sleep=_no_sleep)
+        ch.start()
+        await ch._task
+        assert reg.get("a").channel == "idle" and world.opened == []
+    run(go())
+
+
+def test_the_hub_keeps_one_channel_per_vm_and_drops_it(tmp_path):
+    async def go():
+        world = World()
+        reg, _ = _channel(tmp_path, world)
+        hub = vm_channel.Hub(reg, log_dir=tmp_path, opener=world.opener, sleep=_no_sleep)
+        one = hub.ensure("a")
+        assert hub.ensure("a") is one
+        await one.wait_up(2)
+        await hub.drop("a")
+        assert "a" not in hub.channels and reg.get("a").channel == "idle"
+        try:
+            hub.get("a")
+        except VmError as exc:
+            assert exc.code == "vm_unavailable"
+    run(go())

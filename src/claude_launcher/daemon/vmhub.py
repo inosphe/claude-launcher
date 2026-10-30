@@ -88,6 +88,13 @@ class Vm:
     #: daemon reads; no key or password is ever stored here.
     ssh_user: str = "admin"
     ssh_key: str = ""
+    #: The guest's cua-driver, by absolute path: a name would resolve to
+    #: whatever the guest's PATH holds, and the host's own never applies.
+    cua_path: str = "/Users/admin/.local/bin/cua-driver"
+    #: The guest channel (daemon/vm_channel.py): idle | connecting | up |
+    #: down | failed. Not saved: a restarted daemon has no channel.
+    channel: str = "idle"
+    channel_error: str = ""
     #: Boot readiness, set by the layer that watches the guest. ``running``
     #: only means tart reports the VM up; a session may acquire it once all
     #: three are true.
@@ -117,7 +124,8 @@ class Vm:
         return {
             "id": self.id, "tart_name": self.tart_name, "state": self.state,
             "ip": self.ip, "ssh_user": self.ssh_user, "ssh_key": self.ssh_key,
-            "ssh_ready": self.ssh_ready, "gui_ready": self.gui_ready,
+            "cua_path": self.cua_path, "channel": self.channel,
+            "channel_error": self.channel_error, "ssh_ready": self.ssh_ready, "gui_ready": self.gui_ready,
             "cua_ready": self.cua_ready, "fault_reason": self.fault_reason,
             "controller": self.controller,
             "extra_controllers": dict(self.extra_controllers),
@@ -133,6 +141,7 @@ class Vm:
         vm.ip = str(raw.get("ip") or "")
         vm.ssh_user = str(raw.get("ssh_user") or "admin")
         vm.ssh_key = str(raw.get("ssh_key") or "")
+        vm.cua_path = str(raw.get("cua_path") or vm.cua_path)
         vm.fault_reason = str(raw.get("fault_reason") or "")
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
@@ -285,6 +294,17 @@ class Registry:
             self._drop_control(vm, why=f"vm {state}")
         self._log(vm.id, "", "state", frm=old, to=state, reason=reason)
         self._save()
+
+    def set_channel(self, vm_id: str, status: str, error: str = "") -> Vm:
+        """The guest channel's state. ``up`` is what makes the cua daemon
+        count as ready; every other status clears it."""
+        with self._lock:
+            vm = self.get(vm_id)
+            vm.channel = status
+            vm.channel_error = error
+            vm.cua_ready = status == "up"
+            self._log(vm_id, "", "channel", status=status, error=error)
+            return vm
 
     def adopt(self, vm_id: str, state: str) -> Vm:
         """Set the state tart reports, whatever the record said. For the
