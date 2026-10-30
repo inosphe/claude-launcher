@@ -694,6 +694,7 @@ BROWSER_CHECKS = [
     "chart_browser.cjs",
     "hive_browser.cjs",
     "megathread_browser.cjs",
+    "resendactions_browser.cjs",
     "sessionprs_browser.cjs",
     "commandcopy_browser.cjs",
     "termcflow_browser.cjs",
