@@ -10729,6 +10729,18 @@ let railBeadsBusy = false;
 const RAIL_BEADS_EVERY = 5000;
 const RAIL_BEADS_MAX = 4;    // pills on a row before "+n"
 
+/* Collect the issue prefixes every board payload carries (board_head's
+   issue_prefix), so mdInline can link mentions of digit-less ids like
+   claunch-jpqat. Older daemons send no issue_prefix: the set simply stays
+   smaller and digit-bearing ids still link. */
+function beadsNotePrefixes(boards) {
+  for (const b of boards || []) {
+    if (b && typeof b.issue_prefix === "string" && b.issue_prefix) {
+      beadsIdPrefixes.add(b.issue_prefix);
+    }
+  }
+}
+
 async function refreshRailBeads() {
   const now = Date.now();
   if (railBeadsBusy || now - railBeadsAt < RAIL_BEADS_EVERY) return;
@@ -10738,6 +10750,7 @@ async function refreshRailBeads() {
     if (resp.status === 404) { railBeadsAt = now + 60000; return; }  // older daemon: stop asking for a while
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return;
+    beadsNotePrefixes(data.boards);
     railBeads = railBeadsIndex(data);
     railBeadsAt = Date.now();
     applyRailBeads();
@@ -29769,6 +29782,21 @@ const MD_BLOCK_START = /^\s{0,3}(#{1,6}\s|>|```|~~~)/;
 // renders as the link's own text — visible, inert, and not silently dropped.
 const MD_SAFE_HREF = /^(https?:\/\/|mailto:|#|\/)/i;
 
+/* Beads issue ids, as minted by `br`: a slug prefix, a dash, a base36
+   suffix, and an optional `.N` comment ordinal (gds6-bfu7.1). The mention
+   must not be glued to a word char, path, email, or another dash on either
+   side — "state-of-the-art" and "dir/claunch-x" stay text. */
+const MD_BEADS_ID = /^[a-z][a-z0-9]*-[a-z0-9]{3,}(?:\.\d+)?(?![\w@-])/;
+/* Issue prefixes the daemon's boards mint under (board_head.issue_prefix),
+   collected from every beads payload the page receives. A mention whose id
+   carries one of these prefixes links even with no digit in it
+   (claunch-jpqat); without the set, only digit-bearing ids link, which
+   measured at 81% of one real board. */
+let beadsIdPrefixes = new Set();
+/* >0 while mdLink renders a label: an issue id inside a link's text stays
+   text, so the renderer never nests an <a> in an <a>. */
+let mdLinkDepth = 0;
+
 /* Inline markers, in the order they must be tried: a code span swallows
    what is inside it, so it matches before emphasis can see the backticks.
    `_` comes after `*` on purpose and is guarded below — snake_case_names
@@ -29792,7 +29820,13 @@ function mdWrap(tag, cls, text) {
 function mdLink(text, href) {
   const label = text || href;
   if (!MD_SAFE_HREF.test(href)) return mdWrap("span", "md-link-inert", label);
-  const a = mdWrap("a", "md-link", label);
+  mdLinkDepth++;
+  let a;
+  try {
+    a = mdWrap("a", "md-link", label);
+  } finally {
+    mdLinkDepth--;
+  }
   a.setAttribute("href", href);
   if (/^https?:/i.test(href)) {
     a.setAttribute("target", "_blank");
@@ -29819,6 +29853,30 @@ function mdInline(src) {
     }
     // A mid-word underscore is part of the word: test_web_topology.py
     if (c === "_" && i > 0 && /\w/.test(text[i - 1])) { plain += c; i++; continue; }
+    // A beads issue id mentioned in prose links to its board page. Guarded
+    // from link labels (mdLinkDepth), mid-word/mid-path positions, and ids
+    // that carry no digit unless their prefix is a known board's — plain
+    // hyphenated words like "node-based" must stay text.
+    if (!mdLinkDepth && /[a-z0-9]/.test(c) &&
+        !(i > 0 && /[\w/.@-]/.test(text[i - 1]))) {
+      const m = MD_BEADS_ID.exec(text.slice(i));
+      if (m) {
+        const token = m[0];
+        const base = token.replace(/\.\d+$/, "");
+        const dash = base.indexOf("-");
+        const suffix = base.slice(dash + 1);
+        if (beadsIdPrefixes.has(base.slice(0, dash)) ||
+            (/\d/.test(base) && /[a-z]/.test(suffix))) {
+          flush();
+          const a = el("a", "md-link md-beads-link", token);
+          a.setAttribute("href", "#/beads/" + encodeURIComponent(base));
+          a.title = "beads issue " + base;
+          out.push(a);
+          i += token.length;
+          continue;
+        }
+      }
+    }
     let hit = null;
     if ("`*_~[".includes(c)) {
       for (const [re, make] of MD_INLINE) {
@@ -31012,6 +31070,7 @@ async function loadBeadsPage(opts = {}) {
     const selected = boards.find((b) => b.root === beadsWorkspace);
     beadsLoadedWorkspace = beadsWorkspace;
     beadsCache = data;
+    beadsNotePrefixes(data.boards);
     beadsPage = page;
     beadsError = data.error || "";
     beadsMore = !!selected?.has_more;
@@ -31210,6 +31269,7 @@ async function loadBeadsNewOptions() {
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     beadsNew.boards = data.boards || [];
     beadsNew.workspaces = data.workspaces || [];
+    beadsNotePrefixes(beadsNew.boards);
   } catch (err) {
     beadsNew.error = String((err && err.message) || err);
     beadsNew.boards = [];

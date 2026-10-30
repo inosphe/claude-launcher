@@ -88,6 +88,7 @@ new Function(
   + "function restartBeadsStream() { exports.restarted = true; }\n"
   + "let beadsCache = null;\n"
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
+  + "let beadsIdPrefixes = new Set();\n" + slice("beadsNotePrefixes")
   + slice("loadBeadsNewOptions") + slice("submitNewIssue") + slice("beadsNewBlock")
   + "let beadsNew = { open: false, busy: false, error: '', done: '',"
   + "  boards: null, workspaces: [], loading: false,"

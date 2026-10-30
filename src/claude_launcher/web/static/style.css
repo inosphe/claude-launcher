@@ -5607,6 +5607,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .md-strike { color: #6e7681; }
 .md-link { color: #58a6ff; text-decoration: none; }
 .md-link:hover { text-decoration: underline; }
+/* A beads issue id mentioned in prose (claunch-dvg6c) links to its board
+   page; slightly heavier than a plain link so the affordance reads as
+   "board record", not "web page". */
+.md-beads-link { font-weight: 600; }
 /* A link the page will not follow (javascript:, data:) still shows its text
    — dropping it silently would hide that the report said something. */
 .md-link-inert { color: #9da5b0; text-decoration: underline dotted; }
