@@ -584,6 +584,7 @@ CHECKS = [
         "beadsstream_check.js",
         "beadsdetailroot_check.js",
         "ragsearch_check.js",
+        "beadssearch_check.js",
         "relaysettings_check.js",
         "profilesettings_check.js",
         "providerinstall_check.js",

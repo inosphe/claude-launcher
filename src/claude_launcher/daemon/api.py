@@ -276,6 +276,13 @@ async def revalidate_middleware(request: web.Request, handler):
     Last-Modified the static handler already sends turn each load into a
     conditional GET that answers 304 in a couple of hundred bytes.
 
+    *Compression.* ``app.js`` is a 2.9 MB single bundle served over relays
+    as well as localhost, and the relay path pays the full weight on every
+    cold load. Files under ``/static/`` that are text (script, stylesheet,
+    svg, json) are gzip-encoded when the client says it accepts gzip; a
+    revalidating load still answers 304 untouched, so the CPU is paid once
+    per cold load, not per poll.
+
     *Release.* A browser keeps a connection in its pool after the answer
     arrives -- Firefox for 115 seconds by default -- and counts it against
     a per-server ceiling of six. This page asks for twelve assets on a
@@ -297,8 +304,45 @@ async def revalidate_middleware(request: web.Request, handler):
     path = request.path
     if path == "/" or path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "no-cache")
+        if _wants_gzip(request, response):
+            response.enable_compression(web.ContentCoding.gzip)
         response.force_close()
     return response
+
+
+#: Extensions worth gzip-encoding under ``/static/`` — text-shaped assets
+#: only. Fonts and raster images are already compressed; running them
+#: through gzip again spends CPU on bytes that only get bigger. The check
+#: is by path, not response Content-Type: at middleware time the static
+#: handler's FileResponse has not been prepared, so its Content-Type is
+#: still the octet-stream placeholder.
+_GZIP_SUFFIXES = frozenset(
+    {".js", ".mjs", ".css", ".html", ".htm", ".svg", ".json", ".map",
+     ".xml", ".txt", ".webmanifest"}
+)
+
+
+def _wants_gzip(request: web.Request, response: web.StreamResponse) -> bool:
+    """Whether this static answer should be gzip-encoded.
+
+    A conditional GET that will answer 304 carries no body, but aiohttp
+    stamps the enabled coding on the 304's headers all the same — and a 304
+    that promises a gzip body its empty payload cannot deliver makes the
+    next unconditional GET mis-decode. So a request revalidating a cached
+    copy skips compression: the 304 needs nothing, and a changed file's 200
+    is the rare, self-healing case (the next load holds the fresh copy and
+    revalidates normally).
+    """
+    if request.method not in ("GET", "HEAD"):
+        return False
+    if response.status != 200:
+        return False
+    if request.headers.get("If-None-Match") or request.headers.get("If-Modified-Since"):
+        return False
+    if request.path != "/" and Path(request.path).suffix.lower() not in _GZIP_SUFFIXES:
+        return False
+    accepted = request.headers.get("Accept-Encoding", "").lower()
+    return any(e.strip().split(";")[0].strip() == "gzip" for e in accepted.split(","))
 
 
 #: A refused cflow v2 operation or an unreadable v2 definition/run: a 400
@@ -1453,6 +1497,9 @@ def build_app(
     # pattern would be read as an issue called "queues".
     r.add_get("/api/beads/queues", h_beads_queues)
     r.add_get("/api/beads/stream", h_beads_stream)
+    # Before "/api/beads/{id}": the substring fallback behind the board
+    # page's search box when the rag is not configured.
+    r.add_get("/api/beads/text-search", h_beads_text_search)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_post("/api/beads/{id}/assign", h_beads_assign)
     r.add_post("/api/beads/{id}/workspace", h_beads_workspace)
@@ -16638,6 +16685,34 @@ async def h_beads_stream(request: web.Request) -> web.Response:
         board_root=request.query.get("board"),
     )
     return json_response(view)
+
+
+async def h_beads_text_search(request: web.Request) -> web.Response:
+    """Substring search of one board — the search box's no-rag path.
+
+    ``q`` is required; ``cwd`` names the board (any directory inside the
+    repository, default the daemon's own). This is the fallback the board
+    page reaches for when the rag block is absent or its embeddings are
+    unreachable, so it must work with nothing configured beyond ``br``.
+    """
+    q = request.query.get("q", "").strip()
+    if not q:
+        return json_error(400, "q is required")
+    if len(q) > 200:
+        return json_error(400, "q must be at most 200 characters")
+    try:
+        limit = int(request.query.get("limit", "30"))
+    except ValueError:
+        return json_error(400, "limit must be an integer")
+    if not 1 <= limit <= 100:
+        return json_error(400, "limit must be 1..100")
+    board = request.app["beads"]
+    cwd = request.query.get("cwd") or os.getcwd()
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    rows = await board.text_search(root, q, limit=limit)
+    return json_response({"issues": rows[:limit], "root": str(root)})
 
 
 async def h_beads_boards(request: web.Request) -> web.Response:

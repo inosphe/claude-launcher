@@ -137,6 +137,18 @@ class FakeBr:
         if cmd == "show":
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
+        if cmd == "search":
+            # Substring over id, title and description, closed included —
+            # what the board page's text-search fallback asks for
+            # (claunch-w3wrk).
+            needle = rest[0].lower()
+            rows = [
+                r for r in self.issues.values()
+                if needle in (r.get("id") or "").lower()
+                or needle in (r.get("title") or "").lower()
+                or needle in (r.get("description") or "").lower()
+            ]
+            return 0, json.dumps({"issues": rows}), ""
         if cmd == "dep":
             if rest[0] == "list":
                 return 0, json.dumps(self.deps.get(rest[1], [])), ""

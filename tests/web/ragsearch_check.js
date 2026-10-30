@@ -151,10 +151,10 @@ new Function("exports", "el", "document", "beadsFocus", "beadsSearch", "clearBea
   // by its board rather than by the directory it sits in.
   "let beadsCache = { boards: [{ root: '/b', board: 'bee' }] };\n" +
   slice("beadsBoardLabel") + "\n" + slice("beadsNameOfRoot") + "\n" +
-  slice("beadsMergeSearch") + "\n" + slice("beadsSearchSection") + "\n" +
+  slice("beadsMergeSearch") + "\n" + slice("beadsMarkHits") + "\n" + slice("beadsSearchSection") + "\n" +
   "exports.section = beadsSearchSection; exports.merge = beadsMergeSearch;")(
   page, el, document, "", {
-    q: "relay", pending: false, error: "", reranked: true,
+    q: "relay", pending: false, error: "", reranked: true, mode: "rag", active: 0,
     index: { total: 10, indexed: 8, syncing: true },
     results: [
       { id: "cl-2", title: "relay reconnect", status: "open", priority: 1, score: 0.71,

@@ -30903,11 +30903,14 @@ let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
 let beadsDragging = "";    // the issue id a Queues card drag is carrying
-/* The board searched by meaning (the box in the filter bar, Enter). While a
-   query stands, the lanes give way to its ranked rows; Esc or the clear
-   button brings the lanes back. One request per board root the page shows,
-   merged best-first. */
-let beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+/* The board searched — the box in the filter bar. While a query stands,
+   the lanes give way to its ranked rows; Esc or the clear button brings
+   the lanes back. ``mode`` is the engine the last run used ("rag" |
+   "text"); ``active`` is the keyboard-walked row; ``draft`` is what the
+   box holds, which can run ahead of ``q``. One request per board root the
+   page shows, merged best-first. */
+let beadsSearch = { q: "", results: null, pending: false, error: "", index: null,
+                    reranked: false, mode: "", active: 0, draft: "" };
 /* The focused issue's nearest neighbours (/api/beads/<id>/related), drawn
    in the detail pane as the dedup question answered by the index. */
 let beadsRelated = null;   // { id, results, error }
@@ -31617,26 +31620,87 @@ function beadsFilterBar() {
   return bar;
 }
 
-/* ---- search by meaning ------------------------------------------------ */
+/* ---- search ------------------------------------------------------------ */
+/* Two engines behind one box. With the rag configured the box ranks the
+   board by meaning; without it, a substring search over id/title/
+   description (br search, /api/beads/text-search) answers instead — the box
+   must do something useful in both states, not just refuse when the rag is
+   absent or its embeddings are down (claunch-w3wrk). Typing debounces into
+   a search, Enter runs one immediately, ↑/↓ walk the results and Enter on
+   a walked row opens it. `draft` is what the box holds, which can be ahead
+   of `q`, the query the shown results are for. */
+let beadsSearchTimer = null;
+/* Whether the search box held focus at the last render. The filter bar is
+   rebuilt on every render — a poll, a result landing, a walked row — and a
+   rebuilt box is born unfocused, which would cut a typing burst off at the
+   first answer. When this flag stands, the new box takes the focus back
+   (after attach; focusing a detached node is a no-op). */
+let beadsSearchFocus = false;
+const BEADS_SEARCH_DEBOUNCE = 300;
+
 function beadsSearchBox() {
   const box = document.createElement("input");
   box.type = "search";
   box.className = "beads-search";
   box.autocomplete = "off";
-  box.value = beadsSearch.q;
+  box.value = beadsSearch.draft || beadsSearch.q;
   box.placeholder = ragConfigured
-    ? "search the board by meaning — Enter"
-    : "search needs the rag: block in ~/.claude-launcher/.claunch.yaml";
-  box.title = "Enter ranks every issue of the board by meaning (and by id/title); Esc clears";
+    ? "search the board by meaning — type or press Enter"
+    : "search titles, descriptions and ids — type to search";
+  box.title = ragConfigured
+    ? "type to search as you pause; Enter searches now; ↑/↓ walk the results, Enter opens the walked one; Esc clears"
+    : "substring search over the whole board; ↑/↓ walk the results, Enter opens the walked one; Esc clears";
+  box.addEventListener("focus", () => { beadsSearchFocus = true; });
+  box.addEventListener("blur", () => { beadsSearchFocus = false; });
+  if (beadsSearchFocus) {
+    // The timeout defers to after this render has attached the box; a blur
+    // in between (the reader clicked away) cancels the hand-back.
+    setTimeout(() => {
+      if (!beadsSearchFocus) return;
+      box.focus();
+      const end = box.value.length;
+      if (typeof box.setSelectionRange === "function") {
+        try { box.setSelectionRange(end, end); } catch { /* not selectable */ }
+      }
+    }, 0);
+  }
   box.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); box.blur(); runBeadsSearch(box.value); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (beadsSearch.results && beadsSearch.results.length) {
+        e.preventDefault();
+        beadsSearchMove(e.key === "ArrowDown" ? 1 : -1);
+      }
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      box.blur();
+      // Enter opens the walked row when what is on screen matches what is
+      // in the box; typing something new first re-searches.
+      if (beadsSearch.results && beadsSearch.results.length
+          && box.value.trim() === beadsSearch.q) {
+        beadsSearchOpen();
+        return;
+      }
+      runBeadsSearch(box.value);
+    }
     if (e.key === "Escape") { box.value = ""; box.blur(); clearBeadsSearch(); }
+  });
+  box.addEventListener("input", () => {
+    beadsSearch.draft = box.value;
+    if (beadsSearchTimer) clearTimeout(beadsSearchTimer);
+    const value = box.value.trim();
+    if (!value) { clearBeadsSearch(); return; }
+    if (value.length < 2 || value === beadsSearch.q) return;
+    beadsSearchTimer = setTimeout(() => runBeadsSearch(box.value), BEADS_SEARCH_DEBOUNCE);
   });
   return box;
 }
 
 function clearBeadsSearch() {
-  beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+  if (beadsSearchTimer) { clearTimeout(beadsSearchTimer); beadsSearchTimer = null; }
+  beadsSearch = { q: "", results: null, pending: false, error: "", index: null,
+                  reranked: false, mode: "", active: 0, draft: "" };
   renderBeads();
 }
 
@@ -31646,30 +31710,59 @@ function beadsSearchRoots() {
   return roots.length ? roots : [""];
 }
 
+/* Walk the results list; wraps at both ends so holding an arrow keeps
+   moving instead of sticking. */
+function beadsSearchMove(delta) {
+  const n = (beadsSearch.results || []).length;
+  if (!n) return;
+  beadsSearch.active = (beadsSearch.active + delta + n) % n;
+  renderBeads();
+}
+
+/* Open the walked result the way clicking its id does. */
+function beadsSearchOpen() {
+  const r = (beadsSearch.results || [])[beadsSearch.active];
+  if (r && r.id) location.hash = "#/beads/" + encodeURIComponent(r.id);
+}
+
+async function beadsAskRag(root, q) {
+  const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
+  try {
+    const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30${where}`);
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? { root, data } : { root, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    return { root, error: String(err) };
+  }
+}
+
+async function beadsAskText(root, q) {
+  const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
+  try {
+    const resp = await api(`/api/beads/text-search?q=${encodeURIComponent(q)}&limit=30${where}`);
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? { root: (data && data.root) || root, data }
+      : { root, error: (data && data.error) || `HTTP ${resp.status}` };
+  } catch (err) {
+    return { root, error: String(err) };
+  }
+}
+
 async function runBeadsSearch(q) {
   q = String(q || "").trim();
+  if (beadsSearchTimer) { clearTimeout(beadsSearchTimer); beadsSearchTimer = null; }
   if (!q) { clearBeadsSearch(); return; }
-  if (!ragConfigured) {
-    beadsSearch = { q, results: null, pending: false, index: null, reranked: false,
-                    error: "semantic search needs the rag: block in ~/.claude-launcher/.claunch.yaml" };
-    renderBeads();
-    return;
-  }
-  beadsSearch = { q, results: null, pending: true, error: "", index: null, reranked: false };
+  const mode = ragConfigured ? "rag" : "text";
+  beadsSearch = { q, results: null, pending: true, error: "", index: null,
+                  reranked: false, mode, active: 0, draft: q };
   renderBeads();
   const roots = beadsSearchRoots();
-  const answers = await Promise.all(roots.map(async (root) => {
-    const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
-    try {
-      const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30${where}`);
-      const data = await resp.json().catch(() => ({}));
-      return resp.ok ? { root, data } : { root, error: data.error || `HTTP ${resp.status}` };
-    } catch (err) {
-      return { root, error: String(err) };
-    }
-  }));
-  if (beadsSearch.q !== q) return;
-  beadsSearch = beadsMergeSearch(q, answers);
+  const answers = await Promise.all(roots.map((root) =>
+    mode === "rag" ? beadsAskRag(root, q) : beadsAskText(root, q)));
+  if (beadsSearch.q !== q || beadsSearch.mode !== mode) return;
+  beadsSearch = mode === "rag"
+    ? beadsMergeSearch(q, answers)
+    : beadsMergeTextSearch(q, answers);
   renderBeads();
 }
 
@@ -31697,7 +31790,70 @@ function beadsMergeSearch(q, answers) {
   }
   const scoreOf = (r) => (r.rerank_score ?? r.score ?? 0);
   results.sort((x, y) => scoreOf(y) - scoreOf(x));
-  return { q, results, pending: false, error: errors.join("; "), index, reranked };
+  return { q, results, pending: false, error: errors.join("; "), index, reranked,
+           mode: "rag", active: 0, draft: q };
+}
+
+/* The text engine's merge: br search already ordered its rows, so the
+   merge keeps arrival order and only dedups across boards. */
+function beadsMergeTextSearch(q, answers) {
+  const results = [];
+  const errors = [];
+  for (const a of answers) {
+    if (a.error) {
+      errors.push(a.root ? `${beadsNameOfRoot(a.root)}: ${a.error}` : a.error);
+      continue;
+    }
+    for (const r of ((a.data && a.data.issues) || [])) {
+      results.push({ ...r, root: a.root || "" });
+    }
+  }
+  const seen = new Set();
+  const deduped = results.filter((r) => {
+    const key = `${r.root}\n${r.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { q, results: deduped, pending: false, error: errors.join("; "),
+           index: null, reranked: false, mode: "text", active: 0, draft: q };
+}
+
+/* Wrap every case-insensitive occurrence of the query in a hit mark, so
+   the reader sees why a row matched. Walks text nodes first and replaces
+   afterwards: replacing while walking would revisit the marks just made. */
+function beadsMarkHits(rootEl, q) {
+  const needle = String(q || "").trim().toLowerCase();
+  if (!needle || !rootEl) return;
+  const jobs = [];
+  (function walk(node) {
+    if (node.nodeType === 3) {
+      if ((node.nodeValue || "").toLowerCase().includes(needle)) jobs.push(node);
+      return;
+    }
+    for (const kid of [...(node.childNodes || [])]) walk(kid);
+  })(rootEl);
+  for (const node of jobs) {
+    const text = node.nodeValue;
+    const lower = text.toLowerCase();
+    const parent = node.parentNode;
+    if (!parent) continue;
+    const made = [];
+    let at = lower.indexOf(needle);
+    let last = 0;
+    while (at >= 0) {
+      if (at > last) made.push(document.createTextNode(text.slice(last, at)));
+      const mark = document.createElement("mark");
+      mark.className = "beads-hit";
+      mark.textContent = text.slice(at, at + needle.length);
+      made.push(mark);
+      last = at + needle.length;
+      at = lower.indexOf(needle, last);
+    }
+    if (last < text.length) made.push(document.createTextNode(text.slice(last)));
+    for (const m of made) parent.insertBefore(m, node);
+    parent.removeChild(node);
+  }
 }
 
 function ragScoreChip(row) {
@@ -31726,7 +31882,8 @@ function beadsSearchSection() {
   head.appendChild(el("span", "rag-head-text",
     s.pending ? `searching “${s.q}”…`
       : s.results ? `${n} result${n === 1 ? "" : "s"} for “${s.q}”` : `“${s.q}”`));
-  const cover = ragCoverageLine(s.index, s.reranked);
+  const cover = s.mode === "rag" ? ragCoverageLine(s.index, s.reranked)
+    : s.mode === "text" && !s.pending ? "substring match — titles, descriptions, ids" : "";
   if (cover) head.appendChild(el("span", "beads-bits", cover));
   const clear = el("button", "wf-btn clear", "clear");
   clear.type = "button";
@@ -31736,20 +31893,31 @@ function beadsSearchSection() {
   if (s.error) box.appendChild(el("p", "wf-warning", s.error));
   if (!s.results) return box;
   if (!n) {
-    box.appendChild(el("p", "wf-note", "nothing ranked for that — the index may still be filling"));
+    box.appendChild(el("p", "wf-note", s.mode === "rag"
+      ? "nothing ranked for that — the index may still be filling"
+      : "nothing contains that — ids, titles and descriptions were searched"));
     return box;
   }
   const list = el("div", "rag-results");
-  for (const r of s.results) {
-    const hit = el("div", "rag-hit");
+  s.results.forEach((r, i) => {
+    const hit = el("div", "rag-hit" + (i === s.active ? " on" : ""));
     const line = el("div", "rag-hit-line");
-    line.appendChild(ragScoreChip(r));
+    if (s.mode === "rag") line.appendChild(ragScoreChip(r));
     line.appendChild(beadsIssueRow(r, { compact: true }));
     hit.appendChild(line);
     if (r.excerpt) hit.appendChild(el("div", "beads-bits rag-excerpt", r.excerpt));
     list.appendChild(hit);
-  }
+    // The walked row says so without waiting for a click, and stays under
+    // the cursor when walking wraps a list taller than the viewport. After
+    // the append: scrolling an unmounted node is a no-op in every engine.
+    if (i === s.active && typeof hit.scrollIntoView === "function") {
+      hit.scrollIntoView({ block: "nearest" });
+    }
+  });
   box.appendChild(list);
+  // Highlighting after the list is assembled: the walker must not see the
+  // marks it is about to insert.
+  beadsMarkHits(list, s.q);
   return box;
 }
 

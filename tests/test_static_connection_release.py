@@ -26,7 +26,7 @@ import time
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher.daemon.api import build_app
+from claude_launcher.daemon.api import _STATIC_DIR, build_app
 from claude_launcher.daemon.manager import SessionManager
 
 BEARER = {"Authorization": "Bearer sekrit"}
@@ -135,7 +135,82 @@ def test_releasing_the_connection_did_not_cost_the_revalidation(home, tmp_path):
     asyncio.run(run())
 
 
-def test_a_page_load_ends_holding_nothing(home, tmp_path):
+def test_text_assets_are_gzipped_when_the_client_accepts_them(home, tmp_path):
+    """app.js is a 2.9 MB bundle served over relays as well as localhost,
+    and the relay path pays the full weight on every cold load. A client
+    that sends Accept-Encoding: gzip gets the encoded body (the test client
+    transparently decodes it back); one that does not gets identity. The
+    revalidating load still answers 304 untouched."""
+
+    async def run():
+        client = await _serve(build_app(_manager(), "sekrit", started_at=time.monotonic()))
+        try:
+            want = (_STATIC_DIR / "style.css").read_bytes()
+            resp = await client.get(
+                "/static/style.css", headers={"Accept-Encoding": "gzip, deflate"}
+            )
+            assert resp.status == 200, await resp.text()
+            assert resp.headers.get("Content-Encoding") == "gzip", resp.headers
+            assert await resp.read() == want
+            # The revalidation machinery is untouched: same validator, same
+            # 304 to a conditional GET.
+            assert resp.headers.get("ETag") or resp.headers.get("Last-Modified")
+            stamp = resp.headers.get("Last-Modified")
+            if stamp:
+                again = await client.get(
+                    "/static/style.css",
+                    headers={
+                        "Accept-Encoding": "gzip",
+                        "If-Modified-Since": "Wed, 21 Oct 2099 07:28:00 GMT",
+                    },
+                )
+                assert again.status == 304, again.status
+                assert again.headers.get("Content-Encoding") is None
+            plain = await client.get(
+                "/static/style.css", headers={"Accept-Encoding": "identity"}
+            )
+            assert plain.headers.get("Content-Encoding") is None
+            assert await plain.read() == want
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_compression_gate(home):
+    """What qualifies, decided before a body is spent on it: only 200
+    answers to GET/HEAD of a text content type, only with gzip offered."""
+
+    from types import SimpleNamespace
+
+    from claude_launcher.daemon.api import _wants_gzip
+
+    def req(method="GET", accept="gzip", path="/static/style.css", extra=None):
+        headers = {"Accept-Encoding": accept}
+        headers.update(extra or {})
+        return SimpleNamespace(method=method, headers=headers, path=path)
+
+    def resp(status=200):
+        return SimpleNamespace(status=status)
+
+    assert _wants_gzip(req(), resp()) is True
+    assert _wants_gzip(req(accept="GZIP"), resp()) is True
+    assert _wants_gzip(req(accept="br, gzip;q=0.8"), resp()) is True
+    assert _wants_gzip(req(path="/"), resp()) is True
+    assert _wants_gzip(req(path="/static/app.js"), resp()) is True
+    # A coding we did not encode must not be claimed.
+    assert _wants_gzip(req(accept="br"), resp()) is False
+    assert _wants_gzip(req(accept="identity"), resp()) is False
+    # Binary assets and error answers stay as they are.
+    assert _wants_gzip(req(path="/static/vendor/xterm.woff2"), resp()) is False
+    assert _wants_gzip(req(path="/static/logo.png"), resp()) is False
+    assert _wants_gzip(req(), resp(status=304)) is False
+    assert _wants_gzip(req(method="POST"), resp()) is False
+    # A revalidating load answers 304 with no body; it must not carry a
+    # Content-Encoding promise either (the 304 stamps whatever coding is
+    # enabled, body or no body).
+    assert _wants_gzip(req(extra={"If-Modified-Since": "Wed, 21 Oct 2099 07:28:00 GMT"}), resp()) is False
+    assert _wants_gzip(req(extra={"If-None-Match": '"abc"'}), resp()) is False
     """The whole point, at the size the failure has.
 
     Twelve assets against a ceiling of six is what the dashboard asks for,

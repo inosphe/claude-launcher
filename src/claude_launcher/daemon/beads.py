@@ -1419,6 +1419,7 @@ class Board:
         #: full-list cache above: the first 48 issues are not the dependency
         #: graph for every later page.
         self._page_deps: Dict[tuple, Tuple[float, List[dict]]] = {}
+        self._text_searches: Dict[tuple, Tuple[float, List[dict]]] = {}
         #: Sessions mid wind-down, by name: what was typed and when.
         self.winddowns: Dict[str, dict] = {}
         self._tasks: set = set()
@@ -1924,6 +1925,40 @@ class Board:
                 })
         cache[key] = (now, out)
         return out
+
+    #: Short-lived substring-search answers, keyed by (root, query, limit).
+    #: The dashboard's search-as-you-type sends one request per keystroke
+    #: burst; without this cache each one forked ``br search`` afresh. The
+    #: TTL matches the listing caches: fast enough that an edit shows up
+    #: quickly, long enough that one burst pays one fork.
+    _text_searches: Dict[tuple, Tuple[float, List[dict]]]
+
+    async def text_search(
+        self, root: Path, query: str, *, limit: int = 30,
+    ) -> List[dict]:
+        """Substring search over one board — the no-RAG search path.
+
+        ``br search`` matches id/title/description and needs no index, which
+        is what makes it the fallback for a daemon whose rag block is absent
+        or whose embeddings are unreachable: the board page's search box must
+        answer something in that state, not just refuse (claunch-w3wrk).
+        Answers are the full issue rows, so the page renders them with the
+        same row it draws the RAG results on.
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+        limit = max(1, min(limit, 100))
+        key = (str(root), query.lower(), limit)
+        now = self._clock()
+        hit = self._text_searches.get(key)
+        if hit and now - hit[0] < CACHE_TTL:
+            return hit[1]
+        data = await self.br(root, ["search", query])
+        rows = data.get("issues") if isinstance(data, dict) else data
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        self._text_searches[key] = (now, rows)
+        return rows
 
     async def show(self, root: Path, issue_id: str) -> dict:
         """One issue in full, with its comments."""

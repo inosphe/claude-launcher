@@ -4648,6 +4648,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   display: flex; flex-direction: column; gap: 2px; padding: 6px 8px;
   border: 1px solid #2a2e36; border-radius: 6px; background: #1b1e24;
 }
+/* The keyboard-walked result: same amber the score chip uses for lexical
+   hits, so the two kinds of "this row is what you asked for" agree. */
+.rag-hit.on { border-color: #d29922; background: #211d12; }
+mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; padding: 0 1px; }
 .rag-hit-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .rag-hit-line .beads-row { flex: 1; min-width: 0; }
 .rag-excerpt { padding-left: 2px; }
