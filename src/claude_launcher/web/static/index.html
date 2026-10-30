@@ -1090,9 +1090,15 @@
                  this launch: changing it here changes the pick for every
                  session of that profile (h_profile_key_strategy). No `name`:
                  it is not a field the create request carries. -->
-            <label id="new-strategy-row" class="new-usage-strategy hidden">Strategy
+            <div id="new-strategy-row" class="new-usage-strategy hidden">
+              <label for="new-key-strategy">Strategy</label>
               <select id="new-key-strategy"></select>
-            </label>
+              <!-- random's re-draw (claunch-i985h): the draw is stored in the
+                   pool, so pressing this re-decides the key the next launch
+                   takes, as many times as the operator presses it. -->
+              <button id="new-key-roll" class="new-usage-roll hidden" type="button"
+                title="draw another key for random — the draw is what the next launch takes">roll</button>
+            </div>
             <p id="new-usage-note" class="wf-note hidden"></p>
           </div>
         </fieldset>

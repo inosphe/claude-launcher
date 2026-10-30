@@ -923,8 +923,12 @@ def build_app(
     # The key pool a session's launch reads (claunch-wllke.1): the modal's
     # list. Masks only — see h_profile_keys.
     r.add_get("/api/profiles/{profile}/keys", h_profile_keys)
-    # The pool's strategy, written from the create form (claunch-yx2bd).
+    # The pool's strategy, written from the create form (claunch-yx2bd), and
+    # its manual key (claunch-i985h).
     r.add_post("/api/profiles/{profile}/keys/strategy", h_profile_key_strategy)
+    # A fresh draw for a random pool, from the create form's roll button: the
+    # draw is what its next launch takes (claunch-i985h).
+    r.add_post("/api/profiles/{profile}/keys/roll", h_profile_key_roll)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
@@ -3757,14 +3761,20 @@ async def h_usage_keys(request: web.Request) -> web.Response:
 def _credential_preview(prof, selector: str, manual: bool) -> dict:
     """The create form's Runs-as facts about ``prof`` (blocking; worker thread).
 
-    Reads at most one account per key that is not already cached. Three
-    decisions worth naming:
+    Reads at most one account per key that is not already cached, and this
+    read writes nothing: opening the form must not consume a rotation or a
+    random draw (claunch-i985h).
+
+    Three decisions worth naming:
 
     - the profile's own reading answers for the key currently in its token
       file, so that key is skipped in the per-key pass rather than read twice;
-    - a usage strategy's pick is not previewed (``peek`` would spend one
-      account read per key to name a key the launch re-decides anyway), and a
-      random pick is not a fact to display at all;
+    - every strategy now names a key. A usage strategy is compared on the
+      numbers this read already collected (``peek(readings=…)``), so naming
+      its pick costs no account read -- but the launch reads the accounts
+      again, which is why that answer is marked ``exact: False``. A random
+      pool names the draw it stored; a random pool with no stored draw is the
+      one case that cannot promise anything, and says so;
     - a failed key read is a row with an error, never a failed request: a
       form that cannot read one key still shows the others.
     """
@@ -3772,25 +3782,6 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     keys = list(view.get("keys") or [])
     strategy = view.get("strategy")
     current = next((key for key in keys if key.get("current")), None)
-
-    next_key = None
-    next_unknown = None
-    if view.get("pooled"):
-        if strategy in profile_keys.MEASURING_STRATEGIES:
-            next_unknown = (
-                f"{strategy} reads every key's usage at launch and takes the "
-                f"{'lowest' if strategy == 'usage-min' else 'highest'}"
-            )
-        elif strategy in profile_keys.UNPREDICTABLE_STRATEGIES and len(keys) > 1:
-            next_unknown = f"{strategy} picks at launch"
-        else:
-            selection = profile_keys.peek(prof)
-            if selection is not None:
-                next_key = {
-                    "key_id": selection.key.id,
-                    "strategy": selection.strategy,
-                    "fallback": selection.fallback,
-                }
 
     body = None
     usage_error = None
@@ -3815,6 +3806,51 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     except (usage.UsageError, credentials.CredentialsError) as exc:
         readings = {"keys": {}, "unmeasurable": str(exc)}
 
+    # Peak utilization per key, from the readings this answer already carries:
+    # the same number ``usage.utilization_for_token`` returns at launch
+    # (max over the reading's windows). ``None`` means "this key cannot be
+    # compared", which the usage strategies skip rather than score as zero.
+    peaks: Dict[str, Optional[float]] = {}
+    for key in keys:
+        reading = readings.get("keys", {}).get(key["id"])
+        if reading is None and key.get("current") and body is not None:
+            reading = {"windows": body["windows"]}
+        windows = (reading or {}).get("windows") or []
+        values = [
+            window.get("utilization")
+            for window in windows
+            if isinstance(window.get("utilization"), (int, float))
+            and not isinstance(window.get("utilization"), bool)
+        ]
+        peaks[key["id"]] = float(max(values)) if values else None
+
+    next_key = None
+    next_unknown = None
+    if view.get("pooled"):
+        try:
+            selection = profile_keys.peek(prof, readings=peaks)
+        except (profile_keys.KeysError, credentials.CredentialsError):
+            selection = None
+        if selection is None:
+            next_unknown = "the daemon could not read this pool's selection"
+        elif selection.exact or strategy in profile_keys.MEASURING_STRATEGIES:
+            next_key = {
+                "key_id": selection.key.id,
+                "strategy": selection.strategy,
+                "fallback": selection.fallback,
+                # A usage strategy re-reads every account at launch, so the
+                # key named here is this read's answer and may move before the
+                # launch picks. Every other strategy stores its pick.
+                "exact": selection.exact,
+            }
+        elif strategy == "random":
+            next_unknown = (
+                "random has not drawn a key for this pool yet — roll to draw "
+                "the key the next launch takes"
+            )
+        else:
+            next_unknown = f"{strategy} picks at launch"
+
     rows = []
     for key in keys:
         row = dict(key)
@@ -3837,6 +3873,7 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
         "pooled": bool(view.get("pooled")),
         "strategy": strategy,
         "strategies": list(profile_keys.STRATEGIES),
+        "pick": view.get("pick"),
         "next": next_key,
         "next_unknown": next_unknown,
         "unmeasurable": readings.get("unmeasurable"),
@@ -11246,6 +11283,17 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         }
     if not str(body.get("profile") or "").strip():
         return 400, {"error": "a session needs profile; its harness comes from it"}
+    # A session created already pinned to a pool key — the create form's
+    # "use this key" (claunch-i985h). The pin is applied on every launch
+    # (``daemon/harness.build_command``), so a key id the pool does not hold
+    # would be a pin that silently falls back to the strategy at the first
+    # launch and again at every restore. Refuse it here, while the operator is
+    # still looking at the form.
+    pin_error = await _checked_key_pin(body)
+    if pin_error:
+        return 400, {"error": pin_error}
+    if body.get("key_id"):
+        body["key_id"] = str(body["key_id"]).strip()
     # What the session is for (SessionDef.kind), checked here because the
     # definition's own reader only trims: a value it would store verbatim
     # must already be one the list column and the ``?kind=`` filter can take.
@@ -11297,6 +11345,42 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     except onboard.OnboardError as exc:
         return 400, onboard.error_body(exc)
     return 201, {**session.info(), **result}
+
+
+async def _checked_key_pin(body: dict) -> Optional[str]:
+    """Why the ``key_id`` a create carries is unusable, or ``None``.
+
+    A pin the profile's pool does not hold is refused before a session exists
+    (claunch-i985h): the launch would otherwise apply it, find nothing, warn
+    to a log nobody reads, and run on the pool's strategy — a session the
+    operator believes is on one key, on another.
+
+    This is the New session form's pin. A spawn request cannot carry one: the
+    child's definition is built field by field under the spawn policy, which
+    has no key field, so a Spawn child picks its key through the profile's
+    strategy (manual included) rather than per child.
+    """
+    pinned = str(body.get("key_id") or "").strip()
+    if not pinned:
+        return None
+    selector = str(body.get("profile") or "").strip()
+    if not selector:
+        return None
+    try:
+        prof = profile_mod.require_selector(selector)
+        view = await asyncio.to_thread(profile_keys.view, prof)
+    except (
+        profile_mod.ProfileError,
+        profile_keys.KeysError,
+        credentials.CredentialsError,
+    ) as exc:
+        return str(exc)
+    held = {str(k.get("id")) for k in view.get("keys") or []}
+    if pinned not in held:
+        return (
+            f"key {pinned!r} is not in the key pool of profile {prof.name!r}"
+        )
+    return None
 
 
 def _asked_prompt_packs(body: dict) -> List[str]:
@@ -14323,7 +14407,12 @@ async def h_profile_keys(request: web.Request) -> web.Response:
 async def h_profile_key_strategy(request: web.Request) -> web.Response:
     """Set the strategy of the pool a launch of this profile reads.
 
-    Body: ``{"strategy": "usage-min"}`` — one of ``profile_keys.STRATEGIES``.
+    Body: ``{"strategy": "usage-min"}`` — one of ``profile_keys.STRATEGIES``
+    — and, for ``manual``, ``"key_id": "k-ab12cd"`` naming the key the next
+    launch takes (a 1-based position is accepted too, as the CLI does). A
+    ``manual`` switch without a key keeps the pool's current pick, or the key
+    the token file already holds, so it never leaves the pool in a state a
+    launch would fall back from (claunch-i985h).
     The write lands on the pool's own profile, not necessarily the one named:
     a profile holding no token of its own matches its ancestor's pool, and a
     strategy written to the child's (nonexistent) pool would silently do
@@ -14339,6 +14428,9 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     body = await _json_body(request)
     strategy = str(body.get("strategy") or "").strip().lower()
+    key_id = body.get("key_id")
+    if key_id is not None and not isinstance(key_id, str):
+        return json_error(400, "'key_id' must be a key id string or null")
     try:
         source = profile_keys.owner(prof)
     except (profile_keys.KeysError, credentials.CredentialsError) as exc:
@@ -14350,7 +14442,9 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
             f"it holds keys ('claunch keys add {prof.name}')",
         )
     try:
-        pool = await asyncio.to_thread(profile_keys.set_strategy, source, strategy)
+        pool = await asyncio.to_thread(
+            profile_keys.set_strategy, source, strategy, (key_id or "").strip() or None
+        )
     except profile_keys.KeysError as exc:
         return json_error(400, str(exc))
     return json_response(
@@ -14358,7 +14452,41 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
             "profile": prof.name,
             "owner": source.name,
             "strategy": pool.strategy,
+            "pick": pool.pick,
             "keys": len(pool.keys),
+        }
+    )
+
+
+async def h_profile_key_roll(request: web.Request) -> web.Response:
+    """Draw a new key for a ``random`` pool: the create form's roll button.
+
+    The draw a ``random`` pool stores is what its next launch takes
+    (``profile_keys.PINNED_STRATEGIES``), so re-drawing here re-decides that
+    launch — as often as the operator presses it, which is what makes the
+    strategy's effect visible before the session exists (claunch-i985h).
+    Any other strategy is refused: rotation, the two usage strategies and
+    manual each answer "which key" from something other than a draw.
+    """
+    try:
+        prof = profile_mod.require_selector(request.match_info["profile"])
+    except profile_mod.ProfileError as exc:
+        return json_error(400, str(exc))
+    try:
+        selection = await asyncio.to_thread(profile_keys.roll, prof)
+    except profile_keys.KeysError as exc:
+        return json_error(409, str(exc))
+    return json_response(
+        {
+            "profile": prof.name,
+            "owner": selection.owner.name,
+            "strategy": selection.strategy,
+            "pick": selection.key.id,
+            "key": {
+                "id": selection.key.id,
+                "label": selection.key.label,
+                "masked": selection.key.masked(),
+            },
         }
     )
 

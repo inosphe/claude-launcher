@@ -222,8 +222,9 @@ def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypa
     monkeypatch.setattr(
         api.profile_keys,
         "peek",
-        lambda _p: SimpleNamespace(
-            key=SimpleNamespace(id="k-2"), strategy="rotation", fallback=None
+        lambda _p, readings=None: SimpleNamespace(
+            key=SimpleNamespace(id="k-2"), strategy="rotation", fallback=None,
+            exact=True,
         ),
     )
     monkeypatch.setattr(
@@ -254,7 +255,9 @@ def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypa
     # The key in the token file is the profile's own reading; it is not read
     # twice.
     assert asked == [["k-1"]]
-    assert doc["next"] == {"key_id": "k-2", "strategy": "rotation", "fallback": None}
+    assert doc["next"] == {
+        "key_id": "k-2", "strategy": "rotation", "fallback": None, "exact": True,
+    }
     assert [row["next"] for row in doc["keys"]] == [False, True]
     assert doc["keys"][0]["usage"]["windows"][0]["utilization"] == 12.5
     assert doc["keys"][1]["usage"]["windows"][0]["utilization"] == 60.0
@@ -269,7 +272,67 @@ def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypa
     assert "sk-BBBB" not in json.dumps(doc)
 
 
-def test_usage_keys_does_not_preview_a_usage_strategy(monkeypatch):
+def test_usage_keys_names_a_usage_pick_from_the_readings_it_already_has(monkeypatch):
+    """A usage strategy's key is named without asking any account again (claunch-i985h).
+
+    The answer already carries every key's numbers (its own reading for the
+    key in the token file, one per-key read for the rest), so the comparison
+    the launch will repeat can be made here for free. ``exact`` is False
+    because the launch reads the accounts again and may land elsewhere.
+    """
+    prof = SimpleNamespace(name="work")
+    keys = [{"id": "k-1", "masked": "sk-A…1111", "current": True},
+            {"id": "k-2", "masked": "sk-B…2222", "current": False}]
+    monkeypatch.setattr(
+        api.profile_keys,
+        "view",
+        lambda _p: _view(pooled=True, owner="work", strategy="usage-min", keys=keys),
+    )
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": "work",
+            "keys": {
+                "k-2": {
+                    "key_id": "k-2",
+                    "windows": [{"name": "five_hour", "utilization": 3.0}],
+                    "source": "oauth-usage",
+                    "updated_at": 950.0,
+                    "error": None,
+                }
+            },
+            "unmeasurable": None,
+        },
+    )
+    seen = {}
+
+    def peek(_p, readings=None):
+        seen.update(readings or {})
+        return SimpleNamespace(
+            key=SimpleNamespace(id="k-2"), strategy="usage-min", fallback=None,
+            exact=False,
+        )
+
+    monkeypatch.setattr(api.profile_keys, "peek", peek)
+
+    doc = api._credential_preview(prof, "work", False)
+
+    # The current key's peak comes from the profile's own reading (12.5), the
+    # other from the per-key row — both already paid for by this request.
+    assert seen == {"k-1": 12.5, "k-2": 3.0}
+    assert doc["next"]["key_id"] == "k-2"
+    assert doc["next"]["strategy"] == "usage-min"
+    assert doc["next"]["exact"] is False
+    assert doc["next_unknown"] is None
+    assert [row["next"] for row in doc["keys"]] == [False, True]
+
+
+def test_usage_keys_explains_a_usage_strategy_that_cannot_be_compared(monkeypatch):
+    """No key is measurable: the strategy falls back, and the form says why."""
     prof = SimpleNamespace(name="work")
     keys = [{"id": "k-1", "masked": "sk-A…1111", "current": False},
             {"id": "k-2", "masked": "sk-B…2222", "current": False}]
@@ -278,11 +341,6 @@ def test_usage_keys_does_not_preview_a_usage_strategy(monkeypatch):
         "view",
         lambda _p: _view(pooled=True, owner="work", strategy="usage-min", keys=keys),
     )
-
-    def no_peek(_p):
-        raise AssertionError("a usage strategy must not be previewed")
-
-    monkeypatch.setattr(api.profile_keys, "peek", no_peek)
     monkeypatch.setattr(
         api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
     )
@@ -293,15 +351,23 @@ def test_usage_keys_does_not_preview_a_usage_strategy(monkeypatch):
             "owner": "work", "keys": {}, "unmeasurable": None
         },
     )
+    monkeypatch.setattr(
+        api.profile_keys,
+        "peek",
+        lambda _p, readings=None: SimpleNamespace(
+            key=SimpleNamespace(id="k-1"), strategy="rotation", exact=True,
+            fallback="no key's usage could be read",
+        ),
+    )
 
     doc = api._credential_preview(prof, "work", False)
 
-    assert doc["next"] is None
-    assert "usage-min" in doc["next_unknown"]
-    assert "lowest" in doc["next_unknown"]
+    assert doc["next"]["strategy"] == "rotation"
+    assert doc["next"]["fallback"] == "no key's usage could be read"
 
 
-def test_usage_keys_does_not_name_a_random_pick(monkeypatch):
+def test_usage_keys_names_a_stored_random_draw(monkeypatch):
+    """A random pool's stored draw is a fact, and the form names it."""
     prof = SimpleNamespace(name="work")
     keys = [{"id": "k-1", "current": False}, {"id": "k-2", "current": False}]
     monkeypatch.setattr(
@@ -312,7 +378,46 @@ def test_usage_keys_does_not_name_a_random_pick(monkeypatch):
     monkeypatch.setattr(
         api.profile_keys,
         "peek",
-        lambda _p: (_ for _ in ()).throw(AssertionError("random is not a fact")),
+        lambda _p, readings=None: SimpleNamespace(
+            key=SimpleNamespace(id="k-2"), strategy="random", fallback=None,
+            exact=True,
+        ),
+    )
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": "work", "keys": {}, "unmeasurable": None
+        },
+    )
+
+    doc = api._credential_preview(prof, "work", False)
+
+    assert doc["next"] == {
+        "key_id": "k-2", "strategy": "random", "fallback": None, "exact": True,
+    }
+    assert [row["next"] for row in doc["keys"]] == [False, True]
+
+
+def test_usage_keys_does_not_name_a_random_draw_that_was_never_stored(monkeypatch):
+    """A pool written before the draw was stored: name nothing, ask for a roll."""
+    prof = SimpleNamespace(name="work")
+    keys = [{"id": "k-1", "current": False}, {"id": "k-2", "current": False}]
+    monkeypatch.setattr(
+        api.profile_keys,
+        "view",
+        lambda _p: _view(pooled=True, owner="work", strategy="random", keys=keys),
+    )
+    monkeypatch.setattr(
+        api.profile_keys,
+        "peek",
+        lambda _p, readings=None: SimpleNamespace(
+            key=SimpleNamespace(id="k-1"), strategy="random", fallback=None,
+            exact=False,
+        ),
     )
     monkeypatch.setattr(
         api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
@@ -328,7 +433,7 @@ def test_usage_keys_does_not_name_a_random_pick(monkeypatch):
     doc = api._credential_preview(prof, "work", False)
 
     assert doc["next"] is None
-    assert "random" in doc["next_unknown"]
+    assert "roll" in doc["next_unknown"]
 
 
 def test_usage_keys_reports_a_failed_read_without_failing_the_answer(monkeypatch):
@@ -366,9 +471,9 @@ def test_strategy_endpoint_writes_the_pools_own_profile(monkeypatch):
     monkeypatch.setattr(api.profile_keys, "owner", lambda _p: source)
     written = []
 
-    def set_strategy(profile_arg, strategy):
-        written.append((profile_arg.name, strategy))
-        return SimpleNamespace(strategy=strategy, keys=["a", "b"])
+    def set_strategy(profile_arg, strategy, key_id=None):
+        written.append((profile_arg.name, strategy, key_id))
+        return SimpleNamespace(strategy=strategy, pick=None, keys=["a", "b"])
 
     monkeypatch.setattr(api.profile_keys, "set_strategy", set_strategy)
 
@@ -385,11 +490,101 @@ def test_strategy_endpoint_writes_the_pools_own_profile(monkeypatch):
         "profile": "child",
         "owner": "base",
         "strategy": "usage-min",
+        "pick": None,
         "keys": 2,
     }
     # The strategy belongs to the pool, which for a child holding no token of
     # its own is its ancestor's (claunch-wllke.5.1).
-    assert written == [("base", "usage-min")]
+    assert written == [("base", "usage-min", None)]
+
+
+def test_strategy_endpoint_hands_the_manual_key_to_the_pool(monkeypatch):
+    prof = SimpleNamespace(name="work")
+    monkeypatch.setattr(api.profile_mod, "require_selector", lambda _s: prof)
+    monkeypatch.setattr(api.profile_keys, "owner", lambda _p: prof)
+    written = []
+
+    def set_strategy(profile_arg, strategy, key_id=None):
+        written.append((strategy, key_id))
+        return SimpleNamespace(strategy=strategy, pick="k-2", keys=["a", "b"])
+
+    monkeypatch.setattr(api.profile_keys, "set_strategy", set_strategy)
+
+    async def body(_request):
+        return {"strategy": "manual", "key_id": " k-2 "}
+
+    monkeypatch.setattr(api, "_json_body", body)
+
+    response = asyncio.run(
+        api.h_profile_key_strategy(SimpleNamespace(match_info={"profile": "work"}))
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text)["pick"] == "k-2"
+    # Trimmed, and passed on as the manual pick (claunch-i985h).
+    assert written == [("manual", "k-2")]
+
+
+def test_strategy_endpoint_refuses_a_non_string_key_id(monkeypatch):
+    prof = SimpleNamespace(name="work")
+    monkeypatch.setattr(api.profile_mod, "require_selector", lambda _s: prof)
+
+    async def body(_request):
+        return {"strategy": "manual", "key_id": 7}
+
+    monkeypatch.setattr(api, "_json_body", body)
+
+    response = asyncio.run(
+        api.h_profile_key_strategy(SimpleNamespace(match_info={"profile": "work"}))
+    )
+
+    assert response.status == 400
+    assert "key_id" in json.loads(response.text)["error"]
+
+
+def test_roll_endpoint_answers_the_drawn_key(monkeypatch):
+    prof = SimpleNamespace(name="work")
+    owner = SimpleNamespace(name="work")
+    monkeypatch.setattr(api.profile_mod, "require_selector", lambda _s: prof)
+    monkeypatch.setattr(
+        api.profile_keys,
+        "roll",
+        lambda _p: SimpleNamespace(
+            key=SimpleNamespace(id="k-2", label="spare", masked=lambda: "sk-B…2222"),
+            strategy="random",
+            owner=owner,
+        ),
+    )
+
+    response = asyncio.run(
+        api.h_profile_key_roll(SimpleNamespace(match_info={"profile": "work"}))
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {
+        "profile": "work",
+        "owner": "work",
+        "strategy": "random",
+        "pick": "k-2",
+        "key": {"id": "k-2", "label": "spare", "masked": "sk-B…2222"},
+    }
+
+
+def test_roll_endpoint_reports_a_pool_that_cannot_draw(monkeypatch):
+    prof = SimpleNamespace(name="work")
+    monkeypatch.setattr(api.profile_mod, "require_selector", lambda _s: prof)
+
+    def roll(_p):
+        raise api.profile_keys.KeysError("only the random strategy draws a key")
+
+    monkeypatch.setattr(api.profile_keys, "roll", roll)
+
+    response = asyncio.run(
+        api.h_profile_key_roll(SimpleNamespace(match_info={"profile": "work"}))
+    )
+
+    assert response.status == 409
+    assert "random" in json.loads(response.text)["error"]
 
 
 def test_strategy_endpoint_refuses_a_profile_without_a_pool(monkeypatch):

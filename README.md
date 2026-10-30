@@ -191,7 +191,7 @@ claunch run work:claude                  # explicit Claude selector
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
 | `set-token <name> [t]` | Store the profile's launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it (and any key pool); on a pooled profile this replaces the selected key (`--key ID` for another). |
-| `keys list\|add\|remove\|strategy\|select <name>` | Register several tokens on one profile and choose one per launch (see [several keys per profile](#several-keys-per-profile)). |
+| `keys list\|add\|remove\|strategy\|roll\|select <name>` | Register several tokens on one profile and choose one per launch (see [several keys per profile](#several-keys-per-profile)). |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name[:harness]>` | Print the profile root, or the explicit harness's namespaced home. |
@@ -544,6 +544,8 @@ claunch keys add work sk-ant-oat01-aaa --label home    # the first add adopts
 claunch keys add work sk-ant-oat01-bbb --label office  # the current set-token value
 claunch keys list work
 claunch keys strategy work rotation                    # rotation (default)
+claunch keys strategy work manual 2                    # this key, every launch
+claunch keys strategy work random && claunch keys roll work   # draw, re-draw
 claunch keys select work                               # what the next launch picks
 ```
 
@@ -551,7 +553,13 @@ The dashboard's New session / Spawn child form shows the same answers for the
 profile picked in its **Runs as** section: what that account's usage reads
 (the same windows as `claunch usage`), every key of the pool with its own
 usage, which key the next launch takes, and the strategy — editable there,
-since it decides the pick for every launch of that profile.
+since it decides the pick for every launch of that profile. The key the next
+launch takes is named for every strategy, and the form's controls change it in
+place: `roll` draws again for `random`, and each key's `use` button switches
+the profile to `manual` with that key **and** pins the session the form is
+about to create to it (the same pin the rail's key modal sets on an existing
+session — `SessionDef.key_id`, written into the token file on every launch,
+restores included).
 
 Strategies:
 
@@ -560,7 +568,15 @@ Strategies:
 | `rotation` | Keys in file order, one per launch, wrapping at the end. The default. |
 | `usage-min` | The key whose own subscription usage is lowest. |
 | `usage-max` | The key whose own subscription usage is highest. |
-| `random` | A uniformly random key. |
+| `random` | The key last drawn; the launch takes it, then the next draw is stored. `claunch keys roll` (or the form's `roll`) re-draws. |
+| `manual` | The key you name: `claunch keys strategy work manual <id-or-index>`. |
+
+`random` and `manual` store their key in the pool (`pick`), which is what lets
+`claunch keys select` and the form name the next launch's key before it runs.
+Without a stored draw (`random` on a pool written by an older claunch) the next
+launch draws and stores one, and the form says so instead of naming a key. A
+stored `manual` key that is later removed (`claunch keys remove`) makes the
+next launch fall back to `rotation` and report that in `claunch keys select`.
 
 `usage-min`/`usage-max` read each key's own usage, so they only work where the
 launcher token *is* the account credential (a Claude provider key, a Kimi
@@ -627,12 +643,26 @@ it opens a modal listing the keys, masked, with the one in use marked. Picking
 another key restarts that session on it — the same name, the same
 conversation (`--resume`), the harness relaunched on the new key.
 
+The modal states three separate facts, and the rows carry them apart: the key
+this session's process was given (`launched_key`, recorded at launch — the
+profile's token file cannot answer it, because every launch of the pool writes
+that file), the pin (`key_id`), and the key the pool's next launch will take
+(the same peek the create form shows: the cursor's next key for `rotation`, the
+reading-based answer for `usage-min`/`usage-max`, the stored draw for `random`
+and the named key for `manual`). Above the list, the pool's own **Strategy**
+select writes `POST /api/profiles/<pool>/keys/strategy` as it changes, so the
+next launch's key can be chosen from here rather than only from the create
+form; under `manual` the key marked in the list is the one it names, and
+`random` carries a **roll** button (`POST …/keys/roll`) that re-draws.
+
 The pin is part of the session's definition (`key_id`), so it holds across
 daemon restarts and every later restore writes that key into the profile's
 token file rather than taking the pool's next one; pinning one session does
-not consume another session's rotation. `No pin` in the same modal clears it,
-and the strategy picks from the next launch on. Keys themselves are still
-edited only with `claunch keys` — the modal picks, it does not edit.
+not consume another session's rotation. A pinned session ignores the pool's
+strategy, which is what the modal's note says while the pin is set. `No pin`
+in the same modal clears it, and the strategy picks from the next launch on.
+Keys themselves are still edited only with `claunch keys` — the modal picks a
+key and the strategy, it does not add or remove keys.
 
 The two routes behind it, for scripts: `GET /api/profiles/<profile>/keys`
 (id, label, masked token, strategy, which is current — never a plaintext
