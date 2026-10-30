@@ -1267,8 +1267,12 @@ TOOLS = [
         "name": "loop_close",
         "description": (
             "End one open loop by id, with an optional 'note' on how it "
-            "resolved. Close a loop when its wait ends; a loop nobody closes "
-            "turns STALE and keeps asking to be judged."
+            "resolved. The 'loops' tool prints every id this accepts, "
+            "including the reply: waits read off the mesh's response "
+            "watches -- closing one of those deletes the watch, which stops "
+            "the response nudge and drops the line from the re-briefing. "
+            "Close a loop when its wait ends; a loop nobody closes turns "
+            "STALE and keeps asking to be judged."
         ),
         "inputSchema": {
             "type": "object",

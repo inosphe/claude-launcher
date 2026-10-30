@@ -10,7 +10,8 @@ These tests pin the ledger that now holds that half:
 * the mesh writes a re-send loop when it refuses a send for a full inbox,
   and closes it when a later send to that member is accepted;
 * a reply-wait is READ off the mesh's response watch, never stored twice,
-  so it clears the moment the threaded reply lands;
+  so it clears the moment the threaded reply lands -- and closes by the
+  ``reply:`` id a listing printed, deleting the watch that drives the nudge;
 * the re-briefing carries the open list, capped, with stale entries marked;
 * the API routes and the MCP tools reach the same file.
 """
@@ -21,6 +22,7 @@ import asyncio
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import pytest
 
@@ -256,6 +258,98 @@ def test_a_reply_wait_is_read_off_the_response_watch(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_reply_wait_closes_by_the_id_the_listing_printed(home, tmp_path):
+    """claunch-ozern: the ``reply:`` id a listing printed is the key that
+    closes it. The watch is the only record the wait has, so the close
+    deletes the watch -- and leaves the ledger without a second copy."""
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = mm.create("team")
+        mesh.members = {"lead": Member("lead", "s1"), "worker": Member("worker", "s2")}
+        mm._persist_def(mesh)
+        mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
+
+        sent = await mm.send("team", "lead", "worker", "please check", type="ask")
+        original = next(m for m in mesh.messages if m["id"] == sent["id"])
+        mm._watch_delivered_responses(mesh, "worker", [original])
+
+        # a watch of ANOTHER member carries the same id: not this session's
+        decoy = {
+            "id": sent["id"], "from": "worker", "to": "lead",
+            "delivered_at": "2026-01-01T00:00:00+00:00", "notices": 0,
+        }
+        mesh.response_watches["decoy|worker"] = decoy
+
+        listed = loops.summary("s1", mm)["open"]
+        assert [r["id"] for r in listed] == [f"reply:{sent['id']}"]
+
+        closed = loops.close_reply_wait(
+            "s1", listed[0]["id"], mm, note="answered in the channel"
+        )
+        assert closed is not None
+        assert closed["id"] == f"reply:{sent['id']}"
+        assert closed["closed_note"] == "answered in the channel"
+        assert closed["closed_at"]
+        assert closed["refs"] == {
+            "mesh": "team", "message": sent["id"], "handle": "worker",
+        }
+        # the wait is gone from every reading of it, and so is the watch
+        assert loops.summary("s1", mm)["open"] == []
+        assert loops.reply_waits("s1", mm) == []
+        # the decoy -- another member's watch of the same id -- was left alone
+        assert mesh.response_watches == {"decoy|worker": decoy}
+        # and the ledger was not given a copy in the process
+        assert loops.open_entries("s1") == []
+
+        # the plain close door still finds nothing by that id, and a second
+        # close of either kind is a miss
+        assert loops.close("s1", listed[0]["id"]) is None
+        assert loops.close_reply_wait("s1", listed[0]["id"], mm) is None
+        assert loops.close_reply_wait("s1", "loop-nope", mm) is None
+        assert loops.close_reply_wait("s9", f"reply:{sent['id']}", None) is None
+
+    asyncio.run(run())
+
+
+def test_closing_a_reply_wait_stops_the_response_nudge(home, tmp_path):
+    """The nudge is driven by the watch, so the close that deletes the watch
+    is the close that silences it -- one wait at a time."""
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = mm.create("team")
+        mesh.members = {"lead": Member("lead", "s1"), "dev": Member("dev", "s2")}
+        mm._persist_def(mesh)
+        mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
+
+        first = await mm.send("team", "lead", "dev", "status?", type="ask")
+        second = await mm.send("team", "lead", "dev", "and the plan?", type="ask")
+        mm._watch_delivered_responses(
+            mesh, "dev",
+            [
+                next(m for m in mesh.messages if m["id"] == s["id"])
+                for s in (first, second)
+            ],
+        )
+        aged = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        for watch in mesh.response_watches.values():
+            watch["delivered_at"] = aged
+
+        assert loops.close_reply_wait("s1", f"reply:{second['id']}", mm) is not None
+        mm._response_watch_tick(mesh)
+
+        ids = {str(m.get("id") or "") for m in mesh.messages}
+        assert f"response-nudge-{first['id']}-dev-1" in ids
+        assert not any(i.startswith(f"response-nudge-{second['id']}") for i in ids)
+        # one close closed one watch
+        assert [w["id"] for w in mesh.response_watches.values()] == [first["id"]]
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # the re-briefing
 # --------------------------------------------------------------------------- #
@@ -394,6 +488,63 @@ def test_the_api_lists_adds_and_closes(home, tmp_path):
             # ManagerError, mapped by the middleware
             resp = await client.get("/api/sessions/ghost/loops", headers=BEARER)
             assert resp.status == 400
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_api_closes_a_reply_wait_by_the_id_it_listed(home, tmp_path):
+    """The route an agent really uses: the id ``GET .../loops`` printed,
+    percent-encoded as the CLI and MCP send it, closes the wait."""
+
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr, settle=0.05)
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            mesh = mm.create("team")
+            mesh.members = {"lead": Member("lead", "w1"), "dev": Member("dev", "d9")}
+            mm._persist_def(mesh)
+            mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
+            sent = await mm.send("team", "lead", "dev", "status?", type="ask")
+            original = next(m for m in mesh.messages if m["id"] == sent["id"])
+            mm._watch_delivered_responses(mesh, "dev", [original])
+
+            resp = await client.get("/api/sessions/w1/loops", headers=BEARER)
+            open_rows = (await resp.json())["open"]
+            ident = open_rows[0]["id"]
+            assert ident == f"reply:{sent['id']}"
+
+            path = f"/api/sessions/w1/loops/{quote(ident, safe='')}/close"
+            resp = await client.post(
+                path, headers=BEARER, json={"note": "answered in the channel"},
+            )
+            assert resp.status == 200, await resp.text()
+            closed = (await resp.json())["loop"]
+            assert closed["id"] == ident
+            assert closed["closed_note"] == "answered in the channel"
+
+            resp = await client.get("/api/sessions/w1/loops", headers=BEARER)
+            assert (await resp.json())["open"] == []
+            assert mesh.response_watches == {}
+
+            # the second close, and an id nobody printed, are both 404s
+            resp = await client.post(path, headers=BEARER, json={})
+            assert resp.status == 404
+            resp = await client.post(
+                "/api/sessions/w1/loops/"
+                f"{quote('reply:msg-nobody-printed', safe='')}/close",
+                headers=BEARER, json={},
+            )
+            assert resp.status == 404
         finally:
             await client.close()
 
