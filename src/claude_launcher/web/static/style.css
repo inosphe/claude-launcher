@@ -669,10 +669,16 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
              The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` belongs to expanded cards. The API-key picker and
-   briefing/check refresh controls are available after opening the card.
-   Keeping asynchronous
-   refresh labels off the identity line also keeps the profile position stable.
+   `.rail-actions` belongs to expanded cards, with one named pair of
+   exceptions: the spawn `+` and the 📌 pin (claunch-g6ecv, operator
+   request — the child-add button the operator asked back onto the default
+   card, in its remembered place directly left of the pin, on the card's
+   own buttons line). Everything else
+   in the
+   box — the API-key picker, briefing/check refresh controls, observe, note
+   and ⓘ — is available after opening the card. Keeping asynchronous
+   refresh labels off the identity line also keeps the profile position
+   stable.
 
    `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
    case: they SAY something the name and the dot cannot, so both survive the
@@ -744,8 +750,28 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .sess-brief {
   display: none;
 }
-/* All controls, including the key picker, belong to expanded cards. */
-#session-list li[data-rail-mode="compact"] .rail-actions {
+/* The buttons line is the expanded card's, EXCEPT the spawn+pin pair the
+   operator asked back onto the collapsed card (claunch-g6ecv): the `+`
+   spawns a child of the session and sits directly left of the 📌, the
+   arrangement the card wore before the density split. The pair takes the
+   buttons line of its own — riding the name line was tried first and
+   fails on the real rail: a name line's flex bases already fill the 260px
+   rail (dot + name group + a borrow-naming meta), so a fourth base always
+   wraps (measured live: every compact card took a second line). Exited
+   sessions have no `+` (nothing to spawn from) and wear the pin alone.
+   Placing the visible part by exclusion, not by hiding the box, is what
+   keeps the pair reachable: an ancestor `display: none` would take them
+   with the other buttons. The exceptions are listed by name rather than
+   left implicit, so a further control kept on the compact card has to be
+   decided about rather than inherited. */
+#session-list li[data-rail-mode="compact"] .rail-actions
+  > :not(.sess-plus, .sess-pin) {
+  display: none;
+}
+/* ...and a box that holds nothing visible must not cost height. A box
+   whose every child is hidden measures as holding nothing. */
+#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(
+    .sess-plus, .sess-pin)) {
   display: none;
 }
 /* Workflow state remains visible at every card density. */
