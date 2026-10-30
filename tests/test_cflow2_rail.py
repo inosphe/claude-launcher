@@ -295,6 +295,60 @@ def test_rail_ask_carries_the_stamp_the_run_opened_it_with(proj):
         executors.register(None)
 
 
+CRITERIA_ASK = """\
+cflow: 2
+name: critask
+description: an ask that declares the criteria of its own notice
+nodes:
+  a:
+    title: Step A
+    prompt: do a
+    ask: {prompt: "may I a?", criteria: [deferrable], otherwise: human}
+  b: {title: Step B, prompt: do b}
+body:
+  try: [a, b]
+  catch:
+    declined: b
+"""
+
+
+def test_ask_criteria_reaches_the_status_the_rail_and_the_nudge(proj):
+    """A step's ``ask.criteria`` (thread th-3b3470) is carried on three hops,
+    and each one is asserted here because a dashboard that loses any of them
+    folds the wrong requests and nothing else fails: the run's ask record and
+    the status payload built from it (``_open_ask``/``_describe_ask``), the
+    rail's answer row (``cflow2_web._rail_answers``), and the gate row the
+    dashboard draws (``flow_nudge.v2_gates``).
+
+    s1389-rev's review of fc2aeb22 deleted each hop in turn and the 104-module
+    sweep stayed green -- the declaration was tested, the transport was not."""
+    from claude_launcher.daemon import flow_nudge
+
+    executors.register(None)
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "critask.yaml").write_text(CRITERIA_ASK, encoding="utf-8")
+    try:
+        runtime.start(layers.load("critask", cwd), cwd=cwd, scope="s1", caps={})
+
+        # Hop 1: the record _open_ask wrote, and what _describe_ask makes of it.
+        state = runtime.RunStore(cwd, "s1").load_state()
+        (rec,) = state["asks"].values()
+        assert rec["criteria"] == ["deferrable"]
+        (ask,) = runtime.status(cwd=cwd, scope="s1")["asks"]
+        assert ask["criteria"] == ["deferrable"]
+
+        # Hop 2: the rail's answer row.
+        (ans,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert ans["kind"] == "ask" and ans["criteria"] == ["deferrable"]
+
+        # Hop 3: the gate row the dashboard draws it from.
+        (gate,) = flow_nudge.v2_gates(_rail(cwd, "s1")["s1"])
+        assert gate["kind"] == "ask" and gate["criteria"] == ["deferrable"]
+    finally:
+        executors.register(None)
+
+
 def test_rail_answers_carry_what_the_terminal_strip_posts(proj):
     """``answers`` (claunch-bpziz): each owed item with the instance and
     options the run page posts, so the terminal strip's press -- the same
