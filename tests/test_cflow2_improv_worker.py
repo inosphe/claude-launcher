@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 import claude_launcher
-from claude_launcher.cflow2 import check, layers
+from claude_launcher.cflow2 import check, frontend, layers
 from claude_launcher.cflow2.frontend import compile_text
 
 WF_DIR = Path(claude_launcher.__file__).parent / "workflows"
@@ -3677,3 +3677,114 @@ def test_a_blocked_request_reaches_queue_recheck(tmp_path, monkeypatch):
     round_left = [e for e in runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
                   if e.get("event") == "left" and e.get("node") == "round"]
     assert round_left and round_left[-1]["outcome"] == "ok", round_left
+
+
+# -- claunch-d8scd: landing entry (start_at=landing) ------------------------
+
+
+def test_landing_entry_seeds_the_first_round_and_the_recheck_is_the_invalidation():
+    """``start_at=landing`` is a round kind for the FIRST round only.
+
+    The seed step sits in front of the rounds loop, so it runs once. Every
+    later round takes its kind from ``data.recheck.mode``, and queue-recheck
+    rewrites that with ``full`` on both of its continuing answers — that
+    rewrite is the invalidation, so the definition needs no reset node."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+
+    steps = doc["body"]["try"]
+    assert [s["id"] for s in steps] == ["entry-mode", "rounds"]
+
+    arms = steps[0]["cond"]
+    assert arms[0]["if"] == "$data.inputs.start_at == 'landing'"
+    assert arms[0]["then"] == {"call": "landing-entry", "bind": "recheck"}
+    assert list(arms[1]) == ["else"] and arms[1]["else"] == []
+
+    entry = doc["procedures"]["landing-entry"]
+    assert entry["body"] == [{"return": "ok",
+                              "value": {"next": "next-round", "mode": "land-only"}}]
+
+    # the switch is a start input with a default that keeps every existing run
+    # on the full path
+    assert doc["inputs"]["start_at"]["choices"] == ["full", "landing"]
+    assert doc["inputs"]["start_at"]["default"] == "full"
+
+    call = steps[1]["loop"]["do"][0]
+    assert call["id"] == "round" and call["call"] == "worker-round"
+    assert call["with"]["mode"] == "$data.recheck.mode"
+
+    opts = doc["procedures"]["queue-recheck"]["body"]["choose"]["options"]
+    assert opts["next-round"]["then"]["value"] == {"next": "next-round", "mode": "full"}
+    assert opts["done"]["then"]["value"] == {"next": "done", "mode": "full"}
+
+
+def _entry_mode_chart(doc, rounds):
+    """The canon's ``entry-mode`` step and ``landing-entry`` procedure inside a
+    skeleton whose rounds report back the ``mode`` they were called with.
+
+    The queue-recheck stand-in answers ``second`` rather than ``full`` so a
+    later round's kind is distinguishable from the seed's."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    entry = doc["body"]["try"][0]
+    assert entry["id"] == "entry-mode"
+    flow = {
+        "cflow": 2, "name": "landing-entry",
+        "inputs": {"start_at": {"type": "enum", "choices": ["full", "landing"],
+                                "default": "full"}},
+        "data": {"recheck": {"next": "next-round", "mode": "full"}},
+        # a task after the loop keeps the run open, so start() answers with the
+        # payload that carries `result` (a run that finishes inside start()
+        # comes back as a summary without it)
+        "nodes": {"after": {"title": "after", "prompt": "after",
+                            "returns": {"ok": {}}}},
+        "procedures": {
+            "landing-entry": doc["procedures"]["landing-entry"],
+            "worker-round": {"params": {"mode": {"type": "str", "default": ""}},
+                             "returns": {"ok": {"mode": "str"}},
+                             "body": [{"return": "ok",
+                                       "value": {"mode": "$params.mode"}}]},
+            "queue-recheck": {"returns": {"ok": {"next": "str", "mode": "str"}},
+                              "body": [{"return": "ok",
+                                        "value": {"next": "next-round",
+                                                  "mode": "second"}}]},
+        },
+        "body": [entry, {"id": "rounds", "loop": {
+            "while": f"$visits.round == null or $visits.round < {rounds}",
+            "max": rounds,
+            "do": [{"id": "round", "call": "worker-round", "bind": "round",
+                    "with": {"mode": "$data.recheck.mode"}},
+                   {"id": "recheck", "call": "queue-recheck", "bind": "recheck"}]}},
+                 "after"],
+    }
+    return frontend.compile_text(json.dumps(flow, ensure_ascii=False)), runtime
+
+
+def test_start_at_landing_calls_the_first_round_land_only(tmp_path):
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=1)
+    kw = {"cwd": str(tmp_path), "scope": "landing", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "land-only"}
+
+
+def test_a_full_start_calls_the_first_round_full(tmp_path):
+    """The default path is unchanged: a run that says nothing about its entry
+    still hands ``full`` to the first round."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=1)
+    kw = {"cwd": str(tmp_path), "scope": "full", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "full"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "full"}
+
+
+def test_the_second_round_takes_the_recheck_kind_not_the_seed(tmp_path):
+    """The seed runs once, in front of the loop. Round two takes whatever
+    queue-recheck wrote, which in the canon is ``full``."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=2)
+    kw = {"cwd": str(tmp_path), "scope": "landing-two", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "second"}
+
