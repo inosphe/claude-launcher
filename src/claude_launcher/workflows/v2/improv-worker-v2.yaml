@@ -109,12 +109,16 @@ sides:
 #                            integration-request·await-landing 바로 앞. 채널이 없을 때만
 #                            사람의 조치와 승인·거절에 선다. claunch-101wi)
 #   (v2 전용)              -> category-tag, category-refresh
-#                            (워크스페이스 카테고리 자동 갱신 — intake 뒤·코딩 전과
-#                            wrapup 뒤, 제안이 아니라 즉시 반영. claunch-06fwj)
+#                            (워크스페이스 카테고리 배치 — intake 뒤·코딩 전과
+#                            wrapup 뒤. 세션의 wrap-up 임시본으로 남기고 사용자가
+#                            확정할 때 반영. claunch-06fwj, claunch-ar8jn)
 #   (v2 전용)              -> knowledge-recall, knowledge-record
 #                            (워크스페이스 지식 기록 — category-tag 뒤 참조,
-#                            category-refresh 뒤 기록. 시작 입력 knowledge_recall·
-#                            knowledge_record가 켠다. claunch-269q1)
+#                            category-refresh 뒤 임시본. 시작 입력 knowledge_recall·
+#                            knowledge_record가 켠다. claunch-269q1, claunch-ar8jn)
+#   (v2 전용)              -> glossary-draft
+#                            (용어집 임시본 — knowledge-record 뒤, round-report 앞.
+#                            시작 입력 glossary_draft가 켠다. claunch-ar8jn)
 #   (v2 전용)              -> end-watch(loop), self-improve(call — self-improve-common의
 #                            프로시저: review, discuss, align(ask-user), register)
 #                            (end-decision의 self-improve, claunch-c4e6f / .1)
@@ -372,7 +376,19 @@ inputs:
     label: 지식 기록 남기기
     help: >-
       켜면 회차 마감 뒤(카테고리 갱신 다음) 이번 회차에서 확정된 의사결정·사용자 니즈·원칙·교훈을
-      knowledge_record로 남긴다. 끄면 기록하지 않는다
+      세션의 wrap-up 임시본으로 남긴다. 사용자가 wrap-up pane에서 확정해야 지식 기록에 쓰인다.
+      끄면 남기지 않는다
+    group: 지식 기록
+    set_by: [user]
+  # 용어집 임시본(claunch-ar8jn): 지식 기록 뒤에 선다. 기본은 켜짐.
+  glossary_draft:
+    type: bool
+    default: true
+    label: 용어집 임시본 남기기
+    help: >-
+      켜면 회차 마감 뒤(지식 기록 다음) 이번 회차에서 뜻을 정한 용어 가운데 용어집에 없는 것을
+      세션의 wrap-up 임시본으로 남긴다. 사용자가 wrap-up pane에서 확정해야 용어집에 쓰인다.
+      끄면 남기지 않는다
     group: 지식 기록
     set_by: [user]
 
@@ -521,15 +537,21 @@ rules:
 # ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
 # 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
 # 두 자리에 적으면 갈리므로 조각 하나를 ${frag:...}로 전개한다.
-# 이 호출은 제안이 아니다: 사용자 결정(2026-10-23, claunch-06fwj)으로 에이전트의
-# `category_assign {new}`는 기본이 즉시 등록이고, 제안 큐는 사람이 체크박스로
-# 고를 때(`proposal: true`)만 쓴다. 겹치는 라벨은 여전히 409로 거절되므로 트리에
-# 한 키워드가 두 노드로 갈라지지는 않는다.
+# 배치는 트리에 바로 쓰지 않고 세션의 wrap-up 임시본으로 남긴다(사용자 결정
+# 2026-10-30, claunch-ar8jn — claunch-06fwj의 「즉시 등록」을 대체한다). 사용자가
+# wrap-up pane에서 수정·삭제·확정하고, 확정할 때 데몬이 그 인자로 category_assign과
+# 같은 연산을 실행한다. 겹치는 라벨은 그 확정에서 409로 거절되고 임시본은 failed로
+# 남는다.
 fragments:
   category-tag: |
-    이 세션과 그 이슈를 워크스페이스 카테고리 트리에 배치한다. 이 호출은
-    제안이 아니라 즉시 반영이다 — 새 카테고리를 만들 때 `proposal`을 주지
-    않는다(claunch-06fwj, 사용자 결정).
+    이 세션과 그 이슈를 워크스페이스 카테고리 트리의 어디에 둘지 정해
+    **임시본으로 남긴다**. 트리는 사용자가 확정할 때만 바뀐다(claunch-ar8jn,
+    사용자 결정 — 사용자 확인 없이 공유 트리를 바꾸지 않는다). 아래에서
+    `category_assign {...}`이라고 적은 호출은 직접 부르지 않는다: 그 인자를
+    그대로 MCP `wrapup_draft {kind: category, payload: <그 인자>, reason}`으로
+    남긴다. 사용자가 세션의 wrap-up pane(Category 탭)에서 그 임시본을 고치거나
+    지우거나 확정한다. `category_assign`을 직접 부르는 것과 `proposal`을 주는
+    것은 이 절차에 없다.
     1. MCP `category_tree`로 이 워크스페이스의 트리와 어휘를 읽는다.
        필요하면 `category_search`로 후보를 찾고, `category_items`로 그 노드에
        이미 무엇이 있는지 본다.
@@ -570,16 +592,21 @@ fragments:
     3. 맞는 노드가 없으면 가장 가까운 노드의 자식으로(가까운 것이 없으면
        최상위로) 짧은 키워드 라벨·다른 표기의 별칭·한 줄 설명을 만들고
        `category_assign {new: {parent_id, label, aliases, description},
-       reason}`으로 지금 만든다. 기존 라벨·별칭과 겹치면 도구가 409로 그
-       노드를 알려 준다 — 새 이름을 짓지 말고 그 노드에 배정한다.
-    4. `category_assign`을 정확히 한 번 부른다(2b의 group 뒤에 F 아래 새
-       노드가 필요한 경우만 두 번이다). `items`를 생략하면 이 세션과
-       그 이슈가 배치된다. 이번 회차에 만든 인수인계 이슈도 같은 주제면
-       `items`에 함께 넣는다.
-    5. 보고에 결과를 적는다: 배치된 경로, 새로 만든 라벨(있으면), 도구를 쓸 수
-       없었으면 그 사유. 카테고리는 회차를 막지 않는다 — 도구가 없거나
-       (「not configured」) 데몬에 닿지 않으면 한 줄로 사유를 적고
-       assigned=false로 보고한 뒤 다음 단계로 간다.
+       reason}`의 인자로 임시본을 남긴다. 기존 라벨·별칭과 겹치는지는
+       `category_search`로 먼저 본다 — 겹치면 새 이름을 짓지 말고 그 노드에
+       배치하는 `{node_id}` 임시본을 남긴다.
+    4. 임시본은 하나다(2b의 group 뒤에 F 아래 새 노드가 필요한 경우만 둘이다).
+       먼저 `wrapup_list`로 이 세션의 category 임시본을 본다: 아직 확정되지
+       않은 것(draft·failed)이 있으면 새로 남기지 않고 `wrapup_update {id,
+       revision, payload}`로 그것을 고친다 — 같은 배치를 두 번 묻지 않는다.
+       `items`를 생략하면 남기는 시점의 이 세션과 그 이슈가 대상이 된다.
+       이번 회차에 만든 인수인계 이슈도 같은 주제면 `items`에 함께 넣는다.
+    5. 보고에 결과를 적는다: 임시본 id와 확정되면 배치될 경로, 새로 만들
+       라벨(있으면), 도구를 쓸 수 없었으면 그 사유. `assigned`는 임시본을
+       남겼거나 고쳤으면 true다(트리 반영은 사용자의 확정이 한다). 카테고리는
+       회차를 막지 않는다 — 도구가 없거나(「unknown tool」, 「not
+       configured」) 데몬에 닿지 않으면 한 줄로 사유를 적고 assigned=false로
+       보고한 뒤 다음 단계로 간다.
 
 nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────
@@ -3600,8 +3627,9 @@ nodes:
       이 호출은 회차 앞이다: intake(일감 귀속)가 끝났고 아직 코딩을 시작하지
       않았다. 이번 회차의 목표가 트리에 드러나게 배치한다.
     done_when: |
-      `category_assign`을 불렀고(또는 쓸 수 없었다는 사유를 적었고) 배치 경로·
-      새 라벨·사유 가운데 해당하는 값이 보고에 있다.
+      category 임시본(`wrapup_draft kind=category`)을 남겼거나 고쳤고(또는 쓸 수
+      없었다는 사유를 적었고) 임시본 id·배치될 경로·새 라벨·사유 가운데 해당하는
+      값이 보고에 있다.
     returns:
       ok: {assigned: bool, path: "str?", created: "str?", note: str}
     # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
@@ -3613,12 +3641,14 @@ nodes:
       ${frag:category-tag}
       이 호출은 회차 마감 뒤다: wrapup이 정리·마감 코멘트·인수인계 이슈를 남긴
       뒤이므로 이번 회차가 실제로 무엇이었는지가 가장 정확히 드러나는 시점이다.
-      트리를 다시 읽고, 이번 회차의 작업이 앞(category-tag)에서 고른 노드와
-      다른 주제가 되었으면 그 항목을 옮긴다. 같은 노드가 여전히 맞으면 다시
-      배정해도 된다(항목은 한 노드에만 있고 같은 노드 배정은 결과가 같다).
+      트리와 `wrapup_list`를 다시 읽고, 이번 회차의 작업이 앞(category-tag)에서
+      고른 노드와 다른 주제가 되었으면 그 배치를 바꾼다: 앞의 임시본이 아직
+      확정되지 않았으면 `wrapup_update`로 고치고, 사용자가 이미 확정했으면 옮기는
+      임시본을 새로 남긴다. 같은 노드가 여전히 맞으면 아무것도 남기지 않고 그
+      판단을 note에 적는다.
     done_when: |
-      트리를 다시 읽은 뒤의 배치 경로(옮겼으면 새 경로)와, 옮기지 않은 이유
-      또는 도구를 쓸 수 없었던 사유가 보고에 있다.
+      트리와 임시본을 다시 읽은 뒤의 배치될 경로(바꿨으면 새 경로와 임시본 id)와,
+      바꾸지 않은 이유 또는 도구를 쓸 수 없었던 사유가 보고에 있다.
     returns:
       ok: {assigned: bool, path: "str?", created: "str?", note: str}
     # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
@@ -3659,8 +3689,10 @@ nodes:
     title: 지식 기록 남기기 (wrapup 뒤)
     prompt: |
       회차가 끝났다(wrapup·카테고리 갱신 뒤). 이번 회차에서 다음 세션이 알아야 할
-      것 가운데 코드·이슈·커밋 메시지에 남지 않는 것을 워크스페이스 지식 기록으로
-      남긴다.
+      것 가운데 코드·이슈·커밋 메시지에 남지 않는 것을 워크스페이스 지식 기록의
+      **임시본**으로 남긴다. 지식 기록은 사용자가 세션의 wrap-up pane(Knowledge
+      탭)에서 확정할 때만 쓰인다(claunch-ar8jn, 사용자 결정) — `knowledge_record`를
+      직접 부르지 않는다.
       남길 것(있을 때만, 회차당 보통 0~3건):
       · decision — 사용자나 상위가 정한 방향과 그 이유(대안이 있었으면 버린 이유).
       · need — 사용자가 말한 요구와 그 배경(무엇을 원하는가, 왜).
@@ -3672,23 +3704,60 @@ nodes:
       **본문(body)은 markdown으로 쓴다** — 제목(`##`), 목록(`-`), 표, 코드 펜스
       (```), 링크. Knowledge 탭이 markdown으로 렌더링하므로 별표·샵을 이스케이프하지
       않는다. 한 문단으로 몰지 말고 읽는 사람이 훑을 수 있게 나눈다.
-      1. 먼저 `knowledge_search`로 같은 주제의 기록이 있는지 본다. 같은 결정이
-         이미 있으면 새로 쓰지 않는다. 이번 회차가 그 결정을 바꿨으면 새 기록에
+      1. 먼저 `knowledge_search`로 같은 주제의 기록이 있는지, `wrapup_list`로 이
+         세션이 이미 남긴 knowledge 임시본이 있는지 본다. 같은 결정이 이미 있으면
+         새로 쓰지 않는다(아직 확정되지 않은 임시본이면 `wrapup_update`로 고친다). 이번 회차가 그 결정을 바꿨으면 새 기록에
          `supersedes: <그 기록 id>`를 준다(파일 기록 `md:...`은 대체 표시가 되지
          않으므로 그 사실을 note에 적는다). 대체 표시도 그 기록의 이력에 버전으로
          남는다 — 과거 판단이 필요하면 `knowledge_history {id}`로 읽는다.
-      2. 기록마다 MCP `knowledge_record`를 한 번 부른다: kind, title(한 줄로 무엇을
-         정했는가), body(markdown — 이유와 맥락), tags(카테고리 라벨과 같은 낱말),
-         refs(이 회차 이슈 ${data.claim.issue}, 관련 이슈·경로).
+      2. 기록마다 MCP `wrapup_draft {kind: knowledge, payload, reason}`을 한 번
+         부른다. payload는 `knowledge_record`의 인자 그대로다: kind, title(한 줄로
+         무엇을 정했는가), body(markdown — 이유와 맥락), tags(카테고리 라벨과 같은
+         낱말), refs(이 회차 이슈 ${data.claim.issue}, 관련 이슈·경로), 대체하면
+         supersedes. reason은 사용자가 확정 여부를 판단할 한 줄이다.
       3. 남길 것이 없으면 기록하지 않고 그 판단을 note에 적는다.
       4. 도구가 없거나 데몬에 닿지 않으면 사유를 적고 recorded=false로 보고한다.
          기록은 회차를 막지 않는다.
     done_when: |
-      남긴 기록의 id 목록(없으면 남기지 않은 이유), 또는 도구를 쓸 수 없었던 사유가
-      보고에 있다.
+      남긴 knowledge 임시본의 id 목록(없으면 남기지 않은 이유), 또는 도구를 쓸 수
+      없었던 사유가 보고에 있다.
     returns:
       ok: {recorded: bool, ids: list, note: str}
     # 지식 기록은 저장소 밖의 워크스페이스 상태다(카테고리와 같다).
+    effects: [board.write]
+
+  # ── 용어집 임시본(claunch-ar8jn) ─────────────────────────────────────
+  # 지식 기록 뒤, 회차 보고서 앞. 시작 입력 glossary_draft가 꺼졌을 때만 건너뛴다.
+  glossary-draft:
+    title: 용어집 임시본 남기기 (wrapup 뒤)
+    prompt: |
+      회차가 끝났다. 이번 회차에서 새로 정하거나 처음 쓰게 된 용어 가운데 이
+      워크스페이스의 용어집에 없는 것을 용어집 **임시본**으로 남긴다. 용어집은
+      사용자가 세션의 wrap-up pane(Glossary 탭)에서 확정할 때만 쓰인다
+      (claunch-ar8jn, 사용자 결정).
+      남길 것(있을 때만, 회차당 보통 0~5건): 이번 회차의 이슈·코드·보고에서
+      의미를 정한 낱말 — 새 상태 이름, 새 기능·화면 이름, 사용자와 합의한 말의
+      뜻. 남기지 않을 것: 일반 프로그래밍 용어, 파일·함수 이름 그 자체,
+      뜻을 확인하지 못한 낱말.
+      1. 후보마다 MCP `glossary_search {query: <용어>}`로 이미 있는지 본다.
+         같은 용어(또는 별칭)가 있으면 남기지 않는다. `wrapup_list`에 이 세션이
+         이미 남긴 같은 용어의 임시본이 있어도 남기지 않는다(필요하면
+         `wrapup_update`로 고친다).
+      2. 용어마다 `wrapup_draft {kind: glossary, payload: {term, definition,
+         aliases, source}, reason}`을 한 번 부른다. definition은 이 저장소에서의
+         뜻을 한두 문장으로, source는 그 뜻이 정해진 자리(이슈 ${data.claim.issue},
+         파일 경로)다.
+      3. 남길 것이 없으면 그 판단을 note에 적는다.
+      4. 끝으로 `wrapup_list`로 이 세션의 미확정 임시본(draft·failed) 수를 세어
+         보고의 pending에 적는다. 0보다 크면 사용자가 wrap-up pane에서 확정하거나
+         지워야 한다 — 세션이 그 전에 끝나면 대시보드가 사용자에게 알린다.
+      5. 도구가 없거나 데몬에 닿지 않으면 사유를 적고 drafted=false로 보고한다.
+         용어집은 회차를 막지 않는다.
+    done_when: |
+      남긴 glossary 임시본의 id 목록(없으면 남기지 않은 이유)과 이 세션의 미확정
+      임시본 수, 또는 도구를 쓸 수 없었던 사유가 보고에 있다.
+    returns:
+      ok: {drafted: bool, ids: list, pending: int, note: str}
     effects: [board.write]
 
   # ── 회차 마감 ────────────────────────────────────────────────────────
@@ -6267,6 +6336,13 @@ procedures:
         cond:
           - if: "$data.inputs.knowledge_record != false"
             then: [knowledge-record]
+          - else: []
+      # 회차 마감 뒤 용어집 임시본(claunch-ar8jn): glossary_draft가 꺼졌을 때만
+      # 건너뛴다. 이 입력이 없던 런의 null은 기본값(켜짐)으로 읽는다.
+      - id: glossary-post
+        cond:
+          - if: "$data.inputs.glossary_draft != false"
+            then: [glossary-draft]
           - else: []
       - round-report
 

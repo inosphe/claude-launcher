@@ -61,7 +61,26 @@ def test_nodes_stand_right_after_the_category_nodes():
         assert seq[i - 1] == before
         assert seq[i]["cond"][0]["then"] == [task]
     labels = {n.label for n in layers.load("improv-worker-v2").nodes.values()}
-    assert {"knowledge-recall", "knowledge-record"} <= labels
+    assert {"knowledge-recall", "knowledge-record", "glossary-draft"} <= labels
+    # claunch-ar8jn: the glossary drafts stand right after the knowledge
+    # records and before the round report.
+    seq, i = _find(doc["procedures"], "glossary-post") or _find(doc["body"], "glossary-post")
+    assert seq[i - 1]["id"] == "knowledge-post" and seq[i + 1] == "round-report"
+    assert seq[i]["cond"][0]["then"] == ["glossary-draft"]
+
+
+def test_wrapup_nodes_draft_instead_of_writing_the_stores():
+    """claunch-ar8jn: category, knowledge and glossary entries go to the
+    session's wrap-up drafts; the stores are written by the user's confirm."""
+    nodes = _doc()["nodes"]
+    frag = _doc()["fragments"]["category-tag"]
+    assert "wrapup_draft {kind: category" in frag and "직접 부르지 않는다" in frag
+    assert "즉시 반영이다" not in frag
+    assert "wrapup_draft {kind: knowledge" in nodes["knowledge-record"]["prompt"]
+    assert "직접 부르지 않는다" in nodes["knowledge-record"]["prompt"]
+    assert "wrapup_draft {kind: glossary" in nodes["glossary-draft"]["prompt"]
+    sch = layers.load("improv-worker-v2").meta["inputs"]
+    assert sch["glossary_draft"]["default"] is True and sch["glossary_draft"]["set_by"] == ["user"]
 
 
 def _run(tmp_path, monkeypatch, values):
@@ -69,7 +88,8 @@ def _run(tmp_path, monkeypatch, values):
     doc = _doc()
     pre = _find(doc["procedures"], "knowledge-pre") or _find(doc["body"], "knowledge-pre")
     post = _find(doc["procedures"], "knowledge-post") or _find(doc["body"], "knowledge-post")
-    doc["body"] = ["category-tag", pre[0][pre[1]], "category-refresh", post[0][post[1]]]
+    gloss = _find(doc["procedures"], "glossary-post") or _find(doc["body"], "glossary-post")
+    doc["body"] = ["category-tag", pre[0][pre[1]], "category-refresh", post[0][post[1]], gloss[0][gloss[1]]]
     doc.pop("spec", None)
     for name in ("category-tag", "category-refresh"):
         doc["nodes"][name] = {"prompt": name}
@@ -85,16 +105,20 @@ def _run(tmp_path, monkeypatch, values):
         [task] = st["tasks"]
         seen.append(task["label"])
         value = {"knowledge-recall": {"consulted": True, "query": "q", "records": [], "note": ""},
-                 "knowledge-record": {"recorded": False, "ids": [], "note": ""}}.get(task["label"], {})
+                 "knowledge-record": {"recorded": False, "ids": [], "note": ""},
+                 "glossary-draft": {"drafted": False, "ids": [], "pending": 0, "note": ""}}.get(task["label"], {})
         st = runtime.report(task["instance"], "ok", value, **kw)
     return seen
 
 
 @pytest.mark.parametrize("values, expected", [
-    ({}, ["category-tag", "category-refresh", "knowledge-record"]),
-    ({"knowledge_recall": True}, ["category-tag", "knowledge-recall", "category-refresh", "knowledge-record"]),
-    ({"knowledge_recall": True, "knowledge_record": False}, ["category-tag", "knowledge-recall", "category-refresh"]),
-    ({"knowledge_record": False}, ["category-tag", "category-refresh"]),
+    ({}, ["category-tag", "category-refresh", "knowledge-record", "glossary-draft"]),
+    ({"knowledge_recall": True}, ["category-tag", "knowledge-recall", "category-refresh", "knowledge-record",
+                                  "glossary-draft"]),
+    ({"knowledge_recall": True, "knowledge_record": False}, ["category-tag", "knowledge-recall", "category-refresh",
+                                                             "glossary-draft"]),
+    ({"knowledge_record": False}, ["category-tag", "category-refresh", "glossary-draft"]),
+    ({"glossary_draft": False}, ["category-tag", "category-refresh", "knowledge-record"]),
 ])
 def test_switches_route_the_two_nodes(tmp_path, monkeypatch, values, expected):
     assert _run(tmp_path, monkeypatch, values) == expected
