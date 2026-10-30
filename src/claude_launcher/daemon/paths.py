@@ -270,6 +270,13 @@ def qa_db() -> Path:
     return daemon_dir() / "qa.sqlite3"
 
 
+def wrapup_db() -> Path:
+    """Wrap-up drafts sessions file for the workspace glossary, category
+    tree and knowledge records, until the user confirms them
+    (wrapup/store.py, claunch-ar8jn)."""
+    return daemon_dir() / "wrapup.sqlite3"
+
+
 def threads_db() -> Path:
     """Sub-topic conversations between the user and each session
     (threads/store.py, claunch-doj98)."""

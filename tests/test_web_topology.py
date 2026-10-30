@@ -667,6 +667,7 @@ CHECKS = [
         "threadshistory_check.js",
         "megathread_check.js",
         "talkpane_check.js",
+        "wrapuppane_check.js",
         "splitframe_check.js",
         "sessioncli_check.js",
         "specpage_check.js",

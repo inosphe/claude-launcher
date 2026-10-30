@@ -206,6 +206,8 @@ function build(opts) {
     "refreshSessionSims",
     // and the session QA rail (qapane_check).
     "refreshQaRail",
+    // and the session wrap-up drafts rail (wrapuppane_check).
+    "refreshWrapupRail",
     // and the session threads rail (threadspane_check).
     "refreshThreadsRail",
     // and the per-model price table the context bucket line prices against
@@ -245,6 +247,7 @@ function build(opts) {
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
     () => {},   // refreshSessionSims (sessionresources_check)
     () => {},   // refreshQaRail (the ? qa light; qapane_check)
+    () => {},   // refreshWrapupRail (the ✎ wrap-up light; wrapuppane_check)
     () => {},   // refreshThreadsRail (the 🗪 threads light; threadspane_check)
     async () => {},   // refreshModelPrices (the price table for the context bucket line; modelprice_check)
 
