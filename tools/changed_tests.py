@@ -77,7 +77,9 @@ nine test modules and not ``test_daemon_wedge``, which is the one that guards
 it, because ``test_daemon_wedge`` imports ``claude_launcher.cli`` and ``cli``
 is what imports ``cli_sessions`` -- one hop past rule 2b. A red batch landed
 through exactly that (``claunch-uf7m``). :func:`reached_indirectly` names those
-modules without running them; widening the rule to select them was measured
+modules without running them, in both directions a hop can take: through
+``src``, and from a changed *test* module to another test that imports it by
+name (``claunch-d8scd.1``). Widening the rule to select them was measured
 and costs a median 26 of 119 modules against the current 3.
 
 **A path no rule can map is reported, never passed over** --
@@ -869,6 +871,28 @@ def module_name(rel: str) -> Optional[str]:
     return ".".join(parts) or None
 
 
+def test_module_name(rel: str) -> Optional[str]:
+    """``tests/test_mesh.py`` -> ``test_mesh``, the name one test imports.
+
+    Tests are not a package: ``tests/test_reposync_workflows.py`` reaches its
+    neighbour with ``from test_cflow2_improv_worker import _medium_flow``, and
+    that bare spelling is what :func:`test_imports` records. So a hop out of a
+    changed *test* module is looked up by this name, the way a hop out of a
+    changed source module is looked up by :func:`module_name`.
+
+    ``None`` for anything :func:`test_imports` does not parse -- a
+    subdirectory (``tests/web/``), a module that is not ``test_*.py``, a path
+    outside ``tests/``. That set is what the rest of this file means by "a
+    test module": reading one subset here and a wider one there would name
+    modules the selection can never contain, and a name nobody can select is
+    not a caveat a reader can act on.
+    """
+    p = Path(rel)
+    if p.suffix != ".py" or len(p.parts) != 2 or p.parts[0] != "tests":
+        return None
+    return p.stem if p.stem.startswith("test_") else None
+
+
 def _is_dunder(p: Path) -> bool:
     """``__init__.py`` / ``__main__.py`` -- excluded from rule 2c, measured.
 
@@ -1031,19 +1055,33 @@ def reached_indirectly(repo: Path, paths: List[str], picked) -> List[tuple]:
     * **Not truncated.** A capped list reads as a complete one. If the number
       is large that is the finding, and the count is printed with it.
 
-    One hop only, and by ``src``: it is the distance a re-export or an
+    One hop only, in the two directions a change can sit one hop from a test.
+    From a changed *source* module it is the distance a re-export or an
     aggregator adds, which is the shape ``cli.py`` has and the shape this
-    package uses throughout. Returns ``(test module, changed path, via)``, so
-    the reader can check the claim rather than take it.
+    package uses throughout. From a changed *test* module it is another test
+    that imports it by name (``from test_cflow2_improv_worker import
+    _medium_flow``), which :func:`test_module_name` names. The second
+    direction was missing until ``claunch-d8scd.1``: :func:`module_name`
+    answers ``None`` outside ``src``, the path was skipped whole, and the note
+    said nothing sat outside a selection that had left
+    ``tests/test_reposync_workflows.py`` out.
+
+    Returns ``(test module, changed path, via)``, so the reader can check the
+    claim rather than take it.
     """
     picked = set(picked)
     found: dict = {}
     graph = src_importers(repo)
     for rel in paths:
         mod = module_name(rel)
-        if not mod:
-            continue
-        for via in sorted(graph.get(mod, ())):
+        if mod:
+            vias = sorted(graph.get(mod, ()))
+        else:
+            test_mod = test_module_name(rel)
+            if not test_mod:
+                continue
+            vias = [test_mod]
+        for via in vias:
             for name in importers(repo, via):
                 if name in picked or name in found:
                     continue

@@ -2153,6 +2153,50 @@ def test_the_indirect_list_is_whole_rather_than_capped(repo, capsys):
     assert f"NOTE: {len(named)} test module(s)" in out
 
 
+def test_a_hop_from_a_changed_test_module_is_named(repo, capsys):
+    """The blind spot ``claunch-d8scd.1``: a test another test imports.
+
+    ``test_reposync_workflows`` writes ``from test_cflow2_improv_worker import
+    _medium_flow`` and is not selected when that module changes -- correctly,
+    rule 2b is direct imports of *source* modules only. What was wrong is what
+    the tool said: ``module_name`` answers ``None`` outside ``src``, so the
+    changed test module was skipped whole, and the note reported that nothing
+    sat one hop outside a selection that was missing exactly this module.
+    """
+    _seed_on_base(repo, {
+        "tests/test_helper.py": "def shared():\n    return 1\n",
+        "tests/test_uses_helper.py": "from test_helper import shared\n",
+    })
+    _write(repo, "tests/test_helper.py", "def shared():\n    return 2\n")
+    _git(repo, "commit", "-qam", "change a test module another one imports")
+
+    picked = _select(repo)
+    assert "tests/test_helper.py" in picked
+    assert "tests/test_uses_helper.py" not in picked     # named, not selected
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert _named_as_missed(out) == [
+        "  tests/test_uses_helper.py  <- tests/test_helper.py via test_helper"
+    ]
+    assert "no test module sits one import hop outside" not in out
+
+
+def test_a_changed_test_module_nothing_imports_still_says_so(repo, capsys):
+    """The other half of the same statement: no hop, and the line says so.
+
+    Leaving the sentence out whenever the change is a test module would make
+    an empty note indistinguishable from a note the tool never computed.
+    """
+    _write(repo, "tests/test_mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a test module nothing else imports")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert _named_as_missed(out) == []
+    assert "no test module sits one import hop outside this selection." in out
+
+
 def test_both_caveats_are_stated_even_when_they_are_empty(repo, capsys):
     """A clean run says both caveats in words rather than by printing nothing.
 
