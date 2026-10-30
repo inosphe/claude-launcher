@@ -1,0 +1,98 @@
+"""``claunch vm``: the user's commands over /api/vm, against a fake client."""
+from __future__ import annotations
+
+import argparse
+import json
+
+import pytest
+
+from claude_launcher import cli_vm, daemon_client
+
+
+class Client:
+    def __init__(self):
+        self.calls = []
+        self.answer = {"id": "a", "state": "running", "grants": ["view", "control"],
+                       "changed": [], "inflight": 0}
+        self.error = None
+
+    def request(self, method, path, body=None, **kw):
+        self.calls.append((method, path, body))
+        if self.error:
+            raise self.error
+        return self.answer
+
+    def get(self, path, **kw):
+        return self.request("GET", path)
+
+
+@pytest.fixture
+def client(monkeypatch):
+    c = Client()
+    monkeypatch.setattr(cli_vm, "_client", lambda: c)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    return c
+
+
+def run(*argv):
+    parser = argparse.ArgumentParser()
+    cli_vm.register(parser.add_subparsers(dest="command", required=True))
+    args = parser.parse_args(["vm", *argv])
+    return args.func(args)
+
+
+def test_add_registers_with_an_absolute_key_path(client, capsys):
+    assert run("add", "a", "--ssh-key", "~/k") == 0
+    method, path, body = client.calls[0]
+    assert (method, path) == ("POST", "/api/vm")
+    assert body["id"] == "a" and body["tart_name"] == "a" and body["ssh_key"].startswith("/")
+    assert "~" not in body["ssh_key"]
+
+
+def test_start_and_stop_post_to_the_vm_route(client, capsys):
+    assert run("start", "a") == 0
+    assert run("force-stop", "a") == 0
+    assert [c[1] for c in client.calls] == ["/api/vm/a/start", "/api/vm/a/force_stop"]
+    assert "a: running" in capsys.readouterr().out
+
+
+def test_grant_names_the_scopes_and_exec_is_only_there_when_asked(client, capsys):
+    run("grant", "a", "s1", "control")
+    assert client.calls[-1][2] == {"session": "s1", "scopes": ["control"]}
+    with pytest.raises(SystemExit):
+        run("grant", "a", "s1", "root")
+
+
+def test_a_refusal_is_printed_and_exits_1(client, capsys):
+    client.error = daemon_client.DaemonClientError("POST /api/vm/a/start: vm_slots_full: 2 of 2",
+                                                   status=409)
+    assert run("start", "a") == 1
+    assert "vm_slots_full" in capsys.readouterr().err
+
+
+def test_a_managed_sessions_shell_is_refused_before_asking(client, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    assert run("grant", "a", "s1", "control") == 1
+    assert client.calls == []
+    assert "the user's to do" in capsys.readouterr().err
+
+
+def test_listing_is_open_to_a_session(client, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    client.answer = {"vms": [{"id": "a", "state": "running", "channel": "up",
+                              "ip": "1.2.3.4", "controller": "s1", "human": "idle",
+                              "grants": {"s1": ["view", "control"]}}], "slot_limit": 2}
+    assert run("list") == 0
+    out = capsys.readouterr().out
+    assert "a" in out and "up" in out and "s1" in out and "view+control" in out
+
+
+def test_takeover_and_return(client, capsys):
+    run("takeover", "a")
+    run("return", "a")
+    assert [c[2]["action"] for c in client.calls] == ["driving", "idle"]
+
+
+def test_json_output_is_the_daemons_answer(client, capsys):
+    run("start", "a", "--json")
+    assert json.loads(capsys.readouterr().out)["state"] == "running"
