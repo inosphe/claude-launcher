@@ -75,6 +75,10 @@ function makeCategoryView({root, workspace: fixed = ""}) {
   // index is read for, so the page hides them until asked: one box per
   // partition (daemon/session.py session_category).
   let showKilled = false, showArchived = false;
+  // "running only": the opposite read — hide every session the daemon does
+  // not report as live (running, or hold: ended but parked for its next
+  // round). Off by default.
+  let showLiveOnly = false;
   let form = null;   // {kind, ...}: the one inline form open, if any
   let proposalDrafts = {};
   const url = (path, params = {}) => path + (path.includes("?") ? "&" : "?") + new URLSearchParams({workspace, ...params});
@@ -261,12 +265,15 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return out;
   }
 
-  /* Sessions the page is hiding until their box is ticked. `life` is the
-     daemon's partition; a session the daemon no longer has a record of has
-     none and stays visible. */
+  /* Sessions the page is hiding. `life` is the daemon's partition; a session
+     the daemon no longer has a record of has none and stays visible. The
+     "running only" mode hides everything not live instead — running itself,
+     or hold (parked for its next round); killed/archived boxes cannot re-add
+     a session that mode hides. */
   function hiddenSession(item) {
     if (item.kind !== "session") return false;
     const life = ((data?.details || {})[categoryKey(item)] || {}).life;
+    if (showLiveOnly && life !== "running" && life !== "hold") return true;
     return (life === "killed" && !showKilled) || (life === "archived" && !showArchived);
   }
 
@@ -376,7 +383,9 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return f;
   }
 
-  /* "show killed" / "show archived": one box each, both off by default. */
+  /* "running only (hold 포함)" is a mode that hides everything not live; the
+     "show killed"/"show archived" boxes re-add finished partitions. All off
+     by default. */
   function filters() {
     const bar = node("div", null, "category-filters");
     const one = (key, label, on, set) => {
@@ -388,6 +397,7 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       wrap.append(box, node("span", label));
       bar.append(wrap);
     };
+    one("live", "running only (hold 포함)", showLiveOnly, (v) => { showLiveOnly = v; });
     one("killed", "show killed", showKilled, (v) => { showKilled = v; });
     one("archived", "show archived", showArchived, (v) => { showArchived = v; });
     return bar;
