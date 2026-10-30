@@ -41,7 +41,11 @@ let response = {
   resolved: { endpoint: "", model: "", has_key: false },
   profiles: [
     { name: "ds4", endpoint: "https://ds.example/v1/chat/completions",
-      models: ["deepseek-flash", "glm-small"], has_key: true },
+      models: ["deepseek-flash", "glm-small"], has_key: true,
+      keys: [
+        { id: "k-aaa111", label: "main", masked: "sk-…1111", current: true },
+        { id: "k-bbb222", label: "spare", masked: "sk-…2222", current: false },
+      ] },
     { name: "local", endpoint: "http://127.0.0.1:8080/v1/chat/completions",
       models: ["mlx-model"], has_key: false },
   ],
@@ -128,6 +132,20 @@ const submit = (root) =>
   // the card does not offer to remove a key the profile supplies
   assert.equal(find(root, (n) => n.text === "Remove stored key"), undefined);
 
+  /* A profile holding a pool of keys gets a picker: the pool's keys beside
+     the default — the key the token file holds, which is what an unpinned
+     call has always used. */
+  const keyPick = field(root, "llm-key");
+  assert(keyPick, "a pooled profile shows the key picker");
+  assert.deepEqual(keyPick.children.map((o) => o.value),
+                   ["", "k-aaa111", "k-bbb222"]);
+  assert.equal(keyPick.value, "");
+  assert(keyPick.children[0].textContent.includes("default"));
+  keyPick.value = "k-bbb222";
+  keyPick.handlers.change();
+  assert.equal(vm.runInContext("llmDraft.key_id", context), "k-bbb222");
+  assert.equal(vm.runInContext("llmDraft.dirty", context), true);
+
   /* Switching again carries both across a second time. */
   field(root, "llm-profile").value = "local";
   field(root, "llm-profile").handlers.change();
@@ -135,6 +153,10 @@ const submit = (root) =>
   assert.equal(field(root, "llm-endpoint").value,
                "http://127.0.0.1:8080/v1/chat/completions");
   assert.equal(field(root, "llm-model").value, "mlx-model");
+  // a pool-less profile has nothing to choose between — and the switch
+  // dropped the pin, which named a key of ds4's pool
+  assert.equal(field(root, "llm-key"), undefined);
+  assert.equal(vm.runInContext("llmDraft.key_id", context), "");
 
   /* Back to none before saving: the typed endpoint is still in the draft and
      the box is writable again, so a profile tried out and abandoned costs
@@ -151,20 +173,29 @@ const submit = (root) =>
   field(root, "llm-profile").value = "ds4";
   field(root, "llm-profile").handlers.change();
   root = card();
+  // the switches dropped the earlier pick, so the picker is back at default
+  assert.equal(field(root, "llm-key").value, "");
+  field(root, "llm-key").value = "k-bbb222";
+  field(root, "llm-key").handlers.change();
   response = { ...response, profile: "ds4", model: "deepseek-flash",
                endpoint: "", api_key_set: false, configured: true,
+               key_id: "k-bbb222",
                resolved: { endpoint: "https://ds.example/v1/chat/completions",
-                           model: "deepseek-flash", has_key: true } };
+                           model: "deepseek-flash", has_key: true,
+                           key_id: "k-bbb222" } };
   await submit(root);
   sent = JSON.parse(requests.at(-1)[1].body);
   assert.deepEqual(sent, {
     presets: [], preset: "",
     profile: "ds4", model: "deepseek-flash", max_tokens: 4096,
+    key_id: "k-bbb222",
     endpoint: "", api_key: null,
   });
   root = card();
   assert.equal(field(root, "llm-endpoint").value,
                "https://ds.example/v1/chat/completions");
+  // the saved pin is what the picker shows on the next read
+  assert.equal(field(root, "llm-key").value, "k-bbb222");
 
   /* The provider is on the card when one is resolved: it decides which
      request headers the call carries (session_header, anthropic_auth_header),
@@ -684,11 +715,14 @@ const submit = (root) =>
   await find(card(), (n) => n.text === "Test connection").handlers.click();
   const withProfile = JSON.parse(requests.at(-1)[1].body);
   assert.deepEqual(withProfile,
-                   { preset: "", profile: "ds4", model: "deepseek-flash" });
+                   { preset: "", profile: "ds4", model: "deepseek-flash",
+                     key_id: "" });
 
   console.log("briefmodel ok: profile list, direct save, a profile carries "
     + "endpoint and model with it, save clears the block's pair, typed "
     + "endpoint survives an abandoned pick, unknown profile kept, error, "
+    + "a pooled profile offers a key picker, the pick rides the save and "
+    + "the probe, a profile switch drops the pin, "
     + "presets as radios with a named custom row, preset read-only until "
     + "Edit (name included) and locked fields ignore keystrokes, Edit writes "
     + "nothing, Save preset sends the listed edit and pointer, a declined "

@@ -5275,7 +5275,11 @@ under a profile never reads. Before, a profile changed only which credential
 went out while both boxes went on showing the backend typed in before. The
 endpoint you typed survives in the form, so a profile tried and abandoned
 costs nothing — it is the save that drops it. An empty model under a profile
-means that profile's `models.default`. The token budget is the block's, not a
+means that profile's `models.default`. When the chosen profile holds a pool
+of keys, a **Profile key** picker appears under the profile and chooses
+which pool key the briefing call authenticates with; the default is the key
+the profile's token file holds, and switching profiles drops the pin, which
+named a key of the previous profile's pool. The token budget is the block's, not a
 preset's: changing which backend answers must not change what the call may
 spend. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and

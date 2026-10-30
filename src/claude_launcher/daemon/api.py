@@ -4580,7 +4580,8 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
 #: out on purpose: it is a free map of extra chat/completions fields, which a
 #: text box cannot validate and which nothing in the UI reads back.
 LLM_EDITABLE = frozenset(
-    {"profile", "model", "endpoint", "api_key", "max_tokens", "presets", "preset"}
+    {"profile", "model", "endpoint", "api_key", "key_id", "max_tokens",
+     "presets", "preset"}
 )
 #: Upper bound for the completion budget a form may save. The endpoint's own
 #: limit is the real one; this only keeps a typo (a pasted model id, a stray
@@ -4604,14 +4605,32 @@ def _llm_profile_rows(doc: dict) -> List[dict]:
             backend = briefing.profile_backend(prof.name, doc)
         except briefing.BriefingError:
             continue
-        rows.append(
-            {
-                "name": prof.name,
-                "endpoint": backend.endpoint,
-                "models": list(backend.models),
-                "has_key": bool(backend.api_key),
-            }
-        )
+        row = {
+            "name": prof.name,
+            "endpoint": backend.endpoint,
+            "models": list(backend.models),
+            "has_key": bool(backend.api_key),
+        }
+        # The profile's key pool, for the card's key picker: ids, labels and
+        # masks only — a token never crosses to the browser. A pool that
+        # cannot be read is a row error, not a failed settings payload.
+        try:
+            pool = profile_keys.view(prof)
+        except profile_keys.KeysError as exc:
+            row["keys"] = []
+            row["keys_error"] = str(exc)
+        else:
+            if pool.get("pooled"):
+                row["keys"] = [
+                    {
+                        "id": k["id"],
+                        "label": k["label"],
+                        "masked": k["masked"],
+                        "current": k["current"],
+                    }
+                    for k in pool.get("keys") or []
+                ]
+        rows.append(row)
     return rows
 
 
@@ -4635,8 +4654,22 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
     cfg = briefing.llm_config(doc)
     error = ""
     if cfg["profile"]:
+        # The pin the active source wrote, so a stale one (the key was
+        # removed from the pool) is reported here instead of leaving the
+        # feature silently off: llm_config blanks the backend on the same
+        # error, and resolving without the pin would succeed and say nothing.
+        written_pin = str(block.get("key_id") or "").strip()
+        if cfg["preset"]:
+            written_pin = next(
+                (
+                    p.get("key_id", "")
+                    for p in briefing.presets(doc)
+                    if p["id"] == cfg["preset"]
+                ),
+                "",
+            )
         try:
-            briefing.profile_backend(cfg["profile"], doc)
+            briefing.profile_backend(cfg["profile"], doc, key_id=written_pin)
         except briefing.BriefingError as exc:
             error = str(exc)
     presets = briefing.presets_for_display(doc)
@@ -4661,6 +4694,9 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
         "profile": str(block.get("profile") or "").strip(),
         "model": str(block.get("model") or "").strip(),
         "endpoint": str(block.get("endpoint") or "").strip(),
+        # The block's own key pin (a preset's pin rides its row): the card
+        # preselects the key picker from it. An id, never a secret.
+        "key_id": str(block.get("key_id") or "").strip(),
         "max_tokens": cfg["max_tokens"],
         "api_key_set": bool(str(block.get("api_key") or "").strip()),
         "configured": briefing.llm_configured(cfg),
@@ -4668,6 +4704,9 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
             "endpoint": cfg["endpoint"],
             "model": cfg["model"],
             "has_key": bool(cfg["api_key"]),
+            # The pool key the call authenticates with, when the profile
+            # holds a pool and the key could be named ("" otherwise).
+            "key_id": cfg.get("key_id", ""),
             # The provider the endpoint belongs to, when a profile supplies
             # it: its declared request-header rules go out on the call
             # (briefing.briefing_request_headers), and a card that cannot say
@@ -4799,12 +4838,51 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
             block[key] = value
         else:
             block.pop(key, None)
+    # ``key_id`` pins one key of the named profile's pool. Without a profile
+    # it addresses nothing and is dropped — the same pairing rule that drops
+    # a typed endpoint once a profile supplies one. With a profile, a pin
+    # that names no key of its pool is refused: storing it would turn every
+    # briefing call into a BriefingError at compose time instead.
+    key_id = str(block.get("key_id") or "").strip()
+    if key_id:
+        pinned_profile = str(block.get("profile") or "").strip()
+        if not pinned_profile:
+            block.pop("key_id", None)
+        else:
+            _check_llm_key_id(pinned_profile, key_id)
     # An empty block is no block: dropping ``llm:`` entirely is what makes
     # the feature read as off rather than as configured with blanks.
     for field in ("presets",):
         if not block.get(field):
             block.pop(field, None)
     return block
+
+
+def _check_llm_key_id(profile_name: str, key_id: str) -> None:
+    """Refuse (ValueError) a pin that names no key of the profile's pool.
+
+    Save-time check for the block's own ``key_id``. Preset rows are not
+    checked here: the list is refused as a whole on any bad row, and a key
+    removed from a pool by ``claunch keys remove`` would otherwise make an
+    old preset block every later save of an unrelated field. A stale preset
+    pin surfaces instead as the payload's ``error`` and a briefing that is
+    off until the card picks another key.
+    """
+    try:
+        prof = profile_mod.require_selector(profile_name)
+    except ProfileError as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        source = profile_keys.owner(prof)
+        pool = profile_keys.load(source) if source is not None else None
+    except profile_keys.KeysError as exc:
+        raise ValueError(str(exc)) from exc
+    known = {key.id for key in pool.keys} if pool is not None else set()
+    if key_id not in known:
+        raise ValueError(
+            f"profile {profile_name!r} holds no key {key_id!r} — pick one of "
+            "its pool's keys, or save without a pin"
+        )
 
 
 async def h_briefing_llm(request: web.Request) -> web.Response:
@@ -4817,7 +4895,9 @@ async def h_briefing_llm(request: web.Request) -> web.Response:
 #: ``presets`` and ``max_tokens`` are refused rather than ignored — a probe
 #: tests a *backend*, and silently dropping a field the caller sent would
 #: report on something other than what was asked about.
-LLM_TESTABLE = frozenset({"profile", "model", "endpoint", "api_key", "preset"})
+LLM_TESTABLE = frozenset(
+    {"profile", "model", "endpoint", "api_key", "key_id", "preset"}
+)
 
 
 def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
@@ -4860,7 +4940,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
             (p for p in briefing.presets(doc) if p["id"] == wanted), block
         )
     fields = dict(base)
-    for field in ("profile", "model", "endpoint", "api_key"):
+    for field in ("profile", "model", "endpoint", "api_key", "key_id"):
         if field not in body:
             continue
         value = body[field]
@@ -4878,9 +4958,11 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
             continue
         if value is not None and not isinstance(value, str):
             raise ValueError(f"{field} must be text")
-        # For the other three a blank value is the card saying the box is
+        # For the other four a blank value is the card saying the box is
         # empty, and an empty box on save clears the field — so clearing it
-        # here too is what keeps the button honest about what a save would do.
+        # here too is what keeps the button honest about what a save would
+        # do. ``key_id`` is no secret, so blank genuinely means "no pin",
+        # never "keep the base's pin".
         fields[field] = str(value or "").strip()
     fields = {
         field: str(fields.get(field) or "").strip()
@@ -4891,9 +4973,12 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
     api_key = fields["api_key"]
     model = fields["model"]
     provider = ""
+    key_id = ""
     if profile_name:
         try:
-            backend = briefing.profile_backend(profile_name, doc)
+            backend = briefing.profile_backend(
+                profile_name, doc, key_id=fields["key_id"]
+            )
         except briefing.BriefingError as exc:
             # Handed back as a reason rather than raised: a profile that
             # cannot serve is a fact about the backend, which is the thing
@@ -4906,6 +4991,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
         endpoint, api_key = backend.endpoint, backend.api_key
         model = model or backend.model
         provider = backend.provider
+        key_id = backend.key_id
     cfg = {
         "preset": "",
         "profile": profile_name,
@@ -4913,6 +4999,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
+        "key_id": key_id,
         "max_tokens": saved.get("max_tokens") or briefing.DEFAULT_MAX_TOKENS,
         "params": dict(saved.get("params") or {}),
     }
@@ -4943,6 +5030,7 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
                 "model": cfg.get("model", ""),
                 "endpoint": "",
                 "provider": "",
+                "key_id": "",
                 "seconds": 0.0,
             }
         )
@@ -4955,6 +5043,7 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
             "model": probe.model,
             "endpoint": probe.endpoint,
             "provider": probe.provider,
+            "key_id": cfg.get("key_id", ""),
             "seconds": probe.seconds,
         }
     )

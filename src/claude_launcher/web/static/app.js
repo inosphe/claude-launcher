@@ -38319,7 +38319,7 @@ function llmDraftValues() {
   // the moment the operator typed in the name box.
   const presets = (saved.presets || []).map((p) => ({
     key: p.id, id: p.id, profile: p.profile || "", model: p.model || "",
-    endpoint: p.endpoint || "", api_key: "",
+    endpoint: p.endpoint || "", api_key: "", key_id: p.key_id || "",
     api_key_set: !!p.api_key_set, error: p.error || "",
     //: Whether the daemon already holds this row. "Add preset" starts one
     //: that it does not, and leaving it unsaved is what the card warns about.
@@ -38341,6 +38341,10 @@ function llmDraftValues() {
     model: chosen ? chosen.model : (saved.model || ""),
     endpoint: chosen ? chosen.endpoint : (saved.endpoint || ""),
     api_key: "",
+    //: The pinned pool key of whichever backend the fields belong to — the
+    //: preset's, or the block's own for "custom". "" means no pin: the call
+    //: uses whatever the profile's token file holds.
+    key_id: chosen ? (chosen.key_id || "") : (saved.key_id || ""),
     max_tokens: saved.max_tokens || 4096,
     //: The preset the operator has opened for editing, or null. Only one at a
     //: time (the contract this card was asked for), and the fields are
@@ -38374,10 +38378,14 @@ function llmPresetsBody(draft) {
     const id = editing ? (draft.name || "").trim() : p.id;
     const values = editing
       ? { profile: draft.profile, model: draft.model, endpoint: draft.endpoint,
-          api_key: draft.api_key, api_key_set: draft.api_key ? true : p.api_key_set }
+          api_key: draft.api_key, key_id: draft.key_id,
+          api_key_set: draft.api_key ? true : p.api_key_set }
       : p;
     const row = { id, profile: values.profile || "", model: values.model || "",
                   endpoint: values.endpoint || "" };
+    // The pin travels with the profile it names a key of; a row with no
+    // profile has no pool to pin in, and a blank pin clears the row's.
+    if (values.profile) row.key_id = values.key_id || "";
     // The name the row is filed under in the daemon. The Name box edits ``id``
     // in place, and a stored key stays under the name it was saved as — sending
     // the old name is what lets the daemon keep that key when the row is
@@ -38428,6 +38436,7 @@ function llmDraftLoadTarget(draft) {
   draft.profile = target ? target.profile : (llmSettings.profile || "");
   draft.model = target ? target.model : (llmSettings.model || "");
   draft.endpoint = target ? target.endpoint : (llmSettings.endpoint || "");
+  draft.key_id = target ? (target.key_id || "") : (llmSettings.key_id || "");
   // A stored secret is never sent back, so the box starts blank either way.
   draft.api_key = "";
 }
@@ -38518,6 +38527,10 @@ function llmDraftSaveBody(draft) {
     profile: draft.profile,
     model: draft.model,
   };
+  // The pin belongs to the profile; it is sent only with one (a blank pin
+  // there clears a stored one). Without a profile there is no pool to pin
+  // in, and the save leaves the field out entirely.
+  if (draft.profile) body.key_id = draft.key_id || "";
   // Same pairing rule as before: a profile owns the endpoint/key pair, so the
   // block's own two are removed rather than left describing a backend that
   // is no longer called.
@@ -38576,7 +38589,11 @@ async function llmSettingsSave(body) {
 function llmTestBody(draft) {
   const body = { preset: draft.preset || "", profile: draft.profile,
                  model: draft.model };
-  if (!draft.profile) {
+  if (draft.profile) {
+    // A pin is part of the backend being probed; blank means "no pin",
+    // because the picker's value is never a secret held back.
+    body.key_id = draft.key_id || "";
+  } else {
     body.endpoint = draft.endpoint;
     body.api_key = draft.api_key;
   }
@@ -38615,7 +38632,10 @@ function llmSettingsCard() {
     "fresh install is. Inside a preset or in custom, pick a profile to reuse " +
     "that profile's OpenAI-compatible endpoint, key and default model; the " +
     "endpoint and key typed in are then dropped, since that backend does not " +
-    "use them. Leave the profile empty to type them in."
+    "use them. When that profile holds a pool of keys, the Profile key " +
+    "picker chooses which one the call authenticates with — with no pick, " +
+    "the key the profile's token file holds is used. Leave the profile " +
+    "empty to type them in."
   ));
   if (llmSettingsError) card.appendChild(el("p", "error", llmSettingsError));
   if (!llmSettings) {
@@ -38919,11 +38939,55 @@ function llmSettingsCard() {
     // backend that has never heard of it.
     const picked = rows.find((r) => r.name === draft.profile);
     if (picked && picked.models.length) draft.model = picked.models[0];
+    // The pin names a key of the previous profile's pool; keeping it would
+    // pin a key this profile has never held.
+    draft.key_id = "";
     llmDraftTouch(draft);
     renderWorkspaces();
   });
   profileLabel.appendChild(profileSelect);
   form.appendChild(profileLabel);
+
+  // The key picker: only a profile with a key pool of two or more has
+  // anything to choose between. With none, the call uses whatever the
+  // profile's token file holds, exactly as before this picker existed.
+  const pickedRow = rows.find((r) => r.name === draft.profile);
+  const poolKeys = (pickedRow && pickedRow.keys) || [];
+  if (draft.profile && poolKeys.length >= 2) {
+    const keyPickLabel = el("label", null, "Profile key");
+    const keyPick = document.createElement("select");
+    keyPick.id = "llm-key";
+    const unpinned = document.createElement("option");
+    unpinned.value = "";
+    unpinned.textContent = "— default: the key the token file holds —";
+    keyPick.appendChild(unpinned);
+    for (const k of poolKeys) {
+      const opt = document.createElement("option");
+      opt.value = k.id;
+      opt.textContent = `${k.label || k.id} — ${k.masked}${k.current ? " (current)" : ""}`;
+      keyPick.appendChild(opt);
+    }
+    // A pin the pool no longer holds is still shown, or the form would
+    // quietly propose the default for a backend that errors at compose time.
+    if (draft.key_id && !poolKeys.some((k) => k.id === draft.key_id)) {
+      const stale = document.createElement("option");
+      stale.value = draft.key_id;
+      stale.textContent = `${draft.key_id} (not in the pool)`;
+      keyPick.appendChild(stale);
+    }
+    keyPick.value = draft.key_id || "";
+    keyPick.disabled = locked;
+    if (locked) keyPick.title = lockNote;
+    keyPick.title = keyPick.title ||
+      "which key of this profile's pool the briefing call authenticates with";
+    keyPick.addEventListener("change", () => {
+      if (locked) return;
+      draft.key_id = keyPick.value;
+      llmDraftTouch(draft);
+    });
+    keyPickLabel.appendChild(keyPick);
+    form.appendChild(keyPickLabel);
+  }
 
   const modelLabel = el("label", null, "Model");
   const model = document.createElement("input");

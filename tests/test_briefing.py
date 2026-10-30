@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from claude_launcher import harnesses, profile, store, transcripts
+from claude_launcher import harnesses, profile, profile_keys, store, transcripts
 from claude_launcher.daemon import briefing, paths, prompt_presets
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -83,6 +83,7 @@ def test_llm_config_absent_block_is_disabled_defaults(home):
         "endpoint": "",
         "model": "",
         "api_key": "",
+        "key_id": "",
         "max_tokens": briefing.DEFAULT_MAX_TOKENS,
         "params": {},
     }
@@ -324,6 +325,119 @@ def test_llm_config_direct_endpoint_still_works(config_file):
 
 
 # --------------------------------------------------------------------------- #
+# key_id: pinning one key of a profile's pool
+# --------------------------------------------------------------------------- #
+def _pooled_profile(name: str = "brief", *, provider: str = "ds"):
+    """The backend profile holding a two-key pool.
+
+    ``profile_keys.add`` makes each added key the effective token, so the
+    token file ends holding the SECOND one — the state a pool is in between
+    launches, and what an unpinned briefing call reads.
+    """
+    prof = _profile_backend_config(name, provider=provider)
+    first = profile_keys.add(prof, "sk-pool-first", "first")
+    second = profile_keys.add(prof, "sk-pool-second", "second")
+    return prof, first, second
+
+
+def test_profile_backend_uses_the_pinned_pool_key(config_file):
+    _prof, first, _second = _pooled_profile()
+    backend = briefing.profile_backend("brief", key_id=first.id)
+    assert backend.api_key == "sk-pool-first"
+    assert backend.key_id == first.id
+
+
+def test_profile_backend_unpinned_reads_the_token_file(config_file):
+    """No pin: the token file as before — and the pool is not moved by a read."""
+    prof, _first, second = _pooled_profile()
+    backend = briefing.profile_backend("brief")
+    assert backend.api_key == "sk-pool-second"
+    # the display half names which pool key that token is
+    assert backend.key_id == second.id
+    pool = profile_keys.load(prof)
+    assert pool.cursor == second.id
+    assert all(k.use_count == 0 for k in pool.keys)
+
+
+def test_profile_backend_refuses_a_pin_the_pool_does_not_hold(config_file):
+    _pooled_profile()
+    with pytest.raises(briefing.BriefingError, match="holds no key"):
+        briefing.profile_backend("brief", key_id="k-nope")
+
+
+def test_profile_backend_refuses_a_pin_without_a_pool(config_file):
+    _profile_backend_config()
+    with pytest.raises(briefing.BriefingError, match="no key pool"):
+        briefing.profile_backend("brief", key_id="k-nope")
+
+
+def test_llm_config_carries_the_pin_to_the_call(config_file):
+    _prof, first, _second = _pooled_profile()
+    store.update(
+        lambda doc: doc.update(
+            {"llm": {"profile": "brief", "key_id": first.id}}
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["api_key"] == "sk-pool-first"
+    assert cfg["key_id"] == first.id
+
+
+def test_llm_config_drops_the_pin_with_the_profile(config_file):
+    """A pin names a key of a profile's pool; with no profile it is inert."""
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "m",
+                    "api_key": "sk-typed",
+                    "key_id": "k-orphan",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["key_id"] == ""
+    assert cfg["api_key"] == "sk-typed"
+
+
+def test_llm_config_stale_pin_leaves_the_feature_off(config_file):
+    """A removed key is an error at compose time, not a silent other key."""
+    _pooled_profile()
+    store.update(
+        lambda doc: doc.update({"llm": {"profile": "brief", "key_id": "k-gone"}})
+    )
+    cfg = briefing.llm_config()
+    assert (cfg["endpoint"], cfg["api_key"], cfg["key_id"]) == ("", "", "")
+    assert not briefing.llm_configured(cfg)
+
+
+def test_preset_pins_a_pool_key(config_file):
+    _prof, first, _second = _pooled_profile()
+    store.update(
+        lambda doc: doc.update(
+            {
+                "llm": {
+                    "presets": [
+                        {"id": "pooled", "profile": "brief", "key_id": first.id}
+                    ],
+                    "preset": "pooled",
+                }
+            }
+        )
+    )
+    cfg = briefing.llm_config()
+    assert cfg["api_key"] == "sk-pool-first"
+    assert cfg["key_id"] == first.id
+    rows = {r["id"]: r for r in briefing.presets_for_display()}
+    assert rows["pooled"]["key_id"] == first.id
+    assert rows["pooled"]["resolved"]["key_id"] == first.id
+    # the payload crosses to a browser: ids and masks, never a token
+    assert "sk-pool" not in json.dumps(rows)
+
+
+# --------------------------------------------------------------------------- #
 # presets — several saved backends, one of them switched on
 # --------------------------------------------------------------------------- #
 _DIRECT_CHEAP = {
@@ -492,6 +606,7 @@ def test_presets_for_display_never_carry_a_key(config_file):
         "model": "glm-small",
         "has_key": True,
         "provider": "",  # typed in directly: it belongs to no provider entry
+        "key_id": "",  # no profile, so no pool to pin in
     }
     assert rows["big"]["resolved"]["has_key"] is True
     assert rows["big"]["resolved"]["model"] == "deepseek-flash"
@@ -2113,6 +2228,8 @@ def test_briefing_llm_settings_endpoint_reads_and_saves(home):
                 "endpoint": "https://example.test/v1/chat/completions",
                 "model": "glm-small",
                 "has_key": True,
+                # the profile holds no key pool, so nothing to pin or report
+                "key_id": "",
                 # the provider decides which request headers go out
                 "provider": "ds",
             }
@@ -2248,6 +2365,129 @@ def test_briefing_llm_settings_key_handling_and_refusals(home):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_briefing_llm_key_pin_through_the_settings_endpoint(home):
+    """The card's key pin: offered per profile, saved, resolved — never a token."""
+    _prof, first, second = _pooled_profile()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.get("/api/briefing/llm", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            row = next(r for r in body["profiles"] if r["name"] == "brief")
+            assert [k["id"] for k in row["keys"]] == [first.id, second.id]
+            # the token file holds the second key (add() made it effective)
+            assert [k["current"] for k in row["keys"]] == [False, True]
+            assert "sk-pool" not in json.dumps(body)
+
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"profile": "brief", "key_id": first.id},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["key_id"] == first.id
+            assert body["resolved"]["key_id"] == first.id
+            assert body["configured"] is True
+            assert "sk-pool" not in json.dumps(body)
+            # and it is the file that changed, so the next briefing agrees
+            assert briefing.llm_config()["api_key"] == "sk-pool-first"
+            assert store.load()["llm"]["key_id"] == first.id
+
+            # a pin the pool does not hold is refused, and changes nothing
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"profile": "brief", "key_id": "k-nope"},
+            )
+            assert resp.status == 400
+            assert "holds no key" in (await resp.json())["error"]
+            assert store.load()["llm"]["key_id"] == first.id
+
+            # unpinning is a blank value
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={"profile": "brief", "key_id": ""},
+            )
+            assert resp.status == 200
+            assert (await resp.json())["key_id"] == ""
+            assert "key_id" not in store.load()["llm"]
+
+            # a pin without a profile is dropped, not stored
+            resp = await client.put(
+                "/api/briefing/llm", headers=BEARER,
+                json={
+                    "profile": "",
+                    "key_id": first.id,
+                    "endpoint": "https://typed.example/v1/chat/completions",
+                    "model": "m",
+                    "api_key": "sk-typed",
+                },
+            )
+            assert resp.status == 200
+            block = store.load()["llm"]
+            assert "key_id" not in block and "profile" not in block
+            assert briefing.llm_config()["api_key"] == "sk-typed"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_llm_test_sends_the_pinned_key(home):
+    """``POST /api/briefing/llm/test`` with a pin authenticates with that key.
+
+    The probe walks the same resolution as the save, so what is asserted is
+    the Authorization header the fake endpoint actually received.
+    """
+    from aiohttp import web as aioweb
+
+    _prof, first, _second = _pooled_profile()
+    seen = {"auth": []}
+
+    async def handler(request):
+        seen["auth"].append(request.headers.get("Authorization"))
+        return aioweb.json_response(_llm_answer("pong"))
+
+    async def run():
+        server = await _start_llm(handler)
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            store.update(
+                lambda doc: doc["providers"]["ds"].update(
+                    {"endpoints": {"openai": str(server.make_url("/v1"))}}
+                )
+            )
+            resp = await client.post(
+                "/api/briefing/llm/test", headers=BEARER,
+                json={"profile": "brief", "model": "", "key_id": first.id},
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["ok"] is True
+            assert body["key_id"] == first.id
+
+            # without the pin the probe takes the token file's key
+            resp = await client.post(
+                "/api/briefing/llm/test", headers=BEARER,
+                json={"profile": "brief", "model": ""},
+            )
+            assert (await resp.json())["ok"] is True
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+    # the pinned call first, then the token file's key for the unpinned one
+    assert seen["auth"] == ["Bearer sk-pool-first", "Bearer sk-pool-second"]
 
 
 def test_briefing_llm_presets_save_switch_and_keep_their_keys(home):
