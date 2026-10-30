@@ -86,10 +86,12 @@ kinds:
   # terminal is the one who does. It is read here because it is the same
   # kind of stop (nobody else can move the session), and `resolved_by:
   # input` is what keeps it apart from the account and service faults above.
-  # The window is the length of the other short faults; detection reads the
-  # screen and cannot see that the key was pressed, so the badge stays for
-  # the window after the prompt is gone. Nothing acts on this record --
-  # there is no send-keys and no auto-release (claunch-pczoc.3).
+  # The window is the length of the other short faults; it is only the upper
+  # bound here, because an answered prompt leaves the screen's live region
+  # and the detector closes the run early when its message is gone from a
+  # changed screen (daemon/session_fault.py, claunch-4ghrr). Nothing acts on
+  # this record -- there is no send-keys and no auto-release
+  # (claunch-pczoc.3).
   awaiting_input:
     label: waiting for input
     action: answer the prompt on the session's terminal

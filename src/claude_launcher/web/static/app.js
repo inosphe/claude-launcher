@@ -8093,7 +8093,8 @@ function railQuietFlags(name) {
           ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
             "window and never extends the last one\n"
           : "") +
-        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"}.`,
+        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
+        "or until the message scrolls off a changing screen.",
     });
   }
   // Exited rows are left out: a record with no terminal holds nothing back

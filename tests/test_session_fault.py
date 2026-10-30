@@ -5,7 +5,8 @@ matched here against its declared kind, so a pattern that drifts away from
 the message it was collected from fails the suite instead of silently
 missing live faults. The detector is read from the bottom of the rendered
 screen, skips diff and tool-call rows, and keeps a fault until its window
-(or the reset time the message names) runs out.
+(or the reset time the message names) runs out -- or until a changed screen
+no longer shows the message, which closes the run early (claunch-4ghrr).
 """
 
 from __future__ import annotations
@@ -797,6 +798,89 @@ def test_a_line_that_keeps_scrolling_holds_the_badge_one_window_at_a_time():
     view = det.view(now=1000.0 + 1800)
     assert view["strikes"] == 2
     assert view["active"] is False
+
+
+# A screen that moved past the fault: the error line left the live region
+# under freshly painted work rows (s6081/s6082, 2026-10-30 -- the sessions
+# retried through their 429 and worked below it while the badge sat out its
+# fifteen minutes).
+RECOVERED_SCREEN = (
+    "⏺ Search(pattern: session_fault)",
+    "  found 12 files",
+    "the label now clears when the message leaves the live region",
+)
+
+
+def test_a_message_that_scrolls_out_closes_the_run_early():
+    """The scan runs only on a changed screen, and a stopped session has
+    nothing that would push its fault line out of the tail -- so the message
+    being gone from the live region means the stop is visibly over, and the
+    badge comes down then instead of at the window's end (claunch-4ghrr)."""
+    det, now = _detector()
+    det.scan(_Screen("API Error: Request rejected (429) · rate limit"), now=1000.0)
+    assert det.view(now=1000.0)["active"] is True
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    view = det.view(now=1005.0)
+    assert view["active"] is False
+    assert view["cleared"] == "1970-01-01T00:16:45+00:00"
+    # The window the run was opened with stays on the record.
+    assert view["until"] == "1970-01-01T00:31:40+00:00"
+
+
+def test_a_blank_read_does_not_clear_the_record():
+    """A tail of nothing (a momentarily blank redraw) is not evidence: the
+    early close needs rows that could only have painted after the stop."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    det.scan(_Screen(), now=1005.0)
+    view = det.view(now=1005.0)
+    assert view["active"] is True
+    assert view["cleared"] == ""
+
+
+def test_a_cleared_run_that_matches_again_is_a_new_sighting():
+    """A run closed early is closed like one whose window ran out: the same
+    kind coming back opens a new run and counts a strike."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    det.scan(_Screen(WEEKLY), now=1010.0)
+    view = det.view(now=1010.0)
+    assert view["strikes"] == 2
+    assert view["active"] is True
+    assert view["cleared"] == ""
+    assert view["since"] == "1970-01-01T00:16:50+00:00"
+
+
+def test_an_answered_prompt_clears_without_waiting_out_the_window():
+    """awaiting_input: the prompt leaving the screen is the keystroke made
+    visible, so the badge no longer sits out the fifteen minutes."""
+    det, now = _detector()
+    det.scan(_Screen(*AWAITING_PROMPT), now=1000.0)
+    assert det.view(now=1000.0)["kind"] == "awaiting_input"
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    assert det.view(now=1005.0)["active"] is False
+
+
+def test_an_expired_record_is_not_rewritten_by_a_later_clear_scan():
+    """The early close marks runs that were still active; one that already
+    expired keeps its plain expiry."""
+    catalog = session_fault.load(
+        "version: 1\n"
+        "kinds:\n"
+        "  usage_limit: {label: usage limit, action: wait, window: 60, resolved_by: account}\n"
+        "common: []\n"
+        "harnesses:\n"
+        "  claude:\n"
+        "    - kind: usage_limit\n"
+        "      pattern: 'weekly limit'\n"
+    )
+    det, now = _detector(catalog=catalog)
+    det.scan(_Screen("You've hit your weekly limit"), now=1000.0)
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1070.0)
+    view = det.view(now=1070.0)
+    assert view["active"] is False
+    assert view["cleared"] == ""
 
 
 def test_a_second_scan_inside_the_interval_is_throttled():
