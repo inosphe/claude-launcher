@@ -5076,7 +5076,7 @@ async def h_briefing_llm_save(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
     after = briefing.llm_config(saved)
     if (after["endpoint"], after["model"]) != (before["endpoint"], before["model"]):
-        briefing.retire_all()
+        await briefing.retire_all_async()
     return json_response(_llm_settings_payload(saved))
 
 

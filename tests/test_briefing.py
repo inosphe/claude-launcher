@@ -1086,6 +1086,37 @@ def test_the_fleet_file_is_split_into_session_files_once(home):
     assert legacy.with_name("briefings.json.migrated").is_file()
 
 
+def test_migration_compares_generation_times_as_instants(home):
+    """Which of two rows is later is a question about moments, not text.
+
+    ``09:30+09:00`` is 00:30 UTC: earlier than the fleet row's 01:00 UTC
+    though its digits sort later, and ``01:30+09:00`` (16:30 UTC the day
+    before) is earlier still. A file with no time at all loses to any row
+    that has one."""
+    rows = {
+        "s1": "2026-10-28T09:30:00+09:00",
+        "s2": "2026-10-28T01:30:00+09:00",
+        "s3": "",
+    }
+    for name, at in rows.items():
+        paths.session_dir(name).mkdir(parents=True)
+        (paths.session_dir(name) / "briefing.json").write_text(
+            json.dumps(_brief_row("own", at)), encoding="utf-8")
+    paths.session_dir("s4").mkdir(parents=True)
+    (paths.session_dir("s4") / "briefing.json").write_text(
+        json.dumps(_brief_row("own later", "2026-10-28T10:30:00+09:00")), encoding="utf-8")
+    legacy = paths.briefings_json()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        name: _brief_row("fleet", "2026-10-28T01:00:00+00:00")
+        for name in ("s1", "s2", "s3", "s4")
+    }), encoding="utf-8")
+
+    briefing._loaded_cache_path = None
+    assert [briefing.digest(n)["one_line"] for n in ("s1", "s2", "s3", "s4")] == [
+        "fleet", "fleet", "fleet", "own later"]
+
+
 def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     """A model change used to clear the whole cache, and the rail of 636
     sessions lost every one-liner at once — exited sessions included, which
@@ -1112,6 +1143,46 @@ def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     assert briefing._cache["s1"][0] == (*key, "retired")
     assert briefing._cache["s1"][0] != key
     assert briefing.cached_result("s1") is None
+
+
+def test_retire_all_async_writes_the_files_off_the_event_loop(home, monkeypatch):
+    """Saving a new model retires every session's file — 639 took 183ms on
+    the live daemon, inside the request. The async form changes the entries
+    on the loop (the next poll reads them stale at once) and writes the files
+    from a worker thread; a write that lands after the loop replaced an
+    entry carries the replacement, so retiring never puts the old one back."""
+    import threading
+
+    for name in ("s1", "s2"):
+        paths.session_dir(name).mkdir(parents=True)
+        briefing._cache[name] = (("k",), _brief_row(name, "t")["result"])
+    briefing._loaded_cache_path = paths.sessions_root()
+    writers = []
+    real = briefing._write_file
+    monkeypatch.setattr(briefing, "_write_file", lambda path, row: (
+        writers.append(threading.current_thread()), real(path, row))[-1])
+
+    async def run():
+        loop_thread = threading.current_thread()
+        await briefing.retire_all_async()
+        return loop_thread
+
+    loop_thread = asyncio.run(run())
+    assert writers and all(t is not loop_thread for t in writers)
+    for name in ("s1", "s2"):
+        row = json.loads((paths.session_dir(name) / "briefing.json").read_text(encoding="utf-8"))
+        assert row["result"]["stale"] is True and row["key"] == ["k", "retired"]
+
+    # the loop composed s1 anew after the entries were retired and before
+    # the worker reached its file: the file holds the new answer
+    briefing._cache["s1"] = (("k",), _brief_row("s1", "t")["result"])
+    names = briefing._retire_entries()
+    assert names == ["s1"]
+    briefing._cache["s1"] = (("k2",), _brief_row("new", "t")["result"])
+    briefing._write_each(names)
+    row = json.loads((paths.session_dir("s1") / "briefing.json").read_text(encoding="utf-8"))
+    assert row["key"] == ["k2"]
+    assert row["result"]["briefing"]["one-line-job-description"] == "new"
 
 
 def test_retire_all_does_not_recreate_a_cleared_session(home):
