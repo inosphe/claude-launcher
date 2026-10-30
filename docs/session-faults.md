@@ -221,6 +221,21 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 - MCP 도구 `session_faults`: 같은 조회의 읽기 전용 래퍼. 에이전트가 피어의
   한도 소진을 `capture-pane` 없이 확인하는 경로다.
 
+## fault가 바꾸는 데몬 동작
+
+- cflow v2 재촉(renudge): fault가 활성인 driver에는 재촉 메시지를 보내지
+  않는다(`Cflow2Clock._driver_faulted`, claunch-ijot0). 모든 kind가 대상이다.
+  fault 상태의 하네스는 입력마다 같은 fault 문구로 답하므로, 재촉은 화면만
+  채운다(s29: 주간 한도 상태에서 10분마다 8시간 동안 입력됨). 바쁜 driver와
+  같은 방식으로 건너뛰어 간격을 쓰지 않으므로, fault 창이 끝난 뒤 첫 pass에서
+  한 번 재촉한다. 런이 실제로 움직인 알림(wait 발화, 위임 완료)은 그대로 보낸다.
+- 자동 pause: `usage_limit`이 활성인 idle 세션은 데몬이 pause한다
+  (`daemon/fault_pause.py`, 30초 주기, `ended_by`는 `daemon`/`usage-limit`).
+  pause된 세션은 입력을 받지 않고, 리더면 아래 카드도 내려간다. 바쁜 세션은
+  pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
+  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
+  `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+
 ## 리더 fault 알림 (fatal)
 
 리더 역할 세션이 멈추면 그 세션 하나의 문제가 아니다. 착지 요청·통합·심사가
