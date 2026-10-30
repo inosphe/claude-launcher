@@ -309,6 +309,8 @@ function build(opts) {
     " setRailSkew(v) { railClockSkew = v; }," +
     " noticeClocksPaint," +
     " noticeCardAdd, noticeFlipRead, noticeFlipMove, noticeNewerFirst," +
+    " noticeWaitingFoldSet, noticeCriteriaOf, noticeFoldedShows," +
+    " get noticeWaitingFolded() { return noticeWaitingFolded; }," +
     " mk: (cls, text) => el(\"div\", cls, text)," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -2912,6 +2914,136 @@ function gotoRec(rec) {
           w.api.railSkewOf(undefined, null) === null,
           w.api.railSkewOf(undefined, null));
   }
+  /* --- the criteria a notice carries, and the folded waiting list -------
+     (thread th-3b3470, 2026-10-30)
+
+     The reader asked for a few consistent criteria instead of one card
+     being ordered against another. The words are derived from what a notice
+     already is (`fatal`, `blocking`, `urgent`, `expiring`) plus one a step
+     declares (`deferrable`, from ask.criteria), and a folded "Waiting on
+     you" keeps fatal ∪ urgent ∪ (blocking − deferrable). The fold starts
+     expanded, its state is this browser's, and a folded list still counts
+     everything: the heading's number is the whole waiting set. */
+  {
+    const w = build();
+    check("a gate is blocking", w.api.noticeCriteriaOf(
+      { gateType: "restart", id: "r1" }).has("blocking"), null);
+    check("a fatal notice is fatal", w.api.noticeCriteriaOf(
+      { kind: "fatal", source: "fault" }).has("fatal"), null);
+    check("an urgent gate is both blocking and urgent",
+      ["blocking", "urgent"].every((c) =>
+        w.api.noticeCriteriaOf({ gateType: "ask", urgent: true }).has(c)), null);
+    check("a deadline within the window makes a gate expiring",
+      w.api.noticeCriteriaOf({ gateType: "restart",
+        deadline: new Date(BASE + 60000).toISOString() }).has("expiring"), w.clock.at);
+    check("a far-off deadline does not",
+      !w.api.noticeCriteriaOf({ gateType: "restart",
+        deadline: new Date(BASE + 3600000).toISOString() }).has("expiring"), null);
+    check("a plain notice carries no criterion",
+      w.api.noticeCriteriaOf({ source: "thread", title: "reply" }).size === 0, null);
+    check("deferrable is read off the record",
+      w.api.noticeCriteriaOf({ gateType: "ask", criteria: ["deferrable"] })
+        .has("deferrable"), null);
+    check("folded keeps blocking but drops deferrable",
+      w.api.noticeFoldedShows(new Set(["blocking"])) &&
+        !w.api.noticeFoldedShows(new Set(["blocking", "deferrable"])), null);
+    check("folded keeps fatal and urgent",
+      w.api.noticeFoldedShows(new Set(["fatal"])) &&
+        w.api.noticeFoldedShows(new Set(["urgent"])), null);
+    check("folded shows nothing for a notice with no criterion",
+      !w.api.noticeFoldedShows(new Set()), null);
+  }
+  {
+    const w = build();
+    const landing = { id: "ask2-land", session: "s3", cwd: "/w/s3", scope: "s3",
+      version: 2, kind: "ask", label: "landing-review", prompt: "land it?",
+      presses: [] };
+    const ending = { id: "ask2-end", session: "s4", cwd: "/w/s4", scope: "s4",
+      version: 2, kind: "ask", label: "release-decision", prompt: "end or hold?",
+      criteria: ["deferrable"], presses: [] };
+    w.api.runGateSync([landing, ending], []);
+    w.api.noticePanelToggle(true);
+    check("both waiting requests are listed while the list is expanded",
+          /Waiting on you \(2\)/.test(w.panel()) && w.panelRows().length === 2, w.panel());
+    check("the fold starts expanded", w.api.noticeWaitingFolded === false, null);
+    check("and offers a Fold press", !!w.press(w.nodes["notice-panel-body"], "Fold"),
+          w.panel());
+    w.press(w.nodes["notice-panel-body"], "Fold").click();
+    check("folding keeps the blocking request",
+          w.panelRows().length === 1 && /landing-review/.test(w.panel()), w.panel());
+    check("and keeps the deferred one counted, not hidden silently",
+          /Waiting on you \(2\)/.test(w.panel()) && /1 more waiting/.test(w.panel()),
+          w.panel());
+    check("the choice is this browser's", w.storage.getItem("claunch.noticeWaitingFolded") === "true",
+          [...w.storage.data.entries()]);
+    const again = build({ storage: w.storage });
+    again.api.runGateSync([landing, ending], []);
+    again.api.noticePanelToggle(true);
+    check("a reload comes back folded",
+          again.api.noticeWaitingFolded === true && again.panelRows().length === 1,
+          again.panel());
+    again.press(again.nodes["notice-panel-body"], "Expand").click();
+    check("Expand shows them all again",
+          again.panelRows().length === 2 && !/more waiting/.test(again.panel()),
+          again.panel());
+    check("an urgent request survives the fold even when its step also deferred it",
+          (() => {
+            const w2 = build();
+            w2.api.runGateSync([{ ...ending, urgent: true }], []);
+            w2.api.noticeWaitingFoldSet(true);
+            w2.api.noticePanelToggle(true);
+            return w2.panelRows().length === 1;
+          })(), null);
+  }
+  /* --- what the corner shows is in the panel (claunch-0z1ij) -------------
+
+     The reader's report: with several floating cards up, the notification
+     window's list did not contain every one of them. The two surfaces are
+     drawn from different stores — the corner from its own `notices` map, the
+     panel from `gatePending` plus the history — so the invariant worth
+     holding is "every card on the corner has a row in the panel", checked
+     here for every kind rather than for the one the report happened to
+     show. The known exception, kept visible below rather than papered over,
+     is the 100-row history cap: a sticky notice whose row was trimmed stays
+     on the corner. */
+  {
+    const w = build();
+    const before = w.api.noticeHistory.length;
+    w.api.notify("a plain notice", "its sub", { key: "plain-1", source: "thread" });
+    w.api.notify("a warning", "its sub", { key: "warn-1", source: "page", kind: "warn" });
+    w.api.notify("a stopped leader", "its sub", { key: "fatal-1", source: "fault",
+                                                  kind: "fatal", dismissable: false });
+    w.gate.restart = restartRec();
+    await w.api.refreshRestartGate();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    const said = w.said();
+    check("the corner is showing several cards of different kinds",
+          w.strip().length === 5, said);
+    w.api.noticePanelToggle(true);
+    const panel = w.panel();
+    for (const t of ["a plain notice", "a warning", "a stopped leader",
+                     "daemon restart requested", "run move requested"]) {
+      check(`the panel lists the card "${t}"`, panel.includes(t), panel);
+    }
+    check("and the fatal card keeps its grade inside the panel",
+          /notice-row[^"]*fatal/.test(
+            w.panelRows().map((r) => r.className).join(" ")),
+          w.panelRows().map((r) => r.className));
+    check("no history row was lost raising them",
+          w.api.noticeHistory.length === before + 5, w.api.noticeHistory.length);
+  }
+  /* The other direction is not asserted here, and should not be: the history
+     cap (NOTICE_HISTORY_MAX) trims the row of a notice whose card is still
+     on the corner once 100 newer rows are recorded, and nothing re-records
+     it, so that card can outlive its row and be missing from the panel
+     (claunch-0z1ij). It is written down here instead of checked so the next
+     reader does not take this harness's green as "the surfaces agree in both
+     directions" — closing the gap means keeping the row of a notice that is
+     still up, which is a change to the cap's own rule. */
+  check("the panel's fatal row carries the card's red ground, not only its edge",
+        /\.notice-row\.fatal\s*\{[^}]*background:\s*#2a1615/.test(css) &&
+          /\.notice-row\.fatal\s*\{[^}]*border-color:\s*#6b2b28/.test(css), null);
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
   else console.log("noticehistory_check: ok");

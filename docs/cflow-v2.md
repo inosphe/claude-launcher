@@ -290,6 +290,7 @@ ask:
   on_decline: declined    # 거절 시 작업의 결과 이름(기본 declined)
   on_unroutable: unrouted # 선택. 명단을 읽지 못해 아무도 찾지 못했을 때의 결과 이름
   urgent: true            # 선택. 사람의 응답을 바로 기다리는 승인(기본 false)
+  criteria: [deferrable]  # 선택. 이 질문의 알림이 갖는 기준 키워드(기본 없음)
   # options: {pass: {outcome: ok, description: …}, changes: {description: …}}
 ```
 
@@ -341,7 +342,17 @@ ask:
   `urgent_asks`(열림·응답됨, 결정)와 `answers[]`의 `urgent`·`ask`이며,
   `flow_status`의 `asks` 항목도 `urgent`를 싣는다. 끄면 지금까지와 같다.
   예: `improv-worker-v2`의 coding-approval.
-- 게이트가 열린 시각(claunch-l9znm.1): `/api/cflow2/rail`의 `answers[]` 항목마다
+- `criteria`: 이 질문의 알림이 갖는 **기준 키워드** 목록(기본 없음). 순위가 아니라
+  선언이다 — 대시보드는 알림을 순위로 줄 세우지 않고, 어떤 말을 가졌는지로 보여 줄지
+  정한다. 지금 스텝이 선언할 수 있는 말은 `deferrable` 하나다: 「지금 답하지 않아도
+  되는 질문」이라는 뜻이고, 알림 창의 「Waiting on you」가 접혀 있을 때 그 행을
+  접힌다(스레드 th-3b3470, 2026-10-30). 나머지 말은 대시보드가 알림 자체에서
+  유도한다 — `fatal`(리더가 멈춰 프로젝트가 서 있음), `blocking`(게이트 종류),
+  `urgent`(`urgent: true`), `expiring`(기한이 30분 안). `deferrable`은 `urgent`나
+  `fatal`에 지므로, 두 선언이 겹치면 보이는 쪽이 이긴다. 목록의 기본값은 빈
+  목록이고, 이 키가 없는 워크플로(예전에 컴파일된 차트 포함)는 지금과 같다.
+  `/api/cflow2/rail`의 `answers[]`와 `flow_status`의 `asks` 항목이 `criteria`를 싣는다.
+  예: `improv-worker-v2`의 `release-decision`·`end-decision`.
   `opened_at`(epoch 초)이 실린다 — 런이 그 요청으로 사람을 기다리기 시작한 시각이다.
   ask는 `asks` 기록의 `opened`(열 때 `utcnow()`)에서, `choose`는 인스턴스의
   `entered_at`에서, move는 요청의 `at`에서, 루프·방문 한도와 halt·acceptance는

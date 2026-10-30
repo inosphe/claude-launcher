@@ -5966,6 +5966,11 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
         "on_unroutable": raw.get("on_unroutable") or None,
         "urgent": raw.get("urgent") is True,
+        # What the step says about its own notice besides ``urgent``: keywords
+        # the dashboard reads, never a rank (frontend.ASK_CRITERIA). Charts
+        # compiled before this key was normalised simply carry none.
+        "criteria": [str(c) for c in (raw.get("criteria") or [])
+                     if isinstance(c, str)],
         "options": list(options) if options else None,
     }
 
@@ -6171,6 +6176,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "default_option": spec["default_option"], "timeout": spec["timeout"],
         "on_decline": None if spec["options"] else spec["on_decline"],
         "on_unroutable": spec.get("on_unroutable"), "urgent": bool(spec.get("urgent")),
+        "criteria": list(spec.get("criteria") or []),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
@@ -6506,6 +6512,7 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "options": [{"name": o["name"], "description": o.get("description") or ""}
                     for o in _ask_choices(rec)],
         "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),
+        "criteria": [str(c) for c in (rec.get("criteria") or [])],
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
         # when the ask was opened (``_open_ask``): the notification's age is

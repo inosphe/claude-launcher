@@ -23964,6 +23964,9 @@ function personGateRecords() {
         session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 2,
         kind: a.kind, label: a.label || a.instance || a.kind,
         urgent: !!a.urgent, prompt: termCflow2Question(a),
+        // What the step declared about its own notice (ask.criteria): keywords
+        // the panel shows by, never a rank (noticeCriteriaOf).
+        criteria: Array.isArray(a.criteria) ? a.criteria.slice() : [],
         presses: termCflow2Answers(r, a, session),
         // held since the run itself started waiting on a person, in the
         // daemon's epoch seconds (claunch-l9znm.1); absent for a daemon or a
@@ -60432,6 +60435,69 @@ function noticeNewerFirst(a, b) {
   return (b.at || 0) - (a.at || 0);
 }
 
+/* What a notice asks of the reader, as keywords rather than a rank
+   (thread th-3b3470, 2026-10-30: the reader asked for a few consistent
+   criteria instead of one card being ordered against another). A surface
+   shows a notice because it carries a word, never because it scored above
+   another one; adding a word is how a new kind of "show this first" is
+   written, and the words come from what the notice already is:
+
+   `fatal`      the project is stopped (a leader's harness stopped, claunch-9djny)
+   `blocking`   a person's answer is what lets anything proceed (a gate kind)
+   `urgent`     the step said so (a workflow's `urgent: true`)
+   `expiring`   a deadline settles it on its own, and that deadline is near
+   `deferrable` the step said the question can wait (`ask.criteria`)
+
+   `fatal`, `blocking` and `expiring` are read off the notice; `urgent` and
+   `deferrable` are declared by the step. `deferrable` is the one
+   subtraction: a question that can wait is still `blocking` — the run
+   stands on it — but a folded list leaves it out, because nothing else is
+   waiting on that answer. */
+const NOTICE_CRITERIA = ["fatal", "blocking", "urgent", "expiring", "deferrable"];
+/* What a folded "Waiting on you" keeps: fatal ∪ urgent ∪ (blocking − deferrable). */
+const NOTICE_FOLD_KEEPS = ["fatal", "urgent", "blocking"];
+/* How near a deadline has to be to count as `expiring`. */
+const NOTICE_EXPIRING_MS = 30 * 60 * 1000;
+
+/* The criteria of one notice. `entry` is a waiting record with `gateType`
+   filled in (noticePanelPaint does that) or a history row, whose own fields
+   carry the same facts. Unknown words are kept: the set is a vocabulary,
+   and a surface that does not know a word simply does not act on it. */
+function noticeCriteriaOf(entry) {
+  const out = new Set();
+  if (!entry) return out;
+  const words = Array.isArray(entry.criteria) ? entry.criteria : [];
+  for (const w of words) if (typeof w === "string" && w) out.add(w);
+  if (entry.kind === "fatal") out.add("fatal");
+  const type = entry.gateType
+    || (entry.gate && entry.gate.type)
+    || (entry.source && NOTICE_SOURCE.has(entry.source) ? entry.source : "");
+  const gate = !!(entry.gate
+    || (type && NOTICE_SOURCE.has(type) && NOTICE_SOURCE.get(type).gate));
+  if (gate) out.add("blocking");
+  if (entry.urgent) out.add("urgent");
+  if (gate && entry.deadline) {
+    const dead = new Date(entry.deadline).getTime();
+    if (!isNaN(dead) && dead - Date.now() <= NOTICE_EXPIRING_MS) out.add("expiring");
+  }
+  return out;
+}
+
+/* Whether a folded list shows this notice: it carries one of the kept words
+   and none of the dropped ones. A notice with no criteria at all is not
+   shown — it is what the "외 N건" line stands for.
+
+   `deferrable` loses to the words that say otherwise: a step that marks a
+   question deferrable and also `urgent` (or a notice that is `fatal`) is
+   still shown, because those two are declarations that it cannot wait and
+   the fold must not overturn one declaration with another. */
+function noticeFoldedShows(criteria) {
+  if (criteria.has("deferrable") && !criteria.has("urgent") && !criteria.has("fatal")) {
+    return false;
+  }
+  return NOTICE_FOLD_KEEPS.some((w) => criteria.has(w));
+}
+
 /* Whether this reader asked the page not to animate. A person who set
    `prefers-reduced-motion` gets the reorder without the movement — the rows
    still land in the new order, they just do not slide there. Read the way
@@ -60695,6 +60761,20 @@ function noticeFilterOf(value) {
 }
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
+/* Whether the panel's "Waiting on you" list is folded (thread th-3b3470).
+   Folded keeps only the notices whose criteria say they cannot wait
+   (noticeFoldedShows) and puts everything else behind one "N more" line.
+   The choice is this browser's, like the history filter, and it defaults to
+   expanded: a list that hides requests by default is a list that hides the
+   one that mattered. */
+const NOTICE_WAITING_FOLDED_KEY = "claunch.noticeWaitingFolded";
+let noticeWaitingFolded = noticeLoad(NOTICE_WAITING_FOLDED_KEY, false) === true;
+
+function noticeWaitingFoldSet(folded) {
+  noticeWaitingFolded = !!folded;
+  noticeSave(NOTICE_WAITING_FOLDED_KEY, noticeWaitingFolded);
+  noticePanelPaint();
+}
 /* The pending requests of each gate as its last poll answered them. */
 const gatePending = Object.fromEntries(
   NOTICE_SOURCES.filter((s) => s.gate).map((s) => [s.id, []])
@@ -61922,6 +62002,9 @@ function noticePanelState() {
     [...gateRemindIds],
     [...noticeSourcesHidden],
     noticeFilter,
+    // Folding "Waiting on you" changes what the open panel draws and nothing
+    // else in this list moves with it (thread th-3b3470), so it belongs here.
+    noticeWaitingFolded,
     runGateNudgeNotes,
     restartGateStale,
   ]);
@@ -61981,16 +62064,48 @@ function noticePanelPaint() {
   if (shownHidden) keep(shownHidden.key, () => shownHidden.node);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
-  keep(`head:waiting:${unread.length}`,
-       () => el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
+  // Folded, the list shows only what its criteria say cannot wait and puts
+  // the rest behind one line (thread th-3b3470). The unfurled list is
+  // unchanged, and so is the order in both (noticeNewerFirst).
+  const criteriaOf = ([type, rec]) => noticeCriteriaOf(Object.assign(
+    { gateType: type }, rec
+  ));
+  const shownUnread = noticeWaitingFolded
+    ? unread.filter((one) => noticeFoldedShows(criteriaOf(one)))
+    : unread;
+  const keptBack = unread.length - shownUnread.length;
+  // Its own row class rather than notice-panel-section-row: the History head
+  // below carries the filter presses, and a second row of that class would
+  // make "the section head" name two nodes (tests/web/noticehistory_check.js
+  // reads the first one for its All/Kept/Not read presses).
+  const foldHead = el("div", "notice-waiting-head");
+  foldHead.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
+  foldHead.appendChild(noticePanelButton(
+    noticeWaitingFolded ? "Expand" : "Fold",
+    noticeWaitingFolded ? "fold-open" : "fold",
+    noticeWaitingFolded
+      ? `show all ${unread.length} waiting request(s) again`
+      : "show only the ones that cannot wait — the rest stay counted here",
+    () => noticeWaitingFoldSet(!noticeWaitingFolded)
+  ));
+  keep(`head:waiting:${unread.length}:${noticeWaitingFolded ? "folded" : "open"}`,
+       () => foldHead);
   if (!waiting.length) {
     keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
   } else if (!unread.length) {
     keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
   }
-  for (const [type, rec] of unread) {
+  for (const [type, rec] of shownUnread) {
     keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
          () => noticePanelGateRow(type, rec));
+  }
+  if (keptBack > 0) {
+    // One line for what folding keeps back, so nothing is hidden silently and
+    // the count is still the count: the heading said how many there are.
+    keep(`note:folded:${keptBack}`, () => el(
+      "p", "wf-note notice-folded-note",
+      `${keptBack} more waiting — Expand shows them; each is answerable from here`
+    ));
   }
   if (read.length) {
     keep(`head:read:${read.length}`, () => el(

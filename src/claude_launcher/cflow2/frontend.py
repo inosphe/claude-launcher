@@ -980,7 +980,18 @@ def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
 
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
-            "brief", "format", "choices", "require_reason", "on_unroutable", "urgent")
+            "brief", "format", "choices", "require_reason", "on_unroutable", "urgent",
+            "criteria")
+#: What a step may say about the notice its ask raises, besides ``urgent``
+#: (which is its own boolean). These are keywords, not a rank: the dashboard
+#: shows a notice because it carries one of them, never because it scored
+#: above another one (thread th-3b3470, 2026-10-30). ``deferrable`` means the
+#: question can wait — the run stands still, nothing else is blocked by the
+#: answer — so a folded "Waiting on you" leaves it out while the run is
+#: otherwise busy. ``fatal``, ``blocking`` and ``expiring`` are derived by the
+#: dashboard from what the notice already is (a stopped leader, a gate, a
+#: deadline) and are not declared here.
+ASK_CRITERIA = ("deferrable",)
 #: ``${params.NAME}`` -- the one reference ask.format/choices/from may hold.
 _PARAM_REF = re.compile(r"^\$\{\s*\$?params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
 _PARAM_REF_BARE = re.compile(r"^\$params\.([A-Za-z_][A-Za-z0-9_]*)$")
@@ -1122,6 +1133,26 @@ def _ask_urgent(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int
     return value
 
 
+def _ask_criteria(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int) -> list:
+    """``ask.criteria``: keywords the step says about its own notice, beyond
+    ``ask.urgent``. A list of names from :data:`ASK_CRITERIA`, or nothing.
+
+    The dashboard decides how a notice is shown from these words and from
+    what the notice already is; adding a word here is how a step asks to be
+    treated differently without any surface learning its name."""
+    value = ask.get("criteria", [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ctx.err(file, aline, f"task {name!r}: ask.criteria must be a list of names")
+    for one in value:
+        if one not in ASK_CRITERIA:
+            raise ctx.err(file, aline,
+                          f"task {name!r}: ask.criteria names {one!r}; the criteria are "
+                          + ", ".join(ASK_CRITERIA))
+    return list(dict.fromkeys(value))
+
+
 def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
     """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
     default_option, timeout, on_decline, options}``.
@@ -1221,6 +1252,7 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         "on_decline": on_decline,
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "urgent": _ask_urgent(ctx, file, name, ask, aline),
+        "criteria": _ask_criteria(ctx, file, name, ask, aline),
         "options": options,
     }
 
