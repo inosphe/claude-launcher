@@ -269,6 +269,14 @@ const kv = (li) => kvOf(card(li));
   check("a row digest suppresses the identical card title", one(rows.s1), null);
   check("the full card retains its title", ctx.fullCard("s1").querySelector(".sess-brief-one").textContent,
         "착지를 관리한다");
+  /* The row line marked by the poll as failed or stale is the previous
+     answer's; a refresh that just landed repaints it, and the marks would
+     otherwise keep dimming (or reddening) the new text until the next poll. */
+  digest.className = "rail-brief failed stale";
+  digest.textContent = "이전 요약";
+  ctx.apply();
+  check("a landed refresh clears the row line's failed and stale marks",
+        [digest.className, digest.textContent], ["rail-brief", "착지를 관리한다"]);
   digest.remove();
   ctx.apply();
 
