@@ -95,11 +95,14 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
         width: tip.getBoundingClientRect().width,
         actions: actions && mid(actions),
         nameWidth: name && name.getBoundingClientRect().width,
-        /* The failure this block guards is the name stacking a character per
-           line (claunch-ku033), which is a HEIGHT event, not a width one:
-           `.rail-name` grows into free space, so the spawn+pin pair taking
-           ~44px of that space reads as a smaller nameWidth without any
-           stacking. What must hold is the name stays one line. */
+        /* Two guards on the name at 320px. nameHeight catches the failure
+           this block exists for — the name stacking a character per line
+           (claunch-ku033), which is a HEIGHT event. nameWidth keeps the
+           readable-width floor from claunch-pua72 at its original bar: the
+           spawn+pin pair rides the card's own full-width buttons line (the
+           base .rail-actions rule, flex-basis: 100%), so it takes nothing
+           from the name line — at 320px the tip's name measures the same
+           width with and without this branch. */
         nameHeight: name && name.getBoundingClientRect().height,
         buttons: Object.fromEntries(buttons.map((sel) => {
           const el = card && card.querySelector(sel);
@@ -152,8 +155,8 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
     assert.deepEqual(painted(narrow), painted(got), "narrowing does not take a control away");
     assert.ok(narrow.nameHeight <= 22,
       `at 320px the name stays one line instead of stacking (${narrow.nameHeight}px tall)`);
-    assert.ok(narrow.nameWidth >= 72,
-      `at 320px the name keeps at least its 8-character floor (${narrow.nameWidth}px)`);
+    assert.ok(narrow.nameWidth >= 100,
+      `at 320px the name keeps a readable width (${narrow.nameWidth}px)`);
     assert.deepEqual(errors, []);
     console.log("sessiongridtip_browser: ok");
   } finally {

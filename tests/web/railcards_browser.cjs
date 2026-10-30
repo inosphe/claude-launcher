@@ -158,7 +158,8 @@ const READ = `(() => {
         seen: shown(li.querySelector(".rail-seen")),
         actions: shown(li.querySelector(".rail-actions")),
         /* Measure session action buttons separately from their container.
-           On a compact card the container rides the meta line and holds
+           On a compact card the container stays the full-width buttons
+           line (the base .rail-actions rule, flex-basis: 100%) and holds
            only the spawn+pin pair (claunch-g6ecv), so both the box and the
            buttons are read painted or not. */
         actionButtons: [...li.querySelectorAll(
