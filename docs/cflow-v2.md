@@ -3338,8 +3338,8 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   tip이 실패하면 covered 작업은 그대로 두고, `unbatch --job <tip>`이 그것들을 개별
   `queued` 작업으로 풀어(`bisect_of`=tip, 저장소 pause 중에도 실행) 개별 스윕으로 원인 머지를
   좁힌다. tip을 `cancel`하면 covered 작업은 묶기 풀로 돌아간다.
-- 감시 자식: 데몬 Clock이 tip마다 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
-  spawn한다(동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
+- 감시 자식: 데몬 Clock이 tip이 `running`이 된 뒤에 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
+  spawn한다(창 순번을 기다리는 `queued` tip에는 세션이 없다. 동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
   전과 같이 데몬이 시작하고 테스트 창에서 priority -1로 대기한다. 자식은 직접 테스트를
   돌리지 않는다.
 - 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
@@ -3348,6 +3348,12 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
   (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
   좁히기 후 리더에게 한 줄을 보낸다.
+- 대기 상한: 자식은 단발성이다. 알림 8회(약 2시간) 동안 판정이 없으면 `timed-out` 단계가
+  `timed_out`, 작업 id, 큐 상태 한 줄을 보고하고 런이 끝난다(kill-on-end). `loop.max`는 상한이
+  아니다(`loop_limit`으로 사람을 기다린다). 상한 뒤에는 같은 job(같은 generation)에 감시 자식을
+  다시 세우지 않는다(`retry-watcher`가 새로 요청한다). 결과는 감시 자식과 무관하게 Clock이 소유
+  리더에게 `claunch delayed-sweep: result` 블록으로 전달하며, failed·stuck 블록은 `unbatch --job <tip>`
+  명령을 함께 싣는다.
 - 우선순위: 스윕은 priority -1이라 대기 중 단위 테스트(0)를 막지 않는다. 실행 중인 스윕은
   완료까지 독점한다.
 
