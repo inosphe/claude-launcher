@@ -3161,9 +3161,13 @@ class SessionManager:
                 else f"session {name!r} already runs on profile "
                      f"{old.profile!r}'s own token — nothing to clear"
             )
+        # A pin names a key of the pool the old answer read; a new answer to
+        # "whose token" reads another pool (or none), so the pin goes with it
+        # (claunch-e48es) and the new pool's strategy picks.
         relaunched = await self.redefine(
             name, borrow=lender, null_token=null_token,
             disable_artifact_tool=artifact_tool,
+            **({"key_id": None} if auth_changed else {}),
         )
         if auth_changed:
             details = {
@@ -3197,13 +3201,14 @@ class SessionManager:
 
         ``key_id`` must be a key of the pool the session's launch actually
         reads (``profile_keys.owner`` — a child holding no token of its own
-        pins a key of its nearest ancestor's pool). ``None`` unpins, and the
-        pool's strategy picks from the next launch on.
+        pins a key of its nearest ancestor's pool). For a borrowing session
+        that is the lender's pool, since the lender's token is what it
+        authenticates with (claunch-e48es). ``None`` unpins, and the pool's
+        strategy picks from the next launch on.
 
         Refused while nothing has been stopped: a session with no profile, a
         ``--null`` session (no token is injected, so there is no key to
-        switch), a borrowing session (the token comes from the lender), a
-        profile chain with no pool, an unknown key, and a no-op.
+        switch), a profile chain with no pool, an unknown key, and a no-op.
         """
         session = self.get(name)
         old = session.sdef
@@ -3212,18 +3217,13 @@ class SessionManager:
                 f"session {name!r} has no profile, so it reads no key pool"
             )
         try:
-            prof = profile_mod.require_selector(old.profile)
+            prof = profile_mod.require_selector(old.borrow or old.profile)
         except profile_mod.ProfileError as exc:
             raise ManagerError(str(exc)) from exc
         if old.null_token:
             raise ManagerError(
                 f"session {name!r} runs with no token (--null); there is no key "
                 "to switch"
-            )
-        if old.borrow:
-            raise ManagerError(
-                f"session {name!r} borrows {old.borrow!r}'s token; its own "
-                "profile's keys are not what this session authenticates with"
             )
         try:
             view = profile_keys.view(prof)

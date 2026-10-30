@@ -16477,6 +16477,9 @@ const newUsageState = {
    value it is, and it belongs to one profile's pool, so leaving that profile
    drops it. */
 let newSessionKeyId = "";
+// The pool selector the pin was taken from: a borrow picked or dropped moves
+// the block to another pool before its read lands (claunch-e48es).
+let newSessionKeyFor = "";
 
 /* How long ago a stamp was. Two clocks reach this and they are written
    differently: the usage cache keeps an epoch in seconds, and profile_keys
@@ -16661,6 +16664,7 @@ async function setNewKeyChoice(selector, keyId) {
   // field. There the press still decides the profile's manual key, so the
   // child launches on it by the strategy.
   newSessionKeyId = newFormCreatesTopLevel() ? keyId : "";
+  newSessionKeyFor = newSessionKeyId ? selector : "";
   await setNewKeyStrategy(profileName, selector, "manual", keyId);
 }
 
@@ -16705,12 +16709,25 @@ async function rollNewKey(selector) {
   startNewUsageRead(selector, false);
 }
 
+/* Whose pool the block reads: the Profile row's, or under a borrow the
+   lender's. A borrow runs on the lender's token, so the lender's keys are the
+   ones a launch can take and a pin can name (claunch-e48es) — the create
+   request's key_id is checked against that same pool. Asked under the
+   lender's bare name, so its usage is read by the lender's own reader. */
+function newUsageLender(f) {
+  return borrowInPlay(f && f.borrow, spawnParent());
+}
+
+function newUsageSelector(f) {
+  return newUsageLender(f) || newProfileSelector(f);
+}
+
 function renderNewUsage() {
   const box = $("new-usage");
   if (!box) return;  // a page that predates the block still runs
   const f = $("new-session");
   if (!f || !f.profile) return;
-  const selector = newProfileSelector(f);
+  const selector = newUsageSelector(f);
   if (!selector) {
     box.classList.add("hidden");
     return;
@@ -16725,6 +16742,13 @@ function renderNewUsage() {
     return;
   }
   const st = newUsageState;
+  // A pin names a key of the pool it was taken from. A borrow picked or
+  // dropped (or another profile) moves the block to another pool, and the
+  // pin goes at once rather than when that pool's read lands (claunch-e48es).
+  if (newSessionKeyId && newSessionKeyFor !== selector) {
+    newSessionKeyId = "";
+    newSessionKeyFor = "";
+  }
   // An acknowledgment belongs to the profile it was written on.
   if (st.flash && st.flashFor !== selector) {
     st.flash = "";
@@ -16754,13 +16778,15 @@ function renderNewUsage() {
   if (newSessionKeyId && doc &&
       !((doc.keys || []).some((k) => k.id === newSessionKeyId))) {
     newSessionKeyId = "";
+    newSessionKeyFor = "";
   }
 
   const who = $("new-usage-who");
   if (who) {
     const owner = doc && doc.pooled && doc.owner && doc.owner !== doc.profile
       ? ` (pool of ${doc.owner})` : "";
-    who.textContent = `Usage · ${(doc && doc.profile) || selector}${owner}`;
+    const borrowed = newUsageLender(f) ? " · borrowed" : "";
+    who.textContent = `Usage · ${(doc && doc.profile) || selector}${owner}${borrowed}`;
   }
   const when = $("new-usage-when");
   if (when) {
@@ -51024,17 +51050,26 @@ function requestSessionsRefresh() {
   }, 0);
 }
 
+/* The profile whose pool a session's launches read: its own, or under a
+   borrow the lender's, since the lender's token is what it authenticates with
+   (claunch-e48es, harness.key_pool_profile). A --null session reads none. */
+function keyPoolProfile(s) {
+  if (!s || !s.profile || s.null_token) return "";
+  return s.borrow || s.profile;
+}
+
 function railKeyChip(s) {
-  if (!s || !s.profile) return null;
-  const hit = keyPools.get(s.profile);
+  const poolProfile = keyPoolProfile(s);
+  if (!poolProfile) return null;
+  const hit = keyPools.get(poolProfile);
   if (!hit) {
-    fetchKeyPool(s.profile).then((data) => {
+    fetchKeyPool(poolProfile).then((data) => {
       if (data && data.pooled) requestSessionsRefresh();
     });
     return null;
   }
   if (Date.now() - hit.at > KEY_POOL_TTL_MS) {
-    fetchKeyPool(s.profile, { fresh: true }).then(() => requestSessionsRefresh());
+    fetchKeyPool(poolProfile, { fresh: true }).then(() => requestSessionsRefresh());
   }
   const pool = hit.data;
   if (!pool || !pool.pooled || !(pool.keys || []).length) return null;
@@ -51051,16 +51086,17 @@ function railKeyChip(s) {
   text.className = "sess-key-label";
   text.textContent = shown;
   btn.appendChild(text);
+  const borrowed = s.borrow ? ` (borrowed from ${s.borrow})` : "";
   btn.title = pinned
-    ? `pinned to key ${shown} — click to switch this session onto another key`
-    : `pool of ${pool.owner || s.profile}: next launch uses key ${shown} — `
+    ? `pinned to key ${shown}${borrowed} — click to switch this session onto another key`
+    : `pool of ${pool.owner || poolProfile}${borrowed}: next launch uses key ${shown} — `
       + "click to switch it";
   if (typeof btn.setAttribute === "function") {
     btn.setAttribute("aria-label", `session key: ${shown}`);
   }
   btn.addEventListener("click", (e) => {
     e.stopPropagation();   // the row itself attaches; this button does not
-    openKeyPicker(s.name, s.profile);
+    openKeyPicker(s.name, poolProfile);
   });
   return btn;
 }
@@ -51098,17 +51134,22 @@ function decorateKeyRow(li, s) {
     else actions.prepend(chip);
     return;
   }
-  const hit = s && s.profile ? keyPools.get(s.profile) : null;
-  if (existing && hit && (!hit.data || !hit.data.pooled)) existing.remove();
+  const poolProfile = keyPoolProfile(s);
+  const hit = poolProfile ? keyPools.get(poolProfile) : null;
+  if (existing && (!poolProfile || (hit && (!hit.data || !hit.data.pooled)))) {
+    existing.remove();
+  }
 }
 
 /* The usage selector for a session's pool: the profile asked with the
    session's harness, the way the terminal overlay asks it
    (termUsageSelectors), so a pool on an opencode or codex profile is read by
-   that harness's reader. */
+   that harness's reader. A borrowed pool is the lender's accounts, so it is
+   asked under the lender's own name and read by the lender's reader. */
 function keyPickerSelector(profile, session) {
   const harness = session && session.harness;
   if (!profile || String(profile).includes(":") || !harness) return profile;
+  if (session.borrow && session.borrow === profile) return profile;
   return `${profile}:${harness}`;
 }
 
@@ -51363,7 +51404,9 @@ async function openKeyPicker(name, profile) {
   controls.roll.addEventListener("click", roll);
   const asked = showModal({
     title: `Key for ${name}`,
-    body: `The pool of ${poolName}.\n`
+    body: `The pool of ${poolName}`
+      + (session && session.borrow ? ` — borrowed: this session runs on ${session.borrow}'s token.\n`
+        : ".\n")
       + "Switching restarts this session: the same name, the same conversation, "
       + "the harness relaunched on the key you pick. Tokens are masked here — "
       + "the modal never sees a plaintext one.",

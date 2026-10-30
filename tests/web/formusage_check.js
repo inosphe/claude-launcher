@@ -108,7 +108,8 @@ const IDS = [
 const nodes = {};
 for (const id of IDS) nodes[id] = makeNode("div");
 const document = { createElement: makeNode };
-const $ = (id) => (id === "new-session" ? { profile: {} } : nodes[id] || null);
+const form = { profile: {} };
+const $ = (id) => (id === "new-session" ? form : nodes[id] || null);
 
 /* ---- stub daemon ---- */
 const fetches = [];
@@ -135,6 +136,9 @@ let formOnScreen = true;
 const env = {
   $, document, api,
   newProfileSelector: () => selectorNow,
+  // A borrow moves the block to the lender's pool (claunch-e48es).
+  borrowInPlay: (select) => (select && !select.disabled ? String(select.value || "") : ""),
+  spawnParent: () => null,
   baseProfileName: (s) => String(s || "").split(":")[0],
   sessionFormHeld: () => formOnScreen,
   Date, Math, Number, String, JSON, encodeURIComponent, Promise,
@@ -146,6 +150,7 @@ const build = new Function(
   slice("newUsageLevel") + slice("newUsageMoney") + slice("newUsageReset") +
   slice("newUsageWindowText") + slice("newUsageWindowLine") +
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
+  slice("newUsageLender") + slice("newUsageSelector") +
   slice("renderNewUsage") + slice("startNewUsageRead") +
   slice("setNewKeyStrategy") + slice("newUsageProfileName") +
   slice("newFormCreatesTopLevel") + slice("setNewKeyChoice") +
@@ -360,8 +365,7 @@ async function main() {
 
   /* ---- one key in the pool: the row is offered, the choice is not ---- */
   selectorNow = "work:claude";
-  usage.state.at = 0;
-  usage.renderNewUsage();
+  usage.startNewUsageRead("work:claude", false);  // owns the block from here
   settle(pending.length - 1, {
     body: doc({
       pooled: true, owner: "work", strategy: "rotation",
@@ -425,6 +429,53 @@ async function main() {
   await flush();
   check("a refused write says what the daemon said", usage.state.flash,
     "unknown strategy 'weighted'");
+
+  /* ---- a borrow reads the lender's pool (claunch-e48es) ---- */
+  // The launch runs on the lender's token, so the keys a pin can name are
+  // the lender's; the block asks for them under the lender's bare name.
+  selectorNow = "work:claude";
+  usage.startNewUsageRead("work:claude", false);  // owns the block from here
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false },
+      ],
+    }),
+  });
+  await flush();
+  keysBox.children[1].children[5].click();
+  check("a pin taken on the own profile", usage.pin(), "k-2");
+  form.borrow = { value: "lend", disabled: false };
+  fetches.length = 0;
+  usage.renderNewUsage();
+  check("a borrow asks for the lender's pool", fetches[0],
+    "/api/usage/keys?profile=lend&refresh=auto");
+  check("...and drops the own profile's pin before the answer lands",
+    usage.pin(), "");
+  settle(pending.length - 1, {
+    body: doc({
+      profile: "lend", pooled: true, owner: "lend", strategy: "rotation",
+      keys: [
+        { id: "k-9", label: "lender-a", masked: "sk-L…9999", current: true, next: true },
+        { id: "k-8", label: "lender-b", masked: "sk-L…8888", current: false, next: false },
+      ],
+    }),
+  });
+  await flush();
+  check("the block says the pool is borrowed", who.textContent, "Usage · lend · borrowed");
+  check("the lender's keys are listed", keysBox.children.length, 2);
+  calls.length = 0;
+  keysBox.children[1].children[5].click();
+  check("a lender key is chosen on the lender's pool",
+    calls[0] && calls[0].url, "/api/profiles/lend/keys/strategy");
+  check("...and the session this form creates is pinned to it", usage.pin(), "k-8");
+  settle(pending.length - 1, {
+    body: { profile: "lend", owner: "lend", strategy: "manual", pick: "k-8", keys: 2 },
+  });
+  await flush();
+  form.borrow = undefined;
 
   /* ---- refresh forces the account reads ---- */
   // Not awaited: the request is issued before the first await inside, which
