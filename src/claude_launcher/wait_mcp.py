@@ -65,11 +65,16 @@ def call_tool(name: str, args: dict) -> dict:
         raise WaitMcpError(f"unknown tool {name!r}")
     seconds = _seconds(args)
     started = time.monotonic()
-    time.sleep(seconds)
-    return {
+    # Not time.sleep: a wait the host cancels ends here, instead of holding a
+    # worker for the rest of its interval (claunch-368ef).
+    cancelled = mcp_rpc.cancel_event().wait(seconds)
+    result = {
         "requested_seconds": seconds,
         "elapsed_seconds": round(time.monotonic() - started, 3),
     }
+    if cancelled:
+        result["cancelled"] = True
+    return result
 
 
 SERVER = mcp_rpc.Server(

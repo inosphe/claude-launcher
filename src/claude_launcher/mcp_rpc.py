@@ -9,16 +9,42 @@ A :class:`Server` is *what* is exposed (a name, a tool list, a dispatch
 function, the exceptions that mean "the agent asked for something impossible"
 rather than "the server broke"). :func:`merge` composes several into one, which
 is how a single ``claunch mcp`` process serves both feature sets.
+
+:meth:`Server.serve` runs each ``tools/call`` on a worker thread. The host
+sends calls concurrently and moves one that passes 120 s into the background,
+so a loop that answered one line at a time made a ``wait 600`` hold every later
+call of the session behind it (claunch-368ef). A ``notifications/cancelled``
+sets the call's :func:`cancel_event`; a call that has not started is dropped.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 PROTOCOL_VERSION = "2024-11-05"
+
+#: Worker threads for ``tools/call``. A call past this many in flight waits
+#: for a free worker.
+MAX_CALL_WORKERS = 32
+
+_current = threading.local()
+
+
+def cancel_event() -> threading.Event:
+    """The event set when the host cancels the call this thread is running.
+
+    Outside :meth:`Server.serve` (a direct :meth:`Server.handle`, a test) there
+    is no host to cancel, and the event returned is never set.
+    """
+    event = getattr(_current, "cancel", None)
+    return event if event is not None else threading.Event()
 
 
 class ToolNameCollision(Exception):
@@ -121,25 +147,81 @@ class Server:
         }
 
     def serve(self) -> int:
-        """Blocking stdio loop; returns when stdin closes."""
+        """Blocking stdio loop; returns when stdin closes.
+
+        ``tools/call`` runs on a worker thread and answers when it finishes, in
+        any order (the host matches responses by id). Everything else is
+        answered inline, in order.
+        """
         stdin = sys.stdin.buffer
         stdout = sys.stdout.buffer
-        for raw in iter(stdin.readline, b""):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                msg = json.loads(raw.decode("utf-8"))
-            except ValueError:
-                continue
-            if not isinstance(msg, dict):
-                continue
-            response = self.handle(msg)
-            if response is not None:
-                stdout.write(
-                    json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
-                )
+        write_lock = threading.Lock()
+        pending: Dict[object, threading.Event] = {}
+        pending_lock = threading.Lock()
+
+        def write(response: dict) -> None:
+            data = json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
+            with write_lock:
+                stdout.write(data)
                 stdout.flush()
+
+        def run_call(msg: dict, cancel: threading.Event) -> None:
+            msg_id = msg.get("id")
+            try:
+                if cancel.is_set():
+                    return
+                _current.cancel = cancel
+                response = self.handle(msg)
+            except BaseException:
+                # An exception outside ``errors`` is a bug and kills the
+                # process, as it did when calls ran on the main thread.
+                traceback.print_exc()
+                sys.stderr.flush()
+                os._exit(1)
+            finally:
+                _current.cancel = None
+                with pending_lock:
+                    if pending.get(msg_id) is cancel:
+                        del pending[msg_id]
+            # The host has dropped a cancelled request; a late answer to it
+            # is not sent.
+            if response is not None and not cancel.is_set():
+                write(response)
+
+        with ThreadPoolExecutor(max_workers=MAX_CALL_WORKERS,
+                                thread_name_prefix="mcp-call") as pool:
+            for raw in iter(stdin.readline, b""):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                method = msg.get("method")
+                msg_id = msg.get("id")
+                if method == "tools/call" and isinstance(msg_id, (str, int)):
+                    cancel = threading.Event()
+                    with pending_lock:
+                        pending[msg_id] = cancel
+                    pool.submit(run_call, msg, cancel)
+                    continue
+                if method == "notifications/cancelled":
+                    request_id = (msg.get("params") or {}).get("requestId")
+                    with pending_lock:
+                        cancel = pending.get(request_id) if isinstance(request_id, (str, int)) else None
+                    if cancel is not None:
+                        cancel.set()
+                    continue
+                response = self.handle(msg)
+                if response is not None:
+                    write(response)
+            # stdin closed: the host is gone, so nothing in flight is wanted.
+            with pending_lock:
+                for cancel in pending.values():
+                    cancel.set()
         return 0
 
 
