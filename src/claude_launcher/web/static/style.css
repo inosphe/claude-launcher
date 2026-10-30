@@ -7727,6 +7727,17 @@ body.embed #main { width: 100%; }
 .notice-panel-section-row { display: flex; align-items: baseline; gap: 8px; }
 .notice-panel-section-row .notice-panel-section { flex: 1; }
 .notice-panel-section-row .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
+/* Folding "Waiting on you" (thread th-3b3470): the line left behind says how
+   many the fold keeps back, so a folded list never hides a request silently. */
+.notice-folded-note { margin: 2px 0 8px; }
+.notice-panel-section-row .wf-btn.fold-open { color: #58a6ff; }
+/* The Waiting head carries the fold press beside its heading (thread
+   th-3b3470). Its own class, not notice-panel-section-row: that one names
+   the History head, which is where the filter presses live. */
+.notice-waiting-head { display: flex; align-items: baseline; gap: 8px; }
+.notice-waiting-head .notice-panel-section { flex: 1; }
+.notice-waiting-head .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
+.notice-waiting-head .wf-btn.fold-open { color: #58a6ff; }
 .notice-row {
   background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
   border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
@@ -7740,8 +7751,16 @@ body.embed #main { width: 100%; }
 .notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
 .notice-row.bad { border-left-color: #ff7b72; }
 /* The history keeps a raised leader fault (claunch-9djny) after the card is
-   gone, with the same grade the card carried. */
-.notice-row.fatal { border-left-color: #f85149; }
+   gone, with the same grade the card carried. The grade is the card's, not a
+   thinner one (thread th-3b3470): the panel is where the reader goes to find
+   the card again, and a row that dropped the red ground read as an ordinary
+   request. warn and bad already match their cards above. */
+.notice-row.fatal {
+  border-left: 5px solid #f85149; border-color: #6b2b28; background: #2a1615;
+}
+.notice-row.fatal .notice-title { color: #ffb3ad; font-weight: 600; }
+.notice-row.fatal .notice-sub,
+.notice-row.fatal .notice-when { color: #e6b3ae; }
 .notice-row.openable { cursor: pointer; }
 .notice-row.openable:hover { background: #20242b; }
 /* Read marks (claunch-x76l8): an unread row has a dot and full colour, a

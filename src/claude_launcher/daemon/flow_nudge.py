@@ -213,6 +213,7 @@ def v2_gates(entry: dict) -> list:
             "kind": kind, "instance": a.get("instance"), "ask_id": a.get("ask"),
             "request": a.get("request"), "label": a.get("label") or a.get("instance") or kind,
             "prompt": prompt, "urgent": bool(a.get("urgent")),
+            "criteria": [str(c) for c in (a.get("criteria") or [])],
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in a.get("options") or [] if isinstance(o, dict)],
             "presses": v2_presses(entry, a),

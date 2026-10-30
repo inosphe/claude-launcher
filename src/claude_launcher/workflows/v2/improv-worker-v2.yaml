@@ -6528,6 +6528,10 @@ procedures:
                     bind: end_decision
                     with:
                       require_reason: true
+                      # 종료 질문은 회차가 끝난 뒤에 서는 질문이라 답이 늦어도 잃는
+                      # 것이 없다 — 알림이 `deferrable`을 선언해 창의 접힌 목록에서
+                      # 빠진다(스레드 th-3b3470, 2026-10-30 사용자 결정).
+                      criteria: [deferrable]
                       # 질문이 사람 앞에 서는 순간을 대시보드에 올린다(claunch-q4cqy.4):
                       # 드라이버가 부르지 않으면 5분 기한이 도는 것도 사용자에게 닿지
                       # 않아, 답이 없어 auto-release로 넘어간 사실을 나중에야 알게 된다.
@@ -6606,6 +6610,13 @@ procedures:
               bind: release_decision
               with:
                 require_reason: true
+                # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
+                # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
+                # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
+                # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
+                # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
+                # 영향받지 않는다.
+                criteria: [deferrable]
                 # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
                 # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
                 nudge: |

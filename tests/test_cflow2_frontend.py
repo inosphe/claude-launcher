@@ -134,6 +134,22 @@ def test_task_validation_errors():
     assert "unknown task 'zz'" in err("body: zz\n")
 
 
+def test_ask_criteria_is_a_declared_keyword_list():
+    """``ask.criteria`` (thread th-3b3470): what a step says about the notice
+    its question raises, as keywords rather than a rank. The words are a
+    closed set — the dashboard acts on them, so an unknown one is refused
+    where it is written instead of silently doing nothing."""
+    chart = C("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: [deferrable]}}\n")
+    assert chart.node("x").get("ask")["criteria"] == ["deferrable"]
+    # Absent means "no declaration", not "some default word".
+    plain = C("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q}}\n")
+    assert plain.node("x").get("ask")["criteria"] == []
+    msg = err("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: [someday]}}\n")
+    assert "someday" in msg and "deferrable" in msg
+    assert "list of names" in err(
+        "body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: deferrable}}\n")
+
+
 def test_fragments_expand_nested_and_text_id_ignores_values():
     chart = C("body: x\n", """
         fragments:

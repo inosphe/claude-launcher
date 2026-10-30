@@ -1100,6 +1100,9 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
         out.append({
             "kind": "ask", "instance": a.get("instance"), "ask": a.get("ask"),
             "urgent": bool(a.get("urgent")),
+            # What the step declared about its own notice (ask.criteria):
+            # keywords the dashboard shows by, carried through unchanged.
+            "criteria": [str(c) for c in (a.get("criteria") or [])],
             "label": a.get("label") or a.get("node"),
             "prompt": _rail_prompt(a.get("question_text") or a.get("prompt")
                                    or a.get("title")),
