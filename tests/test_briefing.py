@@ -1086,6 +1086,37 @@ def test_the_fleet_file_is_split_into_session_files_once(home):
     assert legacy.with_name("briefings.json.migrated").is_file()
 
 
+def test_migration_compares_generation_times_as_instants(home):
+    """Which of two rows is later is a question about moments, not text.
+
+    ``09:30+09:00`` is 00:30 UTC: earlier than the fleet row's 01:00 UTC
+    though its digits sort later, and ``01:30+09:00`` (16:30 UTC the day
+    before) is earlier still. A file with no time at all loses to any row
+    that has one."""
+    rows = {
+        "s1": "2026-10-28T09:30:00+09:00",
+        "s2": "2026-10-28T01:30:00+09:00",
+        "s3": "",
+    }
+    for name, at in rows.items():
+        paths.session_dir(name).mkdir(parents=True)
+        (paths.session_dir(name) / "briefing.json").write_text(
+            json.dumps(_brief_row("own", at)), encoding="utf-8")
+    paths.session_dir("s4").mkdir(parents=True)
+    (paths.session_dir("s4") / "briefing.json").write_text(
+        json.dumps(_brief_row("own later", "2026-10-28T10:30:00+09:00")), encoding="utf-8")
+    legacy = paths.briefings_json()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        name: _brief_row("fleet", "2026-10-28T01:00:00+00:00")
+        for name in ("s1", "s2", "s3", "s4")
+    }), encoding="utf-8")
+
+    briefing._loaded_cache_path = None
+    assert [briefing.digest(n)["one_line"] for n in ("s1", "s2", "s3", "s4")] == [
+        "fleet", "fleet", "fleet", "own later"]
+
+
 def test_retire_all_keeps_every_briefing_and_marks_it_stale(home):
     """A model change used to clear the whole cache, and the rail of 636
     sessions lost every one-liner at once — exited sessions included, which

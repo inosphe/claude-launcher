@@ -1394,9 +1394,25 @@ def _read_file(path: Path):
         return None
 
 
-def _generated_at(row) -> str:
+_NEVER = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _generated_at(row) -> datetime:
+    """When ``row``'s briefing was composed, as an instant.
+
+    Compared as instants and not as text: an offset other than ``+00:00``
+    (a restore, a hand-written row) sorts by its digits, so ``09:00+09:00``
+    read as later than ``01:00+00:00`` though both are the same moment —
+    and the later of two rows is the one migration keeps. No time, or one
+    that does not parse, is the earliest.
+    """
     result = row.get("result") if isinstance(row, dict) else None
-    return str(result.get("generated_at") or "") if isinstance(result, dict) else ""
+    raw = result.get("generated_at") if isinstance(result, dict) else None
+    try:
+        at = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return _NEVER
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
 
 
 def _migrate_fleet_file() -> None:
