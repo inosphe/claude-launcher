@@ -2622,7 +2622,23 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
 .new-usage-key-used { flex: none; color: #6e7681; font-size: 11px; }
 .new-usage-key-use.bad { color: #d29922; }
-.new-usage-key-now { flex: none; color: #58a6ff; font-size: 10px; }
+/* The manual choice per row (claunch-i985h): small, quiet, and never the
+   loudest thing on a row — the usage numbers are what the block exists for. */
+.new-usage-key-take {
+  flex: none; padding: 0 6px; font-size: 10px; line-height: 16px;
+  border: 1px solid #30363d; border-radius: 4px; background: none;
+  color: #8b949e; cursor: pointer;
+}
+.new-usage-key-take:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.new-usage-key-take:disabled { opacity: .5; cursor: default; }
+.new-usage-key.next .new-usage-key-take:disabled { color: #3fb950; border-color: #2ea04366; }
+.new-usage-roll {
+  flex: none; margin-left: 6px; padding: 1px 8px; font-size: 11px;
+  border: 1px solid #30363d; border-radius: 4px; background: none;
+  color: #8b949e; cursor: pointer;
+}
+.new-usage-roll:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.new-usage-roll:disabled { opacity: .5; cursor: default; }
 .new-usage-strategy { align-items: center; gap: 6px; }
 #new-usage .new-usage-strategy { display: flex; margin: 6px 0 0; }
 .new-usage-strategy select { flex: 1 1 auto; min-width: 0; }

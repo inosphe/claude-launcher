@@ -93,13 +93,17 @@ function makeNode(tag) {
   };
   node.appendChild = (child) => { node.children.push(child); return child; };
   node.append = (...items) => { node.children.push(...items); };
+  node.addEventListener = (type, fn) => {
+    (node.listeners[type] ||= []).push(fn);
+  };
+  node.click = () => (node.listeners.click || []).forEach((fn) => fn({}));
   return node;
 }
 
 const IDS = [
   "new-usage", "new-usage-who", "new-usage-when", "new-usage-refresh",
   "new-usage-windows", "new-usage-keys", "new-strategy-row",
-  "new-key-strategy", "new-usage-note",
+  "new-key-strategy", "new-key-roll", "new-usage-note",
 ];
 const nodes = {};
 for (const id of IDS) nodes[id] = makeNode("div");
@@ -131,6 +135,7 @@ let formOnScreen = true;
 const env = {
   $, document, api,
   newProfileSelector: () => selectorNow,
+  baseProfileName: (s) => String(s || "").split(":")[0],
   sessionFormHeld: () => formOnScreen,
   Date, Math, Number, String, JSON, encodeURIComponent, Promise,
 };
@@ -142,9 +147,12 @@ const build = new Function(
   slice("newUsageWindowText") + slice("newUsageWindowLine") +
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
   slice("renderNewUsage") + slice("startNewUsageRead") +
-  slice("setNewKeyStrategy") +
-  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy, newUsageAge,"
-  + " state: newUsageState };",
+  slice("setNewKeyStrategy") + slice("newUsageProfileName") +
+  slice("newFormCreatesTopLevel") + slice("setNewKeyChoice") +
+  slice("rollNewKey") +
+  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy,"
+  + " setNewKeyChoice, rollNewKey, newUsageAge, state: newUsageState,"
+  + " pin: () => newSessionKeyId };",
 );
 const usage = build(...Object.values(env));
 
@@ -152,6 +160,7 @@ const box = nodes["new-usage"];
 const windowsBox = nodes["new-usage-windows"];
 const keysBox = nodes["new-usage-keys"];
 const select = nodes["new-key-strategy"];
+const roll = nodes["new-key-roll"];
 const strategyRow = nodes["new-strategy-row"];
 const note = nodes["new-usage-note"];
 const who = nodes["new-usage-who"];
@@ -163,7 +172,7 @@ function windowLine(name, utilization) {
 function doc(over = {}) {
   return {
     profile: "work", owner: null, pooled: false, strategy: null,
-    strategies: ["rotation", "usage-min", "usage-max", "random"],
+    strategies: ["rotation", "usage-min", "usage-max", "random", "manual"],
     next: null, next_unknown: null, unmeasurable: null, keys: [],
     usage: {
       source: "oauth-usage", cached: true, updated_at: Date.now() / 1000,
@@ -258,37 +267,96 @@ async function main() {
   check("the strategy row is offered for a pool",
     strategyRow.classList.contains("hidden"), false);
   check("the strategy select holds every strategy",
-    select.children.map((o) => o.value), ["rotation", "usage-min", "usage-max", "random"]);
+    select.children.map((o) => o.value),
+    ["rotation", "usage-min", "usage-max", "random", "manual"]);
   check("the strategy select shows the pool's answer", select.value, "rotation");
   check("a pool with two keys may set the strategy", select.disabled, false);
 
-  /* ---- a usage strategy is arithmetic here, not a preview ---- */
+  /* ---- a usage strategy names its pick, marked as this read's answer ---- */
   selectorNow = "work:claude";
   usage.state.at = 0;
   usage.renderNewUsage();
   settle(pending.length - 1, {
     body: doc({
       pooled: true, owner: "work", strategy: "usage-min",
-      next: null,
-      next_unknown: "usage-min reads every key's usage at launch and takes the lowest",
+      next: { key_id: "k-2", strategy: "usage-min", fallback: null, exact: false },
       keys: [
         { id: "k-1", label: "main", masked: "sk-A…1111", current: false,
           next: false, usage: { windows: [windowLine("five_hour", 12)], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
+          next: true, usage: { windows: [windowLine("five_hour", 80)], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  check("a usage strategy marks the row the server named",
+    [keysBox.children[0].children[0].textContent,
+     keysBox.children[1].children[0].textContent], ["", "next"]);
+  check("the note names that key and its strategy",
+    note.textContent.includes("next launch takes spare (usage-min)"), true);
+  check("...and says the launch reads the accounts again",
+    note.textContent.includes("the launch reads the accounts again"), true);
+  check("no row is marked by arithmetic any more",
+    keysBox.children[0].children.length, 6);
+
+  /* ---- the per-row manual choice writes manual + that key ---- */
+  // Pressing "use" is the manual strategy and, at creation, the pin: one
+  // click decides the profile's next key AND the session this form makes.
+  selectorNow = "work:claude";
+  calls.length = 0;
+  keysBox.children[1].children[5].click();
+  check("the row's use button is a strategy write with the key",
+    calls[0] && calls[0].url, "/api/profiles/work/keys/strategy");
+  check("...for manual, naming that key",
+    calls[0] && JSON.parse(calls[0].opts.body),
+    { strategy: "manual", key_id: "k-2" });
+  check("...and the session this form creates is pinned to it",
+    usage.pin(), "k-2");
+  settle(pending.length - 1, {
+    body: { profile: "work", owner: "work", strategy: "manual",
+            pick: "k-2", keys: 2 },
+  });
+  await flush();
+  check("the write is acknowledged", usage.state.flash, "strategy saved: manual");
+
+  /* ---- roll: random's re-draw, as many times as pressed ---- */
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "random",
+      next: { key_id: "k-1", strategy: "random", fallback: null, exact: true },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: false,
+          next: true, usage: { windows: [windowLine("five_hour", 12)], error: null } },
         { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
           next: false, usage: { windows: [windowLine("five_hour", 80)], error: null } },
       ],
     }),
   });
   await flush();
-  const first = keysBox.children[0];
-  const second = keysBox.children[1];
-  check("no row claims to be the next launch's",
-    [first.children[0].textContent, second.children[0].textContent], ["", ""]);
-  check("the lowest row is marked as arithmetic on the numbers",
-    first.children[5] && first.children[5].textContent, "lowest now");
-  check("the higher row is not marked", second.children.length, 5);
-  check("the note says the pick happens at launch",
-    note.textContent.includes("usage-min reads every key's usage"), true);
+  check("roll is offered for a pool", roll.classList.contains("hidden"), false);
+  check("the draw is named as the next launch's key",
+    note.textContent.includes("next launch takes main (random)"), true);
+  check("...and a stored draw is not hedged",
+    note.textContent.includes("reads the accounts again"), false);
+
+  calls.length = 0;
+  roll.onclick();
+  check("roll asks the daemon to draw", calls[0] && calls[0].url,
+    "/api/profiles/work/keys/roll");
+  check("...with a POST", calls[0] && calls[0].opts.method, "POST");
+  settle(pending.length - 1, {
+    body: { profile: "work", owner: "work", strategy: "random", pick: "k-2",
+            key: { id: "k-2", label: "spare", masked: "sk-B…2222" } },
+  });
+  await flush();
+  check("the draw is acknowledged", usage.state.flash, "drew spare");
+  check("a roll re-reads the block", fetches[fetches.length - 1],
+    "/api/usage/keys?profile=work%3Aclaude&refresh=auto");
+  settle(pending.length - 1, { body: doc({}) });
+  await flush();
 
   /* ---- one key in the pool: the row is offered, the choice is not ---- */
   selectorNow = "work:claude";
