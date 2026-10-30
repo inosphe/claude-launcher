@@ -429,7 +429,12 @@ def test_improv_worker_settle_before_end_holds_with_an_end_in_the_round_body():
 
     path = layers.find("improv-worker-v2")
     doc = _plain(_load_yaml(path.read_text(encoding="utf-8"), path.name))
-    body = doc["body"]["try"]["loop"]["do"]
+    # body.try holds a single step or a list of them (improv-worker-v2 seeds the
+    # round mode in front of the round loop); the round loop is the one to find.
+    steps = doc["body"]["try"]
+    steps = steps if isinstance(steps, list) else [steps]
+    loop = next(s["loop"] for s in steps if isinstance(s, dict) and "loop" in s)
+    body = loop["do"]
     body.insert(1, "end")
     text = _yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
     chart = compile_text(text, source=str(path), resolve_include=layers.resolver())

@@ -3264,7 +3264,9 @@ PR은 닫고 브랜치는 지웠다.
   그래야 다시 선 `sim-recheck`가 같은 `sim_id`를 이어 받는다.
 - 회차에서 `sim-check`가 돌지 않으면 `sim-precheck`의 else가 `sim-idle` 절차로 `data.sim`을
   초기값으로 되돌린다. 회차 중에 `required`로 바뀌어도 앞 회차의 `findings: clear`로 게이트를 통과하지 않는다.
-- stack-only 회차에서는 게이트가 막지 않는다.
+- stack-only 회차에서는 게이트가 막지 않는다. 첫 회차를 착지 절차로 시작하는
+  회차(`start_at=landing`, 회차 종류 `land-only`)에서도 마찬가지다 — 두 회차
+  종류 모두 `sim-gate`의 조건(`mode == 'full'`)에 들지 않는다.
 - 결과 해석과 원천 규칙은 `docs/simulation.md`의 해당 절에 있다.
 
 ## 11. 단계
