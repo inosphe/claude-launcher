@@ -23791,7 +23791,7 @@ function termCflow2Answers(r, a, session) {
     }));
   }
   if (a.kind === "loop_limit" || a.kind === "visit_limit") {
-    return withWake(cf2LimitPresses(a.kind === "visit_limit").map(([label, , extra]) => ({
+    return withWake(cf2LimitPresses(a.kind === "visit_limit", a.max).map(([label, , extra]) => ({
       label,
       ...(extra.by ? { cls: "approve" } : {}),
       ...(extra.stop ? { title: "it finishes with outcome fail" } : {}),
@@ -43923,11 +43923,15 @@ function cf2AskLegendItems(opts, isBrief) {
 }
 
 /* A limit card's presses as [label, meaning, body]: the body is what the
-   press adds to /api/cflow2/extend. A loop limit raises its max by 5 or 15
-   in one press (a long await loop at its max would otherwise want a press
-   per iteration); a visit limit raises by one. The engine's reset of a
-   loop's count stays on the API and CLI, not on the card (claunch-n6ms0). */
-function cf2LimitPresses(visitsKind) {
+   press adds to /api/cflow2/extend. A loop limit raises its max by a fifth
+   and three fifths of that max in one press (a loop at its max would
+   otherwise want a press per iteration): a 25-max loop gets 5 and 15, the
+   await-landing loop at max 5 gets 1 and 3 -- 15 there would open three
+   times the loop's own ceiling (claunch-gpgw1). Without a usable max the old
+   fixed pair stands, so a card drawn from an older payload still works. A
+   visit limit raises by one. The engine's reset of a loop's count stays on
+   the API and CLI, not on the card (claunch-n6ms0). */
+function cf2LimitPresses(visitsKind, max) {
   const stop = ["end it here: it finishes with outcome fail and the run follows that",
                 { stop: true }];
   if (visitsKind) {
@@ -43935,9 +43939,14 @@ function cf2LimitPresses(visitsKind) {
              { by: 1, visits: true }],
             ["Stop here", stop[0], { ...stop[1], visits: true }]];
   }
-  return [["Allow 5 more", "raise the loop's max by 5: it runs 5 more iterations", { by: 5 }],
-          ["Allow 15 more", "raise the loop's max by 15: it runs 15 more iterations",
-           { by: 15 }],
+  const n = Number(max);
+  const known = max != null && max !== "" && Number.isFinite(n) && n >= 1;
+  const small = known ? Math.max(1, Math.floor(n / 5)) : 5;
+  const big = known ? Math.max(small + 1, Math.floor(3 * n / 5)) : 15;
+  return [[`Allow ${small} more`, `raise the loop's max by ${small}: it runs ${small} more iterations`,
+           { by: small }],
+          [`Allow ${big} more`, `raise the loop's max by ${big}: it runs ${big} more iterations`,
+           { by: big }],
           ["Stop the loop", ...stop]];
 }
 
@@ -46347,7 +46356,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const limitCard = (lim, title, visitsKind) => {
     const card = cf2Card("limit", lim.label || lim.node, title);
-    const presses = cf2LimitPresses(visitsKind);
+    const presses = cf2LimitPresses(visitsKind, lim.max);
     const row = el("div", "cf2-press");
     for (const [label, , extra] of presses) {
       const b = el("button", extra.by ? "wf-btn sm approve" : "wf-btn sm", label);

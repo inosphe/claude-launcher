@@ -2261,8 +2261,13 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 - 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
   때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
   조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
-  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow 5
-  more」는 5, 「Allow 15 more」는 15)은 상한을 N만큼 올린다. `--reset`(본문
+  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`은 상한을 N만큼
+  올리고, 웹 카드·터미널 스트립의 두 버튼도 같은 것을 한다 — 그 값은 그 루프의
+  `max`에 비례한다: 1/5과 3/5(정수 내림, 각각 최소 1, 두 값은 서로 다름)라 상한
+  25인 루프는 「Allow 5 more」·「Allow 15 more」, 상한 5인 await-landing 루프는
+  「Allow 1 more」·「Allow 3 more」다(`daemon/flow_nudge.py`의 `loop_raise_steps`,
+  `app.js`의 `cf2LimitPresses`). 상한을 싣지 않은 옛 페이로드에는 5·15가 남는다.
+  `--reset`(본문
   `reset: true`, CLI·API 전용이며 웹 카드에는 버튼이 없다)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
   그때까지 올린 상한은 버린다. 반복의 위치는 유지된다: `foreach`는 다음 항목부터
   이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
