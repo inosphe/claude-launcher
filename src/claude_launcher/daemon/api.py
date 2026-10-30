@@ -753,6 +753,11 @@ def build_app(
     # to the user, answered in its QA pane and typed back into it.
     from . import qa_api
     qa_api.install(app)
+    # Session wrap-up drafts (daemon/wrapup_api.py, claunch-ar8jn): glossary,
+    # category and knowledge entries a session files, written into their
+    # stores only when the user confirms them in the wrap-up pane.
+    from . import wrapup_api
+    wrapup_api.install(app)
     # Turn-end QA nudges (daemon/qa_nudge.py, claunch-165w6): a session that
     # ended its turn asking the user in plain text is told to use qa_ask.
     # After qa_api: the clock reads app["qa"] for the agent's own writes.
