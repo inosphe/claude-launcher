@@ -53,7 +53,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from .. import metering, providers, store
-from . import sessionstats
+from . import sessionstats, tokenusage
 
 #: The windows the page offers, and how many local days each one spans
 #: (today is the current local day alone, so the page's bars line up with the
@@ -620,7 +620,8 @@ class Ledger:
     def series(self, window: str = "7d", *, sessions: Iterable[dict] = (),
                project: str = "", include_killed: bool = False,
                include_archived: bool = False,
-               now: Optional[float] = None) -> dict:
+               now: Optional[float] = None,
+               transcripts: Optional["TranscriptBins"] = None) -> dict:
         """The fleet's token use over time, for the Chart page's series.
 
         One point per bucket of :data:`SERIES_BUCKETS` chosen for the window,
@@ -636,11 +637,23 @@ class Ledger:
         contributes nothing and is counted in ``unmetered`` rather than
         drawn as zero, the same rule the overview's rows follow.
 
+        ``transcripts`` answers for the sessions the ledger has no record of:
+        an OAuth route writes no metering line, so such a session's bins come
+        from its own transcript (:class:`TranscriptBins`, claunch-gbj4h) and
+        are folded into the same points and ``by_session`` as a ledger
+        session's. Each ``by_session`` entry says which it came from in
+        ``source`` (``ledger`` or ``transcript``). Only a session the window
+        can have touched is read, at most :data:`MAX_TRANSCRIPTS` of them per
+        call (``transcript_skipped`` counts the rest, which stay unmetered),
+        and ``partial`` is set while part of a transcript is still being read
+        in the background. Omitting it leaves every such session unmetered.
+
         ``by_session`` carries the same four components per session over the
         same window and the same filters, so a row on the Chart page can print
         the figure the Stats page's table prints for it without a second read:
-        the two are one pass over one set of bins. A wanted session the ledger
-        cannot speak for is absent from the map (the page draws ``-`` there,
+        the two are one pass over one set of bins. A wanted session neither
+        the ledger nor a transcript can speak for is absent from the map (the
+        page draws ``-`` there,
         never a zero -- the overview's rule, claunch-ha2s9). Each entry also
         carries ``points``: the buckets in which that session spent anything,
         as ``[t, total, requests]`` on the same grid, so the row can draw when
@@ -657,6 +670,7 @@ class Ledger:
                 f"window must be one of: {', '.join(SERIES_WINDOWS)}")
         now = time.time() if now is None else now
         wanted = set()
+        metas: Dict[str, dict] = {}
         for item in sessions:
             name = str(item.get("name") or "")
             if not name:
@@ -667,16 +681,51 @@ class Ledger:
                        include_killed, include_archived):
                 continue
             wanted.add(name)
+            metas[name] = item
         # The ledger's own names are not added: a record whose session the
         # store no longer lists cannot be told killed from archived, so the
         # page's two boxes have nothing to act on. What the series draws is
         # what the rows beside it draw.
         unmetered = 0
-        bins = [(b, name) for name in wanted
-                for b in (self.sessions.get(name, {}).get("bins") or {})]
         span = SERIES_WINDOWS[window]
+        # (bin start, session, accumulator) from either source: the ledger's
+        # own bins, then a transcript's for a session the ledger never saw.
+        bins = [(b, name, acc) for name in wanted
+                for b, acc in (self.sessions.get(name, {}).get("bins")
+                               or {}).items()]
+        sources = {name: "ledger" for name in wanted if name in self.sessions}
+        transcript_skipped = 0
+        partial = False
+        if transcripts is not None:
+            # The aligned start can sit up to one (widest) bucket before
+            # `now - span`; reading from there leaves nothing out.
+            since = None if span is None else now - span - SERIES_BUCKETS[-1]
+            spend = transcripts.budget()
+            try:
+                read = 0
+                for name in sorted(wanted - set(sources)):
+                    item = metas.get(name) or {}
+                    sdef = item.get("sdef")
+                    last = _activity(item)
+                    if sdef is None or last is None:
+                        continue
+                    if since is not None and last < since:
+                        continue
+                    if read >= MAX_TRANSCRIPTS:
+                        transcript_skipped += 1
+                        continue
+                    read += 1
+                    got = transcripts.bins(sdef, spend, since=since)
+                    if got is None:
+                        continue
+                    own, behind = got
+                    partial = partial or behind
+                    sources[name] = "transcript"
+                    bins.extend((b, name, acc) for b, acc in own.items())
+            finally:
+                spend.release()
         if span is None:
-            start = min((b for b, _ in bins), default=None)
+            start = min((b for b, _, _ in bins), default=None)
             start = now - 86400 if start is None else float(start)
         else:
             start = now - span
@@ -705,14 +754,13 @@ class Ledger:
         # how the page tells "nothing here" from "not measured here".
         by_session: Dict[str, dict] = {
             name: {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
-                   "total": 0, "requests": 0}
-            for name in wanted if name in self.sessions
+                   "total": 0, "requests": 0, "source": source}
+            for name, source in sources.items()
         }
-        for at, name in bins:
+        for at, name, acc in bins:
             if at < start or at >= start + count * width:
                 continue
             slot = points[int((at - start) // width)]
-            acc = self.sessions[name]["bins"][at]
             slot["input"] += acc[0]
             slot["cache_read"] += acc[1]
             slot["cache_write"] += acc[2]
@@ -746,7 +794,7 @@ class Ledger:
                   ("input", "cache_read", "cache_write", "output",
                    "total", "requests")}
         for name in wanted:
-            if name not in self.sessions:
+            if name not in sources:
                 unmetered += 1
         return {
             "window": window,
@@ -761,6 +809,10 @@ class Ledger:
                             if totals["total"] else None),
             "sessions": len(wanted) - unmetered,
             "unmetered": unmetered,
+            "transcript_sessions": sum(1 for v in sources.values()
+                                       if v == "transcript"),
+            "transcript_skipped": transcript_skipped,
+            "partial": partial,
             "ledger_since": self.earliest_day(),
         }
 
@@ -824,6 +876,110 @@ class Transcripts:
     def forget(self, name: str) -> None:
         with self._lock:
             self._rows.pop(name, None)
+
+
+class TranscriptBins:
+    """Five-minute bins of the sessions the ledger cannot speak for, kept
+    up to date by folding only what each transcript gained since the last look.
+
+    The Chart page's series reads the ledger's :data:`SERIES_BIN_S` bins. A
+    session on an OAuth route has none, so its bins come from its transcript
+    instead (claunch-gbj4h). Both layers of that reading are incremental: the
+    file side is :mod:`tokenusage`'s follower (a transcript is parsed once and
+    then only from the offset where the last read stopped, shared with the
+    Stats page's reading), and this class keeps the bins built from the
+    requests the followers have produced and remembers how many of each
+    reader's requests it has already folded. A poll therefore costs the new
+    requests, not the session's history. A reader that was replaced (its file
+    shrank or was swapped, or the follower was dropped as idle) has lost the
+    count the bins were built on, and that session's bins are rebuilt from
+    the readers as they now stand.
+
+    ``source`` is ``sessionstats.follow_requests``'s shape and is injectable,
+    so a test can answer without a transcript on disk. Each bin is the ledger's
+    accumulator: ``[input, cache_read, cache_write, output, requests]``.
+    """
+
+    def __init__(self, *, width: int = SERIES_BIN_S, source=None,
+                 ttl: float = tokenusage.FOLLOWER_TTL) -> None:
+        self.width = width
+        self.ttl = ttl
+        self.source = source or sessionstats.follow_requests
+        #: name -> {"readers": {key: (reader, folded)}, "bins": {...}, "used"}
+        self._sessions: Dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def budget(self) -> "tokenusage.Budget":
+        """One request's reading budget, shared by every session it asks
+        about; release it once the request is done so what it left unread
+        goes to the catch-up thread."""
+        return tokenusage.Budget(sessionstats.STATS_BUDGET)
+
+    def bins(self, sdef, spend=None, since: Optional[float] = None
+             ) -> Optional[Tuple[Dict[float, list], bool]]:
+        """``(bins, partial)`` for one session, or ``None`` when it has no
+        transcript to read. ``partial`` is set while part of the files is
+        still being read in the background; the bins then hold what has been
+        read so far. Only bins starting at or after ``since`` are returned,
+        as a copy the caller may keep."""
+        name = str(getattr(sdef, "name", "") or "")
+        if not name:
+            return None
+        own = spend is None
+        if own:
+            spend = self.budget()
+        try:
+            followed = self.source(sdef, spend)
+        except Exception:  # noqa: BLE001 - a broken transcript is not a 500
+            followed = None
+        finally:
+            if own:
+                spend.release()
+        if followed is None:
+            with self._lock:
+                self._sessions.pop(name, None)
+            return None
+        readers, partial = followed
+        with self._lock:
+            state = self._sessions.get(name)
+            if state is None or any(
+                    key in state["readers"] and state["readers"][key][0] is not reader
+                    for key, reader in readers):
+                state = {"readers": {}, "bins": {}}
+                self._sessions[name] = state
+            state["used"] = time.monotonic()
+            acc = state["bins"]
+            width = self.width
+            for key, reader in readers:
+                folded = state["readers"].get(key, (reader, 0))[1]
+                requests = reader.requests
+                # The catch-up thread appends to this list while a poll reads
+                # it; the length taken once is the part that is complete.
+                upto = len(requests)
+                for at, fresh, cache_read, cache_write, output, _side in \
+                        requests[folded:upto]:
+                    slot = acc.setdefault(math.floor(at / width) * width,
+                                          [0, 0, 0, 0, 0])
+                    slot[0] += fresh
+                    slot[1] += cache_read
+                    slot[2] += cache_write
+                    slot[3] += output
+                    slot[4] += 1
+                state["readers"][key] = (reader, upto)
+            out = {at: list(v) for at, v in acc.items()
+                   if since is None or at >= since}
+            self._prune(state["used"])
+        return out, partial
+
+    def _prune(self, now: float) -> None:
+        stale = [n for n, st in self._sessions.items()
+                 if now - st.get("used", now) > self.ttl]
+        for name in stale:
+            self._sessions.pop(name, None)
+
+    def forget(self, name: str) -> None:
+        with self._lock:
+            self._sessions.pop(name, None)
 
 
 def transcript_window(reading: Optional[dict],

@@ -695,6 +695,49 @@ def _event_epoch(value) -> Optional[float]:
 
 # -- reading ----------------------------------------------------------------
 
+def _follow_all(path: Path, cls: Type[StatsReader], spend: tokenusage.Budget
+                ) -> Optional[Tuple[List[tokenusage._Follower], bool]]:
+    """The followers of one transcript and its subagent files, brought up to
+    date as far as ``spend`` allows, and whether any of them is still being
+    read in the background. ``None`` when the transcript cannot be read. The
+    conversation's own file comes first."""
+    tokenusage._maybe_prune()
+    main = tokenusage._follow(path, cls, spend, NAMESPACE)
+    if main is None:
+        return None
+    followers = [main]
+    for sub in cls.subagent_files(path):
+        other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
+        if other is not None:
+            followers.append(other)
+    return followers, any(f.behind or f.key in spend.late for f in followers)
+
+
+def follow_requests(sdef, spend: tokenusage.Budget
+                    ) -> Optional[Tuple[List[Tuple[str, StatsReader]], bool]]:
+    """The readers holding one session's timestamped requests, keyed by the
+    file each follows, and whether part of them is still being read.
+
+    The followers are the ones the Stats page reads under the same namespace,
+    so the two share one pass over each file: a transcript is parsed once from
+    the start and afterwards only from where the last read stopped. A reader
+    is replaced when its file shrank or was replaced, or when an idle follower
+    was dropped; a caller that keeps derived figures tells that apart by the
+    reader's identity. ``None`` when the session has no transcript to read.
+    """
+    head, path = locate(sdef)
+    if path is None:
+        return None
+    cls = READERS.get(head["harness"])
+    if cls is None:
+        return None
+    followed = _follow_all(Path(path), cls, spend)
+    if followed is None:
+        return None
+    followers, partial = followed
+    return [(f.key, f.reader) for f in followers], partial
+
+
 def read_file(path: Path, harness: str, unit: str = "day",
               zone: Optional[tzinfo] = None,
               spend: Optional[tokenusage.Budget] = None) -> Optional[dict]:
@@ -710,16 +753,11 @@ def read_file(path: Path, harness: str, unit: str = "day",
     if own:
         spend = tokenusage.Budget(STATS_BUDGET)
     try:
-        tokenusage._maybe_prune()
-        main = tokenusage._follow(path, cls, spend, NAMESPACE)
-        if main is None:
+        followed = _follow_all(path, cls, spend)
+        if followed is None:
             return None
-        followers = [main]
-        for sub in cls.subagent_files(path):
-            other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
-            if other is not None:
-                followers.append(other)
-        partial = any(f.behind or f.key in spend.late for f in followers)
+        followers, partial = followed
+        main = followers[0]
         out = {"harness": harness,
                **summarize(main.reader, [f.reader for f in followers[1:]], unit, zone)}
         if partial:
@@ -742,16 +780,11 @@ def read_series(path: Path, harness: str, window: str = "cap",
     if own:
         spend = tokenusage.Budget(STATS_BUDGET)
     try:
-        tokenusage._maybe_prune()
-        main = tokenusage._follow(path, cls, spend, NAMESPACE)
-        if main is None:
+        followed = _follow_all(path, cls, spend)
+        if followed is None:
             return None
-        followers = [main]
-        for sub in cls.subagent_files(path):
-            other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
-            if other is not None:
-                followers.append(other)
-        partial = any(f.behind or f.key in spend.late for f in followers)
+        followers, partial = followed
+        main = followers[0]
         out = {"harness": harness,
                **series(main.reader, [f.reader for f in followers[1:]], window, points)}
         if partial:

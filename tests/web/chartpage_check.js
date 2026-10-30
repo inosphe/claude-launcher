@@ -301,6 +301,10 @@ assert.strictEqual(sm.totals.total, 2200);
 assert.strictEqual(sm.totals.requests, 3);
 assert.strictEqual(sm.sessions, 2);
 assert.strictEqual(sm.unmetered, 1);
+// An older daemon sends no transcript fields: none filled, none skipped.
+assert.strictEqual(sm.transcriptSessions, 0);
+assert.strictEqual(sm.transcriptSkipped, 0);
+assert.strictEqual(sm.partial, false);
 assert.ok(Math.abs(sm.cacheShare - 2020 / 2200) < 1e-12);
 
 // The rate is what makes the area the total: each column's area on the
@@ -377,8 +381,11 @@ const rowsPayload = {
   by_session: {
     a: { input: 10, cache_read: 20, cache_write: 0, output: 5, total: 35, requests: 2 },
     b: { input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests: 0 },
+    t: { input: 1, cache_read: 2, cache_write: 0, output: 3, total: 6, requests: 1,
+         source: 'transcript' },
     junk: null,
   },
+  transcript_sessions: 1, transcript_skipped: 2, partial: true,
 };
 const rm = C.buildSeriesModel(rowsPayload);
 assert.strictEqual(rm.bySession.get('a').total, 35);
@@ -387,6 +394,13 @@ assert.strictEqual(rm.bySession.get('b').total, 0,
   'a measured session with nothing in the window is a zero');
 assert.ok(!rm.bySession.has('junk'), 'a malformed entry is dropped, not half-read');
 assert.ok(!rm.bySession.has('oauth'), 'a session the ledger never saw is absent, not zero');
+// A session filled from its transcript (claunch-gbj4h) says so; the rest are
+// the ledger's, including an older daemon's entries that name no source.
+assert.strictEqual(rm.bySession.get('t').source, 'transcript');
+assert.strictEqual(rm.bySession.get('a').source, 'ledger');
+assert.strictEqual(rm.transcriptSessions, 1);
+assert.strictEqual(rm.transcriptSkipped, 2);
+assert.strictEqual(rm.partial, true);
 // The total falls back to the four parts when the payload omits it.
 const partsOnly = C.buildSeriesModel({ bucket_s: 60, points: [{ t: 0, total: 60 }],
   by_session: { c: { input: 1, cache_read: 2, output: 3 } } });
@@ -510,16 +524,23 @@ card = C.rowTip(Object.assign({}, tipRow, { tokens: null, session: { name: 'a' }
 assert.strictEqual(card.brief, '');
 tr = tipRows(card);
 // It states the fact and lists the reasons as candidates: a null row is any
-// session the ledger never saw, an OAuth session being only one of them -- an
-// API-key session before its first request reads the same (claunch-p8f73).
+// session neither the ledger nor a transcript spoke for -- an API-key session
+// before its first request reads the same (claunch-p8f73). An OAuth session
+// is filled from its transcript now (claunch-gbj4h), so it is not a reason.
 assert.ok(tr['토큰(창)'].startsWith('원장 기록 없음'), tr['토큰(창)']);
-assert.ok(tr['토큰(창)'].includes('OAuth'), tr['토큰(창)']);
+assert.ok(tr['토큰(창)'].includes('transcript'), tr['토큰(창)']);
+assert.ok(!tr['토큰(창)'].includes('OAuth'), tr['토큰(창)']);
 assert.ok(tr['토큰(창)'].includes('첫 요청 전'), tr['토큰(창)']);
 assert.ok(tr['토큰(창)'].includes('보존 기간'), tr['토큰(창)']);
 assert.ok(!tr['토큰(창)'].includes('대상 아님'), tr['토큰(창)']);
 assert.ok(!('활동 구간' in tr) && !('마지막 요청' in tr));
 // No part figures (the fixture's `a`): no breakdown line.
 assert.ok(!('구성' in tipRows(C.rowTip(tipRow, tipModel, am, null))));
+// A ledger row names no source; a transcript-filled row does (claunch-gbj4h).
+assert.ok(!('출처' in tipRows(C.rowTip(tipRow, tipModel, am, null))));
+tr = tipRows(C.rowTip(Object.assign({}, tipRow, { tokens: Object.assign({},
+  am.bySession.get('a'), { source: 'transcript' }) }), tipModel, am, null));
+assert.ok(tr['출처'].startsWith('transcript'), tr['출처']);
 
 // The card carries what the removed title tooltips did (claunch-9n7g1): the
 // window's tokens in the Stats page's four parts, zero parts left out, and
