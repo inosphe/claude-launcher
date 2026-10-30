@@ -16234,11 +16234,16 @@ async def h_session_loop_close(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     manager.get(name)
     body = await _json_body(request)
-    entry = loops.close(
-        name, request.match_info["loop"], note=str(body.get("note") or "")
-    )
+    loop_id = request.match_info["loop"]
+    note = str(body.get("note") or "")
+    entry = loops.close(name, loop_id, note=note)
     if entry is None:
-        return json_error(404, f"no open loop {request.match_info['loop']!r}")
+        # ``reply:`` waits are derived from the mesh's response watches, so
+        # they have no stored row for ``close`` to find -- the wait ends by
+        # deleting the watch the id was read from.
+        entry = loops.close_reply_wait(name, loop_id, _mesh_mgr(request), note=note)
+    if entry is None:
+        return json_error(404, f"no open loop {loop_id!r}")
     return json_response({"session": name, "loop": entry})
 
 

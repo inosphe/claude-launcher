@@ -1238,7 +1238,13 @@ does not exist afterwards, so the intent has no other home) and closes it on
 the next send that reaches that member; and nobody, for reply-waits — those
 are read off `response_watches` at composition time, since the watch a
 delivered ask opens and a threaded reply clears already has the loop's exact
-lifetime, and a second copy would only drift. The section is capped at ten
+lifetime, and a second copy would only drift. Closing one by hand goes the
+same way: `loop_close` on a `reply:` id deletes the watch
+(`MeshManager.settle_response_watch_for`, scoped to the session's own handle
+and the exact message id), and that delete is also what stops the watch's
+response nudge — before the door existed, `loops.close` scanned only the
+stored rows, so the id a listing printed answered `no open loop`
+(claunch-ozern). The section is capped at ten
 lines and placed just before the opening task.
 
 **Exclusive roles.** A role may declare `exclusive: true`: at most one **live**

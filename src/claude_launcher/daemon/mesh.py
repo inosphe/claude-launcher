@@ -10319,6 +10319,55 @@ class MeshManager:
                 del mesh.response_watches[key]
             self._persist_cursors(mesh)
 
+    def settle_response_watch_for(
+        self, session: str, message_id: str
+    ) -> Optional[dict]:
+        """Close this session's own reply-wait on ``message_id`` by hand.
+
+        A reply-wait has no row in the session's ledger -- :func:`loops.reply_waits`
+        reads it off ``mesh.response_watches`` -- so closing one means
+        deleting the watch, and the delete goes through this store rather
+        than a copy of it. Without a door here the id a listing printed could
+        never be closed: ``loops.close`` scans the stored rows, finds nothing,
+        and the watch keeps driving the response nudge.
+
+        Scoped to the session's OWN member as the sender and to the exact
+        message id, so another member's watch of the same id, or a watch this
+        session owes to somebody else, is not this wait. Returns a copy of
+        the watch with the mesh's name added, or ``None`` when no such watch
+        exists.
+        """
+        if not message_id:
+            return None
+        try:
+            rows = self.meshes_for_session(session)
+        except Exception:  # noqa: BLE001
+            return None
+        for row in rows:
+            try:
+                mesh = self.get(row["mesh"])
+                member = self.member_for_session(mesh, session)
+            except Exception:  # noqa: BLE001
+                continue
+            if member is None:
+                continue
+            settled: Optional[dict] = None
+            for key, watch in list(mesh.response_watches.items()):
+                if (
+                    str(watch.get("id") or "") != message_id
+                    or str(watch.get("from") or "") != member.handle
+                ):
+                    continue
+                if settled is None:
+                    settled = dict(watch)
+                del mesh.response_watches[key]
+            if settled is None:
+                continue
+            settled["mesh"] = mesh.name
+            self._persist_cursors(mesh)
+            return settled
+        return None
+
     def _response_watch_tick(self, mesh: Mesh) -> None:
         """Tell each sender once, and drop what can no longer be answered.
 
