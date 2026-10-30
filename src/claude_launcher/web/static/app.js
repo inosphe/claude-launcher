@@ -60280,12 +60280,27 @@ const NOTICE_HISTORY_MAX = 100;
    waiting against the cap of 100, every feed re-recorded 33+ rows, each a
    whole-history localStorage write, a panel repaint and a card whose age
    restarted at 0s. The daemon's pending set bounds these rows; once settled
-   they are trimmed like any other. */
+   they are trimmed like any other.
+
+   The cap counts the rows that are not waiting requests, not the length of
+   the array (claunch-0z1ij.4). Pending rows stay in the array and are refused
+   here, so counting the length spent the whole budget on them: 133 waits plus
+   5 ordinary rows trimmed all 5 and left the History section empty, which is
+   the section a thread reply lands in. A pending row is a copy of the
+   daemon's pending set, whose size the daemon owns; an ordinary row is this
+   browser's own memory, which is what the cap was ever for. Marked rows are
+   counted and still refused below, so the cap gives way to them exactly as
+   it did when it counted the length. */
 function noticeTrim(rows) {
+  const waiting = (e) => !!(e.gate && e.status === "pending");
+  let general = rows.filter((e) => !waiting(e)).length;
   let i = rows.length - 1;
-  while (rows.length > NOTICE_HISTORY_MAX && i > 0) {
+  while (general > NOTICE_HISTORY_MAX && i > 0) {
     const e = rows[i];
-    if (!e.marked && !(e.gate && e.status === "pending")) rows.splice(i, 1);
+    if (!e.marked && !waiting(e)) {
+      rows.splice(i, 1);
+      general -= 1;
+    }
     i -= 1;
   }
 }

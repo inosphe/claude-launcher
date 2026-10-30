@@ -2662,6 +2662,19 @@ function gotoRec(rec) {
           w.api.noticeHistory.length === 133 &&
             w.api.noticeHistory.every((e) => stamps.get(e.id) === e.at),
           w.api.noticeHistory.length);
+    /* Ordinary history has its own budget (claunch-0z1ij.4). The cap counts
+       the rows it can trim, not the length of the array: while it counted the
+       length, 133 waiting requests spent the whole 100-row budget and these
+       five replies trimmed down to the one newest row -- the History section,
+       which is where a thread reply lands, showed nothing at all. */
+    for (let i = 0; i < 5; i += 1) w.api.notify(`reply${i}`, "", { key: `reply${i}` });
+    const ordinaryRows = () =>
+      w.api.noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+    check("ordinary history keeps its own budget past the cap",
+          ordinaryRows().length === 5 && pendingRows().length === 133 &&
+            w.api.noticeHistory.length === 138,
+          { ordinary: ordinaryRows().length, pending: pendingRows().length,
+            total: w.api.noticeHistory.length });
     // Once they settle they are ordinary rows again, and the next row trims
     // the history back to the cap.
     w.api.runGateSync([], []);
