@@ -71,7 +71,7 @@ def env(tmp_path):
     reg = Registry()
     for name in "abc":
         reg.add(name, ssh_user="admin", ssh_key="/keys/k")
-    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn,
+    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, alive=lambda p: True,
                           sleep=lambda s: None, stop_wait=0.05, boot_wait=0.5)
     return fake, reg, mgr
 
@@ -88,7 +88,7 @@ def test_start_runs_suspendable_and_waits_for_ssh_and_a_console_login(env):
 
 def test_no_graphics_is_an_option_not_the_default(env, tmp_path):
     fake, reg, _ = env
-    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn,
+    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, alive=lambda p: True,
                           sleep=lambda s: None, graphics=False)
     assert mgr.run_argv("a") == ["tart", "run", "--suspendable", "--no-graphics", "a"]
 

@@ -24,7 +24,7 @@ OTHER = {actors.HEADER: "agent:s2"}
 async def _api(tmp_path):
     fake = Fake()
     reg = Registry()
-    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn,
+    mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, alive=lambda p: True,
                           sleep=lambda s: None, stop_wait=0.05, boot_wait=0.5)
     world = World()
 
