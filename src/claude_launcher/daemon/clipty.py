@@ -51,6 +51,14 @@ SHELL_BUFFER_MAX = 256 * 1024
 #: copy the whole ring into one response and a slow reader stays cheap.
 READ_MAX = 64 * 1024
 
+#: How long :meth:`ShellPty.restart` waits for the retired child's reader
+#: thread to come out of its blocking ``read()``. The child is killed and its
+#: master fd closed before the wait starts, so the read ends at once on both
+#: backends; the bound is there so a backend that does not come back cannot
+#: hold the event loop -- the reader's own callbacks name the pty they read
+#: and are inert once it is retired either way.
+READER_RETIRE_TIMEOUT = 1.0
+
 #: Set for the CLI tab's shell only. The shell is a session leader that the
 #: daemon terminates as part of its own shutdown (``api._close_cli_shell``),
 #: so a ``claunch daemon restart`` typed into this tab is SIGHUPed between its
@@ -200,22 +208,48 @@ class ShellPty:
             return False   # an exited shell stays exited until restart
         return self.restart()
 
+    def _retire_child(self) -> None:
+        """Kill and close the current child, then wait for its reader.
+
+        Clearing ``self._pty`` before the spawn is what makes the two
+        callbacks an old reader posts harmless: they compare the pty they
+        carry against ``self._pty``, and a retired one matches nothing.
+        Called on the event loop, so the join is bounded
+        (:data:`READER_RETIRE_TIMEOUT`) — the pty is closed first, which is
+        what ends the ``read()`` it is waiting in.
+        """
+        pty, reader = self._pty, self._reader
+        self._pty = None
+        self._reader = None
+        if pty is None:
+            return
+        try:
+            pty.terminate(force=True)
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+        try:
+            pty.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(READER_RETIRE_TIMEOUT)
+            if reader.is_alive():
+                log.warning("the retired shell's reader is still reading")
+
     def restart(self) -> bool:
         """Replace the child with a fresh shell, clearing its ring buffer.
+
+        The predecessor goes first, reader included (:meth:`_retire_child`):
+        its reader would otherwise post an EOF after the successor is up, and
+        that callback closed the *new* child -- a restart frame that arrived
+        for a live shell killed the one it started (claunch-742jf.1). The
+        callbacks carry the pty they read, so this holds whether or not the
+        reader got out in time.
 
         New viewers are told and so are attached ones: a ``init`` broadcast
         announces the new pid, and the fresh child's first bytes follow it.
         """
-        if self._pty is not None:
-            # Only ever reached for a dead child (restart is how an exited
-            # shell comes back), but a race that left one alive must not
-            # leave an orphan behind it.
-            try:
-                self._pty.terminate(force=True)
-                self._pty.close()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
-            self._pty = None
+        self._retire_child()
         self._buffer.clear()
         self._buffered = 0
         self._total = 0
@@ -260,7 +294,10 @@ class ShellPty:
         self._ever_started = True
         self.pid = self._pty.pid
         self._reader = threading.Thread(
-            target=self._read_pump, name="pty-read-cli", daemon=True
+            target=self._read_pump,
+            args=(self._pty,),
+            name="pty-read-cli",
+            daemon=True,
         )
         self._reader.start()
         self._broadcast(("init", (self._cols, self._rows, self.pid)))
@@ -286,19 +323,22 @@ class ShellPty:
     # ------------------------------------------------------------------ #
     # output pipeline (reader thread -> loop)
     # ------------------------------------------------------------------ #
-    def _read_pump(self) -> None:  # runs on the reader thread
+    def _read_pump(self, pty) -> None:  # runs on the reader thread
+        # ``pty`` is this thread's own incarnation, taken once: reading
+        # ``self._pty`` on each pass made a retired reader follow the
+        # successor -- two readers on one child (claunch-742jf.1).
         try:
             while True:
-                chunk = self._pty.read()
+                chunk = pty.read()
                 if not chunk:
                     break
-                self._loop.call_soon_threadsafe(self._on_output, chunk)
-            self._loop.call_soon_threadsafe(self._on_eof)
+                self._loop.call_soon_threadsafe(self._on_output, pty, chunk)
+            self._loop.call_soon_threadsafe(self._on_eof, pty)
         except RuntimeError:
             pass  # event loop already closed (daemon teardown)
 
-    def _on_output(self, chunk: bytes) -> None:
-        if self.exited:
+    def _on_output(self, pty, chunk: bytes) -> None:
+        if self.exited or pty is not self._pty:
             return
         self._buffer.append(chunk)
         self._buffered += len(chunk)
@@ -308,16 +348,19 @@ class ShellPty:
             self._buffer.popleft()
         self._broadcast(("data", chunk))
 
-    def _on_eof(self) -> None:
+    def _on_eof(self, pty) -> None:
+        # A retired incarnation ends quietly: restart() already killed and
+        # closed it, and its exit code belongs to a child nobody is reading.
+        if pty is not self._pty:
+            return
         if self.exited:
             return
         self.exited = True
-        self.exit_code = self._pty.exit_code() if self._pty is not None else None
-        if self._pty is not None:
-            try:
-                self._pty.close()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
+        self.exit_code = pty.exit_code()
+        try:
+            pty.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
         self._broadcast(("exit", self.exit_code))
 
     # ------------------------------------------------------------------ #
