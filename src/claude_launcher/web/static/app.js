@@ -64030,12 +64030,19 @@ async function refreshFaultResets() {
     if (!noticeSourceShown("fault")) continue;
     const sig = String((r.fault || {}).until || "");
     if (faultResetRaised.get(key) === sig) continue;
+    // Put away in another browser (or before a reload): settled, and not
+    // offered to notify, which would add a history row on every poll.
+    const sync = `fault-reset:${session}:${sig}`;
+    const remote = noticeSync.remote.get(sync);
+    if (remote && remote.dismissed) {
+      faultResetRaised.set(key, sig);
+      continue;
+    }
     // As for the leader card: record the signature only for a card that went
     // up, so an open history panel does not swallow it.
     if (noticePanelOpen()) continue;
     const drawn = notify(`usage limit reset: ${session}`, faultResetSub(r), {
-      source: "fault", key, sticky: true, session,
-      sync: `fault-reset:${session}:${sig}`,
+      source: "fault", key, sticky: true, session, sync,
     });
     if (!drawn) continue;
     faultResetRaised.set(key, sig);
