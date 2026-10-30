@@ -42,7 +42,10 @@ async def _api(tmp_path):
 def scenario(fn):
     """Run an async test body against a fresh app (the suite drives aiohttp
     with asyncio.run, as test_webdebug does)."""
-    def test(tmp_path):
+    def test(tmp_path, monkeypatch):
+        # Screenshots land under the daemon directory: keep it in the test's.
+        monkeypatch.setattr(vm_api.paths, "daemon_dir", lambda: tmp_path)
+
         async def run():
             async with _api(tmp_path) as api:
                 await fn(api)
@@ -71,7 +74,7 @@ async def test_a_session_cannot_register_start_or_grant(api):
                        ("/api/vm/a/revoke_controller", {})):
         resp = await api.post(path, json=body, headers=AGENT)
         assert resp.status == 403, path
-        assert (await resp.json())["error"] == "vm_user_only"
+        assert (await resp.json())["code"] == "vm_user_only"
 
 
 @scenario
@@ -108,7 +111,7 @@ async def test_a_second_session_is_told_who_holds_it(api):
 async def test_acquire_without_a_grant_is_forbidden(api):
     await _up(api)
     resp = await api.post("/api/vm/a/acquire", json={"session": "s1"}, headers=AGENT)
-    assert resp.status == 403 and (await resp.json())["error"] == "vm_no_grant"
+    assert resp.status == 403 and (await resp.json())["code"] == "vm_no_grant"
 
 
 @scenario
@@ -131,7 +134,7 @@ async def test_a_full_machine_answers_409_with_the_holders(api):
         assert (await api.post(f"/api/vm/{v}/start")).status == 200
     resp = await api.post("/api/vm/c/start")
     body = await resp.json()
-    assert resp.status == 409 and body["error"] == "vm_slots_full"
+    assert resp.status == 409 and body["code"] == "vm_slots_full"
     assert sorted(body["holders"]) == ["a", "b"]
 
 
@@ -140,7 +143,7 @@ async def test_stop_that_times_out_is_a_gateway_timeout_and_force_is_separate(ap
     await _up(api)
     api.fake.shutdown_stops_vm = False
     resp = await api.post("/api/vm/a/stop")
-    assert resp.status == 504 and (await resp.json())["error"] == "vm_stop_timeout"
+    assert resp.status == 504 and (await resp.json())["code"] == "vm_stop_timeout"
     assert (await (await api.get("/api/vm/a")).json())["state"] == "stopping"
     resp = await api.post("/api/vm/a/force_stop")
     assert resp.status == 200 and (await resp.json())["state"] == "stopped"
@@ -152,7 +155,7 @@ async def test_the_user_taking_the_screen_blocks_a_session(api):
     await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["control"]})
     await api.post("/api/vm/a/human", json={"action": "driving"})
     resp = await api.post("/api/vm/a/acquire", json={"session": "s1"}, headers=AGENT)
-    assert resp.status == 423 and (await resp.json())["error"] == "vm_busy"
+    assert resp.status == 423 and (await resp.json())["code"] == "vm_busy"
     await api.post("/api/vm/a/human", json={"action": "idle"})
     resp = await api.post("/api/vm/a/acquire", json={"session": "s1"}, headers=AGENT)
     assert resp.status == 200
@@ -183,3 +186,95 @@ async def test_start_opens_the_guest_channel_and_stop_closes_it_first(api):
     got = await (await api.get("/api/vm/a")).json()
     assert got["state"] == "stopped" and got["channel"] == "idle" and not got["cua_ready"]
     assert "a" not in api.hub.channels
+
+
+def _png_result():
+    import base64
+    return {"content": [{"type": "text", "text": "desktop"},
+                        {"type": "image", "mimeType": "image/png",
+                         "data": base64.b64encode(b"PNGDATA").decode()}],
+            "isError": False}
+
+
+@scenario
+async def test_a_look_needs_view_a_click_needs_control_and_the_epoch(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
+    look = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "get_desktop_state"},
+                          headers=AGENT)
+    assert look.status == 200
+    click = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "click"},
+                           headers=AGENT)
+    assert click.status == 403 and (await click.json())["code"] == "vm_no_grant"
+
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["control"]})
+    epoch = (await (await api.post("/api/vm/a/acquire", json={"session": "s1"},
+                                   headers=AGENT)).json())["epoch"]
+    first = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "click",
+                                                    "epoch": epoch}, headers=AGENT)
+    assert first.status == 409 and (await first.json())["code"] == "vm_observe_first"
+    await api.post("/api/vm/a/call", json={"session": "s1", "tool": "get_desktop_state"},
+                   headers=AGENT)
+    ok = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "click",
+                                                 "epoch": epoch}, headers=AGENT)
+    assert ok.status == 200
+    stale = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "click",
+                                                    "epoch": epoch - 1}, headers=AGENT)
+    assert stale.status == 409 and (await stale.json())["code"] == "vm_stale"
+
+
+@scenario
+async def test_screen_images_become_files_not_base64(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
+    chan = api.hub.channels["a"]
+
+    async def fake_call(name, arguments=None, timeout=30):
+        return _png_result()
+
+    chan.call = fake_call
+    body = await (await api.post("/api/vm/a/call", json={"session": "s1", "tool": "get_desktop_state"},
+                                 headers=AGENT)).json()
+    image = [b for b in body["result"]["content"] if b["type"] == "image"][0]
+    assert "data" not in image
+    from pathlib import Path
+    assert Path(image["path"]).read_bytes() == b"PNGDATA"
+
+
+@scenario
+async def test_a_down_channel_answers_unavailable_with_retry_after(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
+    await api.hub.channels["a"].stop()
+    api.reg.set_channel("a", "down", "ssh closed")
+    resp = await api.post("/api/vm/a/call", json={"session": "s1", "tool": "get_desktop_state"},
+                          headers=AGENT)
+    body = await resp.json()
+    assert resp.status == 503 and body["code"] == "vm_unavailable" and body["retry_after"] == 5
+
+
+@scenario
+async def test_exec_needs_its_own_grant_and_control(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["control"]})
+    epoch = (await (await api.post("/api/vm/a/acquire", json={"session": "s1"},
+                                   headers=AGENT)).json())["epoch"]
+    refused = await api.post("/api/vm/a/exec", json={"session": "s1", "command": "id",
+                                                      "epoch": epoch}, headers=AGENT)
+    assert refused.status == 403 and (await refused.json())["code"] == "vm_no_grant"
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["exec"]})
+    await api.post("/api/vm/a/call", json={"session": "s1", "tool": "get_desktop_state"},
+                   headers=AGENT)
+    done = await api.post("/api/vm/a/exec", json={"session": "s1", "command": "id",
+                                                   "epoch": epoch}, headers=AGENT)
+    out = await done.json()
+    assert done.status == 200 and out["rc"] == 0 and out["stdout"] == "ok\n"
+    assert api.fake.execs[-1][-3:] == ["/bin/sh", "-c", "id"]
+
+
+@scenario
+async def test_tools_lists_which_are_look_only(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
+    body = await (await api.get("/api/vm/a/tools?session=s1", headers=AGENT)).json()
+    assert body["tools"] == [{"name": "get_screen_size", "view_only": True, "description": ""}]

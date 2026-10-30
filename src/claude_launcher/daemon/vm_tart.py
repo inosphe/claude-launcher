@@ -35,6 +35,8 @@ TART = "tart"
 STOP_WAIT = 120.0
 BOOT_WAIT = 90.0
 POLL = 2.0
+OUTPUT_CAP = 64 * 1024
+EXEC_MAX = 600.0
 
 #: (returncode, stdout, stderr)
 Result = Tuple[int, str, str]
@@ -44,7 +46,9 @@ Spawner = Callable[[Sequence[str], Path], int]
 
 def run_command(argv: Sequence[str], timeout: float = 30.0) -> Result:
     try:
-        done = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+        # No stdin: a command that reads it would wait for ever (d-003).
+        done = subprocess.run(list(argv), capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout:g}s"
     except OSError as exc:
@@ -141,6 +145,21 @@ class Manager:
             argv += ["-i", vm.ssh_key]
         argv += [f"{vm.ssh_user}@{vm.ip}", command]
         return self._run(argv, timeout)
+
+    def exec(self, vm_id: str, command: str, timeout: float = 60.0) -> dict:
+        """Run ``command`` in the guest's shell through ``tart exec`` (the
+        guest agent: ~50 ms against ssh's ~105 ms in d-003, no address or key
+        needed, and it works on a network-less VM). The result is cut at
+        :data:`OUTPUT_CAP` per stream; the command text is not recorded."""
+        vm = self.registry.get(vm_id)
+        if vm.state != "running":
+            raise VmError("vm_not_ready", f"{vm_id} is {vm.state}")
+        rc, out, err = self._run(
+            [TART, "exec", vm.tart_name, "/bin/sh", "-c", command],
+            min(max(timeout, 1.0), EXEC_MAX))
+        cut = len(out) > OUTPUT_CAP or len(err) > OUTPUT_CAP
+        return {"rc": rc, "stdout": out[:OUTPUT_CAP], "stderr": err[:OUTPUT_CAP],
+                "truncated": cut, "timed_out": rc == 124}
 
     # ---- start / resume -------------------------------------------------- #
     def start(self, vm_id: str) -> vmhub.Vm:

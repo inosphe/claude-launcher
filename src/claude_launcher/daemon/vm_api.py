@@ -32,8 +32,19 @@ _STATUS = {
     "vm_slots_full": 409, "vm_bad_state": 409, "vm_busy_state": 409,
     "vm_not_ready": 409, "vm_busy": 423, "vm_stale": 409, "vm_no_grant": 403,
     "vm_not_controller": 403, "vm_stop_timeout": 504, "vm_boot_timeout": 504,
-    "tart_failed": 502, "vm_stop_failed": 502,
+    "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
+    "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
+    "vm_bad_scope": 400, "vm_bad_request": 400,
 }
+
+#: cua tools that only look. Everything else a session sends through
+#: ``/call`` is treated as control: an unknown tool is refused to a session
+#: that was only allowed to look, which is the safe way to be wrong.
+VIEW_TOOLS = frozenset({
+    "get_desktop_state", "get_window_state", "get_screen_size", "list_apps",
+    "screenshot",
+})
+SHOTS_KEEP = 20
 
 
 def _err(exc: VmError) -> web.Response:
@@ -61,8 +72,8 @@ def _caller(request: web.Request) -> dict:
 def _user_only(request: web.Request) -> Optional[web.Response]:
     if _caller(request).get("kind") in (actors.AGENT, actors.CFLOW):
         return web.json_response(
-            {"ok": False, "error": "vm_user_only",
-             "message": "this is the user's to do, from the dashboard or a shell"},
+            {"ok": False, "code": "vm_user_only",
+             "error": "vm_user_only: this is the user's to do, from the dashboard or a shell"},
             status=403)
     return None
 
@@ -257,6 +268,110 @@ async def h_release(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+def _shots_dir():
+    d = paths.daemon_dir() / "vm" / "shots"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    return d
+
+
+def _materialize(vm_id: str, result: dict) -> dict:
+    """Images in a cua result become files the session can open; the raw
+    base64 never travels through a tool answer. The newest
+    :data:`SHOTS_KEEP` per VM are kept."""
+    import base64
+    import time as _time
+
+    content = []
+    for block in (result.get("content") or []):
+        if isinstance(block, dict) and block.get("type") == "image" and block.get("data"):
+            mime = str(block.get("mimeType") or "image/png")
+            ext = {"image/jpeg": "jpg", "image/png": "png"}.get(mime, "bin")
+            path = _shots_dir() / f"{vm_id}-{int(_time.time() * 1000)}-{len(content)}.{ext}"
+            path.write_bytes(base64.b64decode(block["data"]))
+            content.append({"type": "image", "path": str(path), "mimeType": mime})
+        else:
+            content.append(block)
+    old = sorted(_shots_dir().glob(f"{vm_id}-*"))[:-SHOTS_KEEP]
+    for f in old:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return {**result, "content": content}
+
+
+async def h_call(request: web.Request) -> web.Response:
+    """A session's cua call, through the daemon's one channel."""
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = _as_session(request, body)
+        tool = str(body.get("tool") or "")
+        if not tool:
+            raise VmError("vm_bad_request", "'tool' is required")
+        args = body.get("arguments") or {}
+        if not isinstance(args, dict):
+            raise VmError("vm_bad_request", "'arguments' must be an object")
+        scope = vmhub.VIEW if tool in VIEW_TOOLS else vmhub.CONTROL
+        reg.begin_call(vm_id, session, scope, body.get("epoch"))
+        ok = False
+        try:
+            channel = request.app["vm_channels"].get(vm_id)
+            result = await channel.call(tool, args, float(body.get("timeout") or 30))
+            ok = True
+        finally:
+            reg.end_call(vm_id, session, scope, ok=ok)
+        return web.json_response({"ok": True, "scope": scope,
+                                  "result": _materialize(vm_id, result)})
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_tools(request: web.Request) -> web.Response:
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        session = _as_session(request, {"session": request.query.get("session", "")})
+        reg.begin_call(vm_id, session, vmhub.VIEW)
+        try:
+            tools = await request.app["vm_channels"].get(vm_id).tools()
+        finally:
+            reg.end_call(vm_id, session, vmhub.VIEW)
+        return web.json_response({"ok": True, "tools": [
+            {"name": t.get("name"), "view_only": t.get("name") in VIEW_TOOLS,
+             "description": str(t.get("description") or "")[:200]} for t in tools]})
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_exec(request: web.Request) -> web.Response:
+    """A shell command in the guest: its own scope, off by default."""
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = _as_session(request, body)
+        command = str(body.get("command") or "")
+        if not command.strip():
+            raise VmError("vm_bad_request", "'command' is required")
+        reg.begin_call(vm_id, session, vmhub.EXEC, body.get("epoch"))
+        ok = False
+        try:
+            out = await asyncio.to_thread(mgr.exec, vm_id, command,
+                                          float(body.get("timeout") or 60))
+            ok = out["rc"] == 0
+        finally:
+            reg.end_call(vm_id, session, vmhub.EXEC, ok=ok)
+        return web.json_response({"ok": True, **out})
+    except VmError as exc:
+        return _err(exc)
+
+
 async def _background(app: web.Application):
     reg: Registry = app["vm_registry"]
     mgr: vm_tart.Manager = app["vm_manager"]
@@ -325,3 +440,6 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/human", h_human)
     r.add_post("/api/vm/{id}/acquire", h_acquire)
     r.add_post("/api/vm/{id}/release", h_release)
+    r.add_post("/api/vm/{id}/call", h_call)
+    r.add_post("/api/vm/{id}/exec", h_exec)
+    r.add_get("/api/vm/{id}/tools", h_tools)

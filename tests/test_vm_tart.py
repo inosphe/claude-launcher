@@ -22,6 +22,8 @@ class Fake:
         self.console = "admin"
         self.shutdown_stops_vm = True
         self.suspend_rc = 0
+        self.execs = []
+        self.exec_result = (0, "ok\n", "")
 
     def run(self, argv, timeout):
         argv = list(argv)
@@ -39,6 +41,9 @@ class Fake:
         if argv[:2] == ["tart", "stop"]:
             self.tart[argv[2]] = "stopped"
             return 0, "", ""
+        if argv[:2] == ["tart", "exec"]:
+            self.execs.append(argv)
+            return self.exec_result
         if argv[0] == "ssh":
             cmd = argv[-1]
             if not self.ssh_ok:
@@ -212,3 +217,20 @@ def test_tart_list_failure_is_an_error_not_an_empty_fleet(env):
     with pytest.raises(VmError) as e:
         mgr.reconcile()
     assert e.value.code == "tart_failed"
+
+
+def test_exec_goes_through_tart_exec_and_is_cut_at_the_cap(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    fake.exec_result = (0, "x" * (vm_tart.OUTPUT_CAP + 5), "")
+    out = mgr.exec("a", "ls /Applications")
+    assert fake.execs == [["tart", "exec", "a", "/bin/sh", "-c", "ls /Applications"]]
+    assert out["rc"] == 0 and len(out["stdout"]) == vm_tart.OUTPUT_CAP and out["truncated"]
+    assert not any(c[0] == "ssh" and "ls /Applications" in c[-1] for c in fake.calls)
+
+
+def test_exec_on_a_vm_that_is_not_running_is_refused(env):
+    fake, reg, mgr = env
+    with pytest.raises(VmError) as e:
+        mgr.exec("a", "true")
+    assert e.value.code == "vm_not_ready"

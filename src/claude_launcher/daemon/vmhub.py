@@ -75,7 +75,12 @@ class VmError(Exception):
         self.extra = extra
 
     def as_dict(self) -> dict:
-        return {"ok": False, "error": self.code, "message": str(self), **self.extra}
+        # ``error`` is what a client that shows only that field prints, so it
+        # carries the reading; ``code`` is the stable part to act on.
+        text = str(self)
+        return {"ok": False, "code": self.code,
+                "error": self.code if text == self.code else f"{self.code}: {text}",
+                "message": text, **self.extra}
 
 
 @dataclass
@@ -149,6 +154,26 @@ class Vm:
             for s, v in (raw.get("grants") or {}).items()
         }
         return vm
+
+
+def not_ready(vm: "Vm") -> VmError:
+    """Why a running-looking VM cannot be used yet. A guest channel that is
+    reconnecting (or has given up) is told apart from a VM that is still
+    booting: the first is worth retrying in seconds, and a failed one needs
+    the user."""
+    if vm.state == "running" and vm.ssh_ready and vm.gui_ready and not vm.cua_ready:
+        if vm.channel in ("connecting", "down"):
+            return VmError("vm_unavailable",
+                           f"{vm.id}: the guest channel is {vm.channel}"
+                           + (f" ({vm.channel_error})" if vm.channel_error else ""),
+                           retry_after=5, channel=vm.channel)
+        if vm.channel == "failed":
+            return VmError("vm_unavailable",
+                           f"{vm.id}: the guest channel failed: {vm.channel_error}",
+                           channel="failed")
+    return VmError(
+        "vm_not_ready",
+        f"{vm.id} is {vm.state} (ssh={vm.ssh_ready} gui={vm.gui_ready} cua={vm.cua_ready})")
 
 
 def _normal(scopes) -> List[str]:
@@ -394,16 +419,13 @@ class Registry:
             if CONTROL not in vm.grants.get(session, []):
                 raise VmError("vm_no_grant", f"{session} has no control grant on {vm_id}")
             if not vm.ready:
-                raise VmError(
-                    "vm_not_ready",
-                    f"{vm_id} is {vm.state} (ssh={vm.ssh_ready} gui={vm.gui_ready} "
-                    f"cua={vm.cua_ready})",
-                )
+                raise not_ready(vm)
             if vm.human == "driving":
                 raise VmError("vm_busy", "the user is driving the VM", retry_after=5)
             if vm.controller and vm.controller != session:
-                return {"ok": False, "error": "vm_held", "held_by": vm.controller,
-                        "epoch": vm.epoch}
+                return {"ok": False, "code": "vm_held",
+                        "error": f"vm_held: {vm.controller} holds control of {vm_id}",
+                        "held_by": vm.controller, "epoch": vm.epoch}
             if vm.controller != session:
                 vm.controller = session
                 vm.epoch += 1
@@ -482,7 +504,7 @@ class Registry:
                                   "look at the screen (vm_screenshot) before acting",
                                   needs_observe=True)
             if not vm.ready:
-                raise VmError("vm_not_ready", f"{vm_id} is {vm.state}")
+                raise not_ready(vm)
             vm.inflight += 1
             self._log(vm_id, session, "call", scope=scope, epoch=vm.epoch)
             return vm
