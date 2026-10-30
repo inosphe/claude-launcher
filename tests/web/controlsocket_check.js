@@ -695,7 +695,9 @@ async function flushPrefersSocketThenFallsBack() {
       },
     };
     const code = [
+      `const API_TIMEOUT_MS = ${constOf("API_TIMEOUT_MS")};`,
       slice("api"),
+      slice("apiFetch"),
       slice("budgeted"),
       slice("batchResponse"),
       slice("batchResponses"),
@@ -715,10 +717,12 @@ async function flushPrefersSocketThenFallsBack() {
       "return { api, batchFlush };",
     ].join("\n");
     const make = new Function(
-      "url", "fetch", "relogin", "showAuth", "setTimeout", "controlRead", code
+      "url", "fetch", "relogin", "showAuth", "setTimeout", "clearTimeout",
+      "AbortController", "controlRead", code
     );
     Object.assign(scope, make(
       scope.url, scope.fetch, scope.relogin, scope.showAuth, scope.setTimeout,
+      clearTimeout, typeof AbortController === "function" ? AbortController : undefined,
       controlRead
     ));
     return scope;

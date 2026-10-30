@@ -85,13 +85,48 @@ function relogin() {
   return reloginPromise;
 }
 
+/* A request the daemon never answers must still settle (claunch-8vl1s.1).
+   The dashboard tick runs one batch of reads at a time and the budget below
+   hands out two slots, so a fetch that hangs -- sent as the machine went to
+   sleep, answered by nothing at all -- keeps its slot for the life of the
+   page. Two of them and every later request waits in `httpWaiting` forever:
+   the tick never finishes, `polling` stays true, and nothing the tick does
+   ever runs again -- the sticky cards it would have taken down stay up while
+   the page looks alive, because the terminal's socket is not part of it.
+   `daemonHealth` has been bounded this way since claunch-fm3ud, for the same
+   reason and in its own words. 30 s is between that probe's 10 s and
+   POLL_STUCK_MS: long enough for the slowest page read on a loaded daemon
+   (the run page's read took seconds, claunch-02w8s), short enough that a
+   hang does not outlive the reader's patience. A caller with its own budget
+   passes `timeout` (0 turns this off) or its own `signal`. */
+const API_TIMEOUT_MS = 30000;
+
+function apiFetch(path, opts) {
+  const o = opts || {};
+  // `timeout: 0` turns the deadline off; a value that is not a number keeps
+  // the default rather than silently meaning "no limit".
+  const asked = o.timeout === undefined ? API_TIMEOUT_MS : Number(o.timeout);
+  const limit = asked === 0 ? 0 : (asked > 0 ? asked : API_TIMEOUT_MS);
+  const init = { credentials: "same-origin", ...o };
+  delete init.timeout;
+  // A caller's signal wins: it bounds the request for a reason of its own,
+  // and two signals cannot be merged without listening to both.
+  if (!limit || o.signal || typeof AbortController !== "function") {
+    return fetch(url(path), init);
+  }
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), limit);
+  init.signal = abort.signal;
+  return fetch(url(path), init).finally(() => clearTimeout(timer));
+}
+
 async function api(path, opts = {}) {
   const batched = batchQueue(path, opts);
   if (batched) return batched;
-  let resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
+  let resp = await budgeted(() => apiFetch(path, opts));
   if (resp.status === 401) {
     if (await relogin()) {
-      resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
+      resp = await budgeted(() => apiFetch(path, opts));
       if (resp.status !== 401) return resp;
     }
     showAuth();
@@ -65066,6 +65101,8 @@ async function boot() {
 
 const DASHBOARD_POLL_MS = 5000;
 let polling = false;
+let pollSince = 0;      // when the tick now in flight started
+let pollToken = 0;      // which tick that is, so a late one cannot clear it
 
 /* A tab nobody is looking at asks a third as often. The nine requests below
    are answered by the same event loop that pumps every terminal, and a
@@ -65083,12 +65120,32 @@ async function pollTick() {
   const hidden = typeof document !== "undefined" && document.hidden === true;
   if (hidden && Date.now() - hiddenPolledAt < HIDDEN_POLL_MS) return;
   // A tick that is still waiting on a dead host must not have another stacked
-  // on top of it every two seconds: connect attempts to a machine that has
-  // gone away hang for a good while, and that is exactly when this runs.
-  if (polling) return;
+  // on top of it every interval: connect attempts to a machine that has gone
+  // away hang for a good while, and that is exactly when this runs.
+  //
+  // ...but a tick that never finishes must not stop the poll for good either.
+  // The reads it runs carry their own deadline now (API_TIMEOUT_MS), and this
+  // is the second half of the same guard: if one of them still has not
+  // settled after POLL_STUCK_MS, the next tick runs anyway. Without that,
+  // `polling` never came back down and the whole tick -- every card's
+  // removal included -- was dead until a reload; the card that stayed on
+  // screen while the daemon listed nothing is how that was found
+  // (claunch-8vl1s.1). This is the same escape `visiblePoll` keeps for page
+  // polls (POLL_STUCK_MS, claunch-02w8s), which the dashboard tick never had.
+  // The re-arm is written to the link log: if the symptom is reported again,
+  // whether the poll stalled is read there instead of guessed.
+  if (polling && Date.now() - pollSince < POLL_STUCK_MS) return;
+  if (polling) {
+    if (typeof linkLog === "function") linkLog("poll.stuck", { ms: Date.now() - pollSince });
+  }
+  // A tick that outlived its escape is still in flight and will finish
+  // eventually; it must not clear the flag the newer tick is holding. The
+  // token is `visiblePoll`'s `pending === mine` in another shape.
+  const mine = (pollToken += 1);
   polling = true;
+  pollSince = Date.now();
   if (hidden) hiddenPolledAt = Date.now();
-  try { await pollOnce(); } finally { polling = false; }
+  try { await pollOnce(); } finally { if (pollToken === mine) polling = false; }
 }
 
 /* ------------------------------------------------------------------ */
