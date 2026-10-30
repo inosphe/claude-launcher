@@ -1336,6 +1336,39 @@ def test_session_pause_holds_both_sources_and_resume_starts_fresh(proj):
     assert "## Cflow" in sess.delivered[0]
 
 
+class _FaultedSession(_FakeSession):
+    """A session whose harness painted a session fault (claunch-ijot0)."""
+
+    def __init__(self, name: str, cwd: str) -> None:
+        super().__init__(name, cwd)
+        self.fault_record = {"kind": "usage_limit", "active": True}
+
+    def fault(self):
+        return self.fault_record
+
+
+def test_a_session_in_an_active_fault_gets_no_reminder(proj):
+    """claunch-ijot0: a harness under a usage limit (any active session
+    fault) answers each reminder with the fault line, so neither source is
+    typed into it; once the fault's window ends, reminders come again."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FaultedSession("w1", cwd)
+    mgr = _KinManager({"w1": sess})
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    service = session_reminder.SessionReminderService(mgr, mesh_mgr)
+
+    asyncio.run(service.tick(1000.0))
+    asyncio.run(service.tick(1602.0))
+    asyncio.run(service.tick(2203.0))
+    assert sess.delivered == []
+
+    sess.fault_record = {"kind": "usage_limit", "active": False}
+    asyncio.run(service.tick(2804.0))
+    assert len(sess.delivered) == 1
+    assert "## Cflow" in sess.delivered[0]
+
+
 def test_session_skip_rearms_active_role_and_cflow_sources(proj):
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")

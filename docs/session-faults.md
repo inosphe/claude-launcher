@@ -223,8 +223,11 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 ## fault가 바꾸는 데몬 동작
 
-- cflow v2 재촉(renudge): fault가 활성인 driver에는 재촉 메시지를 보내지
-  않는다(`Cflow2Clock._driver_faulted`, claunch-ijot0). 모든 kind가 대상이다.
+- 반복 재촉: fault가 활성인 세션에는 주기적으로 반복되는 재촉을 보내지 않는다
+  (claunch-ijot0). 모든 kind가 대상이고, 판정은 `session_fault.is_active` 하나다.
+  대상은 cflow v2 재촉(renudge, `Cflow2Clock._driver_faulted`), 세션 리마인더
+  (`SessionReminderService.session_faulted` — cflow·role·prompt pack 블록),
+  stall ping(`StallPingClock`, 기본 꺼짐)이다.
   fault 상태의 하네스는 입력마다 같은 fault 문구로 답하므로, 재촉은 화면만
   채운다(s29: 주간 한도 상태에서 10분마다 8시간 동안 입력됨). 바쁜 driver와
   같은 방식으로 건너뛰어 간격을 쓰지 않으므로, fault 창이 끝난 뒤 첫 pass에서

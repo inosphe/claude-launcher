@@ -208,6 +208,24 @@ def test_a_working_session_is_never_pinged(proj):
     assert clock.scan(t + 99999 + 900) == []
 
 
+def test_a_session_in_an_active_fault_is_never_pinged(proj):
+    """claunch-ijot0: an idle session stopped by a session fault (a usage
+    limit ...) would answer the ping with the fault line; it is armed, not
+    fired, until the fault's window ends."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    store.set_daemon_field("cflow_ping_interval", 600)
+    clock, sessions = _clock(proj)
+    record = {"kind": "usage_limit", "active": True}
+    sessions["w1"].fault = lambda: record
+    t = 1000.0
+    clock.scan(t)
+    assert clock.scan(t + 99999) == []
+    record["active"] = False
+    assert clock.scan(t + 99999) == []             # the fault ends: arm
+    assert clock.scan(t + 99999 + 601) != []
+
+
 def test_starting_is_not_stopped(proj):
     """A session whose harness has not printed yet has not 'stopped'."""
     cwd = str(proj)

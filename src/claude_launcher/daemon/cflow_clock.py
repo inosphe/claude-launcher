@@ -63,7 +63,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
-from . import actors, briefing, instance_manifest, landing_route, pools, session_procs, status_checks
+from . import actors, briefing, instance_manifest, landing_route, pools, session_fault, session_procs, status_checks
 from . import paths as daemon_paths
 from .session import STATUS_BUSY, STATUS_IDLE, delivery_wake
 
@@ -1453,7 +1453,10 @@ class StallPingClock:
                 payload.get("step_id"), payload.get("visit"),
             )
             entry = self._seen.get(key)
-            working = self._working(session)
+            # A session stopped by a session fault (a usage limit ...) is not
+            # a stall a ping can move: it would answer with the fault line.
+            # Arm, never fire, until the fault's window ends (claunch-ijot0).
+            working = self._working(session) or session_fault.is_active(session)
             if entry is None or entry["pos"] != pos or working:
                 # Working, or moved, or first sight: arm, never fire. Only an
                 # unbroken stretch of *stopped at the same position* counts.

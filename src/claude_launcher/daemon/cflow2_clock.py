@@ -94,7 +94,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths, pools
+from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths, pools, session_fault
 from .session import STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2")
@@ -918,19 +918,12 @@ class Cflow2Clock:
         error ...). Such a harness answers every typed notice with the same
         fault message, so a re-nudge only fills its screen (claunch-ijot0:
         s29 under a weekly limit got one every ten minutes for eight hours).
-        A test double without a fault reading is not faulted."""
+        """
         try:
             session = self.manager.get(cstore.session_of(scope))
         except Exception:
             return False
-        fault = getattr(session, "fault", None)
-        if fault is None:
-            return False
-        try:
-            record = fault()
-        except Exception:  # noqa: BLE001 - a broken reading must not silence it
-            return False
-        return bool(record and record.get("active"))
+        return session_fault.is_active(session)
 
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:
