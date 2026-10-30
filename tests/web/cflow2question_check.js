@@ -131,15 +131,23 @@ check("...and says reframe re-asks from the reason",
 check("a plain ask with its own options lists their descriptions",
       fns.cf2AskLegendItems([{ name: "go", description: "ship it" }], false), [["go", "ship it"]]);
 check("a loop limit names its presses and says what each does",
-      fns.cf2LimitPresses(false).map(([n, m]) => [n, /fail/.test(m)]),
+      fns.cf2LimitPresses(false, 25).map(([n, m]) => [n, /fail/.test(m)]),
       [["Allow 5 more", false], ["Allow 15 more", false], ["Stop the loop", true]]);
 check("...and what each adds to the extend body",
-      fns.cf2LimitPresses(false).map(([, , b]) => b),
+      fns.cf2LimitPresses(false, 25).map(([, , b]) => b),
       [{ by: 5 }, { by: 15 }, { stop: true }]);
+check("the raises scale with the loop's max: a 5-max loop offers 1 and 3",
+      fns.cf2LimitPresses(false, 5).map(([n, , b]) => [n, b]),
+      [["Allow 1 more", { by: 1 }], ["Allow 3 more", { by: 3 }], ["Stop the loop", { stop: true }]]);
+check("...a 1-max loop offers 1 and 2 (never zero, never the same twice)",
+      fns.cf2LimitPresses(false, 1).map(([n, , b]) => [n, b.by]),
+      [["Allow 1 more", 1], ["Allow 2 more", 2], ["Stop the loop", undefined]]);
+check("...and a payload without a max keeps the 5 / 15 pair",
+      fns.cf2LimitPresses(false).map(([, , b]) => b), [{ by: 5 }, { by: 15 }, { stop: true }]);
 check("a visit limit names its own presses, without a reset",
-      fns.cf2LimitPresses(true).map(([n]) => n), ["Allow one more visit", "Stop here"]);
+      fns.cf2LimitPresses(true, 9).map(([n]) => n), ["Allow one more visit", "Stop here"]);
 check("...and both carry visits: true",
-      fns.cf2LimitPresses(true).map(([, , b]) => b),
+      fns.cf2LimitPresses(true, 9).map(([, , b]) => b),
       [{ by: 1, visits: true }, { stop: true, visits: true }]);
 const legend = fns.cf2AnswerLegend([["a", "does A"], ["b", ""], ["c", "does C"]]);
 check("the legend is a .cf2-legend list, one row per meaning, empty ones left out",
@@ -180,7 +188,7 @@ check("the run page's ask card takes its kind from cf2AskKind",
 const limitSrc = src.slice(src.indexOf("const limitCard = "),
                            src.indexOf("for (const lim of run.loop_limits"));
 check("the limit card labels its presses and legend from cf2LimitPresses",
-      limitSrc.includes("cf2LimitPresses(visitsKind)")
+      limitSrc.includes("cf2LimitPresses(visitsKind, lim.max)")
         && limitSrc.includes("cf2AnswerLegend(presses)"),
       true);
 const choiceSrc = src.slice(src.indexOf("for (const c of run.choices || [])"),

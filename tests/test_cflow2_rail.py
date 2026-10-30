@@ -578,12 +578,43 @@ def test_operator_gates_carry_a_v2_user_choice_and_a_loop_limit(proj):
         runtime.report(task, cwd=cwd, scope="s1")
     (g,) = api_mod._operator_gates([_live("s1", cwd)])
     assert g["kind"] == "loop_limit" and g["prompt"] == "loop reached its max (1/1)"
-    assert [p["label"] for p in g["presses"]] == ["Allow 5 more", "Allow 15 more",
+    # the raises scale with the loop's max (claunch-gpgw1): a 1-max loop gets
+    # 1 and 2, a 25-max loop keeps 5 and 15, the await-landing loop at 5 gets
+    # 1 and 3 -- see test_a_loop_limit_raises_scale_with_the_loops_max
+    assert [p["label"] for p in g["presses"]] == ["Allow 1 more", "Allow 2 more",
                                                   "Stop the loop"]
     assert all(p["path"] == "/api/cflow2/extend" for p in g["presses"])
     stop = g["presses"][-1]["body"]
     runtime.extend_loop(stop["node"], 0, stop=stop["stop"], cwd=cwd, scope="s1")
     assert api_mod._operator_gates([_live("s1", cwd)]) == []
+
+
+def test_a_loop_limit_raises_scale_with_the_loops_max():
+    """The two raise presses are a fifth and three fifths of the loop's max
+    (claunch-gpgw1): the 25-max loops keep the 5 / 15 the card has offered
+    since claunch-n6ms0, and the await-landing loop, cut to 5, offers 1 / 3
+    -- letting a person add 15 to a 5-max loop would open three times the
+    ceiling the cut set. Never zero, never the same twice; a payload without
+    a max keeps the old pair."""
+    from claude_launcher.daemon import flow_nudge
+
+    assert flow_nudge.loop_raise_steps(25) == (5, 15)
+    assert flow_nudge.loop_raise_steps(5) == (1, 3)
+    assert flow_nudge.loop_raise_steps(1) == (1, 2)
+    assert flow_nudge.loop_raise_steps(10) == (2, 6)
+    for bad in (None, "", "x", 0, -3):
+        assert flow_nudge.loop_raise_steps(bad) == flow_nudge.LOOP_RAISE_FALLBACK
+
+    def labels(max_n, **extra):
+        row = {"cwd": "/w", "scope": "s1", "gated": True, "answers": [
+            {"kind": "loop_limit", "instance": "i1", "label": "await", "max": max_n,
+             **extra}]}
+        (gate,) = flow_nudge.v2_gates(row)
+        return [(p["label"], p["body"].get("by")) for p in gate["presses"]]
+
+    assert labels(25) == [("Allow 5 more", 5), ("Allow 15 more", 15), ("Stop the loop", None)]
+    assert labels(5) == [("Allow 1 more", 1), ("Allow 3 more", 3), ("Stop the loop", None)]
+    assert labels(None) == [("Allow 5 more", 5), ("Allow 15 more", 15), ("Stop the loop", None)]
 
 
 def test_v2_presses_for_a_move_request_and_a_halt():

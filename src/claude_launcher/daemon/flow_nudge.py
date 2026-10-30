@@ -106,14 +106,42 @@ def v1_gate_options(entry: dict) -> list:
             for o in raw or [] if isinstance(o, dict) and o.get("name")]
 
 
-#: A v2 limit's presses (``/api/cflow2/extend``), as the run page and the
-#: terminal strip offer them (app.js ``cf2LimitPresses``).
+#: A v2 limit's fixed presses (``/api/cflow2/extend``), as the run page and
+#: the terminal strip offer them (app.js ``cf2LimitPresses``). A loop limit's
+#: two raises are not here: they scale with the loop's ``max`` (see
+#: :func:`loop_raise_steps`), which only a loop answer carries.
 _V2_LIMIT_PRESSES = {
-    "loop_limit": (("Allow 5 more", {"by": 5}), ("Allow 15 more", {"by": 15}),
-                   ("Stop the loop", {"stop": True})),
     "visit_limit": (("Allow one more visit", {"by": 1, "visits": True}),
                     ("Stop here", {"stop": True, "visits": True})),
 }
+
+#: A loop limit's raises, as a share of the loop's ``max``: a fifth and three
+#: fifths, floored, at least one each, never the same twice. A 25-max loop
+#: keeps the 5 / 15 presses it has had (claunch-n6ms0); the await-landing loop
+#: at max 5 gets 1 / 3, because a 15 there would open three times the loop's
+#: own ceiling (claunch-gpgw1, user decision 2026-10-30).
+LOOP_RAISE_FALLBACK = (5, 15)
+
+
+def loop_raise_steps(max_n) -> tuple:
+    """The two ``by`` amounts a loop limit's presses offer for a loop whose
+    ``max`` is ``max_n``. A missing or unusable ``max`` falls back to the old
+    fixed pair, so a payload written before the field existed still offers
+    usable presses."""
+    try:
+        n = int(max_n)
+    except (TypeError, ValueError):
+        return LOOP_RAISE_FALLBACK
+    if n < 1:
+        return LOOP_RAISE_FALLBACK
+    small = max(1, n // 5)
+    return small, max(small + 1, (3 * n) // 5)
+
+
+def _loop_presses(max_n) -> tuple:
+    """A loop limit's presses: two raises scaled to its ``max``, then stop."""
+    return tuple((f"Allow {by} more", {"by": by})
+                 for by in loop_raise_steps(max_n)) + (("Stop the loop", {"stop": True}),)
 
 
 def v2_presses(entry: dict, answer: dict) -> list:
@@ -154,9 +182,11 @@ def v2_presses(entry: dict, answer: dict) -> list:
                 press["recommended"] = True
             out.append(press)
         return out
-    if kind in _V2_LIMIT_PRESSES:
+    presses = (_loop_presses(answer.get("max")) if kind == "loop_limit"
+               else _V2_LIMIT_PRESSES.get(kind))
+    if presses:
         return [{"label": label, "path": "/api/cflow2/extend", "body": {**body, **extra}}
-                for label, extra in _V2_LIMIT_PRESSES[kind]]
+                for label, extra in presses]
     return []
 
 
