@@ -1276,6 +1276,11 @@ nodes:
   - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
     쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
     (`fell back to '<세션>' at <cwd>`)을 적는다.
+  - `parent:landing`이 mesh leader의 큐에 닿으면(부모 없음, 병합할 수 있는 조상 없음,
+    병합하는 조상이 leader) 그 요청은 independent로 강등된 것이고, `trigger_done`
+    사유와 `claunch gate landing-target --json`의 `demoted`가
+    `stacked demoted to independent: <사유>, ...`로 그 사실을 적는다(claunch-0ka8c).
+    leader가 그 저장소를 받지 못하면 강등할 곳이 없으므로 그대로 대상 없음이다.
   - 어느 쪽이든 데몬은 결과를 런의 드라이버 터미널에 `landing request routed` 블록으로
     타이핑한다(`daemon/cflow2_clock.landing_block`, claunch-g0ttr.1): `result: queued --
     <trigger_done 사유>` 또는 `result: NOT queued -- <trigger_skipped 사유>`. 라우팅은
