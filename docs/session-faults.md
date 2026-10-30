@@ -238,6 +238,18 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
   같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+- pause는 beads 이슈를 open으로 돌리지 않는다. hold와 같이 in_progress로
+  남고, pause된 기록을 kill·archive·remove할 때 `SESSION ENDED` 정리가 돈다
+  (`SessionManager.unpause`/`settle_pause`, `beads.Board.session_settled`).
+  데몬 재기동도 pause된 기록을 정리하지 않는다.
+- 리셋 알림: 자동 pause는 그 fault(`kind`, `until`, `until_stated` 등)를
+  세션 디렉터리의 `fault-pause.json`에 남긴다. 데몬 재기동 뒤의 기록은 화면을
+  잃으므로 이 파일이 근거다. `GET /api/fault-resets`는 이 시계가 pause했고 아직
+  pause 상태인 세션 중 리셋 시각이 지난 것을 돌려주고, 대시보드는 세션마다
+  카드 하나(`usage limit reset: <세션>`, 출처 `fault`, ×로 닫힘)를 띄운다.
+  카드는 하네스가 화면에 리셋 시각을 적었을 때(`until_stated`)만 뜬다 —
+  시각이 없어 kind의 창으로 추정한 `until`은 계획이 돌아오는 시각과 무관하고,
+  하네스마다 시각을 적는지가 다르다. resume·kill·archive하면 카드가 내려간다.
 
 ## 리더 fault 알림 (fatal)
 

@@ -500,9 +500,14 @@ class Detector:
             until = previous["until"]
             reset = previous.get("reset", "")
             strikes = previous.get("strikes", 1)
+            stated = previous.get("until_stated", False)
         else:
             since = now
             until = deadline if deadline is not None else now + kind.window
+            # Whether ``until`` is the harness's own reset time read off the
+            # screen, or this kind's window guessed from the first sighting
+            # (claunch-ijot0: only a stated reset is told to a person).
+            stated = deadline is not None
             reset = hint
             if not same_kind:
                 # A different kind opens its own first run.
@@ -526,6 +531,7 @@ class Detector:
             "since": since,
             "last_seen": now,
             "until": until,
+            "until_stated": stated,
             "strikes": strikes,
         }
         return True
@@ -548,6 +554,7 @@ class Detector:
             "since": _iso(record["since"]),
             "last_seen": _iso(record["last_seen"]),
             "until": _iso(record["until"]),
+            "until_stated": bool(record.get("until_stated", False)),
             "strikes": record.get("strikes", 1),
             "active": now < record["until"],
             "source": "screen",

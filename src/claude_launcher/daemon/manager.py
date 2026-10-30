@@ -1981,8 +1981,12 @@ class SessionManager:
         of them racing — and the whole of its difference from a kill is in
         the record: the process is terminated the same way, the record stays
         respawnable the same way, and :meth:`respawn` clears the marker by
-        constructing a fresh Session. Idempotent like ``kill``: a session
-        that has already exited is left as it is, killed or paused.
+        constructing a fresh Session. The board is the one other place it
+        differs (claunch-ijot0): the session's in_progress issue is not
+        returned to open, as it is not for a hold -- the sweep runs when the
+        pause becomes an ending (:meth:`unpause`, :meth:`settle_pause`).
+        Idempotent like ``kill``: a session that has already exited is left
+        as it is, killed or paused.
         """
         session = self.get(name)
         if not session.exited:
@@ -2019,7 +2023,29 @@ class SessionManager:
             session.ended_by = dict(by)
         self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환", **_known(by=by))
         self.persist()
+        self._run_settle_hooks(session)
         return True
+
+    def settle_pause(self, name: str) -> bool:
+        """The board sweep a pause put off, owed when a paused record is
+        archived or removed (claunch-ijot0). A pause keeps the session's
+        in_progress issue for the resume; filing the record away is its real
+        ending. ``paused_at`` stays: an archived pause still reads paused.
+        Returns whether the sweep was owed."""
+        session = self.get(name)
+        if not session.exited or not getattr(session, "paused_at", None):
+            return False
+        if getattr(session, "swept_at", None):
+            return False
+        self._run_settle_hooks(session)
+        return True
+
+    def _run_settle_hooks(self, session: AnySession) -> None:
+        for hook in list(self.settle_hooks):
+            try:
+                hook(session)
+            except Exception:  # one hook must not silence the next
+                log.exception("settle hook %r failed for %r", hook, session.sdef.name)
 
     # ---- hold (claunch-5l35i) ------------------------------------------------ #
 
@@ -2108,11 +2134,7 @@ class SessionManager:
         if held:
             self._run_exit_hooks(session)
         else:
-            for hook in list(self.settle_hooks):
-                try:
-                    hook(session)
-                except Exception:  # one hook must not silence the next
-                    log.exception("settle hook %r failed for %r", hook, name)
+            self._run_settle_hooks(session)
         return True
 
     async def wake_async(self, name: str, *, by: str = "") -> AnySession:
@@ -2466,6 +2488,7 @@ class SessionManager:
             )
         # Forgetting a held record is its real ending: settle what it owed.
         self.unhold(name)
+        self.settle_pause(name)
         dropped: List[AnySession] = []
         if children == "remove":
             below = self.descendants(name)
@@ -2918,6 +2941,7 @@ class SessionManager:
             )
         # Filing a held record away is its real ending: settle what it owed.
         self.unhold(name)
+        self.settle_pause(name)
         if not session.archived_at:
             session.archived_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
@@ -4234,9 +4258,10 @@ class SessionManager:
         # owed once per ending, and the only records still owing it are the
         # ones that ended across the restart or whose sweep never finished.
         # And so is a held one: a hold is not an ending (Session.held_at).
-        # And a failed one, for the same reason (claunch-0j6gb.1).
+        # And a failed one, for the same reason (claunch-0j6gb.1), and a
+        # paused one: its issue waits for the resume (claunch-ijot0).
         if (not dead.archived_at and not dead.swept_at and not dead.held_at
-                and not dead.failed_at):
+                and not dead.failed_at and not dead.paused_at):
             self._retired_for_sweep.append(dead)
         return dead
 

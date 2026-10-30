@@ -1,5 +1,6 @@
 """The fault pause clock (daemon/fault_pause.py, claunch-ijot0)."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from claude_launcher.daemon import actors, fault_pause
@@ -13,6 +14,9 @@ class FakeSession:
         self.kill_requested = False
         self._fault = fault
         self._status = status
+        self.paused_at = None
+        self.archived_at = None
+        self.ended_by = None
 
     def fault(self):
         return self._fault
@@ -31,7 +35,10 @@ class FakeManager:
 
     def pause(self, name, *, force=False, by=None):
         self.paused.append((name, by))
-        self.sessions[name].exited = True
+        session = self.sessions[name]
+        session.exited = True
+        session.paused_at = "2026-10-30T04:00:00+00:00"
+        session.ended_by = by
 
 
 def _limit(until="2026-11-02T00:00:00+00:00", active=True, kind="usage_limit"):
@@ -89,3 +96,48 @@ def test_the_clock_does_nothing_when_switched_off():
     assert clock.pass_once() == []
     clock = fault_pause.FaultPauseClock(manager, config=lambda: {})
     assert clock.pass_once() == ["s29"]
+
+
+AFTER = datetime(2026, 11, 2, 1, tzinfo=timezone.utc)
+BEFORE = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+
+def _stated(**kw):
+    return {**_limit(**kw), "until_stated": True, "harness": "claude",
+            "label": "usage limit", "message": "You've hit your weekly limit"}
+
+
+def test_a_reset_is_listed_once_its_stated_time_has_passed():
+    manager = FakeManager(FakeSession("s29", _stated()))
+    fault_pause.sweep(manager, {})
+    assert fault_pause.resets(manager, now=BEFORE) == []
+    rows = fault_pause.resets(manager, now=AFTER)
+    assert [r["session"] for r in rows] == ["s29"]
+    assert rows[0]["fault"]["until"] == "2026-11-02T00:00:00+00:00"
+    assert rows[0]["paused_at"] == "2026-10-30T04:00:00+00:00"
+
+
+def test_the_record_outlives_the_live_fault_reading():
+    """A restart turns the record into one without its screen: the reset
+    is read from the file the pause wrote."""
+    manager = FakeManager(FakeSession("s29", _stated()))
+    fault_pause.sweep(manager, {})
+    manager.sessions["s29"]._fault = None
+    assert [r["session"] for r in fault_pause.resets(manager, now=AFTER)] == ["s29"]
+
+
+def test_a_guessed_reset_is_not_told():
+    """A window the detector guessed says nothing about when the plan returns."""
+    manager = FakeManager(FakeSession("s29", _limit()))
+    fault_pause.sweep(manager, {})
+    assert fault_pause.resets(manager, now=AFTER) == []
+
+
+def test_only_a_session_still_paused_by_this_clock_is_listed():
+    manager = FakeManager(FakeSession("a", _stated()), FakeSession("b", _stated()),
+                          FakeSession("c", _stated()))
+    fault_pause.sweep(manager, {})
+    manager.sessions["a"].paused_at = None  # resumed or killed
+    manager.sessions["b"].ended_by = actors.make(actors.USER)  # a person's pause
+    manager.sessions["c"].archived_at = "2026-11-01T00:00:00+00:00"
+    assert fault_pause.resets(manager, now=AFTER) == []

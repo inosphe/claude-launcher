@@ -3702,3 +3702,53 @@ def test_a_pending_session_is_told_its_issue_is_coming(home, tmp_path, repo):
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("ending", ["kill", "archive", "remove"])
+def test_a_pause_keeps_the_issue_until_it_becomes_an_ending(home, repo, ending):
+    """A pause is resumed like a hold (claunch-ijot0): the session's
+    in_progress issue stays where it is. The sweep runs when the paused
+    record is killed, archived or removed -- once."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.exit_hooks.append(board.session_exited)
+        mgr.settle_hooks.append(board.session_settled)
+        mgr.create(_sdef("w1", repo))
+        try:
+            mgr.pause("w1")
+            await _wait_for(lambda: mgr.get("w1").exited, "w1 paused")
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["w"]["status"] == "in_progress"
+            assert not br.comments.get("w")
+            if ending == "kill":
+                assert mgr.unpause("w1")
+            elif ending == "archive":
+                mgr.archive("w1")
+                assert mgr.get("w1").paused_at
+            else:
+                mgr.remove("w1")
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["w"]["status"] == "open"
+            assert len(br.comments["w"]) == 1
+            if ending == "archive":
+                assert not mgr.settle_pause("w1")  # swept once
+        finally:
+            await mgr.shutdown_all()
+            await board.cancel_all()
+
+    asyncio.run(run())
+
+
+def test_a_paused_record_is_not_swept_at_boot(home, repo):
+    """A restart retires records it does not relaunch and sweeps them; a
+    paused one is left for its resume (claunch-ijot0)."""
+    _register_py_harness()
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+    mgr._retire(_sdef("p", repo), {"paused_at": "2026-10-30T00:00:00+00:00"})
+    mgr._retire(_sdef("k", repo), {})
+    assert [d.sdef.name for d in mgr.take_retired_for_sweep()] == ["k"]

@@ -991,3 +991,14 @@ def test_the_route_filters_by_kind_and_expired(mgr, tmp_path):
     assert active["count"] == 0
     assert all_rows["count"] == 1 and all_rows["faults"][0]["active"] is False
     assert auth["count"] == 0
+
+
+def test_until_says_whether_the_harness_stated_it():
+    """A reset read off the screen is ``until_stated``; a window the kind
+    guessed is not (claunch-ijot0: only a stated reset is told to a person)."""
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    assert det.view(now=1000.0)["until_stated"] is True
+    det, _ = _detector()
+    det.scan(_Screen("You've hit your weekly limit"), now=1000.0)
+    assert det.view(now=1000.0)["until_stated"] is False

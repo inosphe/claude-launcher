@@ -23,17 +23,32 @@ Who is paused, measured on the live object every pass:
 A session this clock has paused once for a fault is not paused again for
 the same fault (the same reset deadline): a person who resumes it before the
 reset has decided to, and the clock does not undo that.
+
+Nothing resumes the session at the reset: whether to spend the new plan on it
+is the person's decision. What the daemon can do is say when that decision
+is due. A pause writes the fault it was made for into the session directory
+(:data:`RECORD`), because a daemon restart turns the record into one that
+no longer carries its screen; :func:`resets` lists the sessions still paused
+for it whose reset time has passed, and the dashboard raises a card for each
+(``GET /api/fault-resets``). Only a reset the harness *stated* on the screen
+(``until_stated``) is told: a window guessed from the first sighting says
+nothing about when the plan comes back, and the harnesses differ in whether
+they print one at all.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
+from aiohttp import web
+
 from .. import store
-from . import actors
+from . import actors, paths
 from .session import STATUS_IDLE
 
 log = logging.getLogger(__name__)
@@ -49,6 +64,12 @@ KINDS = ("usage_limit",)
 
 #: The reason recorded on the pause (``Session.ended_by``).
 REASON = "usage-limit"
+
+#: The file in the session directory holding the fault a pause was made for.
+RECORD = "fault-pause.json"
+
+#: The fault fields kept in :data:`RECORD`.
+RECORD_FIELDS = ("kind", "label", "harness", "message", "reset", "until", "until_stated")
 
 
 def enabled(cfg: Optional[dict] = None) -> bool:
@@ -93,11 +114,86 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
         except Exception:  # noqa: BLE001 -- one session must not stop the pass
             log.exception("fault pause of %r failed", name)
             continue
+        write_record(name, record)
         paused[name] = until
         out.append(name)
     if out:
         log.info("fault pause (usage limit): %s", ", ".join(out))
     return out
+
+
+def write_record(name: str, record: dict) -> None:
+    """Keep the fault a pause was made for (:data:`RECORD`)."""
+    body = {k: record.get(k) for k in RECORD_FIELDS if k in record}
+    body["paused_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        target = paths.session_dir(name) / RECORD
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        log.warning("fault pause: could not record the fault of %r", name, exc_info=True)
+
+
+def read_record(name: str) -> Optional[dict]:
+    try:
+        data = json.loads((paths.session_dir(name) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse(value) -> Optional[datetime]:
+    try:
+        at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def resets(manager, now: Optional[datetime] = None) -> List[dict]:
+    """The sessions this clock paused whose stated reset time has passed.
+
+    A row needs the session still paused (``paused_at``) by this clock
+    (``ended_by`` reason :data:`REASON`) and a :data:`RECORD` whose
+    ``until`` was stated by the harness and is not in the future. A resumed,
+    killed or person-paused session, or a fault without a stated reset,
+    contributes nothing.
+    """
+    now = datetime.now(timezone.utc) if now is None else now
+    out: List[dict] = []
+    for session in list(manager.list()):
+        name = session.sdef.name
+        if not getattr(session, "paused_at", None):
+            continue
+        if getattr(session, "archived_at", None):
+            continue
+        ender = getattr(session, "ended_by", None) or {}
+        if ender.get("kind") != actors.DAEMON or ender.get("reason") != REASON:
+            continue
+        record = read_record(name)
+        if not record or not record.get("until_stated"):
+            continue
+        until = _parse(record.get("until"))
+        if until is None or until > now:
+            continue
+        out.append({
+            "session": name,
+            "paused_at": session.paused_at,
+            "fault": {k: record.get(k) for k in RECORD_FIELDS if k in record},
+        })
+    out.sort(key=lambda r: r["session"])
+    return out
+
+
+def install(app) -> None:
+    async def h_fault_resets(request: web.Request) -> web.Response:
+        rows = resets(request.app["manager"])
+        return web.json_response(
+            {"resets": rows, "count": len(rows)},
+            dumps=lambda d: json.dumps(d, ensure_ascii=False),
+        )
+
+    app.router.add_get("/api/fault-resets", h_fault_resets)
 
 
 class FaultPauseClock:
