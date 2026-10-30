@@ -34,6 +34,7 @@ from .vmhub import Registry, VmError
 TART = "tart"
 STOP_WAIT = 120.0
 BOOT_WAIT = 90.0
+SUSPEND_WAIT = 60.0
 POLL = 2.0
 OUTPUT_CAP = 64 * 1024
 EXEC_MAX = 600.0
@@ -127,6 +128,7 @@ class Manager:
         graphics: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         stop_wait: float = STOP_WAIT,
+        suspend_wait: float = SUSPEND_WAIT,
         boot_wait: float = BOOT_WAIT,
     ) -> None:
         self.registry = registry
@@ -139,6 +141,7 @@ class Manager:
         self.graphics = graphics
         self._sleep = sleep
         self.stop_wait = stop_wait
+        self.suspend_wait = suspend_wait
         self.boot_wait = boot_wait
 
     # ---- tart ----------------------------------------------------------- #
@@ -306,6 +309,15 @@ class Manager:
         if rc != 0:
             self.registry.set_state(vm_id, "running")
             raise VmError("tart_failed", f"tart suspend: {err.strip() or rc}")
+        # ``tart suspend`` returns before the VM is saved (⑥: rc 0 in 0.03 s,
+        # state still "running"; "suspended" about 4 s later). Until tart says
+        # so the VM still holds its slot.
+        deadline = time.monotonic() + self.suspend_wait
+        while self.tart_state(vm.tart_name) != "suspended":
+            if time.monotonic() >= deadline:
+                raise VmError("vm_suspend_timeout",
+                              f"{vm_id} was not reported suspended within {self.suspend_wait:g}s")
+            self._sleep(0.5)
         self.registry.set_state(vm_id, "suspended")
         return self.registry.get(vm_id)
 

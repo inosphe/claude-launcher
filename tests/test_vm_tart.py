@@ -22,6 +22,9 @@ class Fake:
         self.console = "admin"
         self.shutdown_stops_vm = True
         self.suspend_rc = 0
+        #: polls of ``tart list`` before a suspend shows as done (-1: never)
+        self.suspend_lag = 0
+        self._suspending = {}
         self.execs = []
         self.exec_result = (0, "ok\n", "")
 
@@ -29,6 +32,12 @@ class Fake:
         argv = list(argv)
         self.calls.append(argv)
         if argv[:2] == ["tart", "list"]:
+            for name, left in list(self._suspending.items()):
+                if left == 0:
+                    self.tart[name] = "suspended"
+                    del self._suspending[name]
+                elif left > 0:
+                    self._suspending[name] = left - 1
             rows = [{"Name": n, "State": s, "Running": s == "running", "Source": "Local"}
                     for n, s in self.tart.items()]
             return 0, json.dumps(rows), ""
@@ -36,7 +45,7 @@ class Fake:
             return (0, self.ip + "\n", "") if self.tart.get(argv[2]) == "running" else (1, "", "no ip")
         if argv[:2] == ["tart", "suspend"]:
             if self.suspend_rc == 0:
-                self.tart[argv[2]] = "suspended"
+                self._suspending[argv[2]] = self.suspend_lag
             return self.suspend_rc, "", "boom" if self.suspend_rc else ""
         if argv[:2] == ["tart", "stop"]:
             self.tart[argv[2]] = "stopped"
@@ -266,3 +275,23 @@ def test_a_fresh_start_whose_tart_exits_is_a_fault(env):
         mgr.start("a")
     assert e.value.code == "tart_exited"
     assert reg.get("a").state == "fault"
+
+
+def test_suspend_waits_for_tart_to_report_suspended(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    fake.suspend_lag = 3
+    vm = mgr.suspend("a")
+    assert vm.state == "suspended" and fake.tart["a"] == "suspended"
+
+
+def test_a_suspend_tart_never_finishes_keeps_the_slot(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr.suspend_wait = 0.05
+    fake.suspend_lag = -1
+    with pytest.raises(VmError) as e:
+        mgr.suspend("a")
+    assert e.value.code == "vm_suspend_timeout"
+    assert reg.get("a").state == "saving"
+    assert "a" in reg.holders()
