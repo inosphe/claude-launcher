@@ -1240,6 +1240,197 @@ def test_an_empty_series_still_answers_a_window(tmp_path, ledger):
     assert 1 <= len(out["points"]) <= statsboard.SERIES_MAX_POINTS
 
 
+# --------------------------------------------------------------------------- #
+# the series' second source: a transcript for a session the ledger never saw
+# --------------------------------------------------------------------------- #
+class Reader:
+    """A stand-in for a ``sessionstats.StatsReader``: only ``requests`` is read,
+    and every slice taken of it is recorded, so a test can see which requests
+    a poll folded."""
+
+    def __init__(self, *requests):
+        self.requests = SliceLog(requests)
+
+
+class SliceLog(list):
+    def __init__(self, items):
+        super().__init__(items)
+        self.starts = []
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            self.starts.append(key.start or 0)
+        return super().__getitem__(key)
+
+
+def req(at, fresh=0, read=0, write=0, out=0, side=False):
+    """One request as a ``StatsReader`` keeps it."""
+    return (at, fresh, read, write, out, side)
+
+
+def bins_source(readers, partial=False, calls=None):
+    """A ``TranscriptBins`` source answering from ``readers``: name -> list of
+    (file key, reader); a name not in it has no transcript."""
+    def source(sdef, spend):
+        if calls is not None:
+            calls.append(sdef.name)
+        got = readers.get(sdef.name)
+        return None if got is None else (list(got), partial)
+    return source
+
+
+def with_sdef(item, harness="claude"):
+    item["sdef"] = SimpleNamespace(name=item["name"], harness=harness)
+    return item
+
+
+def test_the_series_draws_a_session_the_ledger_never_saw_from_its_transcript(
+        tmp_path, ledger):
+    """An OAuth session writes no ledger line; its five-minute bins come from
+    its transcript and land in the same points and row map as a ledger
+    session's, marked by their source (claunch-gbj4h)."""
+    write_ledger(tmp_path / "metering", [record("a", hour=9, fresh=3, cached=0,
+                                                output=0)])
+    ledger.refresh(NOW)
+    nine = datetime(2026, 10, 21, 9, 0, tzinfo=KST).timestamp()
+    reader = Reader(req(nine + 10, fresh=5, read=50, out=2),
+                    req(nine + 70, fresh=1, write=4),
+                    req(nine + 400, out=7, side=True))
+    bins = statsboard.TranscriptBins(
+        source=bins_source({"oauth": [("main", reader)]}))
+    out = ledger.series("24h", sessions=[meta("a"), with_sdef(meta("oauth"))],
+                        now=NOW, transcripts=bins)
+    row = out["by_session"]["oauth"]
+    assert row["source"] == "transcript"
+    assert out["by_session"]["a"]["source"] == "ledger"
+    assert (row["input"], row["cache_read"], row["cache_write"], row["output"]) \
+        == (6, 50, 4, 9)
+    assert row["requests"] == 3, "a subagent request is the session's spend too"
+    # Two bins of the ledger's five-minute grid: 09:00 holds two requests.
+    assert row["points"] == [[nine, 62, 2], [nine + 300, 7, 1]]
+    assert out["totals"]["total"] == 3 + 69
+    assert sum(p["total"] for p in out["points"]) == out["totals"]["total"]
+    assert (out["sessions"], out["unmetered"]) == (2, 0)
+    assert out["transcript_sessions"] == 1 and out["transcript_skipped"] == 0
+    assert out["partial"] is False
+    # Without the second source the same session is a dash, as before.
+    plain = ledger.series("24h", sessions=[meta("a"), with_sdef(meta("oauth"))],
+                          now=NOW)
+    assert "oauth" not in plain["by_session"] and plain["unmetered"] == 1
+
+
+def test_transcript_bins_fold_only_what_was_appended():
+    """The bins are kept between polls: a second poll folds the requests the
+    reader gained since the first and nothing before them."""
+    reader = Reader(req(600, fresh=1), req(650, fresh=2))
+    bins = statsboard.TranscriptBins(source=bins_source({"s": [("f", reader)]}))
+    sdef = SimpleNamespace(name="s")
+    got, partial = bins.bins(sdef)
+    assert got == {600: [3, 0, 0, 0, 2]} and partial is False
+    reader.requests.append(req(900, out=4))
+    got, _ = bins.bins(sdef)
+    assert got == {600: [3, 0, 0, 0, 2], 900: [0, 0, 0, 4, 1]}
+    assert reader.requests.starts == [0, 2], "the second poll starts past the first"
+    # Nothing new: nothing folded twice.
+    assert bins.bins(sdef)[0] == got
+    # A window asks only for its own bins.
+    assert bins.bins(sdef, since=900)[0] == {900: [0, 0, 0, 4, 1]}
+
+
+def test_transcript_bins_rebuild_when_a_reader_is_replaced():
+    """A replaced reader (its file shrank or was swapped, or the follower was
+    dropped as idle) has lost the count the bins were built on; the session's
+    bins are rebuilt from the readers as they now stand, not added to."""
+    first = Reader(req(600, fresh=10))
+    side = Reader(req(1200, out=1))
+    readers = {"s": [("main", first), ("sub", side)]}
+    bins = statsboard.TranscriptBins(source=bins_source(readers))
+    sdef = SimpleNamespace(name="s")
+    assert bins.bins(sdef)[0] == {600: [10, 0, 0, 0, 1], 1200: [0, 0, 0, 1, 1]}
+    readers["s"] = [("main", Reader(req(600, fresh=3))), ("sub", side)]
+    assert bins.bins(sdef)[0] == {600: [3, 0, 0, 0, 1], 1200: [0, 0, 0, 1, 1]}
+    # A file seen for the first time is folded from its start, nothing rebuilt.
+    readers["s"].append(("sub2", Reader(req(1500, read=8))))
+    got = bins.bins(sdef)[0]
+    assert got[1500] == [0, 8, 0, 0, 1] and got[600] == [3, 0, 0, 0, 1]
+
+
+def test_transcript_bins_answer_none_without_a_transcript_and_pass_partial():
+    bins = statsboard.TranscriptBins(source=bins_source({}))
+    assert bins.bins(SimpleNamespace(name="gone")) is None
+    late = statsboard.TranscriptBins(
+        source=bins_source({"s": [("f", Reader(req(0, fresh=1)))]}, partial=True))
+    assert late.bins(SimpleNamespace(name="s"))[1] is True
+
+
+def test_the_series_reads_only_transcripts_the_window_can_have_touched(
+        tmp_path, ledger, monkeypatch):
+    """A session idle since before the window is not read; one with no
+    transcript stays unmetered; past the per-call cap the rest are counted as
+    skipped and stay unmetered; a reading still in the background is said."""
+    ledger.refresh(NOW)
+    calls = []
+    nine = datetime(2026, 10, 21, 9, 0, tzinfo=KST).timestamp()
+    readers = {n: [("f", Reader(req(nine, fresh=1)))] for n in ("x", "y", "old")}
+    bins = statsboard.TranscriptBins(
+        source=bins_source(readers, partial=True, calls=calls))
+    metas = [with_sdef(meta("x")), with_sdef(meta("y")), with_sdef(meta("none")),
+             with_sdef(meta("old", created="2026-09-01T00:00:00+00:00",
+                            activity="2026-10-01T00:00:00+00:00")),
+             meta("nosdef")]
+    out = ledger.series("24h", sessions=metas, now=NOW, transcripts=bins)
+    assert "old" not in calls, "idle before the window: not read"
+    assert set(out["by_session"]) == {"x", "y"}
+    assert out["unmetered"] == 3 and out["partial"] is True
+    # The cap counts reads, a read that finds no transcript included: in name
+    # order `none` and `x` are read, `y` is skipped.
+    monkeypatch.setattr(statsboard, "MAX_TRANSCRIPTS", 2)
+    capped = ledger.series("24h", sessions=metas, now=NOW, transcripts=bins)
+    assert set(capped["by_session"]) == {"x"}
+    assert capped["transcript_skipped"] == 1
+    assert capped["unmetered"] == 4
+
+
+def test_the_series_reads_a_real_transcript_incrementally(
+        tmp_path, ledger, monkeypatch):
+    """End to end through ``sessionstats.follow_requests``: a Claude transcript
+    on disk is folded into bins, and an append is folded on the next poll."""
+    from claude_launcher.daemon import sessionstats, tokenusage
+
+    tokenusage.forget()
+    path = tmp_path / "conv.jsonl"
+
+    def reply(mid, when, fresh, out):
+        return json.dumps({"type": "assistant", "timestamp": when,
+                           "message": {"id": mid, "role": "assistant", "usage": {
+                               "input_tokens": fresh, "output_tokens": out,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0}}}) + "\n"
+
+    path.write_text(reply("m1", "2026-10-21T00:01:00.000Z", 4, 1)
+                    + reply("m1", "2026-10-21T00:01:00.000Z", 4, 1),
+                    encoding="utf-8")
+    monkeypatch.setattr(sessionstats, "locate", lambda sdef: (
+        {"session": sdef.name, "harness": "claude"}, path))
+    ledger.refresh(NOW)
+    bins = statsboard.TranscriptBins()
+    sessions = [with_sdef(meta("oauth"))]
+    try:
+        out = ledger.series("24h", sessions=sessions, now=NOW, transcripts=bins)
+        row = out["by_session"]["oauth"]
+        assert (row["total"], row["requests"]) == (5, 1), \
+            "one response written as two lines is one request"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(reply("m2", "2026-10-21T00:20:00.000Z", 10, 2))
+        again = ledger.series("24h", sessions=sessions, now=NOW,
+                              transcripts=bins)
+        row = again["by_session"]["oauth"]
+        assert (row["total"], row["requests"]) == (17, 2)
+        assert [p[1] for p in row["points"]] == [5, 12]
+    finally:
+        tokenusage.forget()
+
+
 def test_the_series_endpoint_answers_and_refuses_an_unknown_window(
         home, tmp_path, monkeypatch):
     import asyncio

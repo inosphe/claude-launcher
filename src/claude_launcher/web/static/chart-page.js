@@ -28,19 +28,26 @@ globalThis.ChartPage = (() => {
     killed: "killed", archived: "archived",
   };
   const GROUPS = [["", "Off"], ["mesh", "Mesh"], ["workspace", "Workspace"]];
-  /* What a row with no ledger record says. The page only knows the ledger
-     never saw the session (statsboard leaves it out of by_session), so the
-     fact leads and the reasons follow as candidates: the shim (metering.py)
-     only sees API-key providers, so an OAuth session (the Anthropic
-     subscription, Codex's login) never has a record -- but neither does an
-     API-key session before its first request, one whose records aged out,
-     or one on a provider with metering off (claunch-p8f73). */
-  const UNMETERED_TIP = "원장 기록 없음 (원장은 API 키 공급자 요청만 기록 — OAuth 구독 세션, " +
-    "첫 요청 전 세션, 보존 기간 밖 세션은 기록이 없다)";
-  const UNMETERED_DETAIL = "계측 원장에 이 세션의 기록이 없다. 원장은 metering shim을 거치는 " +
-    "API 키 공급자의 요청만 기록한다. 기록이 없는 경우: OAuth 경로(Anthropic 구독, Codex " +
-    "로그인) 세션, 아직 요청을 보내지 않은 세션, 기록이 보존 기간(31일) 밖에 있는 세션, " +
-    "metering을 끈 공급자의 세션.";
+  /* What a row with no figures says. The page only knows that neither the
+     ledger nor a transcript spoke for the session (statsboard leaves it out
+     of by_session), so the fact leads and the reasons follow as candidates.
+     The shim (metering.py) only sees API-key providers; an OAuth session
+     (the Anthropic subscription, Codex's login) is filled from its own
+     transcript instead (claunch-gbj4h). What is left is a session before its
+     first request, one with no readable transcript, one whose records aged
+     out, one on a provider with metering off, or one past the per-poll
+     transcript cap (claunch-p8f73). */
+  const UNMETERED_TIP = "원장 기록 없음, transcript도 읽지 못함 (첫 요청 전 세션, " +
+    "transcript가 없는 세션, 보존 기간 밖 세션은 기록이 없다)";
+  const UNMETERED_DETAIL = "계측 원장에 이 세션의 기록이 없고, transcript에서도 읽지 " +
+    "못했다. 원장은 metering shim을 거치는 API 키 공급자의 요청만 기록하고, OAuth 경로" +
+    "(Anthropic 구독, Codex 로그인) 세션은 transcript로 채운다. 둘 다 없는 경우: 아직 " +
+    "요청을 보내지 않은 세션, transcript를 찾지 못했거나 읽기 도구가 없는 하네스의 세션, " +
+    "기록이 보존 기간(31일) 밖에 있는 세션, metering을 끈 공급자의 세션, 한 번에 읽는 " +
+    "transcript 수 상한을 넘은 세션.";
+  // What a row filled from its transcript says about where its figures came
+  // from: the ledger never saw it, so the numbers are the transcript's.
+  const TRANSCRIPT_SOURCE = "transcript (원장 기록 없음)";
   const REDRAW_MS = 5000;
   const STORE_KEY = "claunch_chart_view";
   // The timeline column's share of the split, in percent.
@@ -235,6 +242,9 @@ globalThis.ChartPage = (() => {
         parts[key] = Number(value[key]) || 0;
       }
       parts.requests = Number(value.requests) || 0;
+      // `ledger`, or `transcript` for a session the ledger never saw whose
+      // figures the daemon read from its own transcript (claunch-gbj4h).
+      parts.source = value.source === "transcript" ? "transcript" : "ledger";
       parts.total = Number(value.total) || (parts.input + parts.cache_read +
         parts.cache_write + parts.output);
       // The buckets the session spent anything in ([t seconds, total,
@@ -273,6 +283,9 @@ globalThis.ChartPage = (() => {
       cacheShare: Number.isFinite(payload.cache_share) ? payload.cache_share : null,
       sessions: Number(payload.sessions) || 0,
       unmetered: Number(payload.unmetered) || 0,
+      transcriptSessions: Number(payload.transcript_sessions) || 0,
+      transcriptSkipped: Number(payload.transcript_skipped) || 0,
+      partial: Boolean(payload.partial),
       ledgerSince: payload.ledger_since || "",
     };
   }
@@ -361,6 +374,7 @@ globalThis.ChartPage = (() => {
     } else if (r.tokens) {
       rows.push(["토큰(창)", `${formatTokens(r.tokens.total)} · 요청 ` +
         `${(Number(r.tokens.requests) || 0).toLocaleString()}`]);
+      if (r.tokens.source === "transcript") rows.push(["출처", TRANSCRIPT_SOURCE]);
       const parts = SERIES_PARTS.filter(([key]) => r.tokens[key])
         .map(([key, label]) => `${label} ${formatTokens(r.tokens[key])}`);
       if (parts.length) rows.push(["구성", parts.join(" · ")]);
@@ -880,7 +894,11 @@ globalThis.ChartPage = (() => {
     head.appendChild(node("span", "chart-muted",
       smodel
         ? `${formatBucketWidth(smodel.width)} 버킷 · 계측 세션 ${smodel.sessions}` +
+          (smodel.transcriptSessions ? ` (transcript ${smodel.transcriptSessions})` : "") +
           (smodel.unmetered ? ` · 원장 기록 없음 ${smodel.unmetered}` : "") +
+          (smodel.transcriptSkipped
+            ? ` · transcript 상한 초과 ${smodel.transcriptSkipped}` : "") +
+          (smodel.partial ? " · transcript 읽는 중" : "") +
           // The ledger starts when metering was switched on: a window reaching
           // past that date is not a window the figures can cover, and saying
           // so is how "nobody measured" stays apart from "spent nothing".

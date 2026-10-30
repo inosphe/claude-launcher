@@ -862,6 +862,10 @@ def build_app(
     # transcript, read through the same call the detail panel makes and kept
     # for a short while so a poll pays only for the append since the last one.
     app["stats_transcripts"] = statsboard.Transcripts()
+    # The Chart page's series asks the same of those sessions at the ledger's
+    # five-minute grid: bins folded from the requests each transcript gained
+    # since the last poll (claunch-gbj4h).
+    app["stats_transcript_bins"] = statsboard.TranscriptBins()
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -12795,7 +12799,10 @@ async def h_stats_series(request: web.Request) -> web.Response:
     ``total / bucket_s`` as a rate and integrating over the axis gives the
     window's total -- the same reading the terminal overlay's throughput
     line gives for a single call. :meth:`statsboard.Ledger.series` chooses
-    the bucket width from the window so one answer is one screen."""
+    the bucket width from the window so one answer is one screen. A session
+    the ledger never saw (an OAuth route) is filled from its own transcript
+    through the daemon's :class:`statsboard.TranscriptBins`, which keeps the
+    bins and folds only what each transcript gained since the last poll."""
     manager: SessionManager = request.app["manager"]
     window = request.query.get("window", "7d")
     if window not in statsboard.SERIES_WINDOWS:
@@ -12809,6 +12816,9 @@ async def h_stats_series(request: web.Request) -> web.Response:
     ledger = request.app.get("stats_ledger")
     if ledger is None:
         ledger = statsboard.Ledger()
+    transcripts = request.app.get("stats_transcript_bins")
+    if transcripts is None:
+        transcripts = statsboard.TranscriptBins()
     events = getattr(manager, "events", None)
     project = str(request.query.get("project") or "").strip()
 
@@ -12818,7 +12828,8 @@ async def h_stats_series(request: web.Request) -> web.Response:
         ledger.refresh()
         return ledger.series(window, sessions=metas, project=project,
                              include_killed=bool(_flag("killed")),
-                             include_archived=bool(_flag("archived")))
+                             include_archived=bool(_flag("archived")),
+                             transcripts=transcripts)
 
     try:
         payload = await asyncio.to_thread(build)
