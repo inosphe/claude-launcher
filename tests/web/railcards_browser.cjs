@@ -157,10 +157,19 @@ const READ = `(() => {
         ctx: shown(li.querySelector(".rail-ctx-line")),
         seen: shown(li.querySelector(".rail-seen")),
         actions: shown(li.querySelector(".rail-actions")),
-        /* Measure session action buttons separately from their container. */
+        /* Measure session action buttons separately from their container.
+           On a compact card the container rides the meta line and holds
+           only the spawn+pin pair (claunch-g6ecv), so both the box and the
+           buttons are read painted or not. */
         actionButtons: [...li.querySelectorAll(
           ".sess-plus, .sess-pin, .sess-observe, .sess-note-edit, .sess-info")]
           .filter((b) => b.getBoundingClientRect().width > 0).length,
+        actionX: Object.fromEntries([...li.querySelectorAll(
+          ".sess-plus, .sess-pin")].filter(
+          (b) => b.getBoundingClientRect().width > 0).map((b) => {
+          const r = b.getBoundingClientRect();
+          return [b.className, Math.round(r.x)];
+        })),
         rowRefreshes: [...li.querySelectorAll(
           ".sess-brief-rowref, .sess-status-check-rowref")]
           .filter((b) => b.getBoundingClientRect().width > 0).length,
@@ -237,15 +246,22 @@ const READ = `(() => {
     assert.deepEqual(by("rev-a").lines,
       { brief: false, cwd: false, ctx: false, seen: false, actions: false,
         actionButtons: 0, rowRefreshes: 0,
-        meta: false, card: false, checks: false },
+        meta: false, card: false, checks: false, actionX: {} },
       "a one-line card draws the name and the role, nothing else");
     assert.deepEqual(by("lead").lines,
-      { brief: true, cwd: false, ctx: false, seen: false, actions: false,
-        actionButtons: 0, rowRefreshes: 0,
-        meta: true, card: false, checks: true },
+      { brief: true, cwd: false, ctx: false, seen: false, actions: true,
+        actionButtons: 2, rowRefreshes: 0,
+        meta: true, card: false, checks: true,
+        /* actionX is positional: asserted on its own lines below. */
+        actionX: by("lead").lines.actionX },
       "a compact card draws the briefing one-line and the chips");
-    assert.equal(by("lead").lines.actionButtons, 0,
-      "a compact card draws no session action buttons");
+    assert.equal(by("lead").lines.actionButtons, 2,
+      "a compact card draws the spawn+pin pair and nothing else");
+    const leadX = by("lead").lines.actionX;
+    assert.deepEqual(Object.keys(leadX).sort(), ["sess-pin", "sess-plus"],
+      "the painted pair on a compact card is exactly the spawn + and the pin");
+    assert.ok(leadX["sess-plus"] < leadX["sess-pin"],
+      "the spawn + sits directly left of the pin on a compact card (claunch-g6ecv)");
     const compactKey = page.locator('#session-list li[data-name="w1"] .sess-key');
     await compactKey.waitFor({ state: "attached" });
     assert.equal(await compactKey.isVisible(), false,

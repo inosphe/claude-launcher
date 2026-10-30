@@ -252,12 +252,37 @@ ok("a compact card keeps the briefing one-line — it is the card's summary",
    !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-brief[^{]*\{/.test(plain),
    "a rule hides .rail-brief on a compact card");
 
-/* Compact cards hide every action, including the pool picker. */
-const compactBox = plain.match(
+/* Compact cards hide every action EXCEPT the spawn+pin pair the operator
+   asked back onto the default card (claunch-g6ecv): the `+` spawns a child
+   and sits directly left of the 📌. The exclusion is listed by name, so a
+   control added to the box later is hidden on compact until someone decides
+   otherwise — the same shape as the 0601dd72 refreshes' exception. */
+const compactExclude = plain.match(
+  /#session-list li\[data-rail-mode="compact"\][^{]*\.rail-actions\s*>\s*:not\(([^)]*)\)\s*\{([^}]*)\}/);
+ok("a compact card hides the actions box's other children by name (spawn and pin excepted)",
+   !!compactExclude && /display:\s*none/.test(compactExclude[2])
+     && /\.sess-plus/.test(compactExclude[1]) && /\.sess-pin/.test(compactExclude[1]),
+   compactExclude ? `:not(${compactExclude[1]}) { ${compactExclude[2].trim()} }`
+                  : "no compact .rail-actions exclusion rule");
+/* Written the same shape as the `.rail-quiet` defence below: the pair is
+   drawn because NO rule hides the box wholesale on compact, so a later
+   `display: none` on the box itself fails here rather than quietly taking
+   the buttons back off the default card that most of the fleet wears. */
+ok("no rule hides the whole actions line on a compact card",
+   !/#session-list li\[data-rail-mode="compact"\]\s*\.rail-actions\s*\{[^}]*display:\s*none/.test(plain),
+   "a compact .rail-actions { display: none } rule came back");
+/* The pair takes the card's buttons line of its own (the base rule's
+   full-width order: 1) — riding the name line was tried and failed on the
+   real rail, where a name line's flex bases already fill the 260px column,
+   so a fourth base always wraps onto a second line anyway. */
+const compactBoxRide = plain.match(
   /#session-list li\[data-rail-mode="compact"\]\s+\.rail-actions\s*\{([^}]*)\}/);
-ok("a compact card hides the whole actions line including its key picker",
-   !!compactBox && /display:\s*none/.test(compactBox[1]),
-   compactBox ? compactBox[1].trim() : "no compact .rail-actions rule");
+ok("a compact card's actions box takes no meta-line override (it stays the buttons line)",
+   !compactBoxRide,
+   compactBoxRide ? compactBoxRide[1].trim() : "no compact .rail-actions box rule");
+ok("an empty actions box costs nothing on a compact card",
+   /#session-list li\[data-rail-mode="compact"\][^{]*\.rail-actions:not\(:has\(/.test(plain),
+   "no :has() guard on the compact actions box");
 /* Written the same shape as the `.rail-quiet` defence below: the chips are
    drawn because NO rule hides them, so a later `display: none` added for the
    compact density fails here rather than quietly taking them off the default
