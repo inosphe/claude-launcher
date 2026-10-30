@@ -156,6 +156,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         send_keys = session_mod.Session.send_keys
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
+        _complete_keystroke_frame = session_mod.Session._complete_keystroke_frame
         note_human_input = session_mod.Session.note_human_input
         keyboard_busy = session_mod.Session.keyboard_busy
         draft_open = session_mod.Session.draft_open

@@ -63,6 +63,7 @@ def _fake_session(*, bracketed: bool = True):
         submit_open_draft = session_mod.Session.submit_open_draft
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
+        _complete_keystroke_frame = session_mod.Session._complete_keystroke_frame
         note_human_input = session_mod.Session.note_human_input
         keyboard_busy = session_mod.Session.keyboard_busy
         draft_open = session_mod.Session.draft_open
@@ -88,39 +89,117 @@ def _fake_session(*, bracketed: bool = True):
 @pytest.mark.parametrize(
     "data, expected",
     [
-        (b"hello", True),                 # plain typing
-        ("한글".encode(), True),           # a committed Hangul syllable
-        (b" ", True),                     # a space is a character too
-        (b"\r", False),                   # Enter submits: the composer empties
-        (b"\n", False),
-        (b"\x03", False),                 # C-c discards the line
-        (b"\x15", False),                 # C-u kills it
-        (b"\x1b\r", True),                # Alt/Shift-Enter: a newline IN the draft
-        (b"\\\r", True),                  # ...and its backslash spelling
-        (b"\x1b[A", None),                # an arrow key is not typing
-        (b"\x1bOB", None),                # ...in either encoding
-        (b"\x1b", None),                  # a lone Escape decides nothing
-        (b"\x7f", None),                  # nor does a backspace
-        (b"\x1b[200~hi\x1b[201~", True),  # a paste fills the composer
-        (b"ab\rcd", True),                # sent, then started again
-        (b"ab\r", False),                 # ...and the other way round
+        (b"hello", (5, False)),           # plain typing, one per character
+        ("한글".encode(), (2, False)),     # ...not one per UTF-8 byte
+        (b" ", (1, False)),               # a space is a character too
+        (b"\r", (0, True)),               # Enter submits: the composer empties
+        (b"\n", (0, True)),
+        (b"\x03", (0, True)),             # C-c discards the line
+        (b"\x15", (0, True)),             # C-u kills it
+        (b"\x1b\r", (1, False)),          # Alt/Shift-Enter: a newline IN the draft
+        (b"\\\r", (2, False)),            # ...and its backslash spelling
+        (b"\x1b[A", (0, False)),          # an arrow key is not typing
+        (b"\x1bOB", (0, False)),          # ...in either encoding
+        (b"\x1b", (0, False)),            # a lone Escape decides nothing
+        (b"\x7f", (-1, False)),           # backspace removes a character
+        (b"\x08", (-1, False)),           # ...in either encoding
+        (b"hi\x7f\x7f", (0, False)),      # typed and erased: nothing left
+        (b"\x1b[200~hi\x1b[201~", (2, False)),  # a paste fills the composer
+        (b"\x1b[200~a\nb\x1b[201~", (3, False)),  # a paste line break stays in it
+        (b"ab\rcd", (2, True)),           # sent, then started again
+        (b"ab\r", (0, True)),             # ...and the other way round
         # the terminal's own replies carry printable payloads nobody typed
-        (b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\", None),  # OSC colour reply
-        (b"\x1b]10;rgb:ffff/ffff/ffff\x07", None),      # ...BEL-terminated
-        (b"\x1bP>|xterm.js(5.5.0)\x1b\\", None),       # DCS XTVERSION
-        (b"\x1b[M #!", None),             # X10 mouse press: three raw bytes
-        (b"\x1b[<0;12;5M\x1b[<0;12;5m", None),  # SGR mouse click
-        (b"\x1b[I", None),                # focus in
-        (b"\x1b[?62;22c", None),          # DA1 reply
-        (b"\x1b]11;rgb:0/0/0\x07hi", True),  # a reply, then real typing
-        (b"hi\x1b[M #!\r", False),         # typing, a click, then Enter
+        (b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\", (0, False)),  # OSC colour reply
+        (b"\x1b]10;rgb:ffff/ffff/ffff\x07", (0, False)),     # ...BEL-terminated
+        (b"\x1bP>|xterm.js(5.5.0)\x1b\\", (0, False)),       # DCS XTVERSION
+        (b"\x1b[M #!", (0, False)),        # X10 mouse press: three raw bytes
+        (b"\x1b[<0;12;5M\x1b[<0;12;5m", (0, False)),  # SGR mouse click
+        (b"\x1b[I", (0, False)),           # focus in
+        (b"\x1b[?62;22c", (0, False)),     # DA1 reply
+        (b"\x1b]11;rgb:0/0/0\x07hi", (2, False)),  # a reply, then real typing
+        (b"hi\x1b[M #!\r", (0, True)),     # typing, a click, then Enter
     ],
 )
-def test_draft_state_is_read_from_the_keystrokes(data, expected):
-    """``None`` matters as much as the other two: a key that says nothing
-    about the composer must LEAVE a draft open. An arrow key pressed inside
-    a half-written prompt is still a half-written prompt."""
-    assert session_mod.draft_state_from_bytes(data) is expected
+def test_draft_edit_is_counted_in_characters(data, expected):
+    """``(0, False)`` matters as much as the rest: a key that says nothing
+    about the composer must CHANGE nothing. An arrow key pressed inside a
+    half-written prompt is still a half-written prompt."""
+    assert session_mod.draft_edit_from_bytes(data) == expected
+
+
+def test_typing_then_erasing_every_character_leaves_no_draft():
+    """claunch-wzx2r: the composer is empty but the daemon still held this
+    session's mail. Backspace used to say "nothing changed", so the "draft
+    open" set by the first keystroke outlived the line it was about and
+    kept the session held for DRAFT_GUARD (180s) after the last character
+    was deleted."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"hi")
+    assert s.draft_open() is True
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is True  # one character left in the line
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is False
+
+
+def test_the_count_is_characters_not_utf8_bytes():
+    """Hangul is one character and three bytes. Counting bytes would need
+    three backspaces to empty the composer, and the hold that survived the
+    first two would be the same false positive in a different costume."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data="한글".encode())
+    assert s.draft_open() is True
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is True
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is False
+
+
+def test_a_key_that_changes_nothing_leaves_an_open_draft_open():
+    """The protection this guard exists for, restated after the counting
+    change: arrows, a lone Escape and a mouse report all leave a half-written
+    prompt exactly as it was."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"half a prompt")
+    for frame in (b"\x1b[A", b"\x1b", b"\x1b[<0;12;5M", b"\x1b[I"):
+        s.note_human_input(at_terminal=True, data=frame)
+        assert s.draft_open() is True, frame
+
+
+def test_an_escape_sequence_split_across_frames_is_still_one_key():
+    """claunch-wzx2r, second branch: ``ESC[`` in one frame and the ``A`` that
+    ends the arrow in the next. Read frame by frame the ``A`` is just a
+    letter, and the daemon opened a draft over a composer nobody had
+    touched."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"\x1b[")
+    assert s.draft_open() is False
+    s.note_human_input(at_terminal=True, data=b"A")  # the rest of the arrow
+    assert s.draft_open() is False
+
+
+def test_a_character_split_across_frames_is_counted_once():
+    """ws.py waits for the rest of a character before it feeds the screen, and
+    the keyboard is read the same way: half a Hangul syllable is not a
+    character, and it is not two either."""
+    s, _ = _fake_session()
+    han = "한".encode()
+    s.note_human_input(at_terminal=True, data=han[:1])
+    s.note_human_input(at_terminal=True, data=han[1:])
+    assert s.draft_open() is True
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is False, "one backspace must empty a one-character line"
+
+
+def test_a_multiline_paste_leaves_the_draft_open():
+    """A line break inside a bracketed paste is composer content, the same
+    reading :class:`_SubmittedLineTracker` already takes: only the Enter
+    after the end marker submits."""
+    s, _ = _fake_session()
+    s.note_human_input(
+        at_terminal=True, data=b"\x1b[200~line one\nline two\x1b[201~"
+    )
+    assert s.draft_open() is True
 
 
 @pytest.mark.parametrize(
