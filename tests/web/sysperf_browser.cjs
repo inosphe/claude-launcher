@@ -121,6 +121,12 @@ const server = http.createServer((req, res) => {
     await page.mouse.move(900, 700);
     await page.waitForFunction(() => document.getElementById("status-overlay").classList.contains("hidden"));
     assert.ok(requests.includes("?history=1"), "the page reads the history");
+    // The charts redraw on every badge poll (every POLL_MS), and a redraw
+    // wipes the hover tip — the sessions-tooltip read raced that and failed
+    // 40~50% of runs (claunch-l12u0 review). The badge assertions above are
+    // complete, so stop the poll for the hover steps: no further renders,
+    // the page keeps the samples it has.
+    await page.evaluate(() => globalThis.SysPerfPage.stopBadge());
     const view = await page.evaluate(() => {
       const v = document.getElementById("sysperf-view");
       return {
@@ -168,21 +174,32 @@ const server = http.createServer((req, res) => {
       assert.ok(Math.abs(line.x + line.width / 2 - px) < 3,
         `hairline at ${line.x + line.width / 2}, cursor at ${px}`);
     }
-    const sessions = page.locator("#sysperf-view .sysperf-card").nth(3);
-    // Scroll with a plain DOM call: the charts redraw on every badge poll,
-    // and playwright's stability wait races the replacement.
-    await page.evaluate(() => {
-      document.querySelectorAll("#sysperf-view .sysperf-card")[3]?.scrollIntoView();
+    // Read the sessions tip atomically: dispatch the hit rect's pointermove
+    // and read the tip it populates in the same task. A real-mouse hover
+    // raced the chart redraw, which wiped the tip between hover and read
+    // (claunch-l12u0 review: 40~50% failure); one synchronous task cannot be
+    // interleaved by a render.
+    const tipState = await page.evaluate(() => {
+      const card = document.querySelectorAll("#sysperf-view .sysperf-card")[3];
+      const hit = card.querySelector("rect.sysperf-hit");
+      const box = hit.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, clientX: box.x + box.width - 2,
+        clientY: box.y + box.height / 2, pointerId: 1, pointerType: "mouse", isPrimary: true };
+      hit.dispatchEvent(new PointerEvent("pointerover", opts));
+      hit.dispatchEvent(new PointerEvent("pointerenter", opts));
+      hit.dispatchEvent(new PointerEvent("pointermove", opts));
+      const tip = card.querySelector(".sysperf-tip");
+      return {
+        hidden: tip.classList.contains("hidden"),
+        rows: [...tip.querySelectorAll(".sysperf-tip-row span")].map((s) => s.textContent),
+        counts: [...tip.querySelectorAll(".sysperf-tip-row strong")].map((s) => s.textContent),
+      };
     });
-    const sbox = await sessions.locator("rect.sysperf-hit").boundingBox();
-    await page.mouse.move(sbox.x + sbox.width - 2, sbox.y + sbox.height / 2);
-    const stip = sessions.locator(".sysperf-tip");
-    await stip.waitFor({ state: "visible" });
-    assert.deepEqual(await stip.locator(".sysperf-tip-row span").allTextContents(),
-      ["Running", "Hold", "Ended (paused / killed)"]);
-    const counts = await stip.locator(".sysperf-tip-row strong").allTextContents();
-    assert.ok(counts.every((c) => /^\d+$/.test(c)), `counts print as integers: ${counts}`);
-    assert.equal(counts[1], "3");
+    assert.equal(tipState.hidden, false, "the hover shows the sessions tip");
+    assert.deepEqual(tipState.rows, ["Running", "Hold", "Ended (paused / killed)"]);
+    assert.ok(tipState.counts.every((c) => /^\d+$/.test(c)),
+      `counts print as integers: ${tipState.counts}`);
+    assert.equal(tipState.counts[1], "3");
     if (process.env.SYSPERF_SHOT) await page.screenshot({ path: process.env.SYSPERF_SHOT, fullPage: true });
 
     // 5. leave
