@@ -23,6 +23,7 @@ from . import (
     harness_policy,
     harnesses,
     lineage,
+    onboarding,
     pi_provider,
     profile_keys,
     provider_spec,
@@ -993,6 +994,14 @@ def run(
                 f"log in with /login, or run 'claunch login {borrow.name}' first",
                 file=sys.stderr,
             )
+    if (
+        not null_token
+        and onboarding.state(profile) != onboarding.DONE
+        and onboarding.has_credential(auth_source)
+    ):
+        # Only a hint: run never writes the profile's .claude.json; the
+        # user decides with 'claunch onboard' (claunch-1lpzm.1).
+        print(f"hint: {onboarding.hint(profile)}", file=sys.stderr)
     _advance_pool(profile, borrow=borrow, null_token=null_token)
     return _spawn(
         profile,
