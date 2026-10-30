@@ -8780,7 +8780,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 /* Composer suggestions remain outside the textarea and preserve its caret. */
 .glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
 .glossary-composer[hidden] { display: none; }
-.gc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .gc-hint { color: #afbed2; margin: 8px 0 12px; line-height: 1.6; }
 .gc-button { font: inherit; text-align: left; border: 1px solid #455771; background: #253750; color: #c8dfff; border-radius: 7px; padding: 8px 12px; cursor: pointer; }
 .gc-button:hover { background: #334e70; }
@@ -8789,9 +8789,18 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .gc-mentions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gc-choices { display: grid; gap: 8px; }
 .gc-choice { display: grid; gap: 6px; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.gc-choice span, .gc-resolved span { color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
+.gc-choice span { color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
 .gc-choice small { color: #97c0ff; }
-.gc-resolved { display: grid; gap: 5px; margin-top: 10px; border-left: 2px solid #73a0d9; padding-left: 12px; overflow-wrap: anywhere; }
+.gc-choice.included small { color: #9cc4ff; }
+.gc-modes { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.gc-mode { padding: 4px 10px; }
+.gc-mode[aria-pressed="true"] { border-color: #73a0d9; background: #334e70; color: #ffffff; }
+.gc-included-list { display: grid; gap: 6px; margin-top: 10px; }
+.gc-included-title { margin: 0; font-size: 12px; font-weight: 600; color: #afbed2; }
+.gc-included { border-left: 2px solid #73a0d9; padding-left: 12px; overflow-wrap: anywhere; }
+.gc-included summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; }
+.gc-included .gc-definition { margin: 6px 0 0; color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
+.gc-badge { border-radius: 999px; padding: 1px 7px; background: #2c3a4d; color: #9cc4ff; font-size: 11px; }
 
 @media (max-width: 820px) { #worktrees-view { padding: 14px 12px; } }
 .wt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
