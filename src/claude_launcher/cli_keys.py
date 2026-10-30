@@ -155,11 +155,21 @@ def _cmd_strategy(args: argparse.Namespace) -> int:
         if owner and owner != p.name:
             print(f" pool: profile {owner!r} (inherited — every launch of {p.name!r} selects from it)")
         return 0
+    if args.key and args.strategy != profile_keys.MANUAL_STRATEGY:
+        raise SystemExit(
+            "claunch: a key applies to the 'manual' strategy; "
+            f"{args.strategy!r} picks its own key"
+        )
     try:
-        pool = profile_keys.set_strategy(p, args.strategy)
+        pool = profile_keys.set_strategy(p, args.strategy, args.key)
     except profile_keys.KeysError as exc:
         raise SystemExit(f"claunch: {exc}")
-    print(f"profile {p.name!r}: strategy {pool.strategy} ({len(pool.keys)} keys)")
+    line = f"profile {p.name!r}: strategy {pool.strategy} ({len(pool.keys)} keys)"
+    if pool.pick and pool.strategy in profile_keys.PINNED_STRATEGIES:
+        # manual and random store the key the next launch takes; printing it is
+        # the CLI half of the create form's NEXT marker (claunch-i985h).
+        line += f", next {pool.pick}"
+    print(line)
     # The set path writes the same pool the display path reads, so on an
     # inherited child it is the ancestor's file that changed -- the caller
     # has to be told, the way `keys list` names the owner (claunch-wllke.5.1.1).
@@ -169,6 +179,20 @@ def _cmd_strategy(args: argparse.Namespace) -> int:
             f" pool: profile {owner.name!r} (inherited — every launch of {p.name!r}"
             f" selects from it)"
         )
+    return 0
+
+
+def _cmd_roll(args: argparse.Namespace) -> int:
+    """Draw a new key for a random pool; that draw is what the next launch takes."""
+    p = profile_mod.require(args.name)
+    try:
+        selection = profile_keys.roll(p)
+    except profile_keys.KeysError as exc:
+        raise SystemExit(f"claunch: {exc}")
+    print(
+        f"profile {p.name!r}: drew {selection.key.id} ({selection.key.masked()}); "
+        "the next launch takes this key"
+    )
     return 0
 
 
@@ -207,7 +231,8 @@ def register(sub) -> None:
             "reader (get-token, inheritance, borrow checks) keeps seeing one "
             "effective token. Strategies: rotation (round-robin in file "
             "order), usage-min / usage-max (compare the keys' own usage where "
-            "the token is the account credential), random."
+            "the token is the account credential), random (a drawn key, which "
+            "'keys roll' re-draws), manual (the key you name)."
         ),
     )
     keys_sub = p.add_subparsers(dest="keys_command", metavar="COMMAND")
@@ -235,7 +260,19 @@ def register(sub) -> None:
     p_strategy.add_argument(
         "strategy", nargs="?", choices=list(profile_keys.STRATEGIES)
     )
+    p_strategy.add_argument(
+        "key",
+        nargs="?",
+        help="for 'manual': the key the next launch takes (id or 1-based index)",
+    )
     p_strategy.set_defaults(func=_cmd_strategy)
+
+    p_roll = keys_sub.add_parser(
+        "roll",
+        help="draw a new key for a random pool — the draw the next launch takes",
+    )
+    p_roll.add_argument("name")
+    p_roll.set_defaults(func=_cmd_roll)
 
     p_select = keys_sub.add_parser(
         "select", help="show (or with --apply, consume) the key a launch would use"

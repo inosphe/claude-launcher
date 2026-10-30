@@ -479,3 +479,99 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the create form's "use this key" (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_a_session_created_pinned_runs_on_that_key_and_keeps_it(home, tmp_path):
+    """The pin travels with the create request and holds across launches.
+
+    This is the rail modal's guarantee applied at creation: the key the
+    operator presses in the Runs-as block is written into the definition, so
+    every launch of that session puts exactly that key in the harness's
+    environment — a restore included, and even though the pool's strategy and
+    some other session's launch point elsewhere.
+    """
+    from claude_launcher import store
+
+    prof, ids = _pooled_profile()
+    marker = tmp_path / "harness.env"
+    _register_env_recording_harness(marker)
+    store.set_profile_field(prof.name, "harness", "keyed")
+    # The pool's own answer is the OTHER key: an unpinned launch takes ids[1].
+    profile_keys.set_strategy(prof, "manual", ids[1])
+
+    async def run():
+        mgr = _manager()
+        try:
+            pinned = mgr.create(
+                SessionDef(
+                    name="s1", harness="keyed", profile=prof.selector,
+                    cwd=str(tmp_path), key_id=ids[0],
+                )
+            )
+            first_pid, first_token = await _await_record(marker)
+            assert first_token == TOKENS[0], "the created session runs on its pin"
+            assert pinned.sdef.key_id == ids[0]
+
+            # Somebody else's launch moves the profile's token file.
+            mgr.create(
+                SessionDef(name="s2", harness="keyed", profile=prof.selector,
+                           cwd=str(tmp_path))
+            )
+            other_pid, other_token = await _await_record(marker, not_pid=first_pid)
+            assert other_token == TOKENS[1]
+
+            # A relaunch through the restore path writes the pin back. Wait on
+            # the LAST record, not the first: the other session's launch is in
+            # the file and satisfies "not the first pid".
+            restored = await mgr.redefine("s1", cols=100)
+            assert restored.sdef.key_id == ids[0]
+            restored_pid, restored_token = await _await_record(
+                marker, not_pid=other_pid
+            )
+            assert restored_token == TOKENS[0]
+            assert restored_pid != first_pid
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_creating_a_pinned_session_refuses_a_key_the_pool_does_not_hold(
+    home, tmp_path
+):
+    """A create naming a key the pool has no business holding is a 400.
+
+    Without this the bad id would be stored on the definition and only surface
+    at the first launch, as a warning and a silent fall back to the strategy.
+    """
+    from claude_launcher import store
+
+    prof, _ids = _pooled_profile()
+    _register_env_recording_harness(tmp_path / "harness.env")
+    store.set_profile_field(prof.name, "harness", "keyed")
+
+    async def run():
+        mgr = _manager()
+        try:
+            client = await _serve(mgr, tmp_path)
+            auth = {"Authorization": "Bearer sekrit"}
+            try:
+                resp = await client.post(
+                    "/api/sessions",
+                    json={
+                        "name": "s9", "profile": prof.selector,
+                        "cwd": str(tmp_path), "key_id": "k-nope",
+                    },
+                    headers=auth,
+                )
+                assert resp.status == 400
+                assert "not in the key pool" in (await resp.json())["error"]
+            finally:
+                await client.close()
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
