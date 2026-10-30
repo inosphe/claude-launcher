@@ -38,6 +38,11 @@ _INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 #: so no named instance can take it. Every other place reads this constant.
 DEFAULT_INSTANCE_ID = "main"
 
+#: Names that look like the default daemon but are not its id. ``-L default``
+#: used to create a separate named instance beside the real default one
+#: (claunch-xliqf), so it is refused with a pointer to ``main`` instead.
+_RESERVED_NAMES = ("default",)
+
 
 def validate_instance(name: str) -> str:
     """Return ``name`` if it is a safe instance name, else raise ValueError.
@@ -53,15 +58,30 @@ def validate_instance(name: str) -> str:
     if name == DEFAULT_INSTANCE_ID:
         raise ValueError(
             f"bad daemon instance name {name!r}: it is the default daemon's id "
-            f"(leave CLAUNCH_DAEMON unset and drop -L for the default daemon)"
+            f"(-L {DEFAULT_INSTANCE_ID} or no -L selects the default daemon; "
+            f"no named instance can take its id)"
+        )
+    if name in _RESERVED_NAMES:
+        raise ValueError(
+            f"bad daemon instance name {name!r}: the default daemon's id is "
+            f"{DEFAULT_INSTANCE_ID!r} (use -L {DEFAULT_INSTANCE_ID} or drop -L)"
         )
     return name
 
 
+def select_instance(name: str) -> str:
+    """The instance a ``-L``/``--name``/``CLAUNCH_DAEMON`` value selects:
+    ``''`` (the default instance) for :data:`DEFAULT_INSTANCE_ID`, else the
+    validated name. So ``claunch -L main run`` is ``claunch run``."""
+    name = name.strip()
+    if not name or name == DEFAULT_INSTANCE_ID:
+        return ""
+    return validate_instance(name)
+
+
 def instance() -> str:
     """The active daemon instance name ('' = the default instance)."""
-    name = os.environ.get(INSTANCE_ENV, "").strip()
-    return validate_instance(name) if name else ""
+    return select_instance(os.environ.get(INSTANCE_ENV, ""))
 
 
 def instance_id(name: Optional[str] = None) -> str:
@@ -98,7 +118,8 @@ def known_instances() -> list:
     if root.is_dir():
         names.extend(sorted(
             p.name for p in root.iterdir()
-            if p.is_dir() and _INSTANCE_RE.match(p.name) and p.name != DEFAULT_INSTANCE_ID
+            if p.is_dir() and _INSTANCE_RE.match(p.name)
+            and p.name != DEFAULT_INSTANCE_ID and p.name not in _RESERVED_NAMES
         ))
     return names
 

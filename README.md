@@ -2580,6 +2580,13 @@ pin one with `CLAUNCH_DAEMON_PORT`), and its own relay identity (defaults to
 keeps the classic `~/.claude-launcher/daemon/` directory and fixed port, so
 nothing changes unless you opt in.
 
+The default instance's id is `main` (the `@main` of a cflow2 run slot).
+`claunch -L main ...` and `CLAUNCH_DAEMON=main` select it, so `claunch -L main
+run ...` is `claunch run ...`: same launcher home, same config file
+(`~/.claude-launcher/.claunch.yaml`), same daemon. `-L main` also returns a
+shell that inherited another instance to the default one. `default` is
+refused as an instance name; it is not an alias of `main`.
+
 ```bash
 claunch -L test daemon start             # creates the 'test' instance
 claunch -L test new-session -s scratch   # later starts of it are automatic

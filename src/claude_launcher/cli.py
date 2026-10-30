@@ -1468,7 +1468,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="target the named daemon instance (tmux -L style; every daemon/"
         "session/mesh command then talks to that instance's server — equivalent "
-        "to setting CLAUNCH_DAEMON=NAME)",
+        "to setting CLAUNCH_DAEMON=NAME). 'main' is the default daemon: "
+        "'claunch -L main run' is 'claunch run'",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1892,9 +1893,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             # Into the environment so daemon paths, auto-started daemons and
             # any spawned children all target the same instance.
-            os.environ[daemon_paths.INSTANCE_ENV] = daemon_paths.validate_instance(
-                args.instance
-            )
+            # -L main is the default instance: drop the variable rather than
+            # set it, so a shell that inherited another instance comes back.
+            name = daemon_paths.select_instance(args.instance)
+            if name:
+                os.environ[daemon_paths.INSTANCE_ENV] = name
+            else:
+                os.environ.pop(daemon_paths.INSTANCE_ENV, None)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
