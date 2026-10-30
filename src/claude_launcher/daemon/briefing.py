@@ -59,6 +59,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1493,16 +1494,32 @@ def _write_file(path: Path, row: dict) -> None:
         log.warning("briefing: could not write %s", path)
 
 
+#: Held while one name's entry is read and its file written. retire_all_async
+#: writes from a worker thread while compose and forget write on the loop;
+#: reading the entry under the lock means whichever write comes last carries
+#: the newest entry, so a retire never puts back what compose just replaced.
+_write_lock = threading.Lock()
+
+
 def _write(name: str) -> None:
     """Mirror ``name``'s entry to its own file; no entry removes the file."""
     if not _plain_name(name):
         return
+    with _write_lock:
+        _write_locked(name)
+
+
+def _write_locked(name: str) -> None:
+    # One read each: from the worker thread the loop may drop the entry
+    # between a membership test and the lookup.
     row: dict = {}
-    if name in _cache:
-        key, result = _cache[name]
+    entry = _cache.get(name)
+    if entry is not None:
+        key, result = entry
         row.update(key=_jsonable(key), result=result)
-    if name in _failures:
-        row["failure"] = _failures[name]
+    failure = _failures.get(name)
+    if failure is not None:
+        row["failure"] = failure
     path = _session_file(name)
     if row:
         _write_file(path, row)
@@ -1551,6 +1568,26 @@ def retire_all() -> None:
     it is showing until then. Recorded failures belong to the old backend
     too and are dropped.
     """
+    for name in _retire_entries():
+        _write(name)
+    _run_hooks()
+
+
+async def retire_all_async() -> None:
+    """:func:`retire_all` for the event loop: the files are written off it.
+
+    Retiring rewrites every session's file — 639 of them took 183ms on the
+    live daemon, all of it inside the request that saved the setting, with
+    every other handler waiting. The entries change on the loop, so the
+    rail's next poll already reads them stale; only the disk follows later.
+    """
+    names = _retire_entries()
+    await asyncio.to_thread(_write_each, names)
+    _run_hooks()
+
+
+def _retire_entries() -> List[str]:
+    """Retire the cached entries in memory; the names whose file must follow."""
     _restore_cache()
     changed = set(_failures)
     for name, (key, result) in list(_cache.items()):
@@ -1559,9 +1596,12 @@ def retire_all() -> None:
         _cache[name] = ((*key, _RETIRED), {**result, "stale": True})
         changed.add(name)
     _failures.clear()
-    for name in sorted(changed):
+    return sorted(changed)
+
+
+def _write_each(names) -> None:
+    for name in names:
         _write(name)
-    _run_hooks()
 
 
 def forget(names) -> None:
