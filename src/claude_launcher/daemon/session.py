@@ -238,6 +238,89 @@ class _SubmittedLineTracker:
         return submitted
 
 
+#: ESC + one of these opens a control *string* (OSC, DCS, SOS, PM, APC) that
+#: runs to BEL or ST. On the input side they are the terminal's own replies —
+#: an OSC 10/11 colour answer, a DCS XTVERSION — never something typed.
+_ESC_STRING_INTRODUCERS = frozenset(b"]PX^_")
+
+
+def _input_tokens(data: bytes):
+    """Split terminal input into ``(kind, start, end)`` spans.
+
+    ``kind`` is ``"report"`` for what the terminal emulator writes on its own
+    account — a reply to a query (OSC/DCS strings, DA, cursor position,
+    DECRQM), a mouse report in either encoding, a focus report — and
+    ``"seq"`` / ``"byte"`` for keys a person pressed. The web terminal sends
+    both down one socket (xterm's ``onData``), so they arrive mixed in the
+    same frames.
+    """
+    i = 0
+    n = len(data)
+    while i < n:
+        b = data[i]
+        if b != 0x1B:
+            yield "byte", i, i + 1
+            i += 1
+            continue
+        nxt = data[i + 1] if i + 1 < n else None
+        if nxt in _ESC_STRING_INTRODUCERS:
+            j = i + 2
+            while j < n:
+                if data[j] == 0x07:
+                    j += 1
+                    break
+                if data[j] == 0x1B and j + 1 < n and data[j + 1] == 0x5C:
+                    j += 2
+                    break
+                j += 1
+            yield "report", i, j
+            i = j
+            continue
+        if nxt == 0x5B:  # CSI — parameters up to the final byte
+            j = i + 2
+            while j < n and not (0x40 <= data[j] <= 0x7E):
+                j += 1
+            final = data[j] if j < n else None
+            params = data[i + 2:j]
+            j += 1
+            if final == 0x4D and not params:
+                # X10 mouse: CSI M and three raw bytes (button, column, row),
+                # each >= 0x20 and so indistinguishable from typed text.
+                yield "report", i, min(j + 3, n)
+                i = min(j + 3, n)
+                continue
+            report = (
+                (params[:1] == b"<" and final in (0x4D, 0x6D))  # SGR mouse
+                or (not params and final in (0x49, 0x4F))  # focus in/out
+                or (params[:1] in (b"?", b">") and final == 0x63)  # DA
+                or final == 0x52 and b";" in params  # cursor position
+                or params[:1] == b"?" and params.endswith(b"$") and final == 0x79
+            )
+            yield ("report" if report else "seq"), i, j
+            i = j
+            continue
+        if nxt == 0x4F:  # SS3 — one final byte
+            yield "seq", i, min(i + 3, n)
+            i += 3
+            continue
+        yield "seq", i, min(i + 2, n)  # ESC alone, or Alt-<key> / ESC + Enter
+        i += 2 if nxt is not None else 1
+
+
+def is_terminal_report(data: bytes) -> bool:
+    """Whether ``data`` is nothing but the terminal emulator's own replies
+    and reports (see :func:`_input_tokens`) — no key a person pressed.
+
+    Such a frame is not a human at the keyboard: it must neither open a
+    draft nor keep one alive. A mouse hover under ``?1003`` or a focus report
+    otherwise restarts the draft clock forever and holds the session's mail
+    over a composer nobody is writing in.
+    """
+    if not data:
+        return False
+    return all(kind == "report" for kind, _, _ in _input_tokens(data))
+
+
 def draft_state_from_bytes(data: bytes) -> Optional[bool]:
     """What ``data`` — keystrokes a human just sent — did to their composer.
 
@@ -257,6 +340,9 @@ def draft_state_from_bytes(data: bytes) -> Optional[bool]:
 
     * an escape sequence (arrows, function keys, a bracketed-paste *marker*)
       changes nothing — its bytes are not characters, whatever they look like;
+      the same for the terminal's own reports, whose payloads (an OSC colour
+      reply's ``11;rgb:...``, an X10 mouse report's three coordinate bytes)
+      are printable but were never typed;
     * ``ESC`` + Enter and backslash + Enter insert a newline *into* the
       composer rather than submitting it (Alt/Shift-Enter, the continuation
       most TUIs take), so they open a draft rather than closing one;
@@ -266,24 +352,14 @@ def draft_state_from_bytes(data: bytes) -> Optional[bool]:
       Hangul syllable, and text arriving inside a bracketed paste — opens one.
     """
     state: Optional[bool] = None
-    i = 0
-    n = len(data)
-    while i < n:
-        b = data[i]
-        if b == 0x1B:  # ESC: a chord or a control sequence, not typing
-            nxt = data[i + 1] if i + 1 < n else None
-            if nxt in (0x5B, 0x4F):  # CSI / SS3 — skip to the final byte
-                i += 2
-                while i < n and not (0x40 <= data[i] <= 0x7E):
-                    i += 1
-                i += 1
-                continue
-            if nxt in (0x0D, 0x0A):  # Alt/Shift-Enter: a newline in the draft
-                state = True
-                i += 2
-                continue
-            i += 2 if nxt is not None else 1  # ESC alone, or Alt-<key>
+    for kind, i, j in _input_tokens(data):
+        if kind == "report":
             continue
+        if kind == "seq":
+            if j - i == 2 and data[i + 1] in (0x0D, 0x0A):
+                state = True  # Alt/Shift-Enter: a newline in the draft
+            continue
+        b = data[i]
         if b in (0x0D, 0x0A):
             # Backslash-Enter is the other "newline, don't send" spelling.
             state = True if (i and data[i - 1] == 0x5C) else False
@@ -291,7 +367,6 @@ def draft_state_from_bytes(data: bytes) -> Optional[bool]:
             state = False
         elif b >= 0x20 and b != 0x7F:  # printable (0x7F is backspace)
             state = True
-        i += 1
     return state
 
 STATUS_STARTING = "starting"
@@ -1875,6 +1950,10 @@ class Session:
         Both are terminal-only: ``send-keys`` types a line and its Enter
         together, and holding *itself* behind its own text would deadlock.
         """
+        if data and is_terminal_report(data):
+            # The emulator answering a query or reporting the mouse/focus:
+            # nobody pressed a key, so neither clock moves and no draft opens.
+            return
         on_command = getattr(self, "on_command_submitted", None)
         if data and on_command is not None:
             for line in self._submitted_lines.feed(data):
