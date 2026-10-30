@@ -53,6 +53,7 @@ from . import (
     lineage,
     metering,
     migrate as migrate_mod,
+    onboarding,
     migrate_config,
     pi_provider,
     provider_spec,
@@ -503,6 +504,59 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             failed += 1
             reason = " ".join(result.reason.split())[:60]
             print(f"{p.selector:<20} FAIL  {reason}")
+        if entry.builtin:
+            # Read-only: whether the first-run screens are already skipped.
+            # It never fails validate; 'claunch onboard' is what writes it.
+            if onboarding.state(p) == onboarding.DONE:
+                print(f"{'':<20} onboarding: done")
+            else:
+                print(
+                    f"{'':<20} onboarding: missing "
+                    f"(run 'claunch onboard {p.name}')"
+                )
+    return 1 if failed else 0
+
+
+def _cmd_onboard(args: argparse.Namespace) -> int:
+    if bool(args.name) == bool(args.all):
+        raise profile.ProfileError("give a profile name or --all, not both")
+    targets = (
+        [profile.require_selector(args.name)] if args.name else profile.list_all()
+    )
+    if not targets:
+        print("no profiles to onboard")
+        return 0
+    failed = 0
+    for p in targets:
+        if not runner.profile_harness(p).builtin:
+            print(f"{p.selector:<20} skip  not the claude harness")
+            continue
+        current = onboarding.state(p)
+        if args.check:
+            print(f"{p.selector:<20} {current}")
+            if current != onboarding.DONE:
+                failed += 1
+            continue
+        if current == onboarding.DONE:
+            print(f"{p.selector:<20} done  (already set)")
+            continue
+        if not onboarding.has_credential(p):
+            # Without a credential the first-run screens are the way in:
+            # skipping them would leave claude with nothing to log in with.
+            failed += 1
+            print(
+                f"{p.selector:<20} FAIL  no auth "
+                f"(run 'claunch login {p.name}' or "
+                f"'claunch set-token {p.name}' first)"
+            )
+            continue
+        try:
+            onboarding.mark(p)
+        except onboarding.OnboardingError as exc:
+            failed += 1
+            print(f"{p.selector:<20} FAIL  {exc}")
+            continue
+        print(f"{p.selector:<20} done  {onboarding.FLAG} set in {onboarding.config_path(p)}")
     return 1 if failed else 0
 
 
@@ -1724,6 +1778,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=120.0, help="seconds per profile (default: 120)"
     )
     p_validate.set_defaults(func=_cmd_validate)
+
+    p_onboard = sub.add_parser(
+        "onboard",
+        help="mark a profile's Claude Code onboarding done so its first run "
+        "skips the theme/login screens (needs a stored credential)",
+    )
+    p_onboard.add_argument("name", nargs="?", help="profile to onboard")
+    p_onboard.add_argument(
+        "--all", action="store_true", help="every profile on the claude harness"
+    )
+    p_onboard.add_argument(
+        "--check",
+        action="store_true",
+        help="only report done/missing; exit 1 if any is missing",
+    )
+    p_onboard.set_defaults(func=_cmd_onboard)
 
     p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
     p_usage.add_argument("name")

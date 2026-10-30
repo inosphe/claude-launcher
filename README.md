@@ -697,6 +697,24 @@ claunch validate         # all profiles
 and token) and reports `OK` with a snippet of the reply, or `FAIL` with the
 reason; it exits non-zero if any profile fails. Profiles without a token fail
 fast without calling the API. Tune with `--prompt` and `--timeout`.
+For a claude-harness profile it also prints `onboarding: done` or
+`onboarding: missing`; that line is informational and never fails `validate`.
+
+A profile created without a seed source (or with `--no-seed`) has no
+`hasCompletedOnboarding` in its `.claude.json`, so Claude Code opens its
+first-run theme/login screens even though `run` injects a working token.
+`claunch onboard` sets that one flag and keeps every other key:
+
+```bash
+claunch onboard work           # one profile (needs a stored credential)
+claunch onboard --all          # every claude-harness profile that has one
+claunch onboard work --check   # only report; exit 1 if missing
+```
+
+A profile with no credential is refused (log it in first: its first-run
+screens are how it gets one). `claunch run` never writes the file; when the
+flag is missing on a profile that has a credential it prints a hint naming
+`claunch onboard <name>`.
 
 ## Seeding (skip onboarding)
 
