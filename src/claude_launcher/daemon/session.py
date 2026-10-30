@@ -120,7 +120,7 @@ TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.
 #: prompt answers "no" every time they stop to think — and a five-second pause
 #: is not the end of a message, it is the middle of one. So the composer's
 #: state is tracked as well as its timing: while characters are sitting in it
-#: unsent (see :func:`draft_state_from_bytes`) the keyboard counts as busy for
+#: unsent (see :func:`draft_edit_from_bytes`) the keyboard counts as busy for
 #: this much longer, and it is released the moment the human submits (Enter)
 #: or clears the line — not on a timer. The cap is only for the person who
 #: types one character and walks away.
@@ -133,6 +133,15 @@ DRAFT_GUARD = float(os.environ.get("CLAUNCH_DRAFT_GUARD") or 180.0)
 #: mark was the last thing it ever sent. Text in the composer gets
 #: DRAFT_GUARD; text that never reached the composer gets this.
 COMPOSING_GUARD = float(os.environ.get("CLAUNCH_COMPOSING_GUARD") or 10.0)
+
+#: How long an escape sequence cut off at a frame boundary waits for the rest
+#: of itself (seconds). The web terminal sends one frame per keystroke event
+#: and a terminal sequence is one event, but the halves can still land in
+#: different frames (a socket split, a reader that handed back half a write).
+#: Holding the tail makes the second half read as the end of a key rather
+#: than as a letter somebody typed; dropping it after this long keeps one
+#: abandoned fragment from swallowing the next person's first keystroke.
+DRAFT_PARTIAL_TTL = float(os.environ.get("CLAUNCH_DRAFT_PARTIAL_TTL") or 2.0)
 
 #: How long a FORCED delivery ("deliver now", pressed by a person) waits for
 #: the keyboard before it stops waiting. The ordinary wait is
@@ -321,53 +330,155 @@ def is_terminal_report(data: bytes) -> bool:
     return all(kind == "report" for kind, _, _ in _input_tokens(data))
 
 
-def draft_state_from_bytes(data: bytes) -> Optional[bool]:
+def _split_incomplete_escape(data: bytes) -> Tuple[bytes, bytes]:
+    """Split a trailing escape sequence that has not finished arriving.
+
+    ``(complete, pending)``: ``complete`` ends on a token boundary and
+    ``pending`` is the unfinished sequence's bytes, to be read with the next
+    frame's. Without this an ``ESC[`` frame followed by an ``A`` frame reads
+    as an arrow's prefix and then a typed letter, and the daemon opens a
+    draft over a composer nobody touched (claunch-wzx2r).
+
+    A lone ``ESC`` is not pending. As far as any terminal can tell it is the
+    Escape key, and holding it back would turn the next frame's Enter into
+    Alt-Enter — a newline where the person pressed submit, which weakens the
+    protection instead of removing a false alarm.
+    """
+    esc = data.rfind(b"\x1b")
+    if esc < 0:
+        return data, b""
+    rest = data[esc + 1:]
+    if not rest:
+        return data, b""
+    intro = rest[0]
+    if intro in _ESC_STRING_INTRODUCERS:
+        # A control string runs to BEL or ST; until one arrives it is whole
+        # unknown, so nothing after it may be read as a key.
+        j = 1
+        while j < len(rest):
+            if rest[j] == 0x07:
+                return data, b""
+            if rest[j] == 0x1B:
+                if j + 1 < len(rest):
+                    return data, b""  # ST: the string ended here
+                return data[:esc], data[esc:]  # maybe the start of ST
+            j += 1
+        return data[:esc], data[esc:]
+    if intro == 0x5B:  # CSI — parameters, then one final byte
+        j = 1
+        while j < len(rest) and not (0x40 <= rest[j] <= 0x7E):
+            j += 1
+        if j >= len(rest):
+            return data[:esc], data[esc:]  # no final byte yet
+        if rest[j] == 0x4D and j == 1:
+            # X10 mouse: three raw bytes follow the final byte and all three
+            # are printable, so a missing one must not be read as typing.
+            if len(rest) - j - 1 < 3:
+                return data[:esc], data[esc:]
+        return data, b""
+    if intro == 0x4F:  # SS3 — exactly one final byte
+        return (data, b"") if len(rest) >= 2 else (data[:esc], data[esc:])
+    return data, b""
+
+
+def _split_incomplete_utf8(data: bytes) -> Tuple[bytes, bytes]:
+    """Split a trailing UTF-8 character that has not finished arriving.
+
+    A Hangul syllable is three bytes, and a frame can end after one of them.
+    Counting the halves as two characters would leave a character's worth of
+    credit in the composer after the person deleted the only character they
+    typed — the false hold this counting exists to remove, by another route.
+    """
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:
+            continue  # a continuation byte; the lead byte is further back
+        if byte < 0x80:
+            return data, b""
+        if byte & 0xE0 == 0xC0:
+            need = 2
+        elif byte & 0xF0 == 0xE0:
+            need = 3
+        elif byte & 0xF8 == 0xF0:
+            need = 4
+        else:
+            return data, b""
+        return (data, b"") if back >= need else (data[:-back], data[-back:])
+    return data, b""
+
+
+def draft_edit_from_bytes(data: bytes) -> Tuple[int, bool]:
     """What ``data`` — keystrokes a human just sent — did to their composer.
 
-    ``True`` = there is now an unsent draft in it, ``False`` = it was just
-    submitted or cleared, ``None`` = neither (nothing about the draft
-    changed). The last one matters as much as the others: an arrow key, a
-    lone Escape or a backspace must leave a draft *open*, because a message
-    typed into the terminal at that moment is still typed into a line
-    somebody is writing.
+    ``(delta, cleared)``. ``cleared`` is True when the frame submitted the
+    line (a bare Enter) or discarded it (``C-c``, ``C-u``): the composer is
+    empty after those, whatever was in it. ``delta`` is the net number of
+    *characters* the frame put in the composer after the last such key:
+    printable text counts one per character (a committed Hangul syllable is
+    one character and three bytes; a pasted run is counted the same way), a
+    backspace subtracts one, and a newline inserted *into* the draft
+    (Alt/Shift-Enter, backslash + Enter, a line break inside a bracketed
+    paste) adds one.
+
+    ``(0, False)`` means the frame said nothing about the composer: an arrow
+    key, a lone Escape, Home, the terminal's own reports. That case matters
+    as much as the others — a message typed into the terminal while somebody
+    is writing a line is still typed into that line — and it is why the
+    count lives on the session (:attr:`Session._draft_chars`) rather than in
+    this answer: only the composer's running total can tell "backspace in a
+    line" from "backspace in an empty one".
 
     Read from the bytes, not from the screen. A composer's contents are a
     guess to make from a rendered grid — placeholder hints look exactly like
     text once the colours are gone — but they are a fact on the wire: this is
     the keyboard, and these are the keys.
-
-    Rules, in the order they are tested:
-
-    * an escape sequence (arrows, function keys, a bracketed-paste *marker*)
-      changes nothing — its bytes are not characters, whatever they look like;
-      the same for the terminal's own reports, whose payloads (an OSC colour
-      reply's ``11;rgb:...``, an X10 mouse report's three coordinate bytes)
-      are printable but were never typed;
-    * ``ESC`` + Enter and backslash + Enter insert a newline *into* the
-      composer rather than submitting it (Alt/Shift-Enter, the continuation
-      most TUIs take), so they open a draft rather than closing one;
-    * a bare Enter submits, and ``C-c`` / ``C-u`` discard: the composer is
-      empty after either, so the draft is closed;
-    * anything printable — including the multi-byte UTF-8 of a committed
-      Hangul syllable, and text arriving inside a bracketed paste — opens one.
     """
-    state: Optional[bool] = None
+    delta = 0
+    cleared = False
+    in_paste = False
+    run = bytearray()
+
+    def flush() -> None:
+        nonlocal delta
+        if run:
+            delta += len(bytes(run).decode("utf-8", errors="replace"))
+            run.clear()
+
     for kind, i, j in _input_tokens(data):
         if kind == "report":
+            flush()
             continue
         if kind == "seq":
-            if j - i == 2 and data[i + 1] in (0x0D, 0x0A):
-                state = True  # Alt/Shift-Enter: a newline in the draft
+            flush()
+            seq = data[i:j]
+            if seq == b"\x1b[200~":
+                in_paste = True
+            elif seq == b"\x1b[201~":
+                in_paste = False
+            elif j - i == 2 and data[i + 1] in (0x0D, 0x0A):
+                delta += 1  # Alt/Shift-Enter: a newline in the draft
             continue
         b = data[i]
         if b in (0x0D, 0x0A):
-            # Backslash-Enter is the other "newline, don't send" spelling.
-            state = True if (i and data[i - 1] == 0x5C) else False
+            flush()
+            if in_paste:
+                delta += 1  # a pasted line break stays in the composer
+            elif i and data[i - 1] == 0x5C:
+                delta += 1  # backslash + Enter: the other newline spelling
+            else:
+                delta = 0
+                cleared = True
         elif b in (0x03, 0x15):  # C-c, C-u — the line is gone
-            state = False
-        elif b >= 0x20 and b != 0x7F:  # printable (0x7F is backspace)
-            state = True
-    return state
+            flush()
+            delta = 0
+            cleared = True
+        elif b in (0x08, 0x7F):  # backspace — one character less
+            flush()
+            delta -= 1
+        elif b >= 0x20:  # printable; collected so one Hangul syllable is one
+            run.append(b)
+    flush()
+    return delta, cleared
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -824,7 +935,7 @@ class Session:
         self._last_terminal_input = 0.0
         #: Whether characters typed at such a terminal are still sitting in
         #: the composer unsent. Opened and closed by the keys themselves (see
-        #: :func:`draft_state_from_bytes`), never by a timer: a delivery typed
+        #: :func:`draft_edit_from_bytes`), never by a timer: a delivery typed
         #: into a half-written line is the corruption all of this exists to
         #: prevent, and the human's own Enter is what says it is safe again.
         self._draft_open = False
@@ -836,6 +947,20 @@ class Session:
         #: no closing bytes at all, and DRAFT_GUARD would hold this
         #: session's mail for minutes over a draft that never existed here.
         self._draft_uncommitted = False
+        #: What the composer holds, in characters, as far as the keys have
+        #: said: +1 per character typed or pasted, -1 per backspace, reset by
+        #: a submit or a discard. ``_draft_open`` is set from this whenever
+        #: bytes arrive, so a line that was typed and then erased closes the
+        #: draft instead of holding the session for DRAFT_GUARD over an empty
+        #: composer (claunch-wzx2r). A composing mark opens a draft with this
+        #: still at 0 — nothing has reached the composer yet.
+        self._draft_chars = 0
+        #: Bytes of an escape sequence or a UTF-8 character that were cut off
+        #: at the end of the last keystroke frame, and when they arrived. They
+        #: are read with the next frame's bytes instead of being taken for
+        #: keys (see :meth:`_complete_keystroke_frame`).
+        self._input_partial = b""
+        self._input_partial_at = 0.0
         #: A person's standing "don't type anything in here" — set from the
         #: dashboard, not derived from the keyboard. Every hold above is the
         #: daemon *guessing* from timing that now is a bad moment; this one
@@ -1925,6 +2050,30 @@ class Session:
             await asyncio.sleep(0.2)
         self._input_ready = True
 
+    def _complete_keystroke_frame(self, data: bytes, now: float) -> bytes:
+        """``data`` minus any escape sequence or character cut off at its end.
+
+        The cut-off bytes are held and read with the next frame's (see
+        :func:`_split_incomplete_escape` and :func:`_split_incomplete_utf8`),
+        so a sequence split across two frames stays one key and a character
+        split across two frames stays one character. A held fragment that
+        never finishes is dropped after :data:`DRAFT_PARTIAL_TTL`, so an
+        abandoned half cannot swallow the next person's first keystroke.
+        """
+        pending = getattr(self, "_input_partial", b"")
+        if (
+            pending
+            and now - getattr(self, "_input_partial_at", 0.0) > DRAFT_PARTIAL_TTL
+        ):
+            pending = b""
+        complete, pending = _split_incomplete_escape(pending + data)
+        complete, tail = _split_incomplete_utf8(complete)
+        if tail:
+            pending = tail + pending
+        self._input_partial = pending
+        self._input_partial_at = now
+        return complete
+
     def note_human_input(
         self,
         *,
@@ -1951,7 +2100,7 @@ class Session:
         what moves the draft state: the timing above says *when* somebody
         last touched the keyboard, ``data`` says whether what they touched it
         for is still sitting unsent in the composer (see
-        :func:`draft_state_from_bytes`). ``composing`` is the web terminal's
+        :func:`draft_edit_from_bytes`). ``composing`` is the web terminal's
         equivalent claim for keys that produced no bytes yet — an IME
         mid-syllable is a draft being written even though the wire is quiet.
         A draft it opens is marked *uncommitted*, though: nothing is in the
@@ -1961,15 +2110,18 @@ class Session:
         Both are terminal-only: ``send-keys`` types a line and its Enter
         together, and holding *itself* behind its own text would deadlock.
         """
-        if data and is_terminal_report(data):
-            # The emulator answering a query or reporting the mouse/focus:
-            # nobody pressed a key, so neither clock moves and no draft opens.
-            return
-        on_command = getattr(self, "on_command_submitted", None)
-        if data and on_command is not None:
-            for line in self._submitted_lines.feed(data):
-                on_command(self, line)
         now = time.monotonic()
+        if data:
+            data = self._complete_keystroke_frame(data, now)
+            if data and is_terminal_report(data):
+                # The emulator answering a query or reporting the mouse/focus:
+                # nobody pressed a key, so neither clock moves and no draft
+                # opens.
+                return
+            on_command = getattr(self, "on_command_submitted", None)
+            if data and on_command is not None:
+                for line in self._submitted_lines.feed(data):
+                    on_command(self, line)
         self._last_human_input = now
         if not at_terminal:
             return
@@ -1988,11 +2140,23 @@ class Session:
                 self._draft_uncommitted = True
             self._draft_open = True
         if data:
-            state = draft_state_from_bytes(data)
-            if state is not None:
-                self._draft_open = state
-                # Bytes settle the question either way: a committed
-                # character is a real draft now, a submit/clear closed it.
+            delta, cleared = draft_edit_from_bytes(data)
+            if cleared:
+                # The line went away with its submit (or was discarded);
+                # only what was typed after it, in this same frame, remains.
+                self._draft_chars = max(0, delta)
+                self._draft_open = self._draft_chars > 0
+                self._draft_uncommitted = False
+            elif delta:
+                self._draft_chars = max(
+                    0, getattr(self, "_draft_chars", 0) + delta
+                )
+                # A line typed and then erased is an empty composer, and an
+                # empty composer is not a draft: it must not hold this
+                # session's mail for DRAFT_GUARD (claunch-wzx2r). Bytes settle
+                # the question either way — a committed character is a real
+                # draft now, a submit/clear closed it.
+                self._draft_open = self._draft_chars > 0
                 self._draft_uncommitted = False
 
     def draft_open(self) -> bool:
@@ -2251,6 +2415,7 @@ class Session:
         """
         await self.write_bytes(b"\r")
         self._draft_open = False
+        self._draft_chars = 0
         self._draft_uncommitted = False
         await asyncio.sleep(FORCE_DRAFT_SETTLE)
 

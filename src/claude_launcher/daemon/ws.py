@@ -846,7 +846,7 @@ async def _pump_from_client(
             # is only half the question — the other half is whether
             # what they typed is still sitting in the composer
             # unsent, and only these bytes can say (Session.
-            # note_human_input / draft_state_from_bytes).
+            # note_human_input / draft_edit_from_bytes).
             if _is_codex_osc_color_response(session.sdef.harness, msg.data):
                 continue
             session.note_human_input(at_terminal=True, data=msg.data)
