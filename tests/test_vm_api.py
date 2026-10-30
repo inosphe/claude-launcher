@@ -126,6 +126,22 @@ async def test_a_session_lists_only_what_it_may_see_and_only_its_own_grants(api)
 
 
 @scenario
+async def test_a_session_gets_no_host_paths_and_no_record_without_a_grant(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
+    await api.post("/api/vm/a/grant", json={"session": "s2", "scopes": ["view"]})
+    mine = await (await api.get("/api/vm/a", headers=AGENT)).json()
+    assert mine["grants"] == {"s1": ["view"]}
+    assert not {"ssh_key", "ssh_user", "cua_path", "channel_error"} & set(mine)
+    listed = (await (await api.get("/api/vm", headers=AGENT)).json())["vms"]
+    assert listed[0]["grants"] == {"s1": ["view"]} and "ssh_key" not in listed[0]
+    await _register(api, "b")
+    other = await api.get("/api/vm/b", headers=AGENT)
+    assert other.status == 403 and (await other.json())["code"] == "vm_no_grant"
+    assert "grants" in await (await api.get("/api/vm/a")).json()  # the user sees all
+
+
+@scenario
 async def test_a_full_machine_answers_409_with_the_holders(api):
     await _register(api, "a")
     await _register(api, "b")

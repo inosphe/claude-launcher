@@ -120,14 +120,27 @@ def _viewable(reg: Registry, session: str):
     return [vm for vm in reg.list() if vm.grants.get(session)]
 
 
+#: Host details a session has no use for: where the daemon's key lives and how
+#: the guest is reached. The user's page and shell still get them.
+HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error")
+
+
+def _for_session(row: dict, session: str) -> dict:
+    """A session sees its own scopes, not the other sessions', and no host
+    paths."""
+    row = {k: v for k, v in row.items() if k not in HOST_ONLY}
+    row["grants"] = {session: row["grants"].get(session, [])}
+    return row
+
+
 async def h_list(request: web.Request) -> web.Response:
     reg, _ = _hub(request)
     session = request.query.get("session", "")
+    actor = _caller(request)
+    if actor.get("kind") in (actors.AGENT, actors.CFLOW):
+        session = _as_session(request, {"session": session or actor.get("name") or ""})
     if session:
-        rows = [reg.view(vm.id) for vm in _viewable(reg, session)]
-        for row in rows:
-            # A session sees its own scopes, not the other sessions'.
-            row["grants"] = {session: row["grants"].get(session, [])}
+        rows = [_for_session(reg.view(vm.id), session) for vm in _viewable(reg, session)]
     else:
         rows = [reg.view(vm.id) for vm in reg.list()]
     return web.json_response({"vms": rows, "slot_limit": reg.slot_limit})
@@ -136,7 +149,15 @@ async def h_list(request: web.Request) -> web.Response:
 async def h_get(request: web.Request) -> web.Response:
     reg, _ = _hub(request)
     try:
-        return web.json_response(reg.view(request.match_info["id"]))
+        row = reg.view(request.match_info["id"])
+        actor = _caller(request)
+        if actor.get("kind") in (actors.AGENT, actors.CFLOW):
+            session = _as_session(request, {"session": request.query.get("session", "")
+                                            or actor.get("name") or ""})
+            if not row["grants"].get(session):
+                raise VmError("vm_no_grant", f"{session} has no grant on {row['id']}")
+            row = _for_session(row, session)
+        return web.json_response(row)
     except VmError as exc:
         return _err(exc)
 
