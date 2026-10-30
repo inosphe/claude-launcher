@@ -24215,6 +24215,10 @@ function personGateRecords() {
         // What the step declared about its own notice (ask.criteria): keywords
         // the panel shows by, never a rank (noticeCriteriaOf).
         criteria: Array.isArray(a.criteria) ? a.criteria.slice() : [],
+        // The question as the ask wrote it, newlines and markers intact: the
+        // card below draws it as markdown, and the one-line `prompt` above is
+        // what the terminal strip reads (claunch-ns4kd).
+        prompt_md: typeof a.prompt_md === "string" ? a.prompt_md : "",
         presses: termCflow2Answers(r, a, session),
         // held since the run itself started waiting on a person, in the
         // daemon's epoch seconds (claunch-l9znm.1); absent for a daemon or a
@@ -62500,11 +62504,25 @@ function noticeRowSpawn(row, head, actions, rec) {
   for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
 }
 
+/* A waiting gate's body. The ask prompt is markdown — headings, lists, the
+   plan's own line breaks — so a card that set it as one `textContent` string
+   showed a request as a single block of prose, with the option lines and the
+   file references run into the argument (claunch-ns4kd). `prompt_md` is that
+   prompt as written; `prompt` is the same text flattened for the terminal
+   strip, and it is what a daemon too old to send `prompt_md` still gives. The
+   `md` class turns `.gate-reason`'s pre-wrap off: the breaks are elements
+   now, not newlines. */
+function noticeAskBody(cls, rec) {
+  const md = typeof rec.prompt_md === "string" ? rec.prompt_md.trim() : "";
+  if (!md) return el("div", cls, rec.prompt);
+  return mdInto(el("div", cls + " md"), md);
+}
+
 function noticeRowAsk(row, head, actions, rec) {
   head.appendChild(gateSessionLink(rec.session));
   head.appendChild(el("span", "notice-title", ` ${runGateTitle(rec)}`));
   row.appendChild(head);
-  if (rec.prompt) row.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+  if (rec.prompt || rec.prompt_md) row.appendChild(noticeAskBody("notice-sub gate-reason", rec));
   const note = runGateNudgeNotes[rec.session];
   if (note) row.appendChild(el("div", "notice-sub gate-nudge", note));
   const short = runGateShortfall(rec);
@@ -64809,7 +64827,7 @@ function applyRunGate(pending, settled) {
     title.appendChild(gateSessionLink(rec.session));
     title.appendChild(el("span", null, ` ${runGateTitle(rec)}`));
     node.appendChild(title);
-    if (rec.prompt) node.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+    if (rec.prompt || rec.prompt_md) node.appendChild(noticeAskBody("notice-sub gate-reason", rec));
     node.appendChild(el("div", "notice-sub gate-nudge" + (note ? "" : " hidden"), note));
     if (rec.workflow) {
       node.appendChild(el("div", "notice-sub",

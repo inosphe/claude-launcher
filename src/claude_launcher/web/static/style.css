@@ -7622,6 +7622,25 @@ body.embed #main { width: 100%; }
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
 .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
+/* A gate body drawn as markdown (claunch-ns4kd): the ask writes headings,
+   lists and the plan's own breaks, and the card renders them as elements —
+   so pre-wrap would turn the newlines between those elements into blank
+   space, and the report-sized spacing of `.md` would push a three-line
+   question to the height of a page. Sizes stay at the card's own. */
+.gate-reason.md { white-space: normal; }
+.gate-reason.md .md-p { margin: 0 0 5px; white-space: pre-wrap; }
+.gate-reason.md > :last-child { margin-bottom: 0; }
+.gate-reason.md .md-h1, .gate-reason.md .md-h2,
+.gate-reason.md .md-h3, .gate-reason.md .md-h4,
+.gate-reason.md .md-h5, .gate-reason.md .md-h6 {
+  font-size: 11.5px; margin: 6px 0 3px; color: #c9d1d9;
+}
+.gate-reason.md .md-list { margin: 0 0 5px; padding-left: 16px; }
+.gate-reason.md .md-item { margin: 1px 0; line-height: 1.45; }
+.gate-reason.md .md-pre { margin: 0 0 5px; padding: 4px 6px; font-size: 10.5px; }
+.gate-reason.md .md-quote { margin: 0 0 5px; }
+.gate-reason.md .md-hr { margin: 6px 0; }
+.gate-reason.md .md-table { margin: 0 0 5px; font-size: 10.5px; }
 /* A spawn card's project / profile / workspace / role / workflow rows
    (claunch-mgope): label column, value column. */
 .gate-facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; margin-top: 4px; }
@@ -7826,6 +7845,10 @@ body.embed #main { width: 100%; }
 .notice-row .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-row .gate-clock, .notice-row .notice-when { color: #8b949e; }
 .notice-row .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The history row draws the same markdown body as the card above, and this
+   rule sits after the `.gate-reason.md` one — same specificity, so it would
+   put the pre-wrap back (claunch-ns4kd). */
+.notice-row .gate-reason.md { white-space: normal; }
 .notice-row .gate-session {
   cursor: pointer; color: #c9d1d9; border-bottom: 1px dotted #6e7681;
 }
