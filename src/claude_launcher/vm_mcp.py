@@ -44,8 +44,9 @@ TOOLS = [
          "type": "object", "description": "passed to cua's get_desktop_state"}},
          "required": ["vm"]}},
     {"name": "vm_cua",
-     "description": "Call any cua-driver tool in the guest (vm_tools lists them). Tools that "
-                    "only look need a view grant; any other needs control and an epoch from "
+     "description": "Call any cua-driver tool in the guest (vm_tools lists them with the scope "
+                    "each needs). Tools that only look need a view grant, tools that install "
+                    "or reconfigure need exec, any other needs control and an epoch from "
                     "vm_acquire. While the user drives the VM the call is refused with vm_busy: "
                     "wait, then look at the screen again.",
      "inputSchema": {"type": "object", "properties": {
@@ -55,7 +56,7 @@ TOOLS = [
          "timeout": {"type": "number", "description": "seconds, default 30"}},
          "required": ["vm", "tool"]}},
     {"name": "vm_tools",
-     "description": "The cua-driver tools the guest offers, and which are look-only.",
+     "description": "The cua-driver tools the guest offers and the scope each needs (view, control, exec).",
      "inputSchema": {"type": "object", "properties": _VM, "required": ["vm"]}},
     {"name": "vm_exec",
      "description": "Run a shell command in the guest as its admin user. Needs an exec grant "

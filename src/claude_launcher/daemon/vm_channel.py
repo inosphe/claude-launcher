@@ -39,6 +39,10 @@ PROBE_TOOL = "get_screen_size"
 #: failed attempt: otherwise a guest that accepts and drops would be
 #: reconnected for ever.
 MIN_UPTIME = 10.0
+#: One JSON-RPC message is one line, and a screenshot or the tool list is far
+#: over asyncio's 64 KiB default line limit (⑥: tools/list closed the channel
+#: with "ssh closed" until this was raised).
+READ_LIMIT = 64 * 1024 * 1024
 
 
 class ChannelDown(Exception):
@@ -61,7 +65,7 @@ async def open_process(argv: Sequence[str], log: Path):
     try:
         return await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=err,
+            stderr=err, limit=READ_LIMIT,
         )
     finally:
         err.close()

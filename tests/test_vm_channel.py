@@ -33,7 +33,7 @@ class FakeProc:
     told to go silent or to close."""
 
     def __init__(self, behaviour):
-        self.stdout = asyncio.StreamReader()
+        self.stdout = asyncio.StreamReader(limit=vm_channel.READ_LIMIT)
         self.stdin = _Stdin(self)
         self.received = []
         self.closed = False
@@ -56,6 +56,8 @@ class FakeProc:
             self.reply(msg["id"], {"protocolVersion": "2024-11-05", "capabilities": {}})
         elif method == "tools/list":
             self.reply(msg["id"], {"tools": [{"name": "get_screen_size"}]})
+        elif method == "tools/call" and msg["params"]["name"] == "big":
+            self.reply(msg["id"], {"content": [{"type": "text", "text": "x" * 300_000}]})
         elif method == "tools/call":
             name = msg["params"]["name"]
             if name == "hang":
@@ -262,3 +264,22 @@ def test_the_hub_keeps_one_channel_per_vm_and_drops_it(tmp_path):
         except VmError as exc:
             assert exc.code == "vm_unavailable"
     run(go())
+
+
+def test_a_result_far_over_the_default_line_limit_does_not_close_the_channel(tmp_path):
+    async def go():
+        world = World()
+        reg, ch = _channel(tmp_path, world)
+        ch.start()
+        await ch.wait_up(2)
+        out = await ch.call("big")
+        assert len(out["content"][0]["text"]) == 300_000
+        assert reg.get("a").channel == "up"
+        await ch.stop()
+    run(go())
+
+
+def test_the_real_opener_raises_the_line_limit():
+    import inspect
+    assert "limit=READ_LIMIT" in inspect.getsource(vm_channel.open_process)
+    assert vm_channel.READ_LIMIT > 10 * 1024 * 1024

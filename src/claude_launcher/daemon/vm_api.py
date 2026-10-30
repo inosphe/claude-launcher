@@ -37,13 +37,32 @@ _STATUS = {
     "vm_bad_scope": 400, "vm_bad_request": 400,
 }
 
-#: cua tools that only look. Everything else a session sends through
-#: ``/call`` is treated as control: an unknown tool is refused to a session
-#: that was only allowed to look, which is the safe way to be wrong.
+#: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
+#: (⑥, runs of 2026-10-31). A tool not named here is control: an unknown tool
+#: is refused to a session that was only allowed to look, which is the safe
+#: way to be wrong. clipboard_read and get_browser_state are left out on
+#: purpose: what they return is the guest user's own content.
 VIEW_TOOLS = frozenset({
     "get_desktop_state", "get_window_state", "get_screen_size", "list_apps",
-    "screenshot",
+    "list_windows", "get_accessibility_tree", "get_cursor_position",
+    "get_agent_cursor_state", "get_config", "get_guide", "health_report",
+    "check_permissions", "verify_state", "zoom", "get_recording_state",
 })
+
+#: cua tools that change the guest beyond what is on its screen -- software
+#: installed, the driver's own configuration rewritten -- and so need the
+#: exec grant, as a shell would.
+EXEC_TOOLS = frozenset({"install_extension", "install_ffmpeg", "set_config"})
+
+
+def tool_scope(tool: str) -> str:
+    if tool in VIEW_TOOLS:
+        return vmhub.VIEW
+    if tool in EXEC_TOOLS:
+        return vmhub.EXEC
+    return vmhub.CONTROL
+
+
 SHOTS_KEEP = 20
 
 
@@ -317,7 +336,7 @@ async def h_call(request: web.Request) -> web.Response:
         args = body.get("arguments") or {}
         if not isinstance(args, dict):
             raise VmError("vm_bad_request", "'arguments' must be an object")
-        scope = vmhub.VIEW if tool in VIEW_TOOLS else vmhub.CONTROL
+        scope = tool_scope(tool)
         reg.begin_call(vm_id, session, scope, body.get("epoch"))
         ok = False
         try:
@@ -343,7 +362,7 @@ async def h_tools(request: web.Request) -> web.Response:
         finally:
             reg.end_call(vm_id, session, vmhub.VIEW)
         return web.json_response({"ok": True, "tools": [
-            {"name": t.get("name"), "view_only": t.get("name") in VIEW_TOOLS,
+            {"name": t.get("name"), "scope": tool_scope(str(t.get("name"))),
              "description": str(t.get("description") or "")[:200]} for t in tools]})
     except VmError as exc:
         return _err(exc)

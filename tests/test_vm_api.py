@@ -277,4 +277,14 @@ async def test_tools_lists_which_are_look_only(api):
     await _up(api)
     await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["view"]})
     body = await (await api.get("/api/vm/a/tools?session=s1", headers=AGENT)).json()
-    assert body["tools"] == [{"name": "get_screen_size", "view_only": True, "description": ""}]
+    assert body["tools"] == [{"name": "get_screen_size", "scope": "view", "description": ""}]
+
+
+def test_every_cua_tool_that_installs_or_configures_needs_exec():
+    assert vm_api.tool_scope("get_desktop_state") == "view"
+    assert vm_api.tool_scope("click") == "control"
+    assert vm_api.tool_scope("run_script") == "control"
+    assert vm_api.tool_scope("a_tool_nobody_has_heard_of") == "control"
+    for name in ("install_extension", "install_ffmpeg", "set_config"):
+        assert vm_api.tool_scope(name) == "exec"
+    assert not (vm_api.VIEW_TOOLS & vm_api.EXEC_TOOLS)
