@@ -257,3 +257,40 @@ def test_a_parent_in_no_mesh_opens_one_and_the_child_takes_the_free_role(home, t
         assert mm.meshes_for_session("solo"), "the parent was joined into it"
 
     asyncio.run(run())
+
+
+def test_a_parent_outside_any_team_joins_its_nearest_ancestors_team(home, tmp_path):
+    """A quick-fork copy is in no mesh; the child joins the ancestor's team in
+    the requested role instead of a free-role mesh of its own (claunch-3e47v)."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mgr.stage(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+        mgr.stage(SessionDef(name="fork", harness="py", cwd=str(tmp_path), parent="lead"))
+        mm.create("team")
+        await mm.join("team", "lead", handle="lead", role="leader")
+        body = {"role": "worker"}
+        await onboard.inherit_mesh(body, parent="fork", mesh_mgr=mm, child="kid")
+        assert body["mesh"] == "team"
+        assert body["role"] == "worker"
+        assert [m.name for m in mm.list()] == ["team"], "no mesh was opened"
+
+    asyncio.run(run())
+
+
+def test_no_ancestor_in_a_team_keeps_the_fallback(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mgr.stage(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+        mgr.stage(SessionDef(name="fork", harness="py", cwd=str(tmp_path), parent="lead"))
+        body = {"role": "worker"}
+        await onboard.inherit_mesh(body, parent="fork", mesh_mgr=mm, child="kid")
+        assert body["mesh"] == "fork"
+        assert body["role"] == onboard.FREE_ROLE
+
+    asyncio.run(run())
