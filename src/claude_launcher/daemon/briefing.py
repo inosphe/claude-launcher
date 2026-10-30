@@ -13,7 +13,7 @@ is authoritative), editable from the web dashboard's Settings page
 (``GET``/``PUT /api/briefing/llm``). The backend comes from one of two
 places: the block's own fields, or — when ``preset:`` names one — a *saved
 preset* from the block's ``presets:`` list. A preset is one whole backend
-(the same four fields), so switching which model answers is a pointer move
+(the same fields), so switching which model answers is a pointer move
 rather than a retype, and the list holds as many as the operator wants.
 
 Within whichever is in charge, the backend is said in one of two ways:
@@ -21,7 +21,9 @@ Within whichever is in charge, the backend is said in one of two ways:
 * ``profile: <name>`` — the call reuses a claunch profile's backend. That
   profile's provider chain states the OpenAI-compatible endpoint
   (``endpoints.openai``), the key that reaches it and the model ids it
-  serves; see :func:`profile_backend`.
+  serves; see :func:`profile_backend`. ``key_id:`` beside it pins one key of
+  the profile's key pool when the profile holds several; without it the call
+  uses whatever the profile's token file holds.
 * ``endpoint:`` plus ``api_key:`` typed in directly, which is what the block
   held before a profile was an option and still works.
 
@@ -74,7 +76,7 @@ except ImportError:  # Python < 3.10, or truststore not installed
 log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, provider_spec, providers
+from .. import lineage, profile as profile_mod, profile_keys, provider_spec, providers
 from .. import routing, store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
@@ -117,7 +119,10 @@ MAX_PRESETS = 20
 #: The fields a preset carries. ``max_tokens``, ``params`` and the preset list
 #: itself stay on the block: switching a preset changes which backend answers,
 #: and must not quietly change how much the call is allowed to spend.
-PRESET_FIELDS = ("profile", "model", "endpoint", "api_key")
+#: ``key_id`` pins one key of the named profile's key pool
+#: (:mod:`claude_launcher.profile_keys`); it is meaningful only beside
+#: ``profile`` and says nothing without one.
+PRESET_FIELDS = ("profile", "model", "endpoint", "api_key", "key_id")
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
 #: (the tail is read from the end, never the whole file); ``EVENT_TAIL`` the
@@ -196,9 +201,67 @@ class Backend(NamedTuple):
     #: routing`), which the harness paths get from the shim and this one
     #: otherwise would not.
     provider: str = ""
+    #: The pool key the call authenticates with, when the profile holds a key
+    #: pool and the key could be named: the pinned ``key_id``, or the pool key
+    #: whose token is in the token file. ``""`` for a provider-key profile and
+    #: for a token file that holds no pool key. Display only — the call reads
+    #: ``api_key``.
+    key_id: str = ""
 
 
-def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
+def _pinned_pool_key(prof, key_id: str) -> Tuple[str, str]:
+    """The token of pool key ``key_id`` for a briefing call under ``prof``.
+
+    A read, not a selection: the pool is not rotated and the token file is
+    not written. The launch seams own those writes
+    (:func:`profile_keys.select_for_launch`); a briefing call that moved them
+    would spend a session's rotation on a summary.
+    """
+    source = profile_keys.owner(prof)
+    if source is None:
+        raise BriefingError(
+            f"profile {prof.name!r} holds no key pool, so key {key_id!r} "
+            "cannot be pinned — add keys with 'claunch keys add' first"
+        )
+    try:
+        pool = profile_keys.load(source)
+    except profile_keys.KeysError as exc:
+        raise BriefingError(str(exc)) from exc
+    for key in (pool.keys if pool is not None else []):
+        if key.id == key_id:
+            return key.token, key.id
+    raise BriefingError(
+        f"profile {source.name!r} holds no key {key_id!r} — it was removed "
+        "from the pool; pick another in Settings ▸ Briefing model"
+    )
+
+
+def _current_pool_key_id(prof, token: str) -> str:
+    """Which of the profile's pool keys ``token`` is — ``""`` when none.
+
+    Display half of the unpinned case: the call uses whatever the token file
+    holds, and the card can say which pool key that currently is. A pool that
+    cannot be read reports nothing here — the read error is not the
+    briefing's to surface, and the call has its token either way.
+    """
+    if not token:
+        return ""
+    source = profile_keys.owner(prof)
+    if source is None:
+        return ""
+    try:
+        pool = profile_keys.load(source)
+    except profile_keys.KeysError:
+        return ""
+    for key in (pool.keys if pool is not None else []):
+        if key.token == token:
+            return key.id
+    return ""
+
+
+def profile_backend(
+    name: str, doc: Optional[dict] = None, *, key_id: str = ""
+) -> Backend:
     """Resolve profile ``name`` into the values :func:`call_llm` needs.
 
     The same resolution the Observer performs
@@ -213,6 +276,12 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
     endpoint alone raises :class:`BriefingError` here rather than producing a
     call that fails at the endpoint later; the Settings page shows that
     message beside the profile it belongs to.
+
+    ``key_id`` pins one key of the profile's key pool: the call then
+    authenticates with that key's token instead of whatever the token file
+    holds. A pin that names no key of the pool raises
+    :class:`BriefingError` — silently falling back to the token file would
+    send a credential the operator did not choose.
 
     Model ids are returned without Claude's context-window tag
     (``deepseek-flash[1m]`` -> ``deepseek-flash``), which is a decoration
@@ -245,12 +314,19 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
         )
         if value
     )
+    key_id = str(key_id or "").strip()
+    if key_id:
+        api_key, resolved_key = _pinned_pool_key(prof, key_id)
+    else:
+        api_key = str(lineage.stored_auth_token(prof) or spec.api_key or "")
+        resolved_key = _current_pool_key_id(prof, api_key)
     return Backend(
         endpoint=endpoint,
-        api_key=str(lineage.stored_auth_token(prof) or spec.api_key or ""),
+        api_key=api_key,
         model=models[0] if models else "",
         models=models,
         provider=providers.resolve_name(prof, doc),
+        key_id=resolved_key,
     )
 
 
@@ -329,8 +405,8 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     ``GET /api/briefing/llm`` is where the reason is reported.
 
     The backend comes from the *active preset* when one is pointed at, and
-    from the block's own ``profile``/``model``/``endpoint``/``api_key``
-    otherwise. A preset is a whole saved backend, so it supplies all four of
+    from the block's own ``profile``/``model``/``endpoint``/``api_key``/
+    ``key_id`` otherwise. A preset is a whole saved backend, so it supplies all of
     its fields at once, in the same pairing the block's own two use: a preset
     that names a profile reads that profile's endpoint and key and ignores
     any typed endpoint it also holds, and a preset with no profile is the
@@ -371,15 +447,17 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     api_key = fields["api_key"]
     model = fields["model"]
     provider = ""
+    key_id = ""
     if profile_name:
         try:
-            backend = profile_backend(profile_name, doc)
+            backend = profile_backend(profile_name, doc, key_id=fields["key_id"])
         except BriefingError:
             endpoint, api_key = "", ""
         else:
             endpoint, api_key = backend.endpoint, backend.api_key
             model = model or backend.model
             provider = backend.provider
+            key_id = backend.key_id
     return {
         "preset": chosen_id,
         "profile": profile_name,
@@ -387,6 +465,7 @@ def llm_config(doc: Optional[dict] = None) -> dict:
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
+        "key_id": key_id,
         "max_tokens": max_tokens,
         "params": dict(params) if isinstance(params, dict) else {},
     }
@@ -418,19 +497,21 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
         profile_name = preset.get("profile", "")
         model = preset.get("model", "")
         endpoint = preset.get("endpoint", "")
+        key_id = preset.get("key_id", "")
         row: dict = {
             "id": preset["id"],
             "profile": profile_name,
             "model": model,
             "endpoint": endpoint,
             "api_key_set": bool(preset.get("api_key")),
+            "key_id": key_id,
             "resolved": {"endpoint": "", "model": "", "has_key": False,
-                         "provider": ""},
+                         "provider": "", "key_id": ""},
             "error": "",
         }
         if profile_name:
             try:
-                backend = profile_backend(profile_name, doc)
+                backend = profile_backend(profile_name, doc, key_id=key_id)
             except BriefingError as exc:
                 row["error"] = str(exc)
             else:
@@ -439,6 +520,7 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
                     "model": model or backend.model,
                     "has_key": bool(backend.api_key),
                     "provider": backend.provider,
+                    "key_id": backend.key_id,
                 }
         else:
             row["resolved"] = {
@@ -446,6 +528,7 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
                 "model": model,
                 "has_key": bool(preset.get("api_key")),
                 "provider": "",
+                "key_id": "",
             }
         rows.append(row)
     return rows
