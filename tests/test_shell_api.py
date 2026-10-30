@@ -462,6 +462,41 @@ def test_a_restarted_shell_is_read_from_its_first_byte(tmp_path):
     asyncio.run(go())
 
 
+def test_a_live_shell_survives_its_own_restart(tmp_path):
+    """Replacing a child that was still running leaves a successor that
+    lives (claunch-742jf.1).
+
+    The retired reader used to post its EOF after ``restart`` had already
+    cleared ``exited``, and that callback closed the *new* pty: the fresh
+    shell died at once, the ring stayed empty and the caller saw an exited
+    shell with a pid that had only just been assigned.
+    """
+
+    async def go():
+        shell = clipty.SessionShell(argv=REPL, cwd=str(tmp_path))
+        shell.start_once()
+        await _wait_for(shell, ">>>")
+        first = shell.pid
+        assert shell.exited is False
+
+        assert shell.restart() is True
+        assert shell.pid != first
+        assert shell.exited is False
+
+        # The successor's prompt lands in the ring, and nothing of the
+        # retired child's reader takes it down afterwards.
+        await _wait_for(shell, ">>>")
+        await asyncio.sleep(0.5)          # a late EOF would arrive here
+        assert shell.exited is False
+        await shell.write_bytes(b"print(6 * 7)\r")
+        got = await _wait_for(shell, "42")
+        assert got["pid"] == shell.pid
+        assert shell.exited is False
+        await shell.shutdown()
+
+    asyncio.run(go())
+
+
 def test_a_cursor_from_an_earlier_incarnation_is_flagged(tmp_path):
     """A reader that kept an offset across a shell restart is told the
     cursor began again instead of being handed a silent empty read."""

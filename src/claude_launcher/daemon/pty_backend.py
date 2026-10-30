@@ -416,7 +416,14 @@ class _UnixPty(PtyHandle):
             pass
 
     def close(self) -> None:
+        # Idempotent on purpose: a child whose end the reader reported is
+        # closed once by that callback and again when the shell that owned it
+        # is restarted, and closing a remembered fd *number* twice can close
+        # whatever the process opened in between (claunch-742jf.1).
+        master, self._master = self._master, -1
+        if master < 0:
+            return
         try:
-            os.close(self._master)
+            os.close(master)
         except OSError:
             pass

@@ -483,6 +483,40 @@ def test_cli_resize_reaches_every_viewer(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_restart_frame_is_refused_while_the_child_is_live(home, tmp_path):
+    """The pane's restart control is for an exited shell. A frame that
+    arrives while one is running is answered and dropped, so a client that is
+    not the panel cannot kill a shell somebody is using (claunch-742jf.1)."""
+
+    async def run():
+        shell = ShellPty(argv=REPL, cwd=str(tmp_path))
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), shell=shell)
+        client = test_utils.TestClient(test_utils.TestServer(app))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/api/cli/ws", headers=BEARER)
+            init = await _next_json(ws)
+            await _stream_until(ws, b">>>")
+
+            await ws.send_str(json.dumps({"type": "restart"}))
+            refused = await _next_json(ws)
+            assert refused["type"] == "restart" and refused["ok"] is False
+            assert refused["reason"] == "live"
+            assert refused["pid"] == init["pid"] == shell.pid
+            assert shell.exited is False
+
+            # The child was left alone: keystrokes still reach it.
+            await ws.send_bytes(b"print(7 * 6)\r")
+            await _stream_until(ws, b"42\r\n")
+            assert shell.pid == init["pid"]
+            await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_cli_exit_then_restart(home, tmp_path):
     """An exited shell drops keystrokes and says so; the restart control
     revives it as a fresh child (new pid), while the socket stays up."""
