@@ -9,6 +9,14 @@ that can merge. Which session that is, is decided here once:
   mesh leader (below).
 * **independent** (v2 ``leader:landing``) -- the mesh leader only.
 
+A stacked walk that ends on the mesh leader's queue -- the session has no
+parent, no direct ancestor can merge, or the ancestor that merges is itself
+the mesh leader -- is the independent route reached from the other side, and
+says so: :attr:`Target.demoted` carries the reason, and :meth:`Target.note`
+puts it in the push detail the run's journal keeps (claunch-0ka8c). The walk
+itself is unchanged by that: a leader that cannot take this repository is
+still no target, exactly as it is for an independent request.
+
 The mesh leader is a ``leader``-role member of a mesh the worker is in, taken
 only when it is one of the worker's direct ancestors or a sibling (the same
 parent; two sessions with no parent count as siblings) of the worker or of one
@@ -76,6 +84,12 @@ def pick(holders: Sequence[Holder]) -> Optional[Holder]:
     return holders[0] if holders else None
 
 
+def demotion(leader: str, reason: str) -> str:
+    """The sentence a demoted stacked request carries (claunch-0ka8c)."""
+    return (f"stacked demoted to independent: {reason}, so the request goes to "
+            f"mesh leader {leader!r}'s landing queue")
+
+
 @dataclass
 class Target:
     """Where the request goes, or why nowhere."""
@@ -93,13 +107,23 @@ class Target:
     #: to re-route a request nobody had shown to be unroutable. Defaulted, so
     #: every existing caller keeps its meaning.
     undecidable: bool = False
+    #: Why a ``stacked`` request lands on the mesh leader's queue as an
+    #: ``independent`` one would (no parent, no ancestor that can merge, or
+    #: the merging ancestor is the leader), else empty. Only set with a
+    #: holder: a demotion that found nobody is the plain "no target".
+    demoted: str = ""
 
     def note(self) -> str:
-        """``"<passed>; fell back to 'X' at <cwd>: "`` when the request did
-        not go to the parent, else empty."""
-        if not self.passed or self.holder is None:
+        """``"[<demoted>; ]<passed>; fell back to 'X' at <cwd>: "`` when the
+        request did not go to the parent or was demoted, else empty."""
+        if self.holder is None:
             return ""
-        return f"{'; '.join(self.passed)}; fell back to {self.owner!r} at {self.holder.cwd}: "
+        head = ""
+        if self.passed:
+            head = f"{'; '.join(self.passed)}; fell back to {self.owner!r} at {self.holder.cwd}"
+        if self.demoted:
+            head = f"{self.demoted}; {head}" if head else self.demoted
+        return f"{head}: " if head else ""
 
 
 class Router:
@@ -173,6 +197,23 @@ class Router:
         where = ", ".join(repr(n) for n in meshes) or "no mesh"
         return f"holds no {MERGER!r} role in the worker's mesh ({where})"
 
+    def is_leader(self, scope: str, name: str) -> bool:
+        """Whether ``name`` holds the ``leader`` role in a mesh ``scope`` is
+        in. Only labels a target already chosen (:attr:`Target.demoted`), so
+        a roster that cannot be read is just "not shown to be the leader"."""
+        if self.mesh is None:
+            return False
+        try:
+            for mname in sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)}):
+                mesh = self.mesh.get(mname)
+                for m in mesh.members.values():
+                    if (m.session == name and LEADER in m.roles
+                            and self.mesh.is_local_member(mesh, m)):
+                        return True
+        except Exception:  # noqa: BLE001 - a label, not a routing fact
+            return False
+        return False
+
     def merger(self, name: str, repo: Optional[str], scope: str = "",
                blind: Optional[List[str]] = None) -> Tuple[Optional[Holder], str]:
         """(holder, why): the run of ``name`` the request goes on, or why
@@ -229,11 +270,18 @@ class Router:
         for depth, name in enumerate(chain):
             holder, why = self.merger(name, repo, scope, blind)
             if holder is not None:
-                return Target(name, holder, passed=tuple(passed))
+                demoted = ""
+                if self.is_leader(scope, name):
+                    who = "parent" if depth == 0 else "ancestor"
+                    demoted = demotion(name, f"{who} {name!r} is the mesh leader")
+                return Target(name, holder, passed=tuple(passed), demoted=demoted)
             passed.append(f"{'parent' if depth == 0 else 'ancestor'} {name!r} {why}")
         owner, holder, why = self.leader(scope, chain, repo, tried=set(chain), blind=blind)
         if holder is not None:
-            return Target(owner, holder, passed=tuple(passed))
+            reason = ("this session has no parent session" if not chain
+                      else "no direct ancestor can take the landing")
+            return Target(owner, holder, passed=tuple(passed),
+                          demoted=demotion(str(owner), reason))
         return Target(why="; ".join(passed + [f"mesh leader fallback: {why}"]),
                       passed=tuple(passed), undecidable=bool(blind))
 

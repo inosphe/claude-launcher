@@ -1110,7 +1110,9 @@ nodes:
       브랜치 기준은 시작 입력 relation(=${data.inputs.relation})이 정한다.
       · stacked(기본): 상위 통합 대상이 기준이다. 부모가 스택을 둔 워커면 부모의
         스택 브랜치(또는 부모가 지정한 선행 자식 브랜치), 부모가 리더면 이 회차
-        시작 시점의 통합 대상 브랜치(master)다.
+        시작 시점의 통합 대상 브랜치(master)다. 부모가 없거나 부모가 착지를 받지
+        못하는 세션(스택을 두지 않은 워커, 워크플로 없는 루트)도 master다 — 그
+        착지는 independent처럼 리더 큐로 강등된다(land의 여섯째 확인, claunch-0ka8c).
       · independent: 부모가 워커여도 통합 대상 브랜치(master)가 기준이다. 착지
         요청은 부모가 아니라 리더의 착지 큐로 간다(integration-request). 부모의
         스택 브랜치에 있는 코드가 필요해지면 혼자 기준을 바꾸지 않는다 — 부모에게
@@ -2603,10 +2605,15 @@ nodes:
         질문이 닫혔다는 통지가 상위 세션에 간다. 충돌하면 사용자 지침이 이긴다.
         그러니 상위 세션은 답할 수 있으면 지금 답하고, 근거가 없으면 추측하지
         말고 abstain으로 넘긴다.
+      # 리더 그룹은 landing-review-leader와 같다(claunch-0ka8c): 부모 체인에
+      # 착지를 받을 세션이 없는 stacked 회차는 착지가 리더 큐로 강등되므로
+      # (Router.stacked의 demoted), 그 착지를 묻는 질문도 independent처럼
+      # 연결되지 않은 루트 리더까지 닿아야 한다. 순서는 가까운 쪽부터다.
       from:
         - {role: worker, scope: ancestor}
-        - {role: leader, scope: ancestor}
-        - {role: leader, scope: sibling}
+        - {role: leader, scope: ancestor, connect: true}
+        - {role: leader, scope: sibling, connect: true}
+        - {role: leader, scope: root, connect: true}
       otherwise: human
       timeout: 1800
       options: &landing_review_options
@@ -3105,6 +3112,11 @@ nodes:
 
 
       증거 묶음은 그 코멘트에 담는다 — 상위가 심사하는 자리가 거기다:
+      - relation이 stacked인데 `claunch gate landing-target --json`의
+        `demoted`가 비어 있지 않으면(부모 없음, 부모가 착지를 받지 못함, 부모가
+        리더 — claunch-0ka8c) 묶음 첫머리에 「relation: stacked였으나 <demoted의
+        사유>로 리더 큐로 라우팅(independent로 강등)」 한 줄을 싣는다. 받는
+        리더가 이 요청이 부모의 스택을 거치지 않았다는 것을 그 줄로 안다.
       - 리뷰 판정이 누구에 의한 것인지 — flow_status의
         `result['peer-review'].value.by`를 본다. 응답자의 핸들이면 묶음에
         「리뷰: REVIEWED: pass @ <tip> (<핸들>, peer-review <ask id>)」를
@@ -5491,6 +5503,14 @@ procedures:
                 1 대상 없음 — 아무도 이 저장소의 착지 큐를 갖지 않는다. 여섯째 거짓.
                 2 판정 불가 — 데몬 미응답, 런을 읽지 못함, 명부를 읽지 못함.
                   여섯째 참도 거짓도 아니다.
+            relation이 stacked인데 0이고 JSON의 `demoted`가 비어 있지 않으면
+            부모 체인에 착지를 받을 세션이 없어(부모 없음, 부모가 착지를 받지
+            못함, 부모가 리더) 요청이 independent처럼 mesh 리더의 착지 큐로
+            강등된 것이다(claunch-0ka8c). 여섯째는 참이고 갈래는 그대로
+            request다 — 강등은 에러가 아니다. 그 `demoted` 문장을 reason에
+            옮기고, integration-request의 증거 묶음에 같은 사유를 싣는다.
+            리더가 이 저장소의 착지를 받지 못해 리더 큐로도 갈 수 없으면
+            게이트는 1이다 — 그 경우는 강등이 아니라 아래의 no-target이다.
             **1이면 request가 아니라 no-target이다.** escalate도 아니다 —
             escalate는 landing-review로 가서 *상위 세션*에게 묻는데, 대상이
             없는 편성에서 상위는 바로 그 병합할 수 없는 세션이다. 그 질문은
