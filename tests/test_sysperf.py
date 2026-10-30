@@ -475,3 +475,77 @@ def test_dashboard_wires_badge_page_and_route():
     assert "DISK ${disk.label}" in page_js
     assert 'node("h3", "", "Disk capacity")' in page_js
     assert ".sysperf-usage" in (STATIC / "style.css").read_text(encoding="utf-8")
+
+
+def _session(*, exited=False, **marks):
+    from types import SimpleNamespace
+
+    fields = {k: None for k in ("archived_at", "held_at", "delayed_at", "failed_at", "paused_at")}
+    fields.update(marks)
+    return SimpleNamespace(exited=exited, **fields)
+
+
+def test_count_sessions_groups_the_lifecycle_partition():
+    stamp = "2026-10-15T00:00:00+00:00"
+    sessions = [
+        _session(), _session(),                                     # running
+        _session(exited=True, held_at=stamp),                       # hold
+        _session(exited=True, held_at=stamp, delayed_at=stamp),     # delayed -> hold
+        _session(exited=True, paused_at=stamp),                     # paused -> ended
+        _session(exited=True),                                      # killed -> ended
+        _session(exited=True, failed_at=stamp),                     # failed -> ended
+        _session(exited=True, archived_at=stamp),                   # archived: not counted
+    ]
+    assert sysperf.count_sessions(sessions) == {"running": 2, "hold": 2, "ended": 3}
+    assert sysperf.count_sessions([]) == {"running": 0, "hold": 0, "ended": 0}
+
+
+def test_samples_carry_session_counts_taken_by_the_collector(tmp_path):
+    clock = iter(range(1000))
+    counts = iter([{"running": 1, "hold": 0, "ended": 2}, {"running": 3, "hold": 1, "ended": 2}])
+
+    def reader():
+        t = next(clock)
+        return _reading(float(t), t * 10, t * 100)
+
+    sp = sysperf.SysPerf(interval=0.01, reader=reader, log_file=tmp_path / "s.log",
+                         sessions=lambda: next(counts, {"running": 3, "hold": 1, "ended": 2}))
+
+    async def run():
+        sp.start()
+        try:
+            for _ in range(500):
+                if len(sp.history) >= 1:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await sp.stop()
+
+    asyncio.run(run())
+    assert sp.history[0]["sessions"] == {"running": 3, "hold": 1, "ended": 2}
+    line = (tmp_path / "s.log").read_text(encoding="utf-8").splitlines()[0]
+    assert json.loads(line)["sessions"] == {"running": 3, "hold": 1, "ended": 2}
+
+
+def test_session_count_failure_leaves_the_sample_without_counts():
+    def boom():
+        raise RuntimeError("registry gone")
+
+    sp = sysperf.SysPerf(reader=lambda: _reading(0.0, 0, 1), sessions=boom)
+    assert sp.count_sessions() is None
+    sp.tick(_reading(0.0, 0, 1))
+    assert "sessions" not in sp.tick(_reading(1.0, 1, 2), sessions=sp.count_sessions())
+
+
+def test_install_counts_the_app_manager_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(sysperf, "log_path", lambda: tmp_path / "sysperf.log")
+    app = web.Application()
+    collector = sysperf.install(app, interval=0)
+    assert collector.count_sessions() == {"running": 0, "hold": 0, "ended": 0}
+
+    class Manager:
+        def list(self):
+            return [_session(), _session(exited=True)]
+
+    app["manager"] = Manager()
+    assert collector.count_sessions() == {"running": 1, "hold": 0, "ended": 1}
