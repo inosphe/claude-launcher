@@ -1039,6 +1039,36 @@ def select_for_launch(profile: Profile) -> Optional[Selection]:
         return selection
 
 
+def identify(profile: Profile, token: Optional[str]) -> Optional[str]:
+    """The id of the pool key whose token is exactly ``token``, or ``None``.
+
+    A launch knows the token it handed the child but not which key of the pool
+    it was: the pool file, the cursor and the token file are shared by every
+    launch of the profile, so a read of the token file afterwards may name a
+    key another session wrote there in between. Matching the token the child
+    was actually given answers the launch's own question, and the daemon keeps
+    that id on the session (``Session.launched_key``) so the rail's key modal
+    can name the key a session is on instead of the key the pool last wrote
+    (claunch-i985h).
+
+    Read-only and mask-free: the caller already holds the token, and nothing
+    here returns one.
+    """
+    text = str(token or "").strip()
+    if not text:
+        return None
+    source = owner(profile)
+    if source is None:
+        return None
+    pool = load(source)
+    if pool is None:
+        return None
+    for key in pool.keys:
+        if key.token == text:
+            return key.id
+    return None
+
+
 def view(profile: Profile) -> dict:
     """The pool a launch of ``profile`` would select from, for the API.
 

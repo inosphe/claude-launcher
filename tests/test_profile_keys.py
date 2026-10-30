@@ -1570,3 +1570,49 @@ def test_login_and_display_paths_do_not_advance_the_pool(home):
     profile_keys.summary(p)
 
     assert profile_keys.load(p).keys[0].use_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# identifying the key a launch used (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_identify_names_the_key_holding_that_token(home):
+    """The token a launch handed the child names its key exactly.
+
+    The token file cannot answer this later — every launch of the pool writes
+    it — which is why the daemon records the answer at launch instead.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    pool = profile_keys.load(p)
+
+    assert profile_keys.identify(p, "sk-AAAA1111BBBB") == pool.keys[0].id
+    assert profile_keys.identify(p, "sk-CCCC2222DDDD") == pool.keys[1].id
+
+
+def test_identify_answers_none_for_a_token_the_pool_does_not_hold(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+
+    assert profile_keys.identify(p, "sk-nobody") is None
+    assert profile_keys.identify(p, "") is None
+    assert profile_keys.identify(p, None) is None
+
+
+def test_identify_of_a_child_names_its_ancestors_key(home):
+    """A child holding no token of its own launches on the ancestor's pool."""
+    parent = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="work")
+    child = profile.create("child")
+    lineage.set_parent(child, parent.name)
+    pool = profile_keys.load(parent)
+
+    assert profile_keys.identify(child, "sk-CCCC2222DDDD") == pool.keys[1].id
+
+
+def test_identify_writes_nothing(home):
+    """Reading which key a launch used must not spend a use or move a cursor."""
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    before = profile_keys.load(p)
+
+    profile_keys.identify(p, "sk-CCCC2222DDDD")
+
+    after = profile_keys.load(p)
+    assert after.cursor == before.cursor
+    assert [k.use_count for k in after.keys] == [k.use_count for k in before.keys]

@@ -21,10 +21,13 @@ import re
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry, pytest_basetemp, session_env
-from .. import lineage, pi_provider, profile as profile_mod, profile_keys, projects, providers, routing, runner
+from .. import (
+    credentials, lineage, pi_provider, profile as profile_mod, profile_keys,
+    projects, providers, routing, runner,
+)
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import instance_manifest, mcp_ready, mesh_roles, paths, pty_backend
@@ -1434,3 +1437,41 @@ def build_command(
     if sys.platform != "win32":
         env.setdefault("TERM", "xterm-256color")
     return argv, env, sdef.cwd
+
+
+def launch_key(sdef: SessionDef, env: Mapping[str, str]) -> Optional[str]:
+    """The pool key this launch handed the child, or ``None`` when it took none.
+
+    :func:`build_command` decides the key — a pin, or the profile's strategy —
+    by writing the profile's token file, and that file cannot answer this
+    question afterwards: every launch of the pool writes it, so a read after
+    the spawn may name a key another session put there. The token the child was
+    actually given is in ``env``, and matching it back to the pool is exact.
+    The daemon keeps the answer on the session (``Session.launched_key``) so
+    the rail's key modal names the key a session is on instead of the key the
+    pool last wrote (claunch-i985h).
+
+    A borrow authenticates with the lender's token and a null-token launch
+    injects none, so neither names a key of this profile's pool.
+    """
+    if sdef.null_token or sdef.borrow or not sdef.profile:
+        return None
+    try:
+        prof = profile_mod.require_selector(sdef.profile)
+    except profile_mod.ProfileError:
+        return None
+    names = [runner.OAUTH_TOKEN_ENV]
+    entry = harness_registry.get(sdef.harness)
+    token_env = getattr(entry, "token_env", "") if entry is not None else ""
+    if token_env:
+        names.append(token_env)
+    try:
+        for name in names:
+            key_id = profile_keys.identify(prof, env.get(name))
+            if key_id:
+                return key_id
+    except (profile_keys.KeysError, credentials.CredentialsError):
+        # A pool that cannot be read names no key; the modal says so rather
+        # than a launch failing over a display-only record.
+        return None
+    return None

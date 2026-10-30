@@ -503,6 +503,17 @@ class Session:
     #: session put together without ``__init__`` (tests do) reads None.
     _seed_done: Optional[asyncio.Event] = None
 
+    #: The key of the profile's pool this session's last launch handed the
+    #: child (``harness.launch_key``), or None when it took none (no pool, a
+    #: null-token session, a borrow) or has not launched yet. Kept in memory
+    #: rather than in the definition: every launch recomputes it, and what it
+    #: answers is "which key was that process on" — a fact about this daemon's
+    #: process, not a setting that outlives it. The rail's key modal reads it
+    #: (claunch-i985h); the profile's token file cannot answer, because every
+    #: launch of the pool writes it. A class default for the same reason as
+    #: ``_seed_done``.
+    launched_key: Optional[str] = None
+
     def __init__(
         self,
         sdef: SessionDef,
@@ -2679,6 +2690,12 @@ class Session:
     def info(self) -> dict:
         return {
             **self.sdef.to_dict(),
+            # Which key of the profile's pool this session's process is on
+            # (see the attribute). Separate from ``key_id``, which is the pin
+            # the operator chose: a session can run on a strategy-picked key
+            # with no pin at all, and the pin can be set for a launch that has
+            # not happened yet.
+            "launched_key": self.launched_key,
             "status": self.status(),
             "pid": self.pid,
             "exit_code": self.exit_code,

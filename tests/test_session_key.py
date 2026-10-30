@@ -167,6 +167,43 @@ def test_build_command_leaves_a_stale_pin_to_the_strategy(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# which key a launch was given (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_launch_key_reads_the_key_out_of_the_childs_environment(home, tmp_path):
+    """The one exact answer to "which key is this session on".
+
+    The profile's token file is written by every launch of the pool, so after
+    the spawn it can name another session's key. The token the child was given
+    is in its environment, and that is what ``launch_key`` matches back.
+    """
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    sdef = SessionDef(
+        name="s", harness="py", profile=prof.selector, cwd=str(tmp_path)
+    )
+
+    assert harness_mod.launch_key(sdef, {"CLAUDE_CODE_OAUTH_TOKEN": TOKENS[1]}) == ids[1]
+    # A token from outside the pool names no key of it.
+    assert harness_mod.launch_key(sdef, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-nobody"}) is None
+    assert harness_mod.launch_key(sdef, {}) is None
+
+
+def test_launch_key_answers_none_for_a_launch_that_takes_no_key(home, tmp_path):
+    """A null-token session injects none and a borrow spends another profile's."""
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    env = {"CLAUDE_CODE_OAUTH_TOKEN": TOKENS[0]}
+
+    for sdef in (
+        SessionDef(name="n", harness="py", profile=prof.selector, cwd=str(tmp_path),
+                   null_token=True),
+        SessionDef(name="b", harness="py", profile=prof.selector, cwd=str(tmp_path),
+                   borrow=prof.selector),
+    ):
+        assert harness_mod.launch_key(sdef, env) is None
+
+
+# --------------------------------------------------------------------------- #
 # the definition
 # --------------------------------------------------------------------------- #
 def test_the_pin_round_trips_through_the_record(home):
@@ -464,6 +501,9 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             # `add` left on the second key, so the rotation lands on the first.
             first_pid, first_token = await _await_record(marker)
             assert first_token == TOKENS[0]
+            # The session says which key it is on, from the token it was given
+            # (claunch-i985h) — the token file cannot say this later.
+            assert mgr.get("s1").info()["launched_key"] == ids[0]
 
             relaunched = await mgr.set_key("s1", ids[1])
 
@@ -472,6 +512,7 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             assert second_token == TOKENS[1], "the new process runs on the chosen key"
             assert credentials.stored_token(prof) == TOKENS[1]
             assert relaunched.sdef.key_id == ids[1]
+            assert relaunched.info()["launched_key"] == ids[1]
             assert relaunched.sdef.conversation_id == session.sdef.conversation_id
             assert not relaunched.exited
             assert mgr.get("s1") is relaunched
@@ -514,14 +555,19 @@ def test_a_session_created_pinned_runs_on_that_key_and_keeps_it(home, tmp_path):
             first_pid, first_token = await _await_record(marker)
             assert first_token == TOKENS[0], "the created session runs on its pin"
             assert pinned.sdef.key_id == ids[0]
+            assert pinned.info()["launched_key"] == ids[0]
 
             # Somebody else's launch moves the profile's token file.
-            mgr.create(
+            other = mgr.create(
                 SessionDef(name="s2", harness="keyed", profile=prof.selector,
                            cwd=str(tmp_path))
             )
             other_pid, other_token = await _await_record(marker, not_pid=first_pid)
             assert other_token == TOKENS[1]
+            # Each session reports its own key, though both share one token
+            # file: this is the fact the rail's modal draws (claunch-i985h).
+            assert other.info()["launched_key"] == ids[1]
+            assert mgr.get("s1").info()["launched_key"] == ids[0]
 
             # A relaunch through the restore path writes the pin back. Wait on
             # the LAST record, not the first: the other session's launch is in
@@ -533,6 +579,7 @@ def test_a_session_created_pinned_runs_on_that_key_and_keeps_it(home, tmp_path):
             )
             assert restored_token == TOKENS[0]
             assert restored_pid != first_pid
+            assert restored.info()["launched_key"] == ids[0]
         finally:
             await mgr.shutdown_all()
 

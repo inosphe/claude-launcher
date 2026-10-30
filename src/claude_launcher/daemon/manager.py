@@ -1054,6 +1054,13 @@ class SessionManager:
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
+        # Which key the child is about to run on, from the token it was given
+        # (claunch-i985h). Recorded here, where the answer exists, because the
+        # profile's token file stops being able to answer it the moment another
+        # session of the pool launches: the rail's key modal shows this id as
+        # *this session's* key, and "whatever the token file held" was a guess
+        # dressed as a fact.
+        session.launched_key = harness_mod.launch_key(session.sdef, env)
         # A restoring launch replays the previous run's log next (launch,
         # launch_async): the relaunched program gets a brand-new screen, and
         # the daemon's pyte history is the only scrollback the web terminal
