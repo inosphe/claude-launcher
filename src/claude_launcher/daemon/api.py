@@ -765,6 +765,10 @@ def build_app(
     # streamed to a window the user drives, and to the session the user picked.
     from . import webdebug
     webdebug.install(app)
+    # The VM registry (daemon/vmhub.py, vm-setup-8s6): tart VMs the daemon
+    # runs, who may look at and drive each, and the macOS VM slots.
+    from . import vm_api
+    vm_api.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.

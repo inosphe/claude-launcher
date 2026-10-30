@@ -804,6 +804,20 @@ DAEMON_DEFAULTS = {
     "webdebug_max_windows": 1,
     "webdebug_no_sandbox": False,
     "webdebug_insecure_tls": False,
+    # The VM registry (daemon/vmhub.py, vm-setup-8s6). Read when the daemon
+    # starts, except vm_human_idle, which is read each time the user is
+    # checked for having let go.
+    #   vm_slot_limit -- macOS VMs that may run at once (Apple's limit is 2).
+    #   vm_stop_wait -- seconds a guest shutdown may take before the VM is
+    #     left "stopping" for the user to decide on a forced stop.
+    #   vm_human_idle -- seconds without input before the screen goes back to
+    #     the session that was driving.
+    #   vm_graphics -- keep the tart run window (the user drives through it
+    #     until the browser screen takes input).
+    "vm_slot_limit": 2,
+    "vm_stop_wait": 120,
+    "vm_human_idle": 15,
+    "vm_graphics": True,
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.
