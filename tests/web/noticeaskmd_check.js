@@ -191,6 +191,8 @@ const PROMPT_MD = [
      "neither card sets the prompt as text directly any more");
   ok(src.includes('prompt_md: typeof a.prompt_md === "string" ? a.prompt_md : ""'),
      "the rail's prompt_md is carried onto the gate record");
+  ok(src.includes('prompt_md: String((r.ask && r.ask.prompt) || "")'),
+     "and a v1 run's ask prompt is carried too, so both versions draw alike");
 }
 
 if (failures) {

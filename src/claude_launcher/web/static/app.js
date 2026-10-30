@@ -24187,6 +24187,11 @@ function personGateRecords() {
       session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 1,
       kind: r.status, label: sessCflowGateStep(r) || "?",
       prompt: termCflowQuestion(r), presses: termCflowAnswers(r, session),
+      // A v1 run carries its ask prompt on the run row, and the card draws it
+      // as markdown like a v2 one (claunch-ns4kd). Only a real ask has one:
+      // a goto request, a hold or a decline is a sentence the daemon wrote,
+      // and the plain `prompt` above stays what the strip shows for all three.
+      prompt_md: String((r.ask && r.ask.prompt) || ""),
     });
   }
   const rail = (typeof cflow2RailCache === "object" && cflow2RailCache) || {};
