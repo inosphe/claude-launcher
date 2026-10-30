@@ -93,6 +93,26 @@ def parse_list(text: str) -> List[TartVm]:
     return out
 
 
+def _tail(log: Optional[Path], lines: int = 3) -> str:
+    try:
+        text = Path(log).read_text(encoding="utf-8", errors="replace") if log else ""
+    except OSError:
+        return "no output"
+    rows = [r.strip() for r in text.strip().splitlines() if r.strip()]
+    return " | ".join(rows[-lines:]) or "no output"
+
+
+def pid_alive(pid: int) -> bool:
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class Manager:
     """Starts, stops, suspends and re-adopts the registered VMs."""
 
@@ -103,6 +123,7 @@ class Manager:
         log_dir: Path,
         run: Runner = run_command,
         spawn: Spawner = spawn_detached,
+        alive: Callable[[int], bool] = pid_alive,
         graphics: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         stop_wait: float = STOP_WAIT,
@@ -112,6 +133,7 @@ class Manager:
         self.log_dir = log_dir
         self._run = run
         self._spawn = spawn
+        self._alive = alive
         #: Phase 1 hands the screen to the user through the ``tart run``
         #: window, so the window stays unless the daemon is told otherwise.
         self.graphics = graphics
@@ -166,7 +188,9 @@ class Manager:
         """Claim a slot, run the VM (``--suspendable``), wait for its address
         and ssh. A suspended VM is resumed the same way: ``tart run`` on a
         suspended VM restores it."""
+        prior = self.registry.get(vm_id).state
         vm = self.registry.claim_slot(vm_id)
+        pid = 0
         try:
             tart = self.tart_state(vm.tart_name)
             if tart == "missing":
@@ -174,22 +198,28 @@ class Manager:
             if tart == "running":
                 raise VmError("tart_already_running",
                               f"{vm.tart_name} is already running; reconcile instead")
-            self._spawn(self.run_argv(vm.tart_name), self.log_dir / f"{vm_id}.log")
+            log = self.log_dir / f"{vm_id}.log"
+            pid = self._spawn(self.run_argv(vm.tart_name), log)
             deadline = time.monotonic() + self.boot_wait
-            ip = self._wait_ip(vm, deadline)
+            ip = self._wait_ip(vm, deadline, pid, log)
             self.registry.set_state(vm_id, "running")
             self.registry.set_ready(vm_id, ip=ip)
             self._probe(vm_id, deadline)
         except VmError as exc:
-            self._fail(vm_id, exc)
+            self._fail(vm_id, exc, prior)
             raise
         return self.registry.get(vm_id)
 
-    def _wait_ip(self, vm: vmhub.Vm, deadline: float) -> str:
+    def _wait_ip(self, vm: vmhub.Vm, deadline: float, pid: int = 0,
+                 log: Optional[Path] = None) -> str:
         while True:
             rc, out, _ = self._run([TART, "ip", vm.tart_name], 10)
             if rc == 0 and out.strip():
                 return out.strip()
+            if pid and not self._alive(pid) and self.tart_state(vm.tart_name) != "running":
+                # tart run ended without a VM: Apple's slot limit on a resume
+                # (VZErrorDomain Code=6) shows up this way, within a second.
+                raise VmError("tart_exited", f"tart run exited: {_tail(log)}")
             if time.monotonic() >= deadline:
                 raise VmError("vm_boot_timeout", f"{vm.id}: no address within {self.boot_wait:g}s")
             self._sleep(POLL)
@@ -217,10 +247,16 @@ class Manager:
                               f"{vm_id}: no console login within {self.boot_wait:g}s")
             self._sleep(POLL)
 
-    def _fail(self, vm_id: str, exc: VmError) -> None:
+    def _fail(self, vm_id: str, exc: VmError, prior: str = "stopped") -> None:
         vm = self.registry.get(vm_id)
-        if vm.state in vmhub.OCCUPIED:
-            self.registry.set_state(vm_id, "fault", reason=f"{exc.code}: {exc}")
+        if vm.state not in vmhub.OCCUPIED:
+            return
+        if prior == "suspended" and self.tart_state(vm.tart_name) == "suspended":
+            # A resume that did not happen leaves the saved state where it was.
+            self.registry.adopt(vm_id, "suspended")
+            self.registry.note(vm_id, "resume_failed", code=exc.code, why=str(exc))
+            return
+        self.registry.set_state(vm_id, "fault", reason=f"{exc.code}: {exc}")
 
     # ---- stop / suspend --------------------------------------------------- #
     def stop(self, vm_id: str) -> vmhub.Vm:

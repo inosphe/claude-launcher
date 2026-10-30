@@ -234,3 +234,35 @@ def test_exec_on_a_vm_that_is_not_running_is_refused(env):
     with pytest.raises(VmError) as e:
         mgr.exec("a", "true")
     assert e.value.code == "vm_not_ready"
+
+
+def test_a_resume_that_tart_cannot_do_leaves_the_vm_suspended_and_fails_fast(env, tmp_path):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr.suspend("a")
+    mgr.start("b")
+    mgr.start("c")
+    mgr.stop("c")
+
+    def spawn(argv, log):
+        log.write_text("Error: VZErrorDomain Code=6 (resume)\n")
+        return 99  # tart run exits at once; the VM stays suspended
+
+    fake.tart["a"] = "suspended"
+    mgr._spawn = spawn
+    mgr._alive = lambda pid: False
+    with pytest.raises(VmError) as e:
+        mgr.start("a")
+    assert e.value.code == "tart_exited" and "VZErrorDomain" in str(e.value)
+    assert reg.get("a").state == "suspended"
+    assert any(r["what"] == "resume_failed" for r in reg.audit_log)
+
+
+def test_a_fresh_start_whose_tart_exits_is_a_fault(env):
+    fake, reg, mgr = env
+    mgr._spawn = lambda argv, log: 99
+    mgr._alive = lambda pid: False
+    with pytest.raises(VmError) as e:
+        mgr.start("a")
+    assert e.value.code == "tart_exited"
+    assert reg.get("a").state == "fault"
