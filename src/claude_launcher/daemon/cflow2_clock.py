@@ -912,6 +912,26 @@ class Cflow2Clock:
         except Exception:  # noqa: BLE001 - a broken session must not spam it
             return False
 
+    def _driver_faulted(self, scope: str) -> bool:
+        """Whether the slot's driver is stopped by a session fault right now
+        (:mod:`session_fault`: a usage limit, a rejected login, an API status
+        error ...). Such a harness answers every typed notice with the same
+        fault message, so a re-nudge only fills its screen (claunch-ijot0:
+        s29 under a weekly limit got one every ten minutes for eight hours).
+        A test double without a fault reading is not faulted."""
+        try:
+            session = self.manager.get(cstore.session_of(scope))
+        except Exception:
+            return False
+        fault = getattr(session, "fault", None)
+        if fault is None:
+            return False
+        try:
+            record = fault()
+        except Exception:  # noqa: BLE001 - a broken reading must not silence it
+            return False
+        return bool(record and record.get("active"))
+
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:
         """Tell a run's driver again when the run has waited on it past the
@@ -923,7 +943,10 @@ class Cflow2Clock:
         the driver) and stops when the run stops waiting on its driver, so a
         resolved choose or a finished run cannot be nudged about again. A busy
         driver is skipped without spending the interval: when its turn ends,
-        the next pass re-nudges at once if the wait is already that old."""
+        the next pass re-nudges at once if the wait is already that old. A
+        driver in an active session fault is skipped the same way, so the
+        first pass after the fault's window (a usage limit's reset) tells it
+        once and the run picks up again (claunch-ijot0)."""
         key = (cwd, scope)
         if not _waits_on_driver(payload):
             self._driver_nudged.pop(key, None)
@@ -939,6 +962,8 @@ class Cflow2Clock:
             self._driver_nudged[key] = clock_now
             return
         if clock_now - last < interval or not self._driver_idle(scope):
+            return
+        if self._driver_faulted(scope):
             return
         self._driver_nudged[key] = clock_now
         notices.append((cwd, payload.get("driver") or _name(scope),
