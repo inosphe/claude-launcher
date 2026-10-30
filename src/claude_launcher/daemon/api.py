@@ -11363,13 +11363,20 @@ async def _checked_key_pin(body: dict) -> Optional[str]:
     child's definition is built field by field under the spawn policy, which
     has no key field, so a Spawn child picks its key through the profile's
     strategy (manual included) rather than per child.
+
+    A create that borrows pins a key of the lender's pool: the lender's token
+    is what the launch authenticates with (claunch-e48es,
+    ``harness.key_pool_profile``).
     """
     pinned = str(body.get("key_id") or "").strip()
     if not pinned:
         return None
-    selector = str(body.get("profile") or "").strip()
-    if not selector:
+    if not str(body.get("profile") or "").strip():
         return None
+    selector = (
+        str(body.get("borrow") or "").strip()
+        or str(body.get("profile") or "").strip()
+    )
     try:
         prof = profile_mod.require_selector(selector)
         view = await asyncio.to_thread(profile_keys.view, prof)

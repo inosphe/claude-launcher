@@ -122,7 +122,8 @@ const requestSessionsRefresh = new Function(
 const railKeyChip = new Function(
   "keyPools", "document", "fetchKeyPool", "requestSessionsRefresh",
   "openKeyPicker",
-  keyPoolTtlTable() + "\n" + slice("railKeyChip") + "; return railKeyChip;"
+  keyPoolTtlTable() + "\n" + slice("keyPoolProfile") + "\n" + slice("railKeyChip")
+  + "; return railKeyChip;"
 )(keyPools, document, fetchKeyPool, requestSessionsRefresh,
   poolEnv.openKeyPicker);
 
@@ -168,6 +169,18 @@ const pinnedChip = railKeyChip(session({ key_id: "k-aaaaaa" }));
 check("a pinned session shows its key", pinnedChip
   && pinnedChip.children[0].textContent === "sk-A…BBBB");
 check("a pinned session is lit", pinnedChip && pinnedChip.className.includes("on"));
+
+// A borrow runs on the lender's token, so the chip is the lender's pool and
+// the picker opens on it (claunch-e48es).
+keyPools.set("lend", { at: Date.now(), data: Object.assign({}, two, { owner: "lend" }) });
+const borrowChip = railKeyChip(session({ borrow: "lend" }));
+check("a borrowing session draws the lender's chip", !!borrowChip);
+check("...and says it is borrowed", borrowChip && borrowChip.title.includes("borrowed from lend"),
+  borrowChip && borrowChip.title);
+borrowChip.listeners.click({ stopPropagation() {} });
+check("...and opens the picker on the lender's pool", poolEnv.opened
+  && poolEnv.opened[0] === "s1" && poolEnv.opened[1] === "lend");
+check("a --null session reads no pool", railKeyChip(session({ null_token: true })) === null);
 
 /* The read the uncached row started settles long before the next poll, so
    its chain is allowed to run first: the stale case below is a cache ON a
@@ -215,6 +228,10 @@ const keyPickerFillUsage = new Function(
   + "; return keyPickerFillUsage;")();
 const keyPickerSelector = new Function(
   slice("keyPickerSelector") + "; return keyPickerSelector;")();
+check("a session's own pool is read with its harness",
+  keyPickerSelector("work", { harness: "claude" }), "work:claude");
+check("a borrowed pool is read under the lender's own name",
+  keyPickerSelector("lend", { harness: "claude", borrow: "lend" }), "lend");
 /* The strategy labels the picker's select is built from, the write helper and
    the row builder itself (claunch-i985h). All three are cut whole from app.js
    so the harness draws the row the page draws. */

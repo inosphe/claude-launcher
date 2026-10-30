@@ -1143,10 +1143,15 @@ def build_command(
     # restores included, and the rotation is not advanced. The token file is
     # shared by every launch of the pool, so a restore that simply trusted it
     # would come back on whichever key somebody else's session picked last.
-    if prof is not None and not sdef.null_token and borrow_prof is None:
+    #
+    # A borrow authenticates with the lender's token, so the pool both of
+    # those read is the lender's (claunch-e48es): its pin names a lender key
+    # and its strategy advances there, exactly as the lender's own launches do.
+    key_prof = borrow_prof if borrow_prof is not None else prof
+    if key_prof is not None and not sdef.null_token:
         try:
             if sdef.key_id:
-                if profile_keys.materialize(prof, sdef.key_id) is None:
+                if profile_keys.materialize(key_prof, sdef.key_id) is None:
                     # The pinned key is gone from the pool (removed with
                     # `claunch keys remove` while this session was pinned to
                     # it). A stale pin must not cost the session its process,
@@ -1156,14 +1161,14 @@ def build_command(
                     log.warning(
                         "session %r is pinned to key %r, which the key pool of "
                         "profile %r no longer holds; %s",
-                        sdef.name, sdef.key_id, prof.name,
+                        sdef.name, sdef.key_id, key_prof.name,
                         "falling back to the pool's strategy"
                         if not restoring else "leaving the effective token alone",
                     )
                     if not restoring:
-                        profile_keys.select_for_launch(prof)
+                        profile_keys.select_for_launch(key_prof)
             elif not restoring:
-                profile_keys.select_for_launch(prof)
+                profile_keys.select_for_launch(key_prof)
         except profile_keys.KeysError as exc:
             raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:
@@ -1439,6 +1444,22 @@ def build_command(
     return argv, env, sdef.cwd
 
 
+def key_pool_profile(sdef: SessionDef) -> Optional["profile_mod.Profile"]:
+    """The profile whose key pool this session's launches read, or ``None``.
+
+    The session's own profile, except under a borrow, where the token is the
+    lender's and so is the pool a pin names (claunch-e48es). A null-token
+    session injects no token and reads no pool; neither does a session with no
+    profile, or one whose profile (or lender) no longer resolves.
+    """
+    if sdef.null_token or not sdef.profile:
+        return None
+    try:
+        return profile_mod.require_selector(sdef.borrow or sdef.profile)
+    except profile_mod.ProfileError:
+        return None
+
+
 def launch_key(sdef: SessionDef, env: Mapping[str, str]) -> Optional[str]:
     """The pool key this launch handed the child, or ``None`` when it took none.
 
@@ -1451,14 +1472,12 @@ def launch_key(sdef: SessionDef, env: Mapping[str, str]) -> Optional[str]:
     the rail's key modal names the key a session is on instead of the key the
     pool last wrote (claunch-i985h).
 
-    A borrow authenticates with the lender's token and a null-token launch
-    injects none, so neither names a key of this profile's pool.
+    A null-token launch injects none. A borrow authenticates with the
+    lender's token, so its key is matched against the lender's pool
+    (:func:`key_pool_profile`, claunch-e48es).
     """
-    if sdef.null_token or sdef.borrow or not sdef.profile:
-        return None
-    try:
-        prof = profile_mod.require_selector(sdef.profile)
-    except profile_mod.ProfileError:
+    prof = key_pool_profile(sdef)
+    if prof is None:
         return None
     names = [runner.OAUTH_TOKEN_ENV]
     entry = harness_registry.get(sdef.harness)
