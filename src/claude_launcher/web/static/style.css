@@ -9991,7 +9991,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    user's on the right in the accent colour; both bodies are markdown.
    No fixed width cap (claunch-1n081): a bubble may use the column's width,
    less a margin that keeps the two sides apart. */
-.th-msg { max-width: 94%; padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
+.th-msg { position: relative; max-width: 94%; padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
   line-height: 1.5; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
 .th-msg.th-user { align-self: flex-end; background: #12274a; border: 1px solid #1f4f99;
   border-bottom-right-radius: 3px; }
@@ -10008,9 +10008,12 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg.th-failed .th-msg-state { color: #f85149; }
 /* A user message's resend/revert (claunch-tpbqz): the mark sits in the meta
    line, and the hover actions stay out of the way until the bubble is
-   hovered. */
+   hovered. The actions float on the pane background above the bubble's
+   top-right corner (claunch-tpbqz.2) — hidden with visibility they still
+   reserved their flex space and left an empty gap beside every message. */
 .th-msg-flag { color: #d29922; font-weight: 600; }
-.th-msg-actions { display: inline-flex; gap: 4px; }
+.th-msg-actions { position: absolute; top: -9px; right: 8px; display: inline-flex; gap: 4px;
+  padding: 1px 3px; background: #14161a; border-radius: 8px; z-index: 2; }
 .th-msg-actions .th-act { padding: 0 6px; border: 1px solid #30363d; border-radius: 8px;
   background: transparent; color: #9da5b0; font-size: 10px; cursor: pointer; }
 .th-msg-actions .th-act:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
