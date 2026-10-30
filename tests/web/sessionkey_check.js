@@ -49,11 +49,30 @@ function slice(name) {
 function el(tag) {
   const node = {
     tag, className: "", title: "", type: "", textContent: "", dataset: {},
-    children: [], listeners: {}, attrs: {},
+    children: [], listeners: {}, attrs: {}, options: [], value: "",
     appendChild(c) { this.children.push(c); return c; },
     append(...cs) { for (const c of cs) this.children.push(c); },
     addEventListener(t, fn) { this.listeners[t] = fn; },
     setAttribute(k, v) { this.attrs[k] = v; },
+    // Just the word-level behaviour the picker uses: `toggle("hidden", on)`
+    // on the roll button, and `contains` for the assertions below.
+    classList: {
+      add(c) {
+        if (!node.className.split(/\s+/).includes(c)) {
+          node.className = (node.className + " " + c).trim();
+        }
+      },
+      remove(c) {
+        node.className = node.className.split(/\s+/)
+          .filter((x) => x && x !== c).join(" ");
+      },
+      contains(c) { return node.className.split(/\s+/).includes(c); },
+      toggle(c, on) {
+        const want = on === undefined ? !this.contains(c) : !!on;
+        if (want) this.add(c); else this.remove(c);
+        return want;
+      },
+    },
   };
   return node;
 }
@@ -196,11 +215,36 @@ const keyPickerFillUsage = new Function(
   + "; return keyPickerFillUsage;")();
 const keyPickerSelector = new Function(
   slice("keyPickerSelector") + "; return keyPickerSelector;")();
+/* The strategy labels the picker's select is built from, the write helper and
+   the row builder itself (claunch-i985h). All three are cut whole from app.js
+   so the harness draws the row the page draws. */
+function strategyLabelTable() {
+  const start = src.indexOf("const NEW_USAGE_STRATEGY_LABELS =");
+  if (start < 0) throw new Error("cannot locate NEW_USAGE_STRATEGY_LABELS in app.js");
+  return src.slice(start, src.indexOf("};", start) + 2);
+}
+const writeApi = (path, opts) => {
+  posted = { path, body: JSON.parse((opts && opts.body) || "{}") };
+  return Promise.resolve({
+    ok: true, status: 200,
+    json: async () => pickEnv.writeAnswer || { key_id: "x" },
+  });
+};
+const keyPickerWrite = new Function("api", "encodeURIComponent",
+  slice("keyPickerWrite") + "; return keyPickerWrite;")(writeApi, encodeURIComponent);
+const keyPickerControls = new Function(
+  "el", "document", "keyPickerWrite",
+  strategyLabelTable() + "\n" + slice("keyPickerControls")
+  + "; return keyPickerControls;")(el, document, keyPickerWrite);
+let poolAnswer = two;
 const pickEnv = {
+  el,
   keyPools,
-  fetchKeyPool: () => Promise.resolve(two),
+  // A live answer: the checks below swap the pool the picker opens on.
+  fetchKeyPool: () => Promise.resolve(poolAnswer),
   modalInfo: (title) => { pickEnv.info = title; },
-  // The real modal hands each option's detail node back on the option.
+  // The real modal hands each option's detail and hint nodes back on the
+  // option.
   showModal: (spec) => {
     dialog = spec;
     for (const opt of (spec.choices && spec.choices.options) || []) {
@@ -208,14 +252,16 @@ const pickEnv = {
         opt.detailEl = el("small");
         opt.detailEl.textContent = opt.detail;
       }
+      if (opt.hint) {
+        opt.hintEl = el("small");
+        opt.hintEl.textContent = opt.hint;
+      }
     }
     return Promise.resolve(pickEnv.answer);
   },
   keyPickerUsage, keyPickerSelector, keyPickerFillUsage,
-  api: (path, opts) => {
-    posted = { path, body: JSON.parse(opts.body) };
-    return Promise.resolve({ ok: true, status: 200, json: async () => ({ key_id: "x" }) });
-  },
+  keyPickerControls, keyPickerWrite,
+  api: writeApi,
   sessionsCache: [{ name: "s1", key_id: "k-bbbbbb" },
                   { name: "s2", harness: "opencode" }],
   currentName: "other",
@@ -242,6 +288,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(
         { name: "seven_day", utilization: 40 }] } },
       { id: "k-bbbbbb", usage: { key_id: "k-bbbbbb", error: "HTTP 401", windows: [] } },
     ],
+    next: { key_id: "k-aaaaaa", exact: true },
     unmeasurable: null,
   };
   await openKeyPicker("s1", "work:claude");
@@ -302,7 +349,106 @@ const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(
     .test(dialog.choices.options[0].detailEl.textContent),
     dialog.choices.options[0].detailEl.textContent);
 
-  // A pick: POST that id, and drop the cached pool so the chips re-read it.
+  /* ---- the strategy row, and which key the next launch takes (claunch-i985h) ---- */
+  // Its own open, on a pinned session, so the row is read against a known
+  // pool rather than whatever fixture the previous case left behind.
+  usageAnswer = {
+    keys: [],
+    next: { key_id: "k-aaaaaa", exact: true },
+    unmeasurable: null,
+  };
+  pickEnv.answer = null;
+  await openKeyPicker("s1", "work:claude");
+  await settle();
+  const opts2 = dialog.choices.options;
+  const box = dialog.controls;
+  check("the modal carries the pool's strategy row", !!box);
+  const row = box && box.children[0];
+  const select = row && row.children[0] && row.children[0].children[0];
+  const roll = row && row.children[1];
+  const nextLine = box && box.children[1];
+  const note = box && box.children[2];
+  check("the select offers every strategy", select && select.children.length === 5,
+    select && String(select.children.length));
+  check("the select starts on the pool's strategy", select && select.value === "rotation",
+    select && select.value);
+  check("the next line names the peek's key", nextLine
+    && nextLine.textContent === "next launch takes sk-A…BBBB",
+    nextLine && nextLine.textContent);
+  check("the row the peek names is marked", opts2[0].hintEl
+    && /next launch takes this/.test(opts2[0].hintEl.textContent),
+    opts2[0].hintEl && opts2[0].hintEl.textContent);
+  check("roll is not offered outside random", roll && roll.className.includes("hidden"),
+    roll && roll.className);
+  check("an unpinned session's strategy row says the pool decides", note
+    && /no pin/i.test(note.textContent) || /No pin/.test(note.textContent),
+    note && note.textContent);
+  // The radio starts on the session's pin, not on the token file's key.
+  check("the radio starts on the session's pinned key",
+    dialog.choices.selected(opts2[1]) === true
+      && dialog.choices.selected(opts2[0]) !== true);
+
+  /* ---- changing the strategy here writes the pool ---- */
+  pickEnv.writeAnswer = { strategy: "manual", pick: "k-bbbbbb", keys: 2 };
+  posted = null;
+  select.value = "manual";
+  select.listeners.change();
+  await settle();
+  check("a strategy change writes the pool",
+    posted && posted.path === "/api/profiles/work/keys/strategy", posted && posted.path);
+  check("manual carries the key marked in the list",
+    posted && posted.body.strategy === "manual" && posted.body.key_id === "k-bbbbbb",
+    posted && JSON.stringify(posted.body));
+  check("the pools cache is dropped after the write", !keyPools.has("work:claude"));
+  // Under manual the pressed key IS the choice: one press, one write.
+  posted = null;
+  dialog.choices.onPick(opts2[0]);
+  await settle();
+  check("pressing a key under manual names that key",
+    posted && posted.body.strategy === "manual" && posted.body.key_id === "k-aaaaaa",
+    posted && JSON.stringify(posted.body));
+
+  /* ---- random: the roll draws the key the next launch takes ---- */
+  poolAnswer = {
+    pooled: true, owner: "work", strategy: "random", pick: "k-bbbbbb",
+    keys: two.keys,
+  };
+  usageAnswer = { keys: [], next: { key_id: "k-bbbbbb", exact: true } };
+  pickEnv.writeAnswer = { strategy: "random", pick: "k-aaaaaa", key: { id: "k-aaaaaa" } };
+  pickEnv.answer = null;
+  await openKeyPicker("s1", "work:claude");
+  await settle();
+  const rbox = dialog.controls;
+  const rroll = rbox.children[0].children[1];
+  check("random offers the roll", !rroll.className.includes("hidden"), rroll.className);
+  check("random's next line is the stored draw", rbox.children[1].textContent
+    === "next launch takes second", rbox.children[1].textContent);
+  // The re-read after a draw answers with the new pick; the harness hands it
+  // the answer the daemon would give.
+  usageAnswer = { keys: [], next: { key_id: "k-aaaaaa", exact: true } };
+  posted = null;
+  rroll.listeners.click();
+  await settle();
+  check("the roll posts to the roll route",
+    posted && posted.path === "/api/profiles/work/keys/roll", posted && posted.path);
+  check("the new draw is what the next launch takes",
+    rbox.children[1].textContent === "next launch takes sk-A…BBBB",
+    rbox.children[1].textContent);
+
+  /* ---- a session with no pin starts on the key its launch was given ---- */
+  poolAnswer = two;
+  usageAnswer = { keys: [], next: { key_id: "k-aaaaaa", exact: true } };
+  pickEnv.sessionsCache.push({ name: "s3", launched_key: "k-aaaaaa" });
+  await openKeyPicker("s3", "work:claude");
+  await settle();
+  const lOpts = dialog.choices.options;
+  check("the radio starts on the key the session was launched with",
+    dialog.choices.selected(lOpts[0]) === true);
+  check("that row says the launch used it",
+    /last launch used this/.test(lOpts[0].hint || ""), lOpts[0].hint);
+
+  /* ---- a pick: POST that id, and drop the cached pool so the chips re-read it ---- */
+  poolAnswer = two;
   pickEnv.answer = { go: true, key_id: "k-aaaaaa" };
   await openKeyPicker("s1", "work:claude");
   check("a pick POSTs to the session's key route",

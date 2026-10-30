@@ -643,12 +643,26 @@ it opens a modal listing the keys, masked, with the one in use marked. Picking
 another key restarts that session on it — the same name, the same
 conversation (`--resume`), the harness relaunched on the new key.
 
+The modal states three separate facts, and the rows carry them apart: the key
+this session's process was given (`launched_key`, recorded at launch — the
+profile's token file cannot answer it, because every launch of the pool writes
+that file), the pin (`key_id`), and the key the pool's next launch will take
+(the same peek the create form shows: the cursor's next key for `rotation`, the
+reading-based answer for `usage-min`/`usage-max`, the stored draw for `random`
+and the named key for `manual`). Above the list, the pool's own **Strategy**
+select writes `POST /api/profiles/<pool>/keys/strategy` as it changes, so the
+next launch's key can be chosen from here rather than only from the create
+form; under `manual` the key marked in the list is the one it names, and
+`random` carries a **roll** button (`POST …/keys/roll`) that re-draws.
+
 The pin is part of the session's definition (`key_id`), so it holds across
 daemon restarts and every later restore writes that key into the profile's
 token file rather than taking the pool's next one; pinning one session does
-not consume another session's rotation. `No pin` in the same modal clears it,
-and the strategy picks from the next launch on. Keys themselves are still
-edited only with `claunch keys` — the modal picks, it does not edit.
+not consume another session's rotation. A pinned session ignores the pool's
+strategy, which is what the modal's note says while the pin is set. `No pin`
+in the same modal clears it, and the strategy picks from the next launch on.
+Keys themselves are still edited only with `claunch keys` — the modal picks a
+key and the strategy, it does not add or remove keys.
 
 The two routes behind it, for scripts: `GET /api/profiles/<profile>/keys`
 (id, label, masked token, strategy, which is current — never a plaintext

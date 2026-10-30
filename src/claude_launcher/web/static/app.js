@@ -1810,7 +1810,7 @@ function syncBulkActions(sessions, filter = "current") {
    safe answer and the destructive one side by side, one click apart. The
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
-function showModal({ title, body, actions, checkbox = null, choices = null }) {
+function showModal({ title, body, actions, checkbox = null, choices = null, controls = null }) {
   if (typeof sessionModal !== "undefined" && sessionModal) {
     sessionModalClose();
     if (sessionModal) return Promise.resolve(null);
@@ -1837,10 +1837,24 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
       label.append(check, document.createTextNode(checkbox.label));
       bodyEl.appendChild(label);
     }
+    // A caller's own row of controls, drawn between the question and the
+    // answers: the key picker puts the pool's strategy and the key its next
+    // launch takes there, so the choice below can be read against them
+    // (claunch-i985h). A node rather than more arguments, because what goes
+    // in it is that caller's business.
+    if (controls) bodyEl.appendChild(controls);
     // The first option is the one selected on open, so it is the safe answer
     // in every group: a modal dismissed with Enter must not take the
-    // destructive branch of a question the operator never read.
+    // destructive branch of a question the operator never read. An option may
+    // say ``selected`` when the caller knows which answer is already true
+    // (the key picker: the key this session is on), and the caller may take
+    // the change as it happens — the same press that moves the radio can be
+    // the write, when the question is "which one, and use it".
     let picked = choices ? choices.options[0] : null;
+    if (choices && choices.selected) {
+      const wanted = choices.options.find(choices.selected);
+      if (wanted) picked = wanted;
+    }
     if (choices) {
       const group = document.createElement("div");
       group.classList.add("modal-choices");
@@ -1858,6 +1872,7 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
               button.classList.toggle("danger", !!opt[action.dangerWhen]);
             }
           }
+          if (choices.onPick) choices.onPick(opt);
         });
         const text = document.createElement("span");
         text.textContent = opt.label;
@@ -1865,6 +1880,10 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
           const hint = document.createElement("small");
           hint.textContent = opt.hint;
           text.appendChild(hint);
+          // Handed back like `detailEl` below: the key picker adds "next
+          // launch takes this" to the row once the pool's peek arrives, and
+          // that answer is not known when the modal opens.
+          opt.hintEl = hint;
         }
         // A second line the caller may still be reading when the modal opens
         // (the key picker's usage): the node is handed back on the option so
@@ -51104,9 +51123,17 @@ function keyPickerUsage(selector) {
 /* The usage line of each key option, written into the nodes the modal handed
    back (showModal's `detail`). A key the answer does not name says so
    instead of keeping "reading…" forever. */
-function keyPickerFillUsage(options, doc) {
+function keyPickerFillUsage(options, doc, nextId) {
   const rows = new Map(((doc && doc.keys) || []).map((k) => [k.id, k.usage]));
   for (const opt of options) {
+    if (opt.hintEl && opt.baseHint !== undefined) {
+      // The "next launch takes this" mark belongs to the row the pool will
+      // actually spend, and that is known only once the peek is back — so the
+      // hint is rewritten here rather than composed at open.
+      const mark = nextId && opt.value && opt.value.key_id === nextId
+        ? " · next launch takes this" : "";
+      opt.hintEl.textContent = opt.baseHint + mark;
+    }
     if (!opt.detailEl || !opt.value || !opt.value.key_id) continue;
     const reading = rows.get(opt.value.key_id);
     let text;
@@ -51120,10 +51147,103 @@ function keyPickerFillUsage(options, doc) {
   }
 }
 
+/* A write to one leaf of a profile's key pool (strategy, roll), answered the
+   way this modal needs it: never throws, and says why when it did not land.
+   The pool's own profile is the target — a session on a child profile reads
+   its ancestor's pool, and a write to the child's nonexistent one would
+   silently do nothing (the split ``h_profile_key_strategy`` documents). */
+async function keyPickerWrite(profileName, leaf, body) {
+  try {
+    const resp = await api(
+      `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}) });
+    const doc = await resp.json().catch(() => null);
+    if (!resp.ok) return { ok: false, error: (doc && doc.error) || `HTTP ${resp.status}` };
+    return { ok: true, doc: doc || {} };
+  } catch (e) {
+    return { ok: false, error: `could not reach the daemon (${(e && e.message) || e})` };
+  }
+}
+
+/* The pool's strategy, the key its next launch takes, and the roll — drawn
+   between the modal's question and its answers, because the answer below is
+   read against them (claunch-i985h).
+
+   The strategy is a profile setting, not this session's: it decides the next
+   key for every session whose launches are not pinned to one, and this
+   session's pin, when it has one, outranks it. That is why the two writes are
+   two controls — this row changes the pool, the button at the bottom pins this
+   session.
+
+   `paint` is called with whatever the next pick currently is (the pool's
+   stored pick at open, the peek when the usage read lands, a fresh draw after
+   a roll), so the line always names the key the next launch would spend. */
+function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
+  const box = el("div", "key-picker-controls");
+  const row = el("div", "key-picker-row");
+  const label = el("label", "key-picker-strategy");
+  label.textContent = "Strategy";
+  const select = document.createElement("select");
+  select.id = "key-picker-strategy";
+  for (const name of Object.keys(NEW_USAGE_STRATEGY_LABELS)) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = NEW_USAGE_STRATEGY_LABELS[name];
+    select.appendChild(option);
+  }
+  select.value = strategy;
+  label.appendChild(select);
+  const roll = el("button", "key-picker-roll", "roll");
+  roll.type = "button";
+  roll.title = "draw again — the new draw is the key the next launch takes";
+  row.append(label, roll);
+  const next = el("p", "key-picker-next");
+  const note = el("p", "key-picker-note muted");
+  box.append(row, next, note);
+
+  const nameOf = (id) => {
+    const hit = keys.find((k) => k.id === id);
+    return hit ? (hit.label || hit.masked) : id;
+  };
+  const paint = ({ nextPick = null, strategy: now = null, flash = "", pinned = false,
+                   unknown = "" } = {}) => {
+    if (now) {
+      strategy = now;
+      select.value = now;
+      roll.classList.toggle("hidden", now !== "random");
+    }
+    if (nextPick) {
+      const what = nextPick.exact === false
+        ? `${nameOf(nextPick.key_id)} (read again when the launch runs)`
+        : nameOf(nextPick.key_id);
+      next.textContent = `next launch takes ${what}`;
+    } else if (unknown) {
+      next.textContent = `next launch: ${unknown}`;
+    } else if (nextPick === null) {
+      next.textContent = "next launch: not known yet";
+    }
+    note.textContent = pinned
+      ? "This session is pinned: the pool's strategy does not move it. "
+        + "“No pin — let the pool's strategy pick” hands it back."
+      : "No pin on this session: the pool's strategy decides its next launch.";
+    if (flash) note.textContent = `${flash} — ${note.textContent}`;
+  };
+  select.addEventListener("change", () => onStrategy(select.value));
+  return { box, paint, roll, strategy: () => strategy };
+}
+
 /* The floating modal. `showModal` is the page's one dialog (Escape, backdrop
    and Cancel all answer null), and its radio group is exactly a key list —
    so the picker is that dialog with the pool as its choices, instead of a
-   second modal implementation with its own dismissal bugs. */
+   second modal implementation with its own dismissal bugs.
+
+   What it says about the session is three separate facts, and before this
+   they were one: the key this session's process was given (``launched_key``),
+   the pin the operator set (``key_id``), and the key the pool's next launch
+   will take (the peek). The old modal selected whichever key the token file
+   held, which for a rotation pool is whichever launch of *any* session of
+   that profile was last — accurate about the file, silent about the session. */
 async function openKeyPicker(name, profile) {
   const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
     .find((x) => x.name === name);
@@ -51146,37 +51266,122 @@ async function openKeyPicker(name, profile) {
       + "the profile has a pool.");
     return;
   }
+  const poolName = pool.owner || profile;   // where a pool write lands
+  const keys = pool.keys;
   const pinnedTo = session && session.key_id;
-  const options = pool.keys.map((k) => ({
-    label: k.label || k.masked,
-    hint: [
-      k.current ? "the key this profile's token file holds now" : "",
+  const launched = session && session.launched_key;
+  let strategy = pool.strategy || "rotation";
+  // What the next launch takes, as far as the pool alone can say: the stored
+  // draw for random and manual, nothing for the rest until the peek lands.
+  let nextPick = pool.pick ? { key_id: pool.pick, exact: true } : null;
+  const options = keys.map((k) => {
+    const hint = [
       k.id === pinnedTo ? "pinned to this session" : "",
+      k.id !== pinnedTo && k.id === launched ? "this session's last launch used this" : "",
+      k.current ? "the pool's token file now" : "",
       k.use_count ? `used ${k.use_count}×` : "never used",
-    ].filter(Boolean).join(" · "),
-    detail: "usage: reading…",
-    value: { key_id: k.id },
-  }));
+    ].filter(Boolean).join(" · ");
+    return { label: k.label || k.masked, hint, baseHint: hint,
+             detail: "usage: reading…", value: { key_id: k.id } };
+  });
   if (pinnedTo) {
     options.push({
       label: "No pin — let the pool's strategy pick",
-      hint: "the next launch takes the next key by the pool's strategy",
+      hint: "the next launch takes the key the strategy below picks",
       value: { key_id: null },
     });
   }
+  // The radio starts on the key this session is actually on: its pin, else
+  // the key its last launch was given, else what the pool would spend next —
+  // and only a session with none of those falls back to the token file's key.
+  const selectedId = pinnedTo || launched || pool.pick ||
+    (keys.find((k) => k.current) || {}).id || "";
+  let chosen = options.find((o) => o.value.key_id === selectedId) || options[0];
+
+  const controls = keyPickerControls({
+    profileName: poolName, keys, strategy,
+    onStrategy: (name) => writeStrategy(name),
+  });
+
+  /* Change the pool's strategy. Under manual the key the operator marked in
+     the list is the one it names, so "manual" and the press on a key are one
+     action rather than two (the same pairing the create form's usage block
+     makes). */
+  async function writeStrategy(name) {
+    const manualKey = chosen && chosen.value && chosen.value.key_id;
+    const body = name === "manual" && manualKey
+      ? { strategy: name, key_id: manualKey } : { strategy: name };
+    const res = await keyPickerWrite(poolName, "strategy", body);
+    if (!res.ok) {
+      controls.paint({ strategy, nextPick, pinned: !!pinnedTo, flash: `not saved: ${res.error}` });
+      return;
+    }
+    strategy = res.doc.strategy || name;
+    nextPick = res.doc.pick ? { key_id: res.doc.pick, exact: true } : null;
+    controls.paint({ strategy, nextPick, pinned: !!pinnedTo });
+    afterPoolWrite();
+  }
+
+  async function roll() {
+    const res = await keyPickerWrite(poolName, "roll", {});
+    if (!res.ok) {
+      controls.paint({ strategy, nextPick, pinned: !!pinnedTo, flash: `no draw: ${res.error}` });
+      return;
+    }
+    nextPick = { key_id: res.doc.pick || (res.doc.key && res.doc.key.id) || "", exact: true };
+    controls.paint({ strategy: res.doc.strategy || strategy, nextPick, pinned: !!pinnedTo });
+    afterPoolWrite();
+  }
+
+  /* The chips in the rail and the peek both read the pool: a strategy change
+     or a draw moves what the next launch takes, so the cached copy is dropped
+     and the usage line re-asked. */
+  function afterPoolWrite() {
+    // Both spellings: the rail caches the pool under the session's own profile
+    // (a child profile answers with its ancestor's pool), and this modal may
+    // have written under the ancestor's name.
+    keyPools.delete(profile);
+    keyPools.delete(poolName);
+    fetchKeyPool(profile);
+    keyPickerUsage(keyPickerSelector(profile, session)).then((doc) => {
+      keyPickerFillUsage(options, doc, doc && doc.next && doc.next.key_id);
+      controls.paint({ nextPick: (doc && doc.next) || nextPick,
+                       unknown: (doc && doc.next_unknown) || "",
+                       pinned: !!pinnedTo });
+    });
+  }
+
+  controls.roll.addEventListener("click", roll);
   const asked = showModal({
     title: `Key for ${name}`,
-    body: `The pool of ${pool.owner || profile} (strategy: ${pool.strategy || "rotation"}).\n`
+    body: `The pool of ${poolName}.\n`
       + "Switching restarts this session: the same name, the same conversation, "
       + "the harness relaunched on the key you pick. Tokens are masked here — "
       + "the modal never sees a plaintext one.",
-    choices: { options },
+    controls: controls.box,
+    choices: {
+      options,
+      selected: (opt) => opt.value && opt.value.key_id === selectedId,
+      // Manual is "the key you pick": pressing a key while the strategy is
+      // manual names that key for the next launch instead of making the
+      // operator pick the strategy twice.
+      onPick: (opt) => {
+        chosen = opt;
+        if (strategy === "manual" && opt.value && opt.value.key_id) writeStrategy("manual");
+      },
+    },
     actions: [
       { label: "Cancel", value: null },
       { label: "Restart on this key", value: { go: true } },
     ],
   });
-  usage.then((doc) => keyPickerFillUsage(options, doc));
+  controls.paint({ strategy, nextPick, pinned: !!pinnedTo });
+  usage.then((doc) => {
+    const next = doc && doc.next;
+    keyPickerFillUsage(options, doc, next && next.key_id);
+    controls.paint({ nextPick: next || nextPick, strategy: (doc && doc.strategy) || strategy,
+                     pinned: !!pinnedTo });
+  });
   const picked = await asked;
   if (!picked || !picked.go) return;
   let resp;

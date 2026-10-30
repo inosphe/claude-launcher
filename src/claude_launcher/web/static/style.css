@@ -6380,6 +6380,20 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    window the way the create form's pool rows are. */
 .modal-choice small.modal-choice-detail.mid { color: #d29922; }
 .modal-choice small.modal-choice-detail.high { color: #f85149; }
+/* The key picker's own row: the pool's strategy, the key its next launch
+   takes, and the roll (claunch-i985h). Sits between the modal's question and
+   the key list, so the list is read against the key that row names. */
+.key-picker-controls { margin: 10px 0 2px; }
+.key-picker-row { display: flex; align-items: center; gap: 8px; }
+.key-picker-strategy { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; color: #8b949e; font-size: 12px; }
+.key-picker-strategy select { flex: 1 1 auto; min-width: 0; }
+.key-picker-roll {
+  flex: none; padding: 1px 8px; font-size: 11px; border-radius: 4px;
+  border: 1px solid #30363d; background: none; color: #8b949e; cursor: pointer;
+}
+.key-picker-roll:hover { color: #e6edf3; border-color: #8b949e; }
+.key-picker-next { margin: 6px 0 0; font-size: 12px; color: #e6edf3; }
+.key-picker-note { margin: 4px 0 0; font-size: 11px; line-height: 1.45; }
 #modal-actions { flex: none; display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 #modal-actions button {
   padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;
