@@ -140,11 +140,10 @@ CONFIG_NAME = ".claunch.yaml"
 def sync_file() -> Path:
     """The config file: ``<launcher home>/.claunch.yaml``.
 
-    It has no override of its own. It used to (``CLAUDE_LAUNCHER_SYNC_FILE``,
-    default ``~/.claunch.yaml``), and a process that isolated only the launcher
-    home kept writing the real config file -- a reproduction script's
+    It has no override of its own: a process that isolated only the launcher
+    home once kept writing the real config file -- a reproduction script's
     ``store.save()`` replaced the whole file with its fixture. Moving the home
-    now moves the config file with it.
+    moves the config file with it.
     """
     return guard_config(launcher_home() / CONFIG_NAME)
 
@@ -163,8 +162,8 @@ def missing_config_error() -> Optional[str]:
         return None
     return (
         f"config file {path} not found: the daemon home {path.parent} has no "
-        f"{CONFIG_NAME}. Copy the config file there (versions before this one "
-        f"read ~/{CONFIG_NAME}); the daemon does not start without it."
+        f"{CONFIG_NAME}. Copy the config file there; the daemon does not "
+        f"start without it."
     )
 
 

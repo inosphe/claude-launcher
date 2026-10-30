@@ -102,3 +102,53 @@ def test_cli_instance_flag_sets_env(home, monkeypatch, capsys):
     assert cli.main(["-L", "alpha", "daemon", "status"]) == 1
     assert os.environ[paths.INSTANCE_ENV] == "alpha"
     assert "not running" in capsys.readouterr().out
+
+
+def test_main_selects_default_instance(home, monkeypatch):
+    """claunch-xliqf: ``main`` is the default daemon's id, so naming it lands on
+    the default instance's paths and config file, not a ``daemons/main``."""
+    from claude_launcher import config
+
+    monkeypatch.delenv(paths.INSTANCE_ENV, raising=False)
+    default = (paths.daemon_dir(), config.sync_file())
+    assert paths.select_instance("main") == ""
+    assert paths.select_instance(" main ") == ""
+    assert paths.select_instance("alpha") == "alpha"
+    monkeypatch.setenv(paths.INSTANCE_ENV, "main")
+    assert paths.instance() == ""
+    assert (paths.daemon_dir(), config.sync_file()) == default
+    assert default == (home / "daemon", home / config.CONFIG_NAME)
+
+
+def test_default_is_not_an_instance_name(home, monkeypatch):
+    with pytest.raises(ValueError, match="'main'"):
+        paths.select_instance("default")
+    with pytest.raises(ValueError):
+        paths.validate_instance("default")
+    monkeypatch.setenv(paths.INSTANCE_ENV, "default")
+    with pytest.raises(ValueError):
+        paths.instance()
+
+
+def test_known_instances_skip_a_default_directory(home):
+    (home / "daemon").mkdir()
+    for name in ("default", "alpha"):
+        (home / "daemons" / name).mkdir(parents=True)
+    assert paths.known_instances() == ["", "alpha"]
+
+
+def test_cli_main_flag_clears_inherited_instance(home, monkeypatch, capsys):
+    import os
+
+    monkeypatch.setenv(paths.INSTANCE_ENV, "alpha")  # a shell of another instance
+    assert cli.main(["-L", "main", "daemon", "status"]) == 1
+    assert paths.INSTANCE_ENV not in os.environ
+    assert paths.daemon_dir() == home / "daemon"
+    assert "not running" in capsys.readouterr().out
+
+
+def test_cli_rejects_default_flag(home, monkeypatch, capsys):
+    monkeypatch.setenv(paths.INSTANCE_ENV, "placeholder")  # so teardown restores
+    assert cli.main(["-L", "default", "daemon", "status"]) == 2
+    err = capsys.readouterr().err
+    assert "default daemon's id is 'main'" in err

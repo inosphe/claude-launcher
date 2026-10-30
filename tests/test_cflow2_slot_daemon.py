@@ -79,7 +79,10 @@ def test_default_daemon_id_is_reserved():
     assert paths.instance_id("") == "main" and paths.instance_id("kimyori") == "kimyori"
     with pytest.raises(ValueError, match="default daemon's id"):
         paths.validate_instance("main")
-    assert paths.validate_instance("default") == "default"  # still a named instance
+    # claunch-xliqf: 'default' is refused too, pointing at 'main' -- it used to
+    # create a named instance beside the default daemon.
+    with pytest.raises(ValueError, match="'main'"):
+        paths.validate_instance("default")
 
 
 def test_known_instances_skip_the_reserved_name(tmp_path):

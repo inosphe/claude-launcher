@@ -1048,7 +1048,11 @@ def main(argv=None) -> int:
     if args.name:
         # Into the environment (not a variable) so every paths.instance()
         # call — and any child process — sees the same instance.
-        os.environ[paths.INSTANCE_ENV] = paths.validate_instance(args.name)
+        name = paths.select_instance(args.name)
+        if name:
+            os.environ[paths.INSTANCE_ENV] = name
+        else:
+            os.environ.pop(paths.INSTANCE_ENV, None)
     # A daemon started straight from a shell (``--name``/``CLAUNCH_DAEMON``
     # without the CLI) still gets its instance's home, config and port. One
     # the CLI auto-started inherited them already; apply() leaves that as is.
