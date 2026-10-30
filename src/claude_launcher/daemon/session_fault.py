@@ -25,9 +25,15 @@ positive expires when its kind's window does.
 
 The lifetime is a kind's ``window`` unless the message names a reset time
 ("resets Oct 26, 9am (Asia/Seoul)"), which is parsed with :mod:`zoneinfo`
-and becomes the deadline. A fault is *active* until that deadline; it is
-never cleared early by later output, because a recovery is not visible in
-the text that follows (a re-login prints nothing that says so).
+and becomes the deadline. A fault is *active* until that deadline, with one
+early exit. The scan only runs on a changed screen, and a stopped session
+paints nothing that could push its fault line out of the live region -- so
+when the message is gone from the bottom rows while the screen kept moving,
+the stop is over as far as anyone watching can tell, and the run closes
+early (``cleared``) instead of sitting out the window. That was the gap the
+window could not cover (claunch-4ghrr, 2026-10-30: sessions s6081/s6082
+retried through their 429 within minutes and worked visibly below the error
+line, but the badge stayed for the rest of the fifteen minutes).
 """
 
 from __future__ import annotations
@@ -410,9 +416,10 @@ class Detector:
     :meth:`scan` is called from the session's sample loop. It reads only the
     bottom ``SCAN_ROWS`` rows, at most once per :data:`SCAN_INTERVAL`, and
     keeps the last match as this session's fault until the kind's window (or
-    the message's own reset time) runs out. Seeing the same kind again inside
-    that window does not extend it; seeing it after the window opens a new
-    run and counts a strike.
+    the message's own reset time) runs out -- or until a changed screen no
+    longer shows the message, which closes the run early. Seeing the same
+    kind again inside that window does not extend it; seeing it after the
+    run ended (window out or cleared) opens a new run and counts a strike.
     """
 
     def __init__(
@@ -450,6 +457,20 @@ class Detector:
         text = " ".join(rows)
         found = self._catalog.match(self.harness, text)
         if found is None:
+            # No fault in the live region. This scan only ran because the
+            # screen changed, so a record whose message is gone while rows
+            # kept painting underneath it names a stop that is visibly over:
+            # a still-stopped session has nothing that would push the fault
+            # line out of the tail. Close the run early rather than sitting
+            # out the window (claunch-4ghrr). An empty read never reaches
+            # here, so a momentarily blank redraw cannot clear a record.
+            previous = self._record
+            if (
+                previous is not None
+                and previous.get("cleared") is None
+                and now < previous["until"]
+            ):
+                previous["cleared"] = now
             return True
         kind, _pattern, match = found
         message = _message_from(text, rows, match.start())
@@ -488,11 +509,16 @@ class Detector:
         # Reading it from the previous record alone held the window shut for
         # good: a session that once drew a stale reset stayed inactive when a
         # later screen named a future one (claunch-5ldt8 review).
+        #
+        # A run closed early (``cleared``) is closed exactly like one whose
+        # window ran out: a later match of the same kind is a new sighting,
+        # not a continuation.
         previous_expired = (
             previous is not None and previous["until"] <= previous["since"]
         )
         this_expired = deadline is not None and deadline <= now
-        running = same_kind and (
+        previous_cleared = previous is not None and previous.get("cleared") is not None
+        running = same_kind and not previous_cleared and (
             now < previous["until"] or (previous_expired and this_expired)
         )
         if running:
@@ -517,7 +543,9 @@ class Detector:
                 # and this is not a second sighting of it.
                 strikes = previous.get("strikes", 1)
             else:
-                # Coming back after the window closed is a second sighting.
+                # Coming back after the run closed -- its window ran out, or
+                # the message scrolled out and the run was cleared -- is a
+                # second sighting.
                 strikes = previous.get("strikes", 0) + 1
         self._record = {
             "harness": self.harness,
@@ -533,6 +561,7 @@ class Detector:
             "until": until,
             "until_stated": stated,
             "strikes": strikes,
+            "cleared": None,
         }
         return True
 
@@ -555,8 +584,9 @@ class Detector:
             "last_seen": _iso(record["last_seen"]),
             "until": _iso(record["until"]),
             "until_stated": bool(record.get("until_stated", False)),
+            "cleared": _iso(record["cleared"]) if record.get("cleared") else "",
             "strikes": record.get("strikes", 1),
-            "active": now < record["until"],
+            "active": now < record["until"] and record.get("cleared") is None,
             "source": "screen",
         }
 
