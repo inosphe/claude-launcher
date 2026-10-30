@@ -132,7 +132,9 @@ sides:
 # - await-landing <-> landing-nudge 순환(interval: 600) -> loop await 안의
 #   choose 옵션 nudge의 interval: 600(docs 「choose interval」). 루프 전체를
 #   멈추는 every가 아니다 -- 재촉 간격 안에서도 landed·rebase·declined를 고를
-#   수 있어야 한다(claunch-jbk5w). 상한 25에 닿으면 런이 사람의 승인(loop_limit)에 선다.
+#   수 있어야 한다(claunch-jbk5w). 상한 5에 닿으면 런이 사람의 승인(loop_limit)에
+#   선다 — 25회(약 4시간)는 fault를 사람이 알아채기까지 너무 길어 5회(약 50분)로
+#   낮췄다(사용자 지시 2026-10-30).
 # - rework 간선(peer-review changes, landing-withdraw, rework-gate -> work) ->
 #   land가 rework로 끝나고 worker-round의 try/catch가 배치 루프를 다시 돈다.
 #   착지 거절(declined) 뒤의 되감기는 `rework-budget`이 `$visits['rework-gate']`로
@@ -3334,7 +3336,8 @@ nodes:
         실렸을 때. 내용은 이슈 id(없으면 PR url)와 tip, 요청 후 시간,
         재촉 횟수, 라우팅 결과, 사용자가 고를 수 있는 길(PR 직접 머지,
         이슈를 만들어 큐에 등록, 요청 철회)이다. 이후에는 상태가 바뀌었을
-        때와 6번째 재촉마다(약 1시간) 한 번씩만 다시 올린다. 런이
+        때와 4번째 재촉(약 40분)에 한 번만 다시 올린다 — 대기 상한이 5회라
+        그보다 뒤의 주기 알림은 상한에 닿기 전에 돌아오지 않는다. 런이
         loop_limit에 닿아 사람의 승인을 기다리게 되면 `flow_nudge`로
         대시보드 카드를 올린다. await-landing이 상위를 기다리는 동안은
         런이 사람에게 빚진 것이 없어 `flow_nudge`가 거절된다
@@ -4308,7 +4311,7 @@ nodes:
 
         채널이 없으면 await-landing의 재촉(landing-nudge)과 상위의 착지 통지가
         이 세션과 수신자 사이에 오가지 못한다. 그 상태로 대기에 들어가면 대기
-        루프의 상한(25회, 10분 간격)을 다 쓸 때까지 그 사실이 드러나지 않는다.
+        루프의 상한(5회, 10분 간격)을 다 쓸 때까지 그 사실이 드러나지 않는다.
 
         필요한 조치(사용자): 두 세션을 같은 메시에서 잇는다 — `claunch mesh
         connect <메시> <이 세션의 핸들> <수신자의 핸들>`(인자는 메시 핸들이다 —
@@ -5492,7 +5495,8 @@ procedures:
             escalate는 landing-review로 가서 *상위 세션*에게 묻는데, 대상이
             없는 편성에서 상위는 바로 그 병합할 수 없는 세션이다. 그 질문은
             후보 그룹을 차례로 비우고 사람 앞에 서며, 그동안 런은 상한까지
-            돈다(실측: 25회·약 4시간, claunch-od1mx). 없는 대상을 상위에
+            돈다(지금 상한은 5회·약 50분이고, 25회 상한 때의 실측이 25회·약
+            4시간이다, claunch-od1mx). 없는 대상을 상위에
             물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 곧바로
             사람이다.
             **2면 escalate다.** 모르는 것을 request로 밀지 않는다 — 그 규칙은
@@ -5665,7 +5669,7 @@ procedures:
                 - else: []
             # 착지 요청 수신자와의 메시지 채널 점검(claunch-101wi). 채널이 없다는
             # 사실은 await-landing의 재촉이 실패하거나 상위의 통지가 오지 않는
-            # 것으로만 드러났고, 그 신호는 대기 루프(상한 25회, 10분 간격)를 다
+            # 것으로만 드러났고, 그 신호는 대기 루프(지금 상한 5회, 10분 간격)를 다
             # 돈 뒤에야 사람 앞에 섰다. 그래서 대기 직전에 한 번 잰다.
             # integration-request는 보드를 in_review로 옮기고 LANDING REQUEST를
             # 남긴 뒤 곧바로 await-landing으로 넘어가는 한 번짜리 스텝이므로, 이
@@ -5718,7 +5722,10 @@ procedures:
             - id: await
               loop:
                 while: "true"
-                max: 25
+                # 25회(10분 간격, 약 4시간)는 답 없는 상위를 기다리는 동안 fault를
+                # 사람이 알아채기까지의 시간이 너무 길었다 — 5회(약 50분)로 낮춰
+                # 빨리 사람의 판단(loop_limit)으로 넘긴다(사용자 지시 2026-10-30).
+                max: 5
                 # 재촉 간격은 루프가 아니라 nudge 옵션의 interval이 진다
                 # (claunch-jbk5w). 루프에 every를 걸면 정지하는 10분 동안 선택이
                 # 닫혀, 상위가 머지해도 landed를 고를 수 없었다(s910, 머지 후 9분
