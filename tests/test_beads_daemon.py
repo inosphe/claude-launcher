@@ -2980,6 +2980,24 @@ def test_the_assignment_comment_names_both_ends_of_the_move():
     assert beads_mod.assign_note("a", "", "s1") == "UNQUEUED by dashboard: taken off s1"
 
 
+def test_the_board_head_carries_the_issue_prefix(repo):
+    """The web UI's markdown renderer links mentions of issue ids whose
+    prefix is a known board's (claunch-jpqat has no digit). The head is
+    where the page learns a board's prefix; a board without a config.yaml
+    still answers, with the slug of its root's name."""
+    board = _board(FakeBr(), repo)
+    head = board.board_head(repo)
+    assert head["board_exists"] is True
+    assert head["issue_prefix"] == "repo"  # slug of the root's name
+    (repo / ".beads" / "config.yaml").write_text(
+        "# Beads Project Configuration\nissue_prefix: legacy\n", encoding="utf-8")
+    board._refs = {}   # ref_for caches; force the re-read the config edit needs
+    assert board.board_head(repo)["issue_prefix"] == "legacy"
+    gone = repo.parent / "gone"
+    gone.mkdir()
+    assert "issue_prefix" not in board.board_head(gone)
+
+
 def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
     """Sessions first in the daemon's order, then assignees the daemon does
     not know (a card must have a row to be dragged back from); an exited

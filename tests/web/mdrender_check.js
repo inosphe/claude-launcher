@@ -66,6 +66,9 @@ new Function("document", "exports", `
   ${sliceTo("const MD_FENCE", ";")}
   ${sliceTo("const MD_BLOCK_START", ";")}
   ${sliceTo("const MD_SAFE_HREF", ";")}
+  ${sliceTo("const MD_BEADS_ID =", ";")}
+  ${sliceTo("let beadsIdPrefixes", ";")}
+  ${sliceTo("let mdLinkDepth", ";")}
   ${sliceTo("const MD_INLINE = [", "\n];")}
   ${sliceTo("const mdCells =", ";")}
   ${slice("mdWrap")}
@@ -81,10 +84,10 @@ new Function("document", "exports", `
   ${slice("localStamp")}
   ${slice("wfReports")}
   Object.assign(exports, {
-    el, mdBlocks, mdInto, mdText, mdPlain, wfReports,
+    el, mdBlocks, mdInto, mdText, mdPlain, wfReports, beadsIdPrefixes,
   });
 `)(document, scope);
-const { el, mdBlocks, mdInto, mdText, mdPlain, wfReports } = scope;
+const { el, mdBlocks, mdInto, mdText, mdPlain, wfReports, beadsIdPrefixes } = scope;
 
 /* ---- helpers ----------------------------------------------------------- */
 let failures = 0;
@@ -249,6 +252,62 @@ const inline = (s) => mdBlocks(s)[0];
      "a javascript: url never becomes a link");
   ok(textOf(p).includes("click"),
      "…but its text is still shown, so nothing is silently dropped");
+}
+
+/* ---- 5b. beads issue ids: a mention is a link to its board page ---------- */
+{
+  // claunch-dvg6c carries a digit, so it links with no prefix list at all —
+  // the state a fresh page (beads payload never received) is in.
+  const p = inline("see claunch-dvg6c for the request");
+  const a = walk(p).find((k) => k.tag === "a");
+  ok(a, "a digit-bearing issue id mention is a link");
+  eq(a.getAttribute("href"), "#/beads/claunch-dvg6c", "…to its board page");
+  eq(textOf(a), "claunch-dvg6c", "…labelled with the id itself");
+  ok(hasClass(a, "md-beads-link"), "…marked as a beads link");
+}
+{
+  // gds6-bfu7.1 names a comment: the whole mention shows, the link drops
+  // the .N ordinal and opens the base issue (the board has no per-comment
+  // page to point at).
+  const p = inline("(gds6-bfu7.1 같은 이슈)");
+  const a = walk(p).find((k) => k.tag === "a");
+  ok(a, "a .N comment ordinal still links");
+  eq(a.getAttribute("href"), "#/beads/gds6-bfu7", "…to the base issue");
+  eq(textOf(a), "gds6-bfu7.1", "…with the ordinal still in the label");
+}
+{
+  // 19% of one real board's ids carry no digit (claunch-jpqat). Those only
+  // link once the page has seen the board's prefix from a beads payload.
+  beadsIdPrefixes.add("claunch");
+  const p = inline("follow-up claunch-jpqat stays");
+  const a = walk(p).find((k) => k.tag === "a");
+  ok(a, "a digit-less id links once its board prefix is known");
+  eq(a.getAttribute("href"), "#/beads/claunch-jpqat", "…to its board page");
+  beadsIdPrefixes.delete("claunch");
+  eq(walk(inline("claunch-jpqat")).filter((k) => k.tag === "a").length, 0,
+     "…and stays text again when the prefix is not known");
+}
+{
+  // Hyphenated prose must not turn into links: no digit, no known prefix.
+  eq(walk(inline("a node-based approach")).filter((k) => k.tag === "a").length, 0,
+     "'node-based' is not an issue id");
+  eq(walk(inline("well-known and state-of-the-art")).filter((k) => k.tag === "a").length, 0,
+     "none of the hyphens in prose link");
+  eq(walk(inline("mail me at user-1abc@example.test")).filter((k) => k.tag === "a").length, 0,
+     "an email address is not an issue id");
+  eq(walk(inline("under dir/claunch-adk8 or so")).filter((k) => k.tag === "a").length, 0,
+     "an id-shaped path tail stays text");
+}
+{
+  // Markdown's own markers keep their meaning: an id inside a code span or
+  // inside a link's label stays inert, and no <a> nests in an <a>.
+  eq(walk(inline("`claunch-dvg6c`")).filter((k) => k.tag === "a").length, 0,
+     "an id inside a code span stays code");
+  const p = inline("[see claunch-dvg6c](https://example.test/x)");
+  eq(walk(p).filter((k) => k.tag === "a").length, 1,
+     "an id inside a link label does not add a second link");
+  eq(walk(p).find((k) => k.tag === "a").getAttribute("href"),
+     "https://example.test/x", "…the outer link is the one that survives");
 }
 
 /* ---- 6. headings, rules, quotes ---------------------------------------- */

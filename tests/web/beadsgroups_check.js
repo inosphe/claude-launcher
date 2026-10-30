@@ -36,7 +36,8 @@ function renderBeads() {}
 async function refreshBeadsDetail() {}
 function refreshBeadsRelated() {}
 function api(url) { return new Promise(resolve => requests.push({ url, resolve })); }
-` + ['loadBeadsPage', 'beadsReadPage', 'beadsMergeLanes', 'beadsLanes',
+` + "let beadsIdPrefixes = new Set();\n" + slice("beadsNotePrefixes") + "\n"
++ ['loadBeadsPage', 'beadsReadPage', 'beadsMergeLanes', 'beadsLanes',
      'beadsGoToLanePage', 'restartBeadsStream', 'beadsStatusQuery', 'beadsPageCount',
      'beadsStatusName', 'beadsStatusNote', 'beadsLanePager'].map(slice).join('\n'), ctx);
 const run = code => vm.runInContext(code, ctx);

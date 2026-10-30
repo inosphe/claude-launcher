@@ -2067,12 +2067,18 @@ class Board:
         ``claunch-default``), ``db`` is the file it actually reads, and
         ``configured`` says whether that file was chosen or derived. The page
         shows the name and keeps the path for the tooltip.
+
+        ``issue_prefix`` is what ids minted on this board carry (``claunch``
+        for ``claunch-xxxx``): the web UI's markdown renderer collects the
+        prefixes from every board payload and links mentions of issue ids —
+        a digit-less suffix (claunch-jpqat) only links when its prefix is a
+        known board's, so boards that do not exist yet do not claim one.
         """
         ref = self.ref_for(root)
         if ref is None:
             return {"root": str(root), "board": Path(root).name, "db": "",
                     "workspace": "", "configured": False, "board_exists": False}
-        return {
+        head = {
             "root": str(root),
             "board": ref.name,
             "db": ref.db,
@@ -2080,6 +2086,10 @@ class Board:
             "configured": ref.configured,
             "board_exists": ref.exists(),
         }
+        if head["board_exists"]:
+            head["issue_prefix"] = cli_beads.issue_prefix(
+                Path(root) / beads_db.BEADS_DIR, Path(root))
+        return head
 
     async def _group_by_root(
         self, sessions: Sequence, extra_roots: Sequence[str] = ()
