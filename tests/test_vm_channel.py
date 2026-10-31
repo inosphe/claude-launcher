@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from claude_launcher.daemon import vm_channel
 from claude_launcher.daemon.vmhub import Registry, VmError
 
@@ -61,6 +63,20 @@ class FakeProc:
         elif method == "tools/call":
             name = msg["params"]["name"]
             if name == "hang":
+                return
+            if name == "odd":
+                # Messages a sloppy server might send; none may end the channel.
+                for odd in ({"jsonrpc": "2.0", "id": [1], "result": {}},
+                            {"jsonrpc": "2.0", "id": {"a": 1}, "error": "x"},
+                            {"jsonrpc": "2.0", "id": 99, "error": "no such call"},
+                            {"jsonrpc": "2.0", "id": True, "result": 3},
+                            {"jsonrpc": "2.0", "method": "ping", "id": [2]}, [1, 2], 7):
+                    self.stdout.feed_data((json.dumps(odd) + "\n").encode())
+            if name == "strerr":
+                self.stdout.feed_data((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": "boom"}) + "\n").encode())
+                return
+            if name == "listresult":
+                self.reply(msg["id"], [1, 2])
                 return
             if name == "get_screen_size" and self.behaviour.get("probe_error"):
                 self.stdout.feed_data((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -1, "message": "no daemon"}}) + "\n").encode())
@@ -283,3 +299,21 @@ def test_the_real_opener_raises_the_line_limit():
     import inspect
     assert "limit=READ_LIMIT" in inspect.getsource(vm_channel.open_process)
     assert vm_channel.READ_LIMIT > 10 * 1024 * 1024
+
+
+def test_odd_json_rpc_messages_do_not_end_the_channel(tmp_path):
+    async def go():
+        world = World()
+        reg, ch = _channel(tmp_path, world)
+        ch.start()
+        assert await ch.wait_up(2)
+        out = await ch.call("odd")
+        assert out["content"][0]["text"] == "odd"
+        with pytest.raises(VmError) as e:
+            await ch.call("strerr")
+        assert e.value.code == "vm_guest_error" and "boom" in str(e.value)
+        assert await ch.call("listresult") == {}
+        assert (await ch.call("get_screen_size"))["content"]
+        assert reg.get("a").channel == "up" and len(world.opened) == 1
+        await ch.stop()
+    asyncio.run(go())

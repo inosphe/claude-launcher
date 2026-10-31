@@ -87,6 +87,19 @@ def tool_scope(tool: str) -> str:
     return vmhub.CONTROL
 
 
+def _timeout(body: dict, default: float) -> float:
+    raw = body.get("timeout")
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise VmError("vm_bad_request", "'timeout' must be a number of seconds") from None
+    if not 0 < value <= vm_tart.EXEC_MAX:
+        raise VmError("vm_bad_request", f"'timeout' must be between 0 and {vm_tart.EXEC_MAX} seconds")
+    return value
+
+
 def check_nested(tool: str, arguments: dict) -> None:
     """Refuse a call whose inner tool names go beyond what the outer tool's
     scope covers (run_steps carries control actions only)."""
@@ -243,7 +256,15 @@ def _lifecycle_route(action: str):
                 # guest that is shutting down.
                 await channels.drop(vm_id)
             # tart and ssh block: keep them off the event loop.
-            await asyncio.to_thread(getattr(mgr, action), vm_id)
+            try:
+                await asyncio.to_thread(getattr(mgr, action), vm_id)
+            except VmError:
+                # The refusal left the guest up (shutdown could not start,
+                # suspend failed): its channel was dropped above, bring it back.
+                vm = reg.get(vm_id)
+                if action != "start" and vm.state == "running" and vm.ssh_ready:
+                    channels.ensure(vm_id)
+                raise
             if action == "start":
                 channels.ensure(vm_id)
             return web.json_response(reg.view(vm_id))
@@ -451,12 +472,13 @@ async def h_call(request: web.Request) -> web.Response:
         if not isinstance(args, dict):
             raise VmError("vm_bad_request", "'arguments' must be an object")
         check_nested(tool, args)
+        timeout = _timeout(body, 30)
         scope = tool_scope(tool)
         reg.begin_call(vm_id, session, scope, body.get("epoch"))
         ok = False
         try:
             channel = request.app["vm_channels"].get(vm_id)
-            result = await channel.call(tool, args, float(body.get("timeout") or 30))
+            result = await channel.call(tool, args, timeout)
             ok = True
         finally:
             reg.end_call(vm_id, session, scope, ok=ok, observe=tool in OBSERVE_TOOLS)
@@ -493,11 +515,11 @@ async def h_exec(request: web.Request) -> web.Response:
         command = str(body.get("command") or "")
         if not command.strip():
             raise VmError("vm_bad_request", "'command' is required")
+        timeout = _timeout(body, 60)
         reg.begin_call(vm_id, session, vmhub.EXEC, body.get("epoch"))
         ok = False
         try:
-            out = await asyncio.to_thread(mgr.exec, vm_id, command,
-                                          float(body.get("timeout") or 60))
+            out = await asyncio.to_thread(mgr.exec, vm_id, command, timeout)
             ok = out["rc"] == 0
         finally:
             reg.end_call(vm_id, session, vmhub.EXEC, ok=ok)
@@ -510,26 +532,38 @@ async def _background(app: web.Application):
     reg: Registry = app["vm_registry"]
     mgr: vm_tart.Manager = app["vm_manager"]
 
-    def _boot():
-        reg.load()
-        if not reg.list():
-            return
-        reg.after_restart()
-        try:
-            mgr.reconcile()
-        except VmError:
-            # tart is missing or unreadable: the records stay as loaded
-            # (stopped) and the next explicit reconcile says why.
-            pass
+    await asyncio.to_thread(reg.load_and_reset)
+    known = {v.id for v in reg.list()}  # what the file held: the recovery's whole business
 
-    await asyncio.to_thread(_boot)
-    for vm in reg.list():
-        if vm.state == "running":
+    async def recover():
+        """After a (re)start: make the records agree with tart, then probe each
+        running guest and open its channel, one VM at a time failing alone.
+        Runs behind the daemon's start, not in front of it."""
+        delay = 5.0
+        while True:
             try:
-                await mgr.reprobe(vm.id)
-                app["vm_channels"].ensure(vm.id)
+                await asyncio.to_thread(mgr.reconcile, known)
+                break
             except VmError:
-                pass
+                # tart unreadable: nothing is ready (after_restart cleared it),
+                # so nothing is used meanwhile; try again.
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60.0)
+
+        async def one(vm_id: str):
+            for attempt in range(3):
+                try:
+                    await mgr.reprobe(vm_id)
+                    app["vm_channels"].ensure(vm_id)
+                    return
+                except VmError as exc:
+                    reg.note(vm_id, "reprobe_failed", code=exc.code, attempt=attempt + 1)
+                    await asyncio.sleep(10.0)
+
+        await asyncio.gather(*(one(v.id) for v in reg.list() if v.id in known and v.state == "running"),
+                             return_exceptions=True)
+
+    recovery = asyncio.create_task(recover()) if known else None
 
     async def hand_back():
         while True:
@@ -539,9 +573,20 @@ async def _background(app: web.Application):
                 if vm.human == "driving":
                     reg.human_timeout(vm.id, idle)
 
+    async def settle():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await asyncio.to_thread(mgr.settle)
+            except VmError:
+                pass
+
     task = asyncio.create_task(hand_back())
+    settling = asyncio.create_task(settle())
     yield
-    task.cancel()
+    for t in (task, settling, recovery):
+        if t is not None:
+            t.cancel()
     await app["vm_frames"].stop_all()
     await app["vm_channels"].drop_all()
 

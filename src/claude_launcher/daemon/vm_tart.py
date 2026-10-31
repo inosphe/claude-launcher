@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -92,6 +93,13 @@ def parse_list(text: str) -> List[TartVm]:
             source=str(row.get("Source") or "").lower(),
         ))
     return out
+
+
+#: ssh's own failures to reach or enter the guest (all exit 255).
+UNREACHABLE = re.compile(
+    r"Connection (refused|timed out)|No route to host|Network is unreachable|"
+    r"Operation timed out|Permission denied|Could not resolve|Host key verification|"
+    r"Connection reset by peer|Too many authentication", re.I)
 
 
 def _tail(log: Optional[Path], lines: int = 3) -> str:
@@ -202,6 +210,7 @@ class Manager:
                 raise VmError("tart_already_running",
                               f"{vm.tart_name} is already running; reconcile instead")
             log = self.log_dir / vm_id / "tart.log"
+            vmhub.rotate_log(log)
             pid = self._spawn(self.run_argv(vm.tart_name), log)
             deadline = time.monotonic() + self.boot_wait
             ip = self._wait_ip(vm, deadline, pid, log)
@@ -271,13 +280,17 @@ class Manager:
             return vm
         if vm.state not in ("running", "starting", "paused", "stopping"):
             raise VmError("vm_bad_state", f"{vm_id} is {vm.state}; cannot stop it")
+        # A VM already "stopping" is being waited for again: its guest is on
+        # the way down and ssh would only fail.
+        rc, err = (0, "") if vm.state == "stopping" else self._ssh(
+            vm, "sync; sudo -n shutdown -h now", 30)[::2]
+        # ssh drops as the guest goes down ("Connection ... closed by remote
+        # host", rc 255). The same rc 255 is also ssh failing to get in, and
+        # then nothing was started: the VM stays as it was, not "stopping".
+        if rc not in (0, 255) or (rc == 255 and UNREACHABLE.search(err or "")):
+            raise VmError("vm_stop_failed", f"{vm_id}: guest shutdown said {err.strip() or rc}")
         if vm.state != "stopping":
             self.registry.set_state(vm_id, "stopping")
-        rc, _, err = self._ssh(vm, "sync; sudo -n shutdown -h now", 30)
-        # ssh drops as the guest goes down; any answer but "could not reach
-        # it" is the shutdown having started.
-        if rc not in (0, 255):
-            raise VmError("vm_stop_failed", f"{vm_id}: guest shutdown said {err.strip() or rc}")
         deadline = time.monotonic() + self.stop_wait
         while time.monotonic() < deadline:
             if self.tart_state(vm.tart_name) in ("stopped", "missing"):
@@ -291,14 +304,37 @@ class Manager:
     def force_stop(self, vm_id: str) -> vmhub.Vm:
         """``tart stop``: the VM is gone at once and unsynced writes with it."""
         vm = self.registry.get(vm_id)
+        if vm.state == "stopped":
+            return vm
+        if vm.state == "suspended":
+            raise VmError("vm_bad_state", f"{vm_id} is suspended; there is nothing running to stop")
         rc, _, err = self._run([TART, "stop", "--", vm.tart_name], 30)
         if rc != 0:
             raise VmError("tart_failed", f"tart stop: {err.strip() or rc}")
         self.registry.note(vm_id, "forced_stop", data_loss_possible=True)
-        if vm.state != "stopping":
-            self.registry.set_state(vm_id, "stopping")
-        self.registry.set_state(vm_id, "stopped")
+        # Whatever the record said (starting, saving, restoring, fault ...),
+        # tart has just stopped the VM.
+        self.registry.adopt(vm_id, "stopped")
         return self.registry.get(vm_id)
+
+    def settle(self) -> List[str]:
+        """Move a VM left in a transitional state to the end tart reports
+        when that end is certain: saving -> suspended, stopping -> stopped.
+        ``saving`` that tart still lists as running may yet finish, so it is
+        left for an explicit reconcile."""
+        done = []
+        for vm in self.registry.list():
+            if vm.state not in ("saving", "stopping"):
+                continue
+            actual = self.tart_state(vm.tart_name)
+            if vm.state == "saving" and actual == "suspended":
+                self.registry.set_state(vm.id, "suspended")
+            elif vm.state == "stopping" and actual in ("stopped", "missing"):
+                self.registry.set_state(vm.id, "stopped")
+            else:
+                continue
+            done.append(vm.id)
+        return done
 
     def suspend(self, vm_id: str) -> vmhub.Vm:
         vm = self.registry.get(vm_id)
@@ -322,7 +358,7 @@ class Manager:
         return self.registry.get(vm_id)
 
     # ---- after a daemon restart ------------------------------------------- #
-    def reconcile(self) -> List[str]:
+    def reconcile(self, ids=None) -> List[str]:
         """Make the records agree with what tart reports: a VM that is up
         is adopted as ``running`` (readiness is probed again), one the
         record thought up but tart does not list as running is stopped or
@@ -330,6 +366,8 @@ class Manager:
         changed = []
         rows = {row.name: row for row in self.tart_list()}
         for vm in self.registry.list():
+            if ids is not None and vm.id not in ids:
+                continue
             row = rows.get(vm.tart_name)
             actual = row.state if row else "missing"
             want = {"running": "running", "suspended": "suspended"}.get(actual, "stopped")

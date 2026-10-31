@@ -301,3 +301,78 @@ def test_a_suspend_tart_never_finishes_keeps_the_slot(env):
     assert e.value.code == "vm_suspend_timeout"
     assert reg.get("a").state == "saving"
     assert "a" in reg.holders()
+
+
+# --------------------------------------------------------------------------- #
+# review items 8-12
+# --------------------------------------------------------------------------- #
+def test_a_stop_ssh_cannot_reach_leaves_the_vm_running_not_stopping(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr._run = lambda argv, timeout: (
+        (255, "", "ssh: connect to host 192.168.64.2 port 22: Connection refused")
+        if argv[0] == "ssh" and "shutdown" in argv[-1] else fake.run(argv, timeout))
+    with pytest.raises(VmError) as e:
+        mgr.stop("a")
+    assert e.value.code == "vm_stop_failed"
+    assert reg.get("a").state == "running" and reg.get("a").ssh_ready
+
+
+def test_a_connection_closed_by_the_guest_is_the_shutdown_having_started(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    run = mgr._run
+    mgr._run = lambda argv, timeout: (
+        (255, "", "Connection to 192.168.64.2 closed by remote host.")
+        if argv[0] == "ssh" and "shutdown" in argv[-1] and not fake.tart.update({"a": "stopped"})
+        else run(argv, timeout))
+    assert mgr.stop("a").state == "stopped"
+
+
+def test_a_second_stop_of_a_stopping_vm_only_waits(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    fake.shutdown_stops_vm = False
+    with pytest.raises(VmError):
+        mgr.stop("a")
+    sent = len([c for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]])
+    fake.tart["a"] = "stopped"
+    assert mgr.stop("a").state == "stopped"
+    assert len([c for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]]) == sent
+
+
+def test_force_stop_follows_whatever_state_the_vm_is_in(env):
+    fake, reg, mgr = env
+    assert mgr.force_stop("a").state == "stopped"           # already stopped: no tart call
+    assert not any(c[:2] == ["tart", "stop"] for c in fake.calls)
+    mgr.start("a")
+    reg.set_state("a", "saving")                              # saving -> stopping is not a move
+    assert mgr.force_stop("a").state == "stopped"
+    mgr.start("a")
+    mgr.suspend("a")
+    with pytest.raises(VmError) as e:
+        mgr.force_stop("a")
+    assert e.value.code == "vm_bad_state"
+
+
+def test_settle_finishes_a_save_or_a_stop_tart_has_finished(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr.suspend_wait = 0.05
+    fake.suspend_lag = -1
+    with pytest.raises(VmError):
+        mgr.suspend("a")
+    assert reg.get("a").state == "saving" and mgr.settle() == []   # tart still says running
+    fake.tart["a"] = "suspended"
+    assert mgr.settle() == ["a"] and reg.get("a").state == "suspended"
+
+
+def test_a_log_over_the_limit_keeps_one_previous_generation(tmp_path):
+    from claude_launcher.daemon import vmhub
+    log = tmp_path / "t.log"
+    log.write_bytes(b"x" * 10)
+    vmhub.rotate_log(log, limit=100)
+    assert log.exists()
+    log.write_bytes(b"y" * 200)
+    vmhub.rotate_log(log, limit=100)
+    assert not log.exists() and (tmp_path / "t.log.1").read_bytes() == b"y" * 200

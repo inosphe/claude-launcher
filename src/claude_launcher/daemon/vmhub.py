@@ -100,6 +100,19 @@ def check_path(what: str, value: str, *, empty_ok: bool = False) -> str:
     return value
 
 
+LOG_LIMIT = 1024 * 1024
+
+
+def rotate_log(path: Path, limit: int = LOG_LIMIT) -> None:
+    """Keep one previous generation: a log that has reached ``limit`` becomes
+    ``<name>.1`` (replacing the older one) before the next run appends."""
+    try:
+        if path.stat().st_size >= limit:
+            path.replace(path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+
+
 def check_ip(value: str) -> str:
     try:
         return str(ipaddress.ip_address(value.strip()))
@@ -270,6 +283,12 @@ class Registry:
                 except (KeyError, TypeError, ValueError, VmError):
                     continue  # a record that would not pass today's checks is not trusted
                 self._vms[vm.id] = vm
+
+    def load_and_reset(self) -> None:
+        """Daemon start: read the file and drop what a restart invalidates."""
+        self.load()
+        if self.list():
+            self.after_restart()
 
     def _save(self) -> None:
         if self.path is None:

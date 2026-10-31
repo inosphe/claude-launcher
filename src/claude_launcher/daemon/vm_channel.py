@@ -61,6 +61,7 @@ def ssh_argv(vm: vmhub.Vm) -> List[str]:
 
 async def open_process(argv: Sequence[str], log: Path):
     log.parent.mkdir(parents=True, exist_ok=True)
+    vmhub.rotate_log(log)
     err = open(log, "ab")
     try:
         return await asyncio.create_subprocess_exec(
@@ -192,19 +193,30 @@ class Channel:
                 continue
             if not isinstance(msg, dict):
                 continue
-            if "id" in msg and ("result" in msg or "error" in msg):
-                fut = self._pending.get(msg["id"])
-                if fut is not None and not fut.done():
-                    if "error" in msg:
-                        err = msg["error"] or {}
-                        fut.set_exception(VmError(
-                            "vm_guest_error", str(err.get("message") or err),
-                            rpc_code=err.get("code")))
-                    else:
-                        fut.set_result(msg.get("result") or {})
-            elif msg.get("method") == "ping" and "id" in msg:
-                proc.stdin.write((json.dumps(
-                    {"jsonrpc": "2.0", "id": msg["id"], "result": {}}) + "\n").encode())
+            try:
+                self._dispatch(proc, msg)
+            except Exception:  # noqa: BLE001 -- one odd message must not end the channel
+                continue
+
+    def _dispatch(self, proc, msg: dict) -> None:
+        ident = msg.get("id")
+        if isinstance(ident, bool) or not isinstance(ident, (int, str)):
+            return
+        if "result" in msg or "error" in msg:
+            fut = self._pending.get(ident)
+            if fut is not None and not fut.done():
+                if "error" in msg:
+                    err = msg["error"]
+                    detail = err if isinstance(err, dict) else {"message": err}
+                    fut.set_exception(VmError(
+                        "vm_guest_error", str(detail.get("message") or detail),
+                        rpc_code=detail.get("code")))
+                else:
+                    result = msg.get("result")
+                    fut.set_result(result if isinstance(result, dict) else {})
+        elif msg.get("method") == "ping":
+            proc.stdin.write((json.dumps(
+                {"jsonrpc": "2.0", "id": ident, "result": {}}) + "\n").encode())
 
     # ---- connection ------------------------------------------------------ #
     async def _connect(self) -> None:

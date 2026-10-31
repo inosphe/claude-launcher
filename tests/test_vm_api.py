@@ -37,7 +37,7 @@ async def _api(tmp_path):
     app = web.Application()
     vm_api.install(app, reg, mgr, hub)
     async with TestClient(TestServer(app)) as client:
-        client.fake, client.reg, client.hub, client.world = fake, reg, hub, world
+        client.fake, client.reg, client.hub, client.world, client.mgr = fake, reg, hub, world, mgr
         yield client
 
 
@@ -358,3 +358,76 @@ def test_the_cua_tool_scopes_hold_for_the_whole_driver_list():
               "get_browser_state", "launch_app", "page", "check_for_update"):
         assert by[n] == "control", n
     assert sum(1 for s in by.values() if s == "view") == len(vm_api.VIEW_TOOLS)
+
+
+@scenario
+async def test_a_bad_timeout_is_a_400_not_a_crash(api):
+    await _up(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["exec"]})
+    for bad in ("soon", [1], -1, 0, 100000):
+        resp = await api.post("/api/vm/a/exec", headers=AGENT,
+                              json={"session": "s1", "command": "true", "timeout": bad, "epoch": 0})
+        assert resp.status == 400 and (await resp.json())["code"] == "vm_bad_request", bad
+
+
+@scenario
+async def test_a_failed_stop_brings_the_channel_back(api):
+    await _up(api)
+    api.fake.ssh_ok = True
+    run = api.mgr._run
+
+    def refuse(argv, timeout):
+        if argv[0] == "ssh" and "shutdown" in argv[-1]:
+            return 255, "", "ssh: connect to host x port 22: Connection refused"
+        return run(argv, timeout)
+    api.mgr._run = refuse
+    resp = await api.post("/api/vm/a/stop")
+    assert resp.status >= 400
+    assert (await resp.json())["code"] == "vm_stop_failed"
+    assert api.reg.get("a").state == "running"
+    assert await api.hub.channels["a"].wait_up(2)
+
+
+def test_a_restart_recovers_each_running_guest_behind_the_start(tmp_path, monkeypatch):
+    """The start is not held up by tart or by one guest; a tart that cannot be
+    read at first is tried again; a guest that comes up gets its channel."""
+    monkeypatch.setattr(vm_api.paths, "daemon_dir", lambda: tmp_path)
+
+    async def go():
+        fake = Fake()
+        reg = Registry(tmp_path / "vms.json")
+        reg.add("a", ssh_key="/keys/k")
+        reg.claim_slot("a")
+        reg.set_state("a", "running")
+        fake.tart["a"] = "running"
+        lists = []
+        run = fake.run
+
+        def flaky(argv, timeout):
+            if argv[:2] == ["tart", "list"]:
+                lists.append(1)
+                if len(lists) == 1:
+                    return 1, "", "tart: busy"
+            return run(argv, timeout)
+        mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=flaky, spawn=fake.spawn, alive=lambda p: True,
+                              sleep=lambda s: None, stop_wait=0.05, boot_wait=0.5)
+        world = World()
+
+        async def hub_sleep(_):
+            await asyncio.sleep(0)
+        hub = vm_channel.Hub(reg, log_dir=tmp_path, opener=world.opener, sleep=hub_sleep)
+        real_sleep = asyncio.sleep
+
+        async def fast(_):
+            await real_sleep(0)
+        monkeypatch.setattr(vm_api.asyncio, "sleep", fast)
+        app = web.Application()
+        vm_api.install(app, reg, mgr, hub)
+        async with TestClient(TestServer(app)):
+            for _ in range(200):
+                if "a" in hub.channels and hub.channels["a"].registry.get("a").channel == "up":
+                    break
+                await asyncio.sleep(0.01)
+            assert len(lists) >= 2
+            assert reg.get("a").state == "running" and reg.get("a").channel == "up"
+    asyncio.run(go())
