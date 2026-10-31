@@ -1593,7 +1593,9 @@ nodes:
           권장대로 간다).
         - **reject** — 구현하지 않고 이유를 반영해 계획을 다시 쓴다.
 
-        위의 네 승인은 이번 일감만의 승인이다 — 다음 일감에서 다시 묻는다.
+        `approve-always`를 뺀 세 승인(as-planned·no-delegate·down-delegate)은
+        이번 일감만의 승인이다 — 다음 일감에서 다시 묻는다. `approve-always`는
+        이 런의 이후 일감에서 다시 묻지 않는다.
         답하지 않으면 코드 변경 없이 이 단계에서 기다린다.
       otherwise: human
       urgent: true
