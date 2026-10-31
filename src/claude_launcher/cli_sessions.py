@@ -1445,6 +1445,8 @@ def _cmd_hold_dispatch(args: argparse.Namespace) -> int:
 def _cmd_migrate_session(args: argparse.Namespace) -> int:
     """Move a session (kill, carry its conversation, relaunch) elsewhere."""
     body: dict = {"children": bool(args.children)}
+    if args.project:
+        body["project"] = args.project
     if args.to:
         # Resolved against *this* shell before it travels: the daemon would
         # resolve a relative path against its own cwd, which is nowhere the
@@ -1469,7 +1471,8 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
         " — conversation carried" if info.get("transcript_moved")
         else ""
     )
-    print(f"session {info['name']!r} migrated to {where}{carried}")
+    project = f" — project {info['project']!r}" if info.get("project") else ""
+    print(f"session {info['name']!r} migrated to {where}{carried}{project}")
     failed = False
     for child in info.get("children") or []:
         if child.get("ok"):
@@ -3934,6 +3937,11 @@ def register(sub) -> None:
         "--children", action="store_true",
         help="also migrate the session's descendants that stand in the same "
              "directory (those already elsewhere stay put)",
+    )
+    p_migrate.add_argument(
+        "--project", metavar="NAME",
+        help="also re-file the session under this project (default: keep its "
+             "current project; followers always keep theirs)",
     )
     p_migrate.add_argument(
         "-a", "--attach", action="store_true", help="attach once migrated"
