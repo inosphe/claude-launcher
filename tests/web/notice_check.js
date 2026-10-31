@@ -154,6 +154,8 @@ function build(opts) {
     "refreshQaRail",
     // and the session wrap-up drafts rail (wrapuppane_check).
     "refreshWrapupRail",
+    // and the session plans rail (planpane_check).
+    "refreshPlanRail",
     // and the session threads rail (threadspane_check).
     "refreshThreadsRail",
     // and the per-model price table the context bucket line prices against
@@ -205,6 +207,7 @@ function build(opts) {
     () => {},   // refreshSessionSims (sessionresources_check)
     () => {},   // refreshQaRail (the ? qa light; qapane_check)
     () => {},   // refreshWrapupRail (the ✎ wrap-up light; wrapuppane_check)
+    () => {},   // refreshPlanRail (the ☰ plan light; planpane_check)
     () => {},   // refreshThreadsRail (the 🗪 threads light; threadspane_check)
     async () => {},   // refreshModelPrices (the price table for the context bucket line; modelprice_check)
 
