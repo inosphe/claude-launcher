@@ -25,10 +25,27 @@ class KeepAlive(Manager):
         self.kept.append((name, on))
 
 
-def build(tmp_path, sessions, created):
+class Meshes:
+    """The two reads plan_api makes of the mesh manager."""
+
+    def __init__(self, members):
+        self.members = members                                      # {session: [mesh, ...]}
+
+    def get(self, name):
+        if not any(name in m for m in self.members.values()):
+            raise ValueError(f"no mesh named {name!r}")
+        return SimpleNamespace(name=name)
+
+    def meshes_for_session(self, session):
+        return [{"mesh": m, "handle": session} for m in self.members.get(session, [])]
+
+
+def build(tmp_path, sessions, created, meshes=None):
     mgr = KeepAlive(sessions)
     app = web.Application()
     app["manager"] = mgr
+    if meshes is not None:
+        app["mesh"] = meshes
 
     async def create(_request, spec):
         if spec["profile"] == "broken":
@@ -73,6 +90,8 @@ def test_start_binds_one_session_per_project(tmp_path):
             assert spec["project"] == "default" and spec["beads"] is False and spec["model"] == "m"
             assert json.loads(spec["context"]) == {"plan_aggregator": "default"}
             assert "plan_overview(project='default')" in spec["task"] and "plan_set" in spec["task"]
+            assert "mesh" not in spec and "handle" not in spec                  # this daemon has no meshes
+            assert "메시로 전달하지 않는다" in spec["task"] and out["mesh"] is None and out["mesh_note"]
             assert mgr.kept == [("agg1", True)]
 
             resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
@@ -92,6 +111,45 @@ def test_start_binds_one_session_per_project(tmp_path):
             assert rows[0]["running"] is False
             resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
             assert resp.status == 201 and (await resp.json())["name"] == "agg2"
+
+    asyncio.run(go())
+
+
+def test_the_aggregator_joins_the_projects_mesh(tmp_path):
+    def session(name, project):
+        s = FakeSession(name)
+        s.sdef = SimpleNamespace(name=name, project=project, cwd=str(tmp_path), parent=None)
+        s.status = lambda: "busy"
+        return s
+
+    meshes = Meshes({"w1": ["team"], "w2": ["team"], "x1": ["other"]})
+    created = []
+    app, mgr = build(tmp_path, [session("w1", "default"), session("w2", "default"), session("x1", "x")],
+                     created, meshes)
+
+    async def go():
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p", "mesh": "nope"})
+            assert resp.status == 400 and "nope" in (await resp.json())["error"] and not created
+
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
+            assert resp.status == 201
+            out = await resp.json()
+            spec, = created
+            assert (spec["mesh"], spec["handle"]) == ("team", "plan-default")       # the one mesh its sessions are on
+            assert "메시 'team'의 send로 전달한다" in spec["task"] and "plan-default" in spec["task"]
+            assert out["mesh"] == "team" and "mesh_note" not in out
+
+            mgr.sessions[out["name"]].exited = True
+            meshes.members["w2"] = ["team", "side"]                                # several: none is guessed
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
+            out = await resp.json()
+            assert resp.status == 201 and out["mesh"] is None and "several meshes" in out["mesh_note"]
+            assert "mesh" not in created[-1] and "메시로 전달하지 않는다" in created[-1]["task"]
+
+            mgr.sessions[out["name"]].exited = True                                # named in the body: that one
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p", "mesh": "side"})
+            assert resp.status == 201 and (created[-1]["mesh"], created[-1]["handle"]) == ("side", "plan-default")
 
     asyncio.run(go())
 

@@ -119,7 +119,17 @@ def feedback_text(session: str, node: Optional[dict], text: str) -> str:
     ])
 
 
-def aggregator_task(project: str) -> str:
+def aggregator_handle(project: str) -> str:
+    return f"plan-{project}"
+
+
+def aggregator_task(project: str, mesh: Optional[str] = None) -> str:
+    """The aggregator's opening task. With no ``mesh`` the session is on no
+    mesh, so the task does not tell it to relay by mesh send."""
+    relay = (f"그 결정이 닿는 세션들에 메시 '{mesh}'의 send로 전달한다(네 handle은 "
+             f"{aggregator_handle(project)}). " if mesh else
+             "너는 어느 메시에도 등록되지 않았으므로 메시로 전달하지 않는다: 그 결정이 닿는 세션들의 "
+             "이름을 네 계획의 해당 결정 아래에 적어, 사용자가 각 세션의 plan 패널에서 전달하게 한다. ")
     return (f"너는 프로젝트 '{project}'의 plan 집계 세션이다. 이 프로젝트의 세션들이 각자 쓴 계획을 모아 "
             "프로젝트 계획 하나로 정리하는 것이 일이다. 다른 세션의 작업을 직접 하지 않는다. "
             f"plan_overview(project='{project}')로 세션마다 단계·런·계획 진행을 읽고, "
@@ -127,7 +137,7 @@ def aggregator_task(project: str) -> str:
             "결과는 plan_set으로 네 계획에 쓴다: 단계는 연관 세션 묶음마다 한 줄(진행, 막힘, 내 결정 대기 수), "
             "결정은 여러 세션에 걸친 선택(착지 순서, 겹치는 작업 정리, 우선순위)마다 선택지별 기대효과·리스크와 "
             "함께 둔다. 개별 세션의 결정은 사용자가 그 세션의 plan 패널에서 하므로 옮겨 적지 않는다. "
-            "사용자가 고른 분기는 [claunch plan] 블록으로 오고, 그 결정이 닿는 세션들에 메시 send로 전달한다. "
+            "사용자가 고른 분기는 [claunch plan] 블록으로 오고, " + relay +
             "10분마다(wait/timer) 다시 읽어 계획을 갱신한다.")
 
 
@@ -209,6 +219,30 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         except Exception:  # noqa: BLE001
             return None
         return None if s.exited else s
+
+    def mesh_of(project: str, asked: str) -> tuple:
+        """``(mesh, why)``: the mesh an aggregator of ``project`` joins --
+        ``asked`` when it exists, else the one team mesh the project's
+        running sessions are on -- and, when there is none, why."""
+        mm = app.get("mesh")
+        if mm is None:
+            return None, "this daemon has no meshes"
+        if asked:
+            try:
+                mm.get(asked)
+            except Exception as exc:  # noqa: BLE001 -- MeshError, or an ambiguous name
+                return None, str(exc)
+            return asked, ""
+        found = set()
+        for s in manager.list():
+            if s.exited or getattr(s.sdef, "project", None) != project:
+                continue
+            found.update(row["mesh"] for row in mm.meshes_for_session(s.sdef.name)
+                         if not row.get("parent_channel"))
+        if len(found) == 1:
+            return found.pop(), ""
+        return None, (f"the sessions of {project!r} are on several meshes ({', '.join(sorted(found))}); "
+                      "name one" if found else f"no running session of {project!r} is on a mesh")
 
     def aggregator_rows() -> list:
         return [{"project": project, **rec, "running": live(rec["session"]) is not None}
@@ -333,9 +367,14 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         profile = str(body.get("profile") or "").strip()
         if not profile:
             return web.json_response({"error": "profile is required"}, status=400)
+        mesh, why = mesh_of(project, str(body.get("mesh") or "").strip())
+        if why and body.get("mesh"):
+            return web.json_response({"error": why}, status=400)
         spec = {"profile": profile, "project": project, "beads": False,
                 "context": json.dumps({"plan_aggregator": project}),
-                "name": str(body.get("name") or "").strip(), "task": aggregator_task(project)}
+                "name": str(body.get("name") or "").strip(), "task": aggregator_task(project, mesh)}
+        if mesh:
+            spec["mesh"], spec["handle"] = mesh, aggregator_handle(project)
         for key in ("model", "effort"):
             value = str(body.get(key) or "").strip()
             if value:
@@ -350,6 +389,9 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         except Exception:  # noqa: BLE001 -- the session is up; it only may close after a run
             log.exception("plan aggregator keep-alive of %r failed", payload["name"])
         payload["project"] = project
+        payload["mesh"] = mesh
+        if why:
+            payload["mesh_note"] = why
         return web.json_response(payload, status=201)
 
     async def h_set(request):
