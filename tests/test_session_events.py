@@ -92,7 +92,13 @@ def test_worktree_event_contains_old_and_new_location_only_after_success(home, t
     moved, carried = asyncio.run(mgr.migrate("s1", str(tmp_path)))
     event = mgr.events.rows(moved)[-1]
     assert event["kind"] == "worktree" and not carried
-    assert event["details"] == {"previous": "/old", "current": str(tmp_path), "transcript_moved": False}
+    assert event["details"] == {
+        "previous": "/old",
+        "current": str(tmp_path),
+        "transcript_moved": False,
+        "slots_moved": [],
+        "project": None,
+    }
 
 
 def test_history_write_failure_does_not_change_control_result(tmp_path, monkeypatch, caplog):

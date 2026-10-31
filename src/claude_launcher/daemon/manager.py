@@ -35,10 +35,12 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, credentials, harnesses as harness_registry
 from .. import profile as profile_mod
 from .. import profile_keys
+from .. import projects
 from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
+from ..cflow2 import relocate as slot_relocate
 from . import actors, briefing, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
@@ -3368,7 +3370,7 @@ class SessionManager:
             )
         return await self.redefine(name, env=env)
 
-    async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
+    async def migrate(self, name: str, new_cwd: str, project: Optional[str] = None) -> Tuple[Session, bool]:
         """Move a session to another directory: stop it, carry its claude
         conversation's transcript, and relaunch it there.
 
@@ -3381,13 +3383,26 @@ class SessionManager:
         touched: the name, the pinned conversation id, the mesh memberships
         keyed on the name, the parent edge.
 
+        Two kinds of metadata travel with the directory change. The session's
+        cflow v2 run slots (keyed ``(cwd, scope)``, see
+        :mod:`claude_launcher.cflow2.store`) move to the same scope directory
+        under ``new_cwd`` — left behind, the session's ``flow_*`` calls would
+        resolve the run store under the new cwd and find nothing. And when
+        ``project`` is given, ``sdef.project`` is re-filed under it (validated
+        against the registry) — the mesh and the listings read the project
+        live from the definition, so nothing else needs re-keying. Archived
+        (finished) runs and the beads board's already-minted issues stay on
+        the old board; only where *new* issues mint moves, with the cwd.
+
         Refused while nothing has been stopped or moved: a target that is not
         a directory, a session already there, a claude session with no pinned
         conversation (its transcript cannot be identified, so moving it would
-        silently lose the conversation), and a profile that no longer exists.
+        silently lose the conversation), a profile that no longer exists, and
+        a ``project`` the registry does not hold.
         A relaunch that fails afterwards puts everything back — the transcript
-        returns to the old slug and the record keeps its old definition — so
-        the failure mode is "still where it was", not "half-moved".
+        returns to the old slug, moved run slots return to the old directory,
+        and the record keeps its old definition — so the failure mode is
+        "still where it was", not "half-moved".
 
         Returns the relaunched session and whether a transcript was actually
         carried (``False`` for other harnesses, and for a conversation that
@@ -3403,6 +3418,16 @@ class SessionManager:
             os.path.abspath(old.cwd or "")
         ):
             raise ManagerError(f"session {name!r} is already in {new_cwd}")
+        new_project = old.project
+        if project is not None:
+            try:
+                new_project = (
+                    None
+                    if projects.normalize(project) == projects.DEFAULT
+                    else projects.require(project).name
+                )
+            except projects.ProjectError as exc:
+                raise ManagerError(str(exc)) from exc
         config_dir = None
         if old.harness == harness_mod.CLAUDE_HARNESS:
             if not old.conversation_id:
@@ -3424,9 +3449,16 @@ class SessionManager:
                 moved = transcripts.relocate(
                     config_dir, old.conversation_id, old.cwd, new_cwd
                 )
+            moved_slots: List[str] = []
             try:
-                relaunched = self._recreate(name, session, replace(old, cwd=new_cwd))
+                moved_slots = slot_relocate.move_slots(old.cwd, new_cwd, name)
+                relaunched = self._recreate(
+                    name, session, replace(old, cwd=new_cwd, project=new_project)
+                )
             except Exception:
+                if moved_slots:
+                    # the slots go back with the transcript
+                    slot_relocate.move_slots(new_cwd, old.cwd, name)
                 if moved is not None:
                     # Restore the transcript alongside the old definition.
                     transcripts.relocate(
@@ -3435,7 +3467,9 @@ class SessionManager:
                 raise
         self.events.record(relaunched, "worktree", "세션 작업 디렉터리 이동",
                            previous=old.cwd, current=new_cwd,
-                           transcript_moved=moved is not None)
+                           transcript_moved=moved is not None,
+                           slots_moved=moved_slots,
+                           project=old.project if new_project != old.project else None)
         return relaunched, moved is not None
 
     async def shutdown_all(self, mode: str = "stop", *, reason: str = "stop") -> None:

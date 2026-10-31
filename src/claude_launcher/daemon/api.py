@@ -14462,10 +14462,14 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     like every path in this API). ``children: true`` also migrates every
     descendant standing in the *same* directory the session is leaving —
     those elsewhere (their own worktrees included) are exactly where someone
-    put them, and stay.
+    put them, and stay. Optional ``project`` re-files the named session under
+    that project (validated against the registry); followers keep their own
+    project — it is a filing of the session, not of the directory.
 
     The move itself is :meth:`SessionManager.migrate`: stop, carry the claude
-    transcript to the new directory's slug, relaunch there. The named session
+    transcript to the new directory's slug, move the session's cflow v2 run
+    slots to the same scope under the new directory (runs are keyed
+    ``(cwd, scope)``), relaunch there. The named session
     is all-or-nothing (a refusal leaves it untouched); the children are each
     their own attempt, reported per name, because "the parent moved but w3
     would not" is a state the operator can finish by hand, while unwinding a
@@ -14481,6 +14485,7 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     session = manager.get(name)  # ManagerError -> 400
     old_cwd = session.sdef.cwd
     wt_name, to = body.get("worktree"), body.get("cwd")
+    project = body.get("project")
     if (wt_name is None) == (to is None):
         return json_error(400, "pass exactly one of 'worktree' or 'cwd'")
     wt = None
@@ -14516,10 +14521,12 @@ async def h_session_migrate(request: web.Request) -> web.Response:
                 os.path.abspath(manager.get(child).sdef.cwd or "")
             ) == old_key
         ]
-    migrated, carried = await manager.migrate(name, new_cwd)
+    migrated, carried = await manager.migrate(name, new_cwd, project=project)
     children = []
     for child in followers:
         try:
+            # a follower's project is its own filing, not the parent's —
+            # only the directory follows
             _, child_carried = await manager.migrate(child, new_cwd)
             children.append(
                 {"name": child, "ok": True, "transcript_moved": child_carried}
