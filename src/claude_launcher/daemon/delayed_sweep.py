@@ -108,6 +108,13 @@ class Clock:
         #: (size, settle) fixed by the caller; None reads the daemon settings each tick.
         self.policy = policy
         self.spawn_tried = {}
+        #: ``(job id, generation)`` pairs that already got a watcher. The
+        #: watcher is one-shot (it ends at its wait cap, see
+        #: workflows/v2/sweep-job-v2.yaml), so an exited watcher of a job
+        #: that has no verdict yet is not replaced: the verdict reaches the
+        #: owner through ``tick``'s result block either way. ``retry-watcher``
+        #: bumps the generation and asks for another one (claunch-1rsgm).
+        self.watched: set = set()
         #: Jobs whose watcher the daemon refused in a way a retry cannot
         #: change, and the refusal it gave. A refused spawn never holds the
         #: sweep back, but an answer that is already final must not be asked
@@ -158,6 +165,12 @@ class Clock:
                           + (f"detail: {job['detail']}\n" if job["status"] == "stuck" else "")
                           + (await asyncio.to_thread(suspect_lines, queue, job)
                              if job["status"] == "failed" else "")
+                          # The watching session ends at its wait cap and may not
+                          # be alive to unbatch (claunch-1rsgm).
+                          + (f"If this tip covered other merges, run 'tools/delayed_sweep.py "
+                             f"unbatch --job {job['id']}' to sweep them one by one and narrow "
+                             "the cause; no watching session does it for you. "
+                             if job["status"] in ("failed", "stuck") else "")
                           + "protocol: call flow_status, read tools/delayed_sweep.py status "
                           "for this repository. A failed active pause requires the "
                           "leader's handle-regression route and a repair child. "
@@ -299,6 +312,13 @@ class Clock:
         for job in queue.unattended():
             if live >= CHILDREN_MAX:
                 break
+            # A job still waiting for the window needs no session: the owner is
+            # told the verdict by ``tick`` whether or not anyone watches. The
+            # watcher starts when the sweep does (claunch-1rsgm).
+            if job["status"] != "running":
+                continue
+            if (job["id"], job["generation"]) in self.watched:
+                continue
             if (job["id"], job["generation"]) in self.spawn_permanent:
                 continue
             origin = json.loads(job["origin"])
@@ -328,6 +348,7 @@ class Clock:
                 # person bumps the generation with ``retry-watcher``.
                 continue
             queue.attach_child(job["id"], name)
+            self.watched.add((job["id"], job["generation"]))
             live += 1
 
     async def _spawn_failed(self, job, exc) -> None:
