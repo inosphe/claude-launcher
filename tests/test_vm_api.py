@@ -431,3 +431,29 @@ def test_a_restart_recovers_each_running_guest_behind_the_start(tmp_path, monkey
             assert len(lists) >= 2
             assert reg.get("a").state == "running" and reg.get("a").channel == "up"
     asyncio.run(go())
+
+
+@scenario
+async def test_changes_by_the_user_routes_are_audited_with_the_declared_actor(api):
+    await _register(api)
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["exec"]})
+    await api.post("/api/vm/a/revoke", json={"session": "s1", "scopes": ["exec"]})
+    rows = [r for r in api.reg.audit_log if r["what"] in ("register", "user_grant", "user_revoke")]
+    assert [r["what"] for r in rows] == ["register", "user_grant", "user_revoke"]
+    assert all(r["actor"] == "user/cli" for r in rows)
+    assert rows[1]["to"] == "s1" and rows[1]["scopes"] == ["view", "exec"]
+    # a request that declares nothing is the user's; one that declares a
+    # session is refused and leaves no change behind
+    before = len(api.reg.audit_log)
+    assert (await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["exec"]},
+                           headers=AGENT)).status == 403
+    assert len(api.reg.audit_log) == before
+
+
+def test_the_page_says_its_limit_and_the_heartbeat_ignores_tab_visibility():
+    from pathlib import Path
+    static = Path(vm_api.__file__).resolve().parent.parent / "web" / "static"
+    js = (static / "vm.js").read_text(encoding="utf-8")
+    beat = js[js.index("function beat()"):js.index("function manageTouch")]
+    assert "document.hidden" not in beat and "new Worker" in beat
+    assert 'id="vm-limit"' in (static / "vm.html").read_text(encoding="utf-8")

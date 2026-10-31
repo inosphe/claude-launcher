@@ -7,6 +7,19 @@ a session's ``vm_*`` tools call only the session routes below, and the user
 routes (register, start, stop, grants, the user taking the screen) refuse a
 request that says it comes from a session or a workflow.
 
+KNOWN LIMIT: the daemon has one token and nothing here can tell a session from
+the user once a request leaves out the actor header. A process that can read
+the token (any process of the same OS user, a managed session's shell
+included) can call a user route as the user: grant itself exec, register a
+VM, start or stop one. Granting control already amounts to a shell on the
+guest; this limit makes the host's daemon token part of that trust. The same
+limit holds for every other route of the daemon (claunch-actor-declared-not-
+proven-vs48). What the daemon does about it is record: each user-route change
+is written to the audit log with the actor it declared and how it
+authenticated (``actor``), so a grant made without a header reads as the
+user's, from the CLI. Telling a session's process from the user's (the peer
+process of the loopback connection) is a separate follow-up.
+
 User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                stop,force_stop,suspend,reconcile,grant,revoke,
                revoke_controller,extra_controller,human}
@@ -158,6 +171,16 @@ def _user_only(request: web.Request) -> Optional[web.Response]:
     return None
 
 
+def _trace(request: web.Request, reg: Registry, vm_id: str, what: str, **extra) -> None:
+    """Audit a change a user route made, with the actor the request declared
+    (kind, name, and how it authenticated: ``web`` cookie or ``cli`` token)."""
+    actor = _caller(request)
+    text = ":".join(x for x in (actor.get("kind"), actor.get("name")) if x)
+    if actor.get("via"):
+        text += f"/{actor['via']}"
+    reg.note(vm_id, what, actor=text or "unknown", **extra)
+
+
 def _as_session(request: web.Request, body: dict) -> str:
     actor = _caller(request)
     session = str(body.get("session") or "")
@@ -226,6 +249,7 @@ async def h_register(request: web.Request) -> web.Response:
         vm = reg.add(vm_id, str(body.get("tart_name") or ""),
                      ssh_user=str(body.get("ssh_user") or "admin"),
                      ssh_key=str(body.get("ssh_key") or ""))
+        _trace(request, reg, vm.id, "register")
         return web.json_response(reg.view(vm.id), status=201)
     except VmError as exc:
         return _err(exc)
@@ -237,6 +261,7 @@ async def h_remove(request: web.Request) -> web.Response:
     reg, _ = _hub(request)
     try:
         reg.remove(request.match_info["id"])
+        _trace(request, reg, request.match_info["id"], "remove")
         return web.json_response({"ok": True})
     except VmError as exc:
         return _err(exc)
@@ -250,6 +275,7 @@ def _lifecycle_route(action: str):
         vm_id = request.match_info["id"]
         try:
             reg.get(vm_id)
+            _trace(request, reg, vm_id, "lifecycle", action=action)
             channels: vm_channel.Hub = request.app["vm_channels"]
             if action != "start":
                 # The channel goes first: it would otherwise reconnect to a
@@ -276,8 +302,9 @@ def _lifecycle_route(action: str):
 async def h_reconcile(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
-    _, mgr = _hub(request)
+    reg, mgr = _hub(request)
     try:
+        _trace(request, reg, "", "reconcile")
         return web.json_response({"changed": await asyncio.to_thread(mgr.reconcile)})
     except VmError as exc:
         return _err(exc)
@@ -293,6 +320,7 @@ async def h_grant(request: web.Request) -> web.Response:
         if not session:
             raise VmError("vm_bad_request", "'session' is required")
         got = reg.grant(request.match_info["id"], session, body.get("scopes") or [])
+        _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got)
         return web.json_response({"ok": True, "grants": got})
     except VmError as exc:
         return _err(exc)
@@ -308,6 +336,7 @@ async def h_revoke(request: web.Request) -> web.Response:
         if not session:
             raise VmError("vm_bad_request", "'session' is required")
         left = reg.revoke(request.match_info["id"], session, body.get("scopes"))
+        _trace(request, reg, request.match_info["id"], "user_revoke", to=session, left=left)
         return web.json_response({"ok": True, "grants": left})
     except VmError as exc:
         return _err(exc)
@@ -319,6 +348,7 @@ async def h_revoke_controller(request: web.Request) -> web.Response:
     reg, _ = _hub(request)
     try:
         reg.revoke_controller(request.match_info["id"])
+        _trace(request, reg, request.match_info["id"], "revoke_controller")
         return web.json_response({"ok": True})
     except VmError as exc:
         return _err(exc)
@@ -352,8 +382,10 @@ async def h_human(request: web.Request) -> web.Response:
     try:
         action = str((await _body(request)).get("action") or "")
         if action == "driving":
+            _trace(request, reg, vm_id, "human", action=action)
             return web.json_response({"ok": True, **reg.human_driving(vm_id)})
         if action == "idle":
+            _trace(request, reg, vm_id, "human", action=action)
             reg.human_idle(vm_id)
         elif action == "touch":
             reg.human_touch(vm_id)

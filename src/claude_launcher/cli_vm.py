@@ -164,7 +164,9 @@ def register(sub) -> None:
         "vm", help="the VMs the daemon runs: start, stop, who may look at or drive them",
         description="Register, start, stop and suspend VMs, grant sessions view, control or "
                     "exec on one, take the screen yourself, and take control back. "
-                    "Run these outside a managed session.",
+                    "Run these outside a managed session. Limit: the daemon has one token and "
+                    "cannot tell a session's shell from yours, so this refusal is a courtesy "
+                    "and not a boundary; every change is audited with the actor it declared.",
     )
     v = p.add_subparsers(dest="vm_command", required=True)
 

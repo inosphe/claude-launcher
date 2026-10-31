@@ -200,17 +200,35 @@ function human(action) {
 $("vm-takeover").addEventListener("click", () => selected && act("조작 시작", () => human("driving")));
 $("vm-return").addEventListener("click", () => selected && act("세션에 돌려주기", () => human("idle")));
 /* While the user is driving, this page says so every few seconds; the daemon
-   hands the screen back by itself when that stops (daemon.vm_human_idle). */
-function manageTouch() {
-  if (takingOver && !touchTimer) {
-    touchTimer = setInterval(() => {
-      if (!document.hidden && selected) human("touch").catch(() => {});
-    }, 5000);
-  } else if (!takingOver && touchTimer) {
-    clearInterval(touchTimer);
-    touchTimer = null;
+   hands the screen back by itself when that stops (daemon.vm_human_idle).
+   The user drives in the host's tart window, so this tab is usually in the
+   background: the beat does not look at tab visibility, and its clock is a
+   Worker's, which a hidden tab's timer throttling does not slow down. */
+const BEAT_MS = 5000;
+let beatWorker = null;
+function beat() {
+  if (selected) human("touch").catch(() => {});
+}
+function startBeat() {
+  try {
+    const src = `setInterval(() => postMessage(0), ${BEAT_MS});`;
+    beatWorker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    beatWorker.onmessage = beat;
+  } catch (_) {
+    beatWorker = null;
+    touchTimer = setInterval(beat, BEAT_MS);  // no Worker: the plain timer
   }
 }
+function stopBeat() {
+  if (beatWorker) { beatWorker.terminate(); beatWorker = null; }
+  if (touchTimer) { clearInterval(touchTimer); touchTimer = null; }
+}
+function manageTouch() {
+  const beating = beatWorker !== null || touchTimer !== null;
+  if (takingOver && !beating) startBeat();
+  else if (!takingOver && beating) stopBeat();
+}
+document.addEventListener("visibilitychange", () => { if (takingOver && !document.hidden) beat(); });
 
 /* ---- the screen ---- */
 let frameRun = 0;
