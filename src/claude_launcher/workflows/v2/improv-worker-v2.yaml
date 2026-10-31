@@ -545,6 +545,38 @@ rules:
       round-report는 wrapup 반환값만 받아 대화에만 있던 판단과 실패 경위를 보고서에
       실을 수 없었다.
     deliver: [work, review, targeted-test, rebase]
+  plan-panel:
+    text: |
+      ── plan 패널: 사용자가 읽는 계획 (claunch-7jzp8) ──
+      사용자는 수십 개 세션을 함께 본다. 산문 보고를 읽게 하지 않고, 이
+      세션의 plan 패널(대시보드의 ☰ plan)에서 계획을 읽고 갈래를 고르게 한다.
+      쓰는 길은 plan_* MCP 도구다(plan_set, plan_node, plan_get).
+      · 착수할 때(coding-plan, 그 단계가 없으면 work를 시작할 때) plan_set으로
+        쓴다: title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈.
+        steps는 단계마다 한 줄이고 detail은 몇 줄까지다. 사용자가 정해야 하는
+        갈래(범위·방식·우선순위)만 decision 노드로 두고, 선택지마다 effect(기대
+        효과)와 risk(리스크)를 적고 권장안 하나에 recommended를 붙인다. 바로
+        실행해도 되는 결정은 decision으로 만들지 않는다. 고르기 전에는 그 갈래
+        아래 단계만 기다리고 나머지 단계는 진행한다.
+      · 진행하면서 plan_node로 단계 status를 옮긴다(doing, done, blocked).
+        방향이 바뀌면 plan_get으로 읽고 id를 그대로 둔 채 plan_set으로 다시
+        쓴다 — id를 바꾸면 사용자가 이미 내린 결정이 사라진다. plan_set이
+        revision으로 거절되면 다시 읽는다(사용자가 방금 결정했을 수 있다).
+      · wrapup에서 closure를 채운다: 사람이 직접 확인해야 하는 것(UI 동작,
+        라이브 데몬에서의 확인)은 verify로, detail에 무엇을 어떻게 확인할지
+        적는다. 이 회차와 연관된 후속 작업 후보는 followup으로 둔다. 사용자가
+        「여기서 진행」이나 「이슈로 넘김」을 고른 followup은 처리한 뒤
+        plan_node status=done으로 닫는다. 패널은 남은 항목이 없을 때 「닫아도
+        됨」을 표시한다.
+      · 사용자의 결정과 의견은 `[claunch plan]` 블록으로 터미널에 온다. 그
+        블록이 말하는 갈래를 따르고 plan을 그에 맞게 고친다.
+      plan_* 도구가 없거나 데몬이 거절하면(재기동 전 데몬) 그 사실을 보고에
+      한 줄 적고 진행한다 — 이 규칙은 회차를 막지 않는다.
+    why: >-
+      claunch-7jzp8: 사용자 1명이 세션 수십~백수십 개와 계획을 맞추는 일이 병목이었고,
+      정제되지 않은 산문 보고는 1:m 보고 관계에서 읽히지 않았다. 세션을 닫지 못하는
+      이유(사람 확인 미완, 연관 후속 작업)도 패널의 closure로 드러낸다(th-0b38dc).
+    deliver: [coding-plan, work, wrapup]
 
 # ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
 # 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
