@@ -30,7 +30,7 @@
     "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
     "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
     "term-zoom", "term-view", "term-life",
-    "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+    "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
     "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
     "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
     "term-tps", "term-note", "term-handle", "term-status",
@@ -57,7 +57,7 @@
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇", "term-categorybtn": "⌘", "term-qabtn": "?", "term-threadsbtn": "🗪",
-    "term-clibtn": "❯", "term-wrapupbtn": "✎", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
+    "term-clibtn": "❯", "term-wrapupbtn": "✎", "term-planbtn": "☰", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
     "term-details": "ⓘ", "term-zoom-level": "A",
     // Already one character: described like the rest, but no glyph -- the
     // fixed glyph width would make them wider, not narrower.

@@ -797,6 +797,11 @@ def build_app(
     # to the user, answered in its QA pane and typed back into it.
     from . import qa_api
     qa_api.install(app)
+    # Session plans (daemon/plan_api.py, claunch-7jzp8): the steps, branch
+    # decisions and closure items a session shows in its plan pane; the
+    # user's decisions there are typed back into it.
+    from . import plan_api
+    plan_api.install(app, create=_create_session)
     # Session wrap-up drafts (daemon/wrapup_api.py, claunch-ar8jn): glossary,
     # category and knowledge entries a session files, written into their
     # stores only when the user confirms them in the wrap-up pane.

@@ -124,7 +124,7 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-wrapupbtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-wrapupbtn", "term-planbtn"]) nodes[id] = node(id);
   const body = node("body");
   const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [], cleared: [] };
   const ctx = {};

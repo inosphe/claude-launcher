@@ -7716,6 +7716,7 @@ function syncSessionResourceButtons() {
     "term-qabtn": qaDoor && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
     "term-threadsbtn": !operator && !!name && (threadsRailCache[name]?.open || 0) > 0,
     "term-wrapupbtn": !!name && (wrapupRailCache[name]?.unresolved || 0) > 0,
+    "term-planbtn": !!name && (planRailCache[name]?.waiting || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
@@ -7885,6 +7886,29 @@ async function refreshWrapupRail() {
   wrapupRailSig = sig;
   wrapupRailCache = rows;
   wrapupNoticeSync(rows);
+  syncSessionResourceButtons();
+}
+
+/* Session plans (plan-pane.js, daemon/plan_api.py, claunch-7jzp8): per
+   session with a plan, its summary -- how many of its nodes wait on the user,
+   whether it may close. Lights ☰ plan while something waits. */
+let planRailCache = {};
+let planRailSig = null;
+
+async function refreshPlanRail() {
+  let data;
+  try {
+    const resp = await api("/api/plan/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === planRailSig) return;
+  planRailSig = sig;
+  planRailCache = rows;
   syncSessionResourceButtons();
 }
 
@@ -24716,6 +24740,14 @@ const SPLIT_PANES = {
     on: "close the wrap-up pane — the terminal takes the column back",
     off: "this session's wrap-up drafts (glossary, category, knowledge) — edit, delete or confirm them",
   },
+  // The session's plan (plan-pane.js, daemon/plan_api.py, claunch-7jzp8):
+  // its steps, the branches it asks the user to pick and the closure items
+  // that keep it open; each decision is typed back into the session.
+  plan: {
+    btn: "term-planbtn", title: "☰ plan",
+    on: "close the plan pane — the terminal takes the column back",
+    off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -24728,7 +24760,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "wrapup", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "cli", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27390,6 +27422,7 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "category": return "category";
     case "sims": return "simulations";
@@ -27564,6 +27597,7 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  plan: "plan-view",
   knowledge: "knowledge-view",
   sims: "sims-view",
   spec: "spec-view",
@@ -27726,7 +27760,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "wrapup", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "wrapup", "plan", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -27801,6 +27835,9 @@ function openSplit(name, kind = "run") {
   // And the session's wrap-up drafts (wrapup-pane.js). A write there moves
   // the header's light at once rather than at the next dashboard poll.
   if (kind === "wrapup") { globalThis.WrapupPane?.mount(splitBody, name); return; }
+  // And the session's plan (plan-pane.js); a decision there relights ☰ plan
+  // at once.
+  if (kind === "plan") { globalThis.PlanPane?.mount(splitBody, name, { onChange: () => refreshPlanRail() }); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -27833,6 +27870,7 @@ function closeSplit() {
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
+  if (splitKind === "plan") globalThis.PlanPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -27930,6 +27968,7 @@ $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // has one, and the daemon spawns it on the pane's first viewer.
 $("term-clibtn").addEventListener("click", () => toggleSplitPane("cli"));
 $("term-wrapupbtn").addEventListener("click", () => toggleSplitPane("wrapup"));
+$("term-planbtn").addEventListener("click", () => toggleSplitPane("plan"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
 
@@ -28389,6 +28428,7 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
@@ -28466,6 +28506,7 @@ function route() {
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
+  if (r.page !== "plan") globalThis.PlanPage?.stop();
   if (r.page !== "knowledge") globalThis.KnowledgePage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
@@ -28558,6 +28599,7 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
@@ -65271,6 +65313,7 @@ async function boot() {
     refreshSessionSims(),
     refreshQaRail(),
     refreshWrapupRail(),
+    refreshPlanRail(),
     refreshThreadsRail(),
     refreshModelPrices(),
   ]);
@@ -65971,6 +66014,7 @@ async function pollOnce() {
     refreshSessionSims(),
     refreshQaRail(),
     refreshWrapupRail(),
+    refreshPlanRail(),
     refreshThreadsRail(),
     refreshTermQueued(),
     refreshTermWindow(),
