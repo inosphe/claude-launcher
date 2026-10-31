@@ -64,6 +64,7 @@ def _fake_session(*, bracketed: bool = True):
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         _complete_keystroke_frame = session_mod.Session._complete_keystroke_frame
+        _carried_paste = session_mod.Session._carried_paste
         note_human_input = session_mod.Session.note_human_input
         keyboard_busy = session_mod.Session.keyboard_busy
         draft_open = session_mod.Session.draft_open
@@ -124,7 +125,29 @@ def test_draft_edit_is_counted_in_characters(data, expected):
     """``(0, False)`` matters as much as the rest: a key that says nothing
     about the composer must CHANGE nothing. An arrow key pressed inside a
     half-written prompt is still a half-written prompt."""
-    assert session_mod.draft_edit_from_bytes(data) == expected
+    delta, cleared, _ = session_mod.draft_edit_from_bytes(data)
+    assert (delta, cleared) == expected
+
+
+@pytest.mark.parametrize(
+    "data, in_paste, expected",
+    [
+        (b"hi", False, False),                    # plain typing opens no paste
+        (b"\x1b[200~", False, True),              # a start marker and no body yet
+        (b"\x1b[200~hi\x1b[201~", False, False),  # both markers in one frame
+        (b"line two\x1b[201~", True, False),      # and the end in the next frame
+        (b"line two", True, True),                # body only: still inside it
+        (b"\x1b[200~a\x1b[201~b", False, False),  # a paste, then typing after it
+    ],
+)
+def test_the_paste_state_a_frame_ends_in_is_answered_with_the_frame(
+    data, in_paste, expected
+):
+    """claunch-wzx2r.1: the start marker and the pasted text can land in
+    different frames. The answer has to say which state the frame ended in,
+    and to take the state it started in, or the reading of a frame depends on
+    where the terminal happened to cut it."""
+    assert session_mod.draft_edit_from_bytes(data, in_paste=in_paste)[2] is expected
 
 
 def test_typing_then_erasing_every_character_leaves_no_draft():
@@ -200,6 +223,47 @@ def test_a_multiline_paste_leaves_the_draft_open():
         at_terminal=True, data=b"\x1b[200~line one\nline two\x1b[201~"
     )
     assert s.draft_open() is True
+
+
+def test_a_multiline_paste_split_across_frames_leaves_the_draft_open():
+    """claunch-wzx2r.1: the same paste, cut by the terminal into the start
+    marker and the body. Read frame by frame, the second frame began with a
+    newline nobody had opened a paste with, so it was taken for a submit —
+    the composer was cleared and the draft closed over a paste still being
+    written."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"\x1b[200~")
+    assert s.draft_open() is False, "the marker alone puts nothing in the composer"
+    s.note_human_input(at_terminal=True, data=b"\n\x1b[201~")
+    assert s.draft_open() is True
+
+
+def test_a_paste_split_across_frames_counts_its_characters_once():
+    """The count has to survive the boundary too, not just the open draft:
+    the body of the split paste is one line of text, and one backspace still
+    leaves a character behind."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"\x1b[200~line one")
+    s.note_human_input(at_terminal=True, data=b"\nline two\x1b[201~")
+    assert s._draft_chars == len(b"line one\nline two".decode())
+    s.note_human_input(at_terminal=True, data=b"\x7f")
+    assert s.draft_open() is True
+
+
+def test_an_unfinished_paste_marker_does_not_swallow_a_later_enter(monkeypatch):
+    """The other direction, and why the carried marker expires. A start
+    marker whose body never arrives must not still be in force when somebody
+    presses Enter: that Enter would read as a pasted line break, the draft
+    would stay open, and the session's mail would be held over a composer the
+    person did submit — the false hold claunch-wzx2r removed, by a new
+    route."""
+    monkeypatch.setattr(session_mod, "DRAFT_PARTIAL_TTL", 0.05)
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"half a prompt")
+    s.note_human_input(at_terminal=True, data=b"\x1b[200~")
+    time.sleep(0.1)  # longer than the carried fragment's life
+    s.note_human_input(at_terminal=True, data=b"\r")
+    assert s.draft_open() is False
 
 
 @pytest.mark.parametrize(
