@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 
 from . import (
-    category_mcp, glossary_mcp, knowledge_mcp, observer_mcp, qa_mcp, sim_mcp, operator_v2_mcp, mcp_rpc, mesh_mcp, reposync_mcp, search_mcp, status_checks_mcp, wait_mcp,
+    category_mcp, glossary_mcp, knowledge_mcp, observer_mcp, plan_mcp, qa_mcp, sim_mcp, operator_v2_mcp, mcp_rpc, mesh_mcp, reposync_mcp, search_mcp, status_checks_mcp, wait_mcp,
     window_mcp, artifact_cleanup_mcp, threads_mcp, prompt_packs_mcp, webdebug_mcp, session_env,
     cflow_watch_mcp, shell_mcp, timer_mcp, session_fault_mcp, contexts_mcp, emergency_nudge_mcp, wrapup_mcp,
 )
@@ -82,6 +82,7 @@ SERVERS = (
     reposync_mcp.SERVER,
     artifact_cleanup_mcp.SERVER,
     qa_mcp.SERVER,
+    plan_mcp.SERVER,
     threads_mcp.SERVER,
     shell_mcp.SERVER,
     prompt_packs_mcp.SERVER,
