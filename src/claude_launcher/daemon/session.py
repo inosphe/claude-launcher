@@ -407,18 +407,29 @@ def _split_incomplete_utf8(data: bytes) -> Tuple[bytes, bytes]:
     return data, b""
 
 
-def draft_edit_from_bytes(data: bytes) -> Tuple[int, bool]:
+def draft_edit_from_bytes(
+    data: bytes, *, in_paste: bool = False
+) -> Tuple[int, bool, bool]:
     """What ``data`` — keystrokes a human just sent — did to their composer.
 
-    ``(delta, cleared)``. ``cleared`` is True when the frame submitted the
-    line (a bare Enter) or discarded it (``C-c``, ``C-u``): the composer is
-    empty after those, whatever was in it. ``delta`` is the net number of
-    *characters* the frame put in the composer after the last such key:
-    printable text counts one per character (a committed Hangul syllable is
-    one character and three bytes; a pasted run is counted the same way), a
+    ``(delta, cleared, in_paste)``. ``cleared`` is True when the frame
+    submitted the line (a bare Enter) or discarded it (``C-c``, ``C-u``): the
+    composer is empty after those, whatever was in it. ``delta`` is the net
+    number of *characters* the frame put in the composer after the last such
+    key: printable text counts one per character (a committed Hangul syllable
+    is one character and three bytes; a pasted run is counted the same way), a
     backspace subtracts one, and a newline inserted *into* the draft
     (Alt/Shift-Enter, backslash + Enter, a line break inside a bracketed
     paste) adds one.
+
+    ``in_paste`` is the bracketed-paste state the frame ended in. A frame can
+    end between the paste's start marker and its body (:data:`ESC[200~` in one
+    frame, the text in the next), and reading each frame on its own made the
+    next frame's newline a submit instead of a pasted line break — the line
+    was cleared and the draft with it (claunch-wzx2r.1). The caller passes the
+    value back in with the following frame's bytes; only the caller can time
+    out a marker whose body never finished (see
+    :meth:`Session._carried_paste`).
 
     ``(0, False)`` means the frame said nothing about the composer: an arrow
     key, a lone Escape, Home, the terminal's own reports. That case matters
@@ -435,7 +446,6 @@ def draft_edit_from_bytes(data: bytes) -> Tuple[int, bool]:
     """
     delta = 0
     cleared = False
-    in_paste = False
     run = bytearray()
 
     def flush() -> None:
@@ -478,7 +488,7 @@ def draft_edit_from_bytes(data: bytes) -> Tuple[int, bool]:
         elif b >= 0x20:  # printable; collected so one Hangul syllable is one
             run.append(b)
     flush()
-    return delta, cleared
+    return delta, cleared, in_paste
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -961,6 +971,16 @@ class Session:
         #: keys (see :meth:`_complete_keystroke_frame`).
         self._input_partial = b""
         self._input_partial_at = 0.0
+        #: Whether the last keystroke frame ended inside a bracketed paste —
+        #: its start marker has arrived and its end marker has not. The marker
+        #: and the pasted text can land in different frames, and a newline
+        #: read without this is a submit rather than a line break in the
+        #: paste (claunch-wzx2r.1). Timed out like :attr:`_input_partial`: a
+        #: marker whose body never finishes must not turn a later Enter into
+        #: a pasted newline, which would hold this session's mail over a
+        #: composer the person did submit.
+        self._input_paste = False
+        self._input_paste_at = 0.0
         #: A person's standing "don't type anything in here" — set from the
         #: dashboard, not derived from the keyboard. Every hold above is the
         #: daemon *guessing* from timing that now is a bad moment; this one
@@ -2074,6 +2094,25 @@ class Session:
         self._input_partial_at = now
         return complete
 
+    def _carried_paste(self, now: float) -> bool:
+        """Whether the previous keystroke frame left a bracketed paste open.
+
+        A paste start marker with no body yet belongs to the frame that
+        follows it (:meth:`draft_edit_from_bytes`), so it is carried the same
+        way a cut-off escape sequence is. It is dropped after
+        :data:`DRAFT_PARTIAL_TTL` for the same reason: a marker whose body
+        never arrives must not make an unrelated later Enter read as a pasted
+        line break — the person submitting their line would otherwise leave a
+        draft open behind them.
+        """
+        if not getattr(self, "_input_paste", False):
+            return False
+        if now - getattr(self, "_input_paste_at", 0.0) > DRAFT_PARTIAL_TTL:
+            self._input_paste = False
+            self._input_paste_at = 0.0
+            return False
+        return True
+
     def note_human_input(
         self,
         *,
@@ -2140,7 +2179,11 @@ class Session:
                 self._draft_uncommitted = True
             self._draft_open = True
         if data:
-            delta, cleared = draft_edit_from_bytes(data)
+            delta, cleared, paste = draft_edit_from_bytes(
+                data, in_paste=self._carried_paste(now)
+            )
+            self._input_paste = paste
+            self._input_paste_at = now if paste else 0.0
             if cleared:
                 # The line went away with its submit (or was discarded);
                 # only what was typed after it, in this same frame, remains.
@@ -2417,6 +2460,8 @@ class Session:
         self._draft_open = False
         self._draft_chars = 0
         self._draft_uncommitted = False
+        self._input_paste = False
+        self._input_paste_at = 0.0
         await asyncio.sleep(FORCE_DRAFT_SETTLE)
 
     async def paste(self, text: str, *, enter: bool = False) -> bytes:
