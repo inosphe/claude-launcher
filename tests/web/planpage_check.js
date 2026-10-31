@@ -1,5 +1,8 @@
-/* Real plan-page.js (claunch-7jzp8.2): the overview grouped by stage, the
-   stage and project filters, the joint grouping read only when asked for,
+/* Real plan-page.js (claunch-7jzp8.2): the tree by default (claunch-7jzp8.5)
+   -- session cards nested by their joint parent, each plan's steps under its
+   card, a decision forking into its options with the taken one marked, a
+   card's steps folded and unfolded, a filtered-out member dimmed -- then the
+   overview grouped by stage, the stage and project filters,
    "ended sessions too" asking with all=1, and the session links; with a
    project picked, its aggregation session's pane (kept across redraws) or
    the start button (claunch-7jzp8.3). */
@@ -28,8 +31,15 @@ const OVERVIEW = {
   ],
 };
 OVERVIEW.aggregators = [{project: 'other', session: 'agg', running: true}];
+const TREE = [
+  {id: 'a', kind: 'step', title: 'write', status: 'doing', children: []},
+  {id: 'd', kind: 'decision', title: 'storage', choice: 'B', detail: 'where the plan lives',
+   options: [{label: 'A', effect: 'fast', risk: 'untested', recommended: true}, {label: 'B', effect: 'safe', risk: 'slow'}],
+   children: [{id: 'c', kind: 'step', title: 'migrate', status: 'todo', children: []}]},
+];
 const JOINT = {groups: [{root: 's1', sessions: 1, waiting: 2, members: [
-  {session: 's1', depth: 0, has_plan: false}, {session: 's2', depth: 1, has_plan: true}]}]};
+  {session: 's1', depth: 0, has_plan: false, parent: null, via: null},
+  {session: 's2', depth: 1, has_plan: true, parent: 's1', via: 'spawn', tree: TREE}]}]};
 
 const posts = [];
 async function request(raw, method, body) {
@@ -62,8 +72,52 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
 
 (async () => {
   ctx.PlanPage.open({request}); await settle();
-  assert.deepStrictEqual(calls, ['/api/plan/overview']);
-  const t = text();
+  assert.deepStrictEqual(calls, ['/api/plan/overview', '/api/plan/joint?steps=1']);
+  const liOf = (session) => all(host).find(n => n.tag === 'li' && n.className === 'ptree-node ptree-session'
+    && all(n.children[0]).some(c => c.className === 'plan-page-session' && c.textContent === session));
+  const byTitle = (title) => all(host).find(n => n.tag === 'li' && n.children[0] && n.children[0].children
+    && n.children[0].children.some(c => c.textContent === title || (c.children || []).some(d => d.textContent === title)));
+  let t = text();
+  for (const want of ['s1 · 세션 2개 · 내 결정 대기 2건', '계획 없는 세션 (1)', '자식 세션', '결정됨',
+                      'Child — 단계 1/3 · 지금: write · 내 결정 대기 2건', '런이 기다림: choose: land?',
+                      '기대효과: fast', '리스크: untested', '기대효과: safe', '리스크: slow'])
+    assert(t.includes(want), `tree: missing ${want}`);
+  assert.deepStrictEqual(rows(), ['s1', 's2', 's3']);
+  // s2 hangs under s1's card; its steps under its own
+  const s2 = liOf('s2');
+  assert.strictEqual(s2.parent.className, 'ptree ptree-sessions');
+  assert.strictEqual(s2.parent.parent, liOf('s1'));
+  assert.strictEqual(s2.children[1].className, 'ptree ptree-steps');
+  const decision = byTitle('storage');
+  assert.strictEqual(decision.className, 'ptree-node ptree-decision ptree-decided');
+  assert.strictEqual(decision.children[0].attributes.title, 'where the plan lives');
+  const branches = decision.children[1].children.map(c => c.className);
+  assert.deepStrictEqual(branches, ['ptree-node ptree-option ptree-unchosen ptree-recommended',
+                                    'ptree-node ptree-option ptree-chosen', 'ptree-node ptree-step ptree-st-todo']);
+  assert.strictEqual(byTitle('write').className, 'ptree-node ptree-step ptree-st-doing');
+  // fold one card's steps, then unfold everything
+  buttons('단계 접기')[0].onclick(); await settle();
+  assert(!text().includes('기대효과: fast') && text().includes('단계 펼치기 (2)'));
+  assert.strictEqual(liOf('s2').children.length, 1);
+  buttons('모두 펼치기')[0].onclick(); await settle();
+  assert(text().includes('기대효과: fast'));
+  buttons('모두 접기')[0].onclick(); await settle();
+  assert(!text().includes('기대효과: fast'));
+  buttons('모두 펼치기')[0].onclick(); await settle();
+  // a filter that keeps s2 keeps its group whole: s1 drawn, dimmed
+  buttons('내 차례')[0].onclick(); await settle();
+  assert.deepStrictEqual(rows(), ['s1', 's2']);
+  const card = (session) => liOf(session).children[0].className;
+  assert(card('s1').includes('ptree-dim') && !card('s2').includes('ptree-dim') && card('s2').includes('plan-stage-user'));
+  buttons('내 차례')[0].onclick(); await settle();
+  buttons('닫아도 됨')[0].onclick(); await settle();
+  assert.deepStrictEqual(rows(), ['s3']);                       // no member of s1's group left: not drawn
+  buttons('닫아도 됨')[0].onclick(); await settle();
+
+  // the stage grouping
+  buttons('단계별')[0].onclick(); await settle();
+  assert.strictEqual(calls.length, 2);                           // no read: the rows are already here
+  t = text();
   for (const want of ['세션 진행 개요', '내 차례 (1)', '닫아도 됨 (1)', '진행 중 (1)',
                       'Child — 단계 1/3 · 지금: write · 내 결정 대기 2건', '런이 기다림: choose: land?',
                       'improv-worker-v2 r1 · work · waiting_approval', 'improv-leader-v2 · standby'])
@@ -104,10 +158,10 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   projectPick().value = ''; projectPick().onchange(); await settle();
   assert(text().includes('other: agg'));
 
-  // joint grouping: read only now; the plan-less parent's row sits first, s3 falls to the rest
-  buttons('연관 세션별')[0].onclick(); await settle();
-  assert(calls.includes('/api/plan/joint'));
-  assert(text().includes('s1 · 세션 2개 · 내 결정 대기 2건') && text().includes('계획 없는 세션 (1)'));
+  // back to the tree: the joint trees are read again
+  const before = calls.filter(c => c === '/api/plan/joint?steps=1').length;
+  buttons('트리')[0].onclick(); await settle();
+  assert.strictEqual(calls.filter(c => c === '/api/plan/joint?steps=1').length, before + 1);
   assert.deepStrictEqual(rows(), ['s1', 's2', 's3']);
 
   // ended sessions too
