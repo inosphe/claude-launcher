@@ -88,6 +88,29 @@ nodes:
 body: [frame, pose]
 """
 
+#: An ask whose prompt is markdown (claunch-ns4kd): the card renders it, so
+#: the rail must carry it unjoined.
+ASKMD = """\
+cflow: 2
+name: askmd
+description: an ask whose prompt is markdown
+nodes:
+  a:
+    title: Step A
+    prompt: do a
+    ask:
+      prompt: |
+        ## 일감
+
+        - `app.js:63882` 를 고친다
+        - 목록은 목록으로 보인다
+  b: {title: Step B, prompt: do b}
+body:
+  try: [a, b]
+  catch:
+    declined: b
+"""
+
 BRIEF = {
     "problem": "how wide?",
     "options": [{"name": "narrow", "summary": "keep it small"},
@@ -104,6 +127,7 @@ def proj(home, tmp_path, monkeypatch):
     (v2 / "pick.yaml").write_text(PICK, encoding="utf-8")
     (v2 / "askme.yaml").write_text(ASKME, encoding="utf-8")
     (v2 / "askbrief.yaml").write_text(ASKBRIEF, encoding="utf-8")
+    (v2 / "askmd.yaml").write_text(ASKMD, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -500,6 +524,37 @@ def test_rail_prompt_is_one_bounded_line():
     assert flat == "a b c"
     long = cflow2_web._rail_prompt("x" * 1000)
     assert len(long) == cflow2_web.RAIL_PROMPT_MAX and long.endswith("…")
+
+
+def test_rail_markdown_keeps_the_line_structure_and_is_bounded():
+    """``prompt_md`` (claunch-ns4kd) is the same question with its lines
+    kept: the dashboard's ask card renders it as markdown, so joining its
+    lines — what ``_rail_prompt`` does for the one-line strip — would hand
+    the card a paragraph where the ask wrote a heading and a list."""
+    assert (cflow2_web._rail_markdown("## 계획\n\n- 하나  \n- 둘\n")
+            == "## 계획\n\n- 하나\n- 둘")
+    assert cflow2_web._rail_markdown("\r\n하나\r\n둘\r\n") == "하나\n둘"
+    long = cflow2_web._rail_markdown("x" * 5000)
+    assert len(long) == cflow2_web.RAIL_PROMPT_MD_MAX and long.endswith("…")
+    assert cflow2_web.RAIL_PROMPT_MD_MAX > cflow2_web.RAIL_PROMPT_MAX
+
+
+def test_rail_ask_carries_the_prompt_as_the_ask_wrote_it(proj):
+    """The ask answer carries the markdown beside the one-line prompt: the
+    card draws ``prompt_md`` (unchanged lines), the terminal strip keeps
+    reading ``prompt`` (one line, bounded) — claunch-ns4kd."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askmd", cwd), cwd=cwd, scope="s1", caps={})
+        (a,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert a["kind"] == "ask"
+        assert a["prompt_md"] == ("## 일감\n\n- `app.js:63882` 를 고친다\n"
+                                  "- 목록은 목록으로 보인다")
+        assert "\n" not in a["prompt"] and a["prompt"].startswith("## 일감")
+        assert len(a["prompt"]) <= cflow2_web.RAIL_PROMPT_MAX
+    finally:
+        executors.register(None)
 
 
 def test_rail_entry_is_recomputed_only_when_the_run_files_change(proj, monkeypatch):

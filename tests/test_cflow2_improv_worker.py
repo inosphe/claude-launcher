@@ -453,6 +453,33 @@ def test_routing_hard_plan_keeps_the_work_here(tmp_path, monkeypatch):
     assert _finish_skip(st, kw)["status"] == "done"
 
 
+def test_routing_gate_keeps_approve_always_out_of_the_per_item_promise(
+        tmp_path, monkeypatch):
+    """The routing prompt offers four approvals and then says which of them
+    last one item. `approve-always` is the exception — the line describing it
+    says the run asks nobody again — so a count over all four ("위의 네 승인은
+    이번 일감만의 승인이다") states the opposite of the line right above it
+    (claunch-ns4kd). The paragraph has to name the exception."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch,
+                           {"session_routing": True, "require_coding_approval": True})
+    st = runtime.report(_one(st, "coding-plan"), "ok",
+                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    [ask] = st["asks"]
+    approvals = [o["name"] for o in ask["options"] if o["name"].startswith("approve-")]
+    assert len(approvals) == 4
+    blocks = [b for b in ask["prompt"].split("\n\n") if "이번 일감만의 승인" in b]
+    assert blocks, "the routing prompt still says which approvals last one item"
+    block = " ".join(blocks[0].split())
+    assert "approve-always" in block, (
+        "the paragraph about per-item approvals has to name approve-always: it "
+        "is the one answer the run keeps for the items after this one")
+    assert "네 승인" not in block, (
+        "counting all four approvals as per-item is the contradiction this "
+        "test exists for")
+
+
 @pytest.mark.parametrize("answer, route, worker", [
     ("approve-as-planned", "route-planned", "delegate-work"),
     ("approve-no-delegate", "route-direct", "work"),

@@ -616,6 +616,7 @@ CHECKS = [
         "railtimer_check.js",
         "termtimer_check.js",
         "mdrender_check.js",
+        "noticeaskmd_check.js",
         "railseen_check.js",
         "raillife_check.js",
         "dotgrade_check.js",

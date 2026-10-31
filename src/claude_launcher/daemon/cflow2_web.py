@@ -1008,6 +1008,28 @@ def _rail_prompt(text: Any) -> str:
     return flat if len(flat) <= RAIL_PROMPT_MAX else flat[:RAIL_PROMPT_MAX - 1] + "…"
 
 
+#: The same question kept as written, for the dashboard's ask card: a v2 ask
+#: prompt is markdown (headings, lists, fenced plans) and the card renders it
+#: as markdown, so flattening it to one line was what made a request read as a
+#: single wall of prose — and the 400-character cap above cut it mid-word
+#: (claunch-ns4kd). Larger than the strip's cap because only a gate that waits
+#: on a person carries it, and the strip does not read this field.
+RAIL_PROMPT_MD_MAX = 1600
+
+
+def _rail_markdown(text: Any) -> str:
+    """``text`` with its line structure kept, cut at :data:`RAIL_PROMPT_MD_MAX`.
+
+    Line endings are normalised and trailing spaces dropped, but no line is
+    joined: the markdown a card draws is the markdown the ask wrote. The cut
+    lands mid-line, which the dashboard's renderer takes as an unterminated
+    line rather than a broken document — the same way it already draws a
+    report whose fence never closes."""
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    src = "\n".join(line.rstrip() for line in src.split("\n")).strip("\n")
+    return src if len(src) <= RAIL_PROMPT_MD_MAX else src[:RAIL_PROMPT_MD_MAX - 1] + "…"
+
+
 #: How many of a run's urgent asks the rail row lists, newest first.
 RAIL_URGENT_MAX = 20
 
@@ -1106,6 +1128,10 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             "label": a.get("label") or a.get("node"),
             "prompt": _rail_prompt(a.get("question_text") or a.get("prompt")
                                    or a.get("title")),
+            # The same question as the ask wrote it, for the card that renders
+            # it as markdown — the strip above shows one line (claunch-ns4kd).
+            "prompt_md": _rail_markdown(a.get("question_text") or a.get("prompt")
+                                        or a.get("title")),
             "require_reason": bool(a.get("require_reason")),
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in a.get("options") or []]

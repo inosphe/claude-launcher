@@ -366,6 +366,13 @@ ask:
   다시 시작한다. 데몬과의 연결이 끊겼다 돌아오면 그 값을 버리고 다음 응답에서
   다시 읽는다. `flow_status`의 `asks`·`choices`·`loop_limits`·`visit_limits` 항목도
   같은 `opened_at`을 싣는다.
+- 질문 본문의 markdown(claunch-ns4kd): `/api/cflow2/rail`의 `answers[]` 항목은
+  `prompt`(한 줄로 접고 400자에서 자른 값 — 터미널 스트립과 상태 줄이 읽는다)와
+  `prompt_md`(ask가 쓴 그대로의 줄바꿈을 보존하고 1600자에서 자른 값)를 함께 싣는다.
+  대시보드의 알림 카드와 기록 행은 `prompt_md`를 markdown으로 그리고, 없는 응답
+  (이 필드가 생기기 전의 데몬, 그리고 v1 런 — 그쪽은 런 행의 `ask.prompt`를 쓴다)은
+  지금까지대로 `prompt`를 평문으로 그린다. 두 상한은
+  `cflow2_web.RAIL_PROMPT_MAX`·`RAIL_PROMPT_MD_MAX`다.
 - 세션 상태(claunch-6vq2m): 세션이 끝나도 그 세션이 남긴 런은 디스크에서 계속
   사람을 기다린다. 그래서 `/api/cflow2/rail`의 행마다 그 세션의
   `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
