@@ -288,7 +288,7 @@ function build(opts) {
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     "confirm", "prompt",
-    "__doc", "__win",
+    "__doc", "__win", "sessionsCache",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, runGateSync," +
     " refreshNudgeGate, refreshMeshJoinGate, noticeGatePoll," +
@@ -328,7 +328,7 @@ function build(opts) {
     o.hub ? o.hub.Channel : undefined,
     (q) => { dialogs.asked.push(["confirm", q]); return dialogs.confirm; },
     (q) => { dialogs.asked.push(["prompt", q]); return dialogs.prompt; },
-    target(listeners.document), target(listeners.window),
+    target(listeners.document), target(listeners.window), [],
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };

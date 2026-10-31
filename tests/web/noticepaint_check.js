@@ -183,7 +183,7 @@ function build() {
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
-    "confirm", "prompt", "document", "window",
+    "confirm", "prompt", "document", "window", "sessionsCache",
     code +
     "\n;(function () {\n" +
     "  const place = noticePanelPlace;\n" +
@@ -200,7 +200,9 @@ function build() {
     noop, noop, noop, noop,
     noop, noop, noop, noop,
     noop, noop, noop,
-    noop, noop, noop, noop, noop,
+    noop, noop,
+    noop, noop, noop, noop,
+    noop, noop, noop, noop, [],
     noop, noop, noop,
     noop, noop, noop, undefined, undefined,
     __doc, __win

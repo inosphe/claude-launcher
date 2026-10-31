@@ -757,6 +757,7 @@ BROWSER_CHECKS = [
         "noticecost_browser.cjs",
         "noticewrap_browser.cjs",
         "noticefold_browser.cjs",
+        "sessiontooltip_browser.cjs",
 ]
 
 
