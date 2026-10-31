@@ -10508,23 +10508,12 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-error { color: #ff7b72; margin: 4px 0; }
 .plan-empty { color: var(--plan-muted); }
 .plan-section { margin: 14px 0 4px; font-size: 13px; border-bottom: 1px solid var(--plan-border); }
-.plan-tree { list-style: none; margin: 0; padding: 0 0 0 4px; }
-.plan-tree .plan-tree { padding-left: 16px; border-left: 1px dashed var(--plan-border); margin-left: 6px; }
 .plan-item { padding: 4px 0; }
 .plan-item-head { display: flex; gap: 8px; align-items: baseline; }
 .plan-title { overflow-wrap: anywhere; }
 .plan-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--plan-border); border-radius: 10px; color: var(--plan-muted); white-space: nowrap; }
-.plan-status-done > .plan-item-head .plan-title, .plan-status-skipped > .plan-item-head .plan-title { color: var(--plan-muted); }
-.plan-status-doing > .plan-item-head .plan-chip { border-color: #427fdf; color: #79b8ff; }
-.plan-status-blocked > .plan-item-head .plan-chip { border-color: #da3633; color: #ff7b72; }
-.plan-decision > .plan-item-head .plan-chip, .plan-status-open.plan-decision > .plan-item-head .plan-chip { border-color: #e3b341; color: #e3b341; }
 .plan-detail { margin: 2px 0 0 4px; color: var(--plan-muted); white-space: pre-wrap; font-size: 12px; }
-.plan-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin: 6px 0; }
-.plan-option { background: var(--plan-panel); border: 1px solid var(--plan-border); border-radius: 8px; padding: 8px 10px; }
-.plan-option p { margin: 2px 0; font-size: 12px; }
 .plan-option-head { display: flex; gap: 6px; align-items: baseline; }
-.plan-recommended { border-color: #427fdf; }
-.plan-chosen { border-color: #2ea043; background: #15261b; }
 .plan-effect { color: #9fd8a8; }
 .plan-risk { color: #f0b37e; }
 .plan-note { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 3px 6px; font: inherit; font-size: 12px; resize: vertical; margin-top: 4px; }
@@ -10603,6 +10592,25 @@ a.category-ref:hover { text-decoration: underline; }
 .ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
 .ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
 .ptree-unchosen > .ptree-opt { opacity: 0.5; }
+/* Each project is the root of its tree (claunch-7jzp8.5.2). */
+.ptree-root + .ptree-root { margin-top: 14px; }
+.ptree-project > .ptree-label { background: var(--plan-panel); border-color: var(--plan-border); font-size: 14px; padding: 3px 10px; }
+.ptree-noplan > .ptree-flat { padding: 6px 0 0 16px; }
+/* The session ☰ plan pane draws the same tree (claunch-7jzp8.5.2): the
+   plan's steps hang from its title, the closure items from their heading,
+   and each branch keeps the pane's controls under its label. The page's own
+   shell is a .plan-pane too, so these rules leave .plan-page out. */
+.plan-pane:not(.plan-page) > .ptree-steps, .plan-pane:not(.plan-page) > .ptree-closures { padding-left: 6px; }
+.plan-pane:not(.plan-page) .ptree-node.plan-item { padding-bottom: 0; }
+.plan-pane:not(.plan-page) .ptree-label { max-width: 100%; box-sizing: border-box; flex-wrap: wrap; }
+.plan-pane:not(.plan-page) .ptree-st-doing > .ptree-label .plan-chip { border-color: #427fdf; color: #79b8ff; }
+.plan-pane:not(.plan-page) .ptree-st-blocked > .ptree-label .plan-chip { border-color: #da3633; color: #ff7b72; }
+.plan-pane:not(.plan-page) .ptree-opt { display: block; max-width: 100%; }
+.plan-pane:not(.plan-page) .ptree-opt .wf-btn { margin-top: 4px; }
+.plan-pane:not(.plan-page) .ptree-unchosen > .ptree-opt:hover { opacity: 1; }
+.plan-decision-box, .plan-pane:not(.plan-page) .ptree-closure > .plan-note, .plan-pane:not(.plan-page) .ptree-closure > .plan-actions,
+.plan-pane:not(.plan-page) .ptree-closure > .plan-result, .plan-pane:not(.plan-page) .ptree-closure > .plan-told { margin-left: 8px; }
+.plan-decision-box .plan-note { max-width: 440px; }
 
 /* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
 .packs-host {

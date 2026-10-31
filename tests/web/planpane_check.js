@@ -3,7 +3,10 @@
    the decide bodies naming the node's rev and the note, a 409 reloading the
    reworded node, and the feedback box. The joint view (claunch-7jzp8.1):
    the toggle, the related sessions' lines, and a nested pane deciding on
-   the other session's plan. */
+   the other session's plan. The plan is drawn as a tree in #/plan's shape
+   (claunch-7jzp8.5.2): step branches with a status mark, a decision forking
+   into option branches (recommended, then chosen and unchosen), its own
+   steps under it, the closure items as branches of their heading. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -97,6 +100,19 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   // the nested step is drawn under the decision
   const d1 = all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'));
   assert(text(d1).includes('write store'));
+  // the tree: the steps hang from the plan, the decision forks into its options, then its own steps
+  assert.strictEqual(d1.className, 'ptree-node ptree-decision ptree-undecided plan-item plan-decision');
+  assert.strictEqual(d1.parent.className, 'ptree ptree-steps');
+  assert.deepStrictEqual(d1.children[0].children.map(c => c.textContent), ['◆', 'storage', '결정 필요']);
+  const optionClasses = () => all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'))
+    .children.find(c => c.className === 'ptree plan-options-tree').children.map(c => c.className);
+  assert.deepStrictEqual(optionClasses(), ['ptree-node ptree-option ptree-recommended', 'ptree-node ptree-option']);
+  const sub = d1.children.find(c => c.className === 'ptree ptree-steps');
+  assert.strictEqual(sub.children[0].className, 'ptree-node ptree-step ptree-st-doing plan-item plan-step');
+  assert.deepStrictEqual(sub.children[0].children[0].children.map(c => c.textContent), ['◐', 'write store', '진행 중']);
+  const closures = all(host).find(n => n.className === 'ptree ptree-closures');
+  assert.deepStrictEqual(closures.children.map(c => c.className),
+    ['ptree-node ptree-closure ptree-st-todo plan-item plan-verify', 'ptree-node ptree-closure ptree-st-todo plan-item plan-followup']);
 
   // Pick B with a note: the body names the node's rev and the note.
   const note = input(host, '선택에 붙일 메모 (선택 사항)')[0];
@@ -106,6 +122,9 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
     {path: '/api/plan/node/d1/decide', method: 'POST', body: {session: 's1', note: 'safer', rev: 2, choice: 'B'}});
   assert.strictEqual(changes, 1);
   assert(text(host).includes('선택: B — safer'));
+  assert.deepStrictEqual(optionClasses(), ['ptree-node ptree-option ptree-unchosen ptree-recommended',
+                                           'ptree-node ptree-option ptree-chosen']);
+  assert(text(host).includes('선택됨'));
 
   // A 409: the session reworded the node; the pane reloads and says so.
   plan.steps[1].result = null;
