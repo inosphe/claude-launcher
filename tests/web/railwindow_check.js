@@ -327,6 +327,25 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   assert.ok(/refreshSessions\(\{ cached: true \}\)/.test(wire),
     "the scroll rebuild reads the cache instead of polling");
 
+  // A scroll-to-top press's smooth animation is not aborted by a mid-flight
+  // pass (claunch-7vd4v): the press marks the list, and while the mark stands
+  // neither the scroll handler nor a rebuild touches the position -- an
+  // instant scrollTop write aborts a smooth scroll (CSSOM View).
+  assert.ok(/railScrollTopMarked\(box\)/.test(wire),
+    "the scroll handler leaves a marked press alone");
+  assert.ok(wire.indexOf("railScrollTopMarked(box)") < wire.indexOf("railSliceCovers(box)"),
+    "...and the mark is checked before the covering check");
+  const marked = slice("railScrollTopMarked");
+  assert.ok(/until > Date\.now\(\)/.test(marked),
+    "the mark is a deadline, not a bare flag");
+  const top = slice("scrollSessionListTop");
+  assert.ok(/_railScrollTopUntil = Date\.now\(\) \+ RAIL_SCROLL_TOP_ANIM_MS/.test(top),
+    "the press marks the list for the animation's run");
+  assert.ok(/scrollend/.test(top),
+    "the mark comes off when the animation settles");
+  assert.ok(/!scrollTopAnim/.test(body),
+    "a rebuild writes no position while the mark stands");
+
   // The flag is what turns the rebuild on, and it is spent once.
   assert.ok(/const changed = windowForced \|\| signature !== list\._sessionsSignature;/
     .test(body), "the forced rebuild opens the same gate a changed fleet does");

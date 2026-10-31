@@ -4425,14 +4425,52 @@ function sessionGroupTabRows(rows, group) {
    rows start at the top, not at the scroll position the last group had. */
 let sessionGroupTabScrollReset = false;
 
+/* A header press sends the rail to its top with a smooth scroll, and that
+   animation has to survive the rail's own passes. A rebuild restores the
+   position with an instant `scrollTop` write (keptScrollTop, railRestoreAnchor),
+   and an instant write aborts a running smooth scroll (CSSOM View): the first
+   pass that ran while the animation was moving froze the rail where it stood --
+   partway up, with the scrollbar's thumb stopped mid-track -- and the next
+   press advanced it only as far as the pass after that. So the press marks the
+   list for the animation's run: while the mark stands, the scroll handler asks
+   for no rebuild and a rebuild writes no position. The mark is a deadline, not
+   a bare flag -- a browser that fires no `scrollend` (or an animation the
+   reader interrupts with the wheel) must not leave the rail without its
+   scroll-triggered rebuilds for more than this. */
+const RAIL_SCROLL_TOP_ANIM_MS = 3000;
+
+/* Whether a scroll-to-top press's animation is still running on `list`. */
+function railScrollTopMarked(list) {
+  const until = list && typeof list._railScrollTopUntil === "number"
+    ? list._railScrollTopUntil : 0;
+  return until > Date.now();
+}
+
 /* The rail back to its top: smoothly where the browser can. */
 function scrollSessionListTop() {
   const list = $("session-list");
-  if (list && typeof list.scrollTo === "function") {
-    list.scrollTo({ top: 0, behavior: "smooth" });
-  } else if (list) {
+  if (!list) return;
+  if (typeof list.scrollTo !== "function") {
     list.scrollTop = 0;
+    return;
   }
+  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
+  if (typeof list.addEventListener === "function") {
+    /* The animation settled: take the mark off and run the covering check the
+       scroll handler skipped while it stood, so the slice around the top is
+       drawn (the window covered where the animation started, not where it
+       ended). */
+    list.addEventListener("scrollend", () => {
+      list._railScrollTopUntil = 0;
+      const box = typeof $ === "function" ? $("session-list") : null;
+      if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
+      if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+      if (railSliceCovers(box)) return;
+      refreshSessions._forceRebuild = true;
+      refreshSessions({ cached: true });
+    }, { once: true });
+  }
+  list.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 /* A tab press. On another tab, open it; on the open one, take the rail back
@@ -5526,6 +5564,14 @@ function railWireWindowScroll(list) {
       const box = typeof $ === "function" ? $("session-list") : null;
       if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
       if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+      /* A scroll-to-top press owns the position until its animation settles;
+         a rebuild here would restore the mid-animation position and abort the
+         smooth scroll. Reaching the top ends the wait -- no `scrollend` a
+         listener could miss is needed for that. */
+      if (railScrollTopMarked(box)) {
+        if ((box.scrollTop || 0) > 0) return;
+        box._railScrollTopUntil = 0;
+      }
       if (railSliceCovers(box)) return;
       refreshSessions._forceRebuild = true;
       // From the cache, not the daemon: a scroll asks for rows already in
@@ -7127,12 +7173,20 @@ async function refreshSessions(options) {
     railMeasureRows(list);
     if (railTailFix) railTailFix();
   }
-  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  // A scroll-to-top press in flight (its smooth animation owns the position):
+  // an instant write here would abort that animation -- the rail froze where
+  // the pass found it, partway up (see scrollSessionListTop). The settle
+  // path redraws the slice around the top once the animation lands. Inlined
+  // rather than read through railScrollTopMarked: the harnesses that slice
+  // this function out of app.js keep working without the helper.
+  const scrollTopAnim = typeof list._railScrollTopUntil === "number"
+    && list._railScrollTopUntil > Date.now();
+  if (rebuild && keptScrollTop && !scrollTopAnim) list.scrollTop = keptScrollTop;
   else if (rebuild && tabSwitched) list.scrollTop = 0;
   // ...and then the row the reader was looking at goes back where it was
   // (claunch-gpxur). The number above is right only while the model's heights
   // match the page; the row is right either way.
-  if (rebuild && railAnchor && typeof railRestoreAnchor === "function") {
+  if (rebuild && railAnchor && !scrollTopAnim && typeof railRestoreAnchor === "function") {
     railRestoreAnchor(list, railAnchor);
   }
   // The ancestor band above the list reads the rows this pass just drew (and
