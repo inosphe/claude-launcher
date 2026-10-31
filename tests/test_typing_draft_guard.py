@@ -104,6 +104,7 @@ def _fake_session(*, bracketed: bool = True):
         (b"\x1b", (0, False)),            # a lone Escape decides nothing
         (b"\x7f", (-1, False)),           # backspace removes a character
         (b"\x08", (-1, False)),           # ...in either encoding
+        (b"\x1b[3~", (-1, False)),        # Delete forward removes one too
         (b"hi\x7f\x7f", (0, False)),      # typed and erased: nothing left
         (b"\x1b[200~hi\x1b[201~", (2, False)),  # a paste fills the composer
         (b"\x1b[200~a\nb\x1b[201~", (3, False)),  # a paste line break stays in it
@@ -163,6 +164,38 @@ def test_typing_then_erasing_every_character_leaves_no_draft():
     assert s.draft_open() is True  # one character left in the line
     s.note_human_input(at_terminal=True, data=b"\x7f")
     assert s.draft_open() is False
+
+
+def test_erasing_with_home_and_the_delete_key_leaves_no_draft():
+    """claunch-m2v4w: the same false positive through the other erase idiom.
+    A line erased with Home + Delete (rather than Backspace) read as still
+    unsent: ESC[3~ said "nothing changed", so the model kept the characters
+    the Delete key had actually removed, and the empty composer held the
+    session's mail for DRAFT_GUARD (180s) as a phantom unsent line."""
+    s, _ = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"hi")
+    assert s.draft_open() is True
+    s.note_human_input(at_terminal=True, data=b"\x1b[H")  # cursor to the start
+    s.note_human_input(at_terminal=True, data=b"\x1b[3~")
+    assert s.draft_open() is True  # one character left in the line
+    s.note_human_input(at_terminal=True, data=b"\x1b[3~")
+    assert s.draft_open() is False
+
+
+def test_draft_transitions_are_logged_for_diagnosis(caplog):
+    """claunch-m2v4w: when the next held draft is reported as a false
+    positive, the frames that built it have to be readable from the daemon
+    log at debug level — without that line the next investigation
+    reconstructs the model from nothing."""
+    import logging
+
+    s, _ = _fake_session()
+    with caplog.at_level(logging.DEBUG, logger=session_mod.log.name):
+        s.note_human_input(at_terminal=True, data=b"hi")
+        s.note_human_input(at_terminal=True, data=b"\r")
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("draft s: chars=2 open=True") for m in lines)
+    assert any(m.startswith("draft s: chars=0 open=False") for m in lines)
 
 
 def test_the_count_is_characters_not_utf8_bytes():

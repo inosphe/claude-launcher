@@ -418,9 +418,9 @@ def draft_edit_from_bytes(
     number of *characters* the frame put in the composer after the last such
     key: printable text counts one per character (a committed Hangul syllable
     is one character and three bytes; a pasted run is counted the same way), a
-    backspace subtracts one, and a newline inserted *into* the draft
-    (Alt/Shift-Enter, backslash + Enter, a line break inside a bracketed
-    paste) adds one.
+    backspace or a forward Delete subtracts one, and a newline inserted *into*
+    the draft (Alt/Shift-Enter, backslash + Enter, a line break inside a
+    bracketed paste) adds one.
 
     ``in_paste`` is the bracketed-paste state the frame ended in. A frame can
     end between the paste's start marker and its body (:data:`ESC[200~` in one
@@ -465,6 +465,14 @@ def draft_edit_from_bytes(
                 in_paste = True
             elif seq == b"\x1b[201~":
                 in_paste = False
+            elif seq == b"\x1b[3~" and not in_paste:
+                # Delete forward removes a character, the same way a
+                # backspace does. A line erased with Home + Delete used
+                # to leave the count positive over an empty composer, and
+                # the phantom draft held the session's mail for
+                # DRAFT_GUARD (claunch-m2v4w). Inside a bracketed paste
+                # the same bytes are literal text, not a keypress.
+                delta -= 1
             elif j - i == 2 and data[i + 1] in (0x0D, 0x0A):
                 delta += 1  # Alt/Shift-Enter: a newline in the draft
             continue
@@ -2201,6 +2209,24 @@ class Session:
                 # draft now, a submit/clear closed it.
                 self._draft_open = self._draft_chars > 0
                 self._draft_uncommitted = False
+        if data or composing:
+            # claunch-m2v4w: a held draft is diagnosed from this line after
+            # the fact. When a session is held over a composer its operator
+            # calls empty, the frames that built the held draft have to be
+            # readable from the daemon log — without them the next
+            # investigation of a false positive reconstructs the model from
+            # nothing, as the round that added this line had to.
+            name = getattr(getattr(self, "sdef", None), "name", None) or "?"
+            log.debug(
+                "draft %s: chars=%d open=%s uncommitted=%s "
+                "(frame=%r composing=%s)",
+                name,
+                getattr(self, "_draft_chars", 0),
+                self._draft_open,
+                self._draft_uncommitted,
+                (data or b"")[:32],
+                composing,
+            )
 
     def draft_open(self) -> bool:
         """Whether a human has an unsent line in this terminal's composer.
