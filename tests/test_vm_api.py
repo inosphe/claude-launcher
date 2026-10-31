@@ -10,7 +10,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
 from claude_launcher.daemon import actors, vm_api, vm_tart
-from claude_launcher.daemon.vmhub import Registry
+import pytest
+
+from claude_launcher.daemon.vmhub import Registry, VmError
 
 from claude_launcher.daemon import vm_channel
 from test_vm_channel import World
@@ -317,6 +319,22 @@ async def test_duplicate_control_is_refused_until_the_command_queue_exists(api):
     assert api.reg.get("a").extra_controllers == {}
 
 
+def test_run_steps_may_carry_control_actions_only():
+    ok = {"steps": [{"tool": "click", "args": {"pid": 1}},
+                    {"type_text": {"text": "x"}, "expect": [{"text": "x"}]},
+                    {"expect": [{"text": "done"}]}]}
+    vm_api.check_nested("run_steps", ok)
+    for bad in ({"tool": "set_config", "args": {}}, {"install_extension": {}},
+                {"tool": "click", "set_config": {}}, {"tool": 7}, {"run_script": {}}):
+        with pytest.raises(VmError) as e:
+            vm_api.check_nested("run_steps", {"steps": [{"tool": "click"}, bad]})
+        assert e.value.code == "vm_tool_not_allowed" or e.value.code == "vm_bad_request"
+    for bad in ({"steps": "x"}, {"steps": ["click"]}, {}):
+        with pytest.raises(VmError):
+            vm_api.check_nested("run_steps", bad)
+    vm_api.check_nested("click", {"steps": "not looked at"})  # only run_steps nests
+
+
 def test_the_cua_tool_scopes_hold_for_the_whole_driver_list():
     """Every tool of cua-driver 0.38.0 (62) has a scope, and the ones that
     write files, install or reconfigure are exec."""
@@ -335,8 +353,8 @@ def test_the_cua_tool_scopes_hold_for_the_whole_driver_list():
     by = {n: vm_api.tool_scope(n) for n in names}
     assert {n for n, s in by.items() if s == "exec"} == {
         "install_extension", "install_ffmpeg", "set_config", "start_recording",
-        "browser_download", "browser_set_input_files"}
-    for n in ("run_script", "run_steps", "replay_trajectory", "kill_app", "clipboard_read",
+        "browser_download", "browser_set_input_files", "replay_trajectory"}
+    for n in ("run_script", "run_steps", "kill_app", "clipboard_read",
               "get_browser_state", "launch_app", "page", "check_for_update"):
         assert by[n] == "control", n
     assert sum(1 for s in by.values() if s == "view") == len(vm_api.VIEW_TOOLS)

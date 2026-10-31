@@ -61,7 +61,22 @@ VIEW_TOOLS = frozenset({
 EXEC_TOOLS = frozenset({
     "install_extension", "install_ffmpeg", "set_config", "start_recording",
     "browser_download", "browser_set_input_files",
+    # Re-invokes whatever tools the trajectory directory on the guest records,
+    # by name; the daemon cannot read that directory, so the widest scope.
+    "replay_trajectory",
 })
+
+#: What run_steps accepts as a step's tool (its own input schema, 0.38.0).
+#: A step names its tool as {tool, args} or as {<tool>: args}; a name outside
+#: this list is refused here rather than left to the driver to refuse, since a
+#: step that reached set_config or install_* would be an exec call made under
+#: a control grant.
+RUN_STEPS_TOOLS = frozenset({
+    "click", "double_click", "right_click", "set_value", "type_text", "press_key",
+    "hotkey", "scroll", "drag", "move_cursor",
+})
+#: Keys of a run_steps step that are not a tool's name.
+RUN_STEPS_KEYS = frozenset({"tool", "args", "wait_for", "expect", "timeout_ms"})
 
 
 def tool_scope(tool: str) -> str:
@@ -70,6 +85,26 @@ def tool_scope(tool: str) -> str:
     if tool in EXEC_TOOLS:
         return vmhub.EXEC
     return vmhub.CONTROL
+
+
+def check_nested(tool: str, arguments: dict) -> None:
+    """Refuse a call whose inner tool names go beyond what the outer tool's
+    scope covers (run_steps carries control actions only)."""
+    if tool != "run_steps":
+        return
+    steps = arguments.get("steps")
+    if not isinstance(steps, list):
+        raise VmError("vm_bad_request", "run_steps: 'steps' must be a list")
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise VmError("vm_bad_request", f"run_steps: step {i} must be an object")
+        names = [step["tool"]] if "tool" in step else []
+        names += [k for k in step if k not in RUN_STEPS_KEYS]
+        for name in names:
+            if name not in RUN_STEPS_TOOLS:
+                raise VmError("vm_tool_not_allowed",
+                              f"run_steps: step {i} names {str(name)[:40]!r}, which is not one of "
+                              + ", ".join(sorted(RUN_STEPS_TOOLS)))
 
 
 SHOTS_KEEP = 20
@@ -411,6 +446,7 @@ async def h_call(request: web.Request) -> web.Response:
         args = body.get("arguments") or {}
         if not isinstance(args, dict):
             raise VmError("vm_bad_request", "'arguments' must be an object")
+        check_nested(tool, args)
         scope = tool_scope(tool)
         reg.begin_call(vm_id, session, scope, body.get("epoch"))
         ok = False
