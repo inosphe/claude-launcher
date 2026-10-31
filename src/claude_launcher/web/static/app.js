@@ -27413,6 +27413,7 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "category": return "category";
     case "sims": return "simulations";
@@ -27587,6 +27588,7 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  plan: "plan-view",
   knowledge: "knowledge-view",
   sims: "sims-view",
   spec: "spec-view",
@@ -28417,6 +28419,7 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
@@ -28494,6 +28497,7 @@ function route() {
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
+  if (r.page !== "plan") globalThis.PlanPage?.stop();
   if (r.page !== "knowledge") globalThis.KnowledgePage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
@@ -28586,6 +28590,7 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
