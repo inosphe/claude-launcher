@@ -175,7 +175,7 @@ def _build(boards, snaps):
     return docs
 
 
-EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
+EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval", "rate_limit", "preset", "presets"}
 SOURCES = ("custom", "profile")
 
 
@@ -209,12 +209,78 @@ def proposed(body):
     ``base_url``/``api_key``/``embedding_model``/``rerank_model``/``profile``)
     still works: those land in the row ``source`` names. Only the chosen path
     is validated, so a profile-backed block needs no typed address.
+
+    ``presets`` replaces the block's saved preset list and ``preset`` points
+    at one of them (empty = the block's own rows). A preset carries its own
+    connection, so the validation below checks the connection in force -- the
+    active preset's fields when one resolves, else the legacy rows.
     """
     if not isinstance(body, dict) or set(body) - EDITABLE:
         raise ValueError("unsupported search setting")
     doc = store.load()
     block = dict(doc.get("rag") or {})
     rows = store.rag_source_rows(block)
+    if "presets" in body:
+        submitted = body["presets"]
+        if not isinstance(submitted, list):
+            raise ValueError("presets must be a list")
+        if len(submitted) > store.RAG_MAX_PRESETS:
+            raise ValueError(f"presets holds at most {store.RAG_MAX_PRESETS}")
+        saved_by_id = {p["id"]: p for p in store.rag_presets(doc)}
+        cleaned = []
+        seen = set()
+        for raw in submitted:
+            preset = store.clean_rag_preset(raw)
+            if preset is None:
+                raise ValueError(
+                    "each preset needs an id of lowercase letters, digits and hyphens"
+                )
+            if preset["id"] in seen:
+                raise ValueError(f"duplicate preset id {preset['id']!r}")
+            seen.add(preset["id"])
+            # An empty api_key field preserves the secret saved under this id,
+            # the same rule the connection rows use.
+            if not preset.get("api_key"):
+                saved = saved_by_id.get(preset["id"])
+                if saved and saved.get("api_key"):
+                    preset["api_key"] = saved["api_key"]
+            cleaned.append(preset)
+        block["presets"] = cleaned
+    merged_presets = store._rag_preset_rows(
+        block.get("presets") if "presets" in body else (doc.get("rag") or {}).get("presets")
+    )
+    if "preset" in body:
+        wanted = body["preset"]
+        if not isinstance(wanted, str):
+            raise ValueError("preset must be text")
+        wanted = wanted.strip()
+        if wanted and wanted not in {p["id"] for p in merged_presets}:
+            raise ValueError(f"preset {wanted!r} is not one of the saved presets")
+        block["preset"] = wanted
+    # The connection the in-force path describes: the active preset's fields
+    # when one resolves (submitted or already saved), else the legacy rows.
+    # Flat keys keep writing the legacy rows either way -- they are the
+    # fallback a dangling preset pointer falls back to.
+    wanted_now = str(block.get("preset") or "").strip()
+    preset_row = next((p for p in merged_presets if p["id"] == wanted_now), None)
+    if preset_row is not None:
+        check_source = "profile" if preset_row.get("source") == "profile" else "custom"
+        check_rows = {
+            "custom": {
+                "base_url": preset_row.get("base_url", ""),
+                "api_key": preset_row.get("api_key", ""),
+                "embedding_model": preset_row.get("embedding_model", ""),
+                "rerank_model": preset_row.get("rerank_model", ""),
+            },
+            "profile": {
+                "profile": preset_row.get("profile", ""),
+                "embedding_model": preset_row.get("embedding_model", ""),
+                "rerank_model": preset_row.get("rerank_model", ""),
+            },
+        }
+    else:
+        check_source = ""
+        check_rows = rows
     if "sources" in body:
         submitted = body["sources"]
         if not isinstance(submitted, dict):
@@ -234,7 +300,7 @@ def proposed(body):
     pending = body.get("source") or block.get("source")
     active = "profile" if pending == "profile" else "custom"
     for key, value in body.items():
-        if key in ("source", "sources"):
+        if key in ("source", "sources", "preset", "presets"):
             continue
         if key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
             if not isinstance(value, str):
@@ -256,34 +322,36 @@ def proposed(body):
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{key} must be a number")
-            if value < (0 if key == "watch_interval" else 1) or value > 10000:
+            if value < (0 if key in ("watch_interval", "rate_limit") else 1) or value > 10000:
                 raise ValueError(f"{key} is out of range")
-            if key in ("batch", "candidates", "rerank_top") and int(value) != value:
+            if key in ("batch", "candidates", "rerank_top", "rate_limit") and int(value) != value:
                 raise ValueError(f"{key} must be an integer")
         block[key] = value
     if "source" in body:
         block["source"] = body["source"]
-    source = active
+    source = check_source or active
+    check = check_rows
     # Only the path in force is validated. The card sends both rows on every
     # save, so "this request carried the profile row" says nothing about
     # whether the profile path is the one being chosen -- and a stale profile
     # name left in the row out of force (the card keeps it, so switching back
     # restores it) would block a custom save the reader meant to make
     # (claunch-pxxn4, found in review). The stale name is kept and diagnosed
-    # by ``profile_error`` when that path is chosen.
-    profile_name = rows["profile"].get("profile", "")
+    # by ``profile_error`` when that path is chosen. With a preset in force
+    # the same rule covers the preset's own rows.
+    profile_name = check["profile"].get("profile", "")
     if source == "profile":
         if not profile_name:
             raise ValueError("choose a profile for the profile connection")
         store.rag_profile_backend(profile_name, doc)
-    if source == "custom" and not rows["custom"].get("base_url"):
+    if source == "custom" and not check["custom"].get("base_url"):
         raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
-    if rows["custom"].get("base_url"):
+    if check["custom"].get("base_url"):
         # Well-formedness of the stored address is checked even while the
         # profile path is in force: the row is written either way, and an
         # address that cannot be parsed is refused at the moment it is given
         # rather than at the switch that would trust it.
-        address = urlsplit(rows["custom"]["base_url"])
+        address = urlsplit(check["custom"]["base_url"])
         if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
             raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
     block.pop("dimensions", None)  # Output width is learned from model responses.
@@ -342,15 +410,24 @@ def public_settings():
     # an extra key would be refused by ``_check_source_row``. Whether a key is
     # on file is the top-level ``api_key_set``.
     rows["custom"].pop("api_key", None)
-    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url", "sources"}}
+    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url", "sources", "presets"}}
+    # The secret never leaves the daemon here either: a preset row reports
+    # whether a key is on file, never the key -- the card posts these rows
+    # straight back and an empty api_key field preserves the saved secret.
     out.update({
         "base_url": custom["base_url"],
         "api_key_set": bool(custom["api_key"]),
         "configured": store.rag_configured(cfg),
         "profile_error": cfg["profile_error"],
+        "model_key": cfg.get("model_key") or "",
         "resolved": {"base_url": cfg["base_url"], "has_key": bool(cfg["api_key"])},
         "profiles": profile_rows(doc),
         "sources": rows,
+        "presets": [
+            {**{k: v for k, v in p.items() if k != "api_key"},
+             "api_key_set": bool(p.get("api_key"))}
+            for p in store.rag_presets(doc)
+        ],
     })
     return out
 
@@ -412,7 +489,38 @@ def install(app):
             raise web.HTTPNotFound()
         return web.json_response(event)
 
+    async def selftest(request):
+        """Sample a corpus and check its entries retrieve at threshold.
+
+        The check to run after switching presets: does the store the active
+        model opened answer its own entries within ``top_k`` at a similarity
+        of at least ``threshold``. Never rate-limited -- the embeddings are
+        the query path, which the limiter never delays.
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            kind = str(body.get("kind") or "sessions")
+            if kind not in rag.KINDS:
+                raise ValueError(f"unknown corpus {kind!r}")
+            root = None
+            if kind == "beads":
+                root = await service.resolve_root(str(body.get("cwd") or ""))
+                if root is None:
+                    raise ValueError("cwd does not resolve to a known board")
+            result = await service.self_test(
+                kind, root,
+                sample=int(body.get("sample") or 20),
+                threshold=(body.get("threshold") if body.get("threshold") is not None else 0.5),
+                top_k=int(body.get("top_k") or 5),
+            )
+            return web.json_response(result)
+        except (ValueError, rag.RagError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)
     app.router.add_post("/api/rag/test", test)
+    app.router.add_post("/api/rag/selftest", selftest)
     app.router.add_get("/api/search/records/{name}/{event}", record)
