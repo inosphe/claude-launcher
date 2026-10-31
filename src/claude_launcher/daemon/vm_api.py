@@ -323,10 +323,13 @@ async def h_release(request: web.Request) -> web.Response:
         return _err(exc)
 
 
-def _shots_dir():
-    d = paths.daemon_dir() / "vm" / "shots"
+def _shots_dir(vm_id: str):
+    """One directory per VM, so that pruning one VM's files can never match
+    another's (ids are checked names, but 'a' and 'a-b' share a prefix)."""
+    d = paths.daemon_dir() / "vm" / "shots" / vmhub.check_name("id", vm_id)
     d.mkdir(parents=True, exist_ok=True)
     try:
+        d.parent.chmod(0o700)
         d.chmod(0o700)
     except OSError:
         pass
@@ -345,12 +348,12 @@ def _materialize(vm_id: str, result: dict) -> dict:
         if isinstance(block, dict) and block.get("type") == "image" and block.get("data"):
             mime = str(block.get("mimeType") or "image/png")
             ext = {"image/jpeg": "jpg", "image/png": "png"}.get(mime, "bin")
-            path = _shots_dir() / f"{vm_id}-{int(_time.time() * 1000)}-{len(content)}.{ext}"
+            path = _shots_dir(vm_id) / f"{int(_time.time() * 1000):016d}-{len(content)}.{ext}"
             path.write_bytes(base64.b64decode(block["data"]))
             content.append({"type": "image", "path": str(path), "mimeType": mime})
         else:
             content.append(block)
-    old = sorted(_shots_dir().glob(f"{vm_id}-*"))[:-SHOTS_KEEP]
+    old = sorted(p for p in _shots_dir(vm_id).iterdir() if p.is_file())[:-SHOTS_KEEP]
     for f in old:
         try:
             f.unlink()

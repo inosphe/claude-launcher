@@ -53,7 +53,7 @@ def capture_argv(vm) -> list:
             "-o", "StrictHostKeyChecking=accept-new"]
     if vm.ssh_key:
         argv += ["-i", vm.ssh_key, "-o", "IdentitiesOnly=yes"]
-    return argv + [f"{vm.ssh_user}@{vm.ip}", CAPTURE]
+    return argv + ["--", f"{vm.ssh_user}@{vm.ip}", CAPTURE]
 
 
 @dataclass

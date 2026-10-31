@@ -161,14 +161,14 @@ class Manager:
         argv = [TART, "run", "--suspendable"]
         if not self.graphics:
             argv.append("--no-graphics")
-        return argv + [name]
+        return argv + ["--", name]
 
     def _ssh(self, vm: vmhub.Vm, command: str, timeout: float = 20.0) -> Result:
         argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                 "-o", "StrictHostKeyChecking=accept-new"]
         if vm.ssh_key:
             argv += ["-i", vm.ssh_key]
-        argv += [f"{vm.ssh_user}@{vm.ip}", command]
+        argv += ["--", f"{vm.ssh_user}@{vm.ip}", command]
         return self._run(argv, timeout)
 
     def exec(self, vm_id: str, command: str, timeout: float = 60.0) -> dict:
@@ -180,7 +180,7 @@ class Manager:
         if vm.state != "running":
             raise VmError("vm_not_ready", f"{vm_id} is {vm.state}")
         rc, out, err = self._run(
-            [TART, "exec", vm.tart_name, "/bin/sh", "-c", command],
+            [TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", command],
             min(max(timeout, 1.0), EXEC_MAX))
         cut = len(out) > OUTPUT_CAP or len(err) > OUTPUT_CAP
         return {"rc": rc, "stdout": out[:OUTPUT_CAP], "stderr": err[:OUTPUT_CAP],
@@ -201,7 +201,7 @@ class Manager:
             if tart == "running":
                 raise VmError("tart_already_running",
                               f"{vm.tart_name} is already running; reconcile instead")
-            log = self.log_dir / f"{vm_id}.log"
+            log = self.log_dir / vm_id / "tart.log"
             pid = self._spawn(self.run_argv(vm.tart_name), log)
             deadline = time.monotonic() + self.boot_wait
             ip = self._wait_ip(vm, deadline, pid, log)
@@ -216,9 +216,9 @@ class Manager:
     def _wait_ip(self, vm: vmhub.Vm, deadline: float, pid: int = 0,
                  log: Optional[Path] = None) -> str:
         while True:
-            rc, out, _ = self._run([TART, "ip", vm.tart_name], 10)
+            rc, out, _ = self._run([TART, "ip", "--", vm.tart_name], 10)
             if rc == 0 and out.strip():
-                return out.strip()
+                return vmhub.check_ip(out.strip().splitlines()[0])
             if pid and not self._alive(pid) and self.tart_state(vm.tart_name) != "running":
                 # tart run ended without a VM: Apple's slot limit on a resume
                 # (VZErrorDomain Code=6) shows up this way, within a second.
@@ -291,7 +291,7 @@ class Manager:
     def force_stop(self, vm_id: str) -> vmhub.Vm:
         """``tart stop``: the VM is gone at once and unsynced writes with it."""
         vm = self.registry.get(vm_id)
-        rc, _, err = self._run([TART, "stop", vm.tart_name], 30)
+        rc, _, err = self._run([TART, "stop", "--", vm.tart_name], 30)
         if rc != 0:
             raise VmError("tart_failed", f"tart stop: {err.strip() or rc}")
         self.registry.note(vm_id, "forced_stop", data_loss_possible=True)
@@ -305,7 +305,7 @@ class Manager:
         if vm.state != "running":
             raise VmError("vm_bad_state", f"{vm_id} is {vm.state}; only a running VM suspends")
         self.registry.set_state(vm_id, "saving")
-        rc, _, err = self._run([TART, "suspend", vm.tart_name], 120)
+        rc, _, err = self._run([TART, "suspend", "--", vm.tart_name], 120)
         if rc != 0:
             self.registry.set_state(vm_id, "running")
             raise VmError("tart_failed", f"tart suspend: {err.strip() or rc}")
@@ -343,7 +343,7 @@ class Manager:
         """Probe an adopted VM's ssh and console again (off the event loop)."""
         vm = self.registry.get(vm_id)
         if not vm.ip:
-            rc, out, _ = self._run([TART, "ip", vm.tart_name], 10)
+            rc, out, _ = self._run([TART, "ip", "--", vm.tart_name], 10)
             if rc == 0 and out.strip():
-                self.registry.set_ready(vm_id, ip=out.strip())
+                self.registry.set_ready(vm_id, ip=out.strip().splitlines()[0])
         await asyncio.to_thread(self._probe, vm_id, time.monotonic() + self.boot_wait)

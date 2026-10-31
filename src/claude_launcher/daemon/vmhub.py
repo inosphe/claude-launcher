@@ -28,7 +28,9 @@ and the HTTP routes are separate layers that call into it.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -64,6 +66,45 @@ _MOVES = {
 }
 
 AUDIT_RING = 500
+
+#: What may reach a command line or a file name. Everything below is checked
+#: when a record is made and again when one is read back from vms.json, and
+#: none may start with '-' (an ssh or tart option) or hold a separator.
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.]{0,62}|[A-Za-z0-9][A-Za-z0-9_.-]{0,62}[A-Za-z0-9_.]")
+_USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
+_PATH_RE = re.compile(r"/[A-Za-z0-9_.+@%=,:/-]*")
+
+
+def check_name(what: str, value: str) -> str:
+    if not _NAME_RE.fullmatch(value) or ".." in value:
+        raise VmError("vm_bad_request",
+                      f"{what} {value!r}: letters, digits, '_', '.', '-' only (up to 64), "
+                      "not starting with '-'")
+    return value
+
+
+def check_user(value: str) -> str:
+    if not _USER_RE.fullmatch(value):
+        raise VmError("vm_bad_request", f"ssh_user {value!r}: not a plain account name")
+    return value
+
+
+def check_path(what: str, value: str, *, empty_ok: bool = False) -> str:
+    """An absolute path of plain characters with no '..' segment (no glob, no
+    quote, no space, no newline)."""
+    if not value and empty_ok:
+        return ""
+    if not _PATH_RE.fullmatch(value) or "/../" in value + "/" or value.endswith("/.."):
+        raise VmError("vm_bad_request", f"{what} {value!r}: an absolute path of plain "
+                      "characters is required")
+    return value
+
+
+def check_ip(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        raise VmError("vm_bad_address", f"not an IP address: {value[:60]!r}") from None
 
 
 class VmError(Exception):
@@ -141,12 +182,13 @@ class Vm:
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Vm":
-        vm = cls(id=str(raw["id"]), tart_name=str(raw.get("tart_name") or raw["id"]))
+        vm = cls(id=check_name("id", str(raw["id"])),
+                 tart_name=check_name("tart_name", str(raw.get("tart_name") or raw["id"])))
         vm.state = raw.get("state") if raw.get("state") in STATES else "stopped"
-        vm.ip = str(raw.get("ip") or "")
-        vm.ssh_user = str(raw.get("ssh_user") or "admin")
-        vm.ssh_key = str(raw.get("ssh_key") or "")
-        vm.cua_path = str(raw.get("cua_path") or vm.cua_path)
+        vm.ip = check_ip(str(raw["ip"])) if raw.get("ip") else ""
+        vm.ssh_user = check_user(str(raw.get("ssh_user") or "admin"))
+        vm.ssh_key = check_path("ssh_key", str(raw.get("ssh_key") or ""), empty_ok=True)
+        vm.cua_path = check_path("cua_path", str(raw.get("cua_path") or vm.cua_path))
         vm.fault_reason = str(raw.get("fault_reason") or "")
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
@@ -221,8 +263,8 @@ class Registry:
             for raw in doc.get("vms") or []:
                 try:
                     vm = Vm.from_dict(raw)
-                except (KeyError, TypeError, ValueError):
-                    continue
+                except (KeyError, TypeError, ValueError, VmError):
+                    continue  # a record that would not pass today's checks is not trusted
                 self._vms[vm.id] = vm
 
     def _save(self) -> None:
@@ -250,6 +292,10 @@ class Registry:
     # ---- records ------------------------------------------------------- #
     def add(self, vm_id: str, tart_name: str = "", *, ssh_user: str = "admin",
             ssh_key: str = "") -> Vm:
+        check_name("id", vm_id)
+        check_name("tart_name", tart_name or vm_id)
+        check_user(ssh_user)
+        check_path("ssh_key", ssh_key, empty_ok=True)
         with self._lock:
             if vm_id in self._vms:
                 raise VmError("vm_exists", f"{vm_id} is already registered")
@@ -363,7 +409,7 @@ class Registry:
             if cua is not None:
                 vm.cua_ready = bool(cua)
             if ip:
-                vm.ip = ip
+                vm.ip = check_ip(ip)
             self._save()
             return vm
 

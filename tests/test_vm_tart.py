@@ -31,6 +31,11 @@ class Fake:
     def run(self, argv, timeout):
         argv = list(argv)
         self.calls.append(argv)
+        # Every tart call ends its options before the VM name; the checks
+        # below look at the call without that marker.
+        if argv[0] == "tart" and len(argv) > 2 and argv[2] == "--":
+            assert argv[1] in ("ip", "stop", "suspend", "exec"), argv
+            argv = argv[:2] + argv[3:]
         if argv[:2] == ["tart", "list"]:
             for name, left in list(self._suspending.items()):
                 if left == 0:
@@ -88,7 +93,7 @@ def env(tmp_path):
 def test_start_runs_suspendable_and_waits_for_ssh_and_a_console_login(env):
     fake, reg, mgr = env
     vm = mgr.start("a")
-    assert fake.spawned == [["tart", "run", "--suspendable", "a"]]
+    assert fake.spawned == [["tart", "run", "--suspendable", "--", "a"]]
     assert vm.state == "running" and vm.ip == "192.168.64.2"
     assert vm.ssh_ready and vm.gui_ready and not vm.cua_ready and not vm.ready
     ssh = [c for c in fake.calls if c[0] == "ssh"][0]
@@ -99,7 +104,7 @@ def test_no_graphics_is_an_option_not_the_default(env, tmp_path):
     fake, reg, _ = env
     mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, alive=lambda p: True,
                           sleep=lambda s: None, graphics=False)
-    assert mgr.run_argv("a") == ["tart", "run", "--suspendable", "--no-graphics", "a"]
+    assert mgr.run_argv("a") == ["tart", "run", "--suspendable", "--no-graphics", "--", "a"]
 
 
 def test_start_that_finds_no_console_login_ends_in_fault(env):
@@ -138,7 +143,7 @@ def test_stop_syncs_inside_the_guest_and_never_calls_tart_stop(env):
     assert vm.state == "stopped" and not vm.ready
     cmds = [c[-1] for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]]
     assert cmds and cmds[0].startswith("sync;")
-    assert ["tart", "stop", "a"] not in fake.calls
+    assert ["tart", "stop", "--", "a"] not in fake.calls
 
 
 def test_a_guest_that_does_not_stop_is_left_stopping_not_forced(env):
@@ -149,7 +154,7 @@ def test_a_guest_that_does_not_stop_is_left_stopping_not_forced(env):
         mgr.stop("a")
     assert e.value.code == "vm_stop_timeout"
     assert reg.get("a").state == "stopping"
-    assert ["tart", "stop", "a"] not in fake.calls
+    assert ["tart", "stop", "--", "a"] not in fake.calls
 
 
 def test_force_stop_is_recorded_as_possible_data_loss(env):
@@ -192,7 +197,7 @@ def test_suspend_then_start_resumes_in_a_slot(env):
     # tart reports the suspended VM as suspended; run restores it
     fake.tart["a"] = "suspended"
     assert mgr.start("a").state == "running"
-    assert fake.spawned[-1] == ["tart", "run", "--suspendable", "a"]
+    assert fake.spawned[-1] == ["tart", "run", "--suspendable", "--", "a"]
 
 
 def test_a_failed_suspend_leaves_the_vm_running(env):
@@ -254,6 +259,7 @@ def test_a_resume_that_tart_cannot_do_leaves_the_vm_suspended_and_fails_fast(env
     mgr.stop("c")
 
     def spawn(argv, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("Error: VZErrorDomain Code=6 (resume)\n")
         return 99  # tart run exits at once; the VM stays suspended
 

@@ -55,7 +55,7 @@ def ssh_argv(vm: vmhub.Vm) -> List[str]:
         argv += ["-i", vm.ssh_key, "-o", "IdentitiesOnly=yes"]
     argv += ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
              "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=accept-new",
-             f"{vm.ssh_user}@{vm.ip}", vm.cua_path, "mcp"]
+             "--", f"{vm.ssh_user}@{vm.ip}", vm.cua_path, "mcp"]
     return argv
 
 
@@ -90,7 +90,7 @@ class Channel:
     ) -> None:
         self.registry = registry
         self.vm_id = vm_id
-        self.log = log_dir / f"{vm_id}-channel.log"
+        self.log = log_dir / vm_id / "channel.log"
         self._opener = opener
         self._backoff = tuple(backoff)
         self._hello_timeout = hello_timeout
