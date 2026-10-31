@@ -227,6 +227,17 @@ inputs:
     # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
     # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
+  coding_brief_thread:
+    type: bool
+    default: true
+    label: 코딩 승인 전 요약 스레드
+    help: 켜면 coding-approval 게이트에 들어가기 직전 사용자 스레드로 문제제기·작업 목표·작업 범위·기대효과·리스크 다섯 항목 요약을 본다(승인 게이트가 서는 일감에만). require_coding_approval이 꺼져 있거나 approve-always 뒤의 일감에는 스레드도 열리지 않는다
+    # require_coding_approval과 같은 블록에 묶는다 — 승인 게이트를 보조하는
+    # 스위치라 게이트 옆에 있어야 무엇에 대한 스위치인지 드러난다.
+    group: 코딩 승인
+    # coding-plan이 일감마다 읽는다. 사람이 런 도중에 바꾸면 다음 일감부터
+    # 적용된다(require_coding_approval과 같은 규칙). 에이전트는 쓰지 못한다.
+    set_by: [user]
   # PR 착지 매체를 정하는 두 스위치(claunch-qke6g). 폼에서 한 블록으로 묶여
   # gh 준비 상태 줄과 함께 놓인다.
   force_pr:
@@ -1549,12 +1560,41 @@ nodes:
       구현하는 비용보다 크다. 위임을 권장하면 brief에 자식에게 넘길 작업
       단위(파일, 할 일, 완료 기준)를 한 단락으로 적는다 — 위임 자식이 그
       단락을 그대로 받는다.
+
+      ── 사용자 요약 스레드 (coding-approval 직전 전달) ──
+      승인 게이트가 이번 일감에 선다면(시작 입력 require_coding_approval이
+      true이고 아직 approve-always를 답하지 않아 coding-approval 또는
+      coding-approval-routing이 묻는다면) brief를 다 쓴 뒤 사용자 스레드
+      하나를 연다(`thread_open`). 터미널 출력과 이슈 코멘트는 사용자에게
+      알림이 가지 않으므로, 사용자가 승인 카드의 전체 계획을 펼쳐 보기
+      전에 다섯 항목 요약을 대시보드 알림으로 받는 길이 이 스레드다.
+      스레드는 시작 입력 `coding_brief_thread`(지금 값
+      ${data.inputs.coding_brief_thread})가 true일 때만 연다 — 사람이 끄면
+      승인 게이트는 그대로 서고 스레드만 생략한다. 게이트 자체가 서지
+      않으면(입력이 꺼져 있거나 approve-always 뒤의 일감) 이 스레드를 열지
+      않는다 — 그 경우 이 일감에는 승인 질문이 오르지 않는다.
+
+      스레드 제목은 한 줄로 이 일감을 가리키게 적는다(이슈 id 포함).
+      본문은 마크다운으로 brief에서 가져온 다음 다섯 항목을 적는다 — 이
+      단계에서 새로 조사하지 않는다:
+      - 문제제기: 이 일감이 왜 필요한가 — 이슈·코드에서 확인한 사실
+      - 작업 목표: 이번에 달성할 것
+      - 작업 범위: 포함하는 것과 제외하는 것
+      - 기대효과: 완료되면 나아지는 것
+      - 리스크: 계획에 있는 위험·주의점
+
+      거절 사유를 반영해 계획을 다시 쓰면(루프가 coding-plan으로 돌아오면)
+      바뀐 계획으로 같은 형태의 스레드를 다시 연다. thread_open이 실패하면
+      그 사유를 보고에 적고 스레드 없이 진행한다 — 전달은 필수이나 게이트를
+      세우는 승인이 아니므로 이 작업의 실패로 보고하지 않는다.
     done_when: |
       사용자가 구현 착수 여부를 판단할 구체적인 계획과 근거가 brief에 있다.
-      session_routing이 true면 difficulty·recommend·why도 있다.
+      session_routing이 true면 difficulty·recommend·why도 있다. 승인 게이트가
+      이번 일감에 서고 coding_brief_thread가 true면 사용자 요약 스레드의 id가
+      보고에 있다.
     returns:
-      ok: {brief: str, difficulty: "str?", recommend: "str?", why: "str?"}
-    effects: [fs.read]
+      ok: {brief: str, difficulty: "str?", recommend: "str?", why: "str?", thread_id: "str?"}
+    effects: [fs.read, thread.write]
 
   coding-approval:
     title: 코딩 시작 전 사용자 승인
@@ -4911,7 +4951,8 @@ procedures:
       위임 측정(실패가 0이 될 때까지) 또는 생략 기록 -> 커밋·보고(v1 work,
       test-decision, review, test-skipped, commit). work의 반환값은
       $data.work_report에 남는다. require_coding_approval이 켜져 있으면
-      방문마다 변경 계획을 제시하고 사용자 승인을 받은 뒤 work에 진입한다 —
+      방문마다 변경 계획을 제시하고(coding-plan, 이때 사용자 요약 스레드를
+      연다), 사용자 승인을 받은 뒤 work에 진입한다 —
       사용자가 approve-always로 답했으면 이 런의 이후 방문은 묻지 않는다.
       session_routing이 켜져 있으면(claunch-yl0to) 계획이 난이도와 위임 권장을
       내고, 쉬운 일감은 fork한 하위 설정 자식이 구현한다(delegate-work). 위임

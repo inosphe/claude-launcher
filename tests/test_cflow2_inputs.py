@@ -172,6 +172,8 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
     sch = layers.load("improv-worker-v2").meta["inputs"]
     assert {n: d["group"] for n, d in sch.items() if d["group"]} == {
         "require_coding_approval": "코딩 승인",
+        # the pre-approval summary thread rides on the approval gate's block.
+        "coding_brief_thread": "코딩 승인",
         "reviewer_profile": "리뷰어", "reviewer_harness": "리뷰어",
         "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
         "parallel_fork": "병렬 작업",
@@ -180,10 +182,11 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
         "knowledge_recall": "지식 기록", "knowledge_record": "지식 기록",
         # claunch-ar8jn: the glossary draft switch sits with them.
         "glossary_draft": "지식 기록"}
-    # A block of one: it does not share a grid with the inputs declared around
-    # it, so the switch no longer pairs with the round limit above it.
+    # A block of its own concern: it does not share a grid with the inputs
+    # declared around it, so the switches no longer pair with the round limit
+    # above them — the thread switch rides on the approval gate's block.
     assert [n for n, d in sch.items() if d["group"] == "코딩 승인"] == [
-        "require_coding_approval"]
+        "require_coding_approval", "coding_brief_thread"]
     # claunch-dm09i: the parallel fork switch is a decision of its own too
     assert [n for n, d in sch.items() if d["group"] == "병렬 작업"] == ["parallel_fork"]
     assert [n for n, d in sch.items() if d["wide"]] == ["session_routing"]

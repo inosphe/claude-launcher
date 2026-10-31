@@ -374,6 +374,22 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     assert ask["urgent"] is True
 
 
+def test_coding_brief_thread_is_a_true_by_default_boolean_and_human_only():
+    """the pre-approval summary thread ships on unless a person turns it off;
+    like require_coding_approval a person may flip it mid-run (set_by [user])."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    declaration = doc["inputs"]["coding_brief_thread"]
+    assert declaration["type"] == "bool"
+    assert declaration["default"] is True
+    assert declaration["set_by"] == ["user"]
+    plan = doc["nodes"]["coding-plan"]
+    assert "thread_id" in plan["returns"]["ok"]
+    prompt = plan["prompt"]
+    assert "문제제기" in prompt and "작업 목표" in prompt
+    assert "작업 범위" in prompt and "기대효과" in prompt and "리스크" in prompt
+    assert "thread_open" in prompt and "coding_brief_thread" in prompt
+
+
 # -- session routing (claunch-yl0to) ----------------------------------------
 
 
