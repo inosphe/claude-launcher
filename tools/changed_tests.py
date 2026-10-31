@@ -361,6 +361,13 @@ EXPLICIT_GUARDS = (
         ("src/claude_launcher/pytest_basetemp.py",),
         ("tests/test_gates_run_this_checkout.py",),
     ),
+    (
+        # No same-named module and no test names the file: cflow2/relocate.py
+        # is exercised through SessionManager.migrate, whose tests live here
+        # (the slot-move tests landed with it, claunch-51gyl).
+        ("src/claude_launcher/cflow2/relocate.py",),
+        ("tests/test_migrate_session.py",),
+    ),
 )
 
 #: ``uv run`` is how every gate in this repository is invoked, and while it
