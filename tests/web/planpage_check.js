@@ -1,7 +1,9 @@
 /* Real plan-page.js (claunch-7jzp8.2): the tree by default (claunch-7jzp8.5)
    -- session cards nested by their joint parent, each plan's steps under its
    card, a decision forking into its options with the taken one marked, a
-   card's steps folded and unfolded, a filtered-out member dimmed -- then the
+   card's steps folded and unfolded, a filtered-out member dimmed, every
+   tree rooted at its project and a session joined to nothing drawn as a
+   branch of its project (claunch-7jzp8.5.2) -- then the
    overview grouped by stage, the stage and project filters,
    "ended sessions too" asking with all=1, and the session links; with a
    project picked, its aggregation session's pane (kept across redraws) or
@@ -78,11 +80,23 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   const byTitle = (title) => all(host).find(n => n.tag === 'li' && n.children[0] && n.children[0].children
     && n.children[0].children.some(c => c.textContent === title || (c.children || []).some(d => d.textContent === title)));
   let t = text();
-  for (const want of ['s1 · 세션 2개 · 내 결정 대기 2건', '계획 없는 세션 (1)', '자식 세션', '결정됨',
+  for (const want of ['세션 2개 · 내 결정 대기 2건', '연관 세션 2개 · 내 결정 대기 2건', '세션 1개 · 내 결정 대기 0건',
+                      '계획 없는 세션 (1)', '자식 세션', '결정됨',
                       'Child — 단계 1/3 · 지금: write · 내 결정 대기 2건', '런이 기다림: choose: land?',
                       '기대효과: fast', '리스크: untested', '기대효과: safe', '리스크: slow'])
     assert(t.includes(want), `tree: missing ${want}`);
   assert.deepStrictEqual(rows(), ['s1', 's2', 's3']);
+  // one tree per project, the project at its root, in name order
+  const projectOf = (li) => { let n = li; while (n && !String(n.className).includes('ptree-project')) n = n.parent; return n; };
+  const projectName = (li) => projectOf(li).children[0].children[1].textContent;
+  const roots = host.children[0].children.filter(n => n.className === 'ptree ptree-root');
+  assert.deepStrictEqual(roots.map(r => r.children[0].children[0].children[1].textContent), ['claunch', 'other']);
+  assert.strictEqual(roots[0].children[0].className, 'ptree-node ptree-project');
+  // s1, the group's root, is a branch of its project; s3 has no plan in a joint tree: under its project's plan-less branch
+  assert.strictEqual(liOf('s1').parent.className, 'ptree ptree-sessions');
+  assert.strictEqual(liOf('s1').parent.parent, roots[0].children[0]);
+  assert.strictEqual(projectName(liOf('s3')), 'other');
+  assert.strictEqual(liOf('s3').parent.parent.className, 'ptree-node ptree-noplan');
   // s2 hangs under s1's card; its steps under its own
   const s2 = liOf('s2');
   assert.strictEqual(s2.parent.className, 'ptree ptree-sessions');
@@ -163,6 +177,16 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   buttons('트리')[0].onclick(); await settle();
   assert.strictEqual(calls.filter(c => c === '/api/plan/joint?steps=1').length, before + 1);
   assert.deepStrictEqual(rows(), ['s1', 's2', 's3']);
+
+  // a session with a plan that no spawn or issue joins to another: its own
+  // group, drawn as a branch of its project beside the others
+  JOINT.groups.push({root: 's3', sessions: 1, waiting: 0, members: [
+    {session: 's3', depth: 0, has_plan: true, parent: null, via: null, tree: [{id: 'z', kind: 'step', title: 'wrap', status: 'done', children: []}]}]});
+  buttons('트리')[0].onclick(); await settle();
+  assert.strictEqual(liOf('s3').parent.className, 'ptree ptree-sessions');
+  assert.strictEqual(liOf('s3').parent.parent.className, 'ptree-node ptree-project');
+  assert.strictEqual(projectName(liOf('s3')), 'other');
+  assert(!text().includes('계획 없는 세션') && text().includes('wrap'));
 
   // ended sessions too
   buttons('끝난 세션 포함')[0].onclick(); await settle();

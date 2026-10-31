@@ -1,7 +1,8 @@
 /* The plan page at #/plan (claunch-7jzp8.2): every running session's stage
    on one screen, from /api/plan/overview (plan/overview.py) -- what a person
    owes it, its cflow v2 run's current task, its plan's progress and whether
-   it may close. Drawn as a tree (the default, claunch-7jzp8.5): each joint
+   it may close. Drawn as a tree (the default, claunch-7jzp8.5): one tree per
+   project, the project at its root (claunch-7jzp8.5.2); under it each joint
    tree (/api/plan/joint?steps=1, plan/joint.py) as session cards joined by
    lines, and under each card its plan's steps, a decision forking into its
    options (effect, risk, recommended, the one taken). Or grouped by stage.
@@ -159,45 +160,85 @@ function makePlanPage({root, request}) {
     return card;
   }
 
-  // Each joint group as one drawn tree: the session cards joined by their
-  // display parent (joint.py's ``parent``), each card's steps under it.
+  // One joint group's sessions: each card under its display parent
+  // (joint.py's ``parent``), each card's steps under it. Returns the li of
+  // every member drawn without a parent, the group's root first; the root's
+  // card says how many sessions the group joins.
+  function groupTree(g, index, shown) {
+    const lis = {}, subs = {}, tops = [];
+    for (const m of g.members) {
+      const li = node("li", null, "ptree-node ptree-session");
+      const card = sessionCard(index[m.session], m, !shown.has(m.session));
+      if (!tops.length && g.members.length > 1) {
+        card.children[0].append(node("span", `연관 세션 ${g.members.length}개 · 내 결정 대기 ${g.waiting}건`, "plan-muted"));
+      }
+      li.append(card);
+      if ((m.tree || []).length && !folded.has(m.session)) {
+        const steps = node("ul", null, "ptree ptree-steps");
+        for (const s of m.tree) steps.append(stepBranch(s));
+        li.append(steps);
+      }
+      lis[m.session] = li;
+      if (m.parent && lis[m.parent]) {
+        if (!subs[m.parent]) { subs[m.parent] = node("ul", null, "ptree ptree-sessions"); lis[m.parent].append(subs[m.parent]); }
+        subs[m.parent].append(li);
+      } else tops.push(li);
+    }
+    return tops;
+  }
+
+  // The tree is rooted at the project (claunch-7jzp8.5.2): a session no
+  // spawn or issue joins to another is still a branch of its project, so the
+  // page draws one tree per project -- the project's node, under it each
+  // joint group's root card, and the sessions without a plan last.
   function byTree(rows) {
     const index = Object.fromEntries((data.rows || []).map(r => [r.session, r]));
     const shown = new Set(rows.map(r => r.session));
-    const placed = new Set(), out = [];
+    const projectOf = (session) => (index[session] && index[session].project) || "";
+    const buckets = new Map();                  // project -> {groups, rest}
+    const bucket = (p) => {
+      if (!buckets.has(p)) buckets.set(p, {groups: [], rest: []});
+      return buckets.get(p);
+    };
+    const placed = new Set();
     for (const g of (joint && joint.groups) || []) {
-      const members = g.members.filter(m => shown.has(m.session));
-      if (!members.length) continue;
-      out.push(node("h4", `${g.root} · 세션 ${g.members.length}개 · 내 결정 대기 ${g.waiting}건`, "plan-section"));
-      const root = node("ul", null, "ptree ptree-root");
-      const lis = {}, subs = {};
-      for (const m of g.members) {
-        const li = node("li", null, "ptree-node ptree-session");
-        li.append(sessionCard(index[m.session], m, !shown.has(m.session)));
-        if ((m.tree || []).length && !folded.has(m.session)) {
-          const steps = node("ul", null, "ptree ptree-steps");
-          for (const s of m.tree) steps.append(stepBranch(s));
-          li.append(steps);
-        }
-        lis[m.session] = li;
-        if (m.parent && lis[m.parent]) {
-          if (!subs[m.parent]) { subs[m.parent] = node("ul", null, "ptree ptree-sessions"); lis[m.parent].append(subs[m.parent]); }
-          subs[m.parent].append(li);
-        } else root.append(li);
-        placed.add(m.session);
-      }
-      out.push(root);
+      if (!g.members.some(m => shown.has(m.session))) continue;
+      const home = projectOf(g.root) || (g.members.map(m => projectOf(m.session)).find(Boolean) || "");
+      bucket(home).groups.push(g);
+      for (const m of g.members) placed.add(m.session);
     }
-    const rest = rows.filter(r => !placed.has(r.session));
-    if (rest.length) {
-      out.push(node("h4", `계획 없는 세션 (${rest.length})`, "plan-section"));
-      const ul = node("ul", null, "ptree ptree-root ptree-flat");
-      for (const r of rest) {
-        const li = node("li", null, "ptree-node ptree-session");
-        li.append(sessionCard(r, {session: r.session}, false));
-        ul.append(li);
+    for (const r of rows) if (!placed.has(r.session)) bucket(r.project || "").rest.push(r);
+
+    const out = [];
+    const names = [...buckets.keys()].sort((x, y) => (x === "") - (y === "") || x.localeCompare(y));
+    for (const name of names) {
+      const {groups, rest} = buckets.get(name);
+      const count = groups.reduce((n, g) => n + g.members.length, 0) + rest.length;
+      const waiting = groups.reduce((n, g) => n + (g.waiting || 0), 0);
+      const root = node("ul", null, "ptree ptree-root");
+      const top = node("li", null, "ptree-node ptree-project");
+      const label = node("div", null, "ptree-label ptree-project-label");
+      label.append(node("span", "▣", "ptree-mark"), node("strong", name || "프로젝트 없음", "plan-title"),
+                   node("span", `세션 ${count}개 · 내 결정 대기 ${waiting}건`, "plan-chip"));
+      top.append(label);
+      const branches = node("ul", null, "ptree ptree-sessions");
+      for (const g of groups) branches.append(...groupTree(g, index, shown));
+      if (rest.length) {
+        const li = node("li", null, "ptree-node ptree-noplan");
+        const l = node("div", null, "ptree-label");
+        l.append(node("span", "○", "ptree-mark"), node("span", `계획 없는 세션 (${rest.length})`, "plan-title"));
+        const flat = node("ul", null, "ptree ptree-root ptree-flat");
+        for (const r of rest) {
+          const s = node("li", null, "ptree-node ptree-session");
+          s.append(sessionCard(r, {session: r.session}, false));
+          flat.append(s);
+        }
+        li.append(l, flat);
+        branches.append(li);
       }
-      out.push(ul);
+      top.append(branches);
+      root.append(top);
+      out.push(root);
     }
     return out;
   }

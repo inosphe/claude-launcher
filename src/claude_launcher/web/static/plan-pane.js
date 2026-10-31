@@ -111,52 +111,71 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if (told[n.id]) box.append(node("p", told[n.id], "plan-told"));
   }
 
-  function decision(n) {
-    const box = node("div", null, "plan-decision");
-    const opts = node("div", null, "plan-options");
-    for (const o of n.options || []) {
-      const chosen = n.result && n.result.choice === o.label;
-      const card = node("div", null, "plan-option" + (chosen ? " plan-chosen" : "") + (o.recommended ? " plan-recommended" : ""));
-      const head = node("div", null, "plan-option-head");
-      head.append(node("strong", o.label));
-      if (o.recommended) head.append(node("span", "권장", "plan-chip"));
-      card.append(head,
-        node("p", "기대 효과: " + o.effect, "plan-effect"),
-        node("p", "리스크: " + o.risk, "plan-risk"));
-      if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`)));
-      opts.append(card);
+  // The plan drawn as a tree (claunch-7jzp8.5.2), in #/plan's shape
+  // (plan-page.js stepBranch, the ptree-* rules in style.css): each step a
+  // branch with its status mark, a decision forking into one branch per
+  // option (effect, risk, recommended, the one taken) before its own steps.
+  // Here the branches also carry the pane's controls.
+  const STEP_MARK = {todo: "○", doing: "◐", done: "●", skipped: "–", blocked: "✕"};
+
+  function label(mark, chip, title) {
+    const l = node("div", null, "ptree-label");
+    l.append(node("span", mark, "ptree-mark"), node("span", title, "plan-title"), node("span", chip, "plan-chip"));
+    return l;
+  }
+
+  function optionBranch(n, o) {
+    const decided = !!(n.result && n.result.choice);
+    const chosen = decided && n.result.choice === o.label;
+    const li = node("li", null, "ptree-node ptree-option" + (chosen ? " ptree-chosen" : decided ? " ptree-unchosen" : "")
+      + (o.recommended ? " ptree-recommended" : ""));
+    const card = node("div", null, "ptree-opt");
+    const head = node("div", null, "plan-option-head");
+    head.append(node("strong", o.label));
+    if (o.recommended) head.append(node("span", "권장", "plan-chip"));
+    if (chosen) head.append(node("span", "선택됨", "plan-chip"));
+    card.append(head,
+      node("p", "기대 효과: " + o.effect, "plan-effect"),
+      node("p", "리스크: " + o.risk, "plan-risk"));
+    if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`)));
+    li.append(card);
+    return li;
+  }
+
+  function stepBranch(n) {
+    const isDecision = n.kind === "decision";
+    const state = isDecision ? (n.result ? "ptree-decided" : "ptree-undecided") : `ptree-st-${n.status || "todo"}`;
+    const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}`);
+    li.append(isDecision
+      ? label("◆", n.result ? "결정됨" : "결정 필요", n.title)
+      : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title));
+    if (n.detail) li.append(node("p", n.detail, "plan-detail"));
+    if (isDecision) {
+      const opts = node("ul", null, "ptree plan-options-tree");
+      for (const o of n.options || []) opts.append(optionBranch(n, o));
+      const box = node("div", null, "plan-decision-box");
+      box.append(noteBox(n, "선택에 붙일 메모 (선택 사항)"));
+      tail(n, box);
+      li.append(opts, box);
     }
-    box.append(opts, noteBox(n, "선택에 붙일 메모 (선택 사항)"));
-    tail(n, box);
-    return box;
+    if ((n.children || []).length) li.append(stepTree(n.children));
+    return li;
   }
 
   function stepTree(nodes) {
-    const ul = node("ul", null, "plan-tree");
-    for (const n of nodes) {
-      const li = node("li", null, `plan-item plan-${n.kind} plan-status-${n.status || (n.result ? "decided" : "open")}`);
-      const head = node("div", null, "plan-item-head");
-      const chip = n.kind === "decision"
-        ? (n.result ? "결정됨" : "결정 필요")
-        : (PLAN_STEP_STATUS[n.status] || n.status);
-      head.append(node("span", chip, "plan-chip"), node("span", n.title, "plan-title"));
-      li.append(head);
-      if (n.detail) li.append(node("p", n.detail, "plan-detail"));
-      if (n.kind === "decision") li.append(decision(n));
-      if ((n.children || []).length) li.append(stepTree(n.children));
-      ul.append(li);
-    }
+    const ul = node("ul", null, "ptree ptree-steps");
+    for (const n of nodes) ul.append(stepBranch(n));
     return ul;
   }
 
   function closureItem(n) {
-    const li = node("li", null, `plan-item plan-${n.kind}`);
-    const head = node("div", null, "plan-item-head");
-    head.append(node("span", n.kind === "verify" ? "사람 확인" : "후속 후보", "plan-chip"), node("span", n.title, "plan-title"));
-    li.append(head);
+    const verify = n.kind === "verify";
+    const res = n.result ? (verify ? `ptree-st-${n.result.verdict === "passed" ? "done" : "blocked"}` : "ptree-st-done") : "ptree-st-todo";
+    const li = node("li", null, `ptree-node ptree-closure ${res} plan-item plan-${n.kind}`);
+    li.append(label(n.result ? "●" : "○", verify ? "사람 확인" : "후속 후보", n.title));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     const row = node("div", null, "plan-actions");
-    if (n.kind === "verify") {
+    if (verify) {
       row.append(button("통과", () => act(n.id, {rev: n.rev, verdict: "passed"}, "통과로 전달했습니다")),
                  button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다")));
       li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지)"), row);
@@ -243,7 +262,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
 
     shell.append(node("h4", "종료 조건", "plan-section"));
     if ((p.closure || []).length) {
-      const ul = node("ul", null, "plan-tree");
+      const ul = node("ul", null, "ptree ptree-closures");
       for (const n of p.closure) ul.append(closureItem(n));
       shell.append(ul);
     } else shell.append(node("p", "사람 확인 항목·후속 후보가 없습니다.", "plan-muted"));
