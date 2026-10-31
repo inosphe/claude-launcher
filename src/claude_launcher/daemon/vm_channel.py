@@ -74,20 +74,30 @@ Reaper = Callable[[vmhub.Vm], Awaitable[None]]
 
 
 async def reap_stale(vm: vmhub.Vm, timeout: float = 10.0) -> None:
-    """End the ``cua-driver mcp`` processes left in the guest by earlier
+    """End the ``<cua_path> mcp`` processes left in the guest by earlier
     channels. When the host side of a ``tart exec -i`` dies (killed, or closed
     and terminated) the guest process does not: measured on t03, one stays per
-    reconnect, for ever. There is one channel per VM, so any ``mcp`` process
-    there is stale. (``serve``, the shared daemon, is not matched; the
-    bracket keeps pkill from matching its own command line.)"""
+    reconnect, for ever. There is one channel per VM, so a process whose whole
+    command line is exactly ``<cua_path> mcp`` is stale; anything else (the
+    shared ``serve`` daemon, a user's own ``cua-driver mcp-foo``, another path)
+    is not matched. ``-x -f`` is an exact match on the full command line, and
+    pkill's own command line is not that."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            TART, "exec", "--", vm.tart_name, "/usr/bin/pkill", "-f", "[c]ua-driver mcp",
+            TART, "exec", "--", vm.tart_name, "/usr/bin/pkill", "-x", "-f", f"{vm.cua_path} mcp",
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL)
         await asyncio.wait_for(proc.wait(), timeout)  # rc 1: nothing to end
     except Exception:  # noqa: BLE001 -- best effort; the channel's own start tells
         pass
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class Channel:

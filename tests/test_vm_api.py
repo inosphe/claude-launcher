@@ -162,7 +162,10 @@ async def test_stop_that_times_out_is_a_gateway_timeout_and_force_is_separate(ap
     api.fake.shutdown_stops_vm = False
     resp = await api.post("/api/vm/a/stop")
     assert resp.status == 504 and (await resp.json())["code"] == "vm_stop_timeout"
-    assert (await (await api.get("/api/vm/a")).json())["state"] == "stopping"
+    # the guest still answers: it is given back running, and its channel reopened
+    got = await (await api.get("/api/vm/a")).json()
+    assert got["state"] == "running" and got["ssh_ready"]
+    assert await api.hub.channels["a"].wait_up(2)
     resp = await api.post("/api/vm/a/force_stop")
     assert resp.status == 200 and (await resp.json())["state"] == "stopped"
 

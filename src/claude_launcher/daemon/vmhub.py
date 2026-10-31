@@ -64,7 +64,7 @@ _MOVES = {
     "saving": {"suspended", "running"},
     "suspended": {"restoring", "stopped"},
     "restoring": {"running", "stopped"},
-    "stopping": {"stopped"},
+    "stopping": {"stopped", "running"},
     "fault": {"stopped"},
 }
 
@@ -117,6 +117,11 @@ def rotate_log(path: Path, limit: int = LOG_LIMIT) -> None:
         pass
 
 
+def _plain(value) -> str:
+    """A free-text field the daemon only stores: no control characters, bounded."""
+    return "".join(c for c in str(value or "") if c.isprintable())[:512]
+
+
 def check_ip(value: str) -> str:
     try:
         return str(ipaddress.ip_address(value.strip()))
@@ -147,8 +152,11 @@ class Vm:
     tart_name: str
     state: str = "stopped"
     ip: str = ""
-    #: How the daemon reaches the guest. The key is a path to a file only the
-    #: daemon reads; no key or password is ever stored here.
+    #: ``ssh_user`` is the account that is logged in on the guest's console
+    #: (the readiness check compares it). ``ssh_key`` and ``ssh_ready`` keep
+    #: their names from when the guest was reached by ssh: the daemon reaches
+    #: it by ``tart exec`` now and uses no key; ``ssh_key`` is only what a
+    #: record said, and ``ssh_ready`` means the guest agent answers.
     ssh_user: str = "admin"
     ssh_key: str = ""
     #: The guest's cua-driver, by absolute path: a name would resolve to
@@ -207,7 +215,7 @@ class Vm:
         vm.state = raw.get("state") if raw.get("state") in STATES else "stopped"
         vm.ip = check_ip(str(raw["ip"])) if raw.get("ip") else ""
         vm.ssh_user = check_user(str(raw.get("ssh_user") or "admin"))
-        vm.ssh_key = check_path("ssh_key", str(raw.get("ssh_key") or ""), empty_ok=True)
+        vm.ssh_key = _plain(raw.get("ssh_key"))  # unused: never a reason to reject a record
         vm.cua_path = check_path("cua_path", str(raw.get("cua_path") or vm.cua_path))
         vm.fault_reason = str(raw.get("fault_reason") or "")
         vm.epoch = int(raw.get("epoch") or 0)
@@ -330,7 +338,7 @@ class Registry:
         check_name("id", vm_id)
         check_name("tart_name", tart_name or vm_id)
         check_user(ssh_user)
-        check_path("ssh_key", ssh_key, empty_ok=True)
+        ssh_key = _plain(ssh_key)
         with self._lock:
             if vm_id in self._vms:
                 raise VmError("vm_exists", f"{vm_id} is already registered")

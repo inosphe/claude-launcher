@@ -153,15 +153,39 @@ def test_stop_syncs_inside_the_guest_and_never_calls_tart_stop(env):
     assert ["tart", "stop", "--", "a"] not in fake.calls
 
 
-def test_a_guest_that_does_not_stop_is_left_stopping_not_forced(env):
+def test_a_guest_that_does_not_stop_is_given_back_running_not_forced(env):
     fake, reg, mgr = env
     mgr.start("a")
     fake.shutdown_stops_vm = False
     with pytest.raises(VmError) as e:
         mgr.stop("a")
-    assert e.value.code == "vm_stop_timeout"
-    assert reg.get("a").state == "stopping"
+    assert e.value.code == "vm_stop_timeout" and "running again" in str(e.value)
+    assert reg.get("a").state == "running" and reg.get("a").ssh_ready   # the route reopens its channel
+    assert any(r["what"] == "stop_abandoned" for r in reg.audit_log)
     assert ["tart", "stop", "--", "a"] not in fake.calls
+    fake.shutdown_stops_vm = True                                       # a retry sends the shutdown again
+    assert mgr.stop("a").state == "stopped"
+    assert len([c for c in fake.calls if c[-1] == vm_tart.SHUTDOWN]) == 2
+
+
+def test_a_guest_that_neither_stops_nor_answers_stays_stopping(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    fake.shutdown_stops_vm = False
+    run = fake.run
+    state = {"sent": False}
+
+    def run2(argv, timeout):
+        if argv[-1] == vm_tart.SHUTDOWN:
+            state["sent"] = True
+        if state["sent"] and argv[-1] == "/usr/bin/true":
+            return 1, "", "Error: unavailable (14): Transport became inactive"
+        return run(argv, timeout)
+    mgr._run = run2
+    with pytest.raises(VmError) as e:
+        mgr.stop("a")
+    assert e.value.code == "vm_stop_timeout" and "running again" not in str(e.value)
+    assert reg.get("a").state == "stopping"
 
 
 def test_force_stop_is_recorded_as_possible_data_loss(env):
@@ -328,16 +352,12 @@ def test_the_shutdown_checks_sudo_syncs_and_runs_in_the_background_by_absolute_p
     assert "shutdown" not in cmd.replace("/sbin/shutdown", "")
 
 
-def test_a_second_stop_of_a_stopping_vm_only_waits(env):
+def test_a_stop_of_a_vm_already_stopping_goes_on_when_the_agent_is_gone(env):
     fake, reg, mgr = env
     mgr.start("a")
-    fake.shutdown_stops_vm = False
-    with pytest.raises(VmError):
-        mgr.stop("a")
-    sent = len([c for c in fake.calls if c[-1] == vm_tart.SHUTDOWN])
-    fake.tart["a"] = "stopped"
+    reg.set_state("a", "stopping")
+    fake.tart["a"] = "stopped"            # the guest went down: the agent answers with an error
     assert mgr.stop("a").state == "stopped"
-    assert len([c for c in fake.calls if c[-1] == vm_tart.SHUTDOWN]) == sent
 
 
 def test_force_stop_follows_whatever_state_the_vm_is_in(env):

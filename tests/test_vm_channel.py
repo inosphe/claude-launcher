@@ -338,9 +338,3 @@ def test_a_new_connection_first_ends_the_stale_guest_processes_of_the_old_one(tm
         assert reaped == ["a", "a"] and len(world.opened) == 2
         await ch.stop()
     asyncio.run(go())
-
-
-def test_the_real_reaper_matches_mcp_only_and_not_its_own_command_line():
-    import inspect
-    src = inspect.getsource(vm_channel.reap_stale)
-    assert '"[c]ua-driver mcp"' in src and '"/usr/bin/pkill"' in src

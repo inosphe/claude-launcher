@@ -30,10 +30,18 @@ def test_a_bad_ssh_user_is_refused(user):
         Registry().add("a", ssh_user=user)
 
 
-@pytest.mark.parametrize("key", ["-i", "keys/k", "/k/../../etc/x", "/k k", "/k;x", "/k*", "/k\n"])
-def test_a_bad_key_path_is_refused(key):
-    with pytest.raises(VmError):
-        Registry().add("a", ssh_key=key)
+def test_the_key_field_is_stored_but_never_a_reason_to_refuse_a_record(home):
+    """The daemon reaches a guest by tart exec and uses no key; a path with a
+    space or a ~ used to reject the whole record (and its grants)."""
+    reg = Registry()
+    assert reg.add("a", ssh_key="~/my keys/k").ssh_key == "~/my keys/k"
+    assert reg.add("b", ssh_key="/k\nsecond line\x00").ssh_key == "/ksecond line"
+    path = paths.vm_json()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"vms": [{"id": "c", "ssh_key": "~/a b", "grants": {"s1": ["view"]}}]}))
+    again = Registry(path)
+    again.load()
+    assert again.get("c").grants == {"s1": ["view"]} and again.get("c").ssh_key == "~/a b"
 
 
 def test_a_plain_record_passes():

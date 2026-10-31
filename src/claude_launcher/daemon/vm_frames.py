@@ -32,8 +32,10 @@ CAPTURE_TIMEOUT = 15.0
 #: The capture command, run by the guest's shell. The temp file is the
 #: guest's own and goes away in the same command.
 #: (Not a dot-file name: screencapture refuses to write one, measured on t03.)
-CAPTURE = ('f=/tmp/claunch-frame-$$.jpg; /usr/sbin/screencapture -x -t jpg "$f" && /bin/cat "$f"; '
-           'rc=$?; /bin/rm -f "$f"; exit $rc')
+#: Files an earlier capture left (its tart exec was killed on a timeout) are
+#: removed first: one poller runs per VM, so none of them is in use.
+CAPTURE = ('/bin/rm -f /tmp/claunch-frame-*.jpg; f=/tmp/claunch-frame-$$.jpg; '
+           '/usr/sbin/screencapture -x -t jpg "$f" && /bin/cat "$f"; rc=$?; /bin/rm -f "$f"; exit $rc')
 
 BytesResult = Tuple[int, bytes, str]
 BytesRunner = Callable[[Sequence[str], float], BytesResult]

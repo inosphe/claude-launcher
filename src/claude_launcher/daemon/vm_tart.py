@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import ipaddress
 import json
 import re
 import subprocess
@@ -48,12 +49,41 @@ EXEC_MAX = 600.0
 #: the guest. The guest's /29 is random per boot, so the block is by range.
 SOFTNET_BLOCK = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
+def parse_softnet(raw_softnet, raw_block) -> Tuple[bool, str]:
+    """The softnet settings as the manager uses them. The block list is what
+    keeps a guest off the host's own ports, so a value that is not a list of
+    CIDRs (or is empty) is replaced by the default rather than read as "no
+    block"; ``vm_softnet`` is off only when it says so in a plain way."""
+    if isinstance(raw_softnet, str):
+        on = raw_softnet.strip().lower() not in ("false", "no", "off", "0")
+    else:
+        on = raw_softnet is not False and raw_softnet != 0
+    parts = raw_block if isinstance(raw_block, (list, tuple)) else str(raw_block or "").split(",")
+    nets = []
+    for part in parts:
+        part = str(part).strip()
+        if not part:
+            continue
+        try:
+            nets.append(str(ipaddress.ip_network(part, strict=False)))
+        except ValueError:
+            return on, SOFTNET_BLOCK
+    return on, ",".join(nets) or SOFTNET_BLOCK
+
+
 #: What tart exec prints when the agent or the VM is not there, as opposed to
 #: what the guest command itself printed (measured on tart 2.41.1: d-005,
 #: s2 t03 runs of 2026-10-31).
 AGENT_ERROR = re.compile(
-    r'^(Error: unavailable|VM ".*" is not running|the specified VM|Error: .*(guest agent|transport))',
-    re.I | re.M)
+    r'Error: unavailable \(\d+\): .*|VM ".*" is not running|the specified VM ".*" does not exist|'
+    r'Error: .*guest agent.*', re.I)
+
+
+def is_agent_error(rc: int, out: str, err: str) -> bool:
+    """tart exec's own failure rather than the guest command's: stderr is
+    exactly one of tart's lines (a command that failed prints its own text and
+    usually more than that), and it failed."""
+    return rc != 0 and AGENT_ERROR.fullmatch((err or "").strip()) is not None
 
 #: (returncode, stdout, stderr)
 Result = Tuple[int, str, str]
@@ -61,16 +91,46 @@ Runner = Callable[[Sequence[str], float], Result]
 Spawner = Callable[[Sequence[str], Path], int]
 
 
-def run_command(argv: Sequence[str], timeout: float = 30.0) -> Result:
+#: What run_command keeps of each stream; the rest is read and dropped so a
+#: guest command cannot fill the daemon's memory (exec cuts to OUTPUT_CAP).
+READ_CAP = 4 * OUTPUT_CAP
+
+
+def _drain(stream, cap: int, into: list) -> None:
+    kept = 0
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            return
+        if kept < cap:
+            into.append(chunk[:cap - kept])
+            kept += len(chunk[:cap - kept])
+
+
+def run_command(argv: Sequence[str], timeout: float = 30.0, cap: int = READ_CAP) -> Result:
     try:
         # No stdin: a command that reads it would wait for ever (d-003).
-        done = subprocess.run(list(argv), capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout:g}s"
+        proc = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
     except OSError as exc:
         return 127, "", str(exc)
-    return done.returncode, done.stdout, done.stderr
+    out: list = []
+    err: list = []
+    readers = [threading.Thread(target=_drain, args=(s, cap, b), daemon=True)
+               for s, b in ((proc.stdout, out), (proc.stderr, err))]
+    for r in readers:
+        r.start()
+    try:
+        rc = proc.wait(timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        rc = 124
+        err.append(f"timed out after {timeout:g}s".encode())
+    for r in readers:
+        r.join(5)
+    text = lambda parts: b"".join(parts).decode("utf-8", "replace")  # noqa: E731
+    return rc, text(out), text(err)
 
 
 def spawn_detached(argv: Sequence[str], log: Path) -> int:
@@ -237,7 +297,7 @@ class Manager:
         if vm.state != "running":
             raise VmError("vm_not_ready", f"{vm_id} is {vm.state}")
         rc, out, err = self._guest(vm, command, min(max(timeout, 1.0), EXEC_MAX))
-        if rc != 0 and AGENT_ERROR.search(err or ""):
+        if is_agent_error(rc, out, err):
             raise VmError("vm_unavailable", f"{vm_id}: the guest agent said {err.strip()[:200]}",
                           retry_after=5)
         cut = len(out) > OUTPUT_CAP or len(err) > OUTPUT_CAP
@@ -344,17 +404,18 @@ class Manager:
             return vm
         if vm.state not in ("running", "starting", "paused", "stopping"):
             raise VmError("vm_bad_state", f"{vm_id} is {vm.state}; cannot stop it")
-        # A VM already "stopping" is being waited for again: its guest is on
-        # the way down. Otherwise sudo is checked first (a guest that needs a
-        # password must say so, not look like a shutdown), the guest syncs,
-        # and the shutdown is started in the background so that this call
-        # returns: run in the foreground, tart exec holds until the VM is gone
-        # and ends with "Transport became inactive" (measured, 34 s).
-        if vm.state != "stopping":
-            rc, out, err = self._guest(vm, SHUTDOWN, 30)
-            if rc != 0:
-                raise VmError("vm_stop_failed",
-                              f"{vm_id}: guest shutdown said {(err or out).strip()[:200] or rc}")
+        # The shutdown is sent each time stop is asked, a retry of a stop that
+        # did not take included: sudo is checked first (a guest that needs a
+        # password must say so, not look like a shutdown), the guest syncs, and
+        # the shutdown is started in the background so that this call returns
+        # (in the foreground tart exec holds until the VM is gone and ends with
+        # "Transport became inactive": measured, 34 s). On a VM already
+        # "stopping" an answer from the guest agent that is an error just means
+        # the guest is on its way down.
+        rc, out, err = self._guest(vm, SHUTDOWN, 30)
+        if rc != 0 and vm.state != "stopping":
+            raise VmError("vm_stop_failed",
+                          f"{vm_id}: guest shutdown said rc {rc}: {(err or out).strip()[:200]}")
         if vm.state != "stopping":
             self.registry.set_state(vm_id, "stopping")
         deadline = time.monotonic() + self.stop_wait
@@ -364,10 +425,21 @@ class Manager:
                     self.registry.set_state(vm_id, "stopped")
                 return self.registry.get(vm_id)
             self._sleep(POLL)
+        # The shutdown did not take. A guest that still answers is up and
+        # usable: give it back as running (the route reopens its channel)
+        # instead of leaving it "stopping" with nothing watching it.
+        back = self._guest(vm, "/usr/bin/true", 10)[0] == 0 and \
+            self.tart_state(vm.tart_name) == "running"
+        if back:
+            self.registry.set_state(vm_id, "running")
+            # Leaving the running state cleared the readiness; the agent has
+            # just answered and the console login was there before.
+            self.registry.set_ready(vm_id, ssh=True, gui=True)
+            self.registry.note(vm_id, "stop_abandoned")
         raise VmError("vm_stop_timeout",
-                      f"{vm_id} did not stop within {self.stop_wait:g}s; "
-                      "force_stop would lose unsynced guest writes")
-
+                      f"{vm_id} did not stop within {self.stop_wait:g}s"
+                      + ("; it is running again" if back else "")
+                      + "; force_stop would lose unsynced guest writes")
     @_operation
     def force_stop(self, vm_id: str) -> vmhub.Vm:
         """``tart stop``: the VM is gone at once and unsynced writes with it."""
