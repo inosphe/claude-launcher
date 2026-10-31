@@ -20,9 +20,11 @@ const PLAN_STAGE = {
   idle: "계획·런 없음",
 };
 const PLAN_STEP_MARK = {todo: "○", doing: "◐", done: "●", skipped: "–", blocked: "✕"};
-const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
 
 function makePlanPage({root, request}) {
+  // Inside the factory: plan-pane.js declares a top-level PLAN_VIA, and both
+  // scripts share the page's global scope (claunch-7jzp8.5.1).
+  const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
   const node = (tag, text, cls) => {
     const n = document.createElement(tag);
     if (text != null) n.textContent = text;
