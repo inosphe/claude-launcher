@@ -35,6 +35,19 @@ function sliceTo(decl, end) {
   if (stop < 0) throw new Error("unterminated " + decl);
   return src.slice(start, stop + end.length);
 }
+/* The block of module-level declarations the renderer reads, from the first
+   regex to the last table. Slicing the whole run rather than naming each
+   declaration keeps this harness green when app.js grows another one: master
+   added `MD_BEADS_ID`/`beadsIdPrefixes`/`mdLinkDepth` to mdInline and an
+   enumerated list here failed with ReferenceError instead of a render
+   verdict (claunch-ns4kd round 2). */
+function sliceDecls(startDecl, endDecl) {
+  const start = src.indexOf(startDecl);
+  if (start < 0) throw new Error("missing " + startDecl);
+  const stop = src.indexOf(endDecl, start);
+  if (stop < 0) throw new Error("missing " + endDecl);
+  return src.slice(start, stop);
+}
 
 /* ---- stub DOM ---------------------------------------------------------- */
 function node(tag) {
@@ -65,12 +78,7 @@ const document = {
 const scope = { document };
 new Function("document", "exports", `
   ${slice("el")}
-  ${sliceTo("const MD_BULLET", ";")}
-  ${sliceTo("const MD_RULE", ";")}
-  ${sliceTo("const MD_FENCE", ";")}
-  ${sliceTo("const MD_BLOCK_START", ";")}
-  ${sliceTo("const MD_SAFE_HREF", ";")}
-  ${sliceTo("const MD_INLINE = [", "\n];")}
+  ${sliceDecls("const MD_BULLET", "function mdWrap(")}
   ${sliceTo("const mdCells =", ";")}
   ${slice("mdWrap")}
   ${slice("mdLink")}
