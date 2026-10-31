@@ -457,3 +457,83 @@ def test_the_page_says_its_limit_and_the_heartbeat_ignores_tab_visibility():
     beat = js[js.index("function beat()"):js.index("function manageTouch")]
     assert "document.hidden" not in beat and "new Worker" in beat
     assert 'id="vm-limit"' in (static / "vm.html").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# re-verification findings (N1-N9)
+# --------------------------------------------------------------------------- #
+def test_a_session_that_ends_gives_back_its_vm_through_the_real_exit_hooks(tmp_path):
+    """The hook is wired in build_app and reads the name where a Session keeps it
+    (session.sdef.name); a registry-level test cannot see either."""
+    import time
+    from types import SimpleNamespace
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    async def go():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        reg = app["vm_registry"]
+        reg.add("a")
+        reg.claim_slot("a")
+        reg.set_state("a", "running")
+        reg.set_ready("a", ssh=True, gui=True, cua=True, ip="192.168.64.2")
+        reg.grant("a", "s1", ["control"])
+        reg.grant("a", "s2", ["control"])
+        reg.acquire("a", "s1")
+        mgr._run_exit_hooks(SimpleNamespace(sdef=SimpleNamespace(name="s2")))
+        assert reg.get("a").controller == "s1"       # another session's exit changes nothing
+        mgr._run_exit_hooks(SimpleNamespace(sdef=SimpleNamespace(name="s1")))
+        assert reg.get("a").controller == "" and reg.get("a").grants["s1"]
+    asyncio.run(go())
+
+
+def test_status_codes_for_the_errors_the_routes_raise():
+    for code, status in (("vm_tool_not_allowed", 403), ("vm_suspend_timeout", 504)):
+        assert vm_api._STATUS[code] == status
+
+
+def test_a_step_whose_tool_is_not_a_string_is_a_400_not_a_crash():
+    for bad in ({"tool": ["click"]}, {"tool": {"a": 1}}, {"tool": 3}):
+        with pytest.raises(VmError) as e:
+            vm_api.check_nested("run_steps", {"steps": [bad]})
+        assert e.value.code == "vm_tool_not_allowed"
+
+
+@scenario
+async def test_reconcile_probes_and_opens_the_channel_of_a_guest_it_adopts(api):
+    await _up(api)
+    api.reg.adopt("a", "stopped")                      # the record lost the VM; tart still runs it
+    await api.hub.drop("a")
+    assert api.fake.tart["a"] == "running"
+    resp = await api.post("/api/vm-reconcile")
+    body = await resp.json()
+    assert body["probing"] == ["a"] and body["changed"]
+    for _ in range(300):
+        if api.reg.get("a").channel == "up":
+            break
+        await asyncio.sleep(0.01)
+    vm = api.reg.get("a")
+    assert vm.state == "running" and vm.ssh_ready and vm.channel == "up"
+
+
+@scenario
+async def test_a_guest_that_never_answers_ends_in_fault_not_in_silence(api):
+    await _up(api)
+    api.reg.adopt("a", "running")                      # readiness gone, as after a restart
+
+    async def hopeless(vm_id):
+        raise VmError("vm_boot_timeout", "no ssh")
+    api.mgr.reprobe = hopeless
+    real = asyncio.sleep
+
+    async def quick(_):
+        await real(0)
+    import unittest.mock as mock
+    with mock.patch.object(vm_api.asyncio, "sleep", quick):
+        assert await vm_api._bring_up(api.server.app, "a") is False
+    vm = api.reg.get("a")
+    assert vm.state == "fault" and "did not come up" in vm.fault_reason
+    assert [r for r in api.reg.audit_log if r["what"] == "reprobe_failed"]

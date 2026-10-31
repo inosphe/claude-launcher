@@ -49,6 +49,8 @@ _STATUS = {
     "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
+    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_bad_address": 502,
+    "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -127,7 +129,7 @@ def check_nested(tool: str, arguments: dict) -> None:
         names = [step["tool"]] if "tool" in step else []
         names += [k for k in step if k not in RUN_STEPS_KEYS]
         for name in names:
-            if name not in RUN_STEPS_TOOLS:
+            if not isinstance(name, str) or name not in RUN_STEPS_TOOLS:
                 raise VmError("vm_tool_not_allowed",
                               f"run_steps: step {i} names {str(name)[:40]!r}, which is not one of "
                               + ", ".join(sorted(RUN_STEPS_TOOLS)))
@@ -305,9 +307,15 @@ async def h_reconcile(request: web.Request) -> web.Response:
     reg, mgr = _hub(request)
     try:
         _trace(request, reg, "", "reconcile")
-        return web.json_response({"changed": await asyncio.to_thread(mgr.reconcile)})
+        changed = await asyncio.to_thread(mgr.reconcile)
     except VmError as exc:
         return _err(exc)
+    # A guest adopted as running has no readiness yet: probe it and open its
+    # channel, as the restart recovery does.
+    probing = [v.id for v in reg.list() if v.state == "running" and not v.ssh_ready]
+    for vm_id in probing:
+        _spawn(request.app, _bring_up(request.app, vm_id))
+    return web.json_response({"changed": changed, "probing": probing})
 
 
 async def h_grant(request: web.Request) -> web.Response:
@@ -506,14 +514,15 @@ async def h_call(request: web.Request) -> web.Response:
         check_nested(tool, args)
         timeout = _timeout(body, 30)
         scope = tool_scope(tool)
-        reg.begin_call(vm_id, session, scope, body.get("epoch"))
+        began = reg.begin_call(vm_id, session, scope, body.get("epoch")).observe_gen
         ok = False
         try:
             channel = request.app["vm_channels"].get(vm_id)
             result = await channel.call(tool, args, timeout)
             ok = True
         finally:
-            reg.end_call(vm_id, session, scope, ok=ok, observe=tool in OBSERVE_TOOLS)
+            reg.end_call(vm_id, session, scope, ok=ok, observe=tool in OBSERVE_TOOLS,
+                         began_at_gen=began)
         return web.json_response({"ok": True, "scope": scope,
                                   "result": _materialize(vm_id, result)})
     except VmError as exc:
@@ -560,6 +569,41 @@ async def h_exec(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+def _spawn(app: web.Application, coro) -> None:
+    """Run ``coro`` in the background with a reference held until it ends."""
+    tasks: set = app.setdefault("vm_tasks", set())
+    task = asyncio.create_task(coro)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+async def _bring_up(app: web.Application, vm_id: str, tries: int = 3) -> bool:
+    """Probe a running guest's ssh and console, then open its channel. After
+    ``tries`` failures the VM is put in ``fault`` with the reason, so it shows
+    and a later reconcile (or a stop) deals with it."""
+    reg: Registry = app["vm_registry"]
+    mgr: vm_tart.Manager = app["vm_manager"]
+    for attempt in range(tries):
+        try:
+            await mgr.reprobe(vm_id)
+            app["vm_channels"].ensure(vm_id)
+            return True
+        except VmError as exc:
+            reg.note(vm_id, "reprobe_failed", code=exc.code, attempt=attempt + 1)
+            last = f"{exc.code}: {exc}"
+            if attempt + 1 < tries:
+                await asyncio.sleep(10.0)
+    try:
+        if reg.get(vm_id).state == "running":
+            reg.set_state(vm_id, "fault", reason=f"the guest did not come up after {tries} probes ({last})")
+    except VmError:
+        pass
+    return False
+
+
+RECONCILE_TRIES = 8
+
+
 async def _background(app: web.Application):
     reg: Registry = app["vm_registry"]
     mgr: vm_tart.Manager = app["vm_manager"]
@@ -568,31 +612,30 @@ async def _background(app: web.Application):
     known = {v.id for v in reg.list()}  # what the file held: the recovery's whole business
 
     async def recover():
-        """After a (re)start: make the records agree with tart, then probe each
-        running guest and open its channel, one VM at a time failing alone.
-        Runs behind the daemon's start, not in front of it."""
+        """After a (re)start: make the records agree with tart, then bring each
+        running guest up, one VM at a time failing alone. Runs behind the
+        daemon's start, not in front of it."""
         delay = 5.0
-        while True:
+        for attempt in range(RECONCILE_TRIES):
             try:
                 await asyncio.to_thread(mgr.reconcile, known)
                 break
-            except VmError:
+            except VmError as exc:
                 # tart unreadable: nothing is ready (after_restart cleared it),
                 # so nothing is used meanwhile; try again.
+                reason = f"{exc.code}: {exc}"
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60.0)
-
-        async def one(vm_id: str):
-            for attempt in range(3):
-                try:
-                    await mgr.reprobe(vm_id)
-                    app["vm_channels"].ensure(vm_id)
-                    return
-                except VmError as exc:
-                    reg.note(vm_id, "reprobe_failed", code=exc.code, attempt=attempt + 1)
-                    await asyncio.sleep(10.0)
-
-        await asyncio.gather(*(one(v.id) for v in reg.list() if v.id in known and v.state == "running"),
+        else:
+            for vm in reg.list():
+                if vm.id in known and vm.state not in ("stopped", "suspended", "fault"):
+                    try:
+                        reg.set_state(vm.id, "fault", reason=f"tart could not be read after a restart ({reason})")
+                    except VmError:
+                        pass
+            return
+        await asyncio.gather(*(_bring_up(app, v.id) for v in reg.list()
+                               if v.id in known and v.state == "running"),
                              return_exceptions=True)
 
     recovery = asyncio.create_task(recover()) if known else None
@@ -609,18 +652,33 @@ async def _background(app: web.Application):
         while True:
             await asyncio.sleep(30)
             try:
-                await asyncio.to_thread(mgr.settle)
+                moved = await asyncio.to_thread(mgr.settle)
             except VmError:
-                pass
+                continue
+            for vm_id in moved:  # a suspend given up on: the guest is up again
+                vm = reg.get(vm_id)
+                if vm.state == "running" and vm.ssh_ready:
+                    app["vm_channels"].ensure(vm_id)
 
     task = asyncio.create_task(hand_back())
     settling = asyncio.create_task(settle())
     yield
-    for t in (task, settling, recovery):
+    for t in (task, settling, recovery, *app.get("vm_tasks", ())):
         if t is not None:
             t.cancel()
     await app["vm_frames"].stop_all()
     await app["vm_channels"].drop_all()
+
+
+def exit_hook(app: web.Application):
+    """The manager's exit hook: a session that ends gives back the VM control it
+    held (its grants stay, so a resumed session of the same name keeps its
+    access). A session's name is ``session.sdef.name``."""
+    def hook(session) -> None:
+        name = getattr(getattr(session, "sdef", None), "name", "")
+        if name:
+            app["vm_registry"].session_exited(name)
+    return hook
 
 
 def install(app: web.Application, registry: Optional[Registry] = None,

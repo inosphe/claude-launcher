@@ -106,6 +106,16 @@ def _post(path: str, body: dict, timeout: float = 40.0) -> dict:
         raise VmMcpError(str(exc)) from None
 
 
+def _seconds(args: dict, default: float) -> float:
+    raw = args.get("timeout")
+    if raw in (None, ""):
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise VmMcpError("timeout must be a number of seconds") from None
+
+
 def _epoch(vm: str, args: dict):
     return args.get("epoch") if args.get("epoch") is not None else _epochs.get(vm)
 
@@ -131,12 +141,12 @@ def call_tool(name: str, args: dict) -> dict:
             "session": me, "tool": "get_desktop_state",
             "arguments": args.get("arguments") or {}})
     if name == "vm_cua":
-        timeout = float(args.get("timeout") or 30)
+        timeout = _seconds(args, 30)
         return _post(f"/api/vm/{vm}/call", {
             "session": me, "tool": args.get("tool"), "arguments": args.get("arguments") or {},
             "epoch": _epoch(vm, args), "timeout": timeout}, timeout + 10)
     if name == "vm_exec":
-        timeout = float(args.get("timeout") or 60)
+        timeout = _seconds(args, 60)
         return _post(f"/api/vm/{vm}/exec", {
             "session": me, "command": args.get("command"),
             "epoch": _epoch(vm, args), "timeout": timeout}, timeout + 10)

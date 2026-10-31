@@ -2,6 +2,8 @@
 epoch, and the user taking the screen."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from claude_launcher.daemon import paths, vmhub
@@ -160,7 +162,7 @@ def test_the_first_control_call_after_acquire_must_follow_a_look(reg):
         reg.begin_call("a", "s1", "control", epoch)
     assert _code(e) == "vm_observe_first"
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s1", "control", epoch)
 
 
@@ -186,7 +188,7 @@ def test_a_duplicate_controller_needs_a_grant_a_reason_and_a_controller(reg):
     assert _code(e) == "vm_reason_required"
     reg.add_extra_controller("a", "s2", "reviewing the run")
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s2", "view")
     reg.begin_call("a", "s2", "control", epoch)
 
@@ -207,7 +209,7 @@ def test_while_the_user_drives_control_is_refused_and_view_is_not(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.human_driving("a")
     with pytest.raises(VmError) as e:
         reg.begin_call("a", "s1", "control", epoch)
@@ -220,7 +222,7 @@ def test_a_call_in_flight_is_waited_for_not_cancelled(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s1", "control", epoch)
     assert reg.human_driving("a")["draining"] is True
     reg.end_call("a", "s1", "control")
@@ -232,7 +234,7 @@ def test_handing_back_keeps_control_but_asks_for_a_new_look(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.human_driving("a")
     reg.human_idle("a")
     assert reg.get("a").controller == "s1" and reg.get("a").epoch == epoch
@@ -300,7 +302,7 @@ def test_the_audit_record_carries_no_command_text(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s1", "control", epoch)
     kinds = [row["what"] for row in reg.audit_log]
     assert {"grant", "acquire", "call"} <= set(kinds)
@@ -319,10 +321,10 @@ def test_only_the_controllers_successful_look_clears_look_first(reg):
     epoch = reg.acquire("a", "s1")["epoch"]
     # another session looking, or a look that has not finished, changes nothing
     reg.begin_call("a", "s2", "view")
-    reg.end_call("a", "s2", "view", observe=True)
+    reg.end_call("a", "s2", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     assert reg.get("a").needs_observe
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", ok=False, observe=True)
+    reg.end_call("a", "s1", "view", ok=False, observe=True, began_at_gen=reg.get("a").observe_gen)
     assert reg.get("a").needs_observe
     reg.begin_call("a", "s1", "view")
     reg.end_call("a", "s1", "view", observe=False)  # a view call that is not a look
@@ -331,7 +333,7 @@ def test_only_the_controllers_successful_look_clears_look_first(reg):
         reg.begin_call("a", "s1", "control", epoch)
     assert _code(e) == "vm_observe_first"
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s1", "control", epoch)
 
 
@@ -339,13 +341,13 @@ def test_a_look_that_began_before_the_hand_back_does_not_count(reg):
     _ready(reg)
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
-    reg.begin_call("a", "s1", "view")
+    began = reg.begin_call("a", "s1", "view").observe_gen
     reg.human_driving("a")
     reg.human_idle("a")  # the screen changed under the look in flight
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=began)
     assert reg.get("a").needs_observe
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view", observe=True)
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=reg.get("a").observe_gen)
     reg.begin_call("a", "s1", "control", epoch)
 
 
@@ -362,3 +364,35 @@ def test_revoking_control_takes_exec_with_it(reg):
     reg.grant("a", "s1", ["exec"])
     assert reg.revoke("a", "s1", ["control"]) == ["view"]
     assert reg.get("a").grants["s1"] == ["view"]
+
+
+def test_a_record_the_checks_reject_stays_in_the_file(home):
+    """Dropping it on the next save lost its grants for good."""
+    path = paths.vm_json()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bad = {"id": "b", "ssh_user": "-oProxyCommand=x", "grants": {"s1": ["view", "control"]}}
+    path.write_text(json.dumps({"vms": [{"id": "a"}, bad]}), encoding="utf-8")
+    reg = Registry(path)
+    reg.load()
+    reg.add("c")                                     # any save
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert [v["id"] for v in doc["vms"]] == ["a", "c"]
+    assert doc["rejected"][0]["record"]["grants"] == {"s1": ["view", "control"]}
+    again = Registry(path)
+    again.load()
+    again.add("d")
+    assert json.loads(path.read_text(encoding="utf-8"))["rejected"][0]["record"]["id"] == "b"
+
+
+def test_a_look_is_judged_by_the_generation_its_own_call_began_in(reg):
+    _ready(reg)
+    reg.grant("a", "s1", ["control"])
+    reg.acquire("a", "s1")
+    first = reg.begin_call("a", "s1", "view").observe_gen
+    reg.human_driving("a")
+    reg.human_idle("a")
+    second = reg.begin_call("a", "s1", "view").observe_gen
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=first)
+    assert reg.get("a").needs_observe                # the older look does not count
+    reg.end_call("a", "s1", "view", observe=True, began_at_gen=second)
+    assert not reg.get("a").needs_observe

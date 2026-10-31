@@ -376,3 +376,59 @@ def test_a_log_over_the_limit_keeps_one_previous_generation(tmp_path):
     log.write_bytes(b"y" * 200)
     vmhub.rotate_log(log, limit=100)
     assert not log.exists() and (tmp_path / "t.log.1").read_bytes() == b"y" * 200
+
+
+def test_settle_leaves_a_vm_a_stop_is_working_on(env):
+    """settle() ran in its own thread against stop()'s polling: it moved the VM
+    to stopped first and stop()'s own move then failed as not allowed."""
+    fake, reg, mgr = env
+    mgr.start("a")
+    run = fake.run
+    seen = []
+
+    def with_settle(argv, timeout):
+        if argv[:2] == ["tart", "list"]:
+            seen.append(mgr.settle())  # what the 30 s loop would do at this moment
+        return run(argv, timeout)
+    mgr._run = with_settle
+    assert mgr.stop("a").state == "stopped"
+    assert all(s == [] for s in seen) and seen
+
+
+def test_reconcile_does_not_depend_on_record_order_and_faults_what_does_not_fit(env):
+    fake, reg, mgr = env
+    reg.add("d")
+    # a is recorded running but tart suspended it; b, c run in tart, d too (one too many)
+    mgr.start("a")
+    fake.tart.update({"a": "suspended", "b": "running", "c": "running", "d": "running"})
+    changed = mgr.reconcile()
+    states = {v.id: v.state for v in reg.list()}
+    assert states["a"] == "suspended" and states["b"] == "running" and states["c"] == "running"
+    assert states["d"] == "fault" and "vm_slots_full" in reg.get("d").fault_reason
+    assert any("d: stopped -> fault" in c for c in changed)
+
+
+def test_a_suspend_given_up_on_returns_to_running_after_a_second_wait(env):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr.suspend_wait = 0.05
+    fake.suspend_lag = -1
+    with pytest.raises(VmError):
+        mgr.suspend("a")
+    assert mgr.settle() == []                       # not yet a second wait
+    import time as _t
+    _t.sleep(0.06)
+    assert mgr.settle() == ["a"] and reg.get("a").state == "running"
+    assert any(r["what"] == "suspend_abandoned" for r in reg.audit_log)
+
+
+@pytest.mark.parametrize("err", ["Connection closed by 192.168.64.2 port 22",
+                                 "Connection reset by peer", "kex_exchange_identification: x"])
+def test_an_unknown_255_is_not_taken_for_a_shutdown_that_started(env, err):
+    fake, reg, mgr = env
+    mgr.start("a")
+    mgr._run = lambda argv, timeout: ((255, "", err) if argv[0] == "ssh" and "shutdown" in argv[-1]
+                                      else fake.run(argv, timeout))
+    with pytest.raises(VmError) as e:
+        mgr.stop("a")
+    assert e.value.code == "vm_stop_failed" and reg.get("a").state == "running"

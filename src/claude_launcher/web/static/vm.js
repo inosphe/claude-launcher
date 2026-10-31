@@ -105,7 +105,7 @@ function renderDetail(vm) {
   $("vm-controller").textContent = vm.controller || "없음";
   $("vm-revoke-control").disabled = !vm.controller;
   const driving = vm.human === "driving";
-  takingOver = driving;
+  takingOver = vms.some((v) => v.human === "driving");
   $("vm-takeover").hidden = driving;
   $("vm-return").hidden = !driving;
   $("vm-human").textContent = driving
@@ -207,7 +207,12 @@ $("vm-return").addEventListener("click", () => selected && act("세션에 돌려
 const BEAT_MS = 5000;
 let beatWorker = null;
 function beat() {
-  if (selected) human("touch").catch(() => {});
+  // The VMs the user is driving, not the one this page happens to show.
+  for (const vm of vms) {
+    if (vm.human === "driving") {
+      post(`api/vm/${encodeURIComponent(vm.id)}/human`, { action: "touch" }).catch(() => {});
+    }
+  }
 }
 function startBeat() {
   try {

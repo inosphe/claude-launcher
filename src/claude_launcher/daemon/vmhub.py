@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import re
 import threading
 import time
@@ -38,6 +39,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from .. import atomic
+
+log = logging.getLogger(__name__)
 
 SLOT_LIMIT = 2
 
@@ -66,6 +69,7 @@ _MOVES = {
 }
 
 AUDIT_RING = 500
+REJECTED_KEEP = 50
 
 #: What may reach a command line or a file name. Everything below is checked
 #: when a record is made and again when one is read back from vms.json, and
@@ -171,7 +175,6 @@ class Vm:
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
-    view_gen: Dict[str, int] = field(default_factory=dict)
     #: Calls running right now (not persisted).
     inflight: int = 0
 
@@ -262,6 +265,7 @@ class Registry:
         self._clock = clock
         self._lock = threading.RLock()
         self._vms: Dict[str, Vm] = {}
+        self._rejected: list = []
         self.audit_log: List[dict] = []
 
     # ---- persistence --------------------------------------------------- #
@@ -277,12 +281,18 @@ class Registry:
         except (OSError, ValueError):
             return
         with self._lock:
+            self._rejected = [r for r in (doc.get("rejected") or []) if isinstance(r, dict)]
             for raw in doc.get("vms") or []:
                 try:
                     vm = Vm.from_dict(raw)
-                except (KeyError, TypeError, ValueError, VmError):
-                    continue  # a record that would not pass today's checks is not trusted
+                except (KeyError, TypeError, ValueError, VmError) as exc:
+                    # Not trusted, and not deleted either: it is kept in the
+                    # file (under "rejected") so its grants survive a fix.
+                    log.warning("vm record %r rejected: %s", (raw or {}).get("id") if isinstance(raw, dict) else raw, exc)
+                    self._rejected.append({"record": raw, "why": str(exc)})
+                    continue
                 self._vms[vm.id] = vm
+            del self._rejected[:-REJECTED_KEEP]
 
     def load_and_reset(self) -> None:
         """Daemon start: read the file and drop what a restart invalidates."""
@@ -294,6 +304,8 @@ class Registry:
         if self.path is None:
             return
         doc = {"vms": [vm.to_dict() for vm in self._vms.values()]}
+        if self._rejected:
+            doc["rejected"] = self._rejected
         with atomic.scratch(self.path) as tmp:
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
             atomic.replace(tmp, self.path)
@@ -566,7 +578,7 @@ class Registry:
                 self._log(vm_id, session, "refused", scope=scope, why="no grant")
                 raise VmError("vm_no_grant", f"{session} has no {scope} grant on {vm_id}")
             if scope == VIEW:
-                vm.view_gen[session] = vm.observe_gen
+                pass
             else:
                 if vm.human == "driving":
                     raise VmError("vm_busy", "the user is driving the VM", retry_after=5,
@@ -591,16 +603,17 @@ class Registry:
             return vm
 
     def end_call(self, vm_id: str, session: str, scope: str, *, ok: bool = True,
-                 observe: bool = False) -> None:
+                 observe: bool = False, began_at_gen: Optional[int] = None) -> None:
         """``observe``: the call returned a look at the screen. It clears the
         controller's "look first" mark only when it succeeded, came from the
-        controller, and began after the mark was last set."""
+        controller, and began after the mark was last set (``began_at_gen`` is
+        the VM's ``observe_gen`` when this very call began)."""
         with self._lock:
             vm = self.get(vm_id)
             vm.inflight = max(0, vm.inflight - 1)
             if (ok and observe and scope == VIEW and vm.needs_observe
                     and (session == vm.controller or session in vm.extra_controllers)
-                    and vm.view_gen.get(session) == vm.observe_gen):
+                    and began_at_gen == vm.observe_gen):
                 vm.needs_observe = False
             self._log(vm_id, session, "done", scope=scope, ok=ok)
 

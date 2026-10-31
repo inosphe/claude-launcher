@@ -21,9 +21,12 @@ What the d-002 measurements decided (vm-setup-q0g.2, runs/d-002):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import json
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,11 +98,12 @@ def parse_list(text: str) -> List[TartVm]:
     return out
 
 
-#: ssh's own failures to reach or enter the guest (all exit 255).
-UNREACHABLE = re.compile(
-    r"Connection (refused|timed out)|No route to host|Network is unreachable|"
-    r"Operation timed out|Permission denied|Could not resolve|Host key verification|"
-    r"Connection reset by peer|Too many authentication", re.I)
+#: What ssh prints (rc 255) when the guest drops the connection as it goes
+#: down. Any other 255 is ssh failing to reach or enter the guest, and the
+#: shutdown was not started.
+CLOSED_BY_GUEST = re.compile(
+    r"closed by remote host|Broken pipe|Connection to \S+ closed|"
+    r"Shared connection to \S+ closed", re.I)
 
 
 def _tail(log: Optional[Path], lines: int = 3) -> str:
@@ -120,6 +124,16 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return True
     return True
+
+
+def _operation(fn):
+    """A lifecycle call holds its VM for its whole run: settle() and
+    reconcile() leave a VM alone while one of these has it."""
+    @functools.wraps(fn)
+    def wrapper(self, vm_id, *args, **kwargs):
+        with self._working(vm_id):
+            return fn(self, vm_id, *args, **kwargs)
+    return wrapper
 
 
 class Manager:
@@ -151,6 +165,24 @@ class Manager:
         self.stop_wait = stop_wait
         self.suspend_wait = suspend_wait
         self.boot_wait = boot_wait
+        self._busy = set()
+        self._busy_lock = threading.Lock()
+        #: vm id -> when a suspend gave up waiting; settle() decides later.
+        self._abandoned = {}
+
+    @contextlib.contextmanager
+    def _working(self, vm_id: str):
+        with self._busy_lock:
+            self._busy.add(vm_id)
+        try:
+            yield
+        finally:
+            with self._busy_lock:
+                self._busy.discard(vm_id)
+
+    def _is_busy(self, vm_id: str) -> bool:
+        with self._busy_lock:
+            return vm_id in self._busy
 
     # ---- tart ----------------------------------------------------------- #
     def tart_list(self) -> List[TartVm]:
@@ -195,6 +227,7 @@ class Manager:
                 "truncated": cut, "timed_out": rc == 124}
 
     # ---- start / resume -------------------------------------------------- #
+    @_operation
     def start(self, vm_id: str) -> vmhub.Vm:
         """Claim a slot, run the VM (``--suspendable``), wait for its address
         and ssh. A suspended VM is resumed the same way: ``tart run`` on a
@@ -271,6 +304,7 @@ class Manager:
         self.registry.set_state(vm_id, "fault", reason=f"{exc.code}: {exc}")
 
     # ---- stop / suspend --------------------------------------------------- #
+    @_operation
     def stop(self, vm_id: str) -> vmhub.Vm:
         """Shut the guest down from inside and wait for tart to say stopped.
         If it does not, the VM stays ``stopping`` and ``VmError`` says so;
@@ -287,20 +321,23 @@ class Manager:
         # ssh drops as the guest goes down ("Connection ... closed by remote
         # host", rc 255). The same rc 255 is also ssh failing to get in, and
         # then nothing was started: the VM stays as it was, not "stopping".
-        if rc not in (0, 255) or (rc == 255 and UNREACHABLE.search(err or "")):
+        if not (rc == 0 or (rc == 255 and CLOSED_BY_GUEST.search(err or "")) or
+                (rc == 255 and not (err or "").strip())):
             raise VmError("vm_stop_failed", f"{vm_id}: guest shutdown said {err.strip() or rc}")
         if vm.state != "stopping":
             self.registry.set_state(vm_id, "stopping")
         deadline = time.monotonic() + self.stop_wait
         while time.monotonic() < deadline:
             if self.tart_state(vm.tart_name) in ("stopped", "missing"):
-                self.registry.set_state(vm_id, "stopped")
+                if self.registry.get(vm_id).state != "stopped":
+                    self.registry.set_state(vm_id, "stopped")
                 return self.registry.get(vm_id)
             self._sleep(POLL)
         raise VmError("vm_stop_timeout",
                       f"{vm_id} did not stop within {self.stop_wait:g}s; "
                       "force_stop would lose unsynced guest writes")
 
+    @_operation
     def force_stop(self, vm_id: str) -> vmhub.Vm:
         """``tart stop``: the VM is gone at once and unsynced writes with it."""
         vm = self.registry.get(vm_id)
@@ -318,24 +355,34 @@ class Manager:
         return self.registry.get(vm_id)
 
     def settle(self) -> List[str]:
-        """Move a VM left in a transitional state to the end tart reports
-        when that end is certain: saving -> suspended, stopping -> stopped.
-        ``saving`` that tart still lists as running may yet finish, so it is
-        left for an explicit reconcile."""
+        """Move a VM left in a transitional state to the end tart reports when
+        that end is certain: saving -> suspended, stopping -> stopped. A suspend
+        that gave up waiting and that tart still lists as running, a second
+        wait period later, is taken as failed and the VM goes back to running
+        (the caller reopens its channel). A VM a lifecycle call is working on
+        is left alone. Returns the ids that moved."""
         done = []
         for vm in self.registry.list():
-            if vm.state not in ("saving", "stopping"):
+            if vm.state not in ("saving", "stopping") or self._is_busy(vm.id):
                 continue
             actual = self.tart_state(vm.tart_name)
+            if self._is_busy(vm.id):
+                continue
             if vm.state == "saving" and actual == "suspended":
                 self.registry.set_state(vm.id, "suspended")
             elif vm.state == "stopping" and actual in ("stopped", "missing"):
                 self.registry.set_state(vm.id, "stopped")
+            elif (vm.state == "saving" and actual == "running" and vm.id in self._abandoned
+                  and time.monotonic() - self._abandoned[vm.id] >= self.suspend_wait):
+                self._abandoned.pop(vm.id, None)
+                self.registry.set_state(vm.id, "running")
+                self.registry.note(vm.id, "suspend_abandoned")
             else:
                 continue
             done.append(vm.id)
         return done
 
+    @_operation
     def suspend(self, vm_id: str) -> vmhub.Vm:
         vm = self.registry.get(vm_id)
         if vm.state != "running":
@@ -351,10 +398,13 @@ class Manager:
         deadline = time.monotonic() + self.suspend_wait
         while self.tart_state(vm.tart_name) != "suspended":
             if time.monotonic() >= deadline:
+                self._abandoned[vm_id] = time.monotonic()
                 raise VmError("vm_suspend_timeout",
                               f"{vm_id} was not reported suspended within {self.suspend_wait:g}s")
             self._sleep(0.5)
-        self.registry.set_state(vm_id, "suspended")
+        self._abandoned.pop(vm_id, None)
+        if self.registry.get(vm_id).state != "suspended":
+            self.registry.set_state(vm_id, "suspended")
         return self.registry.get(vm_id)
 
     # ---- after a daemon restart ------------------------------------------- #
@@ -362,26 +412,39 @@ class Manager:
         """Make the records agree with what tart reports: a VM that is up
         is adopted as ``running`` (readiness is probed again), one the
         record thought up but tart does not list as running is stopped or
-        suspended. Returns what changed, for the log."""
+        suspended. Returns what changed, for the log.
+
+        Order does not matter to the outcome: the VMs that stop holding a slot
+        are adopted first. A VM that cannot be adopted (more are up than the
+        slot limit allows) is put in ``fault`` with the reason, not retried."""
         changed = []
         rows = {row.name: row for row in self.tart_list()}
+        plan = []
         for vm in self.registry.list():
-            if ids is not None and vm.id not in ids:
+            if (ids is not None and vm.id not in ids) or self._is_busy(vm.id):
                 continue
             row = rows.get(vm.tart_name)
             actual = row.state if row else "missing"
             want = {"running": "running", "suspended": "suspended"}.get(actual, "stopped")
             if want != vm.state and not (vm.state == "fault" and want == "stopped"):
-                old = vm.state
+                plan.append((vm, want))
+        plan.sort(key=lambda p: p[1] == "running")
+        for vm, want in plan:
+            old = vm.state
+            try:
                 self.registry.adopt(vm.id, want)
-                changed.append(f"{vm.id}: {old} -> {want}")
+            except VmError as exc:
+                self.registry.set_state(vm.id, "fault", reason=f"{exc.code}: {exc}")
+                changed.append(f"{vm.id}: {old} -> fault ({exc.code})")
+                continue
+            changed.append(f"{vm.id}: {old} -> {want}")
         return changed
 
     async def reprobe(self, vm_id: str) -> None:
         """Probe an adopted VM's ssh and console again (off the event loop)."""
         vm = self.registry.get(vm_id)
         if not vm.ip:
-            rc, out, _ = self._run([TART, "ip", "--", vm.tart_name], 10)
+            rc, out, _ = await asyncio.to_thread(self._run, [TART, "ip", "--", vm.tart_name], 10)
             if rc == 0 and out.strip():
                 self.registry.set_ready(vm_id, ip=out.strip().splitlines()[0])
         await asyncio.to_thread(self._probe, vm_id, time.monotonic() + self.boot_wait)

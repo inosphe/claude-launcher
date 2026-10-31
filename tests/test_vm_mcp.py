@@ -92,3 +92,14 @@ def test_outside_a_session_there_is_no_vm_tool(monkeypatch):
 def test_a_vm_id_cannot_climb_out_of_its_path(client):
     vm_mcp.call_tool("vm_release", {"vm": "../x"})
     assert client.calls[-1][1] == "/api/vm/..%2Fx/release"
+
+
+def test_a_timeout_that_is_not_a_number_is_a_tool_error():
+    import pytest
+    from claude_launcher import vm_mcp
+    assert vm_mcp._seconds({}, 30) == 30 and vm_mcp._seconds({"timeout": "12"}, 30) == 12
+    for bad in ("soon", [1], {}):
+        if bad == {}:
+            continue
+        with pytest.raises(vm_mcp.VmMcpError):
+            vm_mcp._seconds({"timeout": bad}, 30)
