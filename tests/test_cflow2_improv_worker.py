@@ -390,6 +390,56 @@ def test_coding_brief_thread_is_a_true_by_default_boolean_and_human_only():
     assert "thread_open" in prompt and "coding_brief_thread" in prompt
 
 
+def test_merge_approval_is_a_false_by_default_boolean_and_human_only():
+    # claunch-boxug: the switch gates the landing request itself — same shape
+    # as coding approval (bool off by default, person-only, urgent card).
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    declaration = doc["inputs"]["require_merge_approval"]
+    assert declaration["type"] == "bool"  # shared form renders bool as checkbox
+    assert declaration["default"] is False
+    assert declaration["set_by"] == ["user"]
+    assert declaration["group"] == "착지 승인"
+    node = doc["nodes"]["merge-approval"]
+    ask = node["ask"]
+    assert ask["otherwise"] == "human"
+    assert "from" not in ask and "timeout" not in ask
+    assert ask["urgent"] is True
+    assert set(ask["options"]) == {"approve", "hold"}
+    assert ask["options"]["approve"]["outcome"] == "ok"
+    assert ask["options"]["hold"]["outcome"] == "hold"
+    assert set(node["returns"]) == {"ok", "hold"}
+
+
+def test_merge_approval_gate_stands_between_peer_review_and_publish():
+    # claunch-boxug: with the switch on, the ask sits in land's submit right
+    # before publish (the request); a hold ends the round held (freeze), and
+    # the off branch is a pass-through so default runs are unchanged.
+    # safe_load parses the YAML 1.1 ``on:`` handler key as boolean True —
+    # the frontend loader keeps it the string the engine reads.
+    from claude_launcher.cflow2 import frontend
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    land = doc["procedures"]["land"]
+    submit = next(s for s in land["body"]
+                  if isinstance(s, dict) and s.get("id") == "submit")
+    do = submit["loop"]["do"]
+    gate = next(s for s in do if isinstance(s, dict)
+                and s.get("id") == "merge-approval-gate")
+    publish = next(s for s in do if isinstance(s, dict)
+                   and s.get("id") == "publish")
+    assert do.index(publish) == do.index(gate) + 1
+    peer = next(s for s in do if isinstance(s, dict)
+                and s.get("id") == "peer-review-loop")
+    assert do.index(peer) < do.index(gate)
+    cond = gate["cond"][0]["if"]
+    assert "$data.inputs.require_merge_approval == true" in cond
+    assert gate["cond"][1] == {"else": []}
+    hold = gate["cond"][0]["then"][0]["on"]["hold"]
+    assert hold["return"] == "held"
+    assert hold["value"]["reason"] == \
+        "$result['merge-approval'].value.reason"
+    assert gate["cond"][0]["then"][0]["seq"] == ["merge-approval"]
+
+
 # -- session routing (claunch-yl0to) ----------------------------------------
 
 

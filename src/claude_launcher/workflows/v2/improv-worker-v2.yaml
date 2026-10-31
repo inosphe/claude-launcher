@@ -74,6 +74,8 @@ sides:
 #   rebase                -> merge-ready, rebase   (loop align)
 #   reviewer-ensure       -> reviewer-ensure
 #   peer-review           -> peer-review            (ask: 리뷰어)
+#   merge-approval        -> merge-approval         (ask: 사람, require_merge_approval
+#                            켜져 있을 때만 submit의 publish 직전에 선다 — claunch-boxug)
 #   integration-request   -> integration-request
 #   await-landing         -> await-landing          (choose, loop await)
 #   landing-withdraw      -> landing-withdraw
@@ -237,6 +239,16 @@ inputs:
     group: 코딩 승인
     # coding-plan이 일감마다 읽는다. 사람이 런 도중에 바꾸면 다음 일감부터
     # 적용된다(require_coding_approval과 같은 규칙). 에이전트는 쓰지 못한다.
+    set_by: [user]
+  require_merge_approval:
+    type: bool
+    default: false
+    label: 착지(머지) 요청 전 사용자 승인
+    help: 켜면 착지 요청(통합 대기 표 오르기) 직전에 사용자 승인을 기다린다. 승인해야만 요청이 올라가고, 거절하면 이번 회차는 동결로 마감되어 다음 회차가 다시 요청한다. 끄면 기존처럼 기계 확인(landing의 다섯 확인) 후 자동으로 요청한다
+    # 코딩 승인과 다른 결정이라 자기 블록을 쓴다(claunch-kzun2과 같은 이유).
+    group: 착지 승인
+    # land의 submit이 회차·재요청마다 읽으므로, 사람이 런 도중에 켜면 다음
+    # 착지 시도부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
   # PR 착지 매체를 정하는 두 스위치(claunch-qke6g). 폼에서 한 블록으로 묶여
   # gh 준비 상태 줄과 함께 놓인다.
@@ -1682,6 +1694,54 @@ nodes:
         reject: {description: 구현하지 않고 계획을 다시 쓴다}
     prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
+
+  merge-approval:
+    title: 착지 요청 전 사용자 승인
+    # 시작 입력 require_merge_approval이 켜져 있을 때만 land의 submit이 이
+    # 질문을 선다(claunch-boxug). 착지 요청 직전 — rebase·동료 리뷰를 지난
+    # 뒤, publish(통합 대기 표 오르기) 바로 앞. 거절은 이번 회차 동결
+    # 마감(held)이고 다음 회차가 다시 묻는다. 상위 세션 승인(landing-review)과
+    # 겹치지 않는다 — 이것은 사람만 여는 문이다.
+    ask:
+      prompt: |
+        시작 입력 `require_merge_approval`이 켜져 있어 착지 요청(통합 대기 표
+        오르기) 전에 사용자 승인이 필요하다. 이번 회차의 착지 증거를 보고
+        요청을 올릴지 결정한다.
+
+        - 회차 이슈: ${data.claim.issue}
+        - 작업 브랜치: ${result['branch-setup'].value.branch}
+        - 기계 확인(landing의 다섯 확인)은 이미 통과했다 — 작업 트리 깨끗,
+          표적 수치가 tip의 것, 미리 병합 충돌 0, 열린 제동 마커 없음,
+          동결 지시 없음.
+        - 증거 묶음(기능·머지 커밋 해시, 테스트 수치, 양방향 diff)은 이슈의
+          `COMMIT <해시>` 코멘트와 리뷰 판정 코멘트에 있다:
+          `claunch beads comments ${data.claim.issue}`
+
+        ## 선택지
+
+        - **approve** — 착지 요청을 올린다(통합 대기 표에 오르고, 머지 실행은
+          상위 세션).
+        - **hold** — 올리지 않고 이번 회차를 동결로 마감한다. 사유를 함께
+          적는다.
+
+        답하지 않으면 이 단계에서 기다린다.
+      otherwise: human
+      # 사용자의 응답을 바로 기다리는 승인: 대시보드 알림 채널에 다른 승인
+      # 게이트와 같이 뜬다(claunch-x76l8.1).
+      urgent: true
+      options:
+        approve: {outcome: ok, description: 착지 요청을 올린다 — 머지 실행은 상위 세션}
+        hold: {outcome: hold, description: 올리지 않고 이번 회차를 동결로 마감한다 — 사유를 함께 적는다}
+    prompt: |
+      사용자의 머지 승인 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+      hold 답이 오면 이번 회차는 held(동결 마감)다. 그때 이슈에 한 줄을
+      남긴다: `MERGE APPROVAL DECLINED @ <tip> — <사유>`. 이 줄은 사람이
+      읽는 기록이지 제동 마커가 아니다 — `HOLD:`로 쓰지 않는다. 착지 확인 4는
+      `HOLD:`를 만나 escalate로 본다.
+    returns:
+      ok: {}
+      hold: {reason: "str?"}
+    effects: [board.write, fs.read]
 
   route-planned:
     title: 구현 주체 확정 (계획의 권장)
@@ -5864,6 +5924,24 @@ procedures:
                               description: 리뷰 없이 진행한다(REVIEW SKIPPED 코멘트를 남긴다)
                               then: {break: peer-review-loop}
                   - {break: peer-review-loop}
+            # 시작 입력 require_merge_approval이 켜져 있으면 착지 요청 직전에
+            # 사용자 승인을 묻는다(claunch-boxug). rebase·동료 리뷰를 지난 뒤,
+            # publish(통합 대기 표 오르기) 바로 앞 — 승인한 트리가 요청되는
+            # 트리다. hold는 이번 회차 동결 마감(held)이고 다음 회차가 다시
+            # 묻는다. 끄면 이 cond는 통과하고 기존 경로 그대로다.
+            - id: merge-approval-gate
+              cond:
+                - if: "$data.inputs.require_merge_approval == true"
+                  then:
+                    # landing-review-route와 같은 형태 — seq의 on 핸들러로
+                    # hold 답을 받는다. ok는 핸들러 없이 다음 단계로 간다.
+                    - id: merge-approval-ask
+                      seq: [merge-approval]
+                      on:
+                        hold:
+                          return: held
+                          value: {reason: "$result['merge-approval'].value.reason", rework: false}
+                - else: []
             - id: publish
               cond:
                 - if: "$data.landing.medium == 'pr'"
