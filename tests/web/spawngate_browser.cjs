@@ -137,6 +137,13 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
     const resumeCard = page.locator('.notice.spawn-gate', { hasText: 'session resume requested' });
     const heldCard = page.locator('.notice.spawn-gate', { hasText: 'waiting for the form' });
     await spawnCard.waitFor();
+    // A card above the fold threshold opens folded — the presses stay up,
+    // the brief hides behind the toggle (claunch-qf41a). Expand every card
+    // before reading the body text the assertions below pin.
+    await page.evaluate(() => new Promise(done => {
+      for (const t of document.querySelectorAll(".notice .notice-fold-toggle")) t.click();
+      requestAnimationFrame(() => requestAnimationFrame(done));
+    }));
     const spawnText = await spawnCard.innerText();
     assert.match(spawnText, /op1 \(operator Alpha\) on your message: “fix login”/);
     assert.match(spawnText, /reason: no running session does it/);

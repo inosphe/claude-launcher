@@ -212,10 +212,10 @@
 
 ## 브라우저 하네스는 기본으로 skip된다 — 켜는 방법은 `NODE_PATH`
 
-- `tests/web/*_browser.cjs` 60개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
+- `tests/web/*_browser.cjs` 61개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
   `test_browser_harness`가 `node -e "require.resolve('playwright')"`로 게이트를 열 때만
   실행된다. 이 저장소에는 `package.json`도 `node_modules`도 없으므로 기본 실행에서 그
-  60건은 전부 `pytest.skip`이고, 그 실행의 초록에는 60건의 결과가 들어 있지 않다.
+  61건은 전부 `pytest.skip`이고, 그 실행의 초록에는 61건의 결과가 들어 있지 않다.
 - 켜는 방법은 환경변수 하나다. playwright가 설치된 `node_modules`를 `NODE_PATH`에 두고
   같은 선별을 돌린다. `_run_node`는 `subprocess.run(argv, **kwargs)`로 호출되어
   `env=`를 넘기지 않으므로, 셸의 값이 게이트 검사와 하네스 양쪽에 그대로 상속된다.
@@ -244,7 +244,7 @@
 - 켠 상태에서 빨간 하네스는 실제 회귀다. skip은 그 실패를 게이트에 보이지 않게 한다
   (claunch-1bhp2.1: 부트 호출을 스트립하는 정규식이 깨져 네 하네스가 빨갰고, 하네스가
   skip되는 동안 아무 게이트도 그것을 보고하지 않았다).
-- 선별 `-k browser_harness`가 모으는 것은 **61건**이다 — 하네스 60건과
+- 선별 `-k browser_harness`가 모으는 것은 **62건**이다 — 하네스 61건과
   `test_browser_harnesses_strip_the_real_boot_call` 1건이다(그 키워드는 이름의 부분
   문자열로 걸리므로 두 테스트를 함께 고른다). 이 절을 쓴 시점의 실측(2026-10-28,
   `8c13c594`, 당시 하네스 57건·선별 58건): **57 passed / 1 failed** — 실패 1건은 하네스

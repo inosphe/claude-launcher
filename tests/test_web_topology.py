@@ -756,6 +756,7 @@ BROWSER_CHECKS = [
         "noticeplace_browser.cjs",
         "noticecost_browser.cjs",
         "noticewrap_browser.cjs",
+        "noticefold_browser.cjs",
 ]
 
 

@@ -61376,6 +61376,80 @@ function noticeFlipMove(tops) {
   }
 }
 
+/* A card taller than this folds by default (claunch-qf41a): a decision
+   brief the length of a page pinned the corner for as long as it waited,
+   and what a folded card still answers — which request, which presses —
+   lives in its title and its actions row, not in the body. */
+const NOTICE_FOLD_MAX_PX = 260;
+
+function noticeFoldSet(node, toggle, flip) {
+  const folded = flip ? !node.classList.contains("folded") : true;
+  node.classList.toggle("folded", folded);
+  if (!toggle) return;
+  toggle.textContent = folded ? "▸ more" : "▾ less";
+  toggle.title = folded
+    ? "show the rest of this card"
+    : "fold this card back to its title and buttons";
+}
+
+/* Classify a strip card once, after it is laid out: above the threshold the
+   body moves into a .notice-fold box that the `folded` class hides, the
+   title, the answer buttons and the age line stay up, and a toggle is added
+   beside the buttons. The classification is a single decision made where the
+   card's real height is known — a card added while the strip is hidden (the
+   history panel open) measures 0 and stays unclassified until the strip is
+   visible again (noticeFoldScan on panel close). A world that cannot lay a
+   node out (the check-harness stubs) skips silently. */
+function noticeFoldClassify(node) {
+  if (!node || node.__noticeFoldClassified) return;
+  if (typeof node.getBoundingClientRect !== "function") return;
+  const height = node.getBoundingClientRect().height;
+  if (!height) return;             // hidden strip: measured again when shown
+  node.__noticeFoldClassified = true;
+  if (height <= NOTICE_FOLD_MAX_PX) return;
+  const keep = (child) =>
+    /(?:^|\s)(?:notice-title|gate-actions|notice-when|notice-close)(?:\s|$)/
+      .test(child.className || "");
+  const fold = el("div", "notice-fold");
+  for (const child of [...node.children]) {
+    if (!keep(child)) fold.appendChild(child);
+  }
+  if (!fold.childNodes.length) return;   // nothing but chrome: nothing to fold
+  const actions = [...node.children].find((c) =>
+    /(?:^|\s)gate-actions(?:\s|$)/.test(c.className || ""));
+  node.insertBefore(fold, actions || null);
+  const toggle = el("button", "wf-btn notice-fold-toggle", "▸ more");
+  toggle.type = "button";
+  toggle.title = "show the rest of this card";
+  toggle.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    noticeFoldSet(node, toggle, true);
+  });
+  const aside = actions && [...actions.children].find((c) =>
+    /(?:^|\s)gate-aside(?:\s|$)/.test(c.className || ""));
+  // The toggle rides the actions row in a display:contents box — the row's
+  // own convention is that a direct `> button` child is an answer press
+  // (spawngate_browser pins that list), and the toggle answers nothing.
+  if (actions) {
+    const box = el("span", "notice-fold-toggle-box");
+    box.appendChild(toggle);
+    actions.insertBefore(box, aside || null);
+  } else {
+    node.insertBefore(toggle, fold);
+  }
+  node.classList.add("foldable");
+  noticeFoldSet(node, toggle, false);
+}
+
+/* Measures every strip card that is not classified yet. Called when the
+   strip becomes visible again — a card built while the history panel hid
+   the strip could not be measured at birth (claunch-qf41a). */
+function noticeFoldScan() {
+  const strip = $("notices");
+  if (!strip) return;
+  for (const node of strip.children) noticeFoldClassify(node);
+}
+
 /* New cards go into the corner strip in the feed's order (claunch-efpoi,
    and see noticeNewerFirst), and the cards that move to make room slide
    there (claunch-notice-card-order-animate-9znvg). Every card of the strip
@@ -61411,6 +61485,7 @@ function noticeCardAdd(host, node, at) {
   if (ref) host.insertBefore(node, ref);
   else host.appendChild(node);
   noticeFlipMove(tops);
+  noticeFoldClassify(node);
 }
 
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
@@ -62266,6 +62341,7 @@ function noticePanelToggle(force) {
   noticePanelPainted = null;
   noticeHideAll(open);
   if (open) noticePanelPaint();
+  else noticeFoldScan();
   noticeBellPaint();
   // The panel is a column of the layout (claunch-w8q00): opening or closing
   // it changes the session area's width without a window resize, so the
