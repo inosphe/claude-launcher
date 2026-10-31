@@ -1,6 +1,8 @@
 /* Real plan-page.js (claunch-7jzp8.2): the overview grouped by stage, the
    stage and project filters, the joint grouping read only when asked for,
-   "ended sessions too" asking with all=1, and the session links. */
+   "ended sessions too" asking with all=1, and the session links; with a
+   project picked, its aggregation session's pane (kept across redraws) or
+   the start button (claunch-7jzp8.3). */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -25,22 +27,29 @@ const OVERVIEW = {
      plan: null, run: {workflow: 'improv-leader-v2', current: ['standby'], owed: [], status: 'running'}},
   ],
 };
+OVERVIEW.aggregators = [{project: 'other', session: 'agg', running: true}];
 const JOINT = {groups: [{root: 's1', sessions: 1, waiting: 2, members: [
   {session: 's1', depth: 0, has_plan: false}, {session: 's2', depth: 1, has_plan: true}]}]};
 
-async function request(raw) {
+const posts = [];
+async function request(raw, method, body) {
+  if (method === 'POST') { posts.push([raw, body]); return {name: 'agg2'}; }
   calls.push(raw);
   const url = new URL(raw, 'http://test');
+  if (url.pathname === '/api/profiles') return {profile_options: [{value: 'p1'}, {value: 'p2'}]};
   if (url.pathname === '/api/plan/overview') return OVERVIEW;
   if (url.pathname === '/api/plan/joint') return JOINT;
   throw new Error('unexpected ' + raw);
 }
 
 const host = new Element('div');
+const panes = [];
 const ctx = vm.createContext({
   document: {createElement: tag => new Element(tag), getElementById: id => (id === 'plan-view' ? host : null)},
   api: async () => { throw new Error('the page must use the injected request'); },
   URL, console, JSON, Object, Promise, Set,
+  makePlanPane: (opts) => { panes.push({opts, stopped: false}); const me = panes[panes.length - 1];
+    return {open: () => { me.opened = true; }, stop: () => { me.stopped = true; }}; },
   setTimeout: () => 0, clearTimeout: () => {},
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/plan-page.js'), 'utf8'), ctx);
@@ -72,7 +81,28 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   const pick = all(host).find(n => n.tag === 'select');
   pick.value = 'claunch'; pick.onchange(); await settle();
   assert.deepStrictEqual(rows(), ['s2', 's1']);
-  pick.value = ''; pick.onchange(); await settle();
+
+  // aggregation: listed with no project; a running one's pane, kept across redraws
+  const projectPick = () => all(host).find(n => n.tag === 'select' && n.attributes['aria-label'] === '프로젝트');
+  projectPick().value = 'other'; projectPick().onchange(); await settle();
+  assert.strictEqual(panes.length, 1);
+  assert.deepStrictEqual([panes[0].opts.session, panes[0].opts.nested, panes[0].opened], ['agg', true, true]);
+  assert(all(host).some(n => n.className === 'plan-page-agg-session' && n.href === '#/s/agg'));
+  buttons('닫아도 됨')[0].onclick(); await settle();
+  buttons('닫아도 됨')[0].onclick(); await settle();
+  assert.strictEqual(panes.length, 1);                           // the same pane, not a new one each redraw
+  // none running: the profiles are read once and the start posts the picked one
+  projectPick().value = 'claunch'; projectPick().onchange(); await settle();
+  assert.strictEqual(panes[0].stopped, true);
+  assert(text().includes('claunch에는 실행 중인 집계 세션이 없습니다.'));
+  const prof = all(host).find(n => n.tag === 'select' && n.attributes['aria-label'] === '집계 세션 프로필');
+  assert.strictEqual(prof.children.map(o => o.value).join(), 'p1,p2');
+  prof.value = 'p2'; prof.onchange();
+  buttons('집계 세션 시작')[0].onclick(); await settle();
+  assert.strictEqual(JSON.stringify(posts), JSON.stringify([['/api/plan/aggregators/claunch/start', {profile: 'p2'}]]));
+  assert.strictEqual(calls.filter(c => c === '/api/profiles').length, 1);
+  projectPick().value = ''; projectPick().onchange(); await settle();
+  assert(text().includes('other: agg'));
 
   // joint grouping: read only now; the plan-less parent's row sits first, s3 falls to the rest
   buttons('연관 세션별')[0].onclick(); await settle();

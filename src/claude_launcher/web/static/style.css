@@ -10516,6 +10516,8 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-page-row { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
 .plan-page-row p { margin: 2px 0; }
 .plan-page-session { font-weight: 600; color: #79b8ff; }
+.plan-page-agg { border: 1px solid var(--plan-border); border-radius: 6px; padding: 6px 10px; margin: 8px 0; }
+.plan-page-agg-session { font-weight: 600; color: #79b8ff; }
 .plan-stage-user { border-left-color: #e3b341; }
 .plan-stage-blocked { border-left-color: #da3633; }
 .plan-stage-closable { border-left-color: #2ea043; }

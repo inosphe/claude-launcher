@@ -4,7 +4,10 @@
    it may close. Grouped by stage (the default) or by joint tree
    (/api/plan/joint, plan/joint.py), narrowed by project and stage. Each row
    links to its session; the decisions themselves are taken in the session's
-   ☰ plan pane. All session text uses textContent. */
+   ☰ plan pane. With a project picked, the page shows that project's
+   aggregation session (claunch-7jzp8.3): its plan -- the project plan -- in
+   a plan pane decided here, or a start button when none runs. All session
+   text uses textContent. */
 const PLAN_STAGE = {
   user: "내 차례",
   blocked: "막힘",
@@ -22,6 +25,7 @@ function makePlanPage({root, request}) {
   };
   let data = null, joint = null, error = "", seq = 0, timer = null;
   let everyone = false, by = "stage", project = "", only = "";
+  let profiles = null, profile = "", starting = false, startError = "", agg = null;
 
   async function load() {
     const mine = ++seq;
@@ -50,6 +54,7 @@ function makePlanPage({root, request}) {
     link.href = "#/s/" + encodeURIComponent(r.session);
     head.append(node("span", PLAN_STAGE[r.stage] || r.stage, "plan-chip"), link);
     if (r.project) head.append(node("span", r.project, "plan-muted"));
+    if (r.aggregator) head.append(node("span", "집계", "plan-chip"));
     if (r.status === "exited") head.append(node("span", r.category, "plan-muted"));
     li.append(head);
     const p = r.plan, run = r.run;
@@ -111,6 +116,79 @@ function makePlanPage({root, request}) {
     return out;
   }
 
+  async function loadProfiles() {
+    if (profiles) return;
+    profiles = [];
+    try {
+      const f = await request("/api/profiles");
+      profiles = (f.profile_options || []).map(o => o.value).filter(Boolean);
+      if (!profiles.length) profiles = (f.profiles || []).map(x => typeof x === "string" ? x : x.name).filter(Boolean);
+    } catch (exc) { startError = exc.message; }
+    profile = profile || profiles[0] || "";
+    render();
+  }
+
+  async function start() {
+    if (starting || !profile) return;
+    starting = true; startError = ""; render();
+    try {
+      await request(`/api/plan/aggregators/${encodeURIComponent(project)}/start`, "POST", {profile});
+    } catch (exc) { startError = exc.message; }
+    starting = false;
+    load();
+  }
+
+  // The aggregation session's pane is kept across the 10 s redraws: it reads
+  // and polls on its own, and a decision being typed into it stays.
+  function paneOf(session) {
+    if (agg && agg.session === session) return agg.el;
+    stopPane();
+    const el = node("div", null, "plan-host");
+    if (typeof makePlanPane !== "function") { el.textContent = "plan 패널을 불러오지 못했습니다."; return el; }
+    agg = {session, el, view: makePlanPane({root: () => el, session, request, nested: true})};
+    agg.view.open();
+    return el;
+  }
+  function stopPane() { if (agg && agg.view) agg.view.stop(); agg = null; }
+
+  function aggregatorBlock() {
+    const box = node("div", null, "plan-page-agg");
+    const aggs = data.aggregators || [];
+    box.append(node("h4", "프로젝트 집계 세션", "plan-section"));
+    if (!project) {
+      stopPane();
+      const running = aggs.filter(a => a.running);
+      box.append(node("p", running.length ? running.map(a => `${a.project}: ${a.session}`).join(" · ")
+        : "실행 중인 집계 세션이 없습니다.", "plan-muted"));
+      box.append(node("p", "프로젝트를 고르면 그 프로젝트의 집계 계획을 보고 결정하거나 집계 세션을 시작할 수 있습니다.",
+        "plan-muted"));
+      return box;
+    }
+    const mine = aggs.find(a => a.project === project && a.running);
+    if (mine) {
+      const head = node("div", null, "plan-item-head");
+      const link = node("a", mine.session, "plan-page-agg-session");
+      link.href = "#/s/" + encodeURIComponent(mine.session);
+      head.append(node("span", "집계", "plan-chip"), link);
+      box.append(head, paneOf(mine.session));
+      return box;
+    }
+    stopPane();
+    box.append(node("p", `${project}에는 실행 중인 집계 세션이 없습니다. 시작하면 이 프로젝트 세션들의 계획을 `
+      + "읽어 프로젝트 계획 하나를 쓰고, 여러 세션에 걸친 결정을 여기에 올립니다.", "plan-muted"));
+    const row = node("div", null, "plan-joint-bar");
+    if (!profiles) loadProfiles();
+    const pick = node("select"); pick.setAttribute("aria-label", "집계 세션 프로필");
+    for (const v of profiles || []) { const o = node("option", v); o.value = v; o.selected = v === profile; pick.append(o); }
+    pick.onchange = () => { profile = pick.value; };
+    const go = button(starting ? "시작 중…" : "집계 세션 시작", start, false);
+    go.disabled = starting || !profile;
+    row.append(pick, go);
+    box.append(row);
+    if (startError) { const a = node("p", startError, "plan-error"); a.setAttribute("role", "alert"); box.append(a); }
+    return box;
+  }
+
   function render() {
     const el = root(); if (!el) return;
     el.replaceChildren();
@@ -137,7 +215,7 @@ function makePlanPage({root, request}) {
       button("단계별", () => { by = "stage"; render(); }, by === "stage"),
       button("연관 세션별", () => { by = "joint"; load(); }, by === "joint"),
       button("끝난 세션 포함", () => { everyone = !everyone; load(); }, everyone));
-    shell.append(tools);
+    shell.append(tools, aggregatorBlock());
 
     const rows = filtered();
     if (!rows.length) shell.append(node("p", "해당하는 세션이 없습니다.", "plan-muted"));
@@ -145,11 +223,12 @@ function makePlanPage({root, request}) {
     el.append(shell);
   }
 
-  return {open: load, stop: () => { ++seq; clearTimeout(timer); timer = null; }, _state: () => ({data, by, project, only})};
+  return {open: load, stop: () => { ++seq; clearTimeout(timer); timer = null; stopPane(); },
+          _state: () => ({data, by, project, only})};
 }
 
-async function planPageRequest(path) {
-  const response = await api(path);
+async function planPageRequest(path, method = "GET", body) {
+  const response = await api(path, {method, ...(body ? {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {})});
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(Error(result.error || `HTTP ${response.status}`), {status: response.status});
   return result;
