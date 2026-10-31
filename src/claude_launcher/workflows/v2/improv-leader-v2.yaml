@@ -79,7 +79,9 @@ rules:
       summary.current(지금 단계), waiting(사용자 결정 대기 수), closable과
       blockers(닫을 수 없는 이유). 여러 워커를 한 번에 볼 때는 `plan_get joint=true`
       (session을 비우면 나)가 스폰 자식·같은 이슈·하위 이슈 세션의 요약을 한
-      트리로 준다(claunch-7jzp8.1). 착지 후보를 심사할 때 그 워커의 closure에
+      트리로 준다(claunch-7jzp8.1). 프로젝트 전체의 진행 단계(user·blocked·
+      closable·working·idle, v2 런의 현재 노드와 owed)는 `plan_overview
+      project=<프로젝트>` 한 번으로 읽는다(claunch-7jzp8.2). 착지 후보를 심사할 때 그 워커의 closure에
       failed verify가 있으면 판정 근거에 그 항목 id와 메모를 적는다. 갈래 선택과
       확인 판정은 사용자의 것이다 — 리더가 대신 결정하지 않는다. plan이 없거나
       도구가 없으면 지금처럼 보드와 메시로 확인한다.

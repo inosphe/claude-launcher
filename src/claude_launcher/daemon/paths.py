@@ -276,6 +276,12 @@ def plan_db() -> Path:
     return daemon_dir() / "plan.sqlite3"
 
 
+def plan_aggregators() -> Path:
+    """Which session aggregates each project's plans (daemon/plan_api.py,
+    claunch-7jzp8.3)."""
+    return daemon_dir() / "plan_aggregators.json"
+
+
 def wrapup_db() -> Path:
     """Wrap-up drafts sessions file for the workspace glossary, category
     tree and knowledge records, until the user confirms them

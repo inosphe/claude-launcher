@@ -4,7 +4,9 @@ plan pane, and the decisions the user takes there.
   GET  /api/plan?session=<name>          one session's plan ({"plan": null} without one)
   GET  /api/plan/rail                    per session with a plan: title, context, summary
   GET  /api/plan/joint?session=<name>    the joint tree holding it (plan/joint.py); no session: every tree
-  GET  /api/plan/overview[?all=1]        every running session's stage, run and plan progress (plan/overview.py)
+  GET  /api/plan/overview[?all=1&project=]  every running session's stage, run and plan progress (plan/overview.py)
+  GET  /api/plan/aggregators             each project's aggregation session
+  POST /api/plan/aggregators/{project}/start  start it {profile, model?, effort?, name?}         (the user)
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
   POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?}
   POST /api/plan/clear                   clear     {session, revision}
@@ -27,6 +29,13 @@ a ``[claunch plan]`` block that carries what was decided and on what, so the
 agent acts on it without a read. Delivery is tracked the way QA tracks it
 (qa_api.Outbox, one latest notification per node).
 
+A project's aggregation session (claunch-7jzp8.3) is started from the plan
+page the way an operator v2's session is started from its view: one session
+per project, bound in ``plan_aggregators.json`` and kept alive. It reads the
+project's sessions (plan_overview, plan_get) and writes the project plan as
+its own plan, so the page shows it and the user's decisions on it are typed
+back into it like any session's.
+
 The plan's ``context`` (project, cwd, spawn parent) is written by the daemon
 from the session's record on every set, not by the session: the aggregated
 views group plans by it, and a session cannot misplace itself.
@@ -35,7 +44,10 @@ views group plans by it, and a session cannot misplace itself.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
@@ -107,6 +119,42 @@ def feedback_text(session: str, node: Optional[dict], text: str) -> str:
     ])
 
 
+def aggregator_task(project: str) -> str:
+    return (f"너는 프로젝트 '{project}'의 plan 집계 세션이다. 이 프로젝트의 세션들이 각자 쓴 계획을 모아 "
+            "프로젝트 계획 하나로 정리하는 것이 일이다. 다른 세션의 작업을 직접 하지 않는다. "
+            f"plan_overview(project='{project}')로 세션마다 단계·런·계획 진행을 읽고, "
+            "plan_get(joint=true)와 plan_get(session=...)으로 연관 세션 묶음과 각 계획을 읽는다. "
+            "결과는 plan_set으로 네 계획에 쓴다: 단계는 연관 세션 묶음마다 한 줄(진행, 막힘, 내 결정 대기 수), "
+            "결정은 여러 세션에 걸친 선택(착지 순서, 겹치는 작업 정리, 우선순위)마다 선택지별 기대효과·리스크와 "
+            "함께 둔다. 개별 세션의 결정은 사용자가 그 세션의 plan 패널에서 하므로 옮겨 적지 않는다. "
+            "사용자가 고른 분기는 [claunch plan] 블록으로 오고, 그 결정이 닿는 세션들에 메시 send로 전달한다. "
+            "10분마다(wait/timer) 다시 읽어 계획을 갱신한다.")
+
+
+class Aggregators:
+    """``{project: {session, profile, started_at}}`` in one JSON file."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(v, dict) and v.get("session")} \
+            if isinstance(data, dict) else {}
+
+    def bind(self, project: str, session: str, profile: str) -> dict:
+        data = self.load()
+        data[project] = {"session": session, "profile": profile, "started_at": int(time.time())}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(self.path)
+        return data[project]
+
+
 def _v2_rows(app, pairs: list) -> dict:
     """The v2 rail rows of ``pairs`` ((session, cwd)), the same read and
     cache the session rail uses (cflow2_web.rail_entries)."""
@@ -114,10 +162,16 @@ def _v2_rows(app, pairs: list) -> dict:
     return cflow2_web.rail_entries(pairs, registry=app.get("gates"))
 
 
-def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
+def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, create=None,
+            aggregators: Optional[Aggregators] = None):
+    """``create(request, spec) -> (status, payload)`` makes a session the way
+    the new-session route does (api._create_session); without it the
+    aggregator start answers 503."""
     manager = app["manager"]
     plans = store or plan_store.PlanStore(paths.plan_db())
     app["plans"] = plans
+    bound = aggregators or Aggregators(paths.plan_aggregators())
+    app["plan_aggregators"] = bound
     outbox = Outbox(manager)
     app["plan_outbox"] = outbox
 
@@ -148,6 +202,17 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def live(name: str):
+        try:
+            s = manager.get(name)
+        except Exception:  # noqa: BLE001
+            return None
+        return None if s.exited else s
+
+    def aggregator_rows() -> list:
+        return [{"project": project, **rec, "running": live(rec["session"]) is not None}
+                for project, rec in sorted(bound.load().items())]
 
     async def body_of(request) -> dict:
         try:
@@ -214,16 +279,23 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
         from . import session as session_mod
         from ..cflow import state as cflow_state
         everyone = request.query.get("all") in ("1", "true", "yes")
+        only = request.query.get("project") or ""
+        aggs = aggregator_rows()
+        agg_of = {a["session"]: a["project"] for a in aggs}
         rows, pairs = [], []
         for s in manager.list():
             category = session_mod.session_category(s)
             if category == session_mod.CATEGORY_ARCHIVED or (s.exited and not everyone):
                 continue
             sdef = s.sdef
+            project = getattr(sdef, "project", None) or None
+            if only and project != only:
+                continue
             rows.append({"session": sdef.name, "category": category,
                          "status": "exited" if s.exited else s.status(),
-                         "project": getattr(sdef, "project", None) or None,
-                         "parent": getattr(sdef, "parent", None) or None})
+                         "project": project,
+                         "parent": getattr(sdef, "parent", None) or None,
+                         "aggregator": agg_of.get(sdef.name)})
             if getattr(sdef, "cwd", None):
                 pairs.append((sdef.name, cflow_state.resolve_cwd(sdef.cwd)))
         rail, err = await call(plans.rail)
@@ -234,7 +306,51 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
         except Exception:  # noqa: BLE001 -- the plans still answer
             log.exception("plan overview: reading the v2 rail failed")
             runs = {}
-        return web.json_response(plan_overview.overview(rows, rail, runs))
+        out = plan_overview.overview(rows, rail, runs)
+        out["aggregators"] = [a for a in aggs if not only or a["project"] == only]
+        return web.json_response(out)
+
+    async def h_aggregators(_request):
+        return web.json_response({"aggregators": aggregator_rows()})
+
+    async def h_aggregator_start(request):
+        from .. import projects
+        from . import actors
+        if (actors.from_request(request) or {}).get("kind") == actors.AGENT:
+            return web.json_response({"error": "only the user starts an aggregation session"}, status=403)
+        if create is None:
+            return web.json_response({"error": "this daemon cannot create sessions here"}, status=503)
+        project = request.match_info["project"]
+        try:
+            project = projects.require(project).name
+        except projects.ProjectError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        rec = bound.load().get(project)
+        if rec and live(rec["session"]) is not None:
+            return web.json_response({"error": f"project {project!r} is already aggregated by {rec['session']}",
+                                      "session": rec["session"]}, status=409)
+        body = await body_of(request)
+        profile = str(body.get("profile") or "").strip()
+        if not profile:
+            return web.json_response({"error": "profile is required"}, status=400)
+        spec = {"profile": profile, "project": project, "beads": False,
+                "context": json.dumps({"plan_aggregator": project}),
+                "name": str(body.get("name") or "").strip(), "task": aggregator_task(project)}
+        for key in ("model", "effort"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                spec[key] = value
+        status, payload = await create(request, spec)
+        if status >= 300:
+            return web.json_response(payload, status=status)
+        await asyncio.to_thread(bound.bind, project, payload["name"], profile)
+        try:
+            manager.set_keep_alive(payload["name"], True)
+            payload["keep_alive"] = True
+        except Exception:  # noqa: BLE001 -- the session is up; it only may close after a run
+            log.exception("plan aggregator keep-alive of %r failed", payload["name"])
+        payload["project"] = project
+        return web.json_response(payload, status=201)
 
     async def h_set(request):
         body = await body_of(request)
@@ -300,6 +416,8 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
     app.router.add_get("/api/plan/rail", h_rail)
     app.router.add_get("/api/plan/joint", h_joint)
     app.router.add_get("/api/plan/overview", h_overview)
+    app.router.add_get("/api/plan/aggregators", h_aggregators)
+    app.router.add_post("/api/plan/aggregators/{project}/start", h_aggregator_start)
     app.router.add_post("/api/plan", h_set)
     app.router.add_post("/api/plan/clear", h_clear)
     app.router.add_post("/api/plan/feedback", h_feedback)

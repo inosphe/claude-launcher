@@ -87,6 +87,15 @@ TOOLS = [
          "session": {"type": "string", "description": "whose plan; default this session"},
          "joint": {"type": "boolean", "description": "the joint tree holding that session"},
      }}},
+    {"name": "plan_overview",
+     "description": "Every running session's progress stage on one read: user (a person owes it a choice), "
+                    "blocked, closable, working or idle, with its cflow v2 run's current task and what the run "
+                    "waits on, and its plan's progress. A project's aggregation session reads its project here "
+                    "before it writes the project plan.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string", "description": "only this project's sessions"},
+         "all": {"type": "boolean", "description": "also the ended (unarchived) sessions"},
+     }}},
     {"name": "plan_clear",
      "description": "Remove your plan (written by mistake, or the session's work changed altogether).",
      "inputSchema": {"type": "object", "properties": {"revision": {"type": "integer"}},
@@ -121,6 +130,10 @@ def call_tool(name: str, args: dict) -> dict:
         who = str(args.get("session") or me)
         route = "/api/plan/joint?" if args.get("joint") else "/api/plan?"
         return c.get(route + urllib.parse.urlencode({"session": who}))
+    if name == "plan_overview":
+        query = {k: v for k, v in (("project", args.get("project")), ("all", "1" if args.get("all") else None))
+                 if v}
+        return c.get("/api/plan/overview" + ("?" + urllib.parse.urlencode(query) if query else ""))
     if name == "plan_set":
         body = {k: args[k] for k in ("revision", "title", "goal", "issue", "steps", "closure") if k in args}
         return c.post("/api/plan", {**body, "session": me, "by": me})
