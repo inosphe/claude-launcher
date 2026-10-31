@@ -4,6 +4,7 @@ plan pane, and the decisions the user takes there.
   GET  /api/plan?session=<name>          one session's plan ({"plan": null} without one)
   GET  /api/plan/rail                    per session with a plan: title, context, summary
   GET  /api/plan/joint?session=<name>    the joint tree holding it (plan/joint.py); no session: every tree
+  GET  /api/plan/overview[?all=1]        every running session's stage, run and plan progress (plan/overview.py)
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
   POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?}
   POST /api/plan/clear                   clear     {session, revision}
@@ -40,6 +41,7 @@ from typing import Optional
 from aiohttp import web
 
 from ..plan import joint as plan_joint
+from ..plan import overview as plan_overview
 from ..plan import store as plan_store
 from . import paths
 from .qa_api import Outbox
@@ -105,7 +107,14 @@ def feedback_text(session: str, node: Optional[dict], text: str) -> str:
     ])
 
 
-def install(app, store: Optional[plan_store.PlanStore] = None):
+def _v2_rows(app, pairs: list) -> dict:
+    """The v2 rail rows of ``pairs`` ((session, cwd)), the same read and
+    cache the session rail uses (cflow2_web.rail_entries)."""
+    from . import cflow2_web
+    return cflow2_web.rail_entries(pairs, registry=app.get("gates"))
+
+
+def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None):
     manager = app["manager"]
     plans = store or plan_store.PlanStore(paths.plan_db())
     app["plans"] = plans
@@ -199,6 +208,34 @@ def install(app, store: Optional[plan_store.PlanStore] = None):
             return web.json_response({"groups": plan_joint.groups(rail, parent_of)})
         return web.json_response({"session": session, "group": plan_joint.group_of(rail, parent_of, session)})
 
+    async def h_overview(request):
+        """Running sessions by default; ``all=1`` adds every unarchived
+        ended one (held, paused, failed, killed)."""
+        from . import session as session_mod
+        from ..cflow import state as cflow_state
+        everyone = request.query.get("all") in ("1", "true", "yes")
+        rows, pairs = [], []
+        for s in manager.list():
+            category = session_mod.session_category(s)
+            if category == session_mod.CATEGORY_ARCHIVED or (s.exited and not everyone):
+                continue
+            sdef = s.sdef
+            rows.append({"session": sdef.name, "category": category,
+                         "status": "exited" if s.exited else s.status(),
+                         "project": getattr(sdef, "project", None) or None,
+                         "parent": getattr(sdef, "parent", None) or None})
+            if getattr(sdef, "cwd", None):
+                pairs.append((sdef.name, cflow_state.resolve_cwd(sdef.cwd)))
+        rail, err = await call(plans.rail)
+        if err:
+            return err
+        try:
+            runs = await asyncio.to_thread(runs_of or (lambda p: _v2_rows(app, p)), pairs)
+        except Exception:  # noqa: BLE001 -- the plans still answer
+            log.exception("plan overview: reading the v2 rail failed")
+            runs = {}
+        return web.json_response(plan_overview.overview(rows, rail, runs))
+
     async def h_set(request):
         body = await body_of(request)
         session = session_of(body)
@@ -262,6 +299,7 @@ def install(app, store: Optional[plan_store.PlanStore] = None):
     app.router.add_get("/api/plan", h_get)
     app.router.add_get("/api/plan/rail", h_rail)
     app.router.add_get("/api/plan/joint", h_joint)
+    app.router.add_get("/api/plan/overview", h_overview)
     app.router.add_post("/api/plan", h_set)
     app.router.add_post("/api/plan/clear", h_clear)
     app.router.add_post("/api/plan/feedback", h_feedback)

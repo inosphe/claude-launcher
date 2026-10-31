@@ -320,6 +320,7 @@ def summarize(doc: dict) -> dict:
         "verify": sum(1 for n in closure if n["kind"] == "verify"),
         "followups": sum(1 for n in closure if n["kind"] == "followup"),
         "waiting": len(waiting),
+        "blocked": sum(1 for n in steps if n["kind"] == "step" and n.get("status") == "blocked"),
         "closable": not blockers,
         "blockers": blockers,
         "current": next((n["title"] for n in steps if n.get("status") == "doing"), None),
