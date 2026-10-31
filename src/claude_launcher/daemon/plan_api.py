@@ -3,6 +3,7 @@ plan pane, and the decisions the user takes there.
 
   GET  /api/plan?session=<name>          one session's plan ({"plan": null} without one)
   GET  /api/plan/rail                    per session with a plan: title, context, summary
+  GET  /api/plan/joint?session=<name>    the joint tree holding it (plan/joint.py); no session: every tree
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
   POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?}
   POST /api/plan/clear                   clear     {session, revision}
@@ -38,6 +39,7 @@ from typing import Optional
 
 from aiohttp import web
 
+from ..plan import joint as plan_joint
 from ..plan import store as plan_store
 from . import paths
 from .qa_api import Outbox
@@ -122,6 +124,15 @@ def install(app, store: Optional[plan_store.PlanStore] = None):
                 out[key] = str(value)
         return out
 
+    def parent_of(name: str) -> Optional[str]:
+        """The live spawn parent ("" for none); None for a session this
+        daemon does not hold, so joint.py falls back to the plan's context."""
+        try:
+            sdef = manager.get(name).sdef
+        except Exception:  # noqa: BLE001
+            return None
+        return str(getattr(sdef, "parent", None) or "")
+
     def known(name: str) -> bool:
         try:
             manager.get(name)
@@ -178,6 +189,15 @@ def install(app, store: Optional[plan_store.PlanStore] = None):
     async def h_rail(_request):
         res, err = await call(plans.rail)
         return err or web.json_response({"sessions": res})
+
+    async def h_joint(request):
+        session = request.query.get("session") or ""
+        rail, err = await call(plans.rail)
+        if err:
+            return err
+        if not session:
+            return web.json_response({"groups": plan_joint.groups(rail, parent_of)})
+        return web.json_response({"session": session, "group": plan_joint.group_of(rail, parent_of, session)})
 
     async def h_set(request):
         body = await body_of(request)
@@ -241,6 +261,7 @@ def install(app, store: Optional[plan_store.PlanStore] = None):
 
     app.router.add_get("/api/plan", h_get)
     app.router.add_get("/api/plan/rail", h_rail)
+    app.router.add_get("/api/plan/joint", h_joint)
     app.router.add_post("/api/plan", h_set)
     app.router.add_post("/api/plan/clear", h_clear)
     app.router.add_post("/api/plan/feedback", h_feedback)

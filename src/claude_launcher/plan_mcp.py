@@ -80,9 +80,12 @@ TOOLS = [
     {"name": "plan_get",
      "description": "Read a plan: yours (default) or another session's (a leader reading a worker's). It "
                     "carries the revision, every node with its rev and the user's result, and the summary "
-                    "(waiting on the user, closable, and the blockers that keep it from closing).",
+                    "(waiting on the user, closable, and the blockers that keep it from closing). joint: the "
+                    "related sessions' summaries instead -- spawn parent and children, and the sessions on its "
+                    "issue's parent, child or same issue -- as one tree.",
      "inputSchema": {"type": "object", "properties": {
          "session": {"type": "string", "description": "whose plan; default this session"},
+         "joint": {"type": "boolean", "description": "the joint tree holding that session"},
      }}},
     {"name": "plan_clear",
      "description": "Remove your plan (written by mistake, or the session's work changed altogether).",
@@ -116,7 +119,8 @@ def call_tool(name: str, args: dict) -> dict:
     c = _client()
     if name == "plan_get":
         who = str(args.get("session") or me)
-        return c.get("/api/plan?" + urllib.parse.urlencode({"session": who}))
+        route = "/api/plan/joint?" if args.get("joint") else "/api/plan?"
+        return c.get(route + urllib.parse.urlencode({"session": who}))
     if name == "plan_set":
         body = {k: args[k] for k in ("revision", "title", "goal", "issue", "steps", "closure") if k in args}
         return c.post("/api/plan", {**body, "session": me, "by": me})

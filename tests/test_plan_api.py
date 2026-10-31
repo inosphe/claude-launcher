@@ -103,3 +103,18 @@ def test_feedback_is_typed_into_the_session(tmp_path):
         assert "commented on step d1" in block and "> split d1" in block
         await req("POST", "/api/plan/feedback", {"session": "s1", "text": ""}, status=400)
     run(tmp_path, scenario)
+
+
+def test_joint_tree_reads_the_live_parent(tmp_path):
+    async def scenario(req, mgr):
+        await req("POST", "/api/plan", PLAN)
+        mgr.sessions["s2"].sdef.parent = "s1"
+        await req("POST", "/api/plan", {**PLAN, "session": "s2", "by": "s2", "issue": "claunch-x.1"})
+        g = (await req("GET", "/api/plan/joint?session=s2"))["group"]
+        # s1's own spawn parent s29 has no plan (and no record here): drawn from s1's context
+        assert [(m["session"], m["via"], m["has_plan"]) for m in g["members"]] == [
+            ("s29", None, False), ("s1", "spawn", True), ("s2", "spawn", True)]
+        assert g["waiting"] == 6
+        assert (await req("GET", "/api/plan/joint?session=ghost"))["group"] is None
+        assert len((await req("GET", "/api/plan/joint"))["groups"]) == 1
+    run(tmp_path, scenario)

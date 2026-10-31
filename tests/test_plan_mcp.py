@@ -36,5 +36,7 @@ def test_calls_carry_the_session(monkeypatch):
     assert client.calls[-1] == ("GET", "/api/plan?session=s7")
     plan_mcp.call_tool("plan_get", {"session": "s9"})
     assert client.calls[-1] == ("GET", "/api/plan?session=s9")
+    plan_mcp.call_tool("plan_get", {"joint": True})
+    assert client.calls[-1] == ("GET", "/api/plan/joint?session=s7")
     plan_mcp.call_tool("plan_clear", {"revision": 3})
     assert client.calls[-1] == ("POST", "/api/plan/clear", {"revision": 3, "session": "s7", "by": "s7"})
