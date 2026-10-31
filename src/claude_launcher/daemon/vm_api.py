@@ -107,6 +107,10 @@ def check_nested(tool: str, arguments: dict) -> None:
                               + ", ".join(sorted(RUN_STEPS_TOOLS)))
 
 
+#: View tools whose answer is a look at the screen: the only ones that satisfy
+#: "look before you act" after a hand-over.
+OBSERVE_TOOLS = frozenset({"get_desktop_state", "get_window_state", "zoom"})
+
 SHOTS_KEEP = 20
 
 
@@ -455,7 +459,7 @@ async def h_call(request: web.Request) -> web.Response:
             result = await channel.call(tool, args, float(body.get("timeout") or 30))
             ok = True
         finally:
-            reg.end_call(vm_id, session, scope, ok=ok)
+            reg.end_call(vm_id, session, scope, ok=ok, observe=tool in OBSERVE_TOOLS)
         return web.json_response({"ok": True, "scope": scope,
                                   "result": _materialize(vm_id, result)})
     except VmError as exc:

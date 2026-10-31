@@ -769,6 +769,10 @@ def build_app(
     # runs, who may look at and drive each, and the macOS VM slots.
     from . import vm_api
     vm_api.install(app)
+    # A session that ends gives back the VM control it held (its grants stay,
+    # so a resumed session of the same name keeps its access).
+    manager.exit_hooks.append(
+        lambda session: app["vm_registry"].session_exited(getattr(session, "name", "")))
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.

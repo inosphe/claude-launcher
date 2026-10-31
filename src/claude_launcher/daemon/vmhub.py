@@ -155,6 +155,10 @@ class Vm:
     human: str = "idle"  # idle | driving
     human_since: float = 0.0
     needs_observe: bool = False
+    #: Bumped each time the controller is asked to look again; a look counts
+    #: only if it began after the last bump (not persisted).
+    observe_gen: int = 0
+    view_gen: Dict[str, int] = field(default_factory=dict)
     #: Calls running right now (not persisted).
     inflight: int = 0
 
@@ -427,13 +431,24 @@ class Registry:
     def revoke(self, vm_id: str, session: str, scopes=None) -> List[str]:
         """Drop ``scopes`` (all when omitted). Losing ``control`` ends the
         control the session holds; losing ``view`` loses everything."""
+        if scopes is not None:
+            # A malformed list must not revoke less than it says and still
+            # answer ok: a string would be read letter by letter.
+            if isinstance(scopes, str) or not isinstance(scopes, (list, tuple, set)) or not scopes:
+                raise VmError("vm_bad_scope", "scopes must be a non-empty list, or omitted for all")
+            scopes = set(scopes)
+            unknown = {s for s in scopes if s not in SCOPES}
+            if unknown:
+                raise VmError("vm_bad_scope", f"unknown scope(s): {sorted(map(str, unknown))}")
         with self._lock:
             vm = self.get(vm_id)
             have = set(vm.grants.get(session, []))
-            if scopes is None or VIEW in set(scopes):
+            if scopes is None or VIEW in scopes:
                 have = set()
             else:
-                have -= set(scopes)
+                have -= scopes
+                if CONTROL in scopes:
+                    have.discard(EXEC)  # exec runs on top of control
             if have:
                 vm.grants[session] = [s for s in SCOPES if s in have]
             else:
@@ -476,6 +491,7 @@ class Registry:
                 vm.controller = session
                 vm.epoch += 1
                 vm.needs_observe = True
+                vm.observe_gen += 1
                 self._log(vm_id, session, "acquire", epoch=vm.epoch)
                 self._save()
             return {"ok": True, "epoch": vm.epoch, "needs_observe": vm.needs_observe}
@@ -531,7 +547,7 @@ class Registry:
                 self._log(vm_id, session, "refused", scope=scope, why="no grant")
                 raise VmError("vm_no_grant", f"{session} has no {scope} grant on {vm_id}")
             if scope == VIEW:
-                vm.needs_observe = False
+                vm.view_gen[session] = vm.observe_gen
             else:
                 if vm.human == "driving":
                     raise VmError("vm_busy", "the user is driving the VM", retry_after=5,
@@ -555,10 +571,18 @@ class Registry:
             self._log(vm_id, session, "call", scope=scope, epoch=vm.epoch)
             return vm
 
-    def end_call(self, vm_id: str, session: str, scope: str, *, ok: bool = True) -> None:
+    def end_call(self, vm_id: str, session: str, scope: str, *, ok: bool = True,
+                 observe: bool = False) -> None:
+        """``observe``: the call returned a look at the screen. It clears the
+        controller's "look first" mark only when it succeeded, came from the
+        controller, and began after the mark was last set."""
         with self._lock:
             vm = self.get(vm_id)
             vm.inflight = max(0, vm.inflight - 1)
+            if (ok and observe and scope == VIEW and vm.needs_observe
+                    and (session == vm.controller or session in vm.extra_controllers)
+                    and vm.view_gen.get(session) == vm.observe_gen):
+                vm.needs_observe = False
             self._log(vm_id, session, "done", scope=scope, ok=ok)
 
     # ---- the user at the screen ------------------------------------------ #
@@ -578,6 +602,7 @@ class Registry:
             if vm.human == "driving":
                 vm.human = "idle"
                 vm.needs_observe = True
+                vm.observe_gen += 1
                 self._log(vm_id, "", "human_idle")
                 self._save()
 

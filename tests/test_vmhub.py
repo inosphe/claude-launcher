@@ -160,7 +160,7 @@ def test_the_first_control_call_after_acquire_must_follow_a_look(reg):
         reg.begin_call("a", "s1", "control", epoch)
     assert _code(e) == "vm_observe_first"
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.begin_call("a", "s1", "control", epoch)
 
 
@@ -186,6 +186,7 @@ def test_a_duplicate_controller_needs_a_grant_a_reason_and_a_controller(reg):
     assert _code(e) == "vm_reason_required"
     reg.add_extra_controller("a", "s2", "reviewing the run")
     reg.begin_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.begin_call("a", "s2", "view")
     reg.begin_call("a", "s2", "control", epoch)
 
@@ -206,7 +207,7 @@ def test_while_the_user_drives_control_is_refused_and_view_is_not(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.human_driving("a")
     with pytest.raises(VmError) as e:
         reg.begin_call("a", "s1", "control", epoch)
@@ -219,7 +220,7 @@ def test_a_call_in_flight_is_waited_for_not_cancelled(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.begin_call("a", "s1", "control", epoch)
     assert reg.human_driving("a")["draining"] is True
     reg.end_call("a", "s1", "control")
@@ -231,7 +232,7 @@ def test_handing_back_keeps_control_but_asks_for_a_new_look(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.human_driving("a")
     reg.human_idle("a")
     assert reg.get("a").controller == "s1" and reg.get("a").epoch == epoch
@@ -299,10 +300,65 @@ def test_the_audit_record_carries_no_command_text(reg):
     reg.grant("a", "s1", ["control"])
     epoch = reg.acquire("a", "s1")["epoch"]
     reg.begin_call("a", "s1", "view")
-    reg.end_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
     reg.begin_call("a", "s1", "control", epoch)
     kinds = [row["what"] for row in reg.audit_log]
     assert {"grant", "acquire", "call"} <= set(kinds)
     assert all(set(row) <= {"at", "vm", "session", "what", "scope", "epoch", "ok",
                             "why", "scopes", "frm", "to", "reason", "left", "current"}
                for row in reg.audit_log)
+
+
+# --------------------------------------------------------------------------- #
+# review items 5, 6, 11
+# --------------------------------------------------------------------------- #
+def test_only_the_controllers_successful_look_clears_look_first(reg):
+    _ready(reg)
+    reg.grant("a", "s1", ["control"])
+    reg.grant("a", "s2", ["view"])
+    epoch = reg.acquire("a", "s1")["epoch"]
+    # another session looking, or a look that has not finished, changes nothing
+    reg.begin_call("a", "s2", "view")
+    reg.end_call("a", "s2", "view", observe=True)
+    assert reg.get("a").needs_observe
+    reg.begin_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", ok=False, observe=True)
+    assert reg.get("a").needs_observe
+    reg.begin_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=False)  # a view call that is not a look
+    assert reg.get("a").needs_observe
+    with pytest.raises(VmError) as e:
+        reg.begin_call("a", "s1", "control", epoch)
+    assert _code(e) == "vm_observe_first"
+    reg.begin_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
+    reg.begin_call("a", "s1", "control", epoch)
+
+
+def test_a_look_that_began_before_the_hand_back_does_not_count(reg):
+    _ready(reg)
+    reg.grant("a", "s1", ["control"])
+    epoch = reg.acquire("a", "s1")["epoch"]
+    reg.begin_call("a", "s1", "view")
+    reg.human_driving("a")
+    reg.human_idle("a")  # the screen changed under the look in flight
+    reg.end_call("a", "s1", "view", observe=True)
+    assert reg.get("a").needs_observe
+    reg.begin_call("a", "s1", "view")
+    reg.end_call("a", "s1", "view", observe=True)
+    reg.begin_call("a", "s1", "control", epoch)
+
+
+@pytest.mark.parametrize("bad", ["view", "control", [], ["root"], ["view", 3], 7, {"view": 1}])
+def test_a_malformed_revoke_changes_nothing_and_says_so(reg, bad):
+    reg.grant("a", "s1", ["control", "exec"])
+    with pytest.raises(VmError) as e:
+        reg.revoke("a", "s1", bad)
+    assert _code(e) == "vm_bad_scope"
+    assert reg.get("a").grants["s1"] == ["view", "control", "exec"]
+
+
+def test_revoking_control_takes_exec_with_it(reg):
+    reg.grant("a", "s1", ["exec"])
+    assert reg.revoke("a", "s1", ["control"]) == ["view"]
+    assert reg.get("a").grants["s1"] == ["view"]
