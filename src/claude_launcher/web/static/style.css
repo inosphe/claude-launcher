@@ -10502,6 +10502,12 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-feedback { margin-top: 14px; display: grid; gap: 6px; }
 .plan-feedback textarea { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 4px 6px; font: inherit; resize: vertical; }
 .plan-feedback .wf-btn { justify-self: start; }
+.plan-joint-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.plan-joint { list-style: none; margin: 0; padding: 0; }
+.plan-joint-member { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
+.plan-joint-member p { margin: 2px 0; }
+.plan-joint-self { border-left-color: #427fdf; }
+.plan-joint-pane { margin: 6px 0 0; padding: 8px 10px; background: var(--plan-panel); border-radius: 6px; }
 
 /* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
 .packs-host {

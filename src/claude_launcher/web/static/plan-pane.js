@@ -9,7 +9,13 @@
 
    Every decision names the node's rev the pane last read; a 409 means the
    session reworded it, and the pane reloads so the user decides on what it
-   says now. A note being typed is kept per node across polls. */
+   says now. A note being typed is kept per node across polls.
+
+   Joint view (claunch-7jzp8.1): when the session's joint tree
+   (/api/plan/joint, plan/joint.py) holds another planned session, a toggle
+   lists the tree -- spawn children, sessions on the same issue or a
+   sub-issue -- each with its progress line, and opens any of them as a
+   nested pane of its own, where the user decides on that session's plan. */
 
 const PLAN_STEP_STATUS = {todo: "예정", doing: "진행 중", done: "완료", skipped: "건너뜀", blocked: "막힘"};
 const PLAN_VERDICT = {passed: "통과", failed: "실패"};
@@ -19,6 +25,7 @@ const PLAN_ACTIONS = [
   {id: "drop", label: "버림"},
 ];
 const PLAN_ACTION_LABEL = Object.fromEntries(PLAN_ACTIONS.map(a => [a.id, a.label]));
+const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
 
 function planNode(tag, text, cls) {
   const n = document.createElement(tag);
@@ -36,10 +43,12 @@ function planResultText(n) {
   return `처분: ${PLAN_ACTION_LABEL[r.action] || r.action}` + (n.status === "done" ? " · 처리됨" : "");
 }
 
-function makePlanPane({root, session, request, onChange}) {
+function makePlanPane({root, session, request, onChange, nested}) {
   const node = planNode;
   const base = "/api/plan";
   let data = null, error = "", busy = false, seq = 0, timer = null, feedback = "";
+  let joint = null, jointOpen = false;
+  const members = {};    // session -> {el, view} of an opened joint member
   const notes = {};      // node id -> the note being typed
   const told = {};       // node id -> the last write's message
 
@@ -50,6 +59,12 @@ function makePlanPane({root, session, request, onChange}) {
       if (mine !== seq) return;
       data = out; error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
+    if (!nested) {
+      try {
+        const out = await request(`${base}/joint?session=${encodeURIComponent(session)}`);
+        if (mine === seq) joint = out.group;
+      } catch (_exc) { if (mine === seq) joint = null; }
+    }
     if (mine === seq) { render(); schedule(); }
   }
   function schedule() { clearTimeout(timer); timer = setTimeout(load, 5000); }
@@ -153,6 +168,38 @@ function makePlanPane({root, session, request, onChange}) {
     return li;
   }
 
+  function toggleMember(name) {
+    if (members[name]) { members[name].view.stop(); delete members[name]; render(); return; }
+    const el = node("div", null, "plan-joint-pane");
+    members[name] = {el, view: makePlanPane({root: () => el, session: name, request, onChange, nested: true})};
+    render(); members[name].view.open();
+  }
+
+  function jointTree() {
+    const ul = node("ul", null, "plan-joint");
+    for (const m of joint.members) {
+      const li = node("li", null, "plan-joint-member" + (m.session === session ? " plan-joint-self" : ""));
+      li.setAttribute("style", `margin-left: ${m.depth * 1.2}em`);
+      const head = node("div", null, "plan-item-head");
+      if (m.via) head.append(node("span", PLAN_VIA[m.via] || m.via, "plan-chip"));
+      head.append(node("strong", m.session), node("span", m.title || "", "plan-title"));
+      li.append(head);
+      if (!m.has_plan) {
+        li.append(node("p", "계획 없음", "plan-muted"));
+      } else {
+        const line = `단계 ${m.done || 0}/${m.steps || 0} 완료` + (m.current ? ` · 지금: ${m.current}` : "")
+          + ` · 내 결정 대기 ${m.waiting || 0}건 · ` + (m.closable ? "닫아도 됨" : "닫을 수 없음");
+        li.append(node("p", line, m.closable ? "plan-closable" : "plan-progress"));
+        if (m.session !== session) {
+          li.append(button(members[m.session] ? "접기" : "계획 펼치기", () => toggleMember(m.session)));
+          if (members[m.session]) li.append(members[m.session].el);
+        }
+      }
+      ul.append(li);
+    }
+    return ul;
+  }
+
   function verdictLine(s) {
     if (s.closable) return node("p", "닫아도 됨: 남은 단계·결정·확인 항목이 없습니다.", "plan-closable");
     const mine = s.blockers.filter(b => b.who === "user").length;
@@ -169,12 +216,24 @@ function makePlanPane({root, session, request, onChange}) {
     const p = data.plan;
     if (!p) {
       shell.append(node("p", "이 세션은 아직 계획을 쓰지 않았습니다 (plan_set).", "plan-empty"));
+      // a parent without a plan of its own still shows its children's
+      if (joint && joint.sessions > 0) shell.append(node("h4", "연관 세션", "plan-section"), jointTree());
       el.append(shell); return;
     }
     const s = p.summary;
     const head = node("div", null, "plan-pane-head");
     head.append(node("strong", p.title), node("span", `rev ${p.revision}` + (p.issue ? ` · ${p.issue}` : ""), "plan-muted"));
     shell.append(head);
+    if (joint && joint.sessions > 1) {
+      const row = node("div", null, "plan-joint-bar");
+      row.append(node("span", `연관 세션 ${joint.sessions}개 · 내 결정 대기 ${joint.waiting}건`, "plan-muted"),
+                 button(jointOpen ? "이 세션만 보기" : "연관 세션 함께 보기", () => { jointOpen = !jointOpen; render(); }));
+      shell.append(row);
+      if (jointOpen) {
+        shell.append(node("h4", "연관 세션", "plan-section"), jointTree());
+        el.append(shell); return;
+      }
+    }
     if (p.goal) shell.append(node("p", p.goal, "plan-goal"));
     shell.append(node("p", `단계 ${s.done}/${s.steps} 완료` + (s.current ? ` · 지금: ${s.current}` : ""), "plan-progress"), verdictLine(s));
 
@@ -209,7 +268,11 @@ function makePlanPane({root, session, request, onChange}) {
     el.append(shell);
   }
 
-  return {open: load, stop: () => { ++seq; clearTimeout(timer); timer = null; }, _state: () => ({data, notes})};
+  function stop() {
+    ++seq; clearTimeout(timer); timer = null;
+    for (const name of Object.keys(members)) { members[name].view.stop(); delete members[name]; }
+  }
+  return {open: load, stop, _state: () => ({data, notes, joint})};
 }
 
 async function planRequest(path, method = "GET", body) {

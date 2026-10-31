@@ -31,3 +31,8 @@ def test_worker_rule_covers_closure_and_does_not_block_the_round():
     text = yaml.safe_load((V2 / "improv-worker-v2.yaml").read_text(encoding="utf-8"))["rules"]["plan-panel"]["text"]
     assert "verify" in text and "followup" in text and "[claunch plan]" in text
     assert "회차를 막지 않는다" in text
+
+
+def test_leader_rule_names_the_joint_read():
+    text = yaml.safe_load((V2 / "improv-leader-v2.yaml").read_text(encoding="utf-8"))["rules"]["worker-plans"]["text"]
+    assert "joint=true" in text and "claunch-7jzp8.1" in text

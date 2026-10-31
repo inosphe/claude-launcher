@@ -1,7 +1,9 @@
 /* Real plan-pane.js (claunch-7jzp8): the step tree and its decision cards
    (effect, risk, recommendation), the closure section and the closable line,
    the decide bodies naming the node's rev and the note, a 409 reloading the
-   reworded node, and the feedback box. */
+   reworded node, and the feedback box. The joint view (claunch-7jzp8.1):
+   the toggle, the related sessions' lines, and a nested pane deciding on
+   the other session's plan. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -34,16 +36,31 @@ let plan = {
                        {id: 's2', title: 'write store', why: 'step doing', who: 'session'}]},
 };
 let conflictOn = null;
+let jointGroup = null;
+const plan2 = {
+  session: 's2', revision: 1, title: 'Child Y', goal: '', issue: 'claunch-x.1',
+  steps: [{id: 'd9', kind: 'decision', title: 'cache?', detail: '', options: OPTS, rev: 4, result: null, children: []}],
+  closure: [], summary: {steps: 0, done: 0, current: null, closable: false, waiting: 1,
+                         blockers: [{id: 'd9', title: 'cache?', why: 'decision not taken', who: 'user'}]},
+};
 let changes = 0;
 
 async function request(raw, method = 'GET', body) {
   calls.push({path: raw, method, body});
   const url = new URL(raw, 'http://test');
-  if (url.pathname === '/api/plan') return {session: 's1', plan};
+  if (url.pathname === '/api/plan') {
+    const who = url.searchParams.get('session');
+    return {session: who, plan: who === 's2' ? plan2 : plan};
+  }
+  if (url.pathname === '/api/plan/joint') {
+    if (!jointGroup) throw Object.assign(Error('no joint'), {status: 404});
+    return {session: url.searchParams.get('session'), group: jointGroup};
+  }
   if (url.pathname === '/api/plan/feedback') return {delivered: true};
   const m = url.pathname.match(/^\/api\/plan\/node\/([^/]+)\/decide$/);
   if (m) {
-    const node = [...plan.steps, ...plan.closure].find(n => n.id === m[1]);
+    const doc = body.session === 's2' ? plan2 : plan;
+    const node = [...doc.steps, ...doc.closure].find(n => n.id === m[1]);
     if (conflictOn === node.id) {
       conflictOn = null; node.rev += 1; node.title = 'storage, reworded';
       throw Object.assign(Error(`node ${node.id} is at rev ${node.rev}`), {status: 409, body: {current: plan}});
@@ -113,6 +130,32 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   fb.value = 'split d1'; fb.oninput();
   buttons(host, '의견 보내기')[0].onclick(); await settle();
   assert.deepStrictEqual(posts().slice(-1)[0], {path: '/api/plan/feedback', method: 'POST', body: {session: 's1', text: 'split d1'}});
+
+  // Joint view: a toggle, the related sessions' lines, a nested pane on s2's plan.
+  assert(!text(host).includes('연관 세션 함께 보기'));
+  jointGroup = {root: 's1', sessions: 2, waiting: 4, closable: false, members: [
+    {session: 's1', parent: null, via: null, depth: 0, has_plan: true, title: 'Ship X', steps: 2, done: 1, current: 'write store', waiting: 3, closable: false},
+    {session: 's2', parent: 's1', via: 'spawn', depth: 1, has_plan: true, title: 'Child Y', steps: 0, done: 0, waiting: 1, closable: false},
+  ]};
+  ctx.PlanPane._view().open(); await settle();
+  assert(text(host).includes('연관 세션 2개 · 내 결정 대기 4건'));
+  buttons(host, '연관 세션 함께 보기')[0].onclick(); await settle();
+  let jt = text(host);
+  for (const want of ['자식 세션', 'Child Y', '단계 0/0 완료 · 내 결정 대기 1건 · 닫을 수 없음', '이 세션만 보기'])
+    assert(jt.includes(want), `joint missing ${want}`);
+  assert.strictEqual(buttons(host, '계획 펼치기').length, 1);          // not for the session itself
+  buttons(host, '계획 펼치기')[0].onclick(); await settle();
+  assert(text(host).includes('cache?'));
+  assert(calls.some(c => c.path === '/api/plan?session=s2'));
+  assert(!calls.some(c => c.path === '/api/plan/joint?session=s2'));   // a nested pane reads no joint tree
+  buttons(host, '이 안 선택')[0].onclick(); await settle();
+  assert.deepStrictEqual(posts().slice(-1)[0],
+    {path: '/api/plan/node/d9/decide', method: 'POST', body: {session: 's2', note: '', rev: 4, choice: 'A'}});
+  buttons(host, '접기')[0].onclick(); await settle();
+  assert(!text(host).includes('cache?'));
+  buttons(host, '이 세션만 보기')[0].onclick(); await settle();
+  assert(text(host).includes('종료 조건'));
+  jointGroup = null;
 
   // Closable, and a session without a plan.
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};
