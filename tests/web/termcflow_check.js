@@ -108,6 +108,7 @@ new Function(
   + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "sessionCategory", "gateWakeNote",
+     "sessionInfoTooltip",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
      "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState",

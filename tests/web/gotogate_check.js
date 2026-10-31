@@ -134,13 +134,13 @@ function build() {
     "$", "el", "setTimeout", "clearTimeout", "Date", "api", "location",
     // Left without an argument: Node's real BroadcastChannel would hold the
     // process open (claunch-j6lg0).
-    "BroadcastChannel",
+    "BroadcastChannel", "sessionsCache",
     code + "\nreturn { refreshGotoGate," +
     " get cards() { return [...notices.keys()]; } };"
   )(
     (id) => nodes[id],
     (tag, cls, text) => node(cls, text),
-    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, loc,
+    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, loc, undefined, [],
   );
 
   return { api, nodes, clock, gate, apiCalls, loc,

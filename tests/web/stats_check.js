@@ -156,6 +156,7 @@ new Function(
   + objectConstant("STATS_LLM_FEATURES") + slice("statsLlmTokens")
   + slice("usageShort") + slice("usageCost") + slice("usageShare")
   + slice("profileHarnessLabel")
+  + slice("sessionInfoTooltip")
   + ["openStatsPage", "stopStatsPoll", "statsSchedule",
      "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
      "refreshStatsLlm", "setStatsLlmProvider", "statsLlmTable", "statsLlmBar",

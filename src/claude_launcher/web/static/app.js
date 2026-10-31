@@ -34903,7 +34903,7 @@ function statsOverviewTable(d) {
     const value = statsRowTotal(r);
     const row = el("tr", "stats-row");
     row.dataset.session = r.session;
-    row.title = `open ${r.session}'s detail panel`;
+    row.title = sessionInfoTooltip(r.session, `open ${r.session}'s detail panel`);
 
     const name = el("td", "stats-session-cell");
     const link = el("a", null, r.session);
@@ -60916,7 +60916,7 @@ function notify(title, sub, opts) {
   if (sub) node.appendChild(el("div", "notice-sub", sub));
   // A card about one session (a QA request) opens it: the reader's next
   // move is that session's pane, and the click puts the card away as well.
-  node.title = o.session ? `open ${o.session}`
+  node.title = o.session ? sessionInfoTooltip(o.session, `open ${o.session}`)
     : dismissable ? "click to dismiss" : "stays until the alert clears";
   node.addEventListener("click", () => {
     if (dismissable) {
@@ -60943,6 +60943,31 @@ function dismissNotice(key) {
   if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
 }
 
+/* What a session name's hover tooltip adds on top of the surface's own
+   wording ("open s6110", "open s6110's detail panel"): the opening task and
+   the briefing one-liner, so a session is told apart where its name is
+   seen — the ask of a reader who met "open s6110" on a gate card and could
+   not say which session that was (claunch-q4qn0).
+
+   Read off the session poll like briefingTabTooltip: hovering composes
+   nothing and calls nothing; a name the poll has no record for keeps the
+   plain title, and one composed before the record arrived gains the lines
+   on the next poll. `base` is the first line and is preserved untouched.
+   Long values are clipped, not dropped — a tooltip that fills the screen
+   answers less than one that stays readable. */
+function sessionInfoTooltip(name, base) {
+  const rec = sessionsCache.find((s) => s.name === name);
+  if (!rec) return base;
+  const clip = (text, max) =>
+    text.length > max ? text.slice(0, max - 1) + "…" : text;
+  const lines = [];
+  const task = String(rec.task || "").trim();
+  if (task) lines.push("task: " + clip(task.split("\n")[0].trim(), 200));
+  const one = rec.briefing && String(rec.briefing.one_line || "").trim();
+  if (one) lines.push("briefing: " + clip(one, 240));
+  return lines.length ? `${base}\n\n${lines.join("\n")}` : base;
+}
+
 /* A session named on a notification card, as a press that opens its
    terminal. A gate card names the two sessions the answer turns on — who is
    asking and whose run moves — and the reader's first move is usually to
@@ -60958,7 +60983,7 @@ function dismissNotice(key) {
 function gateSessionLink(name, onOpen) {
   if (!name) return el("span", null, "?");
   const node = el("span", "linkish gate-session", name);
-  node.title = `open ${name}`;
+  node.title = sessionInfoTooltip(name, `open ${name}`);
   if (node.dataset) node.dataset.session = name;
   gateSessionStateSet(node, gateSessionState(name));
   node.addEventListener("click", (ev) => {
@@ -64964,7 +64989,7 @@ function applyRunGate(pending, settled) {
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
-    node.title = `open ${rec.session}`;
+    node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => runGateGo(rec, key));
     noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
     notices.set(key, { node, timer: null });
@@ -65239,7 +65264,7 @@ async function refreshNudgeGate() {
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
-    node.title = `open ${rec.session}`;
+    node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => nudgeGo(rec, key));
     noticeCardAdd(host, node, gateSeenAt("nudge", rec.id));
     notices.set(key, { node, timer: null });
