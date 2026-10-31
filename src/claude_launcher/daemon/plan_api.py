@@ -244,6 +244,26 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         return None, (f"the sessions of {project!r} are on several meshes ({', '.join(sorted(found))}); "
                       "name one" if found else f"no running session of {project!r} is on a mesh")
 
+    async def free_handle(project: str, mesh: str, prior: Optional[str]) -> tuple:
+        """``(mesh, why)`` once ``plan-<project>`` is free on ``mesh``: a
+        membership outlives its session, so the handle the project's last
+        aggregator (``prior``, now ended) held is released here; one any
+        other session holds is not touched and the start goes without a
+        mesh."""
+        handle = aggregator_handle(project)
+        mm = app["mesh"]
+        member = mm.get(mesh).members.get(handle)
+        if member is None:
+            return mesh, ""
+        holder = getattr(member, "session", None)
+        if holder != prior or live(holder) is not None:
+            return None, f"handle {handle!r} on mesh {mesh!r} is held by session {holder!r}"
+        try:
+            await mm.leave(mesh, handle)
+        except Exception as exc:  # noqa: BLE001 -- MeshError: the start goes on without a mesh
+            return None, f"handle {handle!r} on mesh {mesh!r} could not be released: {exc}"
+        return mesh, ""
+
     def aggregator_rows() -> list:
         return [{"project": project, **rec, "running": live(rec["session"]) is not None}
                 for project, rec in sorted(bound.load().items())]
@@ -370,6 +390,8 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         mesh, why = mesh_of(project, str(body.get("mesh") or "").strip())
         if why and body.get("mesh"):
             return web.json_response({"error": why}, status=400)
+        if mesh:
+            mesh, why = await free_handle(project, mesh, (rec or {}).get("session"))
         spec = {"profile": profile, "project": project, "beads": False,
                 "context": json.dumps({"plan_aggregator": project}),
                 "name": str(body.get("name") or "").strip(), "task": aggregator_task(project, mesh)}

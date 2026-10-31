@@ -30,11 +30,18 @@ class Meshes:
 
     def __init__(self, members):
         self.members = members                                      # {session: [mesh, ...]}
+        self.handles = {}                                           # {(mesh, handle): session}; outlives the session
+        self.left = []
 
     def get(self, name):
         if not any(name in m for m in self.members.values()):
             raise ValueError(f"no mesh named {name!r}")
-        return SimpleNamespace(name=name)
+        held = {h: SimpleNamespace(handle=h, session=s) for (m, h), s in self.handles.items() if m == name}
+        return SimpleNamespace(name=name, members=held)
+
+    async def leave(self, name, handle):
+        self.left.append((name, handle))
+        del self.handles[(name, handle)]
 
     def meshes_for_session(self, session):
         return [{"mesh": m, "handle": session} for m in self.members.get(session, [])]
@@ -52,6 +59,10 @@ def build(tmp_path, sessions, created, meshes=None):
             return 400, {"error": "no such profile"}
         created.append(spec)
         name = f"agg{len(created)}"
+        if meshes is not None and spec.get("mesh"):
+            key = (spec["mesh"], spec["handle"])
+            assert key not in meshes.handles, f"handle {key} is already taken"   # onboard.preflight's refusal
+            meshes.handles[key] = name
         s = FakeSession(name)
         s.sdef = SimpleNamespace(name=name, project=spec["project"], cwd=str(tmp_path), parent=None)
         s.status = lambda: "idle"
@@ -140,7 +151,21 @@ def test_the_aggregator_joins_the_projects_mesh(tmp_path):
             assert "메시 'team'의 send로 전달한다" in spec["task"] and "plan-default" in spec["task"]
             assert out["mesh"] == "team" and "mesh_note" not in out
 
+            mgr.sessions[out["name"]].exited = True                                # ended, its handle kept:
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
+            out = await resp.json()                                                # the start releases it
+            assert resp.status == 201 and meshes.left == [("team", "plan-default")]
+            assert (created[-1]["mesh"], meshes.handles[("team", "plan-default")]) == ("team", out["name"])
+
             mgr.sessions[out["name"]].exited = True
+            meshes.handles[("team", "plan-default")] = "w1"                        # someone else's: left alone
+            resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
+            out = await resp.json()
+            assert resp.status == 201 and out["mesh"] is None and "held by session 'w1'" in out["mesh_note"]
+            assert "mesh" not in created[-1] and meshes.left == [("team", "plan-default")]
+
+            mgr.sessions[out["name"]].exited = True
+            del meshes.handles[("team", "plan-default")]
             meshes.members["w2"] = ["team", "side"]                                # several: none is guessed
             resp = await client.post("/api/plan/aggregators/default/start", json={"profile": "p"})
             out = await resp.json()
