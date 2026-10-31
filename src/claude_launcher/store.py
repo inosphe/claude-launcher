@@ -814,10 +814,17 @@ DAEMON_DEFAULTS = {
     #     the session that was driving.
     #   vm_graphics -- keep the tart run window (the user drives through it
     #     until the browser screen takes input).
+    #   vm_softnet -- start guests with tart's softnet network (a random
+    #     private /29 per boot) and block the private ranges in
+    #     vm_softnet_block, so that the guest cannot reach the host's own ports
+    #     or the LAN (d-005). With the block on, the guest's DNS must be a
+    #     public one (docs/vm-hub.md); the control channel is tart exec.
     "vm_slot_limit": 2,
     "vm_stop_wait": 120,
     "vm_human_idle": 15,
     "vm_graphics": True,
+    "vm_softnet": True,
+    "vm_softnet_block": "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.

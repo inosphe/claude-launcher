@@ -73,15 +73,15 @@ def _vm():
     return vm
 
 
-def test_every_ssh_call_ends_its_options_before_the_destination():
+def test_every_guest_call_ends_its_options_before_the_vm_name():
     vm = _vm()
-    for argv in (vm_channel.ssh_argv(vm), vm_frames.capture_argv(vm)):
-        assert argv[argv.index("--") + 1] == "admin@192.168.64.2"
+    for argv in (vm_channel.exec_argv(vm), vm_frames.capture_argv(vm)):
+        assert argv[argv.index("--") + 1] == "a" and argv[0] == "tart"
     mgr = vm_tart.Manager(Registry(), log_dir=None, run=lambda a, t: (0, "", ""))
     seen = []
     mgr._run = lambda argv, timeout: seen.append(argv) or (0, "", "")
-    mgr._ssh(vm, "true")
-    assert seen[0][seen[0].index("--") + 1] == "admin@192.168.64.2"
+    mgr._guest(vm, "true")
+    assert seen[0][:4] == ["tart", "exec", "--", "a"]
 
 
 def test_every_tart_call_ends_its_options_before_the_name():

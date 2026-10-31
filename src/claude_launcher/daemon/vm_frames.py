@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
+from .vm_tart import TART
 from .vmhub import Registry
 
 WATCH = 6.0
@@ -30,8 +31,9 @@ BACKOFF = 3.0
 CAPTURE_TIMEOUT = 15.0
 #: The capture command, run by the guest's shell. The temp file is the
 #: guest's own and goes away in the same command.
-CAPTURE = ('f=/tmp/.claunch-frame-$$.jpg; screencapture -x -t jpg "$f" && cat "$f"; '
-           'rc=$?; rm -f "$f"; exit $rc')
+#: (Not a dot-file name: screencapture refuses to write one, measured on t03.)
+CAPTURE = ('f=/tmp/claunch-frame-$$.jpg; /usr/sbin/screencapture -x -t jpg "$f" && /bin/cat "$f"; '
+           'rc=$?; /bin/rm -f "$f"; exit $rc')
 
 BytesResult = Tuple[int, bytes, str]
 BytesRunner = Callable[[Sequence[str], float], BytesResult]
@@ -49,11 +51,9 @@ def run_bytes(argv: Sequence[str], timeout: float) -> BytesResult:
 
 
 def capture_argv(vm) -> list:
-    argv = ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-            "-o", "StrictHostKeyChecking=accept-new"]
-    if vm.ssh_key:
-        argv += ["-i", vm.ssh_key, "-o", "IdentitiesOnly=yes"]
-    return argv + ["--", f"{vm.ssh_user}@{vm.ip}", CAPTURE]
+    """The capture runs in the guest through ``tart exec`` (~0.14 s a frame
+    after the first, measured on t03)."""
+    return [TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", CAPTURE]
 
 
 @dataclass
@@ -108,8 +108,8 @@ class Frames:
     async def _loop(self, vm_id: str, w: _Watch) -> None:
         while self._clock() - w.last_ask < self.watch:
             vm = self.registry.get(vm_id)
-            if vm.state != "running" or not vm.ssh_ready or not vm.ip:
-                self._set(w, error=f"{vm_id} is {vm.state}" + ("" if vm.ssh_ready else ", ssh not up"))
+            if vm.state != "running" or not vm.ssh_ready:
+                self._set(w, error=f"{vm_id} is {vm.state}" + ("" if vm.ssh_ready else ", the guest agent is not up"))
                 await asyncio.sleep(self.backoff)
                 continue
             rc, out, err = await asyncio.to_thread(self._run, capture_argv(vm), CAPTURE_TIMEOUT)

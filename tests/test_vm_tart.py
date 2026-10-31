@@ -1,4 +1,4 @@
-"""The VM runner (vm-setup-8s6, step 2), driven by a fake tart and ssh: no VM
+"""The VM runner (vm-setup-8s6, step 2), driven by a fake tart and guest agent: no VM
 is started and no guest is reached."""
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ class Fake:
         self.calls = []
         self.spawned = []
         self.ip = "192.168.64.2"
-        self.ssh_ok = True
+        self.agent_ok = True
+        self.shutdown_rc = 0
         self.console = "admin"
         self.shutdown_stops_vm = True
         self.suspend_rc = 0
@@ -56,27 +57,31 @@ class Fake:
             self.tart[argv[2]] = "stopped"
             return 0, "", ""
         if argv[:2] == ["tart", "exec"]:
+            cmd = argv[-1]
+            if cmd in ("/usr/bin/true", vm_tart.SHUTDOWN) or cmd.startswith("/usr/bin/stat"):
+                if not self.agent_ok or self.tart.get(argv[2]) != "running":
+                    return 2, "", f'VM "{argv[2]}" is not running'
+                if cmd == "/usr/bin/true":
+                    return 0, "", ""
+                if cmd.startswith("/usr/bin/stat"):
+                    return 0, self.console + "\n", ""
+                if self.shutdown_rc:
+                    return self.shutdown_rc, "", "sudo: a password is required"
+                if self.shutdown_stops_vm:
+                    self.tart[argv[2]] = "stopped"
+                return 0, "", ""
             self.execs.append(argv)
             return self.exec_result
-        if argv[0] == "ssh":
-            cmd = argv[-1]
-            if not self.ssh_ok:
-                return 255, "", "refused"
-            if "shutdown" in cmd:
-                if self.shutdown_stops_vm:
-                    for n, s in self.tart.items():
-                        if s == "running":
-                            self.tart[n] = "stopped"
-                return 255, "", ""
-            if "/dev/console" in cmd:
-                return 0, self.console + "\n", ""
-            return 0, "", ""
         raise AssertionError(argv)
 
     def spawn(self, argv, log):
         self.spawned.append(list(argv))
         self.tart[argv[-1]] = "running"
         return 4242
+
+
+RUN_A = ["tart", "run", "--suspendable", "--net-softnet",
+         "--net-softnet-block=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "--", "a"]
 
 
 @pytest.fixture
@@ -90,21 +95,23 @@ def env(tmp_path):
     return fake, reg, mgr
 
 
-def test_start_runs_suspendable_and_waits_for_ssh_and_a_console_login(env):
+def test_start_runs_suspendable_on_softnet_and_waits_for_the_agent_and_a_console_login(env):
     fake, reg, mgr = env
     vm = mgr.start("a")
-    assert fake.spawned == [["tart", "run", "--suspendable", "--", "a"]]
+    assert fake.spawned == [RUN_A]
     assert vm.state == "running" and vm.ip == "192.168.64.2"
     assert vm.ssh_ready and vm.gui_ready and not vm.cua_ready and not vm.ready
-    ssh = [c for c in fake.calls if c[0] == "ssh"][0]
-    assert "-i" in ssh and "/keys/k" in ssh and "admin@192.168.64.2" in ssh
+    assert not any(c[0] == "ssh" for c in fake.calls)       # the guest is reached by tart exec only
+    probes = [c for c in fake.calls if c[:3] == ["tart", "exec", "--"]]
+    assert probes and all(c[3] == "a" and c[4:6] == ["/bin/sh", "-c"] for c in probes)
 
 
 def test_no_graphics_is_an_option_not_the_default(env, tmp_path):
     fake, reg, _ = env
     mgr = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, alive=lambda p: True,
                           sleep=lambda s: None, graphics=False)
-    assert mgr.run_argv("a") == ["tart", "run", "--suspendable", "--no-graphics", "--", "a"]
+    assert mgr.run_argv("a") == ["tart", "run", "--suspendable", "--net-softnet", "--net-softnet-block=" + vm_tart.SOFTNET_BLOCK,
+                                 "--no-graphics", "--", "a"]
 
 
 def test_start_that_finds_no_console_login_ends_in_fault(env):
@@ -141,8 +148,8 @@ def test_stop_syncs_inside_the_guest_and_never_calls_tart_stop(env):
     mgr.start("a")
     vm = mgr.stop("a")
     assert vm.state == "stopped" and not vm.ready
-    cmds = [c[-1] for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]]
-    assert cmds and cmds[0].startswith("sync;")
+    cmds = [c[-1] for c in fake.calls if c[:2] == ["tart", "exec"] and "shutdown" in c[-1]]
+    assert cmds == [vm_tart.SHUTDOWN]
     assert ["tart", "stop", "--", "a"] not in fake.calls
 
 
@@ -172,12 +179,7 @@ def test_a_stop_the_guest_cannot_start_is_reported(env):
     fake, reg, mgr = env
     mgr.start("a")
 
-    def run(argv, timeout):
-        if argv[0] == "ssh" and "shutdown" in argv[-1]:
-            return 1, "", "sudo: a password is required"
-        return fake.run(argv, timeout)
-
-    mgr._run = run
+    fake.shutdown_rc = 77
     with pytest.raises(VmError) as e:
         mgr.stop("a")
     assert e.value.code == "vm_stop_failed"
@@ -197,7 +199,7 @@ def test_suspend_then_start_resumes_in_a_slot(env):
     # tart reports the suspended VM as suspended; run restores it
     fake.tart["a"] = "suspended"
     assert mgr.start("a").state == "running"
-    assert fake.spawned[-1] == ["tart", "run", "--suspendable", "--", "a"]
+    assert fake.spawned[-1] == RUN_A
 
 
 def test_a_failed_suspend_leaves_the_vm_running(env):
@@ -240,7 +242,7 @@ def test_exec_goes_through_tart_exec_and_is_cut_at_the_cap(env):
     out = mgr.exec("a", "ls /Applications")
     assert fake.execs == [["tart", "exec", "a", "/bin/sh", "-c", "ls /Applications"]]
     assert out["rc"] == 0 and len(out["stdout"]) == vm_tart.OUTPUT_CAP and out["truncated"]
-    assert not any(c[0] == "ssh" and "ls /Applications" in c[-1] for c in fake.calls)
+    assert not any(c[0] == "ssh" for c in fake.calls)
 
 
 def test_exec_on_a_vm_that_is_not_running_is_refused(env):
@@ -306,27 +308,24 @@ def test_a_suspend_tart_never_finishes_keeps_the_slot(env):
 # --------------------------------------------------------------------------- #
 # review items 8-12
 # --------------------------------------------------------------------------- #
-def test_a_stop_ssh_cannot_reach_leaves_the_vm_running_not_stopping(env):
+def test_a_guest_agent_that_cannot_be_reached_leaves_the_vm_running_not_stopping(env):
     fake, reg, mgr = env
     mgr.start("a")
+    run = fake.run
     mgr._run = lambda argv, timeout: (
-        (255, "", "ssh: connect to host 192.168.64.2 port 22: Connection refused")
-        if argv[0] == "ssh" and "shutdown" in argv[-1] else fake.run(argv, timeout))
+        (1, "", "Error: unavailable (14): Transport became inactive")
+        if argv[:2] == ["tart", "exec"] and argv[-1] == vm_tart.SHUTDOWN else run(argv, timeout))
     with pytest.raises(VmError) as e:
         mgr.stop("a")
-    assert e.value.code == "vm_stop_failed"
+    assert e.value.code == "vm_stop_failed" and "unavailable" in str(e.value)
     assert reg.get("a").state == "running" and reg.get("a").ssh_ready
 
 
-def test_a_connection_closed_by_the_guest_is_the_shutdown_having_started(env):
-    fake, reg, mgr = env
-    mgr.start("a")
-    run = mgr._run
-    mgr._run = lambda argv, timeout: (
-        (255, "", "Connection to 192.168.64.2 closed by remote host.")
-        if argv[0] == "ssh" and "shutdown" in argv[-1] and not fake.tart.update({"a": "stopped"})
-        else run(argv, timeout))
-    assert mgr.stop("a").state == "stopped"
+def test_the_shutdown_checks_sudo_syncs_and_runs_in_the_background_by_absolute_path():
+    cmd = vm_tart.SHUTDOWN
+    assert cmd.startswith("/usr/bin/sudo -n /usr/bin/true || exit 77;")
+    assert "/bin/sync;" in cmd and "/sbin/shutdown -h now" in cmd and cmd.rstrip().endswith("&)")
+    assert "shutdown" not in cmd.replace("/sbin/shutdown", "")
 
 
 def test_a_second_stop_of_a_stopping_vm_only_waits(env):
@@ -335,10 +334,10 @@ def test_a_second_stop_of_a_stopping_vm_only_waits(env):
     fake.shutdown_stops_vm = False
     with pytest.raises(VmError):
         mgr.stop("a")
-    sent = len([c for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]])
+    sent = len([c for c in fake.calls if c[-1] == vm_tart.SHUTDOWN])
     fake.tart["a"] = "stopped"
     assert mgr.stop("a").state == "stopped"
-    assert len([c for c in fake.calls if c[0] == "ssh" and "shutdown" in c[-1]]) == sent
+    assert len([c for c in fake.calls if c[-1] == vm_tart.SHUTDOWN]) == sent
 
 
 def test_force_stop_follows_whatever_state_the_vm_is_in(env):
@@ -422,13 +421,21 @@ def test_a_suspend_given_up_on_returns_to_running_after_a_second_wait(env):
     assert any(r["what"] == "suspend_abandoned" for r in reg.audit_log)
 
 
-@pytest.mark.parametrize("err", ["Connection closed by 192.168.64.2 port 22",
-                                 "Connection reset by peer", "kex_exchange_identification: x"])
-def test_an_unknown_255_is_not_taken_for_a_shutdown_that_started(env, err):
+def test_softnet_can_be_turned_off_and_its_block_changed(env, tmp_path):
+    fake, reg, _ = env
+    off = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn, softnet=False)
+    assert off.run_argv("a") == ["tart", "run", "--suspendable", "--", "a"]
+    own = vm_tart.Manager(reg, log_dir=tmp_path, run=fake.run, spawn=fake.spawn,
+                          softnet_block="10.0.0.0/8")
+    assert own.run_argv("a")[3:6] == ["--net-softnet", "--net-softnet-block=10.0.0.0/8", "--"]
+
+
+def test_exec_in_a_guest_without_its_agent_is_unavailable_not_a_failed_command(env):
     fake, reg, mgr = env
     mgr.start("a")
-    mgr._run = lambda argv, timeout: ((255, "", err) if argv[0] == "ssh" and "shutdown" in argv[-1]
-                                      else fake.run(argv, timeout))
+    mgr._run = lambda argv, timeout: (1, "", "Error: unavailable (14): Transport became inactive")
     with pytest.raises(VmError) as e:
-        mgr.stop("a")
-    assert e.value.code == "vm_stop_failed" and reg.get("a").state == "running"
+        mgr.exec("a", "ls")
+    assert e.value.code == "vm_unavailable" and e.value.extra["retry_after"] == 5
+    mgr._run = lambda argv, timeout: (1, "", "ls: nothing: No such file or directory")
+    assert mgr.exec("a", "ls nothing")["rc"] == 1       # the command's own failure is its result

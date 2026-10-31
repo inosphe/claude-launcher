@@ -1,5 +1,5 @@
 """The guest channel (vm-setup-8s6, step 4) against a scripted MCP server
-that stands in for ``ssh ... cua-driver mcp``: no VM, no ssh."""
+that stands in for ``tart exec -i ... cua-driver mcp``: no VM, no guest."""
 from __future__ import annotations
 
 import asyncio
@@ -127,10 +127,10 @@ def run(coro):
 
 def test_the_command_runs_the_guests_cua_driver_by_absolute_path(tmp_path):
     reg, _ = _channel(tmp_path, World())
-    argv = vm_channel.ssh_argv(reg.get("a"))
+    argv = vm_channel.exec_argv(reg.get("a"))
     assert argv[-2:] == ["/Users/admin/.local/bin/cua-driver", "mcp"]
-    assert "admin@192.168.64.2" in argv and "BatchMode=yes" in argv
-    assert argv[argv.index("-i") + 1] == "/keys/k"
+    assert argv == ["tart", "exec", "-i", "--", "a", "/Users/admin/.local/bin/cua-driver", "mcp"]
+    assert "ssh" not in argv
 
 
 def test_up_means_a_call_went_through_and_cua_is_ready_then(tmp_path):
@@ -317,3 +317,30 @@ def test_odd_json_rpc_messages_do_not_end_the_channel(tmp_path):
         assert reg.get("a").channel == "up" and len(world.opened) == 1
         await ch.stop()
     asyncio.run(go())
+
+
+def test_a_new_connection_first_ends_the_stale_guest_processes_of_the_old_one(tmp_path):
+    async def go():
+        reaped = []
+
+        async def reap(vm):
+            reaped.append(vm.id)
+        world = World([{}, {}])
+        reg, ch = _channel(tmp_path, world, reap=reap)
+        ch.start()
+        assert await ch.wait_up(2)
+        assert reaped == ["a"]
+        ch._proc.die()                      # the guest side drops; the supervisor reconnects
+        for _ in range(200):
+            if len(world.opened) == 2 and ch._up.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert reaped == ["a", "a"] and len(world.opened) == 2
+        await ch.stop()
+    asyncio.run(go())
+
+
+def test_the_real_reaper_matches_mcp_only_and_not_its_own_command_line():
+    import inspect
+    src = inspect.getsource(vm_channel.reap_stale)
+    assert '"[c]ua-driver mcp"' in src and '"/usr/bin/pkill"' in src

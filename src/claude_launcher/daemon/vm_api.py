@@ -692,6 +692,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
         reg, log_dir=paths.daemon_dir() / "vm",
         graphics=bool(cfg.get("vm_graphics", True)),
         stop_wait=float(cfg.get("vm_stop_wait", 120)),
+        softnet=bool(cfg.get("vm_softnet", True)),
+        softnet_block=str(cfg.get("vm_softnet_block", vm_tart.SOFTNET_BLOCK)),
     )
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")

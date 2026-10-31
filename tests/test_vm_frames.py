@@ -55,16 +55,17 @@ def test_a_look_starts_the_loop_and_returns_a_jpeg():
     run(go())
 
 
-def test_the_capture_command_is_one_ssh_that_cleans_its_temp_file():
+def test_the_capture_command_is_one_tart_exec_that_cleans_its_temp_file():
     async def go():
         reg, cap = Registry(), Capture()
         _running(reg)
         frames = vm_frames.Frames(reg, run=cap, interval=0.01)
         await frames.get("a")
         await frames.stop_all()
-        assert cap.argv[0] == "ssh" and "admin@192.168.64.2" in cap.argv
+        assert cap.argv[:5] == ["tart", "exec", "--", "a", "/bin/sh"] and cap.argv[5] == "-c"
         cmd = cap.argv[-1]
-        assert "screencapture -x -t jpg" in cmd and "rm -f" in cmd and "cat" in cmd
+        assert "/usr/sbin/screencapture -x -t jpg" in cmd and "/bin/rm -f" in cmd and "/bin/cat" in cmd
+        assert "/tmp/." not in cmd, "screencapture cannot write a dot-file"
     run(go())
 
 

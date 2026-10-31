@@ -180,8 +180,9 @@ def register(sub) -> None:
     sp = v.add_parser("add", help="register a VM that tart already has")
     vm_arg(sp)
     sp.add_argument("--tart-name", help="the name tart knows it by (default: the id)")
-    sp.add_argument("--ssh-key", help="private key the daemon uses to reach the guest")
-    sp.add_argument("--ssh-user", default="admin")
+    sp.add_argument("--ssh-key", help="unused: the daemon reaches the guest through tart exec; kept in the record")
+    sp.add_argument("--ssh-user", default="admin",
+                    help="the guest account that is logged in on the console (default admin)")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=_cmd_add)
 

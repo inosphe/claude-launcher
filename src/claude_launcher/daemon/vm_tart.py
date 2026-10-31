@@ -43,6 +43,18 @@ POLL = 2.0
 OUTPUT_CAP = 64 * 1024
 EXEC_MAX = 600.0
 
+#: Guest traffic to the host's own addresses stays closed: with softnet the
+#: gateway IS the host (d-005), so every host port would otherwise be open to
+#: the guest. The guest's /29 is random per boot, so the block is by range.
+SOFTNET_BLOCK = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+#: What tart exec prints when the agent or the VM is not there, as opposed to
+#: what the guest command itself printed (measured on tart 2.41.1: d-005,
+#: s2 t03 runs of 2026-10-31).
+AGENT_ERROR = re.compile(
+    r'^(Error: unavailable|VM ".*" is not running|the specified VM|Error: .*(guest agent|transport))',
+    re.I | re.M)
+
 #: (returncode, stdout, stderr)
 Result = Tuple[int, str, str]
 Runner = Callable[[Sequence[str], float], Result]
@@ -98,12 +110,10 @@ def parse_list(text: str) -> List[TartVm]:
     return out
 
 
-#: What ssh prints (rc 255) when the guest drops the connection as it goes
-#: down. Any other 255 is ssh failing to reach or enter the guest, and the
-#: shutdown was not started.
-CLOSED_BY_GUEST = re.compile(
-    r"closed by remote host|Broken pipe|Connection to \S+ closed|"
-    r"Shared connection to \S+ closed", re.I)
+#: The guest's own orderly shutdown, by absolute path (PATH is minimal under
+#: tart exec; plain ``shutdown`` is not found).
+SHUTDOWN = ("/usr/bin/sudo -n /usr/bin/true || exit 77; /bin/sync; "
+            "(/usr/bin/sudo -n /sbin/shutdown -h now </dev/null >/dev/null 2>&1 &)")
 
 
 def _tail(log: Optional[Path], lines: int = 3) -> str:
@@ -152,6 +162,8 @@ class Manager:
         stop_wait: float = STOP_WAIT,
         suspend_wait: float = SUSPEND_WAIT,
         boot_wait: float = BOOT_WAIT,
+        softnet: bool = True,
+        softnet_block: str = SOFTNET_BLOCK,
     ) -> None:
         self.registry = registry
         self.log_dir = log_dir
@@ -165,6 +177,8 @@ class Manager:
         self.stop_wait = stop_wait
         self.suspend_wait = suspend_wait
         self.boot_wait = boot_wait
+        self.softnet = softnet
+        self.softnet_block = softnet_block
         self._busy = set()
         self._busy_lock = threading.Lock()
         #: vm id -> when a suspend gave up waiting; settle() decides later.
@@ -199,29 +213,33 @@ class Manager:
 
     def run_argv(self, name: str) -> List[str]:
         argv = [TART, "run", "--suspendable"]
+        if self.softnet:
+            argv += ["--net-softnet"]
+            if self.softnet_block:
+                argv.append(f"--net-softnet-block={self.softnet_block}")
         if not self.graphics:
             argv.append("--no-graphics")
         return argv + ["--", name]
 
-    def _ssh(self, vm: vmhub.Vm, command: str, timeout: float = 20.0) -> Result:
-        argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=accept-new"]
-        if vm.ssh_key:
-            argv += ["-i", vm.ssh_key]
-        argv += ["--", f"{vm.ssh_user}@{vm.ip}", command]
-        return self._run(argv, timeout)
+    def _guest(self, vm: vmhub.Vm, command: str, timeout: float = 20.0) -> Result:
+        """Run ``command`` in the guest through ``tart exec`` (the Tart Guest
+        Agent): no address, key or network needed, PATH is minimal so commands
+        are written with absolute paths."""
+        return self._run([TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", command],
+                         timeout)
 
     def exec(self, vm_id: str, command: str, timeout: float = 60.0) -> dict:
-        """Run ``command`` in the guest's shell through ``tart exec`` (the
-        guest agent: ~50 ms against ssh's ~105 ms in d-003, no address or key
-        needed, and it works on a network-less VM). The result is cut at
-        :data:`OUTPUT_CAP` per stream; the command text is not recorded."""
+        """Run ``command`` in the guest's shell. The result is cut at
+        :data:`OUTPUT_CAP` per stream; the command text is not recorded. A
+        guest without its agent (or a VM that is not up) is ``vm_unavailable``,
+        not a command that failed."""
         vm = self.registry.get(vm_id)
         if vm.state != "running":
             raise VmError("vm_not_ready", f"{vm_id} is {vm.state}")
-        rc, out, err = self._run(
-            [TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", command],
-            min(max(timeout, 1.0), EXEC_MAX))
+        rc, out, err = self._guest(vm, command, min(max(timeout, 1.0), EXEC_MAX))
+        if rc != 0 and AGENT_ERROR.search(err or ""):
+            raise VmError("vm_unavailable", f"{vm_id}: the guest agent said {err.strip()[:200]}",
+                          retry_after=5)
         cut = len(out) > OUTPUT_CAP or len(err) > OUTPUT_CAP
         return {"rc": rc, "stdout": out[:OUTPUT_CAP], "stderr": err[:OUTPUT_CAP],
                 "truncated": cut, "timed_out": rc == 124}
@@ -246,44 +264,56 @@ class Manager:
             vmhub.rotate_log(log)
             pid = self._spawn(self.run_argv(vm.tart_name), log)
             deadline = time.monotonic() + self.boot_wait
-            ip = self._wait_ip(vm, deadline, pid, log)
+            self._wait_agent(vm, deadline, pid, log)
             self.registry.set_state(vm_id, "running")
-            self.registry.set_ready(vm_id, ip=ip)
+            self.registry.set_ready(vm_id, ssh=True)  # "ssh" is the flag's old name: the guest agent answers
             self._probe(vm_id, deadline)
+            self._note_ip(vm_id)
         except VmError as exc:
             self._fail(vm_id, exc, prior)
             raise
         return self.registry.get(vm_id)
 
-    def _wait_ip(self, vm: vmhub.Vm, deadline: float, pid: int = 0,
-                 log: Optional[Path] = None) -> str:
+    def _wait_agent(self, vm: vmhub.Vm, deadline: float, pid: int = 0,
+                    log: Optional[Path] = None) -> None:
+        """Until the guest agent answers ``tart exec``."""
         while True:
-            rc, out, _ = self._run([TART, "ip", "--", vm.tart_name], 10)
-            if rc == 0 and out.strip():
-                return vmhub.check_ip(out.strip().splitlines()[0])
+            rc, _, _ = self._guest(vm, "/usr/bin/true", 10)
+            if rc == 0:
+                return
             if pid and not self._alive(pid) and self.tart_state(vm.tart_name) != "running":
                 # tart run ended without a VM: Apple's slot limit on a resume
                 # (VZErrorDomain Code=6) shows up this way, within a second.
                 raise VmError("tart_exited", f"tart run exited: {_tail(log)}")
             if time.monotonic() >= deadline:
-                raise VmError("vm_boot_timeout", f"{vm.id}: no address within {self.boot_wait:g}s")
+                raise VmError("vm_boot_timeout",
+                              f"{vm.id}: the guest agent did not answer within {self.boot_wait:g}s")
             self._sleep(POLL)
 
+    def _note_ip(self, vm_id: str) -> None:
+        """The guest's address is for display; nothing depends on it."""
+        vm = self.registry.get(vm_id)
+        rc, out, _ = self._run([TART, "ip", "--", vm.tart_name], 10)
+        if rc == 0 and out.strip():
+            try:
+                self.registry.set_ready(vm_id, ip=out.strip().splitlines()[0])
+            except VmError:
+                pass
+
+    def _reprobe(self, vm_id: str, deadline: float) -> None:
+        vm = self.registry.get(vm_id)
+        self._wait_agent(vm, deadline)
+        self.registry.set_ready(vm_id, ssh=True)
+        self._probe(vm_id, deadline)
+        self._note_ip(vm_id)
+
     def _probe(self, vm_id: str, deadline: float) -> None:
-        """ssh up, then a console login: the two things a boot must reach
-        before the guest channel is worth opening. The cua daemon is the
+        """A console login: what a boot must reach before the guest channel is
+        worth opening (the agent has answered already). The cua daemon is the
         channel's business."""
         vm = self.registry.get(vm_id)
         while True:
-            rc, _, _ = self._ssh(vm, "true", 10)
-            if rc == 0:
-                self.registry.set_ready(vm_id, ssh=True)
-                break
-            if time.monotonic() >= deadline:
-                raise VmError("vm_boot_timeout", f"{vm_id}: ssh not up within {self.boot_wait:g}s")
-            self._sleep(POLL)
-        while True:
-            rc, out, _ = self._ssh(vm, "stat -f %Su /dev/console", 10)
+            rc, out, _ = self._guest(vm, "/usr/bin/stat -f %Su /dev/console", 10)
             if rc == 0 and out.strip() == vm.ssh_user:
                 self.registry.set_ready(vm_id, gui=True)
                 return
@@ -315,15 +345,16 @@ class Manager:
         if vm.state not in ("running", "starting", "paused", "stopping"):
             raise VmError("vm_bad_state", f"{vm_id} is {vm.state}; cannot stop it")
         # A VM already "stopping" is being waited for again: its guest is on
-        # the way down and ssh would only fail.
-        rc, err = (0, "") if vm.state == "stopping" else self._ssh(
-            vm, "sync; sudo -n shutdown -h now", 30)[::2]
-        # ssh drops as the guest goes down ("Connection ... closed by remote
-        # host", rc 255). The same rc 255 is also ssh failing to get in, and
-        # then nothing was started: the VM stays as it was, not "stopping".
-        if not (rc == 0 or (rc == 255 and CLOSED_BY_GUEST.search(err or "")) or
-                (rc == 255 and not (err or "").strip())):
-            raise VmError("vm_stop_failed", f"{vm_id}: guest shutdown said {err.strip() or rc}")
+        # the way down. Otherwise sudo is checked first (a guest that needs a
+        # password must say so, not look like a shutdown), the guest syncs,
+        # and the shutdown is started in the background so that this call
+        # returns: run in the foreground, tart exec holds until the VM is gone
+        # and ends with "Transport became inactive" (measured, 34 s).
+        if vm.state != "stopping":
+            rc, out, err = self._guest(vm, SHUTDOWN, 30)
+            if rc != 0:
+                raise VmError("vm_stop_failed",
+                              f"{vm_id}: guest shutdown said {(err or out).strip()[:200] or rc}")
         if vm.state != "stopping":
             self.registry.set_state(vm_id, "stopping")
         deadline = time.monotonic() + self.stop_wait
@@ -447,4 +478,4 @@ class Manager:
             rc, out, _ = await asyncio.to_thread(self._run, [TART, "ip", "--", vm.tart_name], 10)
             if rc == 0 and out.strip():
                 self.registry.set_ready(vm_id, ip=out.strip().splitlines()[0])
-        await asyncio.to_thread(self._probe, vm_id, time.monotonic() + self.boot_wait)
+        await asyncio.to_thread(self._reprobe, vm_id, time.monotonic() + self.boot_wait)

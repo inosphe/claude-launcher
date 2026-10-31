@@ -1,11 +1,11 @@
-"""The guest channel (vm-setup-8s6, step 4): one ``ssh ... cua-driver mcp``
+"""The guest channel (vm-setup-8s6, step 4): one ``tart exec -i ... cua-driver mcp``
 per VM, held by the daemon and spoken to as an MCP client.
 
 Why the daemon holds it (vm-setup-q0g.3, d-002 items 1-2): a session that
-registers the ssh command itself loses its tools when the ssh drops, and the
+registers the guest command itself loses its tools when the connection drops, and the
 harness does not bring them back; the failure never shows as an error. Here
 the sessions talk to the daemon's own always-connected MCP server, and what
-happens on the guest side is this module's business: a dropped ssh is
+happens on the guest side is this module's business: a dropped exec is
 reconnected a bounded number of times with growing pauses, and a call made
 while the channel is down is answered with ``vm_unavailable`` rather than
 hanging or vanishing.
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 from . import vmhub
+from .vm_tart import TART
 from .vmhub import Registry, VmError
 
 BACKOFF = (1.0, 2.0, 4.0, 8.0, 15.0)
@@ -41,7 +42,7 @@ PROBE_TOOL = "get_screen_size"
 MIN_UPTIME = 10.0
 #: One JSON-RPC message is one line, and a screenshot or the tool list is far
 #: over asyncio's 64 KiB default line limit (⑥: tools/list closed the channel
-#: with "ssh closed" until this was raised).
+#: with a closed channel until this was raised).
 READ_LIMIT = 64 * 1024 * 1024
 
 
@@ -49,14 +50,10 @@ class ChannelDown(Exception):
     pass
 
 
-def ssh_argv(vm: vmhub.Vm) -> List[str]:
-    argv = ["ssh", "-T"]
-    if vm.ssh_key:
-        argv += ["-i", vm.ssh_key, "-o", "IdentitiesOnly=yes"]
-    argv += ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
-             "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=accept-new",
-             "--", f"{vm.ssh_user}@{vm.ip}", vm.cua_path, "mcp"]
-    return argv
+def exec_argv(vm: vmhub.Vm) -> List[str]:
+    """``tart exec -i``: stdin and stdout of the host process are the guest
+    process's. cua_path is absolute (PATH is minimal there)."""
+    return [TART, "exec", "-i", "--", vm.tart_name, vm.cua_path, "mcp"]
 
 
 async def open_process(argv: Sequence[str], log: Path):
@@ -73,6 +70,24 @@ async def open_process(argv: Sequence[str], log: Path):
 
 
 Opener = Callable[[Sequence[str], Path], Awaitable[object]]
+Reaper = Callable[[vmhub.Vm], Awaitable[None]]
+
+
+async def reap_stale(vm: vmhub.Vm, timeout: float = 10.0) -> None:
+    """End the ``cua-driver mcp`` processes left in the guest by earlier
+    channels. When the host side of a ``tart exec -i`` dies (killed, or closed
+    and terminated) the guest process does not: measured on t03, one stays per
+    reconnect, for ever. There is one channel per VM, so any ``mcp`` process
+    there is stale. (``serve``, the shared daemon, is not matched; the
+    bracket keeps pkill from matching its own command line.)"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            TART, "exec", "--", vm.tart_name, "/usr/bin/pkill", "-f", "[c]ua-driver mcp",
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), timeout)  # rc 1: nothing to end
+    except Exception:  # noqa: BLE001 -- best effort; the channel's own start tells
+        pass
 
 
 class Channel:
@@ -88,11 +103,14 @@ class Channel:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_failed: Optional[Callable[[str, str], None]] = None,
         clock: Callable[[], float] = time.monotonic,
+        reap: Optional[Reaper] = None,
     ) -> None:
         self.registry = registry
         self.vm_id = vm_id
         self.log = log_dir / vm_id / "channel.log"
         self._opener = opener
+        # Only the real opener leaves processes in a real guest.
+        self._reap = reap if reap is not None else (reap_stale if opener is open_process else None)
         self._backoff = tuple(backoff)
         self._hello_timeout = hello_timeout
         self._sleep = sleep
@@ -221,7 +239,9 @@ class Channel:
     # ---- connection ------------------------------------------------------ #
     async def _connect(self) -> None:
         vm = self.registry.get(self.vm_id)
-        self._proc = proc = await self._opener(ssh_argv(vm), self.log)
+        if self._reap is not None:
+            await self._reap(vm)
+        self._proc = proc = await self._opener(exec_argv(vm), self.log)
         reader = asyncio.create_task(self._reader(proc))
         self._reader_task = reader
         try:
@@ -280,7 +300,7 @@ class Channel:
                 self._up.set()
                 await self._reader_task_done()
                 self._up.clear()
-                self._fail_pending(ChannelDown("ssh closed"))
+                self._fail_pending(ChannelDown("the guest channel closed"))
                 await self._kill()
                 error = "the guest channel closed"
                 failures = failures + 1 if self._clock() - came_up < MIN_UPTIME else 0

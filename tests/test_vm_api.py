@@ -373,12 +373,11 @@ async def test_a_bad_timeout_is_a_400_not_a_crash(api):
 @scenario
 async def test_a_failed_stop_brings_the_channel_back(api):
     await _up(api)
-    api.fake.ssh_ok = True
     run = api.mgr._run
 
     def refuse(argv, timeout):
-        if argv[0] == "ssh" and "shutdown" in argv[-1]:
-            return 255, "", "ssh: connect to host x port 22: Connection refused"
+        if argv[-1] == vm_tart.SHUTDOWN:
+            return 1, "", "Error: unavailable (14): Transport became inactive"
         return run(argv, timeout)
     api.mgr._run = refuse
     resp = await api.post("/api/vm/a/stop")
