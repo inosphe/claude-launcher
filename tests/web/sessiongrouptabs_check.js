@@ -129,6 +129,7 @@ function load(seed, project = "") {
     "exports", "document", "$", "localStorage", "BASE", "refreshSessions", "go",
     constLine("SESSION_GROUP_KEY") + constLine("SESSION_GROUP_ORDER_KEY") +
     constLine("SESSION_GROUPS") + letBlock("sessionGroupOrder") + "\n" +
+    constLine("RAIL_SCROLL_TOP_ANIM_MS") + "\n" +
     constLine("SESSION_GROUP_TAB_KEY") + letBlock("sessionGroupTab") + "\n" +
     constLine("SESSION_ORIGIN_FILTERS") + constLine("SESSION_ORIGIN_KEY") +
     letBlock("sessionOriginFilter") + "\n" +
