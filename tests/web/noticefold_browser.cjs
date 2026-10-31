@@ -2,20 +2,28 @@
    (claunch-qf41a): the reader's screenshot was an end-decision card whose
    decision brief filled the corner for as long as the run waited. What such
    a card still answers while folded — which request it is, and the presses
-   that settle it — must stay up; the body comes back with a toggle.
+   that settle it — must stay up; the body comes back with a toggle. The
+   fold no longer hides the body outright: it stays up as a five-line
+   preview so the reader can tell what the notice is about
+   (claunch-qf41a.1, thread th-e3d6db), and the notification history
+   window's rows fold the same way.
 
    Pinned here, measured in a real browser against the shipped stylesheet
    and app.js:
    1. a decision card with a report-length markdown body is foldable and
-      folded by default; folded, its body takes no space, its title and
-      every answer press are still drawn, and the folded card is no taller
-      than the threshold the classification measured it against;
+      folded by default; folded, its body shows as a clamped five-line
+      preview, its title and every answer press are still drawn, and the
+      folded card is no taller than the threshold the classification
+      measured it against;
    2. the toggle expands the card (body back, label flipped) and folds it
       again on a second press;
    3. a one-question card stays unfolded — the threshold is a size, not a
       kind: small cards are untouched;
    4. a card born while the history panel hid the strip (measured 0 there)
-      is classified when the panel closes and the strip shows it. */
+      is classified when the panel closes and the strip shows it;
+   5. a long row of the notification history window is foldable and folded
+      by default: the head stays up, the body is a clamped preview, and the
+      row's toggle expands it. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -102,6 +110,8 @@ const SHORT_ASK = {
         titleShown: shown(node.querySelector(":scope > .notice-title")),
         foldPresent: !!fold,
         foldShown: shown(fold),
+        foldClientH: fold ? fold.getBoundingClientRect().height : null,
+        foldScrollH: fold ? fold.scrollHeight : null,
         actionsShown: shown(actions),
         presses: actions ? [...actions.querySelectorAll("button")]
           .filter(b => b.getClientRects().length > 0 && !b.closest(".gate-remind"))
@@ -122,7 +132,9 @@ const SHORT_ASK = {
     assert(c, "the long card is drawn");
     assert(/(?:^|\s)foldable(?:\s|$)/.test(c.classes), `foldable by default: ${c.classes}`);
     assert(/(?:^|\s)folded(?:\s|$)/.test(c.classes), `folded by default: ${c.classes}`);
-    assert(c.foldPresent && !c.foldShown, "folded: the body takes no space");
+    assert(c.foldPresent && c.foldShown, "folded: a five-line preview of the body stays up");
+    assert(c.foldScrollH > c.foldClientH + 1,
+      `folded: the preview is clamped (shows ${c.foldClientH}px of ${c.foldScrollH}px)`);
     assert(c.titleShown, "folded: the title stays up");
     assert(c.actionsShown, "folded: the actions row stays up");
     for (const want of ANSWERS) {
@@ -131,7 +143,11 @@ const SHORT_ASK = {
     assert(c.toggle === "▸ more", `folded: the toggle offers more (${c.toggle})`);
     assert(c.presses.length === ANSWERS.length + 2,
       `folded: only the answers, Hide and the toggle are up (${c.presses})`);
-    assert(c.height <= 260, `folded: the card is back under the threshold (${c.height})`);
+    // Folded, the card is chrome (title, buttons, age) plus the five-line
+    // preview — not necessarily back under NOTICE_FOLD_MAX_PX, which measures
+    // the unfolded card. The promise is the clamped preview above plus a
+    // bound a reader can scan at a glance.
+    assert(c.height <= 320, `folded: chrome plus a five-line preview (${c.height})`);
 
     await page.click("#notices .run-gate .notice-fold-toggle");
     await settle();
@@ -177,6 +193,56 @@ const SHORT_ASK = {
     for (const want of ANSWERS) {
       assert(c.presses.includes(want), `born-hidden: the answer ${want} is drawn`);
     }
+
+    // 5. the notification history window folds the same way: a long history
+    //    row is foldable and folded by default — head up, body a clamped
+    //    preview — and the row's own toggle expands it.
+    await load();
+    await page.evaluate(() => {
+      window.claunchNotices.record({
+        id: "hist-fold-1", kind: "notice", title: "a notice with a page of detail",
+        sub: Array.from(
+          { length: 24 },
+          (_, i) => `detail line ${i + 1}: ` + "content that runs on. ".repeat(6),
+        ).join("\n"),
+      });
+      noticePanelToggle(true);
+    });
+    await settle();
+    const hrow = () => page.evaluate(() => {
+      const node = document.querySelector("#notice-panel-body .notice-row");
+      if (!node) return null;
+      const shown = (el) => !!el && el.getClientRects().length > 0;
+      const fold = node.querySelector(":scope > .notice-fold");
+      const toggle = node.querySelector(":scope > .notice-fold-toggle");
+      return {
+        classes: node.className,
+        headShown: shown(node.querySelector(":scope > .notice-row-head")),
+        foldPresent: !!fold,
+        foldShown: shown(fold),
+        foldClientH: fold ? fold.getBoundingClientRect().height : null,
+        foldScrollH: fold ? fold.scrollHeight : null,
+        toggle: toggle && shown(toggle) ? toggle.textContent.trim() : null,
+      };
+    });
+    let h = await hrow();
+    assert(h, "the history row is drawn");
+    assert(/(?:^|\s)foldable(?:\s|$)/.test(h.classes), `history row foldable by default: ${h.classes}`);
+    assert(/(?:^|\s)folded(?:\s|$)/.test(h.classes), `history row folded by default: ${h.classes}`);
+    assert(h.headShown, "history row folded: the head stays up");
+    assert(h.foldPresent && h.foldShown,
+      "history row folded: a five-line preview of the body stays up");
+    assert(h.foldScrollH > h.foldClientH + 1,
+      `history row folded: the preview is clamped (shows ${h.foldClientH}px of ${h.foldScrollH}px)`);
+    assert(h.toggle === "▸ more", `history row folded: the toggle offers more (${h.toggle})`);
+
+    await page.click("#notice-panel-body .notice-row > .notice-fold-toggle");
+    await settle();
+    h = await hrow();
+    assert(!/(?:^|\s)folded(?:\s|$)/.test(h.classes), "history row toggle: the row opens");
+    assert(h.foldShown && !(h.foldScrollH > h.foldClientH + 1),
+      "history row toggle: the body is back");
+    assert(h.toggle === "▾ less", `history row toggle: the label flips (${h.toggle})`);
 
     assert.deepEqual(errors, [], "no page errors");
     console.log("noticefold_browser: ok");
