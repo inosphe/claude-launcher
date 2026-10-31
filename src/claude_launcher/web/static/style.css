@@ -10557,6 +10557,52 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-stage-user { border-left-color: #e3b341; }
 .plan-stage-blocked { border-left-color: #da3633; }
 .plan-stage-closable { border-left-color: #2ea043; }
+/* The plan page's tree (claunch-7jzp8.5): every li draws its own elbow --
+   a vertical from the parent's line down to its label and a short
+   horizontal into it; the last child stops the vertical at its label. */
+.ptree { list-style: none; margin: 0; padding: 0 0 0 22px; }
+.ptree > .ptree-node { position: relative; padding: 6px 0 0 16px; }
+.ptree > .ptree-node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; border-left: 1px solid #4d5566; }
+.ptree > .ptree-node:last-child::before { bottom: auto; height: 20px; }
+.ptree > .ptree-node::after { content: ""; position: absolute; left: 0; top: 20px; width: 14px; border-top: 1px solid #4d5566; }
+.ptree-root { padding-left: 0; }
+.ptree-root > .ptree-node { padding-left: 0; }
+.ptree-root > .ptree-node::before, .ptree-root > .ptree-node::after { display: none; }
+.ptree-flat { display: flex; flex-wrap: wrap; gap: 8px; }
+.ptree-steps > .ptree-node::before, .ptree-steps .ptree > .ptree-node::before { border-left-style: dashed; }
+.ptree-steps > .ptree-node::after, .ptree-steps .ptree > .ptree-node::after { border-top-style: dashed; }
+.ptree-card {
+  display: inline-block; min-width: 260px; max-width: 560px; box-sizing: border-box;
+  background: var(--plan-panel); border: 1px solid var(--plan-border); border-left-width: 4px;
+  border-radius: 6px; padding: 4px 10px 6px;
+}
+.ptree-card p { margin: 2px 0; }
+.ptree-card .wf-btn { margin-left: auto; font-size: 11px; padding: 0 6px; }
+.ptree-card .plan-item-head { flex-wrap: wrap; }
+.ptree-dim { opacity: 0.45; }
+.ptree-label {
+  display: inline-flex; gap: 6px; align-items: baseline; max-width: 560px;
+  padding: 1px 8px; border: 1px solid transparent; border-radius: 4px;
+}
+.ptree-mark { color: var(--plan-muted); }
+.ptree-st-doing > .ptree-label .ptree-mark { color: #79b8ff; }
+.ptree-st-done > .ptree-label .ptree-mark { color: #7ee787; }
+.ptree-st-done > .ptree-label .plan-title, .ptree-st-skipped > .ptree-label .plan-title { color: var(--plan-muted); }
+.ptree-st-blocked > .ptree-label { border-color: #da3633; }
+.ptree-st-blocked > .ptree-label .ptree-mark { color: #ff7b72; }
+.ptree-decision > .ptree-label { border-color: #e3b341; background: #2a2412; }
+.ptree-decision > .ptree-label .ptree-mark, .ptree-decision > .ptree-label .plan-chip { color: #e3b341; border-color: #e3b341; }
+.ptree-decided > .ptree-label { border-color: #2ea043; background: #15261b; }
+.ptree-decided > .ptree-label .ptree-mark, .ptree-decided > .ptree-label .plan-chip { color: #7ee787; border-color: #2ea043; }
+.ptree-opt {
+  display: inline-block; max-width: 440px; box-sizing: border-box;
+  background: var(--plan-panel); border: 1px solid var(--plan-border); border-radius: 6px; padding: 3px 9px;
+}
+.ptree-opt p { margin: 1px 0; font-size: 12px; }
+.ptree-recommended > .ptree-opt { border-color: #427fdf; }
+.ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
+.ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
+.ptree-unchosen > .ptree-opt { opacity: 0.5; }
 
 /* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
 .packs-host {

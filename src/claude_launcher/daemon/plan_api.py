@@ -318,14 +318,43 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         res, err = await call(plans.rail)
         return err or web.json_response({"sessions": res})
 
+    def step_tree(nodes: list) -> list:
+        """A plan's steps as the plan page draws them (claunch-7jzp8.5):
+        what each node says and how far it got, without revs or history."""
+        out = []
+        for n in nodes:
+            item = {k: n[k] for k in ("id", "kind", "title", "detail", "status", "options") if n.get(k)}
+            choice = (n.get("result") or {}).get("choice")
+            if choice:
+                item["choice"] = choice
+            item["children"] = step_tree(n.get("children") or [])
+            out.append(item)
+        return out
+
+    async def with_steps(groups: list) -> list:
+        for g in groups:
+            for m in g["members"]:
+                if not m.get("has_plan"):
+                    continue
+                plan, err = await call(plans.get, m["session"])
+                m["tree"] = step_tree((plan or {}).get("steps") or []) if not err else []
+        return groups
+
     async def h_joint(request):
+        """``steps=1`` adds each planned member's step tree as ``tree``, for
+        the plan page's tree view (``steps`` there is the rail's count)."""
         session = request.query.get("session") or ""
+        steps = request.query.get("steps") in ("1", "true", "yes")
         rail, err = await call(plans.rail)
         if err:
             return err
         if not session:
-            return web.json_response({"groups": plan_joint.groups(rail, parent_of)})
-        return web.json_response({"session": session, "group": plan_joint.group_of(rail, parent_of, session)})
+            groups = plan_joint.groups(rail, parent_of)
+            return web.json_response({"groups": await with_steps(groups) if steps else groups})
+        group = plan_joint.group_of(rail, parent_of, session)
+        if group and steps:
+            await with_steps([group])
+        return web.json_response({"session": session, "group": group})
 
     async def h_overview(request):
         """Running sessions by default; ``all=1`` adds every unarchived

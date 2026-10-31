@@ -1,8 +1,12 @@
 /* The plan page at #/plan (claunch-7jzp8.2): every running session's stage
    on one screen, from /api/plan/overview (plan/overview.py) -- what a person
    owes it, its cflow v2 run's current task, its plan's progress and whether
-   it may close. Grouped by stage (the default) or by joint tree
-   (/api/plan/joint, plan/joint.py), narrowed by project and stage. Each row
+   it may close. Drawn as a tree (the default, claunch-7jzp8.5): each joint
+   tree (/api/plan/joint?steps=1, plan/joint.py) as session cards joined by
+   lines, and under each card its plan's steps, a decision forking into its
+   options (effect, risk, recommended, the one taken). Or grouped by stage.
+   Narrowed by project and stage; in the tree a session the filter leaves
+   out stays drawn, dimmed, so its group keeps its shape. Each row
    links to its session; the decisions themselves are taken in the session's
    ☰ plan pane. With a project picked, the page shows that project's
    aggregation session (claunch-7jzp8.3): its plan -- the project plan -- in
@@ -15,6 +19,8 @@ const PLAN_STAGE = {
   working: "진행 중",
   idle: "계획·런 없음",
 };
+const PLAN_STEP_MARK = {todo: "○", doing: "◐", done: "●", skipped: "–", blocked: "✕"};
+const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
 
 function makePlanPage({root, request}) {
   const node = (tag, text, cls) => {
@@ -24,15 +30,16 @@ function makePlanPage({root, request}) {
     return n;
   };
   let data = null, joint = null, error = "", seq = 0, timer = null;
-  let everyone = false, by = "stage", project = "", only = "";
+  let everyone = false, by = "tree", project = "", only = "";
   let profiles = null, profile = "", starting = false, startError = "", agg = null;
+  const folded = new Set();                     // sessions whose steps are hidden in the tree
 
   async function load() {
     const mine = ++seq;
     try {
       const [o, j] = await Promise.all([
         request("/api/plan/overview" + (everyone ? "?all=1" : "")),
-        by === "joint" ? request("/api/plan/joint") : Promise.resolve(null),
+        by === "tree" ? request("/api/plan/joint?steps=1") : Promise.resolve(null),
       ]);
       if (mine !== seq) return;
       data = o; joint = j; error = "";
@@ -47,30 +54,38 @@ function makePlanPage({root, request}) {
     return b;
   }
 
-  function line(r) {
-    const li = node("li", null, `plan-page-row plan-stage-${r.stage}`);
+  // A session's head and its plan/run lines, shared by the stage list's
+  // rows and the tree's cards.
+  function describe(box, r, session) {
     const head = node("div", null, "plan-item-head");
-    const link = node("a", r.session, "plan-page-session");
-    link.href = "#/s/" + encodeURIComponent(r.session);
-    head.append(node("span", PLAN_STAGE[r.stage] || r.stage, "plan-chip"), link);
+    const link = node("a", session, "plan-page-session");
+    link.href = "#/s/" + encodeURIComponent(session);
+    head.append(node("span", r ? PLAN_STAGE[r.stage] || r.stage : "목록 밖", "plan-chip"), link);
+    box.append(head);
+    if (!r) return head;
     if (r.project) head.append(node("span", r.project, "plan-muted"));
     if (r.aggregator) head.append(node("span", "집계", "plan-chip"));
     if (r.status === "exited") head.append(node("span", r.category, "plan-muted"));
-    li.append(head);
     const p = r.plan, run = r.run;
     if (p) {
-      li.append(node("p", (p.title || "") + ` — 단계 ${p.done || 0}/${p.steps || 0}`
+      box.append(node("p", (p.title || "") + ` — 단계 ${p.done || 0}/${p.steps || 0}`
         + (p.current ? ` · 지금: ${p.current}` : "")
         + (p.waiting ? ` · 내 결정 대기 ${p.waiting}건` : "")
         + (p.blocked ? ` · 막힌 단계 ${p.blocked}` : "")
         + (p.closable ? " · 닫아도 됨" : ""), "plan-page-plan"));
     }
     if (run) {
-      li.append(node("p", `${run.workflow || "런"}` + (run.round ? ` r${run.round}` : "")
+      box.append(node("p", `${run.workflow || "런"}` + (run.round ? ` r${run.round}` : "")
         + ((run.current || []).length ? ` · ${run.current.join(", ")}` : "")
         + (run.status && run.status !== "running" ? ` · ${run.status}` : ""), "plan-muted"));
-      for (const o of run.owed || []) li.append(node("p", "런이 기다림: " + o, "plan-open"));
+      for (const o of run.owed || []) box.append(node("p", "런이 기다림: " + o, "plan-open"));
     }
+    return head;
+  }
+
+  function line(r) {
+    const li = node("li", null, `plan-page-row plan-stage-${r.stage}`);
+    describe(li, r, r.session);
     return li;
   }
 
@@ -91,29 +106,104 @@ function makePlanPage({root, request}) {
     return out;
   }
 
-  function byJoint(rows) {
-    const index = Object.fromEntries(rows.map(r => [r.session, r]));
+  // One plan node as a branch: a step with its status mark, or a decision
+  // that forks into one branch per option before its own children.
+  function stepBranch(n) {
+    const decided = n.kind === "decision" && n.choice;
+    const li = node("li", null, `ptree-node ptree-${n.kind} `
+      + (n.kind === "decision" ? (decided ? "ptree-decided" : "ptree-undecided") : `ptree-st-${n.status || "todo"}`));
+    const label = node("div", null, "ptree-label");
+    if (n.detail) label.setAttribute("title", n.detail);
+    if (n.kind === "decision") {
+      label.append(node("span", "◆", "ptree-mark"), node("span", n.title, "plan-title"),
+                   node("span", decided ? "결정됨" : "결정 필요", "plan-chip"));
+    } else {
+      label.append(node("span", PLAN_STEP_MARK[n.status] || PLAN_STEP_MARK.todo, "ptree-mark"),
+                   node("span", n.title, "plan-title"));
+    }
+    li.append(label);
+    const kids = node("ul", null, "ptree");
+    for (const o of n.options || []) {
+      const chosen = decided && o.label === n.choice;
+      const opt = node("li", null, "ptree-node ptree-option" + (chosen ? " ptree-chosen" : decided ? " ptree-unchosen" : "")
+        + (o.recommended ? " ptree-recommended" : ""));
+      const card = node("div", null, "ptree-opt");
+      const head = node("div", null, "plan-option-head");
+      head.append(node("strong", o.label));
+      if (o.recommended) head.append(node("span", "권장", "plan-chip"));
+      if (chosen) head.append(node("span", "선택됨", "plan-chip"));
+      card.append(head, node("p", "기대효과: " + o.effect, "plan-effect"), node("p", "리스크: " + o.risk, "plan-risk"));
+      opt.append(card);
+      kids.append(opt);
+    }
+    for (const c of n.children || []) kids.append(stepBranch(c));
+    if (kids.children.length) li.append(kids);
+    return li;
+  }
+
+  function sessionCard(r, m, dim) {
+    const card = node("div", null, `ptree-card plan-stage-${r ? r.stage : "idle"}` + (dim ? " ptree-dim" : ""));
+    const head = describe(card, r, m.session);
+    if (m.via) head.append(node("span", PLAN_VIA[m.via] || m.via, "plan-muted"));
+    if ((m.tree || []).length) {
+      const open = !folded.has(m.session);
+      const t = button(open ? "단계 접기" : `단계 펼치기 (${m.tree.length})`, () => {
+        if (open) folded.add(m.session); else folded.delete(m.session);
+        render();
+      }, false);
+      t.setAttribute("aria-expanded", open ? "true" : "false");
+      head.append(t);
+    }
+    return card;
+  }
+
+  // Each joint group as one drawn tree: the session cards joined by their
+  // display parent (joint.py's ``parent``), each card's steps under it.
+  function byTree(rows) {
+    const index = Object.fromEntries((data.rows || []).map(r => [r.session, r]));
+    const shown = new Set(rows.map(r => r.session));
     const placed = new Set(), out = [];
     for (const g of (joint && joint.groups) || []) {
-      const members = g.members.filter(m => index[m.session]);
+      const members = g.members.filter(m => shown.has(m.session));
       if (!members.length) continue;
-      out.push(node("h4", `${g.root} · 세션 ${members.length}개 · 내 결정 대기 ${g.waiting}건`, "plan-section"));
-      const ul = node("ul", null, "plan-page-list");
-      for (const m of members) {
-        const li = line(index[m.session]);
-        li.setAttribute("style", `margin-left: ${m.depth * 1.2}em`);
-        ul.append(li); placed.add(m.session);
+      out.push(node("h4", `${g.root} · 세션 ${g.members.length}개 · 내 결정 대기 ${g.waiting}건`, "plan-section"));
+      const root = node("ul", null, "ptree ptree-root");
+      const lis = {}, subs = {};
+      for (const m of g.members) {
+        const li = node("li", null, "ptree-node ptree-session");
+        li.append(sessionCard(index[m.session], m, !shown.has(m.session)));
+        if ((m.tree || []).length && !folded.has(m.session)) {
+          const steps = node("ul", null, "ptree ptree-steps");
+          for (const s of m.tree) steps.append(stepBranch(s));
+          li.append(steps);
+        }
+        lis[m.session] = li;
+        if (m.parent && lis[m.parent]) {
+          if (!subs[m.parent]) { subs[m.parent] = node("ul", null, "ptree ptree-sessions"); lis[m.parent].append(subs[m.parent]); }
+          subs[m.parent].append(li);
+        } else root.append(li);
+        placed.add(m.session);
       }
-      out.push(ul);
+      out.push(root);
     }
     const rest = rows.filter(r => !placed.has(r.session));
     if (rest.length) {
       out.push(node("h4", `계획 없는 세션 (${rest.length})`, "plan-section"));
-      const ul = node("ul", null, "plan-page-list");
-      for (const r of rest) ul.append(line(r));
+      const ul = node("ul", null, "ptree ptree-root ptree-flat");
+      for (const r of rest) {
+        const li = node("li", null, "ptree-node ptree-session");
+        li.append(sessionCard(r, {session: r.session}, false));
+        ul.append(li);
+      }
       out.push(ul);
     }
     return out;
+  }
+
+  function foldAll(fold) {
+    folded.clear();
+    if (fold) for (const g of (joint && joint.groups) || []) for (const m of g.members) folded.add(m.session);
+    render();
   }
 
   async function loadProfiles() {
@@ -212,19 +302,21 @@ function makePlanPage({root, request}) {
     }
     pick.onchange = () => { project = pick.value; render(); };
     tools.append(pick,
+      button("트리", () => { by = "tree"; load(); }, by === "tree"),
       button("단계별", () => { by = "stage"; render(); }, by === "stage"),
-      button("연관 세션별", () => { by = "joint"; load(); }, by === "joint"),
       button("끝난 세션 포함", () => { everyone = !everyone; load(); }, everyone));
+    if (by === "tree") tools.append(button("모두 펼치기", () => foldAll(false), false),
+                                    button("모두 접기", () => foldAll(true), false));
     shell.append(tools, aggregatorBlock());
 
     const rows = filtered();
     if (!rows.length) shell.append(node("p", "해당하는 세션이 없습니다.", "plan-muted"));
-    else shell.append(...(by === "joint" ? byJoint(rows) : byStage(rows)));
+    else shell.append(...(by === "tree" ? byTree(rows) : byStage(rows)));
     el.append(shell);
   }
 
   return {open: load, stop: () => { ++seq; clearTimeout(timer); timer = null; stopPane(); },
-          _state: () => ({data, by, project, only})};
+          _state: () => ({data, by, project, only, folded: [...folded]})};
 }
 
 async function planPageRequest(path, method = "GET", body) {

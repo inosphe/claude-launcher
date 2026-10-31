@@ -117,4 +117,16 @@ def test_joint_tree_reads_the_live_parent(tmp_path):
         assert g["waiting"] == 6
         assert (await req("GET", "/api/plan/joint?session=ghost"))["group"] is None
         assert len((await req("GET", "/api/plan/joint"))["groups"]) == 1
+        assert "tree" not in g["members"][1]                                  # only when asked for
+
+        await req("POST", "/api/plan/node/d1/decide", {"session": "s1", "rev": 1, "choice": "B"})
+        g, = (await req("GET", "/api/plan/joint?steps=1"))["groups"]
+        s29, s1, s2 = g["members"]
+        assert "tree" not in s29                                              # no plan, nothing to draw
+        d1, = s1["tree"]
+        assert (d1["kind"], d1["choice"], [o["label"] for o in d1["options"]]) == ("decision", "B", ["A", "B"])
+        assert d1["children"] == [] and "rev" not in d1 and "result" not in d1
+        assert "choice" not in s2["tree"][0]                                  # s2 has not decided
+        one = (await req("GET", "/api/plan/joint?session=s2&steps=1"))["group"]
+        assert one["members"][1]["tree"][0]["choice"] == "B"
     run(tmp_path, scenario)
