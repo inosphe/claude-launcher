@@ -61455,10 +61455,13 @@ function noticeFlipMove(tops) {
   }
 }
 
-/* A card taller than this folds by default (claunch-qf41a): a decision
-   brief the length of a page pinned the corner for as long as it waited,
-   and what a folded card still answers — which request, which presses —
-   lives in its title and its actions row, not in the body. */
+/* A card or panel row taller than this folds by default (claunch-qf41a,
+   claunch-qf41a.1): a decision brief the length of a page pinned the corner
+   for as long as it waited, and what a folded card still answers — which
+   request, which presses — lives in its title and its actions row, not in
+   the body. The fold no longer hides the body outright: it stays up as a
+   five-line preview so the reader can tell what the notice is about
+   (thread th-e3d6db). */
 const NOTICE_FOLD_MAX_PX = 260;
 
 function noticeFoldSet(node, toggle, flip) {
@@ -61467,27 +61470,31 @@ function noticeFoldSet(node, toggle, flip) {
   if (!toggle) return;
   toggle.textContent = folded ? "▸ more" : "▾ less";
   toggle.title = folded
-    ? "show the rest of this card"
-    : "fold this card back to its title and buttons";
+    ? "show the rest of this notice"
+    : "fold this notice back to a five-line preview";
 }
 
-/* Classify a strip card once, after it is laid out: above the threshold the
-   body moves into a .notice-fold box that the `folded` class hides, the
-   title, the answer buttons and the age line stay up, and a toggle is added
-   beside the buttons. The classification is a single decision made where the
-   card's real height is known — a card added while the strip is hidden (the
-   history panel open) measures 0 and stays unclassified until the strip is
-   visible again (noticeFoldScan on panel close). A world that cannot lay a
-   node out (the check-harness stubs) skips silently. */
+/* Classify a strip card or an open panel's row once, after it is laid out:
+   above the threshold the body moves into a .notice-fold box that the
+   `folded` class clamps to a five-line preview (claunch-qf41a.1), the
+   title/head, the answer buttons and the age line stay up, and a toggle is
+   added beside the buttons. The keep list names the chrome of both
+   surfaces: a corner card keeps its notice-title direct child, a panel row
+   keeps its notice-row-head. The classification is a single decision made
+   where the node's real height is known — one added while the strip is
+   hidden (the history panel open) measures 0 and stays unclassified until
+   the strip is visible again (noticeFoldScan on panel close); a panel row
+   is classified by noticePanelPaint while the panel is open. A world that
+   cannot lay a node out (the check-harness stubs) skips silently. */
 function noticeFoldClassify(node) {
   if (!node || node.__noticeFoldClassified) return;
   if (typeof node.getBoundingClientRect !== "function") return;
   const height = node.getBoundingClientRect().height;
-  if (!height) return;             // hidden strip: measured again when shown
+  if (!height) return;             // hidden surface: measured again when shown
   node.__noticeFoldClassified = true;
   if (height <= NOTICE_FOLD_MAX_PX) return;
   const keep = (child) =>
-    /(?:^|\s)(?:notice-title|gate-actions|notice-when|notice-close)(?:\s|$)/
+    /(?:^|\s)(?:notice-title|notice-row-head|gate-actions|notice-when|notice-close)(?:\s|$)/
       .test(child.className || "");
   const fold = el("div", "notice-fold");
   for (const child of [...node.children]) {
@@ -63186,6 +63193,18 @@ function noticePanelPaint() {
          () => noticePanelHistoryRow(entry));
   }
   noticePanelPlace(body, rows);
+  // The panel's rows fold the way the corner cards do (claunch-qf41a.1): a
+  // row above the threshold keeps its head and shows a five-line preview of
+  // the rest, with the same toggle. A kept row was classified when it was
+  // built and keeps its fold state across rebuilds; a row this build made is
+  // a new node and is classified here, where the open panel gives it a real
+  // height. Rows under the threshold are classified once as such and left
+  // alone.
+  for (const node of body.children) {
+    if (/(?:^|\s)notice-row(?:\s|$)/.test(node.className || "")) {
+      noticeFoldClassify(node);
+    }
+  }
 }
 
 /* What a waiting request's row draws, as a short string: the fields its own

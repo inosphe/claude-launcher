@@ -7668,11 +7668,21 @@ body.embed #main { width: 100%; }
 .gate-actions .gate-remind .wf-btn + .wf-btn { border-left-width: 0; }
 .gate-actions .gate-remind .wf-btn:first-of-type { border-radius: 4px 0 0 4px; }
 .gate-actions .gate-remind .wf-btn:last-of-type { border-radius: 0 4px 4px 0; }
-/* A card above NOTICE_FOLD_MAX_PX tall folds by default (claunch-qf41a):
-   the title and the answer buttons stay up, the body moves into this box
-   and the `folded` class hides it until the card's toggle is pressed. */
+/* A card or history row above NOTICE_FOLD_MAX_PX tall folds by default
+   (claunch-qf41a, claunch-qf41a.1): the title/head and the answer buttons
+   stay up, the body moves into this box and the `folded` class clamps it
+   to a five-line preview — enough to read what the notice is about — until
+   the toggle is pressed. The clamp is five lines of the markdown body the
+   box mostly carries (16px × 1.55); smaller text shows more lines, larger
+   fewer, and the fade says the box continues. */
 .notice-fold { display: block; }
-.notice.folded .notice-fold { display: none; }
+.notice.folded .notice-fold,
+.notice-row.folded .notice-fold {
+  max-height: calc(5 * 1.55 * 1em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
 /* The fold toggle rides the actions row like the other presses (it is
    inserted before Hide), so inside .gate-actions it picks up the row's
    own wf-btn sizing; the declaration keeps a lone toggle (a card with no
