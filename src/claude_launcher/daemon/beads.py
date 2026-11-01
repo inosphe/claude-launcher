@@ -172,6 +172,18 @@ STALE_TTL = 30.0
 #: (524) behind it (claunch-9urxl). A normal read is well under 5 s.
 BR_DEADLINE = 60.0
 
+#: How long a board's dependency edges are trusted before they are read
+#: again. Edges change far less often than listings and cost far more to
+#: read -- one ``br dep list`` fork per issue that has any, even read
+#: concurrently -- so they keep a longer TTL than the listing's. A write
+#: through this daemon drops them (:meth:`Board.invalidate`), so the page
+#: never answers a drag from before itself; only a write made outside the
+#: daemon (a ``claunch beads …`` shell command) waits out the TTL for its
+#: hierarchy edge to appear, while the issue rows themselves still refresh
+#: at :data:`CACHE_TTL`. The 30 s value is the trade :data:`STALE_TTL`
+#: already accepts for listings (claunch-fa1xk).
+DEPS_TTL = 30.0
+
 #: The unassigned pool the Queues page draws folded (its ``BEADS_Q_CELL_CAP``):
 #: past this many cards a folded view answers the count and not the cards.
 QUEUES_POOL_CAP = 24
@@ -179,12 +191,19 @@ QUEUES_POOL_CAP = 24
 #: The most issues an edge read will ask ``br dep list`` about in one pass.
 #: The listing already says which issues have outgoing edges at all
 #: (``dependency_count``), so on an ordinary board this loop runs a handful of
-#: times or not once -- but ``br`` has no bulk edge dump and the per-board lock
-#: serialises these, so a board that wired everything to everything would spend
-#: the poll interval forking. Past the cap the hierarchy is drawn from the edges
-#: that were read and the rest of the board stays flat, which is the same shape
-#: a board with no edges draws; the page is never held up for it.
+#: times or not once -- but ``br`` has no bulk edge dump and each fork costs
+#: the ``br`` startup even read concurrently, so a board that wired
+#: everything to everything would spend the poll interval forking. Past the
+#: cap the hierarchy is drawn from the edges that were read and the rest of
+#: the board stays flat, which is the same shape a board with no edges
+#: draws; the page is never held up for it.
 DEPS_SCAN_LIMIT = 200
+
+#: The most ``br dep list`` forks one edge read runs at once. Each fork is
+#: independent (its own issue, its own subprocess), so the cap bounds the
+#: process fan-out against a wide board without giving up the concurrency
+#: that makes a 200-issue scan seconds instead of a minute.
+DEPS_CONCURRENCY = 16
 
 #: How much of an issue's description a LISTING carries.
 #:
@@ -1648,6 +1667,16 @@ class Board:
         ``ref`` names the board outright instead of resolving it from
         ``root`` -- for a caller holding a row that already says which
         database it means (the Settings page's boards card).
+
+        A read against a board whose database already exists runs without
+        the board's lock. The lock exists so two callers that each read
+        "missing" both run :meth:`create_board`; a read that creates
+        nothing has no race to lose, and concurrent ``br`` processes are
+        not a new load shape -- shells on this machine already run
+        ``claunch beads …`` against live boards without this lock. What
+        the lock still guards is every call that can create or rebuild
+        the database: a write, a read of a board whose database is gone
+        (``br`` rebuilds it from the tracked JSONL), and ``init``.
         """
         if not self.available():
             raise BeadsUnavailable(
@@ -1657,35 +1686,24 @@ class Board:
         assert ref is not None  # root is not None here; ref_for only nulls on that
         beads_dir = Path(ref.root) / cli_beads.BEADS_DIR
         key = str(root)
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            # Both of these are read under the lock, not before it: creating
-            # the board is a step of its own, and two callers that each read
-            # "missing" outside the lock would both run it.
-            if (
-                not ref.exists()
-                and not (beads_dir / cli_beads.JSONL_NAME).is_file()
-                and cli_beads.autocreatable(ref)
-                and args[:1] != ["init"]
-            ):
-                await self.create_board(ref)
+        if args and _reads_only(args) and ref.exists():
             self._ensure_policy(beads_dir)
-            commands = cli_beads.plan(
-                list(args) + (["--json"] if "--json" not in args else []),
-                Path(ref.root),
-                actor,
-                db_exists=ref.exists(),
-                jsonl_exists=(beads_dir / cli_beads.JSONL_NAME).is_file(),
-                db=ref.db,
-            )
-            out = ""
-            for cmd in commands:
-                code, out, err = await self._run(cmd, str(root))
-                if code != 0:
-                    detail = (err or out).strip()
-                    raise cli_beads.BeadsError(
-                        f"br {' '.join(cmd[3:])[:80]} failed ({code}): {detail}"
-                    )
+            out = await self._run_planned(ref, root, args, actor)
+        else:
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                # Both of these are read under the lock, not before it:
+                # creating the board is a step of its own, and two callers
+                # that each read "missing" outside the lock would both run it.
+                if (
+                    not ref.exists()
+                    and not (beads_dir / cli_beads.JSONL_NAME).is_file()
+                    and cli_beads.autocreatable(ref)
+                    and args[:1] != ["init"]
+                ):
+                    await self.create_board(ref)
+                self._ensure_policy(beads_dir)
+                out = await self._run_planned(ref, root, args, actor)
         if args and not _reads_only(args):
             self.invalidate(root)
             for hook in list(self.write_hooks):
@@ -1710,6 +1728,32 @@ class Board:
                 return json.loads(text[start:])
             except ValueError:
                 return None
+
+    async def _run_planned(
+        self, ref: beads_db.BoardRef, root: Path, args: List[str],
+        actor: Optional[str],
+    ) -> str:
+        """The ``br`` invocations :func:`cli_beads.plan` composes for ``args``,
+        run in order; the last command's stdout. Shared by :meth:`br`'s locked
+        and lock-free paths."""
+        beads_dir = Path(ref.root) / cli_beads.BEADS_DIR
+        commands = cli_beads.plan(
+            list(args) + (["--json"] if "--json" not in args else []),
+            Path(ref.root),
+            actor,
+            db_exists=ref.exists(),
+            jsonl_exists=(beads_dir / cli_beads.JSONL_NAME).is_file(),
+            db=ref.db,
+        )
+        out = ""
+        for cmd in commands:
+            code, out, err = await self._run(cmd, str(root))
+            if code != 0:
+                detail = (err or out).strip()
+                raise cli_beads.BeadsError(
+                    f"br {' '.join(cmd[3:])[:80]} failed ({code}): {detail}"
+                )
+        return out
 
     def invalidate(self, root: Path) -> None:
         """Drop every cached reading of ``root``'s board: the listing, its
@@ -1879,15 +1923,17 @@ class Board:
         now = self._clock()
         cache = self._deps if cache_key is None else self._page_deps
         hit = cache.get(key)
-        if hit and now - hit[0] < CACHE_TTL:
+        if hit and now - hit[0] < DEPS_TTL:
             return hit[1]
         # Read through br, never out of the database file: br 0.7's engine
         # (frankensqlite) keeps its own WAL index, and a SQLite reader that
         # opened the file made br's next call set that index aside as
         # poisoned and leave a .br-wal-index-*/ directory behind -- one per
         # read, and this read ran on every Beads page load. One fork per
-        # issue with edges is slower; making it fast again without opening
-        # the file is its own piece of work.
+        # issue with edges stays; what changed is that the forks now run
+        # concurrently (a bounded fan-out, each its own subprocess) and
+        # that a board's reads no longer queue behind its write lock, so
+        # the scan costs seconds instead of a poll interval.
         wanted = [
             r.get("id") for r in rows
             if r.get("id") and (r.get("dependency_count") or 0)
@@ -1898,13 +1944,16 @@ class Board:
                 "%d", key, len(wanted), DEPS_SCAN_LIMIT,
             )
             wanted = wanted[:DEPS_SCAN_LIMIT]
-        out: List[dict] = []
-        for issue_id in wanted:
-            try:
-                data = await self.br(root, ["dep", "list", issue_id])
-            except cli_beads.BeadsError as exc:
-                log.debug("beads: no edges for %r: %s", issue_id, exc)
-                continue
+        sem = asyncio.Semaphore(DEPS_CONCURRENCY)
+
+        async def read_one(issue_id: str) -> List[dict]:
+            async with sem:
+                try:
+                    data = await self.br(root, ["dep", "list", issue_id])
+                except cli_beads.BeadsError as exc:
+                    log.debug("beads: no edges for %r: %s", issue_id, exc)
+                    return []
+            rows_out: List[dict] = []
             if isinstance(data, dict):
                 data = data.get("dependencies") or data.get("edges") or []
             for row in data or []:
@@ -1918,11 +1967,15 @@ class Board:
                 target = row.get("depends_on_id") or row.get("id")
                 if not target:
                     continue
-                out.append({
+                rows_out.append({
                     "from": row.get("issue_id") or issue_id,
                     "to": target,
                     "type": row.get("type") or row.get("dependency_type") or "",
                 })
+            return rows_out
+
+        parts = await asyncio.gather(*(read_one(i) for i in wanted))
+        out = [edge for part in parts for edge in part]
         cache[key] = (now, out)
         return out
 

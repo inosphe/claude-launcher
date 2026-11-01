@@ -1113,6 +1113,102 @@ def test_reading_the_edges_does_not_throw_away_the_listing_it_came_from(repo):
     asyncio.run(run())
 
 
+def test_edges_are_read_in_parallel(repo):
+    """Each ``br dep list`` is its own subprocess, so a wide board's edge
+    scan forks concurrently under a bounded fan-out instead of paying one
+    ``br`` startup after another: the in-flight count passes 1 while every
+    edge and its order survive."""
+    br = FakeBr()
+    br.add(id="epic")
+    for n in range(6):
+        br.add(id=f"kid-{n}")
+        br.link(f"kid-{n}", "epic")
+    state = {"inflight": 0, "max": 0}
+
+    async def gated(argv, cwd):
+        if "dep" in argv and "list" in argv:
+            state["inflight"] += 1
+            state["max"] = max(state["max"], state["inflight"])
+            try:
+                await asyncio.sleep(0.02)
+            finally:
+                state["inflight"] -= 1
+        return await br(argv, cwd)
+
+    board = beads_mod.Board(gated, root_for=lambda cwd: repo if cwd else None)
+
+    async def run():
+        rows = await board.issues(repo)
+        edges = await board.edges(repo, rows)
+        assert state["max"] > 1, "dep reads ran one at a time"
+        # gather keeps the listing's order: one entry per child, in order.
+        assert [(e["from"], e["to"]) for e in edges] == [
+            (f"kid-{n}", "epic") for n in range(6)
+        ]
+
+    asyncio.run(run())
+
+
+def test_reads_of_an_existing_board_run_without_the_board_lock(repo):
+    """The board lock exists for creation and rebuild, not reads: a read
+    against a board whose database already exists answers even while the
+    lock is held, and a write still queues behind it."""
+    br = FakeBr()
+    br.add(id="a")
+    board = _board(br, repo)
+
+    async def run():
+        lock = board._locks.setdefault(str(repo), asyncio.Lock())
+        await lock.acquire()
+        try:
+            rows = await asyncio.wait_for(board.issues(repo), timeout=1)
+            assert [r["id"] for r in rows] == ["a"]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    board.br(repo, ["create", "b"], actor="s1"), timeout=0.2
+                )
+        finally:
+            lock.release()
+        await board.br(repo, ["create", "b"], actor="s1")
+        assert sum(1 for c in br.calls if "create" in c) == 1
+        assert any(i["title"] == "b" for i in br.issues.values())
+
+    asyncio.run(run())
+
+
+def test_edge_cache_outlives_the_listing_ttl_but_dies_on_write(repo):
+    """Edges cost one fork per issue with dependencies, so they keep a
+    longer TTL than the listing: a re-read past CACHE_TTL is still
+    answered from the cache, and a write through the daemon still drops
+    it -- the page never draws a hierarchy from before its own edit."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    now = [1000.0]
+    board = beads_mod.Board(
+        br, root_for=lambda cwd: repo if cwd else None, clock=lambda: now[0]
+    )
+
+    async def dep_calls():
+        return sum(1 for c in br.calls if "dep" in c and "list" in c)
+
+    async def run():
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 1
+        now[0] += beads_mod.CACHE_TTL + 1  # past the listing TTL, ...
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 1  # ... the edges are still cached
+        await board.br(repo, ["dep", "add", "kid", "epic"], actor="s1")
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 2  # a write drops them
+
+    asyncio.run(run())
+
+
 def test_an_edge_read_that_fails_leaves_the_board_readable(repo):
     """A hierarchy is an ornament over a listing that is already useful. One
     unreadable issue must not cost the reader the whole board."""
