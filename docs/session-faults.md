@@ -255,11 +255,27 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   남고, pause된 기록을 kill·archive·remove할 때 `SESSION ENDED` 정리가 돈다
   (`SessionManager.unpause`/`settle_pause`, `beads.Board.session_settled`).
   데몬 재기동도 pause된 기록을 정리하지 않는다.
+- pause된 세션의 fault: pause는 프로세스를 종료시키므로 화면을 읽던 fault
+  기록도 함께 사라진다. 그래서 pause한 세션은 리셋까지 며칠 동안 `fault: null`로
+  보였고, 대시보드에는 데몬이 멈춘 세션과 그냥 죽은 세션의 구분이 없었다
+  (claunch-9djny.1). 이제 `DeadSession.fault()`가 세션 디렉터리의
+  `fault-pause.json`을 읽어 같은 모양의 뷰를 답하고 `source`를
+  `pause-record`로 낸다. 조건은 넷이고 모두 참일 때만 답한다 —
+  `ended_by.reason`이 `usage-limit`, `paused_at`이 있음, `archived_at`이 없음,
+  기록의 `paused_at`이 세션의 값과 같음(이름을 다시 쓴 나중 세션이 옛 파일을
+  읽지 않게). `active`는 살아 있는 판독과 같은 식(`now < until`)이고, `until`을
+  읽을 수 없는 기록은 kind의 창(usage_limit 86400초)을 pause 시각에 더해 상한으로
+  쓴다. unpause는 `paused_at`을 지우므로 그 fault도 함께 사라진다. 세션 레일은
+  이 행에 `!` pill을 세우고, 툴팁이 pause 이유·리셋 시각·할 일과 「리셋이
+  자동으로 재개하지 않는다」를 적는다.
 - 리셋 알림: 자동 pause는 그 fault(`kind`, `until`, `until_stated` 등)를
   세션 디렉터리의 `fault-pause.json`에 남긴다. 데몬 재기동 뒤의 기록은 화면을
   잃으므로 이 파일이 근거다. `GET /api/fault-resets`는 이 시계가 pause했고 아직
-  pause 상태인 세션 중 리셋 시각이 지난 것을 돌려주고, 대시보드는 세션마다
-  카드 하나(`usage limit reset: <세션>`, 출처 `fault`, ×로 닫힘)를 띄운다.
+  pause 상태인 세션을 두 목록으로 나눠 돌려준다 — `pending`(리셋 전)과
+  `resets`(리셋 시각이 지남), 행마다 `due`가 붙는다. 대시보드는 세션마다 카드
+  하나를 처음부터 띄우고(`usage limit pause: <세션>`, 출처 `fault`, ×로 닫힘),
+  리셋이 지나면 같은 카드의 문구만 「재개 결정 필요」(`usage limit reset: ...`)로
+  바뀐다 — 키는 세션이고 서명은 `session + until`이라 카드가 두 장이 되지 않는다.
   카드는 하네스가 화면에 리셋 시각을 적었을 때(`until_stated`)만 뜬다 —
   시각이 없어 kind의 창으로 추정한 `until`은 계획이 돌아오는 시각과 무관하고,
   하네스마다 시각을 적는지가 다르다. resume·kill·archive하면 카드가 내려간다.

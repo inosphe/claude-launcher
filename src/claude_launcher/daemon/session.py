@@ -3318,10 +3318,24 @@ class DeadSession:
             "ended_by": self.ended_by,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
-            # A record has no live screen to scan; a fault it showed before
-            # ending was a live session's reading, and it is not persisted.
-            "fault": None,
+            # A record has no live screen to scan, so a fault it showed while
+            # running is gone -- except the one the fault-pause clock stopped
+            # it for, which that clock wrote to the session directory.
+            "fault": self.fault(),
         }
 
     def fault(self) -> Optional[dict]:
-        return None
+        """The fault the fault-pause clock stopped this session for, or None.
+
+        A pause kills the process, so the live reading (:mod:`session_fault`,
+        taken off the screen) dies with it and this record answered ``None``
+        for the days between the pause and its reset -- a session visibly
+        stopped with nothing on the dashboard saying why (claunch-9djny.1).
+        While the pause is still in force (not unpaused, not archived) and
+        the record on disk is that pause's, its fault is answered here in the
+        shape a live reading has, with ``source: "pause-record"``.
+        """
+        # Imported here: fault_pause imports this module for STATUS_IDLE.
+        from . import fault_pause
+
+        return fault_pause.paused_fault(self)

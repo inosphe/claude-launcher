@@ -8189,25 +8189,42 @@ function railQuietFlags(name) {
      answers with. */
   if (s && s.fault && s.fault.active) {
     const f = s.fault;
+    /* A reading taken from the pause record (fault_pause.py, source
+       "pause-record") is not a live screen: the daemon stopped this session
+       on purpose and nothing resumes it at the reset, so the tooltip says
+       what the person has to decide instead of how the message would leave
+       a changing screen. Before claunch-9djny.1 such a row drew nothing at
+       all, and the reason was unreadable until the reset had passed. */
+    const paused = f.source === "pause-record";
     out.push({
       cls: "quiet-fault",
       glyph: "!",
       text: f.label || f.kind || "fault",
-      title:
-        `session fault — ${f.label || f.kind} (${f.harness})` +
-        (f.code ? ` · API ${f.code}` : "") + "\n" +
-        (f.resolved_by
-          ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
-          : "") +
-        `${f.message}\n` +
-        (f.reset ? `resets: ${f.reset}\n` : "") +
-        (f.action ? `what to do: ${f.action}\n` : "") +
-        (f.strikes > 1
-          ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
-            "window and never extends the last one\n"
-          : "") +
-        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
-        "or until the message scrolls off a changing screen.",
+      title: paused
+        ? `paused by the daemon — ${f.label || f.kind} (${f.harness})` +
+          (f.code ? ` · API ${f.code}` : "") + "\n" +
+          (f.resolved_by
+            ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
+            : "") +
+          `${f.message}\n` +
+          (f.reset ? `resets: ${f.reset}\n` : "") +
+          (f.until ? `paused until ${f.until}\n` : "") +
+          (f.action ? `what to do: ${f.action}\n` : "") +
+          "nothing resumes it at the reset — resume it yourself if you want it back."
+        : `session fault — ${f.label || f.kind} (${f.harness})` +
+          (f.code ? ` · API ${f.code}` : "") + "\n" +
+          (f.resolved_by
+            ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
+            : "") +
+          `${f.message}\n` +
+          (f.reset ? `resets: ${f.reset}\n` : "") +
+          (f.action ? `what to do: ${f.action}\n` : "") +
+          (f.strikes > 1
+            ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
+              "window and never extends the last one\n"
+            : "") +
+          `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
+          "or until the message scrolls off a changing screen.",
     });
   }
   // Exited rows are left out: a record with no terminal holds nothing back
@@ -65172,17 +65189,22 @@ async function refreshLeaderFaults() {
 }
 
 /* ------------------------------------------------------------------ */
-/* fault resets: a usage-limit pause whose stated reset has passed     */
+/* fault resets: a session paused on a usage limit                     */
 /* ------------------------------------------------------------------ */
 /* The daemon pauses a session the harness stopped on a usage limit and does
    not resume it: spending the new plan is the person's decision
-   (GET /api/fault-resets, daemon/fault_pause.py — claunch-ijot0). This poll
-   says when that decision is due: one card per session, sticky with ×, once
-   per reset (the signature is session + until). A click opens the session,
-   where Resume is. The card comes down when the row goes — the session was
-   resumed, killed or archived. */
+   (GET /api/fault-resets, daemon/fault_pause.py — claunch-ijot0). The route
+   answers the sessions still waiting for their stated reset as well
+   (claunch-9djny.1): before that, a session the daemon had stopped read
+   exactly like one that had died, for the days until the reset.
+   So this poll draws one card per session from the moment the pause is
+   recorded, sticky with ×, and only its wording changes when the reset
+   passes ("reset passed — decide") — the key is the session and the
+   signature is session + until, so the transition replaces the card rather
+   than adding a second one. A click opens the session, where Resume is. The
+   card comes down when the row goes — resumed, killed or archived. */
 const FAULT_RESET_PREFIX = "fault-reset-";
-const faultResetRaised = new Map();   // card key -> the signature raised
+const faultResetDrawn = new Map();   // card key -> `${until}|due` last drawn
 
 function faultResetSub(r) {
   const f = r.fault || {};
@@ -65193,7 +65215,9 @@ function faultResetSub(r) {
     const at = new Date(f.until);
     if (!isNaN(at)) lines.push(`reset ${at.toLocaleString()}`);
   }
-  lines.push("paused by the daemon — resume it if you want it back");
+  lines.push(r.due
+    ? "reset passed — decide whether to resume it"
+    : "paused by the daemon — it will not resume itself; resume it if you want it back");
   return lines.join(" · ");
 }
 
@@ -65206,7 +65230,14 @@ async function refreshFaultResets() {
   } catch {
     return;
   }
-  const rows = body && Array.isArray(body.resets) ? body.resets : [];
+  const rows = [];
+  for (const key of ["resets", "pending"]) {
+    const list = body && Array.isArray(body[key]) ? body[key] : [];
+    for (const r of list) {
+      if (!r) continue;
+      rows.push({ ...r, due: typeof r.due === "boolean" ? r.due : key === "resets" });
+    }
+  }
   const live = new Set();
   for (const r of rows) {
     const session = String((r && r.session) || "");
@@ -65215,27 +65246,34 @@ async function refreshFaultResets() {
     live.add(key);
     if (!noticeSourceShown("fault")) continue;
     const sig = String((r.fault || {}).until || "");
-    if (faultResetRaised.get(key) === sig) continue;
+    // The signature a person's "put away" is remembered by stays session +
+    // until; `state` adds the phase so a card that went up while the reset
+    // was still coming is redrawn (same key, one card) when it passes.
+    const state = `${sig}|${r.due ? "due" : "pending"}`;
+    if (faultResetDrawn.get(key) === state) continue;
     // Put away in another browser (or before a reload): settled, and not
     // offered to notify, which would add a history row on every poll.
     const sync = `fault-reset:${session}:${sig}`;
     const remote = noticeSync.remote.get(sync);
     if (remote && remote.dismissed) {
-      faultResetRaised.set(key, sig);
+      faultResetDrawn.set(key, state);
       continue;
     }
     // As for the leader card: record the signature only for a card that went
     // up, so an open history panel does not swallow it.
     if (noticePanelOpen()) continue;
-    const drawn = notify(`usage limit reset: ${session}`, faultResetSub(r), {
+    const title = r.due
+      ? `usage limit reset: ${session}`
+      : `usage limit pause: ${session}`;
+    const drawn = notify(title, faultResetSub(r), {
       source: "fault", key, sticky: true, session, sync,
     });
     if (!drawn) continue;
-    faultResetRaised.set(key, sig);
+    faultResetDrawn.set(key, state);
   }
-  for (const key of [...faultResetRaised.keys()]) {
+  for (const key of [...faultResetDrawn.keys()]) {
     if (live.has(key)) continue;
-    faultResetRaised.delete(key);
+    faultResetDrawn.delete(key);
     dismissNotice(key);
   }
 }
