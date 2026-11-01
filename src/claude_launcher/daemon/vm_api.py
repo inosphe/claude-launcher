@@ -38,7 +38,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_frames, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_frames, vm_presets, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -49,7 +49,8 @@ _STATUS = {
     "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
-    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_host_locked": 423, "vm_bad_address": 502,
+    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_preset_exists": 409,
+    "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
 }
 
@@ -271,17 +272,108 @@ async def h_tart_list(request: web.Request) -> web.Response:
     except VmError as exc:
         return _err(exc)
     held = {vm.tart_name: vm.id for vm in reg.list()}
+    copies = {item["tart_name"] for item in await asyncio.to_thread(_presets(request).list)}
     out = []
     for row in rows:
         try:
             vmhub.check_name("tart_name", row.name)
-            usable = True
+            usable = row.name not in copies  # a preset's copy is not run as a VM
         except VmError:
             usable = False
         out.append({"name": row.name, "state": row.state, "running": row.running,
                     "registered": row.name in held, "id": held.get(row.name, ""),
-                    "usable": usable})
+                    "usable": usable, "preset": row.name in copies})
     return web.json_response({"tart": out})
+
+
+def _presets(request: web.Request) -> vm_presets.Presets:
+    return request.app["vm_presets"]
+
+
+async def h_preset_list(request: web.Request) -> web.Response:
+    if (refused := _user_only(request)) is not None:
+        return refused
+    rows = await asyncio.to_thread(_presets(request).list)
+    return web.json_response({"presets": rows})
+
+
+async def h_preset_save(request: web.Request) -> web.Response:
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    try:
+        body = await _body(request)
+        vm_id = str(body.get("vm") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not vm_id or not name:
+            raise VmError("vm_bad_request", "'vm' and 'name' are required")
+        _trace(request, reg, vm_id, "preset_save", preset=name)
+        item = await asyncio.to_thread(
+            _presets(request).save, vm_id, name, str(body.get("description") or ""))
+        return web.json_response(item.to_dict(), status=201)
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_preset_describe(request: web.Request) -> web.Response:
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    name = request.match_info["name"]
+    try:
+        body = await _body(request)
+        _trace(request, reg, "", "preset_describe", preset=name)
+        item = await asyncio.to_thread(_presets(request).describe, name,
+                                       str(body.get("description") or ""))
+        return web.json_response(item.to_dict())
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_preset_delete(request: web.Request) -> web.Response:
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    name = request.match_info["name"]
+    try:
+        body = await _body(request)
+        _trace(request, reg, "", "preset_delete", preset=name)
+        await asyncio.to_thread(_presets(request).delete, name, str(body.get("confirm") or ""))
+        return web.json_response({"ok": True})
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_preset_create(request: web.Request) -> web.Response:
+    """A new VM from a preset: clone, register, start. The VM is registered
+    once the clone is made; a start that cannot happen (no free slot, the guest
+    does not come up) leaves it registered and says why."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    name = request.match_info["name"]
+    try:
+        body = await _body(request)
+        vm_id = str(body.get("id") or "").strip()
+        if not vm_id:
+            raise VmError("vm_bad_request", "'id' is required")
+        _trace(request, reg, vm_id, "preset_create", preset=name)
+        await asyncio.to_thread(_presets(request).create_vm, name, vm_id)
+    except VmError as exc:
+        return _err(exc)
+    started, why = False, ""
+    held = reg.holders(except_id=vm_id)
+    if len(held) >= reg.slot_limit:
+        why = (f"{len(held)} of {reg.slot_limit} macOS VM slots are in use ({', '.join(held)}); "
+               "the new VM is registered and stopped")
+    else:
+        try:
+            await asyncio.to_thread(mgr.start, vm_id)
+            request.app["vm_channels"].ensure(vm_id)
+            started = True
+        except VmError as exc:
+            why = f"{exc.code}: {exc}"
+    return web.json_response({"vm": reg.view(vm_id), "started": started, "why": why}, status=201)
 
 
 async def h_remove(request: web.Request) -> web.Response:
@@ -711,7 +803,8 @@ def exit_hook(app: web.Application):
 def install(app: web.Application, registry: Optional[Registry] = None,
             manager: Optional[vm_tart.Manager] = None,
             channels: Optional[vm_channel.Hub] = None,
-            frames: Optional[vm_frames.Frames] = None) -> None:
+            frames: Optional[vm_frames.Frames] = None,
+            presets: Optional[vm_presets.Presets] = None) -> None:
     cfg = store.daemon_config()
     reg = registry or Registry(paths.vm_json(), slot_limit=int(cfg.get("vm_slot_limit", 2)))
     app["vm_registry"] = reg
@@ -723,6 +816,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
                    vm_tart.parse_softnet(cfg.get("vm_softnet", True),
                                          cfg.get("vm_softnet_block", vm_tart.SOFTNET_BLOCK)))),
     )
+    app["vm_presets"] = presets or vm_presets.Presets(
+        paths.vm_presets_json(), reg, app["vm_manager"])
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")
     app["vm_frames"] = frames or vm_frames.Frames(reg)
@@ -736,6 +831,11 @@ def install(app: web.Application, registry: Optional[Registry] = None,
         r.add_post(f"/api/vm/{{id}}/{action}", _lifecycle_route(action))
     r.add_post("/api/vm-reconcile", h_reconcile)
     r.add_get("/api/vm-tart", h_tart_list)
+    r.add_get("/api/vm-presets", h_preset_list)
+    r.add_post("/api/vm-presets", h_preset_save)
+    r.add_post("/api/vm-presets/{name}/describe", h_preset_describe)
+    r.add_post("/api/vm-presets/{name}/delete", h_preset_delete)
+    r.add_post("/api/vm-presets/{name}/create", h_preset_create)
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)
     r.add_post("/api/vm/{id}/revoke_controller", h_revoke_controller)

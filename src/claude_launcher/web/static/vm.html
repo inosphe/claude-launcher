@@ -31,6 +31,26 @@
       <button id="vm-register-go" type="button" disabled>등록</button>
       <p id="vm-register-note" class="vm-muted" hidden></p>
     </details>
+    <details id="vm-presets">
+      <summary>프리셋</summary>
+      <p class="vm-muted">정지된 VM을 복사해 두었다가 새 VM을 만드는 틀입니다. 복제본은 원본의 계정·admin 비밀번호·키와 게스트 DNS 설정을 그대로 가집니다. 새 VM은 사설 대역을 막는 softnet으로 시작하며, 이 네트워크에서는 게이트웨이 DNS를 쓸 수 없으므로 <b>저장하기 전에 원본 게스트의 DNS를 공용 서버로 설정</b>하십시오(<code>networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8</code>).</p>
+      <div id="vm-preset-save">
+        <strong>선택한 VM을 프리셋으로 저장</strong>
+        <label class="sr-only" for="vm-preset-name">프리셋 이름</label>
+        <input id="vm-preset-name" type="text" maxlength="57" placeholder="프리셋 이름" autocomplete="off" spellcheck="false">
+        <label class="sr-only" for="vm-preset-desc">설명</label>
+        <input id="vm-preset-desc" type="text" maxlength="500" placeholder="설명 (선택)" autocomplete="off">
+        <button id="vm-preset-save-go" type="button" disabled>저장</button>
+        <p id="vm-preset-save-note" class="vm-muted"></p>
+      </div>
+      <div id="vm-preset-new">
+        <strong>프리셋에서 새 VM</strong>
+        <label class="sr-only" for="vm-preset-newid">새 VM 이름</label>
+        <input id="vm-preset-newid" type="text" maxlength="64" placeholder="새 VM 이름" autocomplete="off" spellcheck="false">
+      </div>
+      <ul id="vm-preset-list"></ul>
+      <p id="vm-preset-note" class="vm-muted" hidden></p>
+    </details>
   </aside>
   <section id="vm-detail" hidden>
     <div id="vm-head">

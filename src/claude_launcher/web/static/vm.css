@@ -35,6 +35,15 @@ button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-ac
 #vm-register select, #vm-register input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px;
   font: inherit; color: inherit; background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
 #vm-register button { margin-top: 6px; }
+#vm-presets { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); max-height: 45vh; overflow: auto; }
+#vm-presets summary { cursor: pointer; font-weight: 600; }
+#vm-presets input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px; font: inherit; color: inherit;
+  background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
+#vm-presets button { margin-top: 6px; }
+#vm-preset-list { list-style: none; margin: 8px 0 0; padding: 0; }
+#vm-preset-list li { padding: 6px 0; border-bottom: 1px solid var(--vm-line); }
+#vm-preset-list .sub { display: block; color: var(--vm-muted); font-size: 11px; }
+#vm-preset-list button { margin-right: 6px; }
 .embed .vm-brand { display: none; }
 .vm-card { display: block; width: 100%; height: auto; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--vm-line);
   border-radius: 0; background: none; text-align: left; }

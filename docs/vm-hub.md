@@ -80,3 +80,42 @@ registry would refuse are shown and not selectable). Registering posts the VM
 `claunch vm add` and `claunch vm reconcile`. Sessions for a grant are picked from
 the session list; when the list cannot be read the name is typed. The limit in
 the panel (one token, actor declared and audited) applies to the new route too.
+
+## Presets: new VMs by cloning
+
+A preset is a stopped tart copy named `preset-<name>` plus a record in
+`~/.claude-launcher/daemon/vm-presets.json` (0600: description, the VM it was
+saved from, when, tart's reported size). Everything here is the user's: the
+panel's "프리셋" section and `claunch vm preset save|list|describe|rm|new`; no
+session tool and no session route (a session gets `vm_user_only`).
+
+- **Save**: a registered VM that is `stopped` (shut it down first; running and
+  suspended VMs are refused) is copied with `tart clone`. The copy is never
+  registered as a VM, and the register form lists it as a preset copy.
+- **New VM**: the name is checked (`_NAME_RE`), tart must not already have it,
+  the disk must have as many GB free as tart reports the source uses (an APFS
+  clone shares blocks at first, so this is the room the copy may grow into), then
+  `tart clone` registers the VM with no grants and no controller and with softnet
+  pinned on (`Vm.softnet = true`, so turning `vm_softnet` off does not open it),
+  and it starts at once. If both macOS slots are in use it is left registered and
+  stopped, with the reason in the answer. If the clone or the registration fails,
+  the copy this call made is deleted and nothing else. If the start fails, the
+  copy stays registered (the fault shows) and `claunch vm start` retries.
+- **Delete**: the request must repeat the preset's name. Only `preset-<name>` is
+  deleted, only when the record names it and no registered VM uses that tart
+  name. A missing record file deletes nothing; an unreadable one is left as it
+  is and every write is refused until it is fixed.
+
+Limits to know before saving:
+
+- The copy has the source's accounts and its admin password and keys. A preset
+  changes nothing inside the guest; changing the password is not built.
+- A new VM runs on softnet with the private ranges blocked, so the guest's
+  gateway DNS does not answer. Set public DNS in the source guest before saving
+  (`networksetup -setdnsservers Ethernet 1.1.1.1 8.8.8.8`); the panel says so and
+  does not check it.
+
+A daemon restart is needed for the preset routes and the register form's preset
+marks (`/api/vm-presets`, `softnet` in the VM record). The panel's static files
+need only a refresh; until the restart the panel says the daemon has no preset
+API.

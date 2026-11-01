@@ -180,6 +180,10 @@ class Vm:
     human: str = "idle"  # idle | driving
     human_since: float = 0.0
     needs_observe: bool = False
+    #: tart's softnet network for this VM: True/False, or None to follow the
+    #: daemon-wide ``vm_softnet``. A VM made from a preset is pinned True, so
+    #: turning the global off does not open it; only a user route sets it.
+    softnet: Optional[bool] = None
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
@@ -205,7 +209,7 @@ class Vm:
             "extra_controllers": dict(self.extra_controllers),
             "epoch": self.epoch, "grants": {k: list(v) for k, v in self.grants.items()},
             "human": self.human, "human_since": self.human_since,
-            "needs_observe": self.needs_observe,
+            "needs_observe": self.needs_observe, "softnet": self.softnet,
         }
 
     @classmethod
@@ -218,6 +222,7 @@ class Vm:
         vm.ssh_key = _plain(raw.get("ssh_key"))  # unused: never a reason to reject a record
         vm.cua_path = check_path("cua_path", str(raw.get("cua_path") or vm.cua_path))
         vm.fault_reason = str(raw.get("fault_reason") or "")
+        vm.softnet = raw["softnet"] if isinstance(raw.get("softnet"), bool) else None
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
             str(s): [x for x in SCOPES if x in (v or [])]
@@ -334,7 +339,7 @@ class Registry:
 
     # ---- records ------------------------------------------------------- #
     def add(self, vm_id: str, tart_name: str = "", *, ssh_user: str = "admin",
-            ssh_key: str = "") -> Vm:
+            ssh_key: str = "", softnet: Optional[bool] = None, cua_path: str = "") -> Vm:
         check_name("id", vm_id)
         check_name("tart_name", tart_name or vm_id)
         check_user(ssh_user)
@@ -343,7 +348,9 @@ class Registry:
             if vm_id in self._vms:
                 raise VmError("vm_exists", f"{vm_id} is already registered")
             vm = Vm(id=vm_id, tart_name=tart_name or vm_id, ssh_user=ssh_user,
-                    ssh_key=ssh_key)
+                    ssh_key=ssh_key, softnet=softnet)
+            if cua_path:
+                vm.cua_path = check_path("cua_path", cua_path)
             self._vms[vm_id] = vm
             self._save()
             return vm

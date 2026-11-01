@@ -162,6 +162,12 @@ def sessions_db() -> Path:
     return daemon_dir() / "sessions.db"
 
 
+def vm_presets_json() -> Path:
+    """The VM presets (``daemon/vm_presets.py``): metadata of the stopped tart
+    copies a new VM can be cloned from."""
+    return daemon_dir() / "vm-presets.json"
+
+
 def vm_json() -> Path:
     """The VM registry (``daemon/vmhub.py``): records, grants and slot state."""
     return daemon_dir() / "vms.json"

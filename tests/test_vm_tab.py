@@ -58,3 +58,14 @@ def test_the_panel_calls_the_tart_route_and_no_ssh_text_is_left():
     assert "--ssh-key" not in html and "--ssh-key" not in js
     for ident in re.findall(r'\$\("([a-z-]+)"\)', js):
         assert f'id="{ident}"' in html, ident
+
+
+def test_the_panel_has_the_preset_controls_and_the_dns_notice():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    assert "api/vm-presets" in js
+    for ident in ("vm-presets", "vm-preset-save-go", "vm-preset-newid", "vm-preset-list"):
+        assert f'id="{ident}"' in html
+    assert "networksetup -setdnsservers" in html and "admin 비밀번호" in html
+    assert "confirm(" in js[js.index("function deletePreset"):]
+    assert "innerHTML" not in js
