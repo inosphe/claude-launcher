@@ -133,10 +133,20 @@ and reports how many come back within `top_k` at a similarity of at least
 vector, so a healthy index scores self-hits near 1.0 — the failures list
 names what the index answered instead and the score it gave.
 
-**Settings ▸ Search settings** keeps editing the block's own rows for now;
-the preset list travels through the settings API (`presets` in the payload,
-secrets reported as `api_key_set` only) but the card's picker for it is a
-separate piece of work.
+**Settings ▸ Search settings** is preset-only (claunch-rag-preset-always-hn5bc):
+the picker addresses one preset, its values load into the connection fields,
+and 저장 writes them back over that preset — editing a preset and switching
+which is active are the same save. There is no "direct rows" mode left; a
+block whose `preset` pointer resolves to nothing is migrated on the first
+settings read — the pre-preset connection becomes a preset named after its
+`embedding_model` (a taken id gets a `-2` suffix), or, with nothing stored,
+the pointer wakes at the first saved preset. The connection test
+(`POST /api/rag/test`) probes the values on the card rather than the saved
+preset, so an edit is tested before it is written. A bare-host `base_url`
+is called with a `/v1` root appended — the OpenAI-compatible paths hang off
+it — while the stored spelling is left as typed. The preset list travels
+through the settings API (`presets` in the payload, secrets reported as
+`api_key_set` only).
 
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the

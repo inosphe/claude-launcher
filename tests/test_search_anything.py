@@ -171,6 +171,13 @@ def test_config_preserves_secret_and_removes_requested_dimensions():
     assert "api_key" not in doc["rag"] and "base_url" not in doc["rag"]
     assert "dimensions" not in doc["rag"]
     assert "secret" not in str(search_anything.public_settings())
+    # public_settings migrates a configured legacy block into a preset
+    # (claunch-rag-preset-always-hn5bc), and with a preset in force the bad
+    # connection rows below are not the ones validated -- so exercise the
+    # legacy validation path with a fresh no-preset block.
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "http://localhost:123/v1", "api_key": "secret", "embedding_model": "embed", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
     for bad in ({"dimensions": 123}, {"batch": 1.5}, {"timeout": float("nan")}, {"base_url": "http://user:pass@host/v1"}):
         with pytest.raises(ValueError):
             search_anything.proposed(bad)
@@ -995,15 +1002,15 @@ def test_profile_source_uses_the_profile_backend_and_keeps_the_typed_pair():
     assert cfg["api_key"] == "fw-secret"
     store.save(doc)
     public = search_anything.public_settings()
-    assert public["source"] == "profile" and public["profile"] == "ds4"
-    assert public["base_url"] == "http://localhost:8000/v1"  # the form keeps the typed address
+    # The first card read migrates the legacy block into a preset named
+    # after the model (claunch-rag-preset-always-hn5bc); the card edits
+    # presets now, so the pointer and the preset row are what it is told.
+    assert public["preset"] == "embed"
+    assert public["presets"][0]["profile"] == "ds4"
     assert public["resolved"] == {"base_url": "https://api.fireworks.ai/inference/v1", "has_key": True}
-    assert public["configured"] and public["api_key_set"]
+    assert public["configured"]
     assert [row["name"] for row in public["profiles"]] == ["ds4"]
     assert "fw-secret" not in str(public) and "local-secret" not in str(public)
-    back = store.rag_config(search_anything.proposed({"source": "custom"}))
-    assert (back["base_url"], back["api_key"]) == ("http://localhost:8000/v1", "local-secret")
-    assert back["profile"] == "ds4"
 
 
 def test_the_environment_key_belongs_to_the_custom_endpoint(monkeypatch):
@@ -1180,13 +1187,20 @@ def test_the_settings_card_is_told_both_rows_and_no_secret():
         "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
     }, "source": "profile"}})
     public = search_anything.public_settings()
+    # The first read migrates the legacy rows into a preset (named after the
+    # in-force model), which becomes the pointer — the card edits presets.
+    assert public["preset"] == "fw-embed"
     assert set(public["sources"]) == {"custom", "profile"}
     assert public["sources"]["custom"]["embedding_model"] == "omlx-embed"
     assert public["sources"]["custom"]["rerank_model"] == "omlx-rerank"
     assert public["sources"]["profile"] == {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""}
     assert "api_key" not in public["sources"]["custom"]
     assert "local-secret" not in str(public) and "fw-secret" not in str(public)
-    assert public["api_key_set"]
+    # api_key_set describes the row the card edits (the active preset): a
+    # profile-source preset carries no typed key. The legacy custom row
+    # still holds local-secret on file — proven by the PUT below preserving
+    # it through an empty field.
+    assert not public["api_key_set"]
     # Every row sails through the save's own check, since the card posts it back.
     assert search_anything.proposed({"source": "profile", "sources": public["sources"]})["rag"]["source"] == "profile"
 
@@ -1329,6 +1343,120 @@ def test_settings_routes_refuse_bad_presets(tmp_path):
             await client.close()
             await server.close()
 
+    asyncio.run(run())
+
+
+def test_legacy_direct_settings_migrate_into_a_named_preset():
+    """claunch-rag-preset-always-hn5bc: the card is preset-only, so a block
+    whose pointer resolves to nothing is migrated on the first settings
+    read — the pre-preset direct settings become a preset named after the
+    embedding model, exactly the backfill the user asked for."""
+    store.save({"rag": {"base_url": "http://host/v1", "api_key": "secret-key",
+                        "embedding_model": "qwen3-embedding-8b", "rerank_model": "r"}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "qwen3-embedding-8b"
+    row = public["presets"][0]
+    assert row["embedding_model"] == "qwen3-embedding-8b"
+    assert row["rerank_model"] == "r"
+    assert row["api_key_set"] is True
+    assert "secret-key" not in json.dumps(public)
+    assert store.load()["rag"]["preset"] == "qwen3-embedding-8b"
+    # idempotent — a second read adds nothing
+    again = search_anything.public_settings()
+    assert [p["id"] for p in again["presets"]] == ["qwen3-embedding-8b"]
+
+
+def test_migration_takes_a_suffix_when_the_model_name_is_taken():
+    store.save({"rag": {"base_url": "http://host/v1", "api_key": "k",
+                        "embedding_model": "qwen3-embedding-8b",
+                        "presets": [{"id": "qwen3-embedding-8b", "source": "custom",
+                                     "base_url": "http://other/v1", "api_key": "k2",
+                                     "embedding_model": "other-model"}]}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "qwen3-embedding-8b-2"
+    assert [p["id"] for p in public["presets"]] == ["qwen3-embedding-8b", "qwen3-embedding-8b-2"]
+    assert public["presets"][1]["base_url"] == "http://host/v1"
+
+
+def test_migration_wakes_a_dangling_pointer_to_the_first_preset():
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "", "api_key": "", "embedding_model": "", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}},
+                        "presets": [{"id": "only", "source": "custom", "base_url": "http://h/v1",
+                                     "api_key": "k", "embedding_model": "m"}]}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "only"
+    assert [p["id"] for p in public["presets"]] == ["only"]
+
+
+def test_migration_leaves_an_unconfigured_block_alone():
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "", "api_key": "", "embedding_model": "", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+    public = search_anything.public_settings()
+    assert public["preset"] == ""
+    assert public["presets"] == []
+
+
+def test_base_url_without_a_version_root_is_normalized_for_calls():
+    """A bare host answers the protocol paths with 404 (measured live: oMLX
+    with no /v1, selftest failing on /embeddings). The stored spelling is
+    kept; the call target gains the /v1 root."""
+    for typed, called in [("https://omlx.inosphe.work", "https://omlx.inosphe.work/v1"),
+                          ("https://omlx.inosphe.work/", "https://omlx.inosphe.work/v1"),
+                          ("https://h/v1", "https://h/v1"),
+                          ("https://h/openai/v1", "https://h/openai/v1")]:
+        cfg = store.rag_config({"rag": {"source": "custom", "base_url": typed,
+                                        "api_key": "k", "embedding_model": "m"}})
+        assert cfg["base_url"] == called, typed
+    # a profile-sourced block borrows its root from the provider, untouched
+    assert store.rag_normalize_base_url("") == ""
+
+
+def test_connection_test_probes_the_screen_rows_not_the_saved_preset(tmp_path):
+    """POST /api/rag/test must evaluate what is on the card — the reader
+    tests edits before saving. A saved preset in the same body must not
+    redirect the probe at the preset's stored connection."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        live = str(server.make_url("/v1"))
+        store.save({"rag": {
+            "source": "custom",
+            "watch_interval": 0,
+            "presets": [{"id": "saved", "source": "custom", "base_url": live,
+                         "api_key": "rag-secret", "embedding_model": "saved-model"}],
+            "preset": "saved",
+            "sources": {"custom": {"base_url": live, "api_key": "rag-secret",
+                                   "embedding_model": "screen-model", "rerank_model": ""},
+                        "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            calls_before = len(endpoint.embed_calls)
+            # screen rows point at the live server while the saved preset is
+            # unreachable: the probe succeeds, proving it used the screen
+            body = {"preset": "saved", "timeout": 2,
+                    "sources": {"custom": {"base_url": live, "api_key": "rag-secret",
+                                           "embedding_model": "screen-model", "rerank_model": ""},
+                                "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 200, await response.text()
+            assert len(endpoint.embed_calls) > calls_before
+            # and the inverse: screen rows unreachable, saved preset live —
+            # the probe fails, so it cannot have used the preset
+            body["sources"]["custom"]["base_url"] = "http://localhost:9/v1"
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
     asyncio.run(run())
 
 

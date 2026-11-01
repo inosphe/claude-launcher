@@ -397,6 +397,14 @@ def public_settings():
     changed models.
     """
     doc = store.load()
+    # Preset-only card (claunch-rag-preset-always-hn5bc): a pointer that
+    # resolves to nothing is migrated here, on the read the card opens with
+    # — legacy direct settings become a preset named after their model, and
+    # the picker never shows an unowned connection.
+    migrated = store.rag_migrate_legacy_preset(doc)
+    if migrated is not None:
+        store.save(migrated)
+        doc = migrated
     block = doc.get("rag") if isinstance(doc.get("rag"), dict) else {}
     cfg = store.rag_config(doc)
     custom = store.rag_config({"rag": {**block, "source": "custom"}})
@@ -414,9 +422,17 @@ def public_settings():
     # The secret never leaves the daemon here either: a preset row reports
     # whether a key is on file, never the key -- the card posts these rows
     # straight back and an empty api_key field preserves the saved secret.
+    # ``api_key_set`` answers the card's field placeholder: does the row the
+    # reader is editing carry a key. With a preset in force that is the
+    # preset row; the resolved custom config cannot answer it for a
+    # profile-source preset, whose backend lives outside the synthetic
+    # custom-spelled document (claunch-rag-preset-always-hn5bc).
+    stored = store.rag_source_rows(block)
+    active_row = next((p for p in store.rag_presets(doc) if p["id"] == cfg["preset"]), None)
+    key_on_file = bool((active_row or stored["custom"]).get("api_key"))
     out.update({
         "base_url": custom["base_url"],
-        "api_key_set": bool(custom["api_key"]),
+        "api_key_set": key_on_file,
         "configured": store.rag_configured(cfg),
         "profile_error": cfg["profile_error"],
         "model_key": cfg.get("model_key") or "",
@@ -463,7 +479,17 @@ def install(app):
     async def test(request):
         stage, dimensions = "embedding", None
         try:
-            cfg = store.rag_config(proposed(await request.json()))
+            body = await request.json()
+            # The probe tests what is on screen, not what is saved: the card
+            # posts the field values as the legacy rows, and a saved preset
+            # pointer would make proposed()/rag_config resolve the preset's
+            # stored connection instead — the exact values the reader is
+            # about to change (claunch-rag-preset-always-hn5bc). Pointing the
+            # body at no preset leaves the submitted rows as the connection
+            # the probe validates and calls.
+            if isinstance(body, dict):
+                body["preset"] = ""
+            cfg = store.rag_config(proposed(body))
             if not store.rag_configured(cfg):
                 if cfg["profile_error"]:
                     return web.json_response({"error": f"Profile connection unavailable: {cfg['profile_error']}", "stage": "config"}, status=400)

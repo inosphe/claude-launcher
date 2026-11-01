@@ -92,6 +92,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import uuid
 
 import yaml
+from urllib.parse import urlsplit
 
 from . import atomic, config
 
@@ -1327,6 +1328,88 @@ def rag_active_preset(doc: Optional[dict] = None) -> str:
     return wanted if any(p["id"] == wanted for p in rag_presets(doc)) else ""
 
 
+def rag_migrate_legacy_preset(doc: dict) -> Optional[dict]:
+    """The preset pointer every card session resolves to, creating it if needed.
+
+    The card is preset-only (claunch-rag-preset-always-hn5bc): there is no
+    "direct rows" mode left to fall back to, so a block whose pointer resolves
+    to nothing is migrated on the spot. Three cases, all of them idempotent —
+    a block with a resolving pointer is returned unchanged:
+
+    · Pointer empty, legacy rows carry a usable connection — wrap them into a
+      new preset named after the embedding model (``qwen3-embedding-8b``) and
+      point at it. This is the promised backfill of the pre-preset settings;
+      an id that is taken gets a ``-2`` suffix rather than clobbering.
+    · Pointer empty, presets exist but the rows carry nothing — point at the
+      first preset. With no direct mode left, a dangling pointer would leave
+      the card with nothing editable, and the first row is the visible,
+      predictable choice.
+    · Nothing configured anywhere — leave the block alone; the card offers
+      the empty fields as a draft for the first preset.
+
+    Returns a new document when the migration wrote something, else ``None``.
+    The caller persists it (``public_settings`` does, on its read).
+    """
+    block = doc.get("rag")
+    if not isinstance(block, dict):
+        return None
+    if rag_active_preset(doc):
+        return None
+    rows = rag_source_rows(block)
+    presets = _rag_preset_rows(block.get("presets"))
+    source = "profile" if block.get("source") == "profile" else "custom"
+    row = rows[source]
+    legacy_model = str(row.get("embedding_model") or "").strip()
+    legacy_connected = bool(legacy_model) and bool(
+        row.get("profile") if source == "profile" else row.get("base_url")
+    )
+    out = dict(doc)
+    out_block = dict(block)
+    if legacy_connected:
+        base = rag_model_key_slug(legacy_model) or "preset"
+        taken = {p["id"] for p in presets}
+        preset_id = base
+        n = 2
+        while preset_id in taken:
+            preset_id = f"{base}-{n}"
+            n += 1
+        preset: dict = {"id": preset_id, "source": source, "embedding_model": legacy_model}
+        for key in ("profile", "base_url", "api_key", "rerank_model"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                preset[key] = value
+        out_block["presets"] = presets + [preset]
+        out_block["preset"] = preset_id
+    elif presets:
+        out_block["preset"] = presets[0]["id"]
+    else:
+        return None
+    out["rag"] = out_block
+    return out
+
+
+def rag_normalize_base_url(url: str) -> str:
+    """The address embedding and rerank calls actually use.
+
+    The OpenAI-compatible root is the ``/v1`` root — ``/embeddings`` and
+    ``/rerank`` hang off it — but readers type the bare host as often as the
+    versioned root, and a bare host answers the protocol paths with 404
+    (measured live: oMLX with ``https://host`` set, selftest failing with
+    404 on ``/embeddings``, claunch-rag-preset-always-hn5bc). Appending
+    ``/v1`` when the path does not already end in a version segment turns
+    both spellings into one call. The stored value keeps what the reader
+    typed; this shapes only the request target.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    trimmed = url.rstrip("/")
+    path = urlsplit(trimmed).path or ""
+    if re.search(r"/v\d+$", path):
+        return trimmed
+    return f"{trimmed}/v1"
+
+
 def rag_source_rows(block: dict) -> Dict[str, dict]:
     """Both connection paths as the file holds them, every field present.
 
@@ -1446,6 +1529,9 @@ def rag_config(doc: Optional[dict] = None) -> dict:
         env_key = os.environ.get("CLAUNCH_RAG_API_KEY")
         if env_key:
             out["api_key"] = env_key.strip()
+        # Call shape, not stored shape: a bare-host address gets its /v1
+        # root here so both spellings reach the same protocol paths.
+        out["base_url"] = rag_normalize_base_url(out["base_url"])
     out["verify_tls"] = block.get("verify_tls", True) is not False
     for key in ("dimensions", "batch", "candidates", "rerank_top"):
         try:
