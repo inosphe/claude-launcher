@@ -539,6 +539,8 @@ class Registry:
             if value not in vm.allow:
                 raise VmError("vm_bad_request", f"{vm_id}는 {value}를 허용하지 않습니다")
             vm.allow.remove(value)
+            self._save()
+            return vm
 
     # ---- the lock (the user's) -------------------------------------------- #
     def set_locked(self, vm_id: str, locked: bool) -> Vm:
