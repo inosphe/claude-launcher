@@ -11,11 +11,13 @@
    and model_key, staying empty when the daemon has no active record.
    And the card wiring is the contract: switching the picker PUTs only
    the preset pointer and restores the previous selection on failure,
-   the connection fieldsets go read-only under a preset, values() carries
-   the pointer on a normal save, the progress line polls /api/rag/status
-   until nothing is pending, and the Selftest button POSTs the selftest
-   endpoint with threshold/top_k/sample and renders the verdict in its
-   own result line. */
+   the connection fieldsets go read-only under a preset, the save-preset
+   control appends the screen's connection values through the settings
+   PUT and locks under an active preset, values() carries the pointer on
+   a normal save, the progress line polls /api/rag/status until nothing
+   is pending, the pause/resume toggle POSTs the backfill endpoints, and
+   the Selftest button POSTs the selftest endpoint with threshold/top_k/
+   sample and renders the verdict in its own result line. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -108,6 +110,9 @@ check("a finished backfill with an active record appends the active line",
 check("a finished backfill with no active record is plain done",
       api.stateLine([{ kind: "sessions", pending: 0, total: 150 }], null),
       { state: "done", text: "색인 갱신 완료" });
+check("a paused backfill names the hold and keeps the counts",
+      api.stateLine([{ kind: "sessions", pending: 12, total: 200 }], null, true),
+      { state: "paused", text: "소급 임베딩 일시정지됨 · 남은 문서 12 / 200건" });
 
 /* ---- the active line ----------------------------------------------------- */
 check("a preset active record names the preset, model and key",
@@ -143,6 +148,18 @@ check("the selftest button posts the selftest endpoint with threshold",
 check("the selftest result renders in its own line",
       [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
       [true, true]);
+check("the pause toggle posts the backfill endpoints",
+      [src.includes('"api/rag/backfill/pause"'), src.includes('"api/rag/backfill/resume"')],
+      [true, true]);
+check("the pause button reflects the polled state",
+      src.includes('pauseBtn.textContent = backfillPaused ? "재개" : "일시정지"'),
+      true);
+check("the save-preset control appends through the settings PUT",
+      [src.includes("{ presets: [...presets, preset] }"), src.includes("savePresetBtn")],
+      [true, true]);
+check("the save-preset control locks under an active preset",
+      src.includes("savePresetId.disabled = savePresetBtn.disabled = Boolean(active)"),
+      true);
 check("the stylesheet ships the state line rule",
       css.includes(".search-settings .rag-preset-state"), true);
 check("the stylesheet ships the selftest result line rule",

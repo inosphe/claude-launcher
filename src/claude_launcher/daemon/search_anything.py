@@ -489,6 +489,14 @@ def install(app):
             raise web.HTTPNotFound()
         return web.json_response(event)
 
+    async def backfill_pause(request):
+        """Hold the backfill consumer; queued corpora keep their order."""
+        return web.json_response({"paused": service.pause_backfill()})
+
+    async def backfill_resume(request):
+        """Let the consumer drain the queue from where the pause left it."""
+        return web.json_response({"paused": service.resume_backfill()})
+
     async def selftest(request):
         """Sample a corpus and check its entries retrieve at threshold.
 
@@ -521,6 +529,8 @@ def install(app):
 
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)
+    app.router.add_post("/api/rag/backfill/pause", backfill_pause)
+    app.router.add_post("/api/rag/backfill/resume", backfill_resume)
     app.router.add_post("/api/rag/test", test)
     app.router.add_post("/api/rag/selftest", selftest)
     app.router.add_get("/api/search/records/{name}/{event}", record)

@@ -1188,6 +1188,13 @@ class RagService:
         self._in_flight: Optional[str] = None
         self._pending: Dict[str, Tuple[str, Optional[Path]]] = {}
         self._consumer: Optional[asyncio.Task] = None
+        # Backfill pause (claunch-fhs7f): while cleared, the consumer holds
+        # before dequeuing — queued keys and in-progress bookkeeping stay
+        # untouched, and a resume drains from where it stopped. Runtime
+        # state only: a daemon restart comes back unpaused.
+        self._backfill_paused: bool = False
+        self._resume: "asyncio.Event" = asyncio.Event()
+        self._resume.set()
         self._watcher: Optional[asyncio.Task] = None
         #: Board roots the watcher stats: every root a producer or a search
         #: ever named, plus the ones the board resolved for a session.
@@ -1689,8 +1696,32 @@ class RagService:
         if self._consumer is None or self._consumer.done():
             self._consumer = asyncio.get_running_loop().create_task(self._consume_loop())
 
+    def pause_backfill(self) -> bool:
+        """Hold the consumer before it dequeues the next key.
+
+        Keys already queued keep their order and wait; the key a pass is
+        mid-flight on finishes its pass. Returns the resulting paused state
+        (always ``True``).
+        """
+        self._backfill_paused = True
+        self._resume.clear()
+        return True
+
+    def resume_backfill(self) -> bool:
+        """Let the consumer drain the queue again; returns the resulting
+        paused state (always ``False``)."""
+        self._backfill_paused = False
+        self._resume.set()
+        return False
+
+    def backfill_paused(self) -> bool:
+        return self._backfill_paused
+
     async def _consume_loop(self) -> None:
         while True:
+            # Held here, not mid-pass: a pause never cancels embedding work
+            # in flight, it only stops the next key from starting.
+            await self._resume.wait()
             key = await self._queue.get()
             # Out of pending BEFORE the pass runs: an enqueue that lands while
             # this pass reads the corpus queues the key again, behind it.
@@ -2296,6 +2327,7 @@ class RagService:
             "rate": self._limiter.view(),
             "indexes": indexes,
             "queue": self.queue_view(),
+            "backfill_paused": self._backfill_paused,
         }
 
 

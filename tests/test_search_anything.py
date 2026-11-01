@@ -295,6 +295,70 @@ def test_settings_routes_test_without_saving_and_persist_models(tmp_path):
     asyncio.run(run())
 
 
+def test_backfill_pause_resume_routes_flip_the_flag_reported_by_status(tmp_path):
+    async def run():
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            # /api/rag/status itself is api.py's route; the flag this pair of
+            # endpoints flips is what service.status() reports.
+            assert service.status()["backfill_paused"] is False
+            response = await client.post("/api/rag/backfill/pause")
+            assert response.status == 200
+            assert (await response.json())["paused"] is True
+            assert service.backfill_paused() is True
+            # Pausing twice is the same state, not an error.
+            response = await client.post("/api/rag/backfill/pause")
+            assert (await response.json())["paused"] is True
+            response = await client.post("/api/rag/backfill/resume")
+            assert response.status == 200
+            assert (await response.json())["paused"] is False
+            assert service.backfill_paused() is False
+            assert service.status()["backfill_paused"] is False
+        finally:
+            await service.shutdown()
+            await client.close()
+    asyncio.run(run())
+
+
+def test_paused_consumer_holds_the_queue_and_resume_drains_it(tmp_path):
+    """Pause holds before the dequeue, not mid-pass: the queued key keeps its
+    place and a resume drains it without a re-enqueue."""
+    async def run():
+        service = rag.RagService(
+            config=lambda: {**store.RAG_DEFAULTS, "base_url": "http://127.0.0.1:9/v1",
+                            "api_key": "k", "embedding_model": "m"},
+            root_dir=tmp_path / "index",
+        )
+        consumed = []
+        async def spy_consume(kind, root):
+            consumed.append(kind)
+        service._consume = spy_consume
+        service.pause_backfill()
+        try:
+            assert service.enqueue("sessions") is True
+            await asyncio.sleep(0.05)
+            assert consumed == []
+            assert service._queue.qsize() == 1
+            assert "sessions" in service._pending
+            service.resume_backfill()
+            for _ in range(200):
+                if consumed:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions"]
+            assert service._queue.empty()
+            assert not service._pending
+        finally:
+            await service.shutdown()
+    asyncio.run(run())
+
+
 def test_all_search_uses_reranker_and_rebuilds_for_endpoint_change(tmp_path):
     async def run():
         endpoint = Endpoint()
