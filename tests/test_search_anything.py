@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
 from claude_launcher.daemon import observer, rag, search_anything, search_records, status_checks
-from test_rag import Endpoint, _start_endpoint, _cfg
+from test_rag import Endpoint, FakeBr, _start_endpoint, _cfg
 
 
 def _world(tmp_path, n_sessions=3):
@@ -1130,3 +1130,193 @@ def test_settings_routes_call_the_profile_backend(tmp_path):
             await client.close()
             await server.close()
     asyncio.run(run())
+
+
+def test_settings_routes_round_trip_presets_without_secrets(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            presets = [
+                {"id": "local", "source": "custom", "base_url": "http://h:1/v1",
+                 "api_key": "first-secret", "embedding_model": "emb-a",
+                 "rerank_model": "", "model_key": "shared-key"},
+                {"id": "cloud", "source": "custom", "base_url": "http://h:2/v1",
+                 "api_key": "second-secret", "embedding_model": "emb-b",
+                 "model_key": "shared-key"},
+            ]
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": presets, "preset": "cloud"})
+            assert response.status == 200
+            body = await response.json()
+            # secrets never cross the boundary; whether one is on file does
+            assert "first-secret" not in json.dumps(body)
+            assert "second-secret" not in json.dumps(body)
+            assert body["presets"][0]["api_key_set"] is True
+            assert body["preset"] == "cloud"
+            assert [p["id"] for p in body["presets"]] == ["local", "cloud"]
+            assert body["presets"][0]["model_key"] == "shared-key"
+
+            saved = store.rag_config()
+            assert saved["preset"] == "cloud"
+            assert saved["model_key"] == "shared-key"  # the active preset's key
+            assert saved["embedding_model"] == "emb-b"
+            # the secrets actually landed in the file
+            stored = store.rag_presets()
+            assert stored[0]["api_key"] == "first-secret"
+            assert stored[1]["api_key"] == "second-secret"
+
+            # an empty api_key preserves the saved secret under that id
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{**presets[0], "api_key": ""}, presets[1]]})
+            assert response.status == 200
+            assert store.rag_presets()[0]["api_key"] == "first-secret"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_settings_routes_refuse_bad_presets(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            good = {"id": "one", "source": "custom", "base_url": "http://h/v1",
+                    "api_key": "k", "embedding_model": "emb"}
+            for bad, needle in [
+                ({"presets": "nope"}, "presets must be a list"),
+                ({"presets": [{"id": "Bad Name", "embedding_model": "emb"}]},
+                 "lowercase letters, digits and hyphens"),
+                ({"presets": [good, dict(good)]}, "duplicate preset id"),
+                ({"presets": [good], "preset": "ghost"}, "not one of the saved presets"),
+                ({"presets": [good], "preset": 5}, "preset must be text"),
+                ({"presets": [{"id": f"p{i}"} for i in range(21)]}, "at most"),
+            ]:
+                response = await client.put("/api/rag/settings", json=bad)
+                assert response.status == 400, bad
+                if needle:
+                    assert needle in (await response.json())["error"]
+            # a failed save leaves the file as it was
+            assert store.rag_config()["embedding_model"] == "emb"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_settings_save_with_a_preset_validates_the_preset_connection(tmp_path):
+    """Only the connection in force is validated: a preset save needs the
+    preset's endpoint, and an unresolvable active profile is refused."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "local", "source": "custom", "api_key": "k",
+                             "embedding_model": "emb"}],
+                "preset": "local"})
+            assert response.status == 400
+            assert "base_url" in (await response.json())["error"]
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "prof", "source": "profile", "profile": "ghost",
+                             "embedding_model": "emb"}],
+                "preset": "prof"})
+            assert response.status == 400
+            # the legacy rows out of force are not validated: a custom save
+            # with a preset active ignores the legacy custom row's address
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "prof", "source": "profile", "profile": "ghost",
+                             "embedding_model": "emb"}],
+                "preset": ""})
+            assert response.status == 200
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_selftest_route_reports_the_sample_against_the_threshold(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        root = tmp_path / "repo"
+        (root / ".beads").mkdir(parents=True)
+        (root / ".beads" / "beads.db").write_bytes(b"")
+
+        issue = {"id": "x-1", "title": "kanban lanes", "status": "open",
+                 "description": "kanban lanes\n\nadd the column"}
+        from claude_launcher.daemon import beads as beads_mod
+        br = FakeBr([issue])
+        board = beads_mod.Board(br, root_for=lambda cwd: root if cwd and str(cwd).startswith(str(root)) else None)
+        service = rag.RagService(board=board, root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            prog = service.ensure_sync("beads", root)
+            await service.wait_sync(prog, 5)
+            assert prog.error is None
+            response = await client.post("/api/rag/selftest",
+                                         json={"kind": "beads", "cwd": str(root),
+                                               "sample": 1, "threshold": 0.5, "top_k": 2})
+            assert response.status == 200
+            body = await response.json()
+            assert body["sampled"] == 1 and body["passed"] == 1 and body["failed"] == 0
+            assert body["similarity"]["max"] == pytest.approx(1.0)
+            assert "rag-secret" not in json.dumps(body)
+            # a beads self test needs a cwd that resolves to a board
+            response = await client.post("/api/rag/selftest",
+                                         json={"kind": "beads", "cwd": "/nowhere"})
+            assert response.status == 400
+            response = await client.post("/api/rag/selftest", json={"kind": "nope"})
+            assert response.status == 400
+            # no body at all: the sessions corpus is the default
+            response = await client.post("/api/rag/selftest")
+            assert response.status in (200, 400)  # empty registry: 400, nothing to sample
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+

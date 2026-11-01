@@ -69,8 +69,74 @@ That set was what both paths meant then, so `store.rag_source_rows()` reads
 it as both rows' initial values; the first save writes the rows and drops the
 flat keys. `CLAUNCH_RAG_API_KEY` is a key for the typed endpoint and applies
 to `custom` only. The embedding and rerank model ids are always typed in: a
-profile's `models` are chat models. Changing the source changes the
-base URL, so the index is rebuilt.
+profile's `models` are chat models. Changing the source row (or a preset's
+model to one of another identity) changes which collection answers; the old
+one is kept on disk, so switching back is cheap.
+
+### presets — switching models without re-embedding
+
+Saved connections under an id, the same shape `llm:` uses for its briefing
+backends (claunch-7m5v8). `preset` names the active one; empty (or naming a
+row that no longer exists) falls back to the block's own rows above.
+
+```yaml
+rag:
+  preset: local-qwen
+  presets:
+    - id: local-qwen
+      source: custom
+      base_url: https://omlx.inosphe.work/v1
+      api_key: <key>
+      embedding_model: mlx-community--Qwen3-Embedding-4B-mxfp8
+      model_key: qwen3-embedding-4b   # optional; see below
+    - id: cloud-qwen
+      source: custom
+      base_url: https://api.fireworks.ai/inference/v1
+      api_key: <key>
+      embedding_model: accounts/fireworks/models/qwen3-embedding-8b
+```
+
+Which collection a corpus opens is decided by the store's **identity**, not
+by the `(endpoint, model)` pair: each preset may carry a `model_key`, and
+without one the key derives from the `embedding_model` name (lower-cased,
+non-alphanumerics folded to hyphens). Two presets that reach the same real
+model through different providers or name aliases — a local oMLX id and a
+provider's id for the same weights — share one collection by sharing one
+`model_key`, so switching between them answers from the vectors already on
+disk instead of embedding the corpus again. A genuinely different model
+opens its own collection under `<corpus>.<model-key>.zvec` and the normal
+sync backfills it, paced by `rate_limit`; switching back reuses what the
+first pass stored. Without a preset, paths and behavior are unchanged
+(`<corpus>.zvec`), and a preset naming the model a pre-preset collection was
+built under adopts that directory rather than starting a second copy.
+
+The daemon still manages one embedding model at a time — the single sync
+queue is unchanged; a preset switch is a configuration choice, not a second
+concurrent embedder.
+
+`rate_limit` caps the embedding requests a five-minute sliding window may
+carry (default 120, 0 = unlimited). It paces document backfills so a corpus
+catch-up does not land on the endpoint as one burst; query embeddings are
+metered but never delayed by it.
+
+The engine records the resolved selection — which preset is in force, which
+model and store identity it resolved to, through which connection, when — in
+`<daemon dir>/rag/active.json`, and shows it in `rag status` and the
+dashboard's search card, so which model answered is a record rather than a
+guess.
+
+After switching, `POST /api/rag/selftest` checks the new store against its
+own entries: it samples the corpus, queries with each picked entry's text,
+and reports how many come back within `top_k` at a similarity of at least
+`threshold` (both parameters, with `sample`, in the JSON body; corpus
+`kind` and a board `cwd` for beads). Identical text embeds to the unit
+vector, so a healthy index scores self-hits near 1.0 — the failures list
+names what the index answered instead and the score it gave.
+
+**Settings ▸ Search settings** keeps editing the block's own rows for now;
+the preset list travels through the settings API (`presets` in the payload,
+secrets reported as `api_key_set` only) but the card's picker for it is a
+separate piece of work.
 
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the

@@ -1342,3 +1342,346 @@ def test_a_second_holder_of_one_index_is_named_not_a_traceback(tmp_path):
     third.load()
     assert set(third.entries) == {"a"}
     third.close()
+
+
+# --------------------------------------------------------------------------- #
+# presets: config resolution, store identity, switching, self test, rate limit
+# --------------------------------------------------------------------------- #
+def test_rag_config_resolves_the_active_preset():
+    cfg = store.rag_config({"rag": {
+        "preset": "local",
+        "presets": [
+            {"id": "local", "source": "custom", "base_url": "http://h/v1",
+             "api_key": "k", "embedding_model": "Qwen/Qwen3-Embedding-8B"},
+            {"id": "cloud", "source": "custom", "base_url": "http://other/v1",
+             "api_key": "k2", "embedding_model": "qwen3-embedding-8b-alias",
+             "model_key": "qwen-qwen3-embedding-8b"},
+        ],
+        "source": "custom",
+        "sources": {"custom": {"base_url": "http://legacy/v1", "api_key": "kl",
+                               "embedding_model": "legacy-emb", "rerank_model": ""}},
+    }})
+    assert cfg["preset"] == "local"
+    # the preset's connection is in force, the legacy rows are not
+    assert (cfg["base_url"], cfg["api_key"], cfg["embedding_model"]) == (
+        "http://h/v1", "k", "Qwen/Qwen3-Embedding-8B")
+    # no explicit model_key: derived from the model name
+    assert cfg["model_key"] == "qwen-qwen3-embedding-8b"
+
+
+def test_rag_config_explicit_model_key_wins_and_aliases_share_a_store():
+    """Two presets naming one real model through different providers or
+    aliases share a store by sharing one model_key."""
+    doc = {"rag": {"preset": "cloud", "presets": [
+        {"id": "local", "source": "custom", "base_url": "http://h/v1",
+         "api_key": "k", "embedding_model": "Qwen/Qwen3-Embedding-8B"},
+        {"id": "cloud", "source": "custom", "base_url": "http://other/v1",
+         "api_key": "k2", "embedding_model": "qwen3-embedding-8b-alias",
+         "model_key": "qwen-qwen3-embedding-8b"},
+    ]}}
+    local = store.rag_config({**doc, "rag": {**doc["rag"], "preset": "local"}})
+    cloud = store.rag_config(doc)
+    assert cloud["model_key"] == "qwen-qwen3-embedding-8b"
+    # derived-from-name and explicit agree: switching between these presets
+    # is the same store, whatever the endpoint or alias says
+    assert local["model_key"] == cloud["model_key"]
+
+
+def test_rag_config_dangling_preset_falls_back_to_the_legacy_rows():
+    doc = {"rag": {
+        "preset": "gone",
+        "presets": [{"id": "kept", "source": "custom", "base_url": "http://h/v1",
+                     "api_key": "k", "embedding_model": "emb"}],
+        "source": "custom",
+        "sources": {"custom": {"base_url": "http://legacy/v1", "api_key": "kl",
+                               "embedding_model": "legacy-emb", "rerank_model": ""}},
+    }}
+    cfg = store.rag_config(doc)
+    assert cfg["preset"] == ""
+    assert cfg["base_url"] == "http://legacy/v1"
+    assert cfg["model_key"] == ""  # legacy mode keeps the pre-preset paths
+
+
+def test_rag_config_rate_limit_coerces_and_zero_is_unlimited():
+    assert store.rag_config({})["rate_limit"] == 120
+    assert store.rag_config({"rag": {"rate_limit": 0}})["rate_limit"] == 0
+    assert store.rag_config({"rag": {"rate_limit": "30"}})["rate_limit"] == 30
+    assert store.rag_config({"rag": {"rate_limit": "nope"}})["rate_limit"] == 120
+    assert store.rag_config({"rag": {"rate_limit": -5}})["rate_limit"] == 0
+
+
+def test_rag_model_key_slug():
+    slug = store.rag_model_key_slug
+    assert slug("Qwen/Qwen3-Embedding-8B") == "qwen-qwen3-embedding-8b"
+    assert slug("bge-m3") == "bge-m3"
+    assert slug("Jina Embeddings v4 (prod)") == "jina-embeddings-v4-prod"
+    assert slug("  Mixed CASE  tokens ") == "mixed-case-tokens"
+    assert slug("") == ""
+    assert slug("한글 모델") == ""
+    assert len(slug("x" * 100)) == store.RAG_MODEL_KEY_MAX
+
+
+def test_clean_rag_preset_drops_unusable_rows():
+    assert store.clean_rag_preset("nope") is None
+    assert store.clean_rag_preset({"id": "Bad Name"}) is None
+    assert store.clean_rag_preset({}) is None
+    # source is case-insensitive; only "profile" is meaningful, anything
+    # else reads as the custom connection and is dropped from the row
+    assert store.clean_rag_preset({"id": "ok", "source": "PROFILE"}) == {"id": "ok", "source": "profile"}
+    assert store.clean_rag_preset({"id": "ok", "source": "profile", "unknown": "x"}) == \
+        {"id": "ok", "source": "profile"}
+    assert store.clean_rag_preset({"id": "ok", "source": "banana"}) == {"id": "ok"}
+    kept = store.rag_presets({"rag": {"presets": [
+        {"id": "one", "embedding_model": "e"}, {"id": "one", "embedding_model": "e2"},
+        {"id": "Bad"}, {"id": "two"},
+    ]}})
+    assert [p["id"] for p in kept] == ["one", "two"]
+    assert kept[0]["embedding_model"] == "e"  # the first row wins a duplicate id
+
+
+def test_index_path_uses_the_model_key_and_adopts_the_legacy_collection(tmp_path):
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    base = tmp_path
+    # no preset: the pre-preset path, whatever the model
+    assert svc._index_path(base, "sessions", {"model_key": ""}) == base / "sessions.zvec"
+    cfg = {"model_key": "qwen-qwen3-embedding-8b", "dimensions": 0}
+    # nothing on disk yet: a fresh collection under the key
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.qwen-qwen3-embedding-8b.zvec"
+    (base / "sessions.qwen-qwen3-embedding-8b.zvec").mkdir(parents=True)
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.qwen-qwen3-embedding-8b.zvec"
+    # only the pre-preset collection exists and it is the same identity:
+    # adopt it instead of embedding the corpus a second time
+    (base / "sessions.qwen-qwen3-embedding-8b.zvec").rmdir()
+    (base / "sessions.zvec").mkdir(parents=True)
+    (base / "sessions.meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "Qwen/Qwen3-Embedding-8B", "dims": 8,
+    }))
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.zvec"
+    # a different configured width is another index: no adoption
+    assert svc._index_path(base, "sessions", {"model_key": "qwen-qwen3-embedding-8b",
+                                              "dimensions": 4}) == \
+        base / "sessions.qwen-qwen3-embedding-8b.zvec"
+    # a legacy collection of another model is not adopted either
+    (base / "sessions.meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "other-model", "dims": 8,
+    }))
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.qwen-qwen3-embedding-8b.zvec"
+
+
+def test_rate_limiter_paces_requests(monkeypatch):
+    async def run():
+        monkeypatch.setattr(rag._RateLimiter, "WINDOW", 0.3)
+        limiter = rag._RateLimiter()
+        start = time.monotonic()
+        await limiter.acquire(2, 2)
+        await limiter.acquire(2, 2)  # over the cap: waits for the window to slide
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.25
+        assert limiter.view()["recent"] == 2
+        # a limit of 0 never waits
+        before = time.monotonic()
+        await limiter.acquire(50, 0)
+        assert time.monotonic() - before < 0.05
+
+    asyncio.run(run())
+
+
+def test_rate_limiter_slices_groups_larger_than_the_cap(monkeypatch):
+    """A single group with more requests than the cap must not crash:
+    the window can never hold n > limit stamps, and the wait-index math
+    indexed past the list. The group is admitted in cap-sized slices."""
+
+    async def run():
+        monkeypatch.setattr(rag._RateLimiter, "WINDOW", 0.3)
+        limiter = rag._RateLimiter()
+        start = time.monotonic()
+        await limiter.acquire(5, 3)  # used to raise IndexError
+        first = time.monotonic() - start
+        assert first >= 0.25  # slice 2 had to wait for slice 1 to slide
+        assert limiter.view()["recent"] == 2  # 5 = slices of 3 + 2; the 2-stamp slice remains
+        # the window is now full (2 + 3 > 3): the next admission paces
+        start = time.monotonic()
+        await limiter.acquire(3, 3)
+        assert time.monotonic() - start >= 0.2
+
+    asyncio.run(run())
+
+
+def test_presets_switch_stores_by_model_key_and_reuse_vectors(tmp_path, repo):
+    """The switch the feature exists for: two aliases of one real model keep
+    one collection (no re-embedding); a different model opens its own store
+    and backfills; switching back reuses what is on disk."""
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            holder: dict = {}
+
+            def cfg():
+                c = _cfg(server)
+                c.update(holder)
+                return c
+
+            svc = rag.RagService(board=_board(br, repo), config=cfg, root_dir=tmp_path / "rag")
+            key = svc._key("beads", repo)
+            base = tmp_path / "rag"
+            holder.update({"preset": "one", "model_key": "qwen-qwen3-embedding-8b",
+                           "embedding_model": "emb-a"})
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            assert prog.error is None
+            assert (base / f"{key}.qwen-qwen3-embedding-8b.zvec").is_dir()
+            record = json.loads((base / "active.json").read_text())
+            assert record["preset"] == "one" and record["model_key"] == "qwen-qwen3-embedding-8b"
+            assert record["embedding_model"] == "emb-a"
+            assert svc.status()["active"]["preset"] == "one"
+            embeds_after_first = len(ep.embed_calls)
+
+            # the alias preset: same store, no re-embed, the record moves on
+            holder.update({"preset": "two", "model_key": "qwen-qwen3-embedding-8b",
+                           "embedding_model": "emb-b"})
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            assert prog.error is None and prog.pending == 0
+            assert len(ep.embed_calls) == embeds_after_first  # nothing re-embedded
+            assert not (base / f"{key}.emb-b.zvec").exists()
+            record = json.loads((base / "active.json").read_text())
+            assert record["preset"] == "two" and record["embedding_model"] == "emb-b"
+            recorded_at = record["recorded_at"]
+            # the same selection does not rewrite the record
+            svc._record_active(cfg())
+            assert json.loads((base / "active.json").read_text())["recorded_at"] == recorded_at
+
+            # a genuinely different model: its own collection, a backfill
+            holder.update({"preset": "three", "model_key": "bge-m3",
+                           "embedding_model": "emb-c"})
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            assert prog.error is None and prog.indexed == 3  # the corpus, again
+            assert (base / f"{key}.bge-m3.zvec").is_dir()
+            assert len(ep.embed_calls) > embeds_after_first
+
+            # back to the first store: what it held is reused
+            embeds_before_return = len(ep.embed_calls)
+            holder.update({"preset": "one", "model_key": "qwen-qwen3-embedding-8b",
+                           "embedding_model": "emb-a"})
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            assert prog.error is None and prog.pending == 0
+            assert len(ep.embed_calls) == embeds_before_return
+            assert svc.status()["active"]["model_key"] == "qwen-qwen3-embedding-8b"
+            await svc.shutdown()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_preset_with_a_derived_key_adopts_the_legacy_collection(tmp_path, repo):
+    """The migration case: an index built before presets keeps serving when
+    a preset names the same model -- same identity, no second copy."""
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            legacy = _cfg(server, embedding_model="Qwen/Qwen3-Embedding-8B")
+            legacy["preset"] = ""
+            legacy["model_key"] = ""
+            svc = rag.RagService(board=_board(br, repo), config=lambda: legacy,
+                                 root_dir=tmp_path / "rag")
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            key = svc._key("beads", repo)
+            base = tmp_path / "rag"
+            assert (base / f"{key}.zvec").is_dir()  # the pre-preset path
+            before = len(ep.embed_calls)
+            await svc.shutdown()
+
+            preset = _cfg(server, embedding_model="qwen3-embedding-8b-alias")
+            preset.update({"preset": "cloud",
+                           "model_key": "qwen-qwen3-embedding-8b"})
+            svc2 = rag.RagService(board=_board(br, repo), config=lambda: preset,
+                                  root_dir=tmp_path / "rag")
+            prog = svc2.ensure_sync("beads", repo)
+            await svc2.wait_sync(prog, 5)
+            assert prog.error is None and prog.pending == 0  # adopted, not re-embedded
+            assert len(ep.embed_calls) == before
+            assert not list(base.glob(f"{key}.*.zvec"))  # no second collection
+            await svc2.shutdown()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_self_test_scores_sampled_entries_against_the_threshold(tmp_path, repo, monkeypatch):
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server, preset="one", model_key="qwen-qwen3-embedding-8b")
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg,
+                                 root_dir=tmp_path / "rag")
+            prog = svc.ensure_sync("beads", repo)
+            await svc.wait_sync(prog, 5)
+            assert prog.error is None
+
+            result = await svc.self_test("beads", repo, sample=3, threshold=0.5, top_k=2)
+            assert result["sampled"] == 3 and result["passed"] == 3 and result["failed"] == 0
+            assert result["similarity"]["max"] == pytest.approx(1.0)
+            assert result["similarity"]["min"] == pytest.approx(1.0)
+            assert result["model_key"] == "qwen-qwen3-embedding-8b"
+            assert result["preset"] == "one"
+            assert result["failures"] == []
+
+            # a low score instead of a confident self-hit: the sample fails
+            # and the report carries the score the index actually gave
+            index = await svc._index("beads", repo, cfg)
+            monkeypatch.setattr(index, "rank", lambda *a, **k: [("x-1", 0.2)])
+            result = await svc.self_test("beads", repo, sample=1, threshold=0.5, top_k=2)
+            assert result["passed"] == 0 and result["failed"] == 1
+            assert result["failures"][0]["score"] == pytest.approx(0.2)
+            assert result["failures"][0]["top"][0]["id"] == "x-1"
+
+            # nothing retrieves at all: the failure says "not in the top-k"
+            monkeypatch.setattr(index, "rank", lambda *a, **k: [])
+            result = await svc.self_test("beads", repo, sample=2, threshold=0.5, top_k=2)
+            assert result["passed"] == 0 and result["failed"] == 2
+            assert all(f["score"] is None for f in result["failures"])
+            await svc.shutdown()
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_self_test_refuses_when_unconfigured_or_empty(tmp_path, repo):
+    async def run():
+        off = rag.RagService(board=None, config=lambda: dict(store.RAG_DEFAULTS),
+                             root_dir=tmp_path / "rag")
+        with pytest.raises(rag.RagError):
+            await off.self_test("sessions")
+
+        cfg = _cfg_for_selftest()
+        svc = rag.RagService(board=None, manager=None, config=lambda: cfg,
+                             root_dir=tmp_path / "rag")
+        with pytest.raises(rag.RagError):
+            await svc.self_test("sessions")  # no registry: nothing to sample
+        with pytest.raises(ValueError):
+            await svc.self_test("nope")
+        with pytest.raises(ValueError):
+            await svc.self_test("sessions", threshold=2.0)
+
+    asyncio.run(run())
+
+
+def _cfg_for_selftest() -> dict:
+    cfg = dict(store.RAG_DEFAULTS)
+    cfg.update({"base_url": "http://unused/v1", "api_key": "k", "embedding_model": "e"})
+    return cfg

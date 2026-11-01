@@ -445,6 +445,8 @@ def test_briefing_compose_charges_the_session_it_briefs(monkeypatch):
 
 
 class _Client:
+    batch = 4  # what RagClient carries; _embed_group counts requests by it
+
     def __init__(self):
         self.calls = []
 
@@ -457,7 +459,8 @@ def test_rag_index_charges_each_chunk_to_its_documents_session():
     group = [rag.Doc("s1", "h", ["a", "b"], {"name": "s1"}),
              rag.Doc("beads:x:i-1:0", "h", ["c"], {"kind": "beads", "assignee": "s5"})]
     client = _Client()
-    svc = SimpleNamespace(_put_group=lambda index, group, vecs: None)
+    svc = SimpleNamespace(_put_group=lambda index, group, vecs: None,
+                          _limiter=rag._RateLimiter())
     asyncio.run(rag.RagService._embed_group(svc, client, None, group, rag.Progress()))
     [(texts, kw)] = client.calls
     assert texts == ["a", "b", "c"]

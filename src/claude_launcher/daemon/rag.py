@@ -23,13 +23,23 @@ the measured endpoint, which is why it scores a dozen and not the board.
 Indexes are machine-local derived data under ``<daemon dir>/rag/`` — the same
 rule the briefing cache (``sessions/<name>/briefing.json``) follows: ``~/.claude-launcher/.claunch.yaml`` carries configuration and
 is synced, this directory carries what a reindex can rebuild and is not. Each
-corpus is a zvec collection (``<key>.zvec/``) beside a small sidecar
+corpus is a zvec collection (``<key>.zvec/``, or ``<key>.<model-key>.zvec/``
+while a preset is active) beside a small sidecar
 (``<key>.meta.json``) holding the model, width and signature it was built
-under. Each entry remembers a content hash, so a sync embeds only what changed
+under. The ``model-key`` half is the store's identity: two presets that reach
+the same real model through different providers or name aliases share one
+collection by sharing one ``model_key``, so switching between them reuses the
+vectors instead of embedding the corpus again (claunch-7m5v8). Which model
+answers is recorded in ``active.json`` under the same directory, rewritten
+whenever the resolved selection changes. Each entry remembers a content hash,
+so a sync embeds only what changed
 since the last one; a full first index of a 778-issue board was measured at
 10-12 minutes and an incremental one at a second or two per changed issue,
 which is why syncing is a background task and a search reports how much of the
-corpus it covered rather than waiting for all of it.
+corpus it covered rather than waiting for all of it. Backfill requests are
+paced by ``rate_limit`` — a sliding window of five minutes the configured
+number of embedding requests may carry — so a corpus catch-up does not land
+on the endpoint as one burst (query embeddings are never delayed by it).
 
 A collection holds an exclusive lock on its directory — it refuses a second
 open even for reading — so one process at a time owns an index. That is the
@@ -50,7 +60,11 @@ times over embeds each changed document once.
 
 Configuration is the ``rag:`` block (``store.rag_config``); its ``source``
 says whether the endpoint and key are typed into the block (``custom``) or
-come from a claunch profile's backend (``profile``). An empty api key
+come from a claunch profile's backend (``profile``). A block may instead point
+``preset:`` at one of its ``presets:`` — saved connections under an id —
+and the named preset's fields are then the connection in force; its
+``model_key``, explicit or derived from its ``embedding_model``, decides
+which store a corpus opens. An empty api key
 means the feature is off: every producer is a no-op and the queue stays empty
 until the block is filled in, at which point the watcher's next tick catches
 up. The key leaves this module only as the ``Authorization`` header of the
@@ -575,9 +589,9 @@ class VectorIndex:
 
     Keyed by document id; each entry keeps the content hash it was embedded
     from, how many chunks it has, and the display metadata a result needs, so
-    a search answers from the index alone. ``model``/``dims`` are recorded in
-    a sidecar and a collection made under another model is discarded rather
-    than mixed.
+    a search answers from the index alone. ``model``/``model_key``/``dims``
+    are recorded in a sidecar and a collection made under another identity is
+    discarded rather than mixed.
 
     The vectors themselves stay in the collection. Ranking is a matrix
     operation inside zvec rather than a Python loop over every stored vector:
@@ -587,10 +601,16 @@ class VectorIndex:
     :meth:`neighbors` fetches the one vector it needs (0.3 ms).
     """
 
-    def __init__(self, path: Path, *, model: str, dims: int, signature: str = "") -> None:
+    def __init__(self, path: Path, *, model: str, dims: int, signature: str = "",
+                 model_key: str = "") -> None:
         self.signature = signature
         self.path = path
         self.model = model
+        #: The store identity (``rag.model_key``): which collection a model
+        #: opens is decided by this, so two aliases of one real model -- same
+        #: key through different providers or names -- keep using the vectors
+        #: they already have instead of re-embedding the corpus.
+        self.model_key = model_key
         self.dims = dims
         self.entries: Dict[str, Entry] = {}
         self.keywords = search_keywords.KeywordIndex()
@@ -705,7 +725,17 @@ class VectorIndex:
         file_dims = int(data.get("dims") or 0)
         # dims 0 means "the model's own width": adopt whatever the file was
         # made with. A configured width that differs is another index.
-        if data.get("model") != self.model or (self.dims and file_dims != self.dims) or (self.signature and data.get("signature") != self.signature):
+        # Files written before model keys existed carry none; their identity
+        # is the model name's slug, which is exactly what a preset without an
+        # explicit key derives -- so a pre-preset collection reads as the
+        # same identity the first preset names.
+        file_key = str(data.get("model_key") or "") or store.rag_model_key_slug(
+            str(data.get("model") or ""))
+        if self.model_key:
+            if file_key != self.model_key or (self.dims and file_dims != self.dims):
+                return
+        elif (data.get("model") != self.model or (self.dims and file_dims != self.dims)
+              or (self.signature and data.get("signature") != self.signature)):
             return
         if not self.dims:
             self.dims = file_dims
@@ -752,6 +782,7 @@ class VectorIndex:
         data = {
             "format": FORMAT,
             "model": self.model,
+            "model_key": self.model_key,
             "dims": self.dims,
             "signature": self.signature,
             "updated_at": self.updated_at,
@@ -971,11 +1002,77 @@ class VectorIndex:
         return hits
 
 
-def _index_fits(index: Optional[VectorIndex], model: str, dims: int, signature: str) -> bool:
-    """Whether an open index was made under the settings now configured."""
+def _index_fits(index: Optional[VectorIndex], model: str, dims: int, signature: str,
+                model_key: str = "") -> bool:
+    """Whether an open index was made under the settings now configured.
+
+    With a ``model_key`` the identity decides: aliases of one real model
+    share a key and one collection, so the raw model name and endpoint are
+    allowed to differ. Without one, the pre-preset comparison stands.
+    """
     if index is None:
         return False
+    if model_key:
+        return index.model_key == model_key and not (dims and index.dims != dims)
     return index.model == model and index.signature == signature and not (dims and index.dims != dims)
+
+
+def _stored_meta(path: Path) -> Optional[dict]:
+    """The sidecar of a collection directory, when it is one of ours."""
+    try:
+        data = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("format") == FORMAT else None
+
+
+class _RateLimiter:
+    """A sliding window on embedding requests (see ``rag.rate_limit``).
+
+    One consumer task drains the sync queue, so a single uncorrelated
+    limiter inside the service is enough: each ``acquire`` waits until the
+    window has room for the caller's requests, then records them. A limit
+    of 0 disables the cap. The window is fixed at five minutes -- the unit
+    the configuration speaks in.
+    """
+
+    WINDOW = 300.0
+
+    def __init__(self) -> None:
+        self._times: List[float] = []
+
+    async def acquire(self, n: int, limit: int) -> None:
+        if limit <= 0 or n <= 0:
+            return
+        # A group larger than the cap can never fit the window as one
+        # admission (``len + n <= limit`` stays false even on an empty
+        # window), and the wait-index math below assumes ``n <= limit`` --
+        # slice oversized groups so each slice is admissible.
+        remaining = n
+        while remaining > 0:
+            step = min(remaining, limit)
+            await self._acquire(step, limit)
+            remaining -= step
+
+    async def _acquire(self, n: int, limit: int) -> None:
+        while True:
+            now = time.monotonic()
+            cutoff = now - self.WINDOW
+            self._times = [t for t in self._times if t > cutoff]
+            if len(self._times) + n <= limit:
+                self._times.extend([now] * n)
+                return
+            # Admitting n needs len + n - limit of the oldest stamps to age
+            # out; wait for the newest of those. n <= limit keeps the index
+            # inside the list.
+            k = len(self._times) + n - limit - 1
+            wait = self._times[k] + self.WINDOW - now
+            await asyncio.sleep(max(wait, 0.05))
+
+    def view(self) -> dict:
+        now = time.monotonic()
+        cutoff = now - self.WINDOW
+        return {"window_s": int(self.WINDOW), "recent": sum(1 for t in self._times if t > cutoff)}
 
 
 def _now_iso() -> str:
@@ -1099,6 +1196,11 @@ class RagService:
         #: Whether the last watcher tick saw the feature configured — the edge
         #: a later-filled ``rag:`` block is caught on.
         self._armed = False
+        #: Paces document backfills against ``rag.rate_limit`` (see the class).
+        self._limiter = _RateLimiter()
+        #: The last selection written to ``active.json`` -- compared to skip
+        #: rewriting a file whose content already matches.
+        self._active_recorded: Optional[dict] = None
         #: Set by :meth:`shutdown`; a hook that fires after it (a late board
         #: write) must not start a consumer on a loop that is closing.
         self._closed = False
@@ -1143,17 +1245,21 @@ class RagService:
         """
         key = self._key(kind, root)
         model = str(cfg.get("embedding_model") or "")
+        model_key = str(cfg.get("model_key") or "")
         dims = int(cfg.get("dimensions") or 0)
         signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
         self._roots[key] = root
+        self._record_active(cfg)
         while True:
             index = self._indexes.get(key)
-            if _index_fits(index, model, dims, signature):
+            if _index_fits(index, model, dims, signature, model_key):
                 return index
             task = self._loading.get(key)
             if task is None:
                 base = self._root_dir if self._root_dir is not None else paths.rag_dir()
-                fresh = VectorIndex(base / f"{key}.zvec", model=model, dims=dims, signature=signature)
+                fresh = VectorIndex(
+                    self._index_path(base, key, cfg),
+                    model=model, dims=dims, signature=signature, model_key=model_key)
                 # Out of the table before the thread starts: the old
                 # collection is closed there, and nothing should pick it up
                 # meanwhile.
@@ -1164,6 +1270,92 @@ class RagService:
             # An open started under other settings is waited for and then
             # checked again, like the table above.
             await asyncio.shield(task)
+
+    def _index_path(self, base: Path, key: str, cfg: dict) -> Path:
+        """The collection directory for this corpus under the resolved model.
+
+        Without a preset the path is what it always was (``<key>.zvec``) —
+        existing collections keep serving. With one, the store's identity is
+        the preset's ``model_key``: same key, same directory, so presets that
+        reach the same real model through different providers or name aliases
+        reuse one collection instead of embedding the corpus again. A preset
+        whose key matches the collection built before presets existed adopts
+        that directory rather than starting a second copy of the same model's
+        vectors.
+        """
+        legacy = base / f"{key}.zvec"
+        slug = str(cfg.get("model_key") or "").strip()
+        if not slug:
+            return legacy
+        slugged = base / f"{key}.{slug}.zvec"
+        if slugged.is_dir():
+            return slugged
+        dims = int(cfg.get("dimensions") or 0)
+        meta = _stored_meta(legacy)
+        meta_key = ""
+        if meta is not None:
+            meta_key = str(meta.get("model_key") or "") or store.rag_model_key_slug(
+                str(meta.get("model") or ""))
+        if meta_key == slug and (not dims or int(meta.get("dims") or 0) == dims):
+            return legacy
+        return slugged
+
+    def _record_active(self, cfg: dict) -> None:
+        """Remember which model answers, in ``<rag dir>/active.json``.
+
+        Written whenever the resolved selection changes (and once per boot):
+        which preset is in force, which embedding model and store identity it
+        resolved to, and through which connection. The record is how a switch
+        is read back later — the index files show a model name, this file
+        shows the selection that put it there.
+        """
+        if not store.rag_configured(cfg):
+            return
+        record = {
+            "model_key": str(cfg.get("model_key") or ""),
+            "preset": str(cfg.get("preset") or ""),
+            "embedding_model": str(cfg.get("embedding_model") or ""),
+            "source": str(cfg.get("source") or "custom"),
+            "connection": str(cfg.get("profile") or cfg.get("base_url") or ""),
+            "recorded_at": _now_iso(),
+        }
+        if record == self._active_recorded:
+            return
+        base = self._root_dir if self._root_dir is not None else paths.rag_dir()
+        path = base / "active.json"
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        stale = {
+            "model_key": str(existing.get("model_key") or ""),
+            "preset": str(existing.get("preset") or ""),
+            "embedding_model": str(existing.get("embedding_model") or ""),
+            "source": str(existing.get("source") or "custom"),
+            "connection": str(existing.get("connection") or ""),
+            "recorded_at": str(existing.get("recorded_at") or ""),
+        } if isinstance(existing, dict) else None
+        if stale is not None and all(stale[k] == record[k] for k in (
+            "model_key", "preset", "embedding_model", "source", "connection"
+        )):
+            record["recorded_at"] = stale["recorded_at"]
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+                atomic.replace(tmp, path)
+            self._active_recorded = record
+        except OSError:
+            pass
+
+    def active_record(self) -> dict:
+        """The last selection this daemon wrote, or ``{}`` before the first."""
+        base = self._root_dir if self._root_dir is not None else paths.rag_dir()
+        try:
+            data = json.loads((base / "active.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     async def _swap_index(self, key: str, old: Optional[VectorIndex], fresh: VectorIndex) -> VectorIndex:
         def work() -> None:
@@ -1267,14 +1459,15 @@ class RagService:
             # the error paths below write it.
             group: List[Doc] = []
             chunks = 0
+            limit = int(cfg.get("rate_limit") or 0)
             for doc in stale:
                 if group and chunks + len(doc.chunks) > batch:
-                    await self._embed_group(client, index, group, prog)
+                    await self._embed_group(client, index, group, prog, limit)
                     group, chunks = [], 0
                 group.append(doc)
                 chunks += len(doc.chunks)
             if group:
-                await self._embed_group(client, index, group, prog)
+                await self._embed_group(client, index, group, prog, limit)
             await index.save_soon()
         except RagError as exc:
             prog.error = str(exc)
@@ -1326,8 +1519,11 @@ class RagService:
             index.put(doc, vecs[pos:pos + n])
             pos += n
 
-    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress) -> None:
+    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress, limit: int = 0) -> None:
         texts = [c for d in group for c in d.chunks]
+        # One client.embed is one HTTP request per batch slice; the limiter
+        # counts requests, not texts, so a group pays for the calls it makes.
+        await self._limiter.acquire(math.ceil(len(texts) / max(1, int(client.batch or 1))), limit)
         owners = [doc_session(d) for d in group for _ in d.chunks]
         vecs = await client.embed(texts, owners=owners)
         await pools.background(self._put_group, index, group, vecs)
@@ -1979,6 +2175,89 @@ class RagService:
             results.append(row)
         return {"id": issue_id, "results": results, "index": prog.view(), "indexed": True}
 
+    # -- self test -------------------------------------------------------- #
+    async def self_test(self, kind: str, root: Optional[Path] = None, *,
+                        sample: int = 20, threshold: float = 0.5,
+                        top_k: int = 5) -> dict:
+        """Sample the corpus and check each picked entry retrieves itself
+        within ``top_k`` at a similarity of at least ``threshold``.
+
+        The question this answers: does the store the active model opened
+        actually retrieve its own entries with confident similarity — the
+        check to run after switching presets, when the vectors came from a
+        backfill under a model whose quality is being compared. Each sampled
+        document's first chunk is embedded as a query (the query path, which
+        the rate limiter never delays) and ranked; the pass criterion is the
+        document itself appearing in the top ``top_k`` at ``threshold`` or
+        above. Identical text embeds to (near) the unit vector, so a healthy
+        index scores self-hits close to 1.0 — a collapse toward the threshold
+        says the store and the model disagree.
+
+        Raises :class:`RagError` when the feature is unconfigured or the
+        corpus has nothing to sample.
+        """
+        cfg = self.config()
+        if not store.rag_configured(cfg):
+            raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
+        if kind not in KINDS:
+            raise ValueError(f"unknown corpus {kind!r}")
+        try:
+            sample = max(1, min(int(sample), 200))
+        except (TypeError, ValueError):
+            sample = 20
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = 0.5
+        if not -1.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between -1 and 1")
+        try:
+            top_k = max(1, min(int(top_k), 50))
+        except (TypeError, ValueError):
+            top_k = 5
+        index = await self._index(kind, root, cfg)
+        docs = [d for d in await self._docs(kind, root) if d.chunks and d.chunks[0].strip()]
+        if not docs:
+            raise RagError(f"rag: corpus {self._key(kind, root)} has no documents to sample")
+        # A deterministic spread over the corpus rather than a random pick:
+        # re-running the test over the same index measures the same entries.
+        step = len(docs) / sample
+        picked = [docs[int(i * step)] for i in range(min(sample, len(docs)))]
+        client = self._client(cfg)
+        scores: List[float] = []
+        failures = []
+        for doc in picked:
+            qvec = (await client.embed([doc.chunks[0]], purpose="self-test"))[0]
+            hits = index.rank(qvec, top_k)
+            hit_scores = dict(hits)
+            score = hit_scores.get(doc.id)
+            scores.append(score if score is not None else 0.0)
+            if score is None or score < threshold:
+                failures.append({
+                    "id": doc.id,
+                    "score": None if score is None else round(score, 4),
+                    "top": [{"id": d, "score": round(s, 4)} for d, s in hits[:3]],
+                })
+        ordered = sorted(scores)
+        return {
+            "key": self._key(kind, root),
+            "model_key": str(cfg.get("model_key") or ""),
+            "preset": str(cfg.get("preset") or ""),
+            "embedding_model": str(cfg.get("embedding_model") or ""),
+            "sampled": len(picked),
+            "passed": len(picked) - len(failures),
+            "failed": len(failures),
+            "threshold": threshold,
+            "top_k": top_k,
+            "similarity": {
+                "min": round(ordered[0], 4),
+                "median": round(ordered[len(ordered) // 2], 4),
+                "max": round(ordered[-1], 4),
+            },
+            "failures": failures,
+            "tested_at": _now_iso(),
+        }
+
     # -- status --------------------------------------------------------- #
     def status(self) -> dict:
         cfg = self.config()
@@ -2010,6 +2289,11 @@ class RagService:
             "rerank_model": cfg.get("rerank_model") or "",
             "verify_tls": bool(cfg.get("verify_tls", True)),
             "dimensions": int(cfg.get("dimensions") or 0),
+            "rate_limit": int(cfg.get("rate_limit") or 0),
+            "preset": cfg.get("preset") or "",
+            "model_key": cfg.get("model_key") or "",
+            "active": self.active_record(),
+            "rate": self._limiter.view(),
             "indexes": indexes,
             "queue": self.queue_view(),
         }
