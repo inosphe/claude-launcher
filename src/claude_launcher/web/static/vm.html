@@ -19,7 +19,19 @@
   <button id="vm-reconcile" type="button" title="tart가 보고하는 상태에 기록을 맞춘다">⟳ 상태 맞추기</button>
 </header>
 <main id="vm-main">
-  <nav id="vm-list" aria-label="VM 목록"></nav>
+  <aside id="vm-side">
+    <nav id="vm-list" aria-label="VM 목록"></nav>
+    <details id="vm-register">
+      <summary>VM 등록</summary>
+      <p class="vm-muted">이 호스트의 tart에 있는 VM을 골라 등록합니다. 등록해도 VM은 시작·종료되지 않고, 실행 중이면 상태만 채택합니다.</p>
+      <label class="sr-only" for="vm-tart-pick">등록할 tart VM</label>
+      <select id="vm-tart-pick"><option value="">tart VM 선택</option></select>
+      <label class="sr-only" for="vm-register-id">등록 이름</label>
+      <input id="vm-register-id" type="text" maxlength="64" placeholder="등록 이름 (기본: tart 이름)" autocomplete="off" spellcheck="false">
+      <button id="vm-register-go" type="button" disabled>등록</button>
+      <p id="vm-register-note" class="vm-muted" hidden></p>
+    </details>
+  </aside>
   <section id="vm-detail" hidden>
     <div id="vm-head">
       <h1 id="vm-name"></h1>
@@ -66,10 +78,14 @@
     <div id="vm-grant-add">
       <label class="sr-only" for="vm-grant-session">권한을 줄 세션</label>
       <select id="vm-grant-session"><option value="">세션 선택</option></select>
-      <button id="vm-grant" type="button">view 권한 부여</button>
+      <input id="vm-grant-session-text" type="text" maxlength="64" placeholder="세션 이름 (목록을 읽지 못했을 때)" autocomplete="off" spellcheck="false" hidden>
+      <label><input type="checkbox" id="vm-grant-view" checked disabled> view</label>
+      <label><input type="checkbox" id="vm-grant-control"> control</label>
+      <label><input type="checkbox" id="vm-grant-exec"> exec</label>
+      <button id="vm-grant" type="button">권한 부여</button>
     </div>
   </section>
-  <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. <code>claunch vm add &lt;id&gt; --ssh-key &lt;경로&gt;</code>로 등록하십시오.</p>
+  <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. 왼쪽 아래 'VM 등록'에서 이 호스트의 tart VM을 골라 등록하십시오. 셸에서는 <code>claunch vm add &lt;id&gt;</code>와 <code>claunch vm reconcile</code>을 실행해도 됩니다.</p>
 </main>
 <script src="static/vm.js"></script>
 </body>

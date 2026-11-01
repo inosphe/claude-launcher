@@ -137,6 +137,7 @@ async def _api(tmp_path, cap):
     vm_api.install(app, reg, mgr, hub, frames)
     async with TestClient(TestServer(app)) as client:
         client.reg = reg
+        client.mgr_fake = fake
         yield client
 
 
