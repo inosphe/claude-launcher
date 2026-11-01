@@ -587,12 +587,13 @@ class SessionReminderService:
         (:mod:`session_fault`: a usage limit, a rejected login ...). Such a
         harness answers every typed reminder with the same fault line, so no
         repeating source is delivered to it until the fault's window ends
-        (claunch-ijot0)."""
+        (claunch-ijot0), or its longer hold when the fault keeps coming back
+        (claunch-16j5v)."""
         try:
             session = self.manager.get(name)
         except Exception:  # noqa: BLE001 - an unknown session has no fault
             return False
-        return session_fault.is_active(session)
+        return session_fault.holds_notices(session)
 
     def _rearm_session(self, name: str, now: Optional[float] = None) -> List[str]:
         """Re-arm every repeating source currently held for one session."""

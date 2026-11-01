@@ -67,7 +67,11 @@ window를 쓴다. 상대 표기(`resets in 3h`)도 읽는다.
 `overloaded`). 코드로 읽는 판정도 `common:`에 있어야 그 판정이 다른 하네스에서도
 선다 — 401과 429가 `claude` 목록에만 있던 동안 다른 하네스의 같은 문구는 fault로
 서지 않았다. 한도를 적은 429는 rate window가 아니라 소진된 플랜이므로, 한도
-문구가 같은 창에 있으면 그 문구가 이긴다(아래의 판정 규칙).
+문구가 같은 창에 있으면 그 문구가 이긴다(아래의 판정 규칙). `opencode` 경로 뒤의
+프로바이더가 쓰는 `Request rejected (429) · Go usage limit exceeded`도 `common:`의
+`\busage limit exceeded\b` 항목으로 `usage_limit`(24시간 창, 자동 pause 대상)으로
+읽는다(claunch-16j5v). 이 항목 전에는 그 줄이 맨 429 항목에만 매칭되어
+`rate_limit`(15분)으로 읽혔다.
 
 `529 Overloaded`는 프로바이더가 요청을 거절하는 동안 하네스가 스스로 재시도하는
 상태다(`API Error: 529 Overloaded — retrying in 30s (attempt 3/10)`). 창을
@@ -236,8 +240,9 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 ## fault가 바꾸는 데몬 동작
 
-- 반복 재촉: fault가 활성인 세션에는 주기적으로 반복되는 재촉을 보내지 않는다
-  (claunch-ijot0). 모든 kind가 대상이고, 판정은 `session_fault.is_active` 하나다.
+- 반복 재촉: fault가 활성이거나 보류(`held`) 중인 세션에는 주기적으로 반복되는
+  재촉을 보내지 않는다(claunch-ijot0, claunch-16j5v). 모든 kind가 대상이고, 판정은
+  `session_fault.holds_notices` 하나다(활성 판정은 `session_fault.is_active`).
   대상은 cflow v2 재촉(renudge, `Cflow2Clock._driver_faulted`), 세션 리마인더
   (`SessionReminderService.session_faulted` — cflow·role·prompt pack 블록),
   stall ping(`StallPingClock`, 기본 꺼짐)이다.
@@ -245,6 +250,21 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   채운다(s29: 주간 한도 상태에서 10분마다 8시간 동안 입력됨). 바쁜 driver와
   같은 방식으로 건너뛰어 간격을 쓰지 않으므로, fault 창이 끝난 뒤 첫 pass에서
   한 번 재촉한다. 런이 실제로 움직인 알림(wait 발화, 위임 완료)은 그대로 보낸다.
+- 반복 보류(claunch-16j5v): 창이 끝난 직후의 재촉이 같은 fault를 다시 띄우면, 그
+  재촉은 화면만 채운 것이다(s6252, 2026-11-01: `Go usage limit exceeded`가
+  15분짜리 `rate_limit`으로 읽혀 17:53·18:08·18:24에 재촉과 429가 반복됨, strikes 9).
+  그래서 run마다 `repeats`와 `hold_until`을 기록한다.
+  - `repeats`: 직전 run의 보류가 끝난 뒤 kind의 창 하나 안에 다시 관측된 연쇄의
+    길이. 첫 관측은 1이고, 창 하나보다 늦게 돌아온 관측은 1로 다시 시작한다.
+    `strikes`는 간격과 무관하게 모든 재관측을 센다. `cleared` 여부는 연쇄를 끊지
+    않는다 — 입력된 재촉이 fault 줄을 화면 밖으로 밀어 run을 닫기 때문이다.
+  - `hold_until`: `since + min(window × 2^(repeats−1), NOTICE_HOLD_CAP)`. 상한은
+    6시간이다(15분 창: 15·30·60·120·240·360분). 화면이 바뀌지 않은 채 끝난 정지도
+    상한 안에 재촉을 한 번 받는다. 하네스가 리셋 시각을 적었으면(`until_stated`)
+    `hold_until`은 `until`과 같다.
+  - `held`: 창이 끝났고(`now >= until`) `hold_until` 전이며 `cleared`가 없음.
+    화면이 fault 줄을 지나 움직이면 창과 같이 보류도 그 자리에서 끝난다. 배지·
+    레일은 `held`를 표시하지 않는다(`active`만 표시).
 - 자동 pause: `usage_limit`이 활성인 idle 세션은 데몬이 pause한다
   (`daemon/fault_pause.py`, 30초 주기, `ended_by`는 `daemon`/`usage-limit`).
   pause된 세션은 입력을 받지 않고, 리더면 아래 카드도 내려간다. 바쁜 세션은

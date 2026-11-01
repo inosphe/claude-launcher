@@ -1455,8 +1455,9 @@ class StallPingClock:
             entry = self._seen.get(key)
             # A session stopped by a session fault (a usage limit ...) is not
             # a stall a ping can move: it would answer with the fault line.
-            # Arm, never fire, until the fault's window ends (claunch-ijot0).
-            working = self._working(session) or session_fault.is_active(session)
+            # Arm, never fire, until the fault's window ends (claunch-ijot0),
+            # or its longer hold when it keeps coming back (claunch-16j5v).
+            working = self._working(session) or session_fault.holds_notices(session)
             if entry is None or entry["pos"] != pos or working:
                 # Working, or moved, or first sight: arm, never fire. Only an
                 # unbroken stretch of *stopped at the same position* counts.
