@@ -69,3 +69,14 @@ def test_the_panel_has_the_preset_controls_and_the_dns_notice():
     assert "networksetup -setdnsservers" in html and "admin 비밀번호" in html
     assert "confirm(" in js[js.index("function deletePreset"):]
     assert "innerHTML" not in js
+
+
+def test_the_panel_has_the_network_section_and_its_warning():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    for ident in ("vm-expose-go", "vm-allow-go", "vm-net-warning", "vm-net-pending", "vm-expose", "vm-allow"):
+        assert f'id="{ident}"' in html
+    assert "같은 LAN의 모든 기기" in html and "호스트 방화벽은 바꾸지 않습니다" in html
+    assert "api/vm/${encodeURIComponent(selected)}/expose" in js and "/allow" in js
+    assert "192.168.1.213" in html and "/32" in html   # the placeholder shows the shape of the value
+    assert "innerHTML" not in js

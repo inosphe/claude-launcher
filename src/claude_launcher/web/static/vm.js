@@ -115,7 +115,67 @@ function renderDetail(vm) {
     : (vm.needs_observe && vm.controller ? "돌려받은 세션이 화면을 다시 확인할 때까지 조작을 시작하지 않습니다." : "");
   manageTouch();
   renderGrants(vm);
+  renderNet(vm);
 }
+function renderNet(vm) {
+  const pending = $("vm-net-pending");
+  const listed = (vm.expose || []).length + (vm.allow || []).length > 0;
+  pending.hidden = !(vm.net_pending);
+  pending.textContent = vm.net_pending
+    ? (vm.net_applied_known ? "저장된 설정이 실행 중인 VM과 다릅니다. VM을 종료한 뒤 다시 시작하면 적용됩니다."
+      : (listed ? "실행 중인 VM이 이 설정으로 시작되었는지 알 수 없습니다(데몬이 재기동된 뒤 채택된 VM). 종료한 뒤 다시 시작하면 적용됩니다." : ""))
+    : "";
+  const ex = document.querySelector("#vm-expose tbody");
+  ex.replaceChildren();
+  for (const pair of vm.expose || []) {
+    const [ext, inner] = pair.split(":");
+    const tr = document.createElement("tr");
+    tr.append(cell(ext), cell(inner));
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "삭제";
+    b.addEventListener("click", () => act(`포트 ${ext} 노출 해제`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/expose`, { action: "rm", external: ext })));
+    td.appendChild(b);
+    tr.appendChild(td);
+    ex.appendChild(tr);
+  }
+  const al = document.querySelector("#vm-allow tbody");
+  al.replaceChildren();
+  for (const cidr of vm.allow || []) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell(cidr));
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "삭제";
+    b.addEventListener("click", () => act(`허용 ${cidr} 해제`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/allow`, { action: "rm", cidr })));
+    td.appendChild(b);
+    tr.appendChild(td);
+    al.appendChild(tr);
+  }
+}
+$("vm-expose-go").addEventListener("click", () => {
+  const external = $("vm-expose-ext").value.trim();
+  const internal = $("vm-expose-int").value.trim();
+  if (!selected || !external || !internal) return;
+  if (!confirm(`호스트의 ${external} 포트를 게스트의 ${internal} 포트로 연결합니다. 같은 LAN의 모든 기기에서 접속할 수 있게 됩니다. 계속합니까?`)) return;
+  act(`포트 ${external}:${internal} 노출`, async () => {
+    await post(`api/vm/${encodeURIComponent(selected)}/expose`, { action: "add", external, internal });
+    $("vm-expose-ext").value = "";
+    $("vm-expose-int").value = "";
+  });
+});
+$("vm-allow-go").addEventListener("click", () => {
+  const cidr = $("vm-allow-cidr").value.trim();
+  if (!selected || !cidr) return;
+  act(`허용 ${cidr}`, async () => {
+    await post(`api/vm/${encodeURIComponent(selected)}/allow`, { action: "add", cidr });
+    $("vm-allow-cidr").value = "";
+  });
+});
 function renderGrants(vm) {
   const body = document.querySelector("#vm-grants tbody");
   body.replaceChildren();

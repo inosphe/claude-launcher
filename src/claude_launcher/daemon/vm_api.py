@@ -49,7 +49,8 @@ _STATUS = {
     "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
-    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_preset_exists": 409,
+    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
+    "vm_allow_holds_host": 400, "vm_preset_exists": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
 }
@@ -200,7 +201,8 @@ def _viewable(reg: Registry, session: str):
 
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
-HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error")
+HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
+             "net_applied_known")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -374,6 +376,55 @@ async def h_preset_create(request: web.Request) -> web.Response:
         except VmError as exc:
             why = f"{exc.code}: {exc}"
     return web.json_response({"vm": reg.view(vm_id), "started": started, "why": why}, status=201)
+
+
+async def h_expose(request: web.Request) -> web.Response:
+    """Publish or withdraw a guest TCP port on the host's egress interface
+    (``tart run --net-softnet-expose``): the user's, applied at the next start."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        action = str(body.get("action") or "")
+        if action == "add":
+            _trace(request, reg, vm_id, "expose_add", external=body.get("external"),
+                   internal=body.get("internal"))
+            reg.expose_add(vm_id, body.get("external"), body.get("internal"))
+        elif action == "rm":
+            _trace(request, reg, vm_id, "expose_rm", external=body.get("external"))
+            reg.expose_remove(vm_id, body.get("external"))
+        else:
+            raise VmError("vm_bad_request", "'action' is add or rm")
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_allow(request: web.Request) -> web.Response:
+    """Let softnet pass traffic to and from an IPv4 range inside the blocked
+    private ranges (``--net-softnet-allow``): the user's, narrow ranges only,
+    applied at the next start."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        action = str(body.get("action") or "")
+        if action == "add":
+            addrs = await asyncio.to_thread(mgr._host_addrs)
+            _trace(request, reg, vm_id, "allow_add", cidr=str(body.get("cidr")))
+            reg.allow_add(vm_id, body.get("cidr"), addrs)
+        elif action == "rm":
+            _trace(request, reg, vm_id, "allow_rm", cidr=str(body.get("cidr")))
+            reg.allow_remove(vm_id, body.get("cidr"))
+        else:
+            raise VmError("vm_bad_request", "'action' is add or rm")
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
 
 
 async def h_remove(request: web.Request) -> web.Response:
@@ -836,6 +887,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-presets/{name}/describe", h_preset_describe)
     r.add_post("/api/vm-presets/{name}/delete", h_preset_delete)
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)
+    r.add_post("/api/vm/{id}/expose", h_expose)
+    r.add_post("/api/vm/{id}/allow", h_allow)
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)
     r.add_post("/api/vm/{id}/revoke_controller", h_revoke_controller)
