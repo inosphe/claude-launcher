@@ -156,6 +156,18 @@ common:
       You'?ve hit your (?:weekly|5-hour|daily) limit
     sample: |-
       You've hit your weekly limit · resets Oct 26, 9am (Asia/Seoul)
+  # A plan's quota spent, worded by the provider behind an `opencode` route
+  # (s6252, 2026-11-01: "Go usage limit exceeded" under a `claude` harness).
+  # The line also carries "Request rejected (429)", which alone reads as a
+  # 15-minute rate_limit; this match starts later on the same row, so it
+  # decides, and the session is held as a usage limit (24-hour window, the
+  # fault-pause clock's auto-pause) instead of being re-nudged every
+  # 15 minutes into the same 429 (claunch-16j5v).
+  - kind: usage_limit
+    pattern: |-
+      \busage limit exceeded\b
+    sample: |-
+      API Error: Request rejected (429) · Go usage limit exceeded
   # A provider answering with a JSON error body, whatever harness painted it.
   - kind: auth
     pattern: |-

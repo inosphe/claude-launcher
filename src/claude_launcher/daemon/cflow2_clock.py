@@ -918,12 +918,14 @@ class Cflow2Clock:
         error ...). Such a harness answers every typed notice with the same
         fault message, so a re-nudge only fills its screen (claunch-ijot0:
         s29 under a weekly limit got one every ten minutes for eight hours).
+        A fault that comes straight back after its window stays held past
+        it, twice as long each time (claunch-16j5v, ``holds_notices``).
         """
         try:
             session = self.manager.get(cstore.session_of(scope))
         except Exception:
             return False
-        return session_fault.is_active(session)
+        return session_fault.holds_notices(session)
 
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:

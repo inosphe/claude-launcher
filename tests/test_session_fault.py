@@ -781,6 +781,127 @@ def test_a_kind_that_comes_back_after_its_window_is_a_second_sighting():
     assert later["active"] is True
 
 
+# ------------------------------------------------------- repeat notice hold
+
+def _rate_catalog(window=60):
+    return session_fault.load(
+        "version: 1\n"
+        "kinds:\n"
+        "  rate_limit: {label: rate limit, action: wait, window: %d, resolved_by: provider}\n"
+        "common: []\n"
+        "harnesses:\n"
+        "  claude:\n"
+        "    - kind: rate_limit\n"
+        "      pattern: 'Request rejected \\(429\\)'\n" % window
+    )
+
+
+LINE_429 = "API Error: Request rejected (429)"
+
+
+def test_the_s6252_quota_line_is_a_usage_limit_over_the_generic_429():
+    """claunch-16j5v: the provider's quota sentence behind an opencode route
+    read as a 15-minute rate limit and was re-nudged every 15 minutes."""
+    found = session_fault.default().match(
+        "claude", "API Error: Request rejected (429) · Go usage limit exceeded"
+    )
+    assert found and found[0].name == "usage_limit"
+
+
+def test_a_first_sighting_holds_notices_for_its_window_only():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    view = det.view(now=1000.0)
+    assert view["repeats"] == 1
+    assert view["hold_until"] == view["until"]
+    assert det.view(now=1061.0)["held"] is False
+
+
+def test_a_fault_that_comes_straight_back_doubles_the_hold():
+    """The notice typed when the hold ends meets the same stop: each such
+    return holds twice as long as the one before."""
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)  # until 1060, hold 1060
+    det.scan(_Screen("re-nudge", LINE_429), now=1070.0)
+    view = det.view(now=1070.0)
+    assert view["repeats"] == 2
+    assert view["until"] == session_fault._iso(1130.0)
+    assert view["hold_until"] == session_fault._iso(1190.0)
+    held = det.view(now=1150.0)
+    assert held["active"] is False and held["held"] is True
+    assert det.view(now=1190.0)["held"] is False
+    det.scan(_Screen(LINE_429, "re-nudge"), now=1200.0)
+    view = det.view(now=1200.0)
+    assert view["repeats"] == 3
+    assert view["hold_until"] == session_fault._iso(1200.0 + 240.0)
+
+
+def test_the_repeat_hold_is_capped():
+    window = 3 * 3600
+    det, _ = _detector(catalog=_rate_catalog(window))
+    now = 1000.0
+    det.scan(_Screen(LINE_429), now=now)
+    for step in range(4):
+        hold_end = det._record["hold_until"]
+        now = hold_end + 1.0
+        det.scan(_Screen("try %d" % step, LINE_429), now=now)
+    record = det._record
+    assert record["repeats"] == 5
+    assert record["hold_until"] - record["since"] == session_fault.NOTICE_HOLD_CAP
+
+
+def test_a_return_far_after_the_hold_starts_the_chain_over():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    det.scan(_Screen("a", LINE_429), now=1070.0)  # repeats 2, hold to 1190
+    det.scan(_Screen("b", LINE_429), now=1251.0)  # past 1190 + 60
+    view = det.view(now=1251.0)
+    assert view["repeats"] == 1
+    assert view["strikes"] == 3
+    assert view["hold_until"] == view["until"]
+
+
+def test_a_stated_reset_is_its_own_hold():
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    view = det.view(now=1000.0)
+    assert view["until_stated"] is True
+    assert view["hold_until"] == view["until"]
+
+
+def test_a_screen_that_moves_on_ends_the_hold():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    det.scan(_Screen("a", LINE_429), now=1070.0)
+    assert det.view(now=1150.0)["held"] is True
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1150.0)
+    view = det.view(now=1151.0)
+    assert view["held"] is False and view["active"] is False
+    assert view["cleared"]
+
+
+class _Faulted:
+    def __init__(self, record=None, broken=False):
+        self.record, self.broken = record, broken
+
+    def fault(self):
+        if self.broken:
+            raise RuntimeError("dead record")
+        return self.record
+
+
+@pytest.mark.parametrize("session, held", [
+    (_Faulted({"active": True}), True),
+    (_Faulted({"active": False, "held": True}), True),
+    (_Faulted({"active": False, "held": False}), False),
+    (_Faulted(None), False),
+    (_Faulted(broken=True), False),
+    (object(), False),
+])
+def test_holds_notices_reads_active_or_held(session, held):
+    assert session_fault.holds_notices(session) is held
+
+
 def test_a_different_kind_starts_the_count_over():
     det, now = _detector()
     det.scan(_Screen(WEEKLY), now=1000.0)
