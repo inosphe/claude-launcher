@@ -1044,6 +1044,17 @@ class _RateLimiter:
     async def acquire(self, n: int, limit: int) -> None:
         if limit <= 0 or n <= 0:
             return
+        # A group larger than the cap can never fit the window as one
+        # admission (``len + n <= limit`` stays false even on an empty
+        # window), and the wait-index math below assumes ``n <= limit`` --
+        # slice oversized groups so each slice is admissible.
+        remaining = n
+        while remaining > 0:
+            step = min(remaining, limit)
+            await self._acquire(step, limit)
+            remaining -= step
+
+    async def _acquire(self, n: int, limit: int) -> None:
         while True:
             now = time.monotonic()
             cutoff = now - self.WINDOW
@@ -1052,9 +1063,10 @@ class _RateLimiter:
                 self._times.extend([now] * n)
                 return
             # Admitting n needs len + n - limit of the oldest stamps to age
-            # out; wait for the newest of those.
+            # out; wait for the newest of those. n <= limit keeps the index
+            # inside the list.
             k = len(self._times) + n - limit - 1
-            wait = self._times[max(0, k)] + self.WINDOW - now
+            wait = self._times[k] + self.WINDOW - now
             await asyncio.sleep(max(wait, 0.05))
 
     def view(self) -> dict:

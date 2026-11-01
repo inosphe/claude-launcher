@@ -1486,6 +1486,27 @@ def test_rate_limiter_paces_requests(monkeypatch):
     asyncio.run(run())
 
 
+def test_rate_limiter_slices_groups_larger_than_the_cap(monkeypatch):
+    """A single group with more requests than the cap must not crash:
+    the window can never hold n > limit stamps, and the wait-index math
+    indexed past the list. The group is admitted in cap-sized slices."""
+
+    async def run():
+        monkeypatch.setattr(rag._RateLimiter, "WINDOW", 0.3)
+        limiter = rag._RateLimiter()
+        start = time.monotonic()
+        await limiter.acquire(5, 3)  # used to raise IndexError
+        first = time.monotonic() - start
+        assert first >= 0.25  # slice 2 had to wait for slice 1 to slide
+        assert limiter.view()["recent"] == 2  # 5 = slices of 3 + 2; the 2-stamp slice remains
+        # the window is now full (2 + 3 > 3): the next admission paces
+        start = time.monotonic()
+        await limiter.acquire(3, 3)
+        assert time.monotonic() - start >= 0.2
+
+    asyncio.run(run())
+
+
 def test_presets_switch_stores_by_model_key_and_reuse_vectors(tmp_path, repo):
     """The switch the feature exists for: two aliases of one real model keep
     one collection (no re-embedding); a different model opens its own store
