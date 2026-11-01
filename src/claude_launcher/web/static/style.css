@@ -8481,6 +8481,9 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings label:has(> input[type=radio]) { flex-direction: row; align-items: center; gap: 6px; }
 .search-settings select { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
 .search-settings button { margin-right: 8px; }
+/* The active-model/backfill line under the card title (preset picker,
+   claunch-7m5v8). */
+.search-settings .rag-preset-state { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
 @media (max-width: 820px) {
   .search-anything input { font-size: 16px; height: 36px; }

@@ -1,6 +1,31 @@
 /* Search source text is rendered as text, never HTML. */
 globalThis.SearchAnything = (() => {
   const node = (tag, text, cls) => { const n = document.createElement(tag); n.textContent = text; if (cls) n.className = cls; return n; };
+  function ragPresetOptionLabel(p) {
+    const parts = [p.id];
+    if (p.embedding_model) parts.push(p.embedding_model);
+    if (p.model_key && p.model_key !== p.embedding_model) parts.push(`model_key ${p.model_key}`);
+    return parts.join(" · ");
+  }
+  function ragPresetSummary(p) {
+    const where = p.source === "profile" ? `profile ${p.profile || ""}`.trim() : (p.base_url || "custom endpoint");
+    return `${p.id} — ${p.embedding_model || "모델 미지정"} (${where})`;
+  }
+  function ragBackfillTotals(indexes) {
+    let pending = 0, total = 0;
+    for (const idx of indexes || []) {
+      pending += Number(idx.pending) || 0;
+      total += Number(idx.total) || 0;
+    }
+    return { pending, total };
+  }
+  function ragActiveText(active) {
+    if (!active || (!active.preset && !active.embedding_model && !active.model_key)) return "";
+    const name = active.preset ? `프리셋 ${active.preset}` : "직접 설정";
+    const model = active.embedding_model || "";
+    const key = active.model_key ? ` · model_key ${active.model_key}` : "";
+    return `활성: ${name}${model ? " · " + model : ""}${key}`;
+  }
   async function request(path, body, method = "POST", signal) {
     const response = await api(path, body === undefined ? {signal} : {
       method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal,
@@ -346,6 +371,24 @@ globalThis.SearchAnything = (() => {
     const status = node("p", "설정을 불러오는 중…"); status.setAttribute("role", "status"); card.append(status);
     request("api/rag/settings").then(cfg => {
       const form = document.createElement("form"), fields = {};
+      // The daemon's own record of what it serves (active.json) plus the
+      // backfill progress after a switch; refreshed by watchBackfill.
+      const ragState = node("p", "", "rag-preset-state"); card.append(ragState);
+      let backfillPolls = 0;
+      async function watchBackfill() {
+        try {
+          const st = await request("api/rag/status");
+          const totals = ragBackfillTotals(st.indexes);
+          if (totals.pending > 0 && backfillPolls < 200) {
+            backfillPolls++;
+            ragState.textContent = `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건`;
+            setTimeout(watchBackfill, 3000);
+            return;
+          }
+          ragState.textContent = ragActiveText(st.active) || "색인 갱신 완료";
+        } catch { /* the status read is best-effort; leave the last line */ }
+      }
+      watchBackfill();
       function field(key, title, type = "text", parent = form) {
         const label = node("label", title), input = document.createElement("input");
         input.type = type; input.name = key; input.value = type === "password" ? "" : cfg[key] ?? "";
@@ -360,6 +403,11 @@ globalThis.SearchAnything = (() => {
       // that path's saved values -- so a custom oMLX model id and a provider's
       // model id never overwrite each other.
       const saved = cfg.sources || { custom: {}, profile: {} };
+      // Model presets (claunch-7m5v8): while one is active it owns the
+      // connection fields, so the fieldsets below go read-only and the picker
+      // saves the pointer on its own. "직접 설정" hands ownership back to the
+      // legacy rows this card has always edited.
+      const presets = Array.isArray(cfg.presets) ? cfg.presets : [];
       const sourceBox = document.createElement("fieldset"); sourceBox.append(node("legend", "연결 방식"));
       const sources = {};
       for (const [value, title] of [["custom", "Custom API (직접 입력)"], ["profile", "Profile (provider)"]]) {
@@ -367,6 +415,14 @@ globalThis.SearchAnything = (() => {
         radio.type = "radio"; radio.name = "rag-source"; radio.value = value; radio.checked = (cfg.source || "custom") === value;
         label.append(radio, " " + title); sourceBox.append(label); sources[value] = radio;
       }
+      const presetBox = document.createElement("fieldset"); presetBox.append(node("legend", "모델 프리셋"));
+      const presetLabel = node("label", "프리셋"), presetSelect = document.createElement("select");
+      presetSelect.name = "preset"; presetSelect.append(new Option("직접 설정 (아래 연결 값 사용)", ""));
+      for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
+      presetSelect.value = cfg.preset || "";
+      presetLabel.append(presetSelect); presetBox.append(presetLabel);
+      const presetNote = node("p", ""); presetBox.append(presetNote);
+      form.append(presetBox);
       form.append(sourceBox);
       const customBox = document.createElement("fieldset"); customBox.append(node("legend", "Custom API"));
       field("base_url", "API 주소 (예: oMLX)", "text", customBox); field("api_key", "API key", "password", customBox);
@@ -397,6 +453,30 @@ globalThis.SearchAnything = (() => {
       for (const radio of Object.values(sources)) radio.onchange = showSource;
       field("embedding_model", "Embedding model"); field("rerank_model", "Rerank model (선택)");
       showSource();
+      function showPreset() {
+        const active = presets.find(p => p.id === presetSelect.value);
+        // The preset owns the connection rows while it is in force; the
+        // legacy editor only applies to the "직접 설정" choice.
+        sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active);
+        presetNote.textContent = active
+          ? `이 프리셋이 연결 설정을 소유합니다 — ${ragPresetSummary(active)}. 다른 값으로 바꾸려면 먼저 이 선택을 “직접 설정”으로 돌리세요.`
+          : "직접 설정 모드 — 아래 연결 방식의 값이 활성 설정입니다.";
+      }
+      showPreset();
+      // Switching presets saves the pointer right away: the fieldsets are
+      // read-only under a preset, so the only thing a switch can mean is
+      // "make this one active", and the daemon starts the backfill on the
+      // same PUT (search_anything.py restarts the service and enqueues "all").
+      presetSelect.onchange = async () => {
+        showPreset();
+        presetSelect.disabled = true; status.textContent = "프리셋을 전환하는 중…";
+        try {
+          const data = await request("api/rag/settings", {preset: presetSelect.value}, "PUT");
+          status.textContent = `저장됨 · ${data.preset ? `프리셋 ${data.preset}` : "직접 설정"}이 활성화됐고 기존 문서의 임베딩을 새 모델로 소급합니다.`;
+          watchBackfill();
+        } catch (error) { status.textContent = error.message; }
+        finally { presetSelect.disabled = false; }
+      };
       const advanced = document.createElement("details"); advanced.append(node("summary", "고급 설정"));
       for (const [key, title] of [["candidates", "검색 후보 수"], ["rerank_top", "Rerank 대상 수"], ["batch", "Embedding 배치 크기"], ["timeout", "요청 제한 시간 (초)"], ["watch_interval", "변경 확인 주기 (초)"]]) field(key, title, "number", advanced);
       field("verify_tls", "TLS 인증서 검증", "checkbox", advanced); form.append(advanced);
@@ -406,6 +486,7 @@ globalThis.SearchAnything = (() => {
         const out = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
         const picked = sources.profile.checked ? "profile" : "custom";
         out.source = picked;
+        out.preset = presetSelect.value;
         // Both rows go with every save: the picked path takes what is on
         // screen, the other keeps what it had. An empty password field is
         // dropped so the daemon keeps the saved secret.
@@ -435,6 +516,7 @@ globalThis.SearchAnything = (() => {
           const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", values(), testOnly ? "POST" : "PUT");
           status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : "저장됨 · 검색 색인을 갱신합니다.";
           if (!testOnly) {
+            backfillPolls = 0; watchBackfill();
             fields.api_key.value = ""; fields.api_key.placeholder = data.api_key_set ? "설정됨 · 비워두면 유지" : "API key";
             // The rows that were just written are now the saved ones, so a
             // second save in this same card starts from them rather than from
