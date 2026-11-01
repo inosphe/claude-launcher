@@ -330,6 +330,7 @@
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
       <a href="#/hive" data-page="hive"><span>⬢</span>Hive</a>
+      <a href="#/vm" data-page="vm"><span>▭</span>VM</a>
       <a href="#/knowledge" data-page="knowledge"><span>◆</span>Knowledge</a>
       <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
@@ -1629,6 +1630,9 @@
          pan-and-zoom canvas of hexagon-cored chips; drawn by hive-page.js
          from the rail's caches and /api/beads/queues. -->
     <div id="hive-view" class="hidden"></div>
+    <!-- The daemon's VM panel (vm.html) in a frame, built on entering the tab
+         and removed on leaving it (vm-page.js). -->
+    <div id="vm-view" class="hidden"></div>
     <!-- Workspace knowledge records: decisions, vision, needs, principles
          (knowledge-page.js, claunch-269q1). -->
     <div id="knowledge-view" class="hidden"></div>
@@ -1765,6 +1769,7 @@
 <script src="static/commit-page.js"></script>
 <script src="static/chart-page.js"></script>
 <script src="static/hive-page.js"></script>
+<script src="static/vm-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/knowledge-page.js"></script>
 <script src="static/spec-page.js"></script>

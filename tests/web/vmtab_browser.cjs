@@ -1,0 +1,146 @@
+/* The dashboard's VM tab (#/vm; vm-page.js, vm.js).
+
+   Serves the real index.html and the VM panel against a fixture daemon, and
+   drives a real browser:
+     1. the nav has a VM link; opening it shows #vm-view with the panel in a
+        frame (vm?embed=1) and hides the other views;
+     2. the panel lists the registered VM; the register form lists tart's VMs,
+        marks the registered one and an unusable name as not selectable, and
+        registering posts the VM and then a reconcile;
+     3. granting takes its session from the session list and sends the
+        scopes ticked (exec asks for a confirmation first);
+     4. leaving the tab removes the frame. */
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const http = require("node:http");
+const path = require("node:path");
+const { chromium } = require("playwright");
+const { safeListen } = require("./safe_listen.cjs");
+const root = path.join(__dirname, "../../src/claude_launcher/web/static");
+
+const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
+const posts = [];
+const hits = [];
+let sessionsDown = false;
+const VM = {
+  id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
+  grants: {}, human: "idle", ip: "", fault_reason: "",
+};
+const json = (res, body, status = 200) => {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+};
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, "http://fixture");
+  const p = url.pathname;
+  if (req.method === "GET" && p.startsWith("/api/vm")) hits.push(p);
+  if (req.method === "POST") {
+    let data = "";
+    req.on("data", (c) => { data += c; });
+    req.on("end", () => {
+      posts.push([p, data ? JSON.parse(data) : {}]);
+      json(res, { ok: true, changed: [] });
+    });
+    return;
+  }
+  if (p === "/api/vm") return json(res, { vms: [VM], slot_limit: 2, host_locked: false });
+  if (p === "/api/vm-tart") {
+    return json(res, { tart: [
+      { name: "alpha", state: "running", running: true, registered: true, id: "alpha", usable: true },
+      { name: "beta", state: "stopped", running: false, registered: false, id: "", usable: true },
+      { name: "bad name", state: "stopped", running: false, registered: false, id: "", usable: false },
+    ] });
+  }
+  if (p === "/api/webdebug/sessions" && sessionsDown) return json(res, {}, 500);
+  if (p === "/api/webdebug/sessions") return json(res, { sessions: [{ name: "s1", status: "running" }] });
+  if (p.startsWith("/api/")) return json(res, {}, 404);
+  const rel = p === "/" ? "index.html" : p === "/vm" ? "vm.html" : p.replace(/^\/static\//, "");
+  try {
+    const body = fs.readFileSync(path.join(root, rel));
+    res.setHeader("Content-Type", TYPES[path.extname(rel)] || "application/octet-stream");
+    res.end(body);
+  } catch { res.statusCode = 404; res.end(); }
+});
+
+(async () => {
+  await safeListen(server);
+  const base = `http://127.0.0.1:${server.address().port}/`;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await (await browser.newContext({ viewport: { width: 1300, height: 900 } })).newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    await page.goto(base + "#/vm");
+
+    // 1. the tab and its frame
+    assert.equal(await page.locator("#rail-nav a[data-page=vm]").count(), 1, "the nav has a VM link");
+    await page.waitForSelector("#vm-view iframe", { timeout: 5000 });
+    assert.equal(await page.evaluate(() => document.getElementById("vm-view").classList.contains("hidden")), false);
+    assert.equal(await page.evaluate(() => document.getElementById("hive-view").classList.contains("hidden")), true);
+    assert.match(await page.getAttribute("#vm-view iframe", "src"), /vm\?embed=1$/);
+    const frame = page.frameLocator("#vm-view iframe");
+
+    // 2. the panel and the register form
+    await frame.locator(".vm-card", { hasText: "alpha" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("body.embed").count(), 1, "the panel knows it is embedded");
+    await frame.locator("#vm-register summary").click();
+    await frame.locator("#vm-tart-pick option", { hasText: "beta" }).waitFor({ state: "attached", timeout: 5000 });
+    const options = await frame.locator("#vm-tart-pick option").evaluateAll(
+      (os) => os.map((o) => ({ text: o.textContent, disabled: o.disabled })));
+    assert.ok(options.find((o) => o.text.includes("alpha") && o.text.includes("등록됨") && o.disabled),
+      `the registered VM is shown and not selectable: ${JSON.stringify(options)}`);
+    assert.ok(options.find((o) => o.text.includes("bad name") && o.disabled), "an unusable name is not selectable");
+    assert.equal(await frame.locator("#vm-register-go").isDisabled(), true, "nothing picked yet");
+    await frame.locator("#vm-tart-pick").selectOption("beta");
+    assert.equal(await frame.locator("#vm-register-id").inputValue(), "beta", "the id defaults to the tart name");
+    await frame.locator("#vm-register-go").click();
+    await page.waitForFunction(() => true);
+    await frame.locator("#vm-activity", { hasText: "완료" }).waitFor({ timeout: 5000 });
+    const reg = posts.findIndex(([u, b]) => u === "/api/vm" && b.id === "beta" && b.tart_name === "beta");
+    assert.ok(reg >= 0, `registering posts the VM: ${JSON.stringify(posts)}`);
+    assert.equal(posts[reg + 1][0], "/api/vm-reconcile", "and then a reconcile");
+
+    // 3. granting from the session list
+    await frame.locator("#vm-grant-session option", { hasText: "s1" }).waitFor({ state: "attached", timeout: 15000 });
+    await frame.locator("#vm-grant-session").selectOption("s1");
+    await frame.locator("#vm-grant-control").check();
+    await frame.locator("#vm-grant").click();
+    await frame.locator("#vm-activity", { hasText: "s1 view+control 부여" }).waitFor({ timeout: 5000 });
+    const grant = posts.find(([u]) => u === "/api/vm/alpha/grant");
+    assert.deepEqual(grant[1], { session: "s1", scopes: ["view", "control"] });
+    let asked = "";
+    page.on("dialog", async (d) => { asked = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-grant-exec").check();
+    const before = posts.length;
+    await frame.locator("#vm-grant").click();
+    await page.waitForTimeout(300);
+    assert.match(asked, /exec/, "exec asks first");
+    assert.equal(posts.length, before, "a dismissed confirmation grants nothing");
+
+    // 4. leaving the tab
+    await page.evaluate(() => { location.hash = "#/settings"; });
+    await page.waitForFunction(() => !document.querySelector("#vm-view iframe"), null, { timeout: 5000 });
+    // nothing in the panel polls once the tab is left (its refresh runs every 2 s)
+    await page.waitForTimeout(500);
+    const seen = hits.length;
+    await page.waitForTimeout(4500);
+    assert.equal(hits.length, seen, `no VM request after leaving the tab: ${hits.slice(seen)}`);
+
+    // the session list unreadable: the name is typed
+    sessionsDown = true;
+    await page.evaluate(() => { location.hash = "#/vm"; });
+    await page.waitForSelector("#vm-view iframe");
+    const again = page.frameLocator("#vm-view iframe");
+    await again.locator("#vm-grant-session-text").waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(await again.locator("#vm-grant-session").isHidden(), true);
+    await again.locator("#vm-grant-session-text").fill("typed-one");
+    await again.locator("#vm-grant").click();
+    await again.locator("#vm-activity", { hasText: "typed-one view 부여" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(errors, [], "no page errors");
+    console.log("vmtab ok");
+  } finally {
+    await browser.close();
+    server.close();
+  }
+})().catch((e) => { console.error(e); process.exit(1); });

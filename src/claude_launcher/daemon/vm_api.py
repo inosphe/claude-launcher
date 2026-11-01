@@ -259,6 +259,31 @@ async def h_register(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+async def h_tart_list(request: web.Request) -> web.Response:
+    """The VMs tart has on this host (local source), each marked with the
+    record that holds it, for the dashboard's register form. Read only, and
+    the user's: a session is told the host's VM inventory by nothing here."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    try:
+        rows = await asyncio.to_thread(mgr.tart_list)
+    except VmError as exc:
+        return _err(exc)
+    held = {vm.tart_name: vm.id for vm in reg.list()}
+    out = []
+    for row in rows:
+        try:
+            vmhub.check_name("tart_name", row.name)
+            usable = True
+        except VmError:
+            usable = False
+        out.append({"name": row.name, "state": row.state, "running": row.running,
+                    "registered": row.name in held, "id": held.get(row.name, ""),
+                    "usable": usable})
+    return web.json_response({"tart": out})
+
+
 async def h_remove(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
@@ -710,6 +735,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     for action in ("start", "stop", "force_stop", "suspend"):
         r.add_post(f"/api/vm/{{id}}/{action}", _lifecycle_route(action))
     r.add_post("/api/vm-reconcile", h_reconcile)
+    r.add_get("/api/vm-tart", h_tart_list)
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)
     r.add_post("/api/vm/{id}/revoke_controller", h_revoke_controller)

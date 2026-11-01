@@ -9,6 +9,7 @@ const $ = (id) => document.getElementById(id);
 const url = (path) => BASE + String(path).replace(/^\//, "");
 const SCOPES = ["view", "control", "exec"];
 
+if (new URLSearchParams(location.search).get("embed")) document.body.classList.add("embed");
 let vms = [];
 let selected = new URLSearchParams(location.search).get("vm") || "";
 let takingOver = false;
@@ -170,17 +171,86 @@ async function refresh() {
 /* ---- sessions to grant to ---- */
 async function loadSessions() {
   let rows = [];
-  try { rows = (await api("api/webdebug/sessions")).sessions || []; } catch (_) { return; }
   const sel = $("vm-grant-session");
+  // The list is the way to pick a session; when it cannot be read the name is
+  // typed instead.
+  try { rows = (await api("api/webdebug/sessions")).sessions || []; } catch (_) {
+    sel.hidden = true;
+    $("vm-grant-session-text").hidden = false;
+    return;
+  }
+  sel.hidden = false;
+  $("vm-grant-session-text").hidden = true;
   const keep = sel.value;
   sel.replaceChildren(new Option("세션 선택", ""));
   for (const s of rows) sel.appendChild(new Option(`${s.name} (${s.status})`, s.name));
   sel.value = keep;
 }
+function grantScopes() {
+  const scopes = ["view"];
+  if ($("vm-grant-control").checked) scopes.push("control");
+  if ($("vm-grant-exec").checked) scopes.push("exec");
+  return scopes;
+}
 $("vm-grant").addEventListener("click", () => {
-  const session = $("vm-grant-session").value;
+  const session = ($("vm-grant-session").hidden ? $("vm-grant-session-text").value : $("vm-grant-session").value).trim();
   if (!session || !selected) return;
-  act(`${session} view 부여`, () => post(`api/vm/${encodeURIComponent(selected)}/grant`, { session, scopes: ["view"] }));
+  const scopes = grantScopes();
+  if (scopes.includes("exec") &&
+      !confirm(`${session}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return;
+  act(`${session} ${scopes.join("+")} 부여`,
+      () => post(`api/vm/${encodeURIComponent(selected)}/grant`, { session, scopes }));
+});
+
+/* ---- registering a tart VM ---- */
+let tartRows = [];
+async function loadTart() {
+  const note = $("vm-register-note");
+  try {
+    tartRows = (await api("api/vm-tart")).tart || [];
+    note.hidden = true;
+  } catch (e) {
+    tartRows = [];
+    note.hidden = false;
+    note.textContent = /HTTP 404/.test(e.message)
+      ? "이 데몬에는 tart 목록 API가 없습니다. 데몬을 재기동한 뒤 사용할 수 있습니다. 셸에서는 claunch vm add <id>로 등록합니다."
+      : `tart 목록을 읽지 못했습니다: ${e.message}`;
+  }
+  const sel = $("vm-tart-pick");
+  const keep = sel.value;
+  sel.replaceChildren(new Option("tart VM 선택", ""));
+  for (const row of tartRows) {
+    const label = row.registered ? `${row.name} (${row.state}) — 등록됨: ${row.id}`
+      : row.usable ? `${row.name} (${row.state})` : `${row.name} — 등록할 수 없는 이름`;
+    const opt = new Option(label, row.name);
+    opt.disabled = row.registered || !row.usable;
+    sel.appendChild(opt);
+  }
+  sel.value = tartRows.some((r) => r.name === keep && !r.registered && r.usable) ? keep : "";
+  syncRegister();
+}
+function syncRegister() {
+  $("vm-register-go").disabled = !$("vm-tart-pick").value;
+}
+$("vm-tart-pick").addEventListener("change", () => {
+  const id = $("vm-register-id");
+  if (!id.value || id.dataset.auto === "1") { id.value = $("vm-tart-pick").value; id.dataset.auto = "1"; }
+  syncRegister();
+});
+$("vm-register-id").addEventListener("input", () => { $("vm-register-id").dataset.auto = "0"; });
+$("vm-register").addEventListener("toggle", () => { if ($("vm-register").open) loadTart(); });
+$("vm-register-go").addEventListener("click", () => {
+  const tart = $("vm-tart-pick").value;
+  const id = ($("vm-register-id").value || tart).trim();
+  if (!tart || !id) return;
+  act(`${id} 등록`, async () => {
+    await post("api/vm", { id, tart_name: tart });
+    selected = id;
+    // Adopt what tart already runs: the same step `claunch vm reconcile` is.
+    await post("api/vm-reconcile");
+    $("vm-register-id").value = "";
+    await loadTart();
+  });
 });
 
 /* ---- actions ---- */

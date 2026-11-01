@@ -724,6 +724,7 @@ BROWSER_CHECKS = [
         "tabdragscroll_browser.cjs",
         "theme_browser.cjs",
         "railnav_browser.cjs",
+        "vmtab_browser.cjs",
         "terminputlayout_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",

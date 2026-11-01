@@ -64,3 +64,19 @@ does not run `tart run`, answers `vm_host_locked` (HTTP 423), and the VM stays
 `suspended`; a retry after the unlock is safe. `GET /api/vm` carries
 `host_locked`, and the `/vm` panel shows it and disables the resume button
 while it holds.
+
+## The dashboard tab
+
+`#/vm` in the dashboard (left menu, "VM") shows the same panel as `/vm`: the tab
+puts `/vm?embed=1` in a frame when it is opened and removes the frame when it is
+left, which also ends the panel's refresh, screen and takeover-heartbeat loops.
+Nothing in the daemon sets `X-Frame-Options` or a frame-blocking CSP on the
+dashboard or the panel.
+
+Registering a VM from the panel: "VM 등록" lists the VMs `tart list` reports on
+this host (`GET /api/vm-tart`, the user's only; registered names and names the
+registry would refuse are shown and not selectable). Registering posts the VM
+(`POST /api/vm`) and then a reconcile, the same two steps as
+`claunch vm add` and `claunch vm reconcile`. Sessions for a grant are picked from
+the session list; when the list cannot be read the name is typed. The limit in
+the panel (one token, actor declared and audited) applies to the new route too.
