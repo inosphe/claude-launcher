@@ -144,9 +144,24 @@ the pointer wakes at the first saved preset. The connection test
 (`POST /api/rag/test`) probes the values on the card rather than the saved
 preset, so an edit is tested before it is written. A bare-host `base_url`
 is called with a `/v1` root appended — the OpenAI-compatible paths hang off
-it — while the stored spelling is left as typed. The preset list travels
+it — while the stored spelling is left as typed. The `/v1` correction has
+one exclusion: a **root-serving endpoint** (TEI — Text Embeddings Inference
+— spells `/embeddings` at the host root, so `<host>/v1/embeddings` is 404)
+opts out with the preset row's `root_serving: true` flag, set from the
+card's "루트 경로에 직접 서빙 (TEI 등)" checkbox in the Custom API box; the
+call target is then the bare host with nothing appended. The flag also
+rides the test probe, so the connection test exercises the same escape
+spelling. The preset list travels
 through the settings API (`presets` in the payload, secrets reported as
-`api_key_set` only).
+`api_key_set` only). A preset is deleted by writing the list without that
+row (`presets` minus the row, `preset` re-pointed at the first remaining
+row) — the card's 삭제 button does exactly that, moving the deleted row's
+screen values into the legacy fallback rows. The saved list holds at most
+`store.RAG_MAX_PRESETS` (20) presets; the card shows the count as `N/20`
+and the server refuses a longer list, which keeps the settings PUT body two
+orders of magnitude under its measured breaking point (~205 bytes per
+preset row, so the aiohttp 1 MiB default body ceiling falls at roughly
+5,100 presets — the 20-preset ceiling binds far earlier).
 
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the

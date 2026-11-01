@@ -175,7 +175,7 @@ def _build(boards, snaps):
     return docs
 
 
-EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval", "rate_limit", "preset", "presets"}
+EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval", "rate_limit", "preset", "presets", "root_serving"}
 SOURCES = ("custom", "profile")
 
 
@@ -319,6 +319,14 @@ def proposed(body):
         elif key == "verify_tls":
             if not isinstance(value, bool):
                 raise ValueError("verify_tls must be boolean")
+        elif key == "root_serving":
+            # The /v1 correction's opt-out for root-serving endpoints (TEI):
+            # the block-level flag the legacy custom row and the test probe
+            # read, while a preset row carries its own (claunch-rag-preset-
+            # always-hn5bc.1).
+            if not isinstance(value, bool):
+                raise ValueError("root_serving must be boolean")
+            block[key] = value is True
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{key} must be a number")
@@ -436,6 +444,10 @@ def public_settings():
         "configured": store.rag_configured(cfg),
         "profile_error": cfg["profile_error"],
         "model_key": cfg.get("model_key") or "",
+        # The saved-list ceiling the daemon enforces on the settings PUT, so
+        # the card can show "N/20" and pre-empt the server's refusal instead
+        # of erroring after the fact (claunch-rag-preset-always-hn5bc.2).
+        "preset_max": store.RAG_MAX_PRESETS,
         "resolved": {"base_url": cfg["base_url"], "has_key": bool(cfg["api_key"])},
         "profiles": profile_rows(doc),
         "sources": rows,

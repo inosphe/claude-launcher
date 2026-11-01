@@ -1413,6 +1413,183 @@ def test_base_url_without_a_version_root_is_normalized_for_calls():
     assert store.rag_normalize_base_url("") == ""
 
 
+def test_root_serving_endpoint_opts_out_of_the_v1_correction():
+    """claunch-rag-preset-always-hn5bc.1: TEI serves /embeddings at the host
+    root, so <host>/v1/embeddings is 404 — the /v1 correction must be
+    escapable. The preset row's root_serving flag (or the legacy block's)
+    keeps the bare host as the call target; the stored spelling is untouched
+    either way."""
+    cfg = store.rag_config({"rag": {"source": "custom", "base_url": "https://tei.local",
+                                    "api_key": "k", "embedding_model": "m",
+                                    "root_serving": True}})
+    assert cfg["base_url"] == "https://tei.local"
+    assert cfg["root_serving"] is True
+    # without the flag the correction stands
+    cfg = store.rag_config({"rag": {"source": "custom", "base_url": "https://tei.local",
+                                    "api_key": "k", "embedding_model": "m"}})
+    assert cfg["base_url"] == "https://tei.local/v1"
+    assert cfg["root_serving"] is False
+    # a preset row carries its own flag and wins while it is active
+    doc = {"rag": {"source": "custom",
+                   "presets": [
+                       {"id": "tei", "source": "custom", "base_url": "https://tei.local",
+                        "api_key": "k", "embedding_model": "m", "root_serving": True},
+                       {"id": "plain", "source": "custom", "base_url": "https://h/v1",
+                        "api_key": "k", "embedding_model": "m"}],
+                   "preset": "tei"}}
+    assert store.rag_config(doc)["base_url"] == "https://tei.local"
+    doc["rag"]["preset"] = "plain"
+    assert store.rag_config(doc)["base_url"] == "https://h/v1"
+    # only the exact boolean counts: a truthy string does not become the flag
+    cleaned = store.clean_rag_preset({"id": "x", "source": "custom", "base_url": "https://h",
+                                      "embedding_model": "m", "root_serving": "yes"})
+    assert cleaned == {"id": "x", "base_url": "https://h", "embedding_model": "m"}
+    # a hand-set legacy flag travels onto the preset the migration mints —
+    # otherwise the preset branch would lose it and the /v1 correction
+    # would quietly break the endpoint again
+    store.save({"rag": {"source": "custom", "base_url": "https://tei.local",
+                        "api_key": "k", "embedding_model": "m", "root_serving": True}})
+    public = search_anything.public_settings()
+    assert public["presets"][0]["root_serving"] is True
+    assert store.rag_config()["base_url"] == "https://tei.local"
+
+
+def test_settings_routes_round_trip_the_root_serving_flag_and_expose_the_cap(tmp_path):
+    """The card checkbox rides the preset row through the settings PUT, the
+    active flag answers at the top level, and the saved-list ceiling the
+    daemon enforces is surfaced as preset_max so the card can show N/20."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "tei", "source": "custom", "base_url": "http://tei.local",
+                             "api_key": "k", "embedding_model": "emb", "root_serving": True}],
+                "preset": "tei"})
+            assert response.status == 200
+            body = await response.json()
+            assert body["presets"][0]["root_serving"] is True
+            assert body["root_serving"] is True
+            assert body["resolved"]["base_url"] == "http://tei.local"  # no /v1 appended
+            assert body["preset_max"] == store.RAG_MAX_PRESETS
+            # a non-boolean spelling is refused, not coerced
+            response = await client.put("/api/rag/settings", json={"root_serving": "yes"})
+            assert response.status == 400
+            assert "boolean" in (await response.json())["error"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_connection_test_honors_the_root_serving_escape(tmp_path):
+    """The probe must exercise the same call shape the save would use: with
+    root_serving set, a bare-host TEI endpoint is called at its root."""
+    async def run():
+        endpoint = Endpoint()
+        root_app = web.Application()
+        root_app.router.add_post("/embeddings", endpoint.embeddings)
+        root_app.router.add_post("/rerank", endpoint.rerank)
+        server = TestServer(root_app)
+        await server.start_server()
+        live = str(server.make_url("/"))
+        store.save({"rag": {"source": "custom", "watch_interval": 0,
+                            "sources": {"custom": {"base_url": live, "api_key": "k",
+                                                   "embedding_model": "m", "rerank_model": ""},
+                                        "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            body = {"timeout": 2, "root_serving": True,
+                    "sources": {"custom": {"base_url": live, "api_key": "k",
+                                           "embedding_model": "m", "rerank_model": ""},
+                                "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}
+            calls_before = len(endpoint.embed_calls)
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 200, await response.text()
+            assert len(endpoint.embed_calls) > calls_before  # reached the root-serving endpoint
+            # without the escape the same address is probed at /v1, which this
+            # server does not serve
+            body["root_serving"] = False
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_settings_delete_one_preset_drops_only_that_row_and_repoints_the_pointer(tmp_path):
+    """claunch-rag-preset-always-hn5bc.2: deletion is a settings PUT carrying
+    the list minus the row. The pointer moves to a remaining preset when the
+    active one went away, the kept rows' secrets survive, and the deleted
+    row's secret leaves the file."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        cfg["presets"] = [
+            {"id": "one", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "secret-1", "embedding_model": "emb-a"},
+            {"id": "two", "source": "custom", "base_url": "http://h:2/v1",
+             "api_key": "secret-2", "embedding_model": "emb-b"},
+        ]
+        cfg["preset"] = "two"
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            kept = dict(cfg["presets"][0])
+            kept.pop("api_key")
+            # the active preset is deleted: the pointer wakes at the first remaining row
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [kept], "preset": "one"})
+            assert response.status == 200
+            assert [p["id"] for p in store.rag_presets()] == ["one"]
+            assert store.rag_presets()[0]["api_key"] == "secret-1"  # empty key preserves it
+            assert store.rag_config()["preset"] == "one"
+            assert "secret-2" not in json.dumps(store.load())
+            # deleting down to none is the same contract: empty list, empty
+            # pointer. The preset-only card never shows zero presets, though
+            # — the read-side migration re-wraps the still-alive legacy
+            # connection as a model-named preset on the same read.
+            response = await client.put("/api/rag/settings", json={"presets": [], "preset": ""})
+            assert response.status == 200
+            rows = store.rag_presets()
+            assert [p["id"] for p in rows] == ["emb"]
+            assert store.rag_config()["preset"] == "emb"
+            assert rows[0]["base_url"] == cfg["base_url"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_connection_test_probes_the_screen_rows_not_the_saved_preset(tmp_path):
     """POST /api/rag/test must evaluate what is on the card — the reader
     tests edits before saving. A saved preset in the same body must not

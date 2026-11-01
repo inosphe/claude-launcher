@@ -438,11 +438,18 @@ globalThis.SearchAnything = (() => {
         label.append(radio, " " + title); sourceBox.append(label); sources[value] = radio;
       }
       const presetBox = document.createElement("fieldset"); presetBox.append(node("legend", "모델 프리셋"));
-      const presetLabel = node("label", "프리셋"), presetSelect = document.createElement("select");
+      const presetLabel = node("label", "프리셋", "rag-preset-row"), presetSelect = document.createElement("select");
       presetSelect.name = "preset";
       for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
       presetSelect.value = cfg.preset || "";
-      presetLabel.append(presetSelect); presetBox.append(presetLabel);
+      // The saved-list ceiling the daemon enforces, surfaced before the
+      // reader hits it, and a per-preset delete control — the list is the
+      // whole PUT body, so without a delete the card only ever grows
+      // (claunch-rag-preset-always-hn5bc.2).
+      const presetMax = Number(cfg.preset_max) > 0 ? Number(cfg.preset_max) : 20;
+      const presetCount = node("span", ` ${presets.length}/${presetMax}`, "rag-preset-count");
+      const deletePresetBtn = node("button", "삭제", "rag-preset-delete"); deletePresetBtn.type = "button";
+      presetLabel.append(presetSelect, presetCount, " ", deletePresetBtn); presetBox.append(presetLabel);
       const presetNote = node("p", ""); presetBox.append(presetNote);
       // Save the connection values on screen as a NEW preset, and make it
       // the active one. The daemon's settings PUT takes the whole saved
@@ -456,6 +463,7 @@ globalThis.SearchAnything = (() => {
         const id = savePresetId.value.trim();
         if (!/^[a-z0-9-]+$/.test(id)) { status.textContent = "프리셋 id는 소문자·숫자·하이픈만 씁니다."; return; }
         if (presets.some(p => p.id === id)) { status.textContent = `프리셋 ${id}이 이미 있습니다 — 다른 id를 쓰세요.`; return; }
+        if (presets.length >= presetMax) { status.textContent = `프리셓은 ${presetMax}개까지 저장됩니다 — 프리셓을 삭제하고 다시 시도하세요.`; return; }
         const preset = editedPreset(id);
         if (!preset) return;
         savePresetBtn.disabled = true; status.textContent = `프리셓 ${id}을 저장하는 중…`;
@@ -465,16 +473,52 @@ globalThis.SearchAnything = (() => {
           presetSelect.append(new Option(ragPresetOptionLabel(preset), preset.id));
           presetSelect.value = id;
           savePresetId.value = "";
+          presetCount.textContent = ` ${presets.length}/${presetMax}`;
           afterSave(data);
           status.textContent = `프리셓 ${id}을 저장하고 활성화했습니다 — 기존 문서의 임베딩을 이 모델로 소급합니다.`;
         } catch (error) {
           status.textContent = `프리셓 저장 실패 · ${error.message}`;
         } finally { savePresetBtn.disabled = false; }
       };
+      // Delete one preset row: the settings PUT takes the whole saved list,
+      // so deletion is the list minus the row, with the pointer moved to the
+      // first remaining preset when the active one went away. The screen
+      // values ride along as the legacy rows, so the deleted preset's
+      // connection stays as the visible fallback rather than a dangling
+      // pointer over empty rows.
+      deletePresetBtn.onclick = async () => {
+        const id = presetSelect.value;
+        if (!id) { status.textContent = "삭제할 프리셓을 먼저 선택하세요."; return; }
+        if (!window.confirm(`프리셓 ${id}을 삭제합니다. 저장된 연결 값과 API key가 지워집니다.`)) return;
+        const remaining = presets.filter(p => p.id !== id);
+        const next = presetSelect.value === id ? (remaining.length ? remaining[0].id : "") : presetSelect.value;
+        save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = true;
+        status.textContent = `프리셓 ${id}을 삭제하는 중…`;
+        try {
+          const data = await request("api/rag/settings", { ...values(), presets: remaining, preset: next }, "PUT");
+          afterSave(data);
+          presetSelect.length = 0;
+          for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
+          presetSelect.value = typeof data.preset === "string" ? data.preset : next;
+          presetCount.textContent = ` ${presets.length}/${presetMax}`;
+          showPreset();
+          loadPreset(presets.find(p => p.id === presetSelect.value));
+          status.textContent = presets.length
+            ? `프리셓 ${id}을 삭제했습니다.`
+            : `프리셓 ${id}을 삭제했습니다 — 남은 프리셓이 없어 직접 연결 값 입력이 기본이 됩니다.`;
+        } catch (error) {
+          status.textContent = `프리셓 삭제 실패 · ${error.message}`;
+        } finally { save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = false; }
+      };
       form.append(presetBox);
       form.append(sourceBox);
       const customBox = document.createElement("fieldset"); customBox.append(node("legend", "Custom API"));
       field("base_url", "API 주소 (예: oMLX)", "text", customBox); field("api_key", "API key", "password", customBox);
+      // The /v1 correction's opt-out (claunch-rag-preset-always-hn5bc.1): a
+      // root-serving endpoint (TEI spells /embeddings at the host root, so
+      // <host>/v1/embeddings does not exist) says so here, and the flag is
+      // saved on the preset row.
+      field("root_serving", "루트 경로에 직접 서빙 (TEI 등 — /v1 경로 없음)", "checkbox", customBox);
       const profileBox = document.createElement("fieldset"); profileBox.append(node("legend", "Profile"));
       const profileLabel = node("label", "프로필"), profileSelect = document.createElement("select");
       profileSelect.name = "profile"; profileSelect.append(new Option("프로필 선택", ""));
@@ -524,6 +568,7 @@ globalThis.SearchAnything = (() => {
         fields.profile.value = p.profile || "";
         fields.embedding_model.value = model;
         fields.rerank_model.value = p.rerank_model || "";
+        fields.root_serving.checked = p.root_serving === true;
         showSource();
       }
       // The screen values as one preset row. ``model_key`` survives an edit
@@ -536,6 +581,7 @@ globalThis.SearchAnything = (() => {
         else {
           preset.base_url = fields.base_url.value.trim();
           if (fields.api_key.value) preset.api_key = fields.api_key.value;
+          if (fields.root_serving.checked) preset.root_serving = true;
         }
         const old = presets.find(p => p.id === id);
         if (old && old.model_key && old.embedding_model === preset.embedding_model) preset.model_key = old.model_key;
@@ -596,8 +642,7 @@ globalThis.SearchAnything = (() => {
         const out = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
         const picked = sources.profile.checked ? "profile" : "custom";
         out.source = picked;
-        out.preset = presetSelect.value;
-        // Both rows go with every save: the picked path takes what is on
+        out.preset = presetSelect.value;        // Both rows go with every save: the picked path takes what is on
         // screen, the other keeps what it had. An empty password field is
         // dropped so the daemon keeps the saved secret.
         out.sources = {
