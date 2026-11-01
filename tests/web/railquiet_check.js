@@ -331,6 +331,60 @@ ctx.setSessions([faultRow({ active: false })]);
 ctx.apply();
 check("an expired fault draws no pill", quiet(rows.s1), null);
 
+/* A fault read back from the pause record (daemon/fault_pause.py, source
+   "pause-record") is not a live screen. The daemon stopped this session on
+   a usage limit and nothing resumes it at the reset, so the row says what a
+   person has to decide -- the reason, the reset, what to do -- and not how
+   the message would leave a changing screen, which is a fact about a
+   terminal that no longer exists (claunch-9djny.1, scope 3). */
+const pausedRow = (extra) => faultRow(Object.assign({
+  source: "pause-record", kind: "usage_limit", label: "usage limit",
+  resolved_by: "account", message: "You've hit your weekly limit",
+  code: "", reset: "Nov 2, 9am (Asia/Seoul)",
+  action: "wait for the reset, or raise the plan",
+  last_seen: "2026-10-30T06:31:07+00:00",
+  until: "2026-11-02T00:00:00+00:00",
+}, extra || {}));
+
+ctx.setSessions([pausedRow()]);
+ctx.apply();
+check("a session the daemon paused shows its fault pill",
+      pills(rows.s1), ["usage limit"]);
+const pausedPill = quiet(rows.s1) && quiet(rows.s1).children[0];
+const pausedTitle = pausedPill ? pausedPill.title : "";
+check("...and the hover says the daemon did it",
+      /paused by the daemon — usage limit \(claude\)/.test(pausedTitle), true);
+check("...names who clears it",
+      pausedTitle.includes("cleared by: the account, plan or login"), true);
+check("...carries the harness message",
+      pausedTitle.includes("You've hit your weekly limit"), true);
+check("...gives the reset as the harness wrote it",
+      pausedTitle.includes("resets: Nov 2, 9am (Asia/Seoul)"), true);
+check("...and the deadline the record will be read against",
+      pausedTitle.includes("paused until 2026-11-02T00:00:00+00:00"), true);
+check("...says what to do",
+      pausedTitle.includes("what to do: wait for the reset, or raise the plan"),
+      true);
+check("...and that nothing brings it back by itself",
+      /nothing resumes it at the reset/.test(pausedTitle)
+      && /resume it yourself/.test(pausedTitle), true);
+check("...without the wording of a live screen that is still scrolling",
+      /scrolls off a changing screen/.test(pausedTitle), false);
+
+/* The screen reading keeps its own wording: the two sources are drawn on the
+   same line and a pause record must not change how a live fault reads. */
+ctx.setSessions([faultRow()]);
+ctx.apply();
+const screenTitle = quiet(rows.s1) && quiet(rows.s1).children[0]
+  ? quiet(rows.s1).children[0].title : "";
+check("a screen reading still reads as a session fault",
+      screenTitle.includes("session fault — waiting for input (claude)"), true);
+check("...and keeps its own expiry wording",
+      /or until the message scrolls off a changing screen/.test(screenTitle),
+      true);
+check("...and is not described as a pause", /paused by the daemon/.test(screenTitle),
+      false);
+
 /* --- the end-of-run protection ------------------------------------------ */
 /* The one flag on this line that is not a silence. `cflow kill-on-end` ends
    the session driving a finished one-shot run; keep-alive says "record the
