@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher.daemon import api, session_fault
+from claude_launcher.daemon import actors, api, fault_pause, session_fault
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -963,6 +963,80 @@ def test_a_dead_session_has_no_fault(home, tmp_path):
     assert dead.info()["fault"] is None
 
 
+# ------------------------------------------------- the fault a pause left
+#
+# A pause kills the process, so the reading off the screen dies with it. The
+# fault-pause clock writes the fault into the session directory, and the
+# dead record reads it back while that pause is still in force
+# (claunch-9djny.1).
+
+PAUSED_AT = "2026-10-30T06:31:07+00:00"
+FAR = "2099-01-01T00:00:00+00:00"
+
+
+def _pause_record(name, *, until=FAR, paused_at=PAUSED_AT):
+    fault_pause.write_record(name, {
+        "kind": "usage_limit",
+        "label": "usage limit",
+        "harness": "claude",
+        "message": "You've hit your weekly limit · resets Nov 2, 9am (Asia/Seoul)",
+        "reset": "Nov 2, 9am (Asia/Seoul)",
+        "until": until,
+        "until_stated": True,
+    }, paused_at=paused_at)
+
+
+def _paused_dead(name, tmp_path, *, paused_at=PAUSED_AT, **kw):
+    return DeadSession(
+        SessionDef(name=name, harness="claude", cwd=str(tmp_path)),
+        exit_code=143,
+        paused_at=paused_at,
+        ended_by=kw.pop(
+            "ended_by", actors.make(actors.DAEMON, reason=fault_pause.REASON)
+        ),
+        **kw,
+    )
+
+
+def test_a_paused_dead_session_reports_the_fault_it_was_paused_for(home, tmp_path):
+    _pause_record("pz")
+    dead = _paused_dead("pz", tmp_path)
+    view = dead.fault()
+    assert view is not None
+    assert view["source"] == "pause-record"
+    assert view["kind"] == "usage_limit" and view["active"] is True
+    assert view["until"] == FAR
+    assert view["message"].startswith("You've hit your weekly limit")
+    # The rail reads /api/sessions, which is built from info().
+    assert dead.info()["fault"]["source"] == "pause-record"
+
+
+def test_a_resumed_or_archived_record_does_not_report_the_pause(home, tmp_path):
+    """Unpause clears paused_at, so the fault goes with it; archiving files
+    the record away and takes its pill down."""
+    _pause_record("p1")
+    _pause_record("p2")
+    resumed = _paused_dead("p1", tmp_path, paused_at=None)
+    archived = _paused_dead("p2", tmp_path, archived_at="2026-11-01T00:00:00+00:00")
+    assert resumed.fault() is None
+    assert archived.fault() is None
+
+
+def test_the_record_of_another_pause_is_not_read(home, tmp_path):
+    """A name reused by a later session carries its own stamp; the file left
+    by the earlier pause must not answer for it."""
+    _pause_record("p3", paused_at="2026-10-30T06:31:07+00:00")
+    later = _paused_dead("p3", tmp_path, paused_at="2026-10-31T09:00:00+00:00")
+    assert later.fault() is None
+
+
+def test_a_pause_record_out_of_its_window_reads_inactive(home, tmp_path):
+    _pause_record("old", until="2026-10-01T00:00:00+00:00")
+    dead = _paused_dead("old", tmp_path)
+    view = dead.fault()
+    assert view is not None and view["active"] is False
+
+
 # ------------------------------------------------------------------------ API
 
 def test_the_rail_field_list_carries_fault():
@@ -1036,6 +1110,29 @@ def test_the_fleet_route_lists_active_faults(mgr, tmp_path):
     assert body["faults"][0]["kind"] == "usage_limit"
     assert one["count"] == 1
     assert none["count"] == 0
+
+
+def test_the_fleet_route_lists_a_paused_sessions_fault(mgr, tmp_path):
+    """The row the dashboard could not draw before claunch-9djny.1: a session
+    the daemon stopped on a usage limit, whose screen reading died with the
+    process. It comes back from the pause record through the same route."""
+    _pause_record("pz")
+    mgr._sessions["pz"] = _paused_dead("pz", tmp_path)
+
+    async def scenario(client):
+        active = await (await client.get("/api/session-faults", headers=BEARER)).json()
+        every = await (await client.get(
+            "/api/session-faults?active=all", headers=BEARER)).json()
+        return active, every
+
+    active, every = _client(mgr, scenario)
+    assert active["count"] == 1
+    row = active["faults"][0]
+    assert row["session"] == "pz"
+    assert row["kind"] == "usage_limit"
+    assert row["source"] == "pause-record"
+    assert row["active"] is True
+    assert every["count"] == 1
 
 
 def test_the_fleet_route_carries_the_grade(mgr, tmp_path):

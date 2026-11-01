@@ -29,11 +29,20 @@ is the person's decision. What the daemon can do is say when that decision
 is due. A pause writes the fault it was made for into the session directory
 (:data:`RECORD`), because a daemon restart turns the record into one that
 no longer carries its screen; :func:`resets` lists the sessions still paused
-for it whose reset time has passed, and the dashboard raises a card for each
+for it, both those whose reset time has passed (``due``) and those still
+waiting for it, and the dashboard draws a card for each
 (``GET /api/fault-resets``). Only a reset the harness *stated* on the screen
 (``until_stated``) is told: a window guessed from the first sighting says
 nothing about when the plan comes back, and the harnesses differ in whether
 they print one at all.
+
+The record is also the only thing left that can answer "why did this stop?"
+for a paused session. The pause kills the process, so the live reading
+(:mod:`session_fault`, taken off the screen) dies with it, and before
+claunch-9djny.1 a paused session answered ``fault: None`` for the days
+between the pause and its reset. :func:`paused_fault` reads the record back
+into the same view shape while it still belongs to this pause and its
+deadline has not passed.
 """
 
 from __future__ import annotations
@@ -42,13 +51,13 @@ import asyncio
 import contextlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 
 from aiohttp import web
 
 from .. import store
-from . import actors, paths
+from . import actors, paths, session_fault
 from .session import STATUS_IDLE
 
 log = logging.getLogger(__name__)
@@ -68,8 +77,20 @@ REASON = "usage-limit"
 #: The file in the session directory holding the fault a pause was made for.
 RECORD = "fault-pause.json"
 
-#: The fault fields kept in :data:`RECORD`.
-RECORD_FIELDS = ("kind", "label", "harness", "message", "reset", "until", "until_stated")
+#: The fault fields kept in :data:`RECORD`. They are the fields the view
+#: answers with, so a record read back after a restart says the same thing
+#: about the stop as the live reading did. ``action``, ``resolved_by`` and
+#: ``code`` were added for that (claunch-9djny.1); a record written before
+#: them simply carries none, and :func:`pause_fault_view` fills what the
+#: catalogue can still say.
+RECORD_FIELDS = (
+    "kind", "label", "harness", "message", "reset", "until", "until_stated",
+    "action", "resolved_by", "code",
+)
+
+#: What a reading taken from :data:`RECORD` says in ``source``, so a reader
+#: can tell it apart from one taken off a screen (``session_fault``).
+SOURCE = "pause-record"
 
 
 def enabled(cfg: Optional[dict] = None) -> bool:
@@ -114,7 +135,11 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
         except Exception:  # noqa: BLE001 -- one session must not stop the pass
             log.exception("fault pause of %r failed", name)
             continue
-        write_record(name, record)
+        # The record carries the pause's OWN ``paused_at``, not a fresh
+        # reading of the clock: :func:`paused_fault` answers only a record
+        # whose stamp is the session's, and two separate ``now()`` calls can
+        # land on either side of a second boundary.
+        write_record(name, record, paused_at=getattr(session, "paused_at", None))
         paused[name] = until
         out.append(name)
     if out:
@@ -122,10 +147,34 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
     return out
 
 
-def write_record(name: str, record: dict) -> None:
-    """Keep the fault a pause was made for (:data:`RECORD`)."""
+def kind_window(kind: str) -> float:
+    """The catalogue's window for ``kind`` in seconds (0 when it is unknown)."""
+    try:
+        spec = session_fault.default().kinds.get(kind)
+    except Exception:  # noqa: BLE001 -- a broken catalogue caps nothing
+        return 0.0
+    return float(spec.window) if spec is not None else 0.0
+
+
+def write_record(name: str, record: dict, *, paused_at: Optional[str] = None) -> None:
+    """Keep the fault a pause was made for (:data:`RECORD`).
+
+    ``paused_at`` is the pause's own stamp on the session record; without it
+    the record takes the current time, which is what a caller outside
+    :func:`sweep` has. A record whose ``until`` cannot be read is capped with
+    its kind's window measured from the pause (usage_limit: 86400s) and is
+    marked as a guess, so a session paused for a stop with no readable
+    deadline still comes off the rail instead of staying on it forever.
+    """
     body = {k: record.get(k) for k in RECORD_FIELDS if k in record}
-    body["paused_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = paused_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body["paused_at"] = stamp
+    if _parse(body.get("until")) is None:
+        window = kind_window(str(body.get("kind") or ""))
+        paused = _parse(stamp)
+        if window and paused is not None:
+            body["until"] = (paused + timedelta(seconds=window)).isoformat(timespec="seconds")
+            body["until_stated"] = False
     try:
         target = paths.session_dir(name) / RECORD
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,14 +199,105 @@ def _parse(value) -> Optional[datetime]:
     return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
 
 
-def resets(manager, now: Optional[datetime] = None) -> List[dict]:
-    """The sessions this clock paused whose stated reset time has passed.
+def _iso(at: Optional[datetime]) -> str:
+    return at.isoformat(timespec="seconds") if at is not None else ""
+
+
+def pause_fault_view(record: dict, now: Optional[datetime] = None) -> dict:
+    """The view shape of :meth:`session_fault.Detector.view`, from a record.
+
+    The record holds what the pause was made for, not a screen: ``since`` and
+    ``last_seen`` are the pause (the last moment anything was read), and
+    ``strikes`` is 1 because a pause is one sighting. ``active`` uses the
+    same expression the live reading does, so the rail, the fleet route and
+    the reset list all agree on when the stop is over.
+    """
+    now = datetime.now(timezone.utc) if now is None else now
+    paused = _parse(record.get("paused_at"))
+    until = _parse(record.get("until"))
+    kind = str(record.get("kind") or "")
+    window = kind_window(kind)
+    if until is None and paused is not None and window:
+        # A record with no readable deadline still cannot last longer than
+        # its kind's window, measured from the pause (write_record does the
+        # same when it can; this covers a file written by an older daemon).
+        until = paused + timedelta(seconds=window)
+    spec = None
+    try:
+        spec = session_fault.default().kinds.get(kind)
+    except Exception:  # noqa: BLE001 -- a broken catalogue costs a label, not the row
+        spec = None
+    stamp = _iso(paused)
+    return {
+        "harness": str(record.get("harness") or ""),
+        "kind": kind,
+        "label": str(record.get("label") or (spec.label if spec else kind)),
+        "action": str(record.get("action") or (spec.action if spec else "")),
+        "resolved_by": str(
+            record.get("resolved_by") or (spec.resolved_by if spec else "")
+        ),
+        "message": str(record.get("message") or ""),
+        "code": str(record.get("code") or ""),
+        "reset": str(record.get("reset") or ""),
+        "since": stamp,
+        "last_seen": stamp,
+        "until": _iso(until),
+        "until_stated": bool(record.get("until_stated")),
+        "cleared": "",
+        "strikes": 1,
+        "active": until is not None and now < until,
+        "source": SOURCE,
+    }
+
+
+def paused_fault(session) -> Optional[dict]:
+    """The fault a pause by this clock was made for, read from the directory.
+
+    A paused session has no screen left to scan, so the live reading dies
+    with the process. This answers in its place, and only while all of these
+    hold -- anything else is not this pause's fault:
+
+    * the record carries this clock's ending (``ended_by`` reason
+      :data:`REASON`) and a ``paused_at``;
+    * it is not archived -- a filed-away record is inert, and its pill would
+      name a stop nobody is being asked about any more;
+    * the record file is *this* pause's: its ``paused_at`` equals the
+      session's. A name reused by a later session has its own stamp, and an
+      older file on disk must not answer for it. Unpausing a record clears
+      ``paused_at``, which fails the first test and takes the fault with it,
+      so a person who resumes a session stops seeing the pause they undid.
+    """
+    paused_at = getattr(session, "paused_at", None)
+    if not paused_at:
+        return None
+    if getattr(session, "archived_at", None):
+        return None
+    ender = getattr(session, "ended_by", None) or {}
+    if ender.get("kind") != actors.DAEMON or ender.get("reason") != REASON:
+        return None
+    record = read_record(session.sdef.name)
+    if not record:
+        return None
+    if _parse(record.get("paused_at")) != _parse(paused_at):
+        return None
+    return pause_fault_view(record)
+
+
+def resets(
+    manager, now: Optional[datetime] = None, *, include_pending: bool = False
+) -> List[dict]:
+    """The sessions this clock paused for a fault with a stated reset.
 
     A row needs the session still paused (``paused_at``) by this clock
     (``ended_by`` reason :data:`REASON`) and a :data:`RECORD` whose
-    ``until`` was stated by the harness and is not in the future. A resumed,
-    killed or person-paused session, or a fault without a stated reset,
-    contributes nothing.
+    ``until`` was stated by the harness. A resumed, killed or person-paused
+    session, or a fault without a stated reset, contributes nothing.
+
+    Each row says whether the reset has passed (``due``). By default only
+    the passed ones are returned; ``include_pending`` adds the ones still
+    waiting, which is what the dashboard draws a card for before the reset
+    (claunch-9djny.1: a person could not tell a session the daemon had
+    stopped from one that had died until the reset was over).
     """
     now = datetime.now(timezone.utc) if now is None else now
     out: List[dict] = []
@@ -174,11 +314,15 @@ def resets(manager, now: Optional[datetime] = None) -> List[dict]:
         if not record or not record.get("until_stated"):
             continue
         until = _parse(record.get("until"))
-        if until is None or until > now:
+        if until is None:
+            continue
+        due = until <= now
+        if not due and not include_pending:
             continue
         out.append({
             "session": name,
             "paused_at": session.paused_at,
+            "due": due,
             "fault": {k: record.get(k) for k in RECORD_FIELDS if k in record},
         })
     out.sort(key=lambda r: r["session"])
@@ -187,9 +331,16 @@ def resets(manager, now: Optional[datetime] = None) -> List[dict]:
 
 def install(app) -> None:
     async def h_fault_resets(request: web.Request) -> web.Response:
-        rows = resets(request.app["manager"])
+        rows = resets(request.app["manager"], include_pending=True)
+        due = [r for r in rows if r["due"]]
+        pending = [r for r in rows if not r["due"]]
         return web.json_response(
-            {"resets": rows, "count": len(rows)},
+            {
+                "resets": due,
+                "pending": pending,
+                "count": len(due),
+                "pending_count": len(pending),
+            },
             dumps=lambda d: json.dumps(d, ensure_ascii=False),
         )
 
