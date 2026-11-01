@@ -19,11 +19,13 @@ globalThis.SearchAnything = (() => {
     }
     return { pending, total };
   }
-  function ragBackfillStateLine(indexes, active) {
+  function ragBackfillStateLine(indexes, active, paused) {
     const rows = Array.isArray(indexes) ? indexes : [];
     const syncing = rows.some(r => r && r.syncing);
     const totals = ragBackfillTotals(rows);
     const activeEmpty = !active || (!active.preset && !active.embedding_model && !active.model_key);
+    if (paused)
+      return { state: "paused", text: `소급 임베딩 일시정지됨 · 남은 문서 ${totals.pending} / ${totals.total}건` };
     if (syncing || totals.pending > 0)
       return { state: "running", text: `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건` };
     if (rows.length === 0 || totals.total === 0)
@@ -388,10 +390,16 @@ globalThis.SearchAnything = (() => {
       // backfill progress after a switch; refreshed by watchBackfill.
       const ragState = node("p", "", "rag-preset-state"); card.append(ragState);
       let backfillPolls = 0;
+      // The pause/resume toggle (claunch-fhs7f) — created below once the
+      // form builds; watchBackfill keeps its label honest from the status
+      // poll so an outside change (another client, a restart) shows up.
+      let pauseBtn = null, backfillPaused = false;
       async function watchBackfill() {
         try {
           const st = await request("api/rag/status");
-          const line = ragBackfillStateLine(st.indexes, st.active);
+          backfillPaused = Boolean(st.backfill_paused);
+          if (pauseBtn) pauseBtn.textContent = backfillPaused ? "재개" : "일시정지";
+          const line = ragBackfillStateLine(st.indexes, st.active, backfillPaused);
           if (line.state === "running" && backfillPolls < 200) {
             backfillPolls++;
             ragState.textContent = line.text;
@@ -435,6 +443,38 @@ globalThis.SearchAnything = (() => {
       presetSelect.value = cfg.preset || "";
       presetLabel.append(presetSelect); presetBox.append(presetLabel);
       const presetNote = node("p", ""); presetBox.append(presetNote);
+      // Save the connection values on screen as a new preset
+      // (claunch-fhs7f). The daemon's settings PUT takes the whole saved
+      // list, so this appends to the list the card loaded. Disabled while a
+      // preset owns the fieldsets — what is on screen then are the legacy
+      // rows, not the preset's values.
+      const savePresetRow = node("p", "");
+      const savePresetId = document.createElement("input");
+      savePresetId.placeholder = "새 프리셋 id (소문자·숫자·하이픈)";
+      const savePresetBtn = node("button", "현재 연결 값으로 프리셋 저장"); savePresetBtn.type = "button";
+      savePresetRow.append(savePresetId, savePresetBtn); presetBox.append(savePresetRow);
+      savePresetBtn.onclick = async () => {
+        const id = savePresetId.value.trim();
+        if (!/^[a-z0-9-]+$/.test(id)) { status.textContent = "프리셋 id는 소문자·숫자·하이픈만 씁니다."; return; }
+        if (presets.some(p => p.id === id)) { status.textContent = `프리셋 ${id}이 이미 있습니다 — 다른 id를 쓰세요.`; return; }
+        const picked = sources.profile.checked ? "profile" : "custom";
+        const preset = { id, source: picked, embedding_model: fields.embedding_model.value, rerank_model: fields.rerank_model.value };
+        if (picked === "profile") preset.profile = fields.profile.value;
+        else {
+          preset.base_url = fields.base_url.value;
+          if (fields.api_key.value) preset.api_key = fields.api_key.value;
+        }
+        savePresetBtn.disabled = true; status.textContent = `프리셓 ${id}을 저장하는 중…`;
+        try {
+          await request("api/rag/settings", { presets: [...presets, preset] }, "PUT");
+          presets.push(preset);
+          presetSelect.append(new Option(ragPresetOptionLabel(preset), preset.id));
+          savePresetId.value = "";
+          status.textContent = `프리셓 ${id}을 저장했습니다 — 드롭다운에서 선택하면 활성화하고 기존 문서의 임베딩을 소급합니다.`;
+        } catch (error) {
+          status.textContent = `프리셓 저장 실패 · ${error.message}`;
+        } finally { savePresetBtn.disabled = false; }
+      };
       form.append(presetBox);
       form.append(sourceBox);
       const customBox = document.createElement("fieldset"); customBox.append(node("legend", "Custom API"));
@@ -471,6 +511,7 @@ globalThis.SearchAnything = (() => {
         // The preset owns the connection rows while it is in force; the
         // legacy editor only applies to the "직접 설정" choice.
         sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active);
+        savePresetId.disabled = savePresetBtn.disabled = Boolean(active);
         presetNote.textContent = active
           ? `이 프리셋이 연결 설정을 소유합니다 — ${ragPresetSummary(active)}. 다른 값으로 바꾸려면 먼저 이 선택을 “직접 설정”으로 돌리세요.`
           : "직접 설정 모드 — 아래 연결 방식의 값이 활성 설정입니다.";
@@ -502,7 +543,27 @@ globalThis.SearchAnything = (() => {
       form.append(node("p", "차원 수는 모델 응답에서 자동으로 읽습니다. 연결 방식, Embedding 모델이나 API 주소를 변경하면 색인을 다시 구성합니다. 선택하지 않은 방식의 값도 설정 파일에 그대로 보존됩니다."));
       const save = node("button", "저장"), test = node("button", "연결 테스트"), selftest = node("button", "Selftest");
       save.type = "submit"; test.type = "button"; selftest.type = "button";
+      pauseBtn = node("button", "일시정지"); pauseBtn.type = "button";
       const selftestResult = node("p", "", "rag-selftest-result"); selftestResult.hidden = true; form.append(selftestResult);
+      // Pause holds the daemon's backfill consumer before its next key; the
+      // in-flight pass finishes, queued corpora keep their order, and resume
+      // drains from where the pause left it (POST api/rag/backfill/pause|resume).
+      pauseBtn.onclick = async () => {
+        save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = true;
+        const resuming = backfillPaused;
+        status.textContent = resuming ? "소급 임베딩을 재개하는 중…" : "소급 임베딩을 일시정지하는 중…";
+        try {
+          const data = await request(resuming ? "api/rag/backfill/resume" : "api/rag/backfill/pause", {}, "POST");
+          backfillPaused = Boolean(data.paused);
+          pauseBtn.textContent = backfillPaused ? "재개" : "일시정지";
+          status.textContent = backfillPaused
+            ? "소급 임베딩이 일시정지됐습니다 — 재개하면 남은 문서부터 이어집니다."
+            : "소급 임베딩을 재개했습니다.";
+          watchBackfill();
+        } catch (error) {
+          status.textContent = error.message;
+        } finally { save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = false; }
+      };
       function values() {
         const out = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
         const picked = sources.profile.checked ? "profile" : "custom";
@@ -532,7 +593,7 @@ globalThis.SearchAnything = (() => {
         return out;
       }
       async function action(testOnly) {
-        save.disabled = test.disabled = selftest.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
+        save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
         try {
           const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", values(), testOnly ? "POST" : "PUT");
           status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : "저장됨 · 검색 색인을 갱신합니다.";
@@ -545,10 +606,10 @@ globalThis.SearchAnything = (() => {
             Object.assign(saved, data.sources || {});
           }
         } catch (error) { status.textContent = error.message; }
-        finally { save.disabled = test.disabled = selftest.disabled = false; }
+        finally { save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = false; }
       }
       selftest.onclick = async () => {
-        save.disabled = test.disabled = selftest.disabled = true; status.textContent = "Selftest 실행 중…";
+        save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = true; status.textContent = "Selftest 실행 중…";
         try {
           const data = await request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20});
           const verdict = data.failed === 0 ? "통과" : `미통과 ${data.failed}/${data.sampled}건`;
@@ -561,10 +622,10 @@ globalThis.SearchAnything = (() => {
           selftestResult.hidden = false;
           status.textContent = "현재 설정";
         }
-        finally { save.disabled = test.disabled = selftest.disabled = false; }
+        finally { save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = false; }
       };
       test.onclick = () => action(true); form.onsubmit = event => { event.preventDefault(); action(false); };
-      form.append(save, test, selftest); card.append(form); status.textContent = "현재 설정";
+      form.append(save, test, selftest, pauseBtn); card.append(form); status.textContent = "현재 설정";
     }).catch(error => { status.textContent = error.message; });
     return card;
   }
