@@ -880,7 +880,7 @@ def test_a_screen_that_moves_on_ends_the_hold():
     assert view["cleared"]
 
 
-class _Faulted:
+class _FaultReading:
     def __init__(self, record=None, broken=False):
         self.record, self.broken = record, broken
 
@@ -891,11 +891,11 @@ class _Faulted:
 
 
 @pytest.mark.parametrize("session, held", [
-    (_Faulted({"active": True}), True),
-    (_Faulted({"active": False, "held": True}), True),
-    (_Faulted({"active": False, "held": False}), False),
-    (_Faulted(None), False),
-    (_Faulted(broken=True), False),
+    (_FaultReading({"active": True}), True),
+    (_FaultReading({"active": False, "held": True}), True),
+    (_FaultReading({"active": False, "held": False}), False),
+    (_FaultReading(None), False),
+    (_FaultReading(broken=True), False),
     (object(), False),
 ])
 def test_holds_notices_reads_active_or_held(session, held):
