@@ -5,13 +5,17 @@
    The summary line a reader sees under an active preset names the model
    and where it lives (profile name or custom endpoint). The backfill
    totals sum pending/total across the daemon's index rows and tolerate
-   rows that carry no counts. The active line names the preset (or says
-   the direct rows are in force) with the model and model_key, and stays
-   empty when the daemon has no active record. And the card wiring is
-   the contract: switching the picker PUTs only the preset pointer, the
-   connection fieldsets go read-only under a preset, values() carries
-   the pointer on a normal save, and the progress line polls
-   /api/rag/status until nothing is pending. */
+   rows that carry no counts. The backfill state line distinguishes
+   running / idle / done from the status payload, and the active line
+   names the preset (or says the direct rows are in force) with the model
+   and model_key, staying empty when the daemon has no active record.
+   And the card wiring is the contract: switching the picker PUTs only
+   the preset pointer and restores the previous selection on failure,
+   the connection fieldsets go read-only under a preset, values() carries
+   the pointer on a normal save, the progress line polls /api/rag/status
+   until nothing is pending, and the Selftest button POSTs the selftest
+   endpoint with threshold/top_k/sample and renders the verdict in its
+   own result line. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -35,9 +39,11 @@ function slice(name) {
 const api = {};
 new Function("exports",
   slice("ragPresetOptionLabel") + "\n" + slice("ragPresetSummary") + "\n" +
-  slice("ragBackfillTotals") + "\n" + slice("ragActiveText") + "\n" +
+  slice("ragBackfillTotals") + "\n" + slice("ragBackfillStateLine") + "\n" +
+  slice("ragActiveText") + "\n" +
   "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n" +
-  "exports.totals = ragBackfillTotals; exports.active = ragActiveText;")(api);
+  "exports.totals = ragBackfillTotals; exports.stateLine = ragBackfillStateLine;\n" +
+  "exports.active = ragActiveText;")(api);
 
 let failures = 0;
 function check(label, got, want) {
@@ -80,6 +86,29 @@ check("rows without counts and a missing list are tolerated",
       [api.totals([{ kind: "all" }, { kind: "sessions", pending: 2 }]), api.totals(undefined)],
       [{ pending: 2, total: 0 }, { pending: 0, total: 0 }]);
 
+/* ---- backfill state line ------------------------------------------------- */
+check("a syncing row means running regardless of pending",
+      api.stateLine([{ kind: "sessions", pending: 0, total: 100, syncing: true }],
+                    { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
+      { state: "running", text: "소급 임베딩 진행 중 · 남은 문서 0 / 100건" });
+check("pending above zero means running",
+      api.stateLine([{ kind: "sessions", pending: 12, total: 200 }],
+                    { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
+      { state: "running", text: "소급 임베딩 진행 중 · 남은 문서 12 / 200건" });
+check("no index rows at all means idle",
+      api.stateLine([], { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
+      { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
+check("zero total on every row means idle",
+      api.stateLine([{ kind: "sessions", pending: 0, total: 0 }], null),
+      { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
+check("a finished backfill with an active record appends the active line",
+      api.stateLine([{ kind: "sessions", pending: 0, total: 150 }],
+                    { preset: "qwen8b", embedding_model: "qwen3-embedding-8b", model_key: "qwen3-embedding-8b" }),
+      { state: "done", text: "활성: 프리셋 qwen8b · qwen3-embedding-8b · model_key qwen3-embedding-8b · 색인 갱신 완료" });
+check("a finished backfill with no active record is plain done",
+      api.stateLine([{ kind: "sessions", pending: 0, total: 150 }], null),
+      { state: "done", text: "색인 갱신 완료" });
+
 /* ---- the active line ----------------------------------------------------- */
 check("a preset active record names the preset, model and key",
       api.active({ preset: "qwen8b", embedding_model: "qwen3-embedding-8b", model_key: "qwen3-embedding-8b" }),
@@ -94,6 +123,8 @@ check("no active record means no line",
 /* ---- the card wiring (source-text contract) ------------------------------ */
 check("switching the picker PUTs only the preset pointer",
       src.includes('request("api/rag/settings", {preset: presetSelect.value}, "PUT")'), true);
+check("a failed switch restores the previous selection",
+      src.includes("presetSelect.value = savedPreset;"), true);
 check("the connection fieldsets go read-only while a preset is in force",
       src.includes("sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active)"), true);
 check("a normal save carries the pointer too",
@@ -107,8 +138,15 @@ check("a save restarts the progress watch",
       src.includes("backfillPolls = 0; watchBackfill();"), true);
 check("the picker offers the direct rows alongside the saved presets",
       src.includes('new Option("직접 설정 (아래 연결 값 사용)", "")'), true);
+check("the selftest button posts the selftest endpoint with threshold",
+      src.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'), true);
+check("the selftest result renders in its own line",
+      [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
+      [true, true]);
 check("the stylesheet ships the state line rule",
       css.includes(".search-settings .rag-preset-state"), true);
+check("the stylesheet ships the selftest result line rule",
+      css.includes(".search-settings .rag-selftest-result"), true);
 
 if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
 console.log("ragpreset ok");
