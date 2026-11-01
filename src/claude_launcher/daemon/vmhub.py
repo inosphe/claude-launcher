@@ -190,7 +190,7 @@ def check_guest_dir(value: str) -> str:
     for prefix, below in _WORK_ROOTS:
         if tuple(parts[:len(prefix)]) == prefix and len(parts) >= len(prefix) + below:
             rest = parts[len(prefix):]
-            if any(p.startswith(".") for p in rest) or (prefix == ("Users",) and rest[1] == "Library"):
+            if any(p.startswith(".") for p in rest) or (prefix == ("Users",) and rest[1].lower() == "library"):
                 raise VmError("vm_bad_request",
                               f"게스트 작업 폴더 {text!r}: 숨김 폴더나 Library 아래는 쓸 수 없습니다")
             return text

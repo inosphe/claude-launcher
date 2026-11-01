@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import io
 import os
+import shutil
 import stat
 import sys
 import tarfile
@@ -256,11 +257,20 @@ def test_the_host_folder_is_private_and_a_link_in_it_is_never_followed(tmp_path)
     (root / "lf").symlink_to(outside / "secret")
     (root / "sub").mkdir()
     (root / "sub" / "up").symlink_to(root.parent)
-    for parts in (["ln"], ["ln", "secret"], ["lf"], ["sub", "up", "files"], ["sub", "up"]):
-        with pytest.raises(VmError) as err:
-            folder.resolve(parts)
-        assert err.value.code == "vm_files_unsafe", parts
-    assert folder.resolve(["sub", "new"]) == root / "sub" / "new"
+    rootfd = folder.open_root()
+    try:
+        for parts in (["ln"], ["ln", "secret"], ["sub", "up"], ["sub", "up", "files"]):
+            with pytest.raises(VmError) as err:
+                folder.open_dir(rootfd, parts)
+            assert err.value.code == "vm_files_unsafe", parts
+        with pytest.raises(VmError):                    # a file is not a folder
+            folder.open_dir(rootfd, ["lf"])
+        assert folder.open_dir(rootfd, ["nothing", "yet"]) is None
+        fd = folder.open_dir(rootfd, ["sub", "new"], create=True)
+        os.close(fd)
+        assert (root / "sub" / "new").is_dir() and stat.S_IMODE(os.stat(root / "sub" / "new").st_mode) == 0o700
+    finally:
+        os.close(rootfd)
 
 
 def test_a_host_folder_that_is_a_link_is_refused(tmp_path):
@@ -450,7 +460,7 @@ def canned_env(tmp_path, entries, items=None, rc=0, **limits):
 
 def test_a_good_tar_is_written_with_owner_only_modes(tmp_path):
     env = canned_env(tmp_path, [("top", "d", None), ("top/a.txt", "f", b"aaa"), ("top/sub", "d", None),
-                                ("top/sub/b", "f", b"bb"), ("top/._a.txt", "f", b"appledouble")])
+                                ("top/sub/b", "f", b"bb"), ("top/._a.txt", "f", vm_files.APPLEDOUBLE + b"\x00" * 40)])
     out = env.get("top")
     assert out["items"] == 4 and out["bytes"] == 5
     assert sorted(p.name for p in (env.host / "top").iterdir()) == ["a.txt", "sub"]   # no AppleDouble
@@ -710,3 +720,154 @@ def test_paths_reach_the_guest_quoted_and_the_tools_by_absolute_path():
         assert "claunch-files" in script
     assert "/usr/bin/tar" in vm_files.put_script("/Users/a/w", "", "n", 1, False)
     assert "/usr/bin/tar" in vm_files.get_script("/Users/a/w", "n")
+
+
+# ---- review fixes (independent security review of 1df8295d) --------------------------- #
+@needs_guest
+@pytest.mark.parametrize("swap", ["ancestor", "source"])
+def test_a_folder_swapped_for_a_link_while_a_put_runs_sends_nothing_from_outside(tmp_path, swap):
+    env = Env(tmp_path)
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "secret.txt").write_text("OUTSIDE")
+    (outside / "sub" / "secret.txt").write_text("OUTSIDE")
+    (env.host / "d" / "sub").mkdir(parents=True)
+    (env.host / "d" / "sub" / "secret.txt").write_text("inside")
+    real_stream = env.mgr._stream
+
+    def swap_then_stream(argv, feed=None, drain=None, timeout=600.0, **kw):
+        victim = env.host / "d"                      # after the scan, before the bytes are read
+        shutil.rmtree(victim)
+        victim.symlink_to(outside if swap == "source" else outside)
+        return real_stream(argv, feed=feed, drain=drain, timeout=timeout)
+    env.mgr._stream = swap_then_stream
+    with contextlib.suppress(VmError):
+        env.put("d/sub" if swap == "ancestor" else "d")
+    leaked = [p for p in env.work.rglob("*") if p.is_file() and "OUTSIDE" in p.read_text(errors="ignore")] \
+        if env.work.exists() else []
+    assert leaked == []
+    assert env.guest_entries() in (None, [])         # and nothing half-made
+
+
+@needs_guest
+def test_a_destination_folder_swapped_for_a_link_during_a_get_lands_inside(tmp_path):
+    env = Env(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (env.host / "sub").mkdir()
+    (env.work).mkdir(parents=True)
+    (env.work / "f").write_text("fromguest")
+    real_stream = env.mgr._stream
+
+    def swap_then_stream(argv, feed=None, drain=None, timeout=600.0, **kw):
+        (env.host / "sub").rmdir()
+        (env.host / "sub").symlink_to(outside)
+        return real_stream(argv, feed=feed, drain=drain, timeout=timeout)
+    env.mgr._stream = swap_then_stream
+    with contextlib.suppress(VmError):
+        env.get("f", dest="sub/f")
+    assert os.listdir(outside) == []
+
+
+@needs_guest
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_get_overwrite_works_for_a_path_named_replaced(env, kind):
+    if kind == "file":
+        (env.work).mkdir(parents=True)
+        (env.work / "replaced").write_text("new")
+        (env.host / "replaced").write_text("old")
+    else:
+        (env.work / "replaced").mkdir(parents=True)
+        (env.work / "replaced" / "x").write_text("new")
+        (env.host / "replaced").mkdir()
+        (env.host / "replaced" / "y").write_text("old")
+    env.get("replaced", overwrite=True)
+    if kind == "file":
+        assert (env.host / "replaced").read_text() == "new"
+    else:
+        assert sorted(os.listdir(env.host / "replaced")) == ["x"]
+    assert env.host_entries() == ["replaced"]
+
+
+def test_any_error_in_an_operation_is_recorded_and_becomes_vm_files_failed(env, monkeypatch):
+    for exc in (FileNotFoundError("gone"), PermissionError("no"), OSError(28, "No space left")):
+        def boom(*a, _exc=exc, **k):
+            raise _exc
+        monkeypatch.setattr(vm_files.Files, "_get", boom)
+        assert code_of(env.get, "x") == "vm_files_failed"
+    rows = list(env.reg.files_log["a"])
+    assert len(rows) == 3 and all(r["ok"] is False and r["code"] == "vm_files_failed" for r in rows)
+
+
+def test_a_host_folder_that_cannot_be_written_is_recorded_not_a_500(tmp_path):
+    env = canned_env(tmp_path, [("top", "d", None), ("top/a", "f", b"1")])
+    os.chmod(env.host, 0o500)
+    try:
+        if os.access(env.host, os.W_OK):
+            pytest.skip("running with privileges that ignore the mode")
+        assert code_of(env.get, "top") == "vm_files_failed"
+    finally:
+        os.chmod(env.host, 0o700)
+    assert env.reg.files_log["a"][-1]["ok"] is False
+
+
+@pytest.mark.parametrize("name", [
+    "Screenshot 2026-11-02 at 1.23.45 PM.png", "a b", "\U0001F468‍\U0001F469‍\U0001F467.txt",
+    "한글 파일.txt", "é.txt", "tab x",
+])
+def test_names_with_real_world_unicode_are_accepted(name):
+    assert vm_files.check_rel("path", f"d/{name}") == ["d", name]
+    assert vm_files.member_parts(f"top/{name}") == ["top", name]
+
+
+@pytest.mark.parametrize("name", ["a‮b", "a b", "a b", "a‎b", "a⁦b", "a\x7fb",
+                                   "a\x1bb", "a\ud800b", "a\x85b"])
+def test_control_line_and_bidirectional_marks_are_still_refused(name):
+    with pytest.raises(VmError):
+        vm_files.check_rel("path", f"d/{name}")
+    with pytest.raises(VmError):
+        vm_files.member_parts(f"top/{name}")
+
+
+@needs_guest
+def test_a_file_with_a_narrow_no_break_space_goes_both_ways(env):
+    name = "Screenshot 1.23.45 PM.png"
+    (env.host / name).write_bytes(b"png")
+    env.put(name)
+    assert (env.work / name).read_bytes() == b"png"
+    env.get(name, dest="back.png")
+    assert (env.host / "back.png").read_bytes() == b"png"
+
+
+def test_only_a_real_appledouble_companion_is_dropped(tmp_path):
+    magic = vm_files.APPLEDOUBLE + b"\x00" * 50
+    env = canned_env(tmp_path, [("top", "d", None), ("top/x", "f", b"data"), ("top/._x", "f", magic),
+                                ("top/._notes", "f", b"my own file named like one")], items=3)
+    out = env.get("top")
+    assert out["items"] == 3
+    assert sorted(os.listdir(env.host / "top")) == ["._notes", "x"]
+    assert (env.host / "top" / "._notes").read_bytes() == b"my own file named like one"
+
+
+@pytest.mark.parametrize("bad", [".CLAUNCH-x", "a/.Claunch-put.x", ".ClAuNcH-get.1"])
+def test_the_reserved_prefix_is_matched_without_regard_to_case(bad):
+    with pytest.raises(VmError):
+        vm_files.check_rel("path", bad)
+
+
+@pytest.mark.parametrize("bad", ["/Users/admin/library/x", "/Users/admin/LIBRARY/x", "/Users/admin/LibRary"])
+def test_the_guest_work_folder_refuses_library_in_any_case(bad):
+    with pytest.raises(VmError):
+        vmhub.check_guest_dir(bad)
+
+
+def test_the_limit_settings_are_range_checked():
+    d = vm_files.limits_from({})
+    assert d == {"max_bytes": vm_files.MAX_BYTES, "max_items": vm_files.MAX_ITEMS, "timeout": vm_files.TIMEOUT}
+    assert vm_files.limits_from({"vm_files_max_mb": 64, "vm_files_max_items": 50, "vm_files_timeout": 30}) == \
+        {"max_bytes": 64 * 1024 * 1024, "max_items": 50, "timeout": 30.0}
+    for key, bad in (("vm_files_max_mb", 0), ("vm_files_max_mb", -5), ("vm_files_max_mb", 10 ** 9),
+                     ("vm_files_max_mb", "lots"), ("vm_files_max_mb", True), ("vm_files_max_mb", None),
+                     ("vm_files_max_items", 0), ("vm_files_max_items", 10 ** 9), ("vm_files_max_items", 1.5),
+                     ("vm_files_timeout", 0), ("vm_files_timeout", 10 ** 6), ("vm_files_timeout", float("nan"))):
+        assert vm_files.limits_from({key: bad}) == d, (key, bad)

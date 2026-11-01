@@ -972,9 +972,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
         paths.vm_presets_json(), reg, app["vm_manager"])
     app["vm_files"] = files or vm_files.Files(
         reg, app["vm_manager"], paths.daemon_dir() / "vm",
-        max_bytes=int(float(cfg.get("vm_files_max_mb", 512)) * 1024 * 1024),
-        max_items=int(cfg.get("vm_files_max_items", vm_files.MAX_ITEMS)),
-        timeout=float(cfg.get("vm_files_timeout", vm_files.TIMEOUT)))
+        **vm_files.limits_from(cfg))
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")
     app["vm_frames"] = frames or vm_frames.Frames(reg)

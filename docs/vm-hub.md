@@ -220,10 +220,16 @@ else: the VM's **host folder** `~/.claude-launcher/daemon/vm/<id>/files/` (mode
   One transfer per VM at a time (`vm_files_busy`).
 - **Host paths.** A session path is relative to the host folder. Refused
   (`vm_files_unsafe`): absolute paths, `..` and `.`, empty parts, backslash,
-  control characters, more than 16 levels or 512 characters, names starting with
-  `.claunch-` (the daemon's own staging). Every part is looked at with `lstat`
-  and a symbolic link anywhere (the last part too) refuses the call; the result
-  is also checked to lie under the real folder.
+  control characters (Cc), line/paragraph separators, lone surrogates and the
+  bidirectional marks (U+200E/F, U+202A-E, U+2066-9, U+061C), more than 16 levels
+  or 512 characters, and names starting with `.claunch-` in any letter case
+  (the daemon's own staging). Other Unicode is fine (NO-BREAK and NARROW NO-BREAK
+  SPACE, ZWJ emoji, Hangul, combining marks). The folder is reached by file
+  descriptors: the root is opened once, then each part with `openat`
+  (`O_NOFOLLOW|O_DIRECTORY`), files with `O_NOFOLLOW`, and the final move is
+  `renameat` between two such descriptors. There is no path that is checked once
+  and used later, so a folder under `files/` swapped for a symbolic link while a
+  transfer runs (up to 600 s) is not followed: the call fails.
 - **Guest work folder.** Set by the user only (panel, or
   `claunch vm files <id> --guest-dir PATH`, route `POST /api/vm/{id}/files_dir`,
   audited as `files_dir`). It must be an absolute path of plain characters in
@@ -253,14 +259,17 @@ else: the VM's **host folder** `~/.claude-launcher/daemon/vm/<id>/files/` (mode
     entry count on stderr and writes the tar. The host never runs `tar -x` on it.
     `extract_tar` reads it member by member: only regular files and folders, names
     under the one expected top name, no `..`, absolute path, control character,
-    duplicate or parent that is a file, `O_EXCL|O_NOFOLLOW`, modes reduced to the
-    owner's rwx (no setuid, no group/other), macOS `._` companions dropped. The
+    duplicate or parent that is a file, `O_EXCL|O_NOFOLLOW` under descriptors, modes
+    reduced to the owner's rwx (no setuid, no group/other). A `._name` member is
+    dropped only when it starts with the AppleDouble header (the guest also sets
+    `COPYFILE_DISABLE=1`); a real file of that name is kept. The
     result is renamed into the host folder only after the whole stream was read, the
     guest exited 0 and the entry count matched; a staging folder
     `.claunch-get.*` is removed on any failure (and swept after a day if the daemon
     died).
-  - *Limits* (config `vm_files_max_mb`, `vm_files_max_items`, `vm_files_timeout`):
-    512 MiB, 10000 items and 600 s per request; over a limit the call is refused
+  - *Limits* (config `vm_files_max_mb` 1-8192, `vm_files_max_items` 1-100000,
+    `vm_files_timeout` 10-3600; a value outside its range is logged and the
+    default is used): 512 MiB, 10000 items and 600 s per request; over a limit the call is refused
     (`vm_files_limit`, 413) or stopped (`vm_timeout`) and nothing is left.
 - **Received files are not executed.** Nothing in the daemon opens, runs or
   imports what it receives. Open them with care yourself: they come from a guest
@@ -272,6 +281,13 @@ else: the VM's **host folder** `~/.claude-launcher/daemon/vm/<id>/files/` (mode
   folder does not exist yet for `ls`/`get`; `put` creates it), `vm_files_exists`
   409, `vm_files_busy` 409, `vm_files_limit` 413, `vm_files_failed` 502, plus
   `vm_no_grant`, `vm_locked`, `vm_not_ready`, `vm_unavailable`, `vm_timeout`.
+
+Known limits (not fixed): a request whose HTTP client went away keeps its
+transfer thread until the transfer ends or the time limit stops it; and
+`overwrite` is two renames, not one atomic step (the old item is put back if the
+second fails, but a crash between them leaves it in a `.claunch-get.*` staging
+folder), and parent folders made for a `get` stay if a later step fails (they are
+empty).
 
 A daemon restart is needed (new routes, scope and tools); MCP sessions pick up
 the four tools when they start.
