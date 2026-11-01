@@ -19,6 +19,19 @@ globalThis.SearchAnything = (() => {
     }
     return { pending, total };
   }
+  function ragBackfillStateLine(indexes, active) {
+    const rows = Array.isArray(indexes) ? indexes : [];
+    const syncing = rows.some(r => r && r.syncing);
+    const totals = ragBackfillTotals(rows);
+    const activeEmpty = !active || (!active.preset && !active.embedding_model && !active.model_key);
+    if (syncing || totals.pending > 0)
+      return { state: "running", text: `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건` };
+    if (rows.length === 0 || totals.total === 0)
+      return { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." };
+    const activeText = ragActiveText(active);
+    if (activeEmpty) return { state: "done", text: "색인 갱신 완료" };
+    return { state: "done", text: `${activeText} · 색인 갱신 완료` };
+  }
   function ragActiveText(active) {
     if (!active || (!active.preset && !active.embedding_model && !active.model_key)) return "";
     const name = active.preset ? `프리셋 ${active.preset}` : "직접 설정";
@@ -378,14 +391,14 @@ globalThis.SearchAnything = (() => {
       async function watchBackfill() {
         try {
           const st = await request("api/rag/status");
-          const totals = ragBackfillTotals(st.indexes);
-          if (totals.pending > 0 && backfillPolls < 200) {
+          const line = ragBackfillStateLine(st.indexes, st.active);
+          if (line.state === "running" && backfillPolls < 200) {
             backfillPolls++;
-            ragState.textContent = `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건`;
+            ragState.textContent = line.text;
             setTimeout(watchBackfill, 3000);
             return;
           }
-          ragState.textContent = ragActiveText(st.active) || "색인 갱신 완료";
+          ragState.textContent = line.text;
         } catch { /* the status read is best-effort; leave the last line */ }
       }
       watchBackfill();
@@ -467,21 +480,29 @@ globalThis.SearchAnything = (() => {
       // read-only under a preset, so the only thing a switch can mean is
       // "make this one active", and the daemon starts the backfill on the
       // same PUT (search_anything.py restarts the service and enqueues "all").
+      let savedPreset = cfg.preset || "";
       presetSelect.onchange = async () => {
         showPreset();
         presetSelect.disabled = true; status.textContent = "프리셋을 전환하는 중…";
         try {
           const data = await request("api/rag/settings", {preset: presetSelect.value}, "PUT");
+          savedPreset = data.preset || "";
           status.textContent = `저장됨 · ${data.preset ? `프리셋 ${data.preset}` : "직접 설정"}이 활성화됐고 기존 문서의 임베딩을 새 모델로 소급합니다.`;
           watchBackfill();
-        } catch (error) { status.textContent = error.message; }
+        } catch (error) {
+          presetSelect.value = savedPreset;
+          showPreset();
+          status.textContent = `프리셋 전환 실패 · ${error.message} — 이전 선택으로 되돌렸습니다.`;
+        }
         finally { presetSelect.disabled = false; }
       };
       const advanced = document.createElement("details"); advanced.append(node("summary", "고급 설정"));
       for (const [key, title] of [["candidates", "검색 후보 수"], ["rerank_top", "Rerank 대상 수"], ["batch", "Embedding 배치 크기"], ["timeout", "요청 제한 시간 (초)"], ["watch_interval", "변경 확인 주기 (초)"]]) field(key, title, "number", advanced);
       field("verify_tls", "TLS 인증서 검증", "checkbox", advanced); form.append(advanced);
       form.append(node("p", "차원 수는 모델 응답에서 자동으로 읽습니다. 연결 방식, Embedding 모델이나 API 주소를 변경하면 색인을 다시 구성합니다. 선택하지 않은 방식의 값도 설정 파일에 그대로 보존됩니다."));
-      const save = node("button", "저장"), test = node("button", "연결 테스트"); save.type = "submit"; test.type = "button";
+      const save = node("button", "저장"), test = node("button", "연결 테스트"), selftest = node("button", "Selftest");
+      save.type = "submit"; test.type = "button"; selftest.type = "button";
+      const selftestResult = node("p", "", "rag-selftest-result"); selftestResult.hidden = true; form.append(selftestResult);
       function values() {
         const out = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
         const picked = sources.profile.checked ? "profile" : "custom";
@@ -511,7 +532,7 @@ globalThis.SearchAnything = (() => {
         return out;
       }
       async function action(testOnly) {
-        save.disabled = test.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
+        save.disabled = test.disabled = selftest.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
         try {
           const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", values(), testOnly ? "POST" : "PUT");
           status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : "저장됨 · 검색 색인을 갱신합니다.";
@@ -524,10 +545,26 @@ globalThis.SearchAnything = (() => {
             Object.assign(saved, data.sources || {});
           }
         } catch (error) { status.textContent = error.message; }
-        finally { save.disabled = test.disabled = false; }
+        finally { save.disabled = test.disabled = selftest.disabled = false; }
       }
+      selftest.onclick = async () => {
+        save.disabled = test.disabled = selftest.disabled = true; status.textContent = "Selftest 실행 중…";
+        try {
+          const data = await request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20});
+          const verdict = data.failed === 0 ? "통과" : `미통과 ${data.failed}/${data.sampled}건`;
+          const sim = data.similarity || {};
+          selftestResult.textContent = `Selftest ${verdict} · 임계값 ${data.threshold} · 유사도 min ${sim.min} / 중간 ${sim.median} / max ${sim.max}${data.failures && data.failures.length ? ` · 미달: ${data.failures.slice(0, 3).map(f => f.id).join(", ")}${data.failures.length > 3 ? " 등" : ""}` : ""}`;
+          selftestResult.hidden = false;
+          status.textContent = "현재 설정";
+        } catch (error) {
+          selftestResult.textContent = `Selftest 실패 · ${error.message}`;
+          selftestResult.hidden = false;
+          status.textContent = "현재 설정";
+        }
+        finally { save.disabled = test.disabled = selftest.disabled = false; }
+      };
       test.onclick = () => action(true); form.onsubmit = event => { event.preventDefault(); action(false); };
-      form.append(save, test); card.append(form); status.textContent = "현재 설정";
+      form.append(save, test, selftest); card.append(form); status.textContent = "현재 설정";
     }).catch(error => { status.textContent = error.message; });
     return card;
   }
