@@ -374,20 +374,23 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     assert ask["urgent"] is True
 
 
-def test_coding_brief_thread_is_a_true_by_default_boolean_and_human_only():
-    """the pre-approval summary thread ships on unless a person turns it off;
-    like require_coding_approval a person may flip it mid-run (set_by [user])."""
+def test_pre_approval_summary_thread_opens_whenever_the_gate_stands():
+    """승인을 구하는 일감이면 항상 사용자 요약 스레드를 연다(사용자 지시,
+    th-275cfa) — 끌 수 있는 스위치가 없고, 거절 뒤 재승인을 구할 때도 매번
+    다시 연다. thread_open이 실패하면 done_when은 thread_id 대신 실패 사유를
+    요구한다(claunch-vz15z)."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
-    declaration = doc["inputs"]["coding_brief_thread"]
-    assert declaration["type"] == "bool"
-    assert declaration["default"] is True
-    assert declaration["set_by"] == ["user"]
+    assert "coding_brief_thread" not in doc["inputs"]
     plan = doc["nodes"]["coding-plan"]
     assert "thread_id" in plan["returns"]["ok"]
     prompt = plan["prompt"]
     assert "문제제기" in prompt and "작업 목표" in prompt
     assert "작업 범위" in prompt and "기대효과" in prompt and "리스크" in prompt
-    assert "thread_open" in prompt and "coding_brief_thread" in prompt
+    assert "thread_open" in prompt
+    assert "항상 연다" in prompt
+    assert "coding_brief_thread" not in prompt
+    done_when = plan["done_when"]
+    assert "thread_open이 실패한 경우에는 thread_id 대신" in done_when
 
 
 def test_merge_approval_is_a_false_by_default_boolean_and_human_only():

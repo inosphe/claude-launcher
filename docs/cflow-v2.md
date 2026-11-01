@@ -848,7 +848,7 @@ inputs:
   `acceptance`는 선언과 무관하게 이미 그렇다. 그룹의 스위치처럼 블록의 다른
   칸 전체에 걸리는 입력에 쓴다.
 
-improv-worker-v2는 `코딩 승인`(require_coding_approval·coding_brief_thread), `착지 승인`
+improv-worker-v2는 `코딩 승인`(require_coding_approval), `착지 승인`
 (require_merge_approval — 착지 요청 직전 사용자 승인 게이트, claunch-boxug),
 `리뷰어`(reviewer_profile·reviewer_harness), `라우팅`(session_routing·delegate_profile·
 delegate_model), `PR`(force_pr·force_no_pr) 다섯 블록을 두고, `session_routing`이
@@ -902,7 +902,6 @@ delegate_model), `PR`(force_pr·force_no_pr) 다섯 블록을 두고, `session_r
   improv-worker-v2의 `require_coding_approval`과 `max_rounds`가 그 예다: 일감마다
   `coding-approval-check`가, 회차마다 회차 루프의 `while`이 그 값을 다시 읽으므로,
   사람이 런 도중에 승인 게이트를 켜면 다음 일감부터 승인을 기다린다.
-  `coding_brief_thread`도 일감마다 `coding-plan`이 다시 읽어 같은 규칙을 따른다.
   `reviewer_profile`·`reviewer_harness`도 같다(10b). required 입력은 빈 값으로
   비울 수 없다 — `' , '`처럼 빈 항목만 준 list도 비우는 값으로 본다.
 

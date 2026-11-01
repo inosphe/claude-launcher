@@ -229,17 +229,6 @@ inputs:
     # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
     # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
-  coding_brief_thread:
-    type: bool
-    default: true
-    label: 코딩 승인 전 요약 스레드
-    help: 켜면 coding-approval 게이트에 들어가기 직전 사용자 스레드로 문제제기·작업 목표·작업 범위·기대효과·리스크 다섯 항목 요약을 본다(승인 게이트가 서는 일감에만). require_coding_approval이 꺼져 있거나 approve-always 뒤의 일감에는 스레드도 열리지 않는다
-    # require_coding_approval과 같은 블록에 묶는다 — 승인 게이트를 보조하는
-    # 스위치라 게이트 옆에 있어야 무엇에 대한 스위치인지 드러난다.
-    group: 코딩 승인
-    # coding-plan이 일감마다 읽는다. 사람이 런 도중에 바꾸면 다음 일감부터
-    # 적용된다(require_coding_approval과 같은 규칙). 에이전트는 쓰지 못한다.
-    set_by: [user]
   require_merge_approval:
     type: bool
     default: false
@@ -1580,11 +1569,11 @@ nodes:
       하나를 연다(`thread_open`). 터미널 출력과 이슈 코멘트는 사용자에게
       알림이 가지 않으므로, 사용자가 승인 카드의 전체 계획을 펼쳐 보기
       전에 다섯 항목 요약을 대시보드 알림으로 받는 길이 이 스레드다.
-      스레드는 시작 입력 `coding_brief_thread`(지금 값
-      ${data.inputs.coding_brief_thread})가 true일 때만 연다 — 사람이 끄면
-      승인 게이트는 그대로 서고 스레드만 생략한다. 게이트 자체가 서지
-      않으면(입력이 꺼져 있거나 approve-always 뒤의 일감) 이 스레드를 열지
-      않는다 — 그 경우 이 일감에는 승인 질문이 오르지 않는다.
+      승인을 구하는 일감이면 항상 연다 — 스위치로 끌 수 있는 선택지가
+      없고, 회차가 돌아 거절 뒤 재승인을 구할 때도 매번 다시 연다. 게이트
+      자체가 서지 않으면(입력이 꺼져 있거나 approve-always 뒤의 일감) 이
+      스레드를 열지 않는다 — 그 경우 이 일감에는 승인 질문이 오르지
+      않는다.
 
       스레드 제목은 한 줄로 이 일감을 가리키게 적는다(이슈 id 포함).
       본문은 마크다운으로 brief에서 가져온 다음 다섯 항목을 적는다 — 이
@@ -1602,8 +1591,9 @@ nodes:
     done_when: |
       사용자가 구현 착수 여부를 판단할 구체적인 계획과 근거가 brief에 있다.
       session_routing이 true면 difficulty·recommend·why도 있다. 승인 게이트가
-      이번 일감에 서고 coding_brief_thread가 true면 사용자 요약 스레드의 id가
-      보고에 있다.
+      이번 일감에 서면 사용자 요약 스레드의 id가 보고에 있다. 단
+      thread_open이 실패한 경우에는 thread_id 대신 그 실패 사유가 보고에
+      있다 — 실패는 이 작업의 실패로 보고하지 않는다.
     returns:
       ok: {brief: str, difficulty: "str?", recommend: "str?", why: "str?", thread_id: "str?"}
     effects: [fs.read, thread.write]
