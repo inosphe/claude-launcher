@@ -371,6 +371,8 @@ class Manager:
         and ssh. A suspended VM is resumed the same way: ``tart run`` on a
         suspended VM restores it."""
         prior = self.registry.get(vm_id).state
+        if self.registry.get(vm_id).locked:
+            raise vmhub.locked_error(self.registry.get(vm_id))
         if prior == "suspended" and self.host_locked():
             # Nothing has been claimed or run: the saved state stays and a
             # retry after the unlock is safe.
@@ -622,6 +624,10 @@ class Manager:
                 changed.append(f"{vm.id}: {old} -> fault ({exc.code})")
                 continue
             changed.append(f"{vm.id}: {old} -> {want}")
+            if want == "running" and vm.locked:
+                # Only recorded and shown: the daemon never stops a VM for this.
+                self.registry.note(vm.id, "locked_but_running")
+                changed.append(f"{vm.id}: locked but running (not stopped)")
         return changed
 
     async def reprobe(self, vm_id: str) -> None:

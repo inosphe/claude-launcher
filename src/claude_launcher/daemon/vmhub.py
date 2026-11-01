@@ -253,6 +253,10 @@ class Vm:
     #: What the running ``tart run`` was given (None: not known, e.g. adopted
     #: after a daemon restart). Not persisted.
     net_applied: Optional[dict] = None
+    #: The user's lock: a locked VM is not started, resumed, acquired or called
+    #: by anything the daemon runs (docs/vm-hub.md). Saved; set only while the
+    #: VM is stopped, and only by the user.
+    locked: bool = False
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
@@ -278,7 +282,7 @@ class Vm:
             "extra_controllers": dict(self.extra_controllers),
             "epoch": self.epoch, "grants": {k: list(v) for k, v in self.grants.items()},
             "human": self.human, "human_since": self.human_since,
-            "needs_observe": self.needs_observe, "softnet": self.softnet,
+            "needs_observe": self.needs_observe, "softnet": self.softnet, "locked": self.locked,
             "expose": list(self.expose), "allow": list(self.allow),
         }
 
@@ -306,6 +310,7 @@ class Vm:
         # would refuse is dropped here.
         vm.expose = _kept(raw.get("expose"), lambda v: check_expose(*split_expose(v)))
         vm.allow = _kept(raw.get("allow"), check_allow)
+        vm.locked = raw.get("locked") is True   # anything but a JSON true reads as unlocked
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
             str(s): [x for x in SCOPES if x in (v or [])]
@@ -325,6 +330,11 @@ def _kept(items, check) -> List[str]:
         if value not in out:
             out.append(value)
     return out[:EXPOSE_MAX]
+
+def locked_error(vm: "Vm") -> VmError:
+    return VmError("vm_locked",
+                   f"{vm.id}은(는) 잠겨 있어 사용할 수 없습니다. 사용자가 잠금을 해제해야 합니다",
+                   locked=True)
 
 
 def not_ready(vm: "Vm") -> VmError:
@@ -532,6 +542,20 @@ class Registry:
             self._save()
             return vm
 
+    # ---- the lock (the user's) -------------------------------------------- #
+    def set_locked(self, vm_id: str, locked: bool) -> Vm:
+        """Lock a stopped VM, or unlock any. A running VM is not stopped for
+        this: the user shuts it down first."""
+        with self._lock:
+            vm = self.get(vm_id)
+            if locked and vm.state != "stopped":
+                raise VmError("vm_lock_needs_stop",
+                              f"{vm_id}은(는) {vm.state} 상태입니다. 먼저 정상 종료한 뒤 잠그십시오"
+                              "(자동으로 종료하지 않습니다)")
+            vm.locked = bool(locked)
+            self._save()
+            return vm
+
     # ---- slots and state ------------------------------------------------ #
     def holders(self, except_id: str = "") -> List[str]:
         return [v.id for v in self._vms.values()
@@ -684,6 +708,8 @@ class Registry:
             vm = self.get(vm_id)
             if CONTROL not in vm.grants.get(session, []):
                 raise VmError("vm_no_grant", f"{session} has no control grant on {vm_id}")
+            if vm.locked:
+                raise locked_error(vm)
             if not vm.ready:
                 raise not_ready(vm)
             if vm.human == "driving":
@@ -751,6 +777,9 @@ class Registry:
             if scope not in vm.grants.get(session, []):
                 self._log(vm_id, session, "refused", scope=scope, why="no grant")
                 raise VmError("vm_no_grant", f"{session} has no {scope} grant on {vm_id}")
+            if vm.locked:
+                self._log(vm_id, session, "refused", scope=scope, why="locked")
+                raise locked_error(vm)
             if scope == VIEW:
                 pass
             else:
@@ -795,6 +824,8 @@ class Registry:
     def human_driving(self, vm_id: str) -> dict:
         with self._lock:
             vm = self.get(vm_id)
+            if vm.locked:
+                raise locked_error(vm)
             if vm.human != "driving":
                 vm.human = "driving"
                 vm.human_since = self._clock()
@@ -849,4 +880,5 @@ class Registry:
             vm = self.get(vm_id)
             return {**vm.to_dict(), "ready": vm.ready, "draining": vm.draining,
                     "inflight": vm.inflight, "net_pending": vm.net_pending(),
-                    "net_applied_known": vm.net_applied is not None}
+                    "net_applied_known": vm.net_applied is not None,
+                    "locked_but_running": vm.locked and vm.state in OCCUPIED}

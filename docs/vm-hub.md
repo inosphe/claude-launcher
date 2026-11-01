@@ -159,3 +159,36 @@ softnet.
   `--net-softnet-block` as its help text says (s5's real-VM check).
 
 A daemon restart is needed (routes and the `tart run` arguments).
+
+## VM lock
+
+A locked VM (`Vm.locked`, saved in `vms.json`) is one the daemon will not run
+for anyone but the user at an unlocked moment: for administration only, unlock,
+work, lock again. It is not the host screen lock of the section above; the panel
+calls this one "VM 잠금".
+
+- **Set**: `claunch vm lock|unlock <id>` or the panel's toggle (🔒/🔓, with a
+  badge and, while locked, a disabled start button and the reason). Only the
+  user (`POST /api/vm/{id}/lock` and `/unlock`; a session gets `vm_user_only`; no
+  MCP tool); each change is audited with the declared actor. A VM can be locked
+  only while `stopped`: a running or suspended one is answered
+  `vm_lock_needs_stop` ("먼저 정상 종료한 뒤 잠그십시오") and is never stopped
+  for it. Unlocking works in any state.
+- **Refused while locked** (`vm_locked`, HTTP 423, Korean text): `start` and
+  resume (so also a preset's new-VM start), `vm_acquire`, every `vm_*` call
+  (`vm_cua`, `vm_tools`, `vm_exec`, the screenshot frame) for a session that has
+  the grant, and the user's takeover. Not refused: listing and reading a VM,
+  stop, force-stop, release, reconcile, removing the record, saving a preset
+  from it (it is stopped). The daemon does not open a guest channel to a locked
+  VM it finds running.
+- **Found running**: `reconcile` (and so a daemon restart) records a locked VM
+  that is up as `running`, writes `locked_but_running` to the audit log and the
+  reconcile output, and the panel says so. Nothing stops it automatically.
+- **Survives** a daemon restart. In `vms.json` only a JSON `true` is a lock;
+  `"true"`, `1`, `"yes"` and the rest read as unlocked.
+- **Limit**: the lock is the daemon's. A user or process that runs `tart run`
+  itself is not stopped by it, and the daemon cannot tell that apart from its
+  own VM beyond what `reconcile` finds.
+
+A daemon restart is needed for the routes and the checks; the panel's static
+files need a refresh.

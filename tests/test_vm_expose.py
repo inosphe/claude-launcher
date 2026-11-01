@@ -248,3 +248,31 @@ def test_a_session_can_neither_change_nor_see_the_settings(tmp_path):
             user = await (await api.get("/api/vm/src")).json()
             assert user["expose"] == ["2222:22"]
     run(go())
+
+
+def _reloaded(path):
+    again = Registry(path)
+    again.load()
+    return again
+
+
+def test_every_network_and_lock_change_is_saved_and_returns_the_record(tmp_path):
+    """Each setter saves before it returns and hands back the VM. The earlier
+    tests read the in-memory record, and a route answers from ``view()``, so a
+    setter that forgot ``_save()`` (or its ``return``) went unnoticed until a
+    rebase left ``allow_remove`` without them."""
+    path = tmp_path / "vms.json"
+    reg = Registry(path)
+    reg.add("a")
+    steps = [
+        (lambda: reg.expose_add("a", 2222, 22), lambda r: r.get("a").expose == ["2222:22"]),
+        (lambda: reg.allow_add("a", "192.168.1.213", HOST), lambda r: r.get("a").allow == ["192.168.1.213/32"]),
+        (lambda: reg.expose_remove("a", 2222), lambda r: r.get("a").expose == []),
+        (lambda: reg.allow_remove("a", "192.168.1.213"), lambda r: r.get("a").allow == []),
+        (lambda: reg.set_locked("a", True), lambda r: r.get("a").locked is True),
+        (lambda: reg.set_locked("a", False), lambda r: r.get("a").locked is False),
+    ]
+    for change, saved in steps:
+        got = change()
+        assert got is reg.get("a"), change
+        assert saved(_reloaded(path)), change

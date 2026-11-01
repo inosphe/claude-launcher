@@ -74,7 +74,7 @@ function renderList() {
     name.textContent = vm.id;
     const sub = document.createElement("span");
     sub.className = "sub";
-    sub.textContent = `${vm.state}${vm.controller ? " · " + vm.controller : ""}`;
+    sub.textContent = `${vm.state}${vm.locked ? " · 🔒" : ""}${vm.controller ? " · " + vm.controller : ""}`;
     b.append(name, sub);
     b.addEventListener("click", () => { selected = vm.id; showFrame(null); render(); startFrames(); });
     nav.appendChild(b);
@@ -99,7 +99,19 @@ function renderDetail(vm) {
   problem.textContent = why || "";
   const running = vm.state === "running";
   $("vm-lock").hidden = !(hostLocked && vm.state === "suspended");
-  $("vm-start").disabled = !(vm.state === "stopped" || (vm.state === "suspended" && !hostLocked));
+  const guarded = !!vm.locked;
+  $("vm-guard-chip").hidden = !guarded;
+  const note = $("vm-guard-note");
+  note.hidden = !guarded;
+  note.textContent = !guarded ? "" : vm.locked_but_running
+    ? "이 VM은 잠겨 있지만 실행 중입니다(데몬이 자동으로 종료하지 않습니다). 세션은 사용할 수 없습니다. 종료하려면 '종료'를 누르십시오."
+    : "이 VM은 잠겨 있어 시작할 수 없고 세션이 사용할 수 없습니다. 관리 작업이 필요하면 '잠금 해제'를 누르십시오.";
+  const toggle = $("vm-guard-toggle");
+  toggle.textContent = guarded ? "🔓 잠금 해제" : "🔒 VM 잠그기";
+  toggle.disabled = !guarded && vm.state !== "stopped";
+  toggle.title = !guarded && vm.state !== "stopped"
+    ? "정지된 VM만 잠글 수 있습니다. 먼저 정상 종료하십시오." : toggle.title;
+  $("vm-start").disabled = guarded || !(vm.state === "stopped" || (vm.state === "suspended" && !hostLocked));
   $("vm-start").textContent = vm.state === "suspended" ? "▶ 재개" : "▶ 시작";
   $("vm-suspend").disabled = !running;
   $("vm-stop").disabled = !(running || vm.state === "stopping" || vm.state === "starting");
@@ -407,6 +419,13 @@ function deletePreset(name) {
 const lifecycle = (action, label, ask) => $(`vm-${action === "force_stop" ? "force" : action}`).addEventListener("click", () => {
   if (!selected || (ask && !confirm(ask))) return;
   act(label, () => post(`api/vm/${encodeURIComponent(selected)}/${action}`));
+});
+$("vm-guard-toggle").addEventListener("click", () => {
+  const vm = vms.find((v) => v.id === selected);
+  if (!vm) return;
+  const op = vm.locked ? "unlock" : "lock";
+  if (op === "unlock" && !confirm(`${vm.id}의 잠금을 해제합니다. 관리 작업이 끝나면 다시 잠그십시오. 계속합니까?`)) return;
+  act(op === "lock" ? `${vm.id} 잠금` : `${vm.id} 잠금 해제`, () => post(`api/vm/${encodeURIComponent(vm.id)}/${op}`));
 });
 lifecycle("start", "시작");
 lifecycle("suspend", "일시 중단");
