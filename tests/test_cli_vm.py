@@ -153,3 +153,17 @@ def test_expose_needs_a_value_and_the_pair_shape(client, capsys):
 def test_a_session_shell_cannot_change_the_network_settings(client, monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     assert run("allow", "a", "add", "1.2.3.4") == cli_vm.EXIT_REFUSED and client.calls == []
+
+def test_lock_and_unlock_post_to_their_routes(client, capsys):
+    client.answer = {"id": "a", "locked": True}
+    assert run("lock", "a") == 0
+    client.answer = {"id": "a", "locked": False}
+    assert run("unlock", "a") == 0
+    assert [(c[0], c[1]) for c in client.calls] == [("POST", "/api/vm/a/lock"), ("POST", "/api/vm/a/unlock")]
+    out = capsys.readouterr().out
+    assert "a: locked" in out and "a: unlocked" in out
+
+
+def test_a_session_shell_cannot_lock_or_unlock(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    assert run("unlock", "a") == cli_vm.EXIT_REFUSED and client.calls == []

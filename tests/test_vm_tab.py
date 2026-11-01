@@ -79,4 +79,12 @@ def test_the_panel_has_the_network_section_and_its_warning():
     assert "같은 LAN의 모든 기기" in html and "호스트 방화벽은 바꾸지 않습니다" in html
     assert "api/vm/${encodeURIComponent(selected)}/expose" in js and "/allow" in js
     assert "192.168.1.213" in html and "/32" in html   # the placeholder shows the shape of the value
+
+def test_the_panel_has_the_lock_controls():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    for ident in ("vm-guard-toggle", "vm-guard-chip", "vm-guard-note"):
+        assert f'id="{ident}"' in html
+    assert "/${op}" in js and "vm.locked" in js
+    assert "호스트 화면 잠금과는 별개" in html     # the two locks are told apart
     assert "innerHTML" not in js

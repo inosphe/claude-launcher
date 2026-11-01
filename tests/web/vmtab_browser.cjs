@@ -25,8 +25,9 @@ let sessionsDown = false;
 const VM = {
   id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
   grants: {}, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
-  net_pending: true, net_applied_known: true,
+  net_pending: true, net_applied_known: true, locked: false,
 };
+const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false };
 const json = (res, body, status = 200) => {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -36,6 +37,11 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   const p = url.pathname;
   if (req.method === "GET" && p.startsWith("/api/vm")) hits.push(p);
+  if (req.method === "POST" && /^\/api\/vm\/beta\/(un)?lock$/.test(p)) {
+    BETA.locked = p.endsWith("/lock") && !p.endsWith("/unlock");
+    posts.push([p, {}]);
+    return json(res, BETA);
+  }
   if (req.method === "POST") {
     let data = "";
     req.on("data", (c) => { data += c; });
@@ -45,7 +51,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM], slot_limit: 2, host_locked: false });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false });
   if (p === "/api/vm-tart") {
     return json(res, { tart: [
       { name: "alpha", state: "running", running: true, registered: true, id: "alpha", usable: true },
@@ -138,6 +144,24 @@ const server = http.createServer((req, res) => {
       { action: "add", external: "8080", internal: "80" });
     await frame.locator("#vm-expose tbody tr", { hasText: "2222" }).getByRole("button", { name: "삭제" }).click();
     await frame.locator("#vm-activity", { hasText: "포트 2222 노출 해제 완료" }).waitFor({ timeout: 5000 });
+    // 2d. the VM lock: a stopped VM is locked, start is disabled with the reason, then unlocked
+    await frame.locator(".vm-card", { hasText: "beta" }).click();
+    await frame.locator("#vm-name", { hasText: "beta" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("#vm-guard-toggle").isDisabled(), false);
+    assert.equal(await frame.locator("#vm-start").isDisabled(), false);
+    await frame.locator("#vm-guard-toggle").click();
+    await frame.locator("#vm-guard-chip").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await frame.locator("#vm-guard-note").innerText(), /잠겨 있어 시작할 수 없고/);
+    assert.equal(await frame.locator("#vm-start").isDisabled(), true, "a locked VM cannot be started from the panel");
+    assert.match(await frame.locator("#vm-guard-toggle").innerText(), /잠금 해제/);
+    page.once("dialog", async (d) => { assert.match(d.message(), /다시 잠그십시오/); await d.accept(); });
+    await frame.locator("#vm-guard-toggle").click();
+    await frame.locator("#vm-guard-chip").waitFor({ state: "hidden", timeout: 5000 });
+    assert.equal(await frame.locator("#vm-start").isDisabled(), false);
+    assert.ok(posts.some(([u]) => u === "/api/vm/beta/lock") && posts.some(([u]) => u === "/api/vm/beta/unlock"));
+    await frame.locator(".vm-card", { hasText: "alpha" }).click();
+    await frame.locator("#vm-name", { hasText: "alpha" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("#vm-guard-toggle").isDisabled(), true, "a running VM is not locked (shut it down first)");
 
     // 3. granting from the session list
     await frame.locator("#vm-grant-session option", { hasText: "s1" }).waitFor({ state: "attached", timeout: 15000 });

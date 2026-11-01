@@ -50,7 +50,7 @@ _STATUS = {
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
-    "vm_allow_holds_host": 400, "vm_preset_exists": 409,
+    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
 }
@@ -202,7 +202,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known")
+             "net_applied_known", "locked_but_running")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -427,6 +427,23 @@ async def h_allow(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+async def h_lock(request: web.Request) -> web.Response:
+    """Lock or unlock a VM: the user's. A locked VM is not started or called
+    by anything the daemon runs until it is unlocked (docs/vm-hub.md)."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    locked = request.match_info["op"] == "lock"
+    try:
+        reg.get(vm_id)
+        _trace(request, reg, vm_id, "lock" if locked else "unlock")
+        reg.set_locked(vm_id, locked)
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
 async def h_remove(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
@@ -646,6 +663,8 @@ async def h_frame(request: web.Request) -> web.Response:
             session = _as_session(request, {"session": request.query.get("session", "")})
             if vmhub.VIEW not in reg.get(vm_id).grants.get(session, []):
                 raise VmError("vm_no_grant", f"{session} has no view grant on {vm_id}")
+            if reg.get(vm_id).locked:
+                raise vmhub.locked_error(reg.get(vm_id))
         try:
             since = int(request.query.get("since") or 0)
         except ValueError:
@@ -756,7 +775,8 @@ async def _bring_up(app: web.Application, vm_id: str, tries: int = 3) -> bool:
     for attempt in range(tries):
         try:
             await mgr.reprobe(vm_id)
-            app["vm_channels"].ensure(vm_id)
+            if not reg.get(vm_id).locked:   # a locked VM's guest is not driven
+                app["vm_channels"].ensure(vm_id)
             return True
         except VmError as exc:
             reg.note(vm_id, "reprobe_failed", code=exc.code, attempt=attempt + 1)
@@ -889,6 +909,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)
     r.add_post("/api/vm/{id}/expose", h_expose)
     r.add_post("/api/vm/{id}/allow", h_allow)
+    r.add_post("/api/vm/{id}/{op:lock|unlock}", h_lock)
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)
     r.add_post("/api/vm/{id}/revoke_controller", h_revoke_controller)

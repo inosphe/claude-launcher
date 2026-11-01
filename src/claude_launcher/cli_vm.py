@@ -147,6 +147,11 @@ def _cmd_expose(args) -> int:
 def _cmd_allow(args) -> int:
     return _net(args, "allow", lambda v: {"cidr": v}, lambda v: {"cidr": v})
 
+def _cmd_lock(args) -> int:
+    def show(out):
+        print(f"{out['id']}: " + ("locked" if out.get("locked") else "unlocked"))
+    return _call(args, "POST", f"/api/vm/{args.vm}/{args.vm_command}", {}, show=show)
+
 
 def _preset_list(args) -> int:
     def show(out):
@@ -285,6 +290,13 @@ def register(sub) -> None:
     sp.add_argument("value", nargs="?", help="the address or CIDR")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=_cmd_allow)
+    for name, text in (("lock", "lock a stopped VM: the daemon starts, resumes and calls nothing on it "
+                                "until it is unlocked (it does not stop a running VM)"),
+                       ("unlock", "unlock a VM for administration")):
+        sp = v.add_parser(name, help=text)
+        vm_arg(sp)
+        sp.add_argument("--json", action="store_true")
+        sp.set_defaults(func=_cmd_lock)
 
     pr = v.add_parser("preset", help="VM presets: a stopped copy to make new VMs from")
     ps = pr.add_subparsers(dest="preset_command", required=True)
