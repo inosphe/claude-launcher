@@ -162,6 +162,11 @@ def sessions_db() -> Path:
     return daemon_dir() / "sessions.db"
 
 
+def vm_json() -> Path:
+    """The VM registry (``daemon/vmhub.py``): records, grants and slot state."""
+    return daemon_dir() / "vms.json"
+
+
 def briefings_json() -> Path:
     """Persisted LLM briefing cache, retained across daemon restarts."""
     return daemon_dir() / "briefings.json"

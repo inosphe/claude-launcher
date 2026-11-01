@@ -2905,7 +2905,11 @@ _LIVE_KEYS = (
 #: delegated work runs on is the person's choice (claunch-yl0to).
 #: reposync_pause_precard_s: a leader that could shorten it would lift the
 #: sync merge pause it is held to (claunch-z6da6).
-_PERSON_ONLY_KEYS = ("reposync_push", "reposync_pause_precard_s", "delegate_profile", "delegate_model")
+#: vm_softnet, vm_softnet_block: they decide what a guest can reach on the
+#: host's network; an agent that could turn them off would lift the isolation
+#: its own VM runs under (vm-setup-8s6).
+_PERSON_ONLY_KEYS = ("reposync_push", "reposync_pause_precard_s", "delegate_profile", "delegate_model",
+                     "vm_softnet", "vm_softnet_block")
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:
@@ -2926,12 +2930,20 @@ def _cmd_daemon_config(args: argparse.Namespace) -> int:
         return 0
     if args.key in _PERSON_ONLY_KEYS and os.environ.get("CLAUNCH_SESSION"):
         print(
-            f"error: {args.key} decides whether a person approves what an agent "
-            "does, so an agent session cannot change it -- ask the user to set "
-            "it from their own shell",
+            f"error: {args.key} is the person's to set (it decides what an agent "
+            "session may do or reach), so an agent session cannot change it -- "
+            "ask the user to set it from their own shell",
             file=sys.stderr,
         )
         return 1
+    if args.key == "vm_softnet_block":
+        from .daemon import vm_tart
+
+        _, block = vm_tart.parse_softnet(True, args.value)
+        if block == vm_tart.SOFTNET_BLOCK and args.value.replace(" ", "") != vm_tart.SOFTNET_BLOCK:
+            print("error: vm_softnet_block must be a comma-separated list of CIDRs "
+                  f"(e.g. {vm_tart.SOFTNET_BLOCK})", file=sys.stderr)
+            return 1
     store.set_daemon_field(args.key, _parse_value(args.value))
     print(f"{args.key} = {args.value}")
     if daemon_client.connect() is not None:

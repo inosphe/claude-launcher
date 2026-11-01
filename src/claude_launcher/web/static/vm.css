@@ -1,0 +1,55 @@
+/* The VM page (vm.html). Dark like the rest of the app; theme.js derives the light theme. */
+:root {
+  --vm-bg: #121417; --vm-bar: #1b1e23; --vm-line: #2c3038; --vm-text: #d7dbe0;
+  --vm-muted: #8b929c; --vm-accent: #e8590c; --vm-ok: #3fb950; --vm-bad: #f85149;
+  --vm-warn: #d29922; --vm-btn: #262a31; --vm-btn-hover: #31363f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; background: var(--vm-bg); color: var(--vm-text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+[hidden] { display: none !important; }
+button, select { font: inherit; color: inherit; height: 26px; padding: 0 10px; border: 1px solid var(--vm-line);
+  border-radius: 4px; background: var(--vm-btn); cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: var(--vm-btn-hover); }
+button:disabled { opacity: .5; cursor: default; }
+button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-accent); }
+.vm-danger { border-color: var(--vm-bad); color: var(--vm-bad); }
+#vm-bar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px;
+  background: var(--vm-bar); border-bottom: 1px solid var(--vm-line); flex: none; }
+.vm-brand { font-weight: 600; color: var(--vm-accent); }
+.vm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vm-bad); }
+.vm-dot.up { background: var(--vm-ok); }
+.vm-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vm-muted); }
+.vm-activity.error { color: var(--vm-bad); }
+#vm-main { display: flex; flex: 1; min-height: 0; }
+#vm-list { flex: none; width: 240px; overflow: auto; border-right: 1px solid var(--vm-line); background: var(--vm-bar); }
+.vm-card { display: block; width: 100%; height: auto; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--vm-line);
+  border-radius: 0; background: none; text-align: left; }
+.vm-card[aria-current="true"] { background: var(--vm-btn); border-left: 3px solid var(--vm-accent); padding-left: 9px; }
+.vm-card .sub { display: block; color: var(--vm-muted); font-size: 11px; }
+#vm-detail { flex: 1; min-width: 0; overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+#vm-head { display: flex; align-items: center; gap: 10px; }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 13px; margin: 8px 0 0; }
+.vm-chip { padding: 1px 8px; border: 1px solid var(--vm-line); border-radius: 10px; font-size: 11px; }
+.vm-chip.ok { border-color: var(--vm-ok); color: var(--vm-ok); }
+.vm-chip.warn { border-color: var(--vm-warn); color: var(--vm-warn); }
+.vm-chip.bad { border-color: var(--vm-bad); color: var(--vm-bad); }
+.vm-muted { color: var(--vm-muted); }
+.vm-problem { padding: 6px 10px; border: 1px solid var(--vm-bad); border-radius: 4px; color: var(--vm-bad); }
+#vm-actions, #vm-control { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#vm-control > div { display: flex; align-items: center; gap: 8px; margin-right: 24px; }
+#vm-screen-wrap { position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 200px; max-height: 60vh; background: #0b0d0f; border: 1px solid var(--vm-line); overflow: hidden; }
+#vm-screen { max-width: 100%; max-height: 60vh; object-fit: contain; }
+#vm-screen-note { padding: 24px; }
+table { border-collapse: collapse; }
+th, td { padding: 4px 14px 4px 0; text-align: left; border-bottom: 1px solid var(--vm-line); }
+th { color: var(--vm-muted); font-weight: 500; }
+#vm-grant-add { display: flex; gap: 8px; align-items: center; }
+code { font: 12px ui-monospace, monospace; }
