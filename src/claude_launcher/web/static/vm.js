@@ -156,6 +156,7 @@ function render() {
   if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
+  syncPresetSave();
 }
 let hostLocked = false;
 async function refresh() {
@@ -221,7 +222,8 @@ async function loadTart() {
   sel.replaceChildren(new Option("tart VM 선택", ""));
   for (const row of tartRows) {
     const label = row.registered ? `${row.name} (${row.state}) — 등록됨: ${row.id}`
-      : row.usable ? `${row.name} (${row.state})` : `${row.name} — 등록할 수 없는 이름`;
+      : row.usable ? `${row.name} (${row.state})`
+      : row.preset ? `${row.name} — 프리셋 복사본` : `${row.name} — 등록할 수 없는 이름`;
     const opt = new Option(label, row.name);
     opt.disabled = row.registered || !row.usable;
     sel.appendChild(opt);
@@ -252,6 +254,94 @@ $("vm-register-go").addEventListener("click", () => {
     await loadTart();
   });
 });
+
+/* ---- presets ---- */
+let presetRows = [];
+async function loadPresets() {
+  const note = $("vm-preset-note");
+  try {
+    presetRows = (await api("api/vm-presets")).presets || [];
+    note.hidden = true;
+  } catch (e) {
+    presetRows = [];
+    note.hidden = false;
+    note.textContent = /HTTP 404/.test(e.message)
+      ? "이 데몬에는 프리셋 API가 없습니다. 데몬을 재기동한 뒤 사용할 수 있습니다."
+      : `프리셋을 읽지 못했습니다: ${e.message}`;
+  }
+  renderPresets();
+}
+function renderPresets() {
+  const ul = $("vm-preset-list");
+  ul.replaceChildren();
+  for (const p of presetRows) {
+    const li = document.createElement("li");
+    const head = document.createElement("strong");
+    head.textContent = p.name;
+    const sub = document.createElement("span");
+    sub.className = "sub";
+    const when = p.created_at ? new Date(p.created_at * 1000).toLocaleString("ko-KR") : "-";
+    sub.textContent = `${p.description || "설명 없음"} · 원본 ${p.source || "-"} · ${when}`
+      + (p.present === false ? " · tart 복사본 없음" : "");
+    const make = document.createElement("button");
+    make.type = "button";
+    make.textContent = "새 VM";
+    make.disabled = p.present === false;
+    make.addEventListener("click", () => createFromPreset(p.name));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "vm-danger";
+    del.textContent = "삭제";
+    del.addEventListener("click", () => deletePreset(p.name));
+    li.append(head, sub, make, del);
+    ul.appendChild(li);
+  }
+  if (!presetRows.length) {
+    const li = document.createElement("li");
+    li.className = "vm-muted";
+    li.textContent = "프리셋이 없습니다.";
+    ul.appendChild(li);
+  }
+  syncPresetSave();
+}
+function syncPresetSave() {
+  const vm = vms.find((v) => v.id === selected);
+  const ok = !!vm && vm.state === "stopped";
+  $("vm-preset-save-go").disabled = !ok || !$("vm-preset-name").value.trim();
+  $("vm-preset-save-note").textContent = !vm ? "VM을 선택하십시오."
+    : ok ? `${vm.id}을(를) 복사합니다.` : `${vm.id}은(는) ${vm.state} 상태입니다. 먼저 정상 종료하십시오.`;
+}
+$("vm-preset-name").addEventListener("input", syncPresetSave);
+$("vm-presets").addEventListener("toggle", () => { if ($("vm-presets").open) loadPresets(); });
+$("vm-preset-save-go").addEventListener("click", () => {
+  const vm = selected;
+  const name = $("vm-preset-name").value.trim();
+  if (!vm || !name) return;
+  act(`${vm} 프리셋 저장`, async () => {
+    await post("api/vm-presets", { vm, name, description: $("vm-preset-desc").value });
+    $("vm-preset-name").value = "";
+    $("vm-preset-desc").value = "";
+    await loadPresets();
+  });
+});
+function createFromPreset(name) {
+  const id = $("vm-preset-newid").value.trim();
+  if (!id) { say("새 VM 이름을 입력하십시오.", true); return; }
+  act(`${name}에서 ${id} 만들기`, async () => {
+    say(`${id}: 복제하고 시작하는 중입니다 (수십 초에서 수 분 걸립니다)`);
+    const out = await post(`api/vm-presets/${encodeURIComponent(name)}/create`, { id });
+    selected = id;
+    $("vm-preset-newid").value = "";
+    if (!out.started) say(`${id}을(를) 등록했지만 시작하지 못했습니다: ${out.why}`, true);
+  });
+}
+function deletePreset(name) {
+  if (!confirm(`프리셋 '${name}'과 그 tart 복사본(preset-${name})을 삭제합니다. 다른 VM은 지우지 않습니다. 계속합니까?`)) return;
+  act(`프리셋 ${name} 삭제`, async () => {
+    await post(`api/vm-presets/${encodeURIComponent(name)}/delete`, { confirm: name });
+    await loadPresets();
+  });
+}
 
 /* ---- actions ---- */
 const lifecycle = (action, label, ask) => $(`vm-${action === "force_stop" ? "force" : action}`).addEventListener("click", () => {

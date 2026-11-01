@@ -193,7 +193,7 @@ def test_the_page_calls_only_routes_the_daemon_has():
     html = (static / "vm.html").read_text(encoding="utf-8")
     app = web.Application()
     vm_api.install(app, Registry())
-    known = {r.resource.canonical for r in app.router.routes()}
+    known = {re.sub(r"\{[^}]*\}", "{id}", r.resource.canonical) for r in app.router.routes()}
     wanted = set(re.findall(r'api/vm[a-z-]*(?:/\$\{[^}]*\}(?:/[a-z_]+)?)?', js))
     for ref in wanted:
         shape = re.sub(r"\$\{[^}]*\}", "{id}", "/" + ref)

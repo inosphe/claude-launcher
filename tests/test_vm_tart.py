@@ -28,6 +28,10 @@ class Fake:
         self._suspending = {}
         self.execs = []
         self.exec_result = (0, "ok\n", "")
+        #: tart's "Size" per VM (GB); the preset tests set it
+        self.sizes = {}
+        self.clone_rc = 0
+        self.delete_rc = 0
 
     def run(self, argv, timeout):
         argv = list(argv)
@@ -37,7 +41,7 @@ class Fake:
         # Every tart call ends its options before the VM name; the checks
         # below look at the call without that marker.
         if argv[0] == "tart" and len(argv) > 2 and argv[2] == "--":
-            assert argv[1] in ("ip", "stop", "suspend", "exec"), argv
+            assert argv[1] in ("ip", "stop", "suspend", "exec", "clone", "delete"), argv
             argv = argv[:2] + argv[3:]
         if argv[:2] == ["tart", "list"]:
             for name, left in list(self._suspending.items()):
@@ -46,7 +50,8 @@ class Fake:
                     del self._suspending[name]
                 elif left > 0:
                     self._suspending[name] = left - 1
-            rows = [{"Name": n, "State": s, "Running": s == "running", "Source": "Local"}
+            rows = [{"Name": n, "State": s, "Running": s == "running", "Source": "Local",
+                     "Size": self.sizes.get(n, 0), "Disk": 140}
                     for n, s in self.tart.items()]
             return 0, json.dumps(rows), ""
         if argv[:2] == ["tart", "ip"]:
@@ -55,6 +60,17 @@ class Fake:
             if self.suspend_rc == 0:
                 self._suspending[argv[2]] = self.suspend_lag
             return self.suspend_rc, "", "boom" if self.suspend_rc else ""
+        if argv[:2] == ["tart", "clone"]:
+            if self.clone_rc:
+                return self.clone_rc, "", "clone failed"
+            self.tart[argv[3]] = "stopped"
+            self.sizes[argv[3]] = self.sizes.get(argv[2], 0)
+            return 0, "", ""
+        if argv[:2] == ["tart", "delete"]:
+            if self.delete_rc:
+                return self.delete_rc, "", "delete failed"
+            self.tart.pop(argv[2], None)
+            return 0, "", ""
         if argv[:2] == ["tart", "stop"]:
             self.tart[argv[2]] = "stopped"
             return 0, "", ""

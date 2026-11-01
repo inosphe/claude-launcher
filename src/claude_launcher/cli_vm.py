@@ -116,6 +116,43 @@ def _lifecycle(args) -> int:
                  show=lambda out: print(f"{out['id']}: {out['state']}"))
 
 
+def _preset_list(args) -> int:
+    def show(out):
+        rows = out.get("presets") or []
+        for p in rows:
+            gone = "" if p.get("present") is not False else "  (tart copy missing)"
+            print(f"{p['name']}\t{p.get('source') or '-'}\t{p.get('description') or ''}{gone}")
+        if not rows:
+            print("no presets")
+    return _call(args, "GET", "/api/vm-presets", show=show)
+
+
+def _preset_save(args) -> int:
+    return _call(args, "POST", "/api/vm-presets",
+                 {"vm": args.vm, "name": args.name, "description": args.description},
+                 show=lambda out: print(f"preset {out['name']} saved from {out['source']}"))
+
+
+def _preset_describe(args) -> int:
+    return _call(args, "POST", f"/api/vm-presets/{args.name}/describe",
+                 {"description": args.description})
+
+
+def _preset_rm(args) -> int:
+    if not args.yes:
+        print(f"this deletes the preset {args.name!r} and its tart copy preset-{args.name}; "
+              "run again with --yes to confirm", file=sys.stderr)
+        return EXIT_REFUSED
+    return _call(args, "POST", f"/api/vm-presets/{args.name}/delete", {"confirm": args.name})
+
+
+def _preset_new(args) -> int:
+    def show(out):
+        vm = out["vm"]
+        print(f"{vm['id']}: {vm['state']}" + ("" if out.get("started") else f" (not started: {out.get('why')})"))
+    return _call(args, "POST", f"/api/vm-presets/{args.name}/create", {"id": args.id}, show=show)
+
+
 def _cmd_rm(args) -> int:
     return _call(args, "DELETE", f"/api/vm/{args.vm}")
 
@@ -198,6 +235,33 @@ def register(sub) -> None:
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_lifecycle)
+
+    pr = v.add_parser("preset", help="VM presets: a stopped copy to make new VMs from")
+    ps = pr.add_subparsers(dest="preset_command", required=True)
+    sp = ps.add_parser("list", help="the presets")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_preset_list)
+    sp = ps.add_parser("save", help="copy a stopped VM into a preset (set the guest DNS to public "
+                                    "servers first; the copy keeps the source's accounts and passwords)")
+    vm_arg(sp)
+    sp.add_argument("name")
+    sp.add_argument("-d", "--description", default="")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_preset_save)
+    sp = ps.add_parser("describe", help="change a preset's description")
+    sp.add_argument("name")
+    sp.add_argument("description")
+    sp.set_defaults(func=_preset_describe)
+    sp = ps.add_parser("rm", help="delete a preset and its tart copy (nothing else)")
+    sp.add_argument("name")
+    sp.add_argument("--yes", action="store_true", help="confirm deleting the named preset")
+    sp.set_defaults(func=_preset_rm)
+    sp = ps.add_parser("new", help="clone a preset into a new VM, register it and start it "
+                                   "(softnet on; the new VM has the source's admin password)")
+    sp.add_argument("name")
+    sp.add_argument("id", help="the new VM's id (also its tart name)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_preset_new)
 
     sp = v.add_parser("reconcile", help="make the records agree with what tart reports")
     sp.set_defaults(func=_cmd_reconcile)

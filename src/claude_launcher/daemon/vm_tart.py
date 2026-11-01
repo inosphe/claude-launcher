@@ -43,6 +43,7 @@ TART = "tart"
 STOP_WAIT = 120.0
 BOOT_WAIT = 90.0
 SUSPEND_WAIT = 60.0
+CLONE_WAIT = 900.0
 POLL = 2.0
 OUTPUT_CAP = 64 * 1024
 EXEC_MAX = 600.0
@@ -162,6 +163,16 @@ class TartVm:
     state: str
     running: bool
     source: str
+    #: GB tart reports as used on disk, and as the disk's size
+    size_gb: int = 0
+    disk_gb: int = 0
+
+
+def _gb(value) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def parse_list(text: str) -> List[TartVm]:
@@ -178,6 +189,7 @@ def parse_list(text: str) -> List[TartVm]:
             state=str(row.get("State") or ("running" if row.get("Running") else "stopped")).lower(),
             running=bool(row.get("Running")),
             source=str(row.get("Source") or "").lower(),
+            size_gb=_gb(row.get("Size")), disk_gb=_gb(row.get("Disk")),
         ))
     return out
 
@@ -279,15 +291,34 @@ class Manager:
             raise VmError("tart_failed", f"tart list: {err.strip() or rc}")
         return parse_list(out)
 
+    def tart_find(self, name: str) -> Optional[TartVm]:
+        for row in self.tart_list():
+            if row.name == name:
+                return row
+        return None
+
+    def tart_clone(self, source: str, name: str, timeout: float = CLONE_WAIT) -> None:
+        """``tart clone`` of a local VM. The caller has checked that ``name``
+        is free: tart would overwrite nothing, but a half-made copy under a
+        name that was not ours to take is not ours to remove."""
+        rc, _, err = self._run([TART, "clone", "--", source, name], timeout)
+        if rc != 0:
+            raise VmError("tart_failed", f"tart clone: {err.strip()[:300] or rc}")
+
+    def tart_delete(self, name: str, timeout: float = 120.0) -> None:
+        rc, _, err = self._run([TART, "delete", "--", name], timeout)
+        if rc != 0:
+            raise VmError("tart_failed", f"tart delete: {err.strip()[:300] or rc}")
+
     def tart_state(self, name: str) -> str:
         for row in self.tart_list():
             if row.name == name:
                 return row.state
         return "missing"
 
-    def run_argv(self, name: str) -> List[str]:
+    def run_argv(self, name: str, softnet: Optional[bool] = None) -> List[str]:
         argv = [TART, "run", "--suspendable"]
-        if self.softnet:
+        if self.softnet if softnet is None else softnet:
             argv += ["--net-softnet"]
             if self.softnet_block:
                 argv.append(f"--net-softnet-block={self.softnet_block}")
@@ -342,7 +373,7 @@ class Manager:
                               f"{vm.tart_name} is already running; reconcile instead")
             log = self.log_dir / vm_id / "tart.log"
             vmhub.rotate_log(log)
-            pid = self._spawn(self.run_argv(vm.tart_name), log)
+            pid = self._spawn(self.run_argv(vm.tart_name, vm.softnet), log)
             deadline = time.monotonic() + self.boot_wait
             self._wait_agent(vm, deadline, pid, log)
             self.registry.set_state(vm_id, "running")

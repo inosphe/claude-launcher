@@ -96,3 +96,32 @@ def test_takeover_and_return(client, capsys):
 def test_json_output_is_the_daemons_answer(client, capsys):
     run("start", "a", "--json")
     assert json.loads(capsys.readouterr().out)["state"] == "running"
+
+
+def test_preset_commands_post_to_the_preset_routes(client, capsys):
+    client.answer = {"name": "gold", "source": "a", "presets": [
+        {"name": "gold", "source": "a", "description": "d", "present": False}],
+        "vm": {"id": "n", "state": "running"}, "started": True}
+    assert run("preset", "save", "a", "gold", "-d", "clean") == 0
+    assert run("preset", "list") == 0
+    assert run("preset", "new", "gold", "n") == 0
+    assert run("preset", "describe", "gold", "text") == 0
+    assert [(c[0], c[1]) for c in client.calls] == [
+        ("POST", "/api/vm-presets"), ("GET", "/api/vm-presets"),
+        ("POST", "/api/vm-presets/gold/create"), ("POST", "/api/vm-presets/gold/describe")]
+    assert client.calls[0][2] == {"vm": "a", "name": "gold", "description": "clean"}
+    out = capsys.readouterr().out
+    assert "tart copy missing" in out and "n: running" in out
+
+
+def test_preset_rm_needs_yes_and_then_names_the_preset(client, capsys):
+    assert run("preset", "rm", "gold") == cli_vm.EXIT_REFUSED
+    assert client.calls == []
+    assert "--yes" in capsys.readouterr().err
+    assert run("preset", "rm", "gold", "--yes") == 0
+    assert client.calls == [("POST", "/api/vm-presets/gold/delete", {"confirm": "gold"})]
+
+
+def test_a_session_shell_cannot_use_preset_commands(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    assert run("preset", "list") == cli_vm.EXIT_REFUSED and client.calls == []

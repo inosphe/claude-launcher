@@ -52,6 +52,10 @@ const server = http.createServer((req, res) => {
       { name: "bad name", state: "stopped", running: false, registered: false, id: "", usable: false },
     ] });
   }
+  if (p === "/api/vm-presets") {
+    return json(res, { presets: [{ name: "gold", tart_name: "preset-gold", description: "깨끗한 설치",
+      source: "alpha", created_at: 1700000000, present: true }] });
+  }
   if (p === "/api/webdebug/sessions" && sessionsDown) return json(res, {}, 500);
   if (p === "/api/webdebug/sessions") return json(res, { sessions: [{ name: "s1", status: "running" }] });
   if (p.startsWith("/api/")) return json(res, {}, 404);
@@ -100,6 +104,21 @@ const server = http.createServer((req, res) => {
     const reg = posts.findIndex(([u, b]) => u === "/api/vm" && b.id === "beta" && b.tart_name === "beta");
     assert.ok(reg >= 0, `registering posts the VM: ${JSON.stringify(posts)}`);
     assert.equal(posts[reg + 1][0], "/api/vm-reconcile", "and then a reconcile");
+
+    // 2b. presets: listed, saved from the selected (stopped) VM, created, deleted
+    await frame.locator("#vm-presets summary").click();
+    await frame.locator("#vm-preset-list li", { hasText: "gold" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("#vm-preset-save-go").isDisabled(), true, "alpha runs: nothing to save");
+    await frame.locator("#vm-preset-newid").fill("fresh");
+    await frame.locator("#vm-preset-list li", { hasText: "gold" }).getByRole("button", { name: "새 VM" }).click();
+    await frame.locator("#vm-activity", { hasText: "gold에서 fresh 만들기 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/create")[1], { id: "fresh" });
+    let sure = "";
+    page.once("dialog", async (d) => { sure = d.message(); await d.accept(); });
+    await frame.locator("#vm-preset-list li", { hasText: "gold" }).getByRole("button", { name: "삭제" }).click();
+    await frame.locator("#vm-activity", { hasText: "프리셋 gold 삭제 완료" }).waitFor({ timeout: 5000 });
+    assert.match(sure, /preset-gold/, "the confirmation names the copy");
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/delete")[1], { confirm: "gold" });
 
     // 3. granting from the session list
     await frame.locator("#vm-grant-session option", { hasText: "s1" }).waitFor({ state: "attached", timeout: 15000 });
