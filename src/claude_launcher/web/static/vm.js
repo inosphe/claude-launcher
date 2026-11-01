@@ -7,7 +7,7 @@ const BASE = location.pathname.replace(/[^/]*$/, "");
 const TOKEN_KEY = `claunch_token:${BASE}`;
 const $ = (id) => document.getElementById(id);
 const url = (path) => BASE + String(path).replace(/^\//, "");
-const SCOPES = ["view", "control", "exec"];
+const SCOPES = ["view", "control", "exec", "files"];
 
 if (new URLSearchParams(location.search).get("embed")) document.body.classList.add("embed");
 let vms = [];
@@ -127,6 +127,7 @@ function renderDetail(vm) {
     : (vm.needs_observe && vm.controller ? "돌려받은 세션이 화면을 다시 확인할 때까지 조작을 시작하지 않습니다." : "");
   manageTouch();
   renderGrants(vm);
+  renderFiles(vm);
   renderNet(vm);
 }
 function renderNet(vm) {
@@ -224,6 +225,49 @@ function renderGrants(vm) {
     body.appendChild(tr);
   }
 }
+/* The file exchange: the two folders, the guest folder setting and the recent
+   transfers. The route is the user's, so this is read from it rather than from
+   the VM row (a session's row carries the folders but not the log). */
+let filesFor = "";
+function fmtTime(at) {
+  const d = new Date(at * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+async function renderFiles(vm) {
+  if (filesFor !== vm.id) delete $("vm-files-dir").dataset.dirty;
+  filesFor = vm.id;
+  let info;
+  try { info = await api(`api/vm/${encodeURIComponent(vm.id)}/files`); } catch (_) { return; }
+  if (filesFor !== vm.id) return;
+  $("vm-files-host").textContent = info.host_dir;
+  const input = $("vm-files-dir");
+  if (document.activeElement !== input && !input.dataset.dirty) {
+    input.value = info.guest_dir;
+    input.dataset.default = info.guest_dir_default;
+  }
+  $("vm-files-default").disabled = info.guest_dir === info.guest_dir_default;
+  const body = document.querySelector("#vm-files-log tbody");
+  body.replaceChildren();
+  for (const row of (info.recent || []).slice().reverse()) {
+    const tr = document.createElement("tr");
+    tr.append(cell(fmtTime(row.at)), cell(row.session || ""), cell(row.op), cell(row.path || ""),
+              cell(row.ok && row.op !== "ls" && row.op !== "rm" ? `${row.bytes || 0} B` : ""),
+              cell(row.ok ? "완료" : `거절: ${row.code || ""}`));
+    body.appendChild(tr);
+  }
+  $("vm-files-log").hidden = !(info.recent || []).length;
+}
+$("vm-files-dir").addEventListener("input", () => { $("vm-files-dir").dataset.dirty = "1"; });
+async function saveFilesDir(dir) {
+  if (!selected) return;
+  delete $("vm-files-dir").dataset.dirty;
+  await act(dir ? "게스트 작업 폴더 저장" : "게스트 작업 폴더 기본값",
+            () => post(`api/vm/${encodeURIComponent(selected)}/files_dir`, { dir }));
+  $("vm-files-dir").blur();
+}
+$("vm-files-save").addEventListener("click", () => saveFilesDir($("vm-files-dir").value.trim()));
+$("vm-files-default").addEventListener("click", () => saveFilesDir(""));
 function render() {
   if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
   renderList();
@@ -263,6 +307,7 @@ function grantScopes() {
   const scopes = ["view"];
   if ($("vm-grant-control").checked) scopes.push("control");
   if ($("vm-grant-exec").checked) scopes.push("exec");
+  if ($("vm-grant-files").checked) scopes.push("files");
   return scopes;
 }
 $("vm-grant").addEventListener("click", () => {

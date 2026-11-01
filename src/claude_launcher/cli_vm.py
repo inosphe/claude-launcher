@@ -15,12 +15,13 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Optional
 
 from . import daemon_client
 
 EXIT_OK, EXIT_REFUSED, EXIT_NO_DAEMON = 0, 1, 2
-SCOPES = ("view", "control", "exec")
+SCOPES = ("view", "control", "exec", "files")
 
 
 def _client():
@@ -151,6 +152,23 @@ def _cmd_lock(args) -> int:
     def show(out):
         print(f"{out['id']}: " + ("locked" if out.get("locked") else "unlocked"))
     return _call(args, "POST", f"/api/vm/{args.vm}/{args.vm_command}", {}, show=show)
+
+
+def _cmd_files(args) -> int:
+    def show(out):
+        print(f"host folder   {out['host_dir']}")
+        print(f"guest folder  {out['guest_dir']}" + ("  (default)" if out['guest_dir'] == out['guest_dir_default'] else ""))
+        lim = out["limits"]
+        print(f"limits        {lim['max_bytes'] // (1024 * 1024)} MiB, {lim['max_items']} items, {lim['timeout']:g}s per request")
+        for row in out.get("recent") or []:
+            when = time.strftime("%m-%d %H:%M:%S", time.localtime(row["at"]))
+            print(f"{when}  {row['session']:<14} {row['op']:<4} {row['path']}  "
+                  + (f"{row.get('bytes', 0)} bytes" if row.get("ok") else f"refused: {row.get('code')}"))
+        if not out.get("recent"):
+            print("no transfers since the daemon started")
+    if args.guest_dir is not None:
+        return _call(args, "POST", f"/api/vm/{args.vm}/files_dir", {"dir": args.guest_dir}, show=show)
+    return _call(args, "GET", f"/api/vm/{args.vm}/files", show=show)
 
 
 def _preset_list(args) -> int:
@@ -298,6 +316,14 @@ def register(sub) -> None:
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_cmd_lock)
 
+    sp = v.add_parser("files", help="a VM's file exchange: the host folder, the guest work folder "
+                                    "(--guest-dir sets it, \"\" restores the default) and recent transfers")
+    vm_arg(sp)
+    sp.add_argument("--guest-dir", default=None, metavar="PATH",
+                    help="under /Users/<account>/<folder>, /private/tmp/<folder> or /tmp/<folder>")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_files)
+
     pr = v.add_parser("preset", help="VM presets: a stopped copy to make new VMs from")
     ps = pr.add_subparsers(dest="preset_command", required=True)
     sp = ps.add_parser("list", help="the presets")
@@ -333,7 +359,9 @@ def register(sub) -> None:
     sp.add_argument("session")
     sp.add_argument("scopes", nargs="+", choices=SCOPES,
                     help="view: look; control: drive (implies view); exec: guest shell and "
-                         "installs (off unless named; implies view)")
+                         "installs (off unless named; implies view); files: copy files between the "
+                         "VM's host folder and its guest work folder (off unless named; implies "
+                         "nothing)")
     sp.set_defaults(func=_cmd_grant)
 
     sp = v.add_parser("revoke", help="take scopes (default: all) away from a session")

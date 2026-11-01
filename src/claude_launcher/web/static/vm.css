@@ -76,3 +76,7 @@ code { font: 12px ui-monospace, monospace; }
   border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; min-width: 150px; }
 .vm-warn-text { margin: 0; padding: 6px 10px; border: 1px solid var(--vm-warn); border-radius: 4px; color: var(--vm-warn); }
 #vm-net-pending { border-color: var(--vm-warn); color: var(--vm-warn); }
+
+#vm-files-host { overflow-wrap: anywhere; }
+#vm-files-dir { min-width: 22em; max-width: 100%; }
+#vm-files-log td { overflow-wrap: anywhere; }

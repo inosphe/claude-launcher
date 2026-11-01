@@ -2,7 +2,7 @@
 
 Thin clients of ``/api/vm`` (daemon/vm_api.py). The user decides which
 sessions may look at a VM and which may drive it (a grant per session and
-scope: view, control, exec); only one session drives a VM at a time. Every
+scope: view, control, exec, files); only one session drives a VM at a time. Every
 call carries ``$CLAUNCH_SESSION`` and the daemon refuses what the grants and
 the control epoch do not allow.
 
@@ -25,7 +25,9 @@ _EPOCH = {"epoch": {"type": "integer",
 TOOLS = [
     {"name": "vm_list",
      "description": "The VMs you have a grant on: state, whether the guest channel is up, who "
-                    "drives it, and your scopes (view, control, exec).",
+                    "drives it, and your scopes (view, control, exec, files). With a files grant a VM "
+                    "row also carries files.host_dir and files.guest_dir, the two folders vm_put "
+                    "and vm_get use.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "vm_acquire",
      "description": "Take control of a VM (needs a control grant from the user, and the user "
@@ -66,7 +68,47 @@ TOOLS = [
          **_VM, **_EPOCH, "command": {"type": "string"},
          "timeout": {"type": "number", "description": "seconds, default 60, at most 600"}},
          "required": ["vm", "command"]}},
+    {"name": "vm_put",
+     "description": "Copy a file or folder from the VM's host exchange folder (files.host_dir in "
+                    "vm_list; put the file there first) into the guest's work folder "
+                    "(files.guest_dir). Needs a files grant (off by default; the user gives it). "
+                    "Paths are relative to those folders: no absolute path, '..' or symbolic link. "
+                    "Refuses to replace an existing item unless overwrite is true. Up to 512 MiB / "
+                    "10000 items / 10 minutes per call. Nothing is executed.",
+     "inputSchema": {"type": "object", "properties": {
+         **_VM, "path": {"type": "string", "description": "relative to the host exchange folder"},
+         "dest": {"type": "string", "description": "relative to the guest work folder; default: the name of path"},
+         "overwrite": {"type": "boolean"}},
+         "required": ["vm", "path"]}},
+    {"name": "vm_get",
+     "description": "Copy a file or folder from the guest's work folder into the VM's host "
+                    "exchange folder; the result gives its host_path. Needs a files grant. Regular "
+                    "files and folders only (a symbolic link or special file refuses the call); "
+                    "setuid bits are dropped and the host never runs what it receives. Same "
+                    "limits as vm_put.",
+     "inputSchema": {"type": "object", "properties": {
+         **_VM, "path": {"type": "string", "description": "relative to the guest work folder"},
+         "dest": {"type": "string", "description": "relative to the host exchange folder; default: the name of path"},
+         "overwrite": {"type": "boolean"}},
+         "required": ["vm", "path"]}},
+    {"name": "vm_ls",
+     "description": "List a folder of the guest's work folder: name, size (files) and kind "
+                    "(file, dir, symlink, other). Needs a files grant.",
+     "inputSchema": {"type": "object", "properties": {
+         **_VM, "path": {"type": "string", "description": "relative to the guest work folder; default: the folder itself"}},
+         "required": ["vm"]}},
+    {"name": "vm_rm",
+     "description": "Delete a file or folder inside the guest's work folder (never the folder "
+                    "itself). Needs a files grant, and confirm must repeat the path exactly.",
+     "inputSchema": {"type": "object", "properties": {
+         **_VM, "path": {"type": "string", "description": "relative to the guest work folder"},
+         "confirm": {"type": "string", "description": "the same path again"}},
+         "required": ["vm", "path", "confirm"]}},
 ]
+
+
+#: A transfer may run for the daemon's whole limit (600 s by default).
+FILES_WAIT = 660.0
 
 
 class VmMcpError(Exception):
@@ -150,6 +192,15 @@ def call_tool(name: str, args: dict) -> dict:
         return _post(f"/api/vm/{vm}/exec", {
             "session": me, "command": args.get("command"),
             "epoch": _epoch(vm, args), "timeout": timeout}, timeout + 10)
+    if name in ("vm_put", "vm_get"):
+        return _post(f"/api/vm/{vm}/files/{name[3:]}", {
+            "session": me, "path": args.get("path"), "dest": args.get("dest"),
+            "overwrite": args.get("overwrite") is True}, FILES_WAIT)
+    if name == "vm_ls":
+        return _post(f"/api/vm/{vm}/files/ls", {"session": me, "path": args.get("path")}, 90)
+    if name == "vm_rm":
+        return _post(f"/api/vm/{vm}/files/rm", {
+            "session": me, "path": args.get("path"), "confirm": args.get("confirm")}, 90)
     raise VmMcpError(f"unknown tool {name!r}")
 
 

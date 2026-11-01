@@ -22,10 +22,12 @@ process of the loopback connection) is a separate follow-up.
 
 User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                stop,force_stop,suspend,reconcile,grant,revoke,
-               revoke_controller,extra_controller,human}
+               revoke_controller,extra_controller,human,files_dir},
+               GET /api/vm/{id}/files
 Anyone:        GET /api/vm, GET /api/vm/{id}
 Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
-               the declared actor)
+               the declared actor), POST /api/vm/{id}/files/{put,get,ls,rm}
+               (``files`` grant)
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_frames, vm_presets, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_files, vm_frames, vm_presets, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -53,6 +55,8 @@ _STATUS = {
     "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
+    "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
+    "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -202,7 +206,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running")
+             "net_applied_known", "locked_but_running", "files_dir")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -213,6 +217,16 @@ def _for_session(row: dict, session: str) -> dict:
     return row
 
 
+def _with_files(request: web.Request, row: dict, session: str) -> dict:
+    """A session that holds the files grant is told where its exchange folders
+    are: the only host path it is given."""
+    if vmhub.FILES in row["grants"].get(session, []):
+        reg, _ = _hub(request)
+        row["files"] = {"host_dir": str(_files(request).host_dir(row["id"])),
+                        "guest_dir": reg.get(row["id"]).work_dir}
+    return row
+
+
 async def h_list(request: web.Request) -> web.Response:
     reg, _ = _hub(request)
     session = request.query.get("session", "")
@@ -220,7 +234,8 @@ async def h_list(request: web.Request) -> web.Response:
     if actor.get("kind") in (actors.AGENT, actors.CFLOW):
         session = _as_session(request, {"session": session or actor.get("name") or ""})
     if session:
-        rows = [_for_session(reg.view(vm.id), session) for vm in _viewable(reg, session)]
+        rows = [_with_files(request, _for_session(reg.view(vm.id), session), session)
+                for vm in _viewable(reg, session)]
     else:
         rows = [reg.view(vm.id) for vm in reg.list()]
     _, mgr = _hub(request)
@@ -238,7 +253,7 @@ async def h_get(request: web.Request) -> web.Response:
                                             or actor.get("name") or ""})
             if not row["grants"].get(session):
                 raise VmError("vm_no_grant", f"{session} has no grant on {row['id']}")
-            row = _for_session(row, session)
+            row = _with_files(request, _for_session(row, session), session)
         return web.json_response(row)
     except VmError as exc:
         return _err(exc)
@@ -758,6 +773,71 @@ async def h_exec(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+def _files(request: web.Request) -> vm_files.Files:
+    return request.app["vm_files"]
+
+
+async def h_files_info(request: web.Request) -> web.Response:
+    """The user's view of a VM's file exchange: the two folders, the limits and
+    the recent transfers."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    try:
+        return web.json_response(_files(request).describe(request.match_info["id"]))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_files_dir(request: web.Request) -> web.Response:
+    """Set the guest work folder ("" for the default): the user's only."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        value = body.get("dir")
+        if not isinstance(value, str):
+            raise VmError("vm_bad_request", "'dir' is required (\"\" for the default)")
+        _trace(request, reg, vm_id, "files_dir", dir=value[:200])
+        reg.set_files_dir(vm_id, value.strip())
+        return web.json_response(_files(request).describe(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_files(request: web.Request) -> web.Response:
+    """put / get / ls / rm: a session with a ``files`` grant. The grant, the
+    lock and the guest agent are checked by ``begin_call``; the paths by
+    ``vm_files``."""
+    reg, _ = _hub(request)
+    vm_id, op = request.match_info["id"], request.match_info["op"]
+    try:
+        body = await _body(request)
+        session = _as_session(request, body)
+        reg.begin_call(vm_id, session, vmhub.FILES)
+        files = _files(request)
+        calls = {
+            "put": lambda: files.put(vm_id, session, body.get("path"), body.get("dest"),
+                                     body.get("overwrite") is True),
+            "get": lambda: files.get(vm_id, session, body.get("path"), body.get("dest"),
+                                     body.get("overwrite") is True),
+            "ls": lambda: files.ls(vm_id, session, body.get("path")),
+            "rm": lambda: files.rm(vm_id, session, body.get("path"), body.get("confirm")),
+        }
+        ok = False
+        try:
+            out = await asyncio.to_thread(calls[op])
+            ok = True
+        finally:
+            reg.end_call(vm_id, session, vmhub.FILES, ok=ok)
+        if op in ("put", "get", "ls"):
+            out["host_dir"] = str(files.host_dir(vm_id))
+        return web.json_response(out)
+    except VmError as exc:
+        return _err(exc)
+
+
 def _spawn(app: web.Application, coro) -> None:
     """Run ``coro`` in the background with a reference held until it ends."""
     tasks: set = app.setdefault("vm_tasks", set())
@@ -875,7 +955,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
             manager: Optional[vm_tart.Manager] = None,
             channels: Optional[vm_channel.Hub] = None,
             frames: Optional[vm_frames.Frames] = None,
-            presets: Optional[vm_presets.Presets] = None) -> None:
+            presets: Optional[vm_presets.Presets] = None,
+            files: Optional[vm_files.Files] = None) -> None:
     cfg = store.daemon_config()
     reg = registry or Registry(paths.vm_json(), slot_limit=int(cfg.get("vm_slot_limit", 2)))
     app["vm_registry"] = reg
@@ -889,6 +970,9 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     )
     app["vm_presets"] = presets or vm_presets.Presets(
         paths.vm_presets_json(), reg, app["vm_manager"])
+    app["vm_files"] = files or vm_files.Files(
+        reg, app["vm_manager"], paths.daemon_dir() / "vm",
+        **vm_files.limits_from(cfg))
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")
     app["vm_frames"] = frames or vm_frames.Frames(reg)
@@ -919,6 +1003,9 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/release", h_release)
     r.add_post("/api/vm/{id}/call", h_call)
     r.add_post("/api/vm/{id}/exec", h_exec)
+    r.add_get("/api/vm/{id}/files", h_files_info)
+    r.add_post("/api/vm/{id}/files_dir", h_files_dir)
+    r.add_post("/api/vm/{id}/files/{op:put|get|ls|rm}", h_files)
     r.add_get("/api/vm/{id}/tools", h_tools)
     r.add_get("/api/vm/{id}/frame", h_frame)
     r.add_get("/vm", h_page)
