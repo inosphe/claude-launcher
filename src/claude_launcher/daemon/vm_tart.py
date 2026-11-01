@@ -84,6 +84,12 @@ def host_locked(run: "Runner" = None) -> bool:
     return rc == 0 and re.search(r'"CGSSessionScreenIsLocked"\s*=\s*Yes', out) is not None
 
 
+def host_ipv4s(run: "Runner" = None) -> List[str]:
+    """This host's IPv4 addresses (``ifconfig -a``); empty when the query fails."""
+    rc, out, _ = (run or run_command)(["ifconfig", "-a"], 10)
+    return re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)", out) if rc == 0 else []
+
+
 #: What tart exec prints when the agent or the VM is not there, as opposed to
 #: what the guest command itself printed (measured on tart 2.41.1: d-005,
 #: s2 t03 runs of 2026-10-31).
@@ -249,6 +255,7 @@ class Manager:
         softnet: bool = True,
         softnet_block: str = SOFTNET_BLOCK,
         locked: Optional[Callable[[], bool]] = None,
+        host_addrs: Optional[Callable[[], List[str]]] = None,
     ) -> None:
         self.registry = registry
         self.log_dir = log_dir
@@ -265,6 +272,7 @@ class Manager:
         self.softnet = softnet
         self.softnet_block = softnet_block
         self._locked = locked or (lambda: host_locked(self._run))
+        self._host_addrs = host_addrs or (lambda: host_ipv4s(self._run))
         self._busy = set()
         self._busy_lock = threading.Lock()
         #: vm id -> when a suspend gave up waiting; settle() decides later.
@@ -316,12 +324,19 @@ class Manager:
                 return row.state
         return "missing"
 
-    def run_argv(self, name: str, softnet: Optional[bool] = None) -> List[str]:
+    def run_argv(self, name: str, softnet: Optional[bool] = None,
+                 expose: Sequence[str] = (), allow: Sequence[str] = ()) -> List[str]:
         argv = [TART, "run", "--suspendable"]
         if self.softnet if softnet is None else softnet:
             argv += ["--net-softnet"]
             if self.softnet_block:
                 argv.append(f"--net-softnet-block={self.softnet_block}")
+            # Longest prefix wins: a narrow allow opens its own address inside
+            # the blocked private ranges and nothing else.
+            if allow:
+                argv.append("--net-softnet-allow=" + ",".join(allow))
+            if expose:
+                argv.append("--net-softnet-expose=" + ",".join(expose))
         if not self.graphics:
             argv.append("--no-graphics")
         return argv + ["--", name]
@@ -362,6 +377,8 @@ class Manager:
             raise VmError("vm_host_locked",
                           f"{vm_id}: the host screen is locked, and a suspended VM cannot be "
                           "resumed until it is unlocked")
+        # Refused before a slot is claimed: the VM stays as it was.
+        allow = self._checked_allow(self.registry.get(vm_id))
         vm = self.registry.claim_slot(vm_id)
         pid = 0
         try:
@@ -373,7 +390,9 @@ class Manager:
                               f"{vm.tart_name} is already running; reconcile instead")
             log = self.log_dir / vm_id / "tart.log"
             vmhub.rotate_log(log)
-            pid = self._spawn(self.run_argv(vm.tart_name, vm.softnet), log)
+            argv = self.run_argv(vm.tart_name, vm.softnet, vm.expose, allow)
+            vm.net_applied = {"expose": list(vm.expose), "allow": list(vm.allow)}
+            pid = self._spawn(argv, log)
             deadline = time.monotonic() + self.boot_wait
             self._wait_agent(vm, deadline, pid, log)
             self.registry.set_state(vm_id, "running")
@@ -384,6 +403,14 @@ class Manager:
             self._fail(vm_id, exc, prior)
             raise
         return self.registry.get(vm_id)
+
+    def _checked_allow(self, vm: vmhub.Vm) -> List[str]:
+        """The allow list as it will be passed, checked again against the host's
+        addresses as they are now (an address can change since it was saved)."""
+        if not vm.allow:
+            return []
+        addrs = self._host_addrs()
+        return [vmhub.check_allow(c, addrs) for c in vm.allow]
 
     def host_locked(self) -> bool:
         return bool(self._locked())

@@ -104,6 +104,27 @@
       <label><input type="checkbox" id="vm-grant-exec"> exec</label>
       <button id="vm-grant" type="button">권한 부여</button>
     </div>
+    <h2>포트 노출 (softnet)</h2>
+    <p class="vm-warn-text" id="vm-net-warning">
+      <b>외부 포트는 호스트와 같은 LAN의 모든 기기에서 접속할 수 있습니다.</b>
+      허용 주소는 softnet 필터가 게스트와의 통신을 통과시키는 주소입니다. 게스트가 그 주소에 접속할 수 있게 되며, 외부 포트로 접속해 오는 기기의 주소도 여기에 있어야 합니다.
+      호스트 방화벽은 바꾸지 않습니다. 변경은 VM을 다음에 시작할 때 적용됩니다. 광범위한 허용(0.0.0.0/0, /8보다 넓은 값, 사설 대역 전체, 호스트 자신의 주소를 포함하는 값)은 격리가 사라지므로 거절됩니다.
+    </p>
+    <div id="vm-net-pending" class="vm-problem" hidden></div>
+    <table id="vm-expose"><thead><tr><th>외부 포트 (호스트)</th><th>게스트 포트</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="vm-expose-add" class="vm-row">
+      <label class="sr-only" for="vm-expose-ext">외부 포트</label>
+      <input id="vm-expose-ext" type="text" inputmode="numeric" maxlength="5" placeholder="외부 포트 (1024-65535)" autocomplete="off">
+      <label class="sr-only" for="vm-expose-int">게스트 포트</label>
+      <input id="vm-expose-int" type="text" inputmode="numeric" maxlength="5" placeholder="게스트 포트" autocomplete="off">
+      <button id="vm-expose-go" type="button">포트 추가</button>
+    </div>
+    <table id="vm-allow"><thead><tr><th>허용 주소 (IPv4)</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="vm-allow-add" class="vm-row">
+      <label class="sr-only" for="vm-allow-cidr">허용 주소</label>
+      <input id="vm-allow-cidr" type="text" maxlength="18" placeholder="/32 주소 (예: 192.168.1.213)" autocomplete="off" spellcheck="false">
+      <button id="vm-allow-go" type="button">주소 추가</button>
+    </div>
   </section>
   <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. 왼쪽 아래 'VM 등록'에서 이 호스트의 tart VM을 골라 등록하십시오. 셸에서는 <code>claunch vm add &lt;id&gt;</code>와 <code>claunch vm reconcile</code>을 실행해도 됩니다.</p>
 </main>

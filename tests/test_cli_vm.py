@@ -125,3 +125,31 @@ def test_preset_rm_needs_yes_and_then_names_the_preset(client, capsys):
 def test_a_session_shell_cannot_use_preset_commands(client, monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     assert run("preset", "list") == cli_vm.EXIT_REFUSED and client.calls == []
+
+
+def test_expose_and_allow_commands(client, capsys):
+    client.answer = {"id": "a", "expose": ["2222:22"], "allow": ["192.168.1.213/32"], "net_pending": True}
+    assert run("expose", "a", "add", "2222:22") == 0
+    assert run("expose", "a", "rm", "2222") == 0
+    assert run("allow", "a", "add", "192.168.1.213") == 0
+    assert run("allow", "a", "rm", "192.168.1.213/32") == 0
+    assert run("expose", "a", "list") == 0
+    assert client.calls == [
+        ("POST", "/api/vm/a/expose", {"action": "add", "external": "2222", "internal": "22"}),
+        ("POST", "/api/vm/a/expose", {"action": "rm", "external": "2222"}),
+        ("POST", "/api/vm/a/allow", {"action": "add", "cidr": "192.168.1.213"}),
+        ("POST", "/api/vm/a/allow", {"action": "rm", "cidr": "192.168.1.213/32"}),
+        ("GET", "/api/vm/a", None)]
+    out = capsys.readouterr().out
+    assert "expose: 2222:22" in out and "allow:  192.168.1.213/32" in out and "restart the VM" in out
+
+
+def test_expose_needs_a_value_and_the_pair_shape(client, capsys):
+    assert run("expose", "a", "add") == cli_vm.EXIT_REFUSED
+    assert run("expose", "a", "add", "2222") == cli_vm.EXIT_REFUSED
+    assert client.calls == []
+
+
+def test_a_session_shell_cannot_change_the_network_settings(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    assert run("allow", "a", "add", "1.2.3.4") == cli_vm.EXIT_REFUSED and client.calls == []

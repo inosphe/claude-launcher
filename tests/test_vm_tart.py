@@ -37,6 +37,10 @@ class Fake:
         argv = list(argv)
         if argv[0] == "ioreg":  # the host-lock query: not locked
             return 0, "", ""
+        if argv[0] == "ifconfig":  # the host's own addresses
+            return 0, ("lo0: flags=8049\n\tinet 127.0.0.1 netmask 0xff000000\n"
+                       "en0: flags=8863\n\tinet 192.168.1.89 netmask 0xffffff00 broadcast 192.168.1.255\n"
+                       "\tinet6 fe80::1 prefixlen 64\n"), ""
         self.calls.append(argv)
         # Every tart call ends its options before the VM name; the checks
         # below look at the call without that marker.

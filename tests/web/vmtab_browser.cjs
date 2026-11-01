@@ -24,7 +24,8 @@ const hits = [];
 let sessionsDown = false;
 const VM = {
   id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
-  grants: {}, human: "idle", ip: "", fault_reason: "",
+  grants: {}, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
+  net_pending: true, net_applied_known: true,
 };
 const json = (res, body, status = 200) => {
   res.statusCode = status;
@@ -119,6 +120,24 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-activity", { hasText: "프리셋 gold 삭제 완료" }).waitFor({ timeout: 5000 });
     assert.match(sure, /preset-gold/, "the confirmation names the copy");
     assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/delete")[1], { confirm: "gold" });
+
+    // 2c. network exposure: shown, warned about, added (after a confirmation), removed
+    assert.match(await frame.locator("#vm-net-warning").innerText(), /같은 LAN의 모든 기기/);
+    await frame.locator("#vm-expose tbody tr", { hasText: "2222" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-net-pending").innerText(), /다시 시작하면 적용/);
+    await frame.locator("#vm-allow-cidr").fill("192.168.1.213");
+    await frame.locator("#vm-allow-go").click();
+    await frame.locator("#vm-activity", { hasText: "허용 192.168.1.213 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm/alpha/allow")[1], { action: "add", cidr: "192.168.1.213" });
+    page.once("dialog", async (d) => { assert.match(d.message(), /LAN/); await d.accept(); });
+    await frame.locator("#vm-expose-ext").fill("8080");
+    await frame.locator("#vm-expose-int").fill("80");
+    await frame.locator("#vm-expose-go").click();
+    await frame.locator("#vm-activity", { hasText: "포트 8080:80 노출 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm/alpha/expose" && b.action === "add")[1],
+      { action: "add", external: "8080", internal: "80" });
+    await frame.locator("#vm-expose tbody tr", { hasText: "2222" }).getByRole("button", { name: "삭제" }).click();
+    await frame.locator("#vm-activity", { hasText: "포트 2222 노출 해제 완료" }).waitFor({ timeout: 5000 });
 
     // 3. granting from the session list
     await frame.locator("#vm-grant-session option", { hasText: "s1" }).waitFor({ state: "attached", timeout: 15000 });

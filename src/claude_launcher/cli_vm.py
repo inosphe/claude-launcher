@@ -116,6 +116,38 @@ def _lifecycle(args) -> int:
                  show=lambda out: print(f"{out['id']}: {out['state']}"))
 
 
+def _net_show(args, out) -> None:
+    print("expose: " + (", ".join(out.get("expose") or []) or "-"))
+    print("allow:  " + (", ".join(out.get("allow") or []) or "-"))
+    if out.get("net_pending"):
+        print("restart the VM for the change to apply")
+
+
+def _net(args, what: str, body_for_add, body_for_rm) -> int:
+    if args.action == "list":
+        return _call(args, "GET", f"/api/vm/{args.vm}", show=lambda out: _net_show(args, out))
+    if not args.value:
+        print(f"claunch vm {what} {args.action}: a value is required", file=sys.stderr)
+        return EXIT_REFUSED
+    body = body_for_add(args.value) if args.action == "add" else body_for_rm(args.value)
+    if body is None:
+        print(f"claunch vm {what}: expected EXTERNAL:GUEST", file=sys.stderr)
+        return EXIT_REFUSED
+    return _call(args, "POST", f"/api/vm/{args.vm}/{what}", {"action": args.action, **body},
+                 show=lambda out: _net_show(args, out))
+
+
+def _cmd_expose(args) -> int:
+    def add(value):
+        ext, sep, inner = value.partition(":")
+        return {"external": ext, "internal": inner} if sep else None
+    return _net(args, "expose", add, lambda value: {"external": value})
+
+
+def _cmd_allow(args) -> int:
+    return _net(args, "allow", lambda v: {"cidr": v}, lambda v: {"cidr": v})
+
+
 def _preset_list(args) -> int:
     def show(out):
         rows = out.get("presets") or []
@@ -235,6 +267,24 @@ def register(sub) -> None:
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_lifecycle)
+
+    sp = v.add_parser("expose", help="TCP ports of the guest published on this host's LAN address "
+                                     "(next start; anyone on the LAN can connect)")
+    vm_arg(sp)
+    sp.add_argument("action", choices=("list", "add", "rm"))
+    sp.add_argument("value", nargs="?", help="add: EXTERNAL:GUEST (external 1024-65535); rm: EXTERNAL")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_expose)
+
+    sp = v.add_parser("allow", help="IPv4 ranges softnet lets through inside the blocked private "
+                                    "ranges (next start; a /32 address is the usual choice; "
+                                    "0.0.0.0/0, wider than /8, a whole private range and a range "
+                                    "holding this host are refused)")
+    vm_arg(sp)
+    sp.add_argument("action", choices=("list", "add", "rm"))
+    sp.add_argument("value", nargs="?", help="the address or CIDR")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_allow)
 
     pr = v.add_parser("preset", help="VM presets: a stopped copy to make new VMs from")
     ps = pr.add_subparsers(dest="preset_command", required=True)

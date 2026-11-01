@@ -119,3 +119,43 @@ A daemon restart is needed for the preset routes and the register form's preset
 marks (`/api/vm-presets`, `softnet` in the VM record). The panel's static files
 need only a refresh; until the restart the panel says the daemon has no preset
 API.
+
+## Published ports and allowed ranges (per VM)
+
+Each VM record has two lists the user sets, from the panel's "포트 노출 (softnet)"
+section or `claunch vm expose <id> list|add EXTERNAL:GUEST|rm EXTERNAL` and
+`claunch vm allow <id> list|add CIDR|rm CIDR`. `tart run` gets them as
+`--net-softnet-expose=` and `--net-softnet-allow=`, and only on a VM that runs on
+softnet.
+
+- **expose** `external:guest`: tart forwards TCP from the external port on the
+  host's egress interface to the guest port. **Anyone on the host's LAN can
+  connect to it.** The external port is 1024-65535, the guest port 1-65535, an
+  external number belongs to one VM only, and a VM has at most 16. A number the
+  host already listens on is not checked here: `tart run` fails to start and its
+  reason is what the panel shows.
+- **allow** (IPv4 CIDR): a range softnet passes inside the blocked private ranges.
+  The longest prefix wins, so a `/32` such as the nginx host opens that address
+  and the rest of 192.168.0.0/16 stays blocked. Per tart's documentation an
+  address also has to be allowed for the machines that connect to an exposed port.
+  The guest can reach every allowed address. The host firewall is not changed.
+  Refused: IPv6, `0.0.0.0/0` and anything shorter than `/8`, a range that holds a
+  whole private block (10/8, 172.16/12, 192.168/16), and a range that holds one of
+  this host's own addresses (read from `ifconfig -a` when the range is saved and
+  again before every start), because that would open the host's ports to the
+  guest. `/32` addresses outside the host (for example 192.168.1.213 when the host
+  is 192.168.1.89) pass.
+- **When it applies**: at the next start. A running VM shows "다시 시작하면 적용됩니다"
+  when the saved lists differ from what it was started with; a VM adopted after a
+  daemon restart is not known to have been started with them. The daemon never
+  restarts a VM for this.
+- **Who**: the user only (routes `POST /api/vm/{id}/expose` and `/allow`, the
+  panel, the CLI); a session gets `vm_user_only`, does not see the lists, and no
+  MCP tool exists. Every change is audited with the declared actor. Values read
+  from `vms.json` go through the same checks and an entry that fails is dropped,
+  so a hand-edited file does not lift the isolation.
+- A VM made from a preset starts with both lists empty; they are not copied.
+- Not measured here: that tart honours both options together with
+  `--net-softnet-block` as its help text says (s5's real-VM check).
+
+A daemon restart is needed (routes and the `tart run` arguments).

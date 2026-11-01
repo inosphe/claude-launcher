@@ -87,6 +87,67 @@ def check_name(what: str, value: str) -> str:
     return value
 
 
+#: A port on the host's egress interface is open to the whole LAN: from 1024
+#: up, one VM per number, a few per VM.
+EXPOSE_EXTERNAL_MIN = 1024
+EXPOSE_MAX = 16
+#: The ranges softnet's block list holds shut (``SOFTNET_BLOCK``). An allow that
+#: covers one of them whole, or anything wider, lifts the isolation.
+PRIVATE_NETS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+ALLOW_MIN_PREFIX = 8
+
+
+def _port(what: str, value, low: int, high: int = 65535) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise VmError("vm_bad_request", f"{what}: {low}-{high} 사이의 정수여야 합니다")
+    text = str(value).strip()
+    if not text.isascii() or not text.isdigit() or not low <= int(text) <= high:
+        raise VmError("vm_bad_request", f"{what} {text!r}: {low}-{high} 사이의 정수여야 합니다")
+    return int(text)
+
+
+def check_expose(external, internal) -> str:
+    """``external:internal``: the port on the host's egress interface and the
+    port in the guest."""
+    return (f"{_port('외부 포트', external, EXPOSE_EXTERNAL_MIN)}:"
+            f"{_port('게스트 포트', internal, 1)}")
+
+
+def split_expose(text: str) -> tuple:
+    ext, sep, inner = str(text).partition(":")
+    if not sep:
+        raise VmError("vm_bad_request", f"노출 {text!r}: 외부포트:게스트포트 형식이어야 합니다")
+    return check_expose(ext, inner).split(":")
+
+
+def check_allow(value, host_addrs=()) -> str:
+    """An IPv4 CIDR softnet may let through. Refused: anything not IPv4, a
+    prefix shorter than /8 (0.0.0.0/0 included), a range that holds a whole
+    private block (10/8, 172.16/12, 192.168/16), and a range that holds one of
+    the host's own addresses (the guest would reach the host's ports)."""
+    text = str(value).strip()
+    try:
+        net = ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        raise VmError("vm_bad_request", f"허용 주소 {text!r}: IPv4 주소 또는 CIDR이어야 합니다") from None
+    if net.version != 4:
+        raise VmError("vm_bad_request", f"허용 주소 {text!r}: IPv4만 쓸 수 있습니다")
+    if net.prefixlen < ALLOW_MIN_PREFIX or any(net.supernet_of(p) for p in PRIVATE_NETS):
+        raise VmError("vm_allow_too_wide",
+                      f"허용 주소 {net}: 범위가 너무 넓어 격리가 사라집니다. "
+                      f"/{ALLOW_MIN_PREFIX}보다 넓은 값, 0.0.0.0/0, 사설 대역(10/8, 172.16/12, 192.168/16) 전체는 쓸 수 없습니다. "
+                      "/32 주소 하나를 쓰는 것이 일반적입니다")
+    for addr in host_addrs:
+        try:
+            if ipaddress.ip_address(addr) in net:
+                raise VmError("vm_allow_holds_host",
+                              f"허용 주소 {net}: 이 호스트 자신의 주소 {addr}를 포함합니다. "
+                              "게스트가 호스트의 포트에 접속할 수 있게 되므로 거절합니다")
+        except ValueError:
+            continue
+    return str(net)
+
+
 def check_user(value: str) -> str:
     if not _USER_RE.fullmatch(value):
         raise VmError("vm_bad_request", f"ssh_user {value!r}: not a plain account name")
@@ -184,6 +245,14 @@ class Vm:
     #: daemon-wide ``vm_softnet``. A VM made from a preset is pinned True, so
     #: turning the global off does not open it; only a user route sets it.
     softnet: Optional[bool] = None
+    #: ``external:guest`` TCP ports published on the host's egress interface,
+    #: and the IPv4 CIDRs softnet lets through besides the public internet.
+    #: Applied at the next start (``tart run`` takes them as arguments).
+    expose: List[str] = field(default_factory=list)
+    allow: List[str] = field(default_factory=list)
+    #: What the running ``tart run`` was given (None: not known, e.g. adopted
+    #: after a daemon restart). Not persisted.
+    net_applied: Optional[dict] = None
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
@@ -210,7 +279,17 @@ class Vm:
             "epoch": self.epoch, "grants": {k: list(v) for k, v in self.grants.items()},
             "human": self.human, "human_since": self.human_since,
             "needs_observe": self.needs_observe, "softnet": self.softnet,
+            "expose": list(self.expose), "allow": list(self.allow),
         }
+
+    def net_pending(self) -> bool:
+        """The saved expose/allow differ from what the running VM was given."""
+        if self.state not in ("starting", "restoring", "running"):
+            return False
+        now = {"expose": list(self.expose), "allow": list(self.allow)}
+        if self.net_applied is None:
+            return bool(now["expose"] or now["allow"])
+        return self.net_applied != now
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Vm":
@@ -223,12 +302,29 @@ class Vm:
         vm.cua_path = check_path("cua_path", str(raw.get("cua_path") or vm.cua_path))
         vm.fault_reason = str(raw.get("fault_reason") or "")
         vm.softnet = raw["softnet"] if isinstance(raw.get("softnet"), bool) else None
+        # A hand-edited file does not lift the isolation: what the setters
+        # would refuse is dropped here.
+        vm.expose = _kept(raw.get("expose"), lambda v: check_expose(*split_expose(v)))
+        vm.allow = _kept(raw.get("allow"), check_allow)
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
             str(s): [x for x in SCOPES if x in (v or [])]
             for s, v in (raw.get("grants") or {}).items()
         }
         return vm
+
+
+def _kept(items, check) -> List[str]:
+    out: List[str] = []
+    for item in items if isinstance(items, list) else []:
+        try:
+            value = check(item)
+        except (VmError, TypeError, ValueError):
+            log.warning("dropped %r from a VM record: not acceptable", item)
+            continue
+        if value not in out:
+            out.append(value)
+    return out[:EXPOSE_MAX]
 
 
 def not_ready(vm: "Vm") -> VmError:
@@ -305,6 +401,16 @@ class Registry:
                     self._rejected.append({"record": raw, "why": str(exc)})
                     continue
                 self._vms[vm.id] = vm
+            taken = set()
+            for vm in self._vms.values():
+                keep = []
+                for pair in vm.expose:
+                    if pair.split(":")[0] in taken:
+                        log.warning("%s: external port of %s is held by another VM; dropped", vm.id, pair)
+                        continue
+                    taken.add(pair.split(":")[0])
+                    keep.append(pair)
+                vm.expose = keep
             del self._rejected[:-REJECTED_KEEP]
 
     def load_and_reset(self) -> None:
@@ -372,6 +478,59 @@ class Registry:
                 raise VmError("vm_busy_state", f"{vm_id} is {vm.state}; stop it first")
             del self._vms[vm_id]
             self._save()
+
+    # ---- network exposure ----------------------------------------------- #
+    def expose_add(self, vm_id: str, external, internal) -> Vm:
+        pair = check_expose(external, internal)
+        ext = pair.split(":")[0]
+        with self._lock:
+            vm = self.get(vm_id)
+            for other in self._vms.values():
+                for have in other.expose:
+                    if have.split(":")[0] == ext:
+                        raise VmError("vm_port_taken",
+                                      f"외부 포트 {ext}는 이미 {other.id}에 노출되어 있습니다 ({have})")
+            if len(vm.expose) >= EXPOSE_MAX:
+                raise VmError("vm_bad_request", f"{vm_id}: 노출 포트는 최대 {EXPOSE_MAX}개입니다")
+            vm.expose.append(pair)
+            self._save()
+            return vm
+
+    def expose_remove(self, vm_id: str, external) -> Vm:
+        ext = str(_port("external port", external, EXPOSE_EXTERNAL_MIN))
+        with self._lock:
+            vm = self.get(vm_id)
+            left = [p for p in vm.expose if p.split(":")[0] != ext]
+            if len(left) == len(vm.expose):
+                raise VmError("vm_bad_request", f"{vm_id}는 외부 포트 {ext}를 노출하지 않습니다")
+            vm.expose = left
+            self._save()
+            return vm
+
+    def allow_add(self, vm_id: str, cidr, host_addrs=()) -> Vm:
+        value = check_allow(cidr, host_addrs)
+        with self._lock:
+            vm = self.get(vm_id)
+            if value in vm.allow:
+                raise VmError("vm_bad_request", f"{vm_id}는 이미 {value}를 허용합니다")
+            if len(vm.allow) >= EXPOSE_MAX:
+                raise VmError("vm_bad_request", f"{vm_id}: 허용 주소는 최대 {EXPOSE_MAX}개입니다")
+            vm.allow.append(value)
+            self._save()
+            return vm
+
+    def allow_remove(self, vm_id: str, cidr) -> Vm:
+        try:
+            value = str(ipaddress.ip_network(str(cidr).strip(), strict=False))
+        except ValueError:
+            raise VmError("vm_bad_request", f"허용 주소 {cidr!r}: IPv4 주소 또는 CIDR이어야 합니다") from None
+        with self._lock:
+            vm = self.get(vm_id)
+            if value not in vm.allow:
+                raise VmError("vm_bad_request", f"{vm_id}는 {value}를 허용하지 않습니다")
+            vm.allow.remove(value)
+            self._save()
+            return vm
 
     # ---- slots and state ------------------------------------------------ #
     def holders(self, except_id: str = "") -> List[str]:
@@ -689,4 +848,5 @@ class Registry:
         with self._lock:
             vm = self.get(vm_id)
             return {**vm.to_dict(), "ready": vm.ready, "draining": vm.draining,
-                    "inflight": vm.inflight}
+                    "inflight": vm.inflight, "net_pending": vm.net_pending(),
+                    "net_applied_known": vm.net_applied is not None}
