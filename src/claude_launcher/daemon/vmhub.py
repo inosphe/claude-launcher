@@ -12,8 +12,10 @@ and the HTTP routes are separate layers that call into it.
   with ``vm_slots_full`` and the names of the holders.
 * **Grants.** ``grants[session]`` is the set of scopes the user gave that
   session: ``view`` (screenshots, status), ``control`` (UI input) and ``exec``
-  (a guest shell). ``control`` and ``exec`` imply ``view``: driving a screen
-  needs seeing it. Nothing is granted by default, and only the user grants.
+  (a guest shell) and ``files`` (copy files between a host folder and the
+  guest's work folder, ``daemon/vm_files.py``). ``control`` and ``exec`` imply
+  ``view``: driving a screen needs seeing it. ``files`` implies nothing and
+  nothing implies it. Nothing is granted by default, and only the user grants.
 * **Control.** At most one ``controller``. :meth:`Registry.acquire` hands out
   the current ``epoch``; every control or exec call presents it and a call
   made under an older epoch is refused (``vm_stale``). The user may add
@@ -34,6 +36,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -44,8 +47,8 @@ log = logging.getLogger(__name__)
 
 SLOT_LIMIT = 2
 
-VIEW, CONTROL, EXEC = "view", "control", "exec"
-SCOPES = (VIEW, CONTROL, EXEC)
+VIEW, CONTROL, EXEC, FILES = "view", "control", "exec", "files"
+SCOPES = (VIEW, CONTROL, EXEC, FILES)
 
 #: States in which a VM holds one of the machine's macOS VM slots.
 OCCUPIED = frozenset({
@@ -69,6 +72,7 @@ _MOVES = {
 }
 
 AUDIT_RING = 500
+FILES_LOG_KEEP = 50
 REJECTED_KEEP = 50
 
 #: What may reach a command line or a file name. Everything below is checked
@@ -165,6 +169,35 @@ def check_path(what: str, value: str, *, empty_ok: bool = False) -> str:
     return value
 
 
+#: Where a VM's guest work folder may be: under a user's home, or under a temp
+#: directory. ``(prefix parts, parts needed below the prefix)``: a home needs
+#: the account and one folder in it, so ``/Users/admin`` itself is not one.
+_WORK_ROOTS = ((("Users",), 2), (("private", "tmp"), 1), (("tmp",), 1))
+FILES_DIR_DEFAULT = "/Users/{user}/work"
+
+
+def check_guest_dir(value: str) -> str:
+    """The folder in the guest that file transfers are limited to. Absolute,
+    plain characters (``check_path``), written canonically (no '//', no '.',
+    no trailing '/'), under ``/Users/<account>/``, ``/private/tmp/`` or
+    ``/tmp/``, and no hidden folder or ``Library`` on the way: a transfer into
+    ``~/.ssh`` or a home itself is refused here, not left to the user's care."""
+    text = str(value or "")
+    check_path("guest work folder", text)
+    parts = text.split("/")[1:]
+    if text == "/" or any(p in ("", ".") for p in parts):
+        raise VmError("vm_bad_request", f"게스트 작업 폴더 {text!r}: '//', '.', 끝의 '/' 없이 정규 형태로 써야 합니다")
+    for prefix, below in _WORK_ROOTS:
+        if tuple(parts[:len(prefix)]) == prefix and len(parts) >= len(prefix) + below:
+            rest = parts[len(prefix):]
+            if any(p.startswith(".") for p in rest) or (prefix == ("Users",) and rest[1] == "Library"):
+                raise VmError("vm_bad_request",
+                              f"게스트 작업 폴더 {text!r}: 숨김 폴더나 Library 아래는 쓸 수 없습니다")
+            return text
+    raise VmError("vm_bad_request",
+                  f"게스트 작업 폴더 {text!r}: /Users/<계정>/<폴더>, /private/tmp/<폴더>, /tmp/<폴더> 아래만 쓸 수 있습니다")
+
+
 LOG_LIMIT = 1024 * 1024
 
 
@@ -257,6 +290,9 @@ class Vm:
     #: by anything the daemon runs (docs/vm-hub.md). Saved; set only while the
     #: VM is stopped, and only by the user.
     locked: bool = False
+    #: The guest folder file transfers are limited to ("": the default,
+    #: ``/Users/<ssh_user>/work``). Saved; only the user sets it.
+    files_dir: str = ""
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
@@ -266,6 +302,16 @@ class Vm:
     @property
     def ready(self) -> bool:
         return self.state == "running" and self.ssh_ready and self.gui_ready and self.cua_ready
+
+    @property
+    def work_dir(self) -> str:
+        return self.files_dir or FILES_DIR_DEFAULT.format(user=self.ssh_user)
+
+    @property
+    def files_ready(self) -> bool:
+        """The guest agent answers, which is all a file transfer needs (no
+        screen, no cua daemon)."""
+        return self.state == "running" and self.ssh_ready
 
     @property
     def draining(self) -> bool:
@@ -284,6 +330,7 @@ class Vm:
             "human": self.human, "human_since": self.human_since,
             "needs_observe": self.needs_observe, "softnet": self.softnet, "locked": self.locked,
             "expose": list(self.expose), "allow": list(self.allow),
+            "files_dir": self.files_dir,
         }
 
     def net_pending(self) -> bool:
@@ -311,6 +358,10 @@ class Vm:
         vm.expose = _kept(raw.get("expose"), lambda v: check_expose(*split_expose(v)))
         vm.allow = _kept(raw.get("allow"), check_allow)
         vm.locked = raw.get("locked") is True   # anything but a JSON true reads as unlocked
+        try:
+            vm.files_dir = check_guest_dir(raw["files_dir"]) if raw.get("files_dir") else ""
+        except VmError:
+            log.warning("%s: files_dir %r is not acceptable; the default is used", vm.id, raw.get("files_dir"))
         vm.epoch = int(raw.get("epoch") or 0)
         vm.grants = {
             str(s): [x for x in SCOPES if x in (v or [])]
@@ -386,6 +437,8 @@ class Registry:
         self._vms: Dict[str, Vm] = {}
         self._rejected: list = []
         self.audit_log: List[dict] = []
+        #: Recent file transfers per VM (path and byte count, never contents).
+        self.files_log: Dict[str, deque] = {}
 
     # ---- persistence --------------------------------------------------- #
     def load(self) -> None:
@@ -443,6 +496,13 @@ class Registry:
         """An audit row from the layers above (forced stop, adoption)."""
         with self._lock:
             self._log(vm, "", what, **extra)
+
+    def note_files(self, vm: str, session: str, **row) -> None:
+        """One file transfer (or refusal) for the VM's recent-transfer list and
+        the audit log."""
+        with self._lock:
+            self._log(vm, session, "files", **row)
+            self.files_log.setdefault(vm, deque(maxlen=FILES_LOG_KEEP)).append(self.audit_log[-1])
 
     def _log(self, vm: str, session: str, what: str, **extra) -> None:
         # The record never carries screen contents or command text: who did
@@ -556,6 +616,15 @@ class Registry:
             self._save()
             return vm
 
+    def set_files_dir(self, vm_id: str, path: str) -> Vm:
+        """The guest work folder ("" back to the default)."""
+        value = check_guest_dir(path) if path else ""
+        with self._lock:
+            vm = self.get(vm_id)
+            vm.files_dir = value
+            self._save()
+            return vm
+
     # ---- slots and state ------------------------------------------------ #
     def holders(self, except_id: str = "") -> List[str]:
         return [v.id for v in self._vms.values()
@@ -659,7 +728,8 @@ class Registry:
 
     def revoke(self, vm_id: str, session: str, scopes=None) -> List[str]:
         """Drop ``scopes`` (all when omitted). Losing ``control`` ends the
-        control the session holds; losing ``view`` loses everything."""
+        control the session holds; losing ``view`` loses control and exec too
+        (files is independent and is dropped only by naming it)."""
         if scopes is not None:
             # A malformed list must not revoke less than it says and still
             # answer ok: a string would be read letter by letter.
@@ -672,10 +742,12 @@ class Registry:
         with self._lock:
             vm = self.get(vm_id)
             have = set(vm.grants.get(session, []))
-            if scopes is None or VIEW in scopes:
+            if scopes is None:
                 have = set()
             else:
                 have -= scopes
+                if VIEW in scopes:
+                    have -= {CONTROL, EXEC}  # they ride on view; files does not
                 if CONTROL in scopes:
                     have.discard(EXEC)  # exec runs on top of control
             if have:
@@ -780,8 +852,8 @@ class Registry:
             if vm.locked:
                 self._log(vm_id, session, "refused", scope=scope, why="locked")
                 raise locked_error(vm)
-            if scope == VIEW:
-                pass
+            if scope in (VIEW, FILES):
+                pass    # no screen, no input: no controller, epoch or look-first
             else:
                 if vm.human == "driving":
                     raise VmError("vm_busy", "the user is driving the VM", retry_after=5,
@@ -799,7 +871,7 @@ class Registry:
                     raise VmError("vm_observe_first",
                                   "look at the screen (vm_screenshot) before acting",
                                   needs_observe=True)
-            if not vm.ready:
+            if not (vm.files_ready if scope == FILES else vm.ready):
                 raise not_ready(vm)
             vm.inflight += 1
             self._log(vm_id, session, "call", scope=scope, epoch=vm.epoch)

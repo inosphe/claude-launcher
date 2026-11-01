@@ -88,3 +88,16 @@ def test_the_panel_has_the_lock_controls():
     assert "/${op}" in js and "vm.locked" in js
     assert "호스트 화면 잠금과는 별개" in html     # the two locks are told apart
     assert "innerHTML" not in js
+
+
+def test_the_panel_has_the_files_section_and_its_scope():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    for ident in ("vm-files-host", "vm-files-dir", "vm-files-save", "vm-files-default", "vm-files-log",
+                  "vm-grant-files", "vm-files-note"):
+        assert f'id="{ident}"' in html
+    assert "받은 파일은 실행하지 않습니다" in html
+    assert 'const SCOPES = ["view", "control", "exec", "files"]' in js
+    assert "/files_dir" in js and "api/vm/${encodeURIComponent(vm.id)}/files`" in js
+    assert 'scope === "exec" &&' in js          # only exec asks first; files has no special dialog
+    assert "innerHTML" not in js

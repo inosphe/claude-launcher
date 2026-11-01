@@ -107,6 +107,8 @@ def is_agent_error(rc: int, out: str, err: str) -> bool:
 #: (returncode, stdout, stderr)
 Result = Tuple[int, str, str]
 Runner = Callable[[Sequence[str], float], Result]
+#: ``(argv, feed, drain, timeout) -> StreamResult`` -- see :func:`run_stream`.
+Streamer = Callable[..., "StreamResult"]
 Spawner = Callable[[Sequence[str], Path], int]
 
 
@@ -150,6 +152,81 @@ def run_command(argv: Sequence[str], timeout: float = 30.0, cap: int = READ_CAP)
         r.join(5)
     text = lambda parts: b"".join(parts).decode("utf-8", "replace")  # noqa: E731
     return rc, text(out), text(err)
+
+
+@dataclass
+class StreamResult:
+    rc: int
+    stderr: str
+    #: What a ``feed`` or ``drain`` raised (the process is killed when one does)
+    feed_error: Optional[BaseException] = None
+    drain_error: Optional[BaseException] = None
+    timed_out: bool = False
+
+
+def run_stream(argv: Sequence[str], feed: Optional[Callable] = None,
+               drain: Optional[Callable] = None, timeout: float = 600.0,
+               cap: int = READ_CAP) -> StreamResult:
+    """Run ``argv`` with bytes streamed in and/or out (file transfer).
+
+    ``feed(stdin)`` writes the process's input (in its own thread; stdin is
+    closed after it returns), ``drain(stdout)`` reads all of its output (in the
+    caller's thread; output nobody drains is read and dropped). The process is
+    killed when either raises or ``timeout`` passes; stderr is kept to ``cap``.
+    """
+    try:
+        proc = subprocess.Popen(list(argv), stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return StreamResult(127, str(exc))
+    err: list = []
+    result = StreamResult(0, "")
+    stderr_reader = threading.Thread(target=_drain, args=(proc.stderr, cap, err), daemon=True)
+    stderr_reader.start()
+
+    def feeder():
+        try:
+            feed(proc.stdin)
+        except BrokenPipeError:
+            pass    # the guest side ended first; its exit status says why
+        except BaseException as exc:  # noqa: BLE001 -- handed to the caller
+            result.feed_error = exc
+            proc.kill()
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
+    feeding = None
+    if feed:
+        feeding = threading.Thread(target=feeder, daemon=True)
+        feeding.start()
+
+    def expired():
+        result.timed_out = True
+        proc.kill()
+
+    timer = threading.Timer(timeout, expired)
+    timer.daemon = True
+    timer.start()
+    try:
+        if drain:
+            drain(proc.stdout)
+        _drain(proc.stdout, 0, [])      # whatever is left is read and dropped
+    except BaseException as exc:  # noqa: BLE001 -- handed to the caller
+        result.drain_error = exc
+        proc.kill()
+    finally:
+        result.rc = proc.wait()
+        timer.cancel()
+    if feeding:
+        feeding.join(5)
+    stderr_reader.join(5)
+    result.stderr = b"".join(err).decode("utf-8", "replace")
+    if result.timed_out:
+        result.rc = 124
+    return result
 
 
 def spawn_detached(argv: Sequence[str], log: Path) -> int:
@@ -245,6 +322,7 @@ class Manager:
         *,
         log_dir: Path,
         run: Runner = run_command,
+        stream: Streamer = run_stream,
         spawn: Spawner = spawn_detached,
         alive: Callable[[int], bool] = pid_alive,
         graphics: bool = True,
@@ -260,6 +338,7 @@ class Manager:
         self.registry = registry
         self.log_dir = log_dir
         self._run = run
+        self._stream = stream
         self._spawn = spawn
         self._alive = alive
         #: Phase 1 hands the screen to the user through the ``tart run``
@@ -347,6 +426,27 @@ class Manager:
         are written with absolute paths."""
         return self._run([TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", command],
                          timeout)
+
+    def guest_stream(self, vm: vmhub.Vm, script: str, *, feed=None, drain=None,
+                     timeout: float = 600.0) -> "StreamResult":
+        """``/bin/sh -c script`` in the guest with bytes streamed through
+        ``tart exec`` (``-i`` when ``feed`` supplies stdin). A guest agent that
+        does not answer is ``vm_unavailable``."""
+        argv = [TART, "exec"] + (["-i"] if feed else []) + ["--", vm.tart_name, "/bin/sh", "-c", script]
+        out = self._stream(argv, feed=feed, drain=drain, timeout=timeout)
+        if is_agent_error(out.rc, "", out.stderr):
+            raise VmError("vm_unavailable", f"{vm.id}: the guest agent said {out.stderr.strip()[:200]}",
+                          retry_after=5)
+        return out
+
+    def guest_run(self, vm: vmhub.Vm, script: str, timeout: float = 60.0) -> Result:
+        """``/bin/sh -c script`` in the guest, output returned (cut at
+        ``READ_CAP``). A guest agent that does not answer is ``vm_unavailable``."""
+        rc, out, err = self._guest(vm, script, timeout)
+        if is_agent_error(rc, out, err):
+            raise VmError("vm_unavailable", f"{vm.id}: the guest agent said {err.strip()[:200]}",
+                          retry_after=5)
+        return rc, out, err
 
     def exec(self, vm_id: str, command: str, timeout: float = 60.0) -> dict:
         """Run ``command`` in the guest's shell. The result is cut at

@@ -9,6 +9,8 @@
         registering posts the VM and then a reconcile;
      3. granting takes its session from the session list and sends the
         scopes ticked (exec asks for a confirmation first);
+     3b. the file exchange section: the folders, the "not executed" text, the guest
+        folder setting (user route), the recent-transfer log and the files tick;
      4. leaving the tab removes the frame. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -24,7 +26,7 @@ const hits = [];
 let sessionsDown = false;
 const VM = {
   id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
-  grants: {}, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
+  grants: { s1: ["files"] }, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
   net_pending: true, net_applied_known: true, locked: false,
 };
 const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false };
@@ -52,6 +54,14 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false });
+  if (p === "/api/vm/alpha/files") {
+    return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
+      guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
+      recent: [
+        { at: 1700000000, session: "s1", op: "put", path: "n.txt", ok: true, bytes: 5, items: 1 },
+        { at: 1700000100, session: "s1", op: "get", path: "../x", ok: false, code: "vm_files_unsafe" },
+      ] });
+  }
   if (p === "/api/vm-tart") {
     return json(res, { tart: [
       { name: "alpha", state: "running", running: true, registered: true, id: "alpha", usable: true },
@@ -171,6 +181,33 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-activity", { hasText: "s1 view+control 부여" }).waitFor({ timeout: 5000 });
     const grant = posts.find(([u]) => u === "/api/vm/alpha/grant");
     assert.deepEqual(grant[1], { session: "s1", scopes: ["view", "control"] });
+    // 3b. the file exchange
+    await frame.locator("#vm-files-host", { hasText: "/vm/alpha/files" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-files-note").innerText(), /받은 파일은 실행하지 않습니다/);
+    const rows = await frame.locator("#vm-files-log tbody tr").allInnerTexts();
+    assert.equal(rows.length, 2, "two transfers are logged");
+    assert.match(rows[0], /s1\s+get\s+\.\.\/x\s+거절: vm_files_unsafe/, "the newest comes first, a refusal shows its code");
+    assert.match(rows[1], /s1\s+put\s+n\.txt\s+5 B\s+완료/);
+    assert.equal(await frame.locator("#vm-files-dir").inputValue(), "/Users/admin/work");
+    assert.equal(await frame.locator("#vm-files-default").isDisabled(), true, "already the default");
+    await frame.locator("#vm-files-dir").fill("/Users/admin/exchange");
+    await frame.locator("#vm-files-save").click();
+    await frame.locator("#vm-activity", { hasText: "게스트 작업 폴더 저장 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/files_dir")[1], { dir: "/Users/admin/exchange" });
+    assert.equal(await frame.getByLabel("s1 files").isChecked(), true, "the grants table has a files tick");
+    assert.equal(await frame.getByLabel("s1 files").count(), 1);
+    await frame.getByLabel("s1 files").uncheck();
+    await frame.locator("#vm-activity", { hasText: "s1 files 회수 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm/alpha/revoke").pop()[1], { session: "s1", scopes: ["files"] });
+    await frame.locator("#vm-grant-control").uncheck();
+    await frame.locator("#vm-grant-files").check();
+    await frame.locator("#vm-grant").click();
+    await frame.locator("#vm-activity", { hasText: "s1 view+files 부여" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm/alpha/grant").pop()[1], { session: "s1", scopes: ["view", "files"] },
+      "files is ticked on its own: no confirmation, no exec or control");
+    assert.equal(await frame.locator("#vm-files-default").isDisabled(), true, "the default button is off while the default is set");
+    assert.equal(posts.filter(([u]) => u === "/api/vm/alpha/files_dir").length, 1);
+
     let asked = "";
     page.on("dialog", async (d) => { asked = d.message(); await d.dismiss(); });
     await frame.locator("#vm-grant-exec").check();

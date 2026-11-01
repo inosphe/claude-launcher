@@ -192,3 +192,90 @@ calls this one "VM 잠금".
 
 A daemon restart is needed for the routes and the checks; the panel's static
 files need a refresh.
+
+## File transfer (`files` scope)
+
+A session with a `files` grant copies files between two folders and nothing
+else: the VM's **host folder** `~/.claude-launcher/daemon/vm/<id>/files/` (mode
+0700) and the VM's **guest work folder** (default `/Users/<account>/work`).
+
+- **Scope.** `files` is the fourth scope (view, control, exec, files). It is off
+  by default, only the user grants or revokes it (panel tick or
+  `claunch vm grant <id> <session> files`), and there is no extra dialog (exec
+  keeps its own). It implies neither view, control nor exec, and none of them
+  implies it; revoking `view` takes control and exec with it and leaves `files`.
+  It touches no `tool_scope` entry and no `run_steps` check: those are for the
+  cua tools, and the four file tools do not go through `vm_cua`.
+- **Tools** (`vm_mcp.py`, thin clients of `POST /api/vm/{id}/files/{put,get,ls,rm}`):
+  `vm_put` (host folder to guest), `vm_get` (guest to host folder, the result
+  has `host_path`), `vm_ls` (name, size, kind of a guest folder) and `vm_rm`
+  (needs `confirm` = the path again; never the work folder itself). There is no
+  edit tool. `put`/`get` refuse to replace an existing item unless `overwrite`
+  is true. A session finds the two folders in its `vm_list` row (`files`).
+- **Per call** the registry checks the grant, the VM lock and that the guest agent
+  answers (`running` and `ssh_ready`: file transfer needs no screen and no cua
+  daemon, and no control, epoch or look-first; a user driving the screen does not
+  block it), then writes an audit row with the op, path, byte and item count and
+  the result, never contents. Rows are kept per VM (the last 50) for the panel.
+  One transfer per VM at a time (`vm_files_busy`).
+- **Host paths.** A session path is relative to the host folder. Refused
+  (`vm_files_unsafe`): absolute paths, `..` and `.`, empty parts, backslash,
+  control characters, more than 16 levels or 512 characters, names starting with
+  `.claunch-` (the daemon's own staging). Every part is looked at with `lstat`
+  and a symbolic link anywhere (the last part too) refuses the call; the result
+  is also checked to lie under the real folder.
+- **Guest work folder.** Set by the user only (panel, or
+  `claunch vm files <id> --guest-dir PATH`, route `POST /api/vm/{id}/files_dir`,
+  audited as `files_dir`). It must be an absolute path of plain characters in
+  canonical form under `/Users/<account>/<folder>`, `/private/tmp/<folder>` or
+  `/tmp/<folder>`: not a home itself, no hidden folder, no `Library`, no space.
+  The file load applies the same check.
+- **Guest paths, and why this method.** Each call runs one `/bin/sh -c` script by
+  `tart exec`, with the paths embedded through `shlex.quote`. The script resolves
+  the work folder with `cd -P && pwd -P` (refusing a work folder that is itself a
+  link), then walks the requested path one component at a time and refuses a
+  symbolic link at any step. A path with no `..` and no link on the way lies inside
+  the real work folder, so no `realpath` binary is needed and nothing depends on
+  how the guest's PATH is set. `rm` may remove a link itself (never what it
+  points to). Not covered: a guest process that swaps a folder for a link
+  while a transfer runs; the guest's own user can already do anything in that
+  folder.
+- **Transport.** `tar` through `tart exec -i`, `/usr/bin/tar` by absolute path.
+  - *put*: the host scans the source first (regular files and folders only; a
+    symbolic link, socket or device refuses the whole put; limits are checked here,
+    before anything is sent) and writes a tar with owner and group zeroed, group/
+    other bits and setuid/setgid/sticky removed. The guest unpacks into a staging
+    folder `.claunch-put.*` inside the work folder, checks that it holds exactly the
+    one expected item, no link or special file and the announced number of entries,
+    drops setuid/setgid again, and only then moves it into place. Any failure
+    removes the staging folder (a trap), and a stream cut anywhere fails the count.
+  - *get*: the guest refuses a source holding a link or special file, reports its
+    entry count on stderr and writes the tar. The host never runs `tar -x` on it.
+    `extract_tar` reads it member by member: only regular files and folders, names
+    under the one expected top name, no `..`, absolute path, control character,
+    duplicate or parent that is a file, `O_EXCL|O_NOFOLLOW`, modes reduced to the
+    owner's rwx (no setuid, no group/other), macOS `._` companions dropped. The
+    result is renamed into the host folder only after the whole stream was read, the
+    guest exited 0 and the entry count matched; a staging folder
+    `.claunch-get.*` is removed on any failure (and swept after a day if the daemon
+    died).
+  - *Limits* (config `vm_files_max_mb`, `vm_files_max_items`, `vm_files_timeout`):
+    512 MiB, 10000 items and 600 s per request; over a limit the call is refused
+    (`vm_files_limit`, 413) or stopped (`vm_timeout`) and nothing is left.
+- **Received files are not executed.** Nothing in the daemon opens, runs or
+  imports what it receives. Open them with care yourself: they come from a guest
+  that a session may have been driving.
+- **Panel.** The VM tab's "파일" section shows the host folder, the guest work
+  folder setting (user only), the "not executed" text and the recent transfers
+  since the daemon started.
+- **Errors**: `vm_files_unsafe` 400, `vm_files_missing` 404 (also: the guest work
+  folder does not exist yet for `ls`/`get`; `put` creates it), `vm_files_exists`
+  409, `vm_files_busy` 409, `vm_files_limit` 413, `vm_files_failed` 502, plus
+  `vm_no_grant`, `vm_locked`, `vm_not_ready`, `vm_unavailable`, `vm_timeout`.
+
+A daemon restart is needed (new routes, scope and tools); MCP sessions pick up
+the four tools when they start.
+
+Not verified without a real VM: that `tart exec -i` passes binary stdin and
+stdout without alteration (and keeps stderr apart), that the guest's `bsdtar`
+takes the options used here, and the timing of a 500 MiB transfer.

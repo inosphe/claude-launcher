@@ -90,14 +90,15 @@
     </div>
     <h2>세션 권한</h2>
     <p class="vm-muted">
-      <b>view</b> 화면 보기, <b>control</b> 화면 조작(view 포함), <b>exec</b> 게스트 셸 실행과 설치·설정 변경.
+      <b>view</b> 화면 보기, <b>control</b> 화면 조작(view 포함), <b>exec</b> 게스트 셸 실행과 설치·설정 변경,
+      <b>files</b> 호스트 교환 폴더와 게스트 작업 폴더 사이의 파일 복사·삭제(다른 권한과 서로 포함하지 않으며 view 없이도 쓸 수 있음).
       control만으로도 Terminal을 띄워 명령을 입력할 수 있으므로 control은 셸 실행에 준하는 신뢰입니다.
     </p>
     <p class="vm-muted" id="vm-limit">
       한계: 데몬은 토큰 하나로 사용자와 세션을 구분하지 못합니다. 같은 OS 사용자로 토큰을 읽을 수 있는 프로세스(관리 세션의 셸 포함)는
       이 페이지의 동작을 사용자 이름으로 호출할 수 있습니다. 그래서 이 페이지의 변경은 감사 기록에 선언된 주체(actor)와 함께 남습니다.
     </p>
-    <table id="vm-grants"><thead><tr><th>세션</th><th>view</th><th>control</th><th>exec</th><th></th></tr></thead><tbody></tbody></table>
+    <table id="vm-grants"><thead><tr><th>세션</th><th>view</th><th>control</th><th>exec</th><th>files</th><th></th></tr></thead><tbody></tbody></table>
     <div id="vm-grant-add">
       <label class="sr-only" for="vm-grant-session">권한을 줄 세션</label>
       <select id="vm-grant-session"><option value="">세션 선택</option></select>
@@ -105,8 +106,26 @@
       <label><input type="checkbox" id="vm-grant-view" checked disabled> view</label>
       <label><input type="checkbox" id="vm-grant-control"> control</label>
       <label><input type="checkbox" id="vm-grant-exec"> exec</label>
+      <label><input type="checkbox" id="vm-grant-files"> files</label>
       <button id="vm-grant" type="button">권한 부여</button>
     </div>
+    <h2>파일</h2>
+    <p class="vm-muted" id="vm-files-note">
+      files 권한이 있는 세션은 <code>vm_put</code>·<code>vm_get</code>·<code>vm_ls</code>·<code>vm_rm</code>으로 아래 두 폴더 사이에서만
+      파일을 복사하거나 지웁니다. 경로는 각 폴더 기준 상대 경로이며 절대 경로, <code>..</code>, 심볼릭 링크는 거절됩니다.
+      <b>받은 파일은 실행하지 않습니다.</b> 호스트 폴더에 쓰는 파일은 일반 파일과 폴더뿐이고, 소유자 권한만 남기며 setuid는 제거합니다.
+      호스트에서 열거나 실행하기 전에 내용을 직접 확인하십시오.
+    </p>
+    <div class="vm-row"><span>호스트 폴더</span> <code id="vm-files-host"></code></div>
+    <div id="vm-files-dir-row" class="vm-row">
+      <label for="vm-files-dir">게스트 작업 폴더</label>
+      <input id="vm-files-dir" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="/Users/admin/work">
+      <button id="vm-files-save" type="button">저장</button>
+      <button id="vm-files-default" type="button">기본값</button>
+    </div>
+    <p class="vm-muted">/Users/&lt;계정&gt;/&lt;폴더&gt;, /private/tmp/&lt;폴더&gt;, /tmp/&lt;폴더&gt; 아래만 지정할 수 있습니다(숨김 폴더·Library·공백 제외). 변경은 사용자만 할 수 있고 감사 기록에 남습니다.</p>
+    <table id="vm-files-log"><thead><tr><th>시각</th><th>세션</th><th>작업</th><th>경로</th><th>크기</th><th>결과</th></tr></thead><tbody></tbody></table>
+    <p class="vm-muted" id="vm-files-log-note">최근 전송은 데몬이 시작된 뒤의 기록이며 경로와 바이트 수만 남기고 내용은 남기지 않습니다.</p>
     <h2>포트 노출 (softnet)</h2>
     <p class="vm-warn-text" id="vm-net-warning">
       <b>외부 포트는 호스트와 같은 LAN의 모든 기기에서 접속할 수 있습니다.</b>
