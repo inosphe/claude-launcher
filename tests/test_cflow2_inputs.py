@@ -172,8 +172,6 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
     sch = layers.load("improv-worker-v2").meta["inputs"]
     assert {n: d["group"] for n, d in sch.items() if d["group"]} == {
         "require_coding_approval": "코딩 승인",
-        # the pre-approval summary thread rides on the approval gate's block.
-        "coding_brief_thread": "코딩 승인",
         # claunch-boxug: the merge approval switch is a concern of its own —
         # it gates the landing request, not the coding start.
         "require_merge_approval": "착지 승인",
@@ -187,9 +185,9 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
         "glossary_draft": "지식 기록"}
     # A block of its own concern: it does not share a grid with the inputs
     # declared around it, so the switches no longer pair with the round limit
-    # above them — the thread switch rides on the approval gate's block.
+    # above them.
     assert [n for n, d in sch.items() if d["group"] == "코딩 승인"] == [
-        "require_coding_approval", "coding_brief_thread"]
+        "require_coding_approval"]
     # claunch-boxug: the merge approval switch stands in its own block too.
     assert [n for n, d in sch.items() if d["group"] == "착지 승인"] == [
         "require_merge_approval"]
