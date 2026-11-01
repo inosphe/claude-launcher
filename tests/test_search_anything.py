@@ -359,6 +359,47 @@ def test_paused_consumer_holds_the_queue_and_resume_drains_it(tmp_path):
     asyncio.run(run())
 
 
+def test_pause_while_consumer_parked_in_get_holds_the_next_key(tmp_path):
+    """The idle consumer parks inside queue.get(); a pause that arrives in
+    that window must still hold a key enqueued afterwards — the peer review
+    of claunch-fhs7f measured the pass running while paused without this."""
+    async def run():
+        service = rag.RagService(
+            config=lambda: {**store.RAG_DEFAULTS, "base_url": "http://127.0.0.1:9/v1",
+                            "api_key": "k", "embedding_model": "m"},
+            root_dir=tmp_path / "index",
+        )
+        consumed = []
+        async def spy_consume(kind, root):
+            consumed.append(kind)
+        service._consume = spy_consume
+        try:
+            assert service.enqueue("sessions") is True
+            for _ in range(200):
+                if consumed:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions"]
+            # The consumer is now parked in get(). Pause, then enqueue: the
+            # key must wait, not run, until resume.
+            service.pause_backfill()
+            assert service.enqueue("beads", tmp_path / "board") is True
+            await asyncio.sleep(0.1)
+            assert consumed == ["sessions"]
+            assert service.backfill_paused() is True
+            service.resume_backfill()
+            for _ in range(200):
+                if len(consumed) > 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions", "beads"]
+            assert service._queue.empty()
+            assert not service._pending
+        finally:
+            await service.shutdown()
+    asyncio.run(run())
+
+
 def test_all_search_uses_reranker_and_rebuilds_for_endpoint_change(tmp_path):
     async def run():
         endpoint = Endpoint()

@@ -1723,6 +1723,14 @@ class RagService:
             # in flight, it only stops the next key from starting.
             await self._resume.wait()
             key = await self._queue.get()
+            # Re-check after dequeue: an idle consumer parks inside get(),
+            # so a pause that arrives in that window has already let this
+            # key through the gate above. Without this second wait the pass
+            # would start while paused — measured live by the claunch-fhs7f
+            # peer review (enqueue on a paused, parked consumer ran
+            # immediately). The key stays held here, keeping its order,
+            # until a resume lets the loop proceed.
+            await self._resume.wait()
             # Out of pending BEFORE the pass runs: an enqueue that lands while
             # this pass reads the corpus queues the key again, behind it.
             kind, root = self._pending.pop(key, (None, None))
