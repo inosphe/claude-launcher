@@ -1,23 +1,29 @@
 /* The preset picker on the Search settings card (search-anything.js
-   settingsCard, the claunch-7m5v8 follow-up). Six things must hold.
-   The option label names the preset id, its embedding model, and a
-   model_key only when that key adds information beyond the model name.
-   The summary line a reader sees under an active preset names the model
-   and where it lives (profile name or custom endpoint). The backfill
-   totals sum pending/total across the daemon's index rows and tolerate
-   rows that carry no counts. The backfill state line distinguishes
-   running / idle / done from the status payload, and the active line
-   names the preset (or says the direct rows are in force) with the model
-   and model_key, staying empty when the daemon has no active record.
-   And the card wiring is the contract: switching the picker PUTs only
-   the preset pointer and restores the previous selection on failure,
-   the connection fieldsets go read-only under a preset, the save-preset
-   control appends the screen's connection values through the settings
-   PUT and locks under an active preset, values() carries the pointer on
-   a normal save, the progress line polls /api/rag/status until nothing
-   is pending, the pause/resume toggle POSTs the backfill endpoints, and
-   the Selftest button POSTs the selftest endpoint with threshold/top_k/
-   sample and renders the verdict in its own result line. */
+   settingsCard). The card is preset-only since
+   claunch-rag-preset-always-hn5bc: the picker addresses one preset, its
+   values load into the fields below, and 저장 writes them back over that
+   preset -- selecting and editing are the same gesture. Six things must
+   hold. The option label names the preset id, its embedding model, and a
+   model_key only when that key adds information beyond the model name. The
+   summary line a reader sees under an active preset names the model and
+   where it lives (profile name or custom endpoint). The backfill totals
+   sum pending/total across the daemon's index rows and tolerate rows that
+   carry no counts. The backfill state line distinguishes running / idle /
+   done / paused from the status payload, and the active line names the
+   preset (or says the direct rows are in force) with the model and
+   model_key, staying empty when the daemon has no active record. And the
+   card wiring is the contract: there is no "직접 설정" option, switching
+   the picker only loads the preset's values into the fields (no PUT --
+   activation happens on save), the fieldsets stay editable under a preset,
+   a save replaces the selected preset's row with the screen values and
+   carries the pointer, a new preset appends through the settings PUT and
+   becomes active, model_key survives an edit only while the embedding
+   model is untouched, the connection-test button POSTs the screen rows and
+   the daemon probes those (its /api/rag/test forces the body to no preset),
+   the progress line polls /api/rag/status until nothing is pending, the
+   pause/resume toggle POSTs the backfill endpoints, and the Selftest button
+   POSTs the selftest endpoint with threshold/top_k/sample and renders the
+   verdict in its own result line. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -126,40 +132,63 @@ check("no active record means no line",
       ["", "", ""]);
 
 /* ---- the card wiring (source-text contract) ------------------------------ */
-check("switching the picker PUTs only the preset pointer",
-      src.includes('request("api/rag/settings", {preset: presetSelect.value}, "PUT")'), true);
-check("a failed switch restores the previous selection",
-      src.includes("presetSelect.value = savedPreset;"), true);
-check("the connection fieldsets go read-only while a preset is in force",
-      src.includes("sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active)"), true);
-check("a normal save carries the pointer too",
-      src.includes("out.preset = presetSelect.value;"), true);
+check("the picker has no direct-rows option",
+      src.includes('new Option("직접 설정'), false);
+check("the picker lists the saved presets",
+      src.includes("for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id))"),
+      true);
+check("switching the picker only loads values — no PUT on change",
+      !slice("settingsCard").includes("presetSelect.onchange = async"),
+      true);
+check("switching reloads the fields from the chosen preset",
+      [src.includes("presetSelect.onchange = () => {"),
+       src.includes("loadPreset(presets.find(p => p.id === presetSelect.value));")],
+      [true, true]);
+check("the fieldsets stay editable under a preset",
+      !src.includes("sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active)"),
+      true);
+check("a save replaces the selected preset row with the screen values",
+      src.includes("body.presets = presets.map(p => p.id === id ? editedPreset(id) : p);"),
+      true);
+check("a save carries the pointer too",
+      src.includes("out.preset = presetSelect.value;"),
+      true);
+check("a save with no preset selected is refused with a hint",
+      src.includes("선택된 프리셓이 없습니다"),
+      true);
+check("model_key survives an edit only while the model is untouched",
+      src.includes('old.embedding_model === preset.embedding_model'),
+      true);
+check("a new preset appends through the settings PUT and activates",
+      src.includes("request(\"api/rag/settings\", { ...values(), presets: [...presets, preset], preset: id }, \"PUT\")"),
+      true);
+check("the save flow uses the replace-row body",
+      src.includes("testOnly ? values() : saveBody()"),
+      true);
+check("a save restarts the progress watch",
+      slice("afterSave").includes("backfillPolls = 0; watchBackfill();"),
+      true);
+check("the connection test posts the screen rows",
+      src.includes('request(testOnly ? "api/rag/test" : "api/rag/settings"'),
+      true);
 check("the progress line polls the status endpoint",
       [src.includes('request("api/rag/status")'), src.includes("setTimeout(watchBackfill, 3000)")],
       [true, true]);
 check("the poll gives up after a bounded number of rounds",
-      src.includes("backfillPolls < 200"), true);
-check("a save restarts the progress watch",
-      src.includes("backfillPolls = 0; watchBackfill();"), true);
-check("the picker offers the direct rows alongside the saved presets",
-      src.includes('new Option("직접 설정 (아래 연결 값 사용)", "")'), true);
-check("the selftest button posts the selftest endpoint with threshold",
-      src.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'), true);
-check("the selftest result renders in its own line",
-      [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
-      [true, true]);
+      src.includes("backfillPolls < 200"),
+      true);
 check("the pause toggle posts the backfill endpoints",
       [src.includes('"api/rag/backfill/pause"'), src.includes('"api/rag/backfill/resume"')],
       [true, true]);
 check("the pause button reflects the polled state",
       src.includes('pauseBtn.textContent = backfillPaused ? "재개" : "일시정지"'),
       true);
-check("the save-preset control appends through the settings PUT",
-      [src.includes("{ presets: [...presets, preset] }"), src.includes("savePresetBtn")],
-      [true, true]);
-check("the save-preset control locks under an active preset",
-      src.includes("savePresetId.disabled = savePresetBtn.disabled = Boolean(active)"),
+check("the selftest button posts the selftest endpoint with threshold",
+      src.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'),
       true);
+check("the selftest result renders in its own line",
+      [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
+      [true, true]);
 check("the stylesheet ships the state line rule",
       css.includes(".search-settings .rag-preset-state"), true);
 check("the stylesheet ships the selftest result line rule",

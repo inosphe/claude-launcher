@@ -424,10 +424,11 @@ globalThis.SearchAnything = (() => {
       // that path's saved values -- so a custom oMLX model id and a provider's
       // model id never overwrite each other.
       const saved = cfg.sources || { custom: {}, profile: {} };
-      // Model presets (claunch-7m5v8): while one is active it owns the
-      // connection fields, so the fieldsets below go read-only and the picker
-      // saves the pointer on its own. "직접 설정" hands ownership back to the
-      // legacy rows this card has always edited.
+      // Model presets (claunch-7m5v8) are the only connection model left
+      // (claunch-rag-preset-always-hn5bc): the picker addresses one, its
+      // values load into the fields below, and 저장 writes them back over
+      // that preset -- selecting and editing are the same gesture, and
+      // switching what is active happens on save, not on select.
       const presets = Array.isArray(cfg.presets) ? cfg.presets : [];
       const sourceBox = document.createElement("fieldset"); sourceBox.append(node("legend", "연결 방식"));
       const sources = {};
@@ -438,39 +439,34 @@ globalThis.SearchAnything = (() => {
       }
       const presetBox = document.createElement("fieldset"); presetBox.append(node("legend", "모델 프리셋"));
       const presetLabel = node("label", "프리셋"), presetSelect = document.createElement("select");
-      presetSelect.name = "preset"; presetSelect.append(new Option("직접 설정 (아래 연결 값 사용)", ""));
+      presetSelect.name = "preset";
       for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
       presetSelect.value = cfg.preset || "";
       presetLabel.append(presetSelect); presetBox.append(presetLabel);
       const presetNote = node("p", ""); presetBox.append(presetNote);
-      // Save the connection values on screen as a new preset
-      // (claunch-fhs7f). The daemon's settings PUT takes the whole saved
-      // list, so this appends to the list the card loaded. Disabled while a
-      // preset owns the fieldsets — what is on screen then are the legacy
-      // rows, not the preset's values.
+      // Save the connection values on screen as a NEW preset, and make it
+      // the active one. The daemon's settings PUT takes the whole saved
+      // list, so this appends to the list the card loaded.
       const savePresetRow = node("p", "");
       const savePresetId = document.createElement("input");
       savePresetId.placeholder = "새 프리셋 id (소문자·숫자·하이픈)";
-      const savePresetBtn = node("button", "현재 연결 값으로 프리셋 저장"); savePresetBtn.type = "button";
+      const savePresetBtn = node("button", "현재 연결 값으로 새 프리셓 저장"); savePresetBtn.type = "button";
       savePresetRow.append(savePresetId, savePresetBtn); presetBox.append(savePresetRow);
       savePresetBtn.onclick = async () => {
         const id = savePresetId.value.trim();
         if (!/^[a-z0-9-]+$/.test(id)) { status.textContent = "프리셋 id는 소문자·숫자·하이픈만 씁니다."; return; }
         if (presets.some(p => p.id === id)) { status.textContent = `프리셋 ${id}이 이미 있습니다 — 다른 id를 쓰세요.`; return; }
-        const picked = sources.profile.checked ? "profile" : "custom";
-        const preset = { id, source: picked, embedding_model: fields.embedding_model.value, rerank_model: fields.rerank_model.value };
-        if (picked === "profile") preset.profile = fields.profile.value;
-        else {
-          preset.base_url = fields.base_url.value;
-          if (fields.api_key.value) preset.api_key = fields.api_key.value;
-        }
+        const preset = editedPreset(id);
+        if (!preset) return;
         savePresetBtn.disabled = true; status.textContent = `프리셓 ${id}을 저장하는 중…`;
         try {
-          await request("api/rag/settings", { presets: [...presets, preset] }, "PUT");
+          const data = await request("api/rag/settings", { ...values(), presets: [...presets, preset], preset: id }, "PUT");
           presets.push(preset);
           presetSelect.append(new Option(ragPresetOptionLabel(preset), preset.id));
+          presetSelect.value = id;
           savePresetId.value = "";
-          status.textContent = `프리셓 ${id}을 저장했습니다 — 드롭다운에서 선택하면 활성화하고 기존 문서의 임베딩을 소급합니다.`;
+          afterSave(data);
+          status.textContent = `프리셓 ${id}을 저장하고 활성화했습니다 — 기존 문서의 임베딩을 이 모델로 소급합니다.`;
         } catch (error) {
           status.textContent = `프리셓 저장 실패 · ${error.message}`;
         } finally { savePresetBtn.disabled = false; }
@@ -508,35 +504,67 @@ globalThis.SearchAnything = (() => {
       showSource();
       function showPreset() {
         const active = presets.find(p => p.id === presetSelect.value);
-        // The preset owns the connection rows while it is in force; the
-        // legacy editor only applies to the "직접 설정" choice.
-        sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active);
-        savePresetId.disabled = savePresetBtn.disabled = Boolean(active);
+        // Nothing is read-only under the new model: the fields always edit
+        // the selected preset, and 저장 is what writes them back.
+        sourceBox.disabled = customBox.disabled = profileBox.disabled = false;
+        savePresetId.disabled = savePresetBtn.disabled = false;
         presetNote.textContent = active
-          ? `이 프리셋이 연결 설정을 소유합니다 — ${ragPresetSummary(active)}. 다른 값으로 바꾸려면 먼저 이 선택을 “직접 설정”으로 돌리세요.`
-          : "직접 설정 모드 — 아래 연결 방식의 값이 활성 설정입니다.";
+          ? `선택한 프리셓을 아래에서 고쳐 저장하면 이 프리셓이 바뀝니다 — ${ragPresetSummary(active)}. Embedding 모델을 바꾸면 기존 문서의 임베딩을 새 모델로 소급합니다. 다른 프리셓으로 옮기면 저장하지 않은 수정은 사라집니다.`
+          : "저장된 프리셓이 없습니다 — 아래에 연결 값을 입력하고 ‘현재 연결 값으로 새 프리셓 저장’으로 첫 프리셓을 만드세요.";
+      }
+      // Load a preset's values into the fields (local only). Both source
+      // rows mirror it: a preset is one connection, not two paths' worth.
+      function loadPreset(p) {
+        if (!p) return;
+        sources[p.source === "profile" ? "profile" : "custom"].checked = true;
+        const model = p.embedding_model || "";
+        saved.custom = { base_url: p.base_url || "", embedding_model: model, rerank_model: p.rerank_model || "" };
+        saved.profile = { profile: p.profile || "", embedding_model: model, rerank_model: p.rerank_model || "" };
+        fields.base_url.value = p.base_url || "";
+        fields.profile.value = p.profile || "";
+        fields.embedding_model.value = model;
+        fields.rerank_model.value = p.rerank_model || "";
+        showSource();
+      }
+      // The screen values as one preset row. ``model_key`` survives an edit
+      // only while the embedding model is untouched -- carrying it across a
+      // model change would alias the new model to the old vector store.
+      function editedPreset(id) {
+        const picked = sources.profile.checked ? "profile" : "custom";
+        const preset = { id, source: picked, embedding_model: fields.embedding_model.value.trim(), rerank_model: fields.rerank_model.value.trim() };
+        if (picked === "profile") preset.profile = fields.profile.value;
+        else {
+          preset.base_url = fields.base_url.value.trim();
+          if (fields.api_key.value) preset.api_key = fields.api_key.value;
+        }
+        const old = presets.find(p => p.id === id);
+        if (old && old.model_key && old.embedding_model === preset.embedding_model) preset.model_key = old.model_key;
+        return preset;
+      }
+      // After a save the daemon's reply is the new truth: mirror the rows
+      // and the preset list (secrets stay stripped) into the card's state.
+      function afterSave(data) {
+        backfillPolls = 0; watchBackfill();
+        fields.api_key.value = ""; fields.api_key.placeholder = data.api_key_set ? "설정됨 · 비워두면 유지" : "API key";
+        Object.assign(saved, data.sources || {});
+        if (Array.isArray(data.presets)) {
+          presets.length = 0;
+          presets.push(...data.presets);
+        }
+        if (typeof data.preset === "string") presetSelect.value = data.preset;
       }
       showPreset();
-      // Switching presets saves the pointer right away: the fieldsets are
-      // read-only under a preset, so the only thing a switch can mean is
-      // "make this one active", and the daemon starts the backfill on the
-      // same PUT (search_anything.py restarts the service and enqueues "all").
-      let savedPreset = cfg.preset || "";
-      presetSelect.onchange = async () => {
+      // Selecting a preset only loads its values. Activation -- the daemon
+      // restart and the backfill it starts -- happens on 저장, so peeking at
+      // another preset costs nothing and an unfinished edit is not lost by
+      // a stray click (search_anything.py restarts the service and enqueues
+      // "all" on the settings PUT).
+      presetSelect.onchange = () => {
+        loadPreset(presets.find(p => p.id === presetSelect.value));
         showPreset();
-        presetSelect.disabled = true; status.textContent = "프리셋을 전환하는 중…";
-        try {
-          const data = await request("api/rag/settings", {preset: presetSelect.value}, "PUT");
-          savedPreset = data.preset || "";
-          status.textContent = `저장됨 · ${data.preset ? `프리셋 ${data.preset}` : "직접 설정"}이 활성화됐고 기존 문서의 임베딩을 새 모델로 소급합니다.`;
-          watchBackfill();
-        } catch (error) {
-          presetSelect.value = savedPreset;
-          showPreset();
-          status.textContent = `프리셋 전환 실패 · ${error.message} — 이전 선택으로 되돌렸습니다.`;
-        }
-        finally { presetSelect.disabled = false; }
       };
+      if (cfg.preset) loadPreset(presets.find(p => p.id === cfg.preset));
+      else showSource();
       const advanced = document.createElement("details"); advanced.append(node("summary", "고급 설정"));
       for (const [key, title] of [["candidates", "검색 후보 수"], ["rerank_top", "Rerank 대상 수"], ["batch", "Embedding 배치 크기"], ["timeout", "요청 제한 시간 (초)"], ["watch_interval", "변경 확인 주기 (초)"]]) field(key, title, "number", advanced);
       field("verify_tls", "TLS 인증서 검증", "checkbox", advanced); form.append(advanced);
@@ -592,19 +620,27 @@ globalThis.SearchAnything = (() => {
         for (const key of ["profile", "base_url", "api_key", "embedding_model", "rerank_model"]) delete out[key];
         return out;
       }
+      // The save body: the loaded preset list with the selected preset's row
+      // replaced by what is on screen, plus the pointer. The test probe
+      // sends values() as-is; the daemon's /api/rag/test ignores the preset
+      // keys and probes the submitted rows, so both paths test the screen.
+      function saveBody() {
+        const body = values();
+        const id = presetSelect.value;
+        if (!id) return body;
+        body.presets = presets.map(p => p.id === id ? editedPreset(id) : p);
+        return body;
+      }
       async function action(testOnly) {
         save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
         try {
-          const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", values(), testOnly ? "POST" : "PUT");
-          status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : "저장됨 · 검색 색인을 갱신합니다.";
-          if (!testOnly) {
-            backfillPolls = 0; watchBackfill();
-            fields.api_key.value = ""; fields.api_key.placeholder = data.api_key_set ? "설정됨 · 비워두면 유지" : "API key";
-            // The rows that were just written are now the saved ones, so a
-            // second save in this same card starts from them rather than from
-            // what the card loaded.
-            Object.assign(saved, data.sources || {});
+          if (!testOnly && !presetSelect.value) {
+            status.textContent = "선택된 프리셓이 없습니다 — ‘현재 연결 값으로 새 프리셓 저장’으로 먼저 프리셓을 만드세요.";
+            return;
           }
+          const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", testOnly ? values() : saveBody(), testOnly ? "POST" : "PUT");
+          status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : `저장됨 · 프리셋 ${data.preset}이 활성화됐고 기존 문서의 임베딩을 이 모델로 소급합니다.`;
+          if (!testOnly) afterSave(data);
         } catch (error) { status.textContent = error.message; }
         finally { save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = false; }
       }
