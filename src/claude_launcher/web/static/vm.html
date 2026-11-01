@@ -28,9 +28,10 @@
       <span id="vm-ip" class="vm-muted"></span>
     </div>
     <div id="vm-problem" class="vm-problem" hidden></div>
+    <div id="vm-lock" class="vm-problem" hidden>호스트 화면이 잠겨 있습니다. 일시 중단된 VM은 잠금을 해제한 뒤에 재개할 수 있습니다.</div>
     <div id="vm-actions">
       <button id="vm-start" type="button">▶ 시작</button>
-      <button id="vm-suspend" type="button" title="상태를 저장하고 macOS VM 슬롯을 돌려준다">⏸ 일시 중단</button>
+      <button id="vm-suspend" type="button" title="선택 기능: 상태를 저장하고 슬롯을 돌려준다. 재개는 호스트 화면이 잠겨 있지 않을 때만 된다. 기본 수단은 종료 후 콜드 부팅이다">⏸ 일시 중단 (선택)</button>
       <button id="vm-stop" type="button" title="게스트 안에서 sync 후 종료하고 tart가 stopped를 보고할 때까지 기다린다">■ 종료</button>
       <button id="vm-force" type="button" class="vm-danger" title="tart stop: 저장하지 않은 게스트 쓰기가 사라질 수 있다">⏻ 강제 종료</button>
     </div>

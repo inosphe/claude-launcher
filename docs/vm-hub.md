@@ -51,3 +51,16 @@ done only after the user agrees. Check afterwards from the host:
   (`pkill -f '[c]ua-driver mcp'`) before it opens a new one.
 - `screencapture` refuses to write a dot-file; the frame capture uses
   `/tmp/claunch-frame-$$.jpg`.
+
+## Checkpoints: stop + cold boot, suspend only with an unlocked screen
+
+The default way to keep a VM's state is a clean stop (`sync`, shutdown from
+inside) and a cold boot. `suspend` is optional: resuming a suspended VM fails
+with `VZErrorDomain Code=12 ... permission denied` while the host console
+screen is locked, and succeeds on the same saved file after the unlock
+(d-006, runs/d-006/investigation.md). Before a resume the daemon reads
+`CGSSessionScreenIsLocked` from `ioreg -n Root -d1`. When it is set, `start`
+does not run `tart run`, answers `vm_host_locked` (HTTP 423), and the VM stays
+`suspended`; a retry after the unlock is safe. `GET /api/vm` carries
+`host_locked`, and the `/vm` panel shows it and disables the resume button
+while it holds.

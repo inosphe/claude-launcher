@@ -5,7 +5,10 @@ VM.
 What the d-002 measurements decided (vm-setup-q0g.2, runs/d-002):
 
 * ``tart run`` always carries ``--suspendable``; a VM started without it
-  cannot be suspended (suspend ~4 s, resume to ssh ~7 s).
+  cannot be suspended (suspend ~4 s, resume to ssh ~7 s). A resume fails
+  while the host console screen is locked (d-006), so :meth:`Manager.start`
+  checks that first; the default way to keep a VM's state is a clean stop
+  and a cold boot.
 * A VM is stopped from inside: ``sync; sudo shutdown -h now``, then wait for
   tart to report ``stopped`` (~34 s). ``tart stop`` returned in 0.24 s and
   lost unsynced writes in 2 of 3 runs, so it is never the first move: a
@@ -69,6 +72,15 @@ def parse_softnet(raw_softnet, raw_block) -> Tuple[bool, str]:
         except ValueError:
             return on, SOFTNET_BLOCK
     return on, ",".join(nets) or SOFTNET_BLOCK
+
+
+def host_locked(run: "Runner" = None) -> bool:
+    """Whether the host's console screen is locked. Restoring a suspended VM
+    fails while it is (VZErrorDomain Code=12, d-006); the key is present in
+    ``ioreg -n Root -d1`` only during a lock. A failed query reads as not
+    locked: the resume then runs and reports its own error."""
+    rc, out, _ = (run or run_command)(["ioreg", "-n", "Root", "-d1"], 10)
+    return rc == 0 and re.search(r'"CGSSessionScreenIsLocked"\s*=\s*Yes', out) is not None
 
 
 #: What tart exec prints when the agent or the VM is not there, as opposed to
@@ -224,6 +236,7 @@ class Manager:
         boot_wait: float = BOOT_WAIT,
         softnet: bool = True,
         softnet_block: str = SOFTNET_BLOCK,
+        locked: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.registry = registry
         self.log_dir = log_dir
@@ -239,6 +252,7 @@ class Manager:
         self.boot_wait = boot_wait
         self.softnet = softnet
         self.softnet_block = softnet_block
+        self._locked = locked or (lambda: host_locked(self._run))
         self._busy = set()
         self._busy_lock = threading.Lock()
         #: vm id -> when a suspend gave up waiting; settle() decides later.
@@ -311,6 +325,12 @@ class Manager:
         and ssh. A suspended VM is resumed the same way: ``tart run`` on a
         suspended VM restores it."""
         prior = self.registry.get(vm_id).state
+        if prior == "suspended" and self.host_locked():
+            # Nothing has been claimed or run: the saved state stays and a
+            # retry after the unlock is safe.
+            raise VmError("vm_host_locked",
+                          f"{vm_id}: the host screen is locked, and a suspended VM cannot be "
+                          "resumed until it is unlocked")
         vm = self.registry.claim_slot(vm_id)
         pid = 0
         try:
@@ -333,6 +353,9 @@ class Manager:
             self._fail(vm_id, exc, prior)
             raise
         return self.registry.get(vm_id)
+
+    def host_locked(self) -> bool:
+        return bool(self._locked())
 
     def _wait_agent(self, vm: vmhub.Vm, deadline: float, pid: int = 0,
                     log: Optional[Path] = None) -> None:

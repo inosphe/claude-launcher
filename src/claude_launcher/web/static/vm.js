@@ -97,7 +97,8 @@ function renderDetail(vm) {
   problem.hidden = !why;
   problem.textContent = why || "";
   const running = vm.state === "running";
-  $("vm-start").disabled = !(vm.state === "stopped" || vm.state === "suspended");
+  $("vm-lock").hidden = !(hostLocked && vm.state === "suspended");
+  $("vm-start").disabled = !(vm.state === "stopped" || (vm.state === "suspended" && !hostLocked));
   $("vm-start").textContent = vm.state === "suspended" ? "▶ 재개" : "▶ 시작";
   $("vm-suspend").disabled = !running;
   $("vm-stop").disabled = !(running || vm.state === "stopping" || vm.state === "starting");
@@ -155,9 +156,12 @@ function render() {
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
 }
+let hostLocked = false;
 async function refresh() {
   try {
-    vms = (await api("api/vm")).vms || [];
+    const data = await api("api/vm");
+    vms = data.vms || [];
+    hostLocked = !!data.host_locked;
     $("vm-link").classList.add("up");
   } catch (_) { $("vm-link").classList.remove("up"); return; }
   render();

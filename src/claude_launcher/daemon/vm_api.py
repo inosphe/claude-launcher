@@ -49,7 +49,7 @@ _STATUS = {
     "tart_failed": 502, "vm_stop_failed": 502, "vm_unavailable": 503,
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
-    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_bad_address": 502,
+    "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
 }
 
@@ -220,7 +220,9 @@ async def h_list(request: web.Request) -> web.Response:
         rows = [_for_session(reg.view(vm.id), session) for vm in _viewable(reg, session)]
     else:
         rows = [reg.view(vm.id) for vm in reg.list()]
-    return web.json_response({"vms": rows, "slot_limit": reg.slot_limit})
+    _, mgr = _hub(request)
+    return web.json_response({"vms": rows, "slot_limit": reg.slot_limit,
+                              "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))})
 
 
 async def h_get(request: web.Request) -> web.Response:

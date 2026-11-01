@@ -31,6 +31,8 @@ class Fake:
 
     def run(self, argv, timeout):
         argv = list(argv)
+        if argv[0] == "ioreg":  # the host-lock query: not locked
+            return 0, "", ""
         self.calls.append(argv)
         # Every tart call ends its options before the VM name; the checks
         # below look at the call without that marker.

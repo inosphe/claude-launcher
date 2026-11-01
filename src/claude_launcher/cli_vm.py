@@ -190,10 +190,10 @@ def register(sub) -> None:
     vm_arg(sp)
     sp.set_defaults(func=_cmd_rm)
 
-    for name, text in (("start", "start it, or resume a suspended one"),
+    for name, text in (("start", "start it, or resume a suspended one (refused while the host screen is locked)"),
                        ("stop", "shut the guest down and wait (never a forced stop)"),
                        ("force-stop", "tart stop: the VM goes at once and unsynced writes with it"),
-                       ("suspend", "save its state and free its slot")):
+                       ("suspend", "optional: save its state and free its slot; resuming needs an unlocked host screen (the default way to keep a VM is stop + cold boot)")):
         sp = v.add_parser(name, help=text)
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
