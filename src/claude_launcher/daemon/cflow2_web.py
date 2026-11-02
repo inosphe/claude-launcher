@@ -1020,8 +1020,29 @@ _MD_BULLET = re.compile(r"^\s*[-*+]\s+")
 _MD_ORDERED = re.compile(r"^\s{0,3}\d{1,2}[.)]\s+")
 _MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
 _MD_LINK = re.compile(r"\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+#: Three-marker emphasis (``***굵게기울임***``, ``___x___``) before the paired
+#: two-marker form: run the two-marker pattern alone first and each side keeps
+#: one asterisk (``***x***`` -> ``*x*``).
+_MD_STRONG_ITALIC = re.compile(r"\*\*\*(.+?)\*\*\*|___(.+?)___")
 _MD_STRONG = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+#: Strikethrough, then subscript. The single-tilde form excludes a second
+#: tilde on either side and refuses whitespace, so the ``~`` of a path
+#: (``~/.config``) and a lone ``~`` in prose stay as they are.
+_MD_STRIKE = re.compile(r"~~(.+?)~~")
+_MD_SUBSCRIPT = re.compile(r"(?<!~)~([^~\s]+)~(?!~)")
 _MD_CODE = re.compile(r"`+([^`]*)`+")
+#: A GFM table is recognised by its delimiter row (``|---|---|``,
+#: ``| :--- | ---: |``), which carries no text and is dropped; a row that opens
+#: with a pipe becomes its cells, separated by spaces. A table with no
+#: delimiter row still loses its outer pipes — they are table syntax either way.
+_MD_TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_MD_TABLE_ROW = re.compile(r"^\s*\|")
+
+
+def _rail_table_row(line: str) -> str:
+    """A table row as its cells, joined by single spaces."""
+    cells = (cell.strip() for cell in line.strip().strip("|").split("|"))
+    return " ".join(cell for cell in cells if cell)
 
 
 def _rail_strip_markdown(text: Any) -> str:
@@ -1030,16 +1051,19 @@ def _rail_strip_markdown(text: Any) -> str:
     The one-line readers (the terminal strip ``#term-cflow`` and the operator
     gate, which re-reads the same field) draw plain text, so the markdown a
     card renders has to become prose before it reaches them. What goes: fence
-    and rule lines, heading/quote/list prefixes at the line start, and the
-    paired inline markers (``**``, ``__``, backticks) with the link and image
+    and rule lines, heading/quote/list prefixes at the line start, table
+    delimiter rows, the pipes of a table row, and the paired inline markers
+    (``***``, ``**``, ``__``, ``~~``, ``~``, backticks) with the link and image
     syntax reduced to its text. What stays: the words, and the line breaks —
     :func:`_rail_prompt` does the flattening.
     """
     src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     lines = []
     for line in src.split("\n"):
-        if _MD_FENCE.match(line) or _MD_RULE.match(line):
+        if _MD_FENCE.match(line) or _MD_RULE.match(line) or _MD_TABLE_DELIM.match(line):
             continue
+        if _MD_TABLE_ROW.match(line):
+            line = _rail_table_row(line)
         line = _MD_HEADING.sub("", line)
         line = _MD_QUOTE.sub("", line)
         line = _MD_BULLET.sub("", line)
@@ -1048,7 +1072,12 @@ def _rail_strip_markdown(text: Any) -> str:
     out = "\n".join(lines)
     out = _MD_IMAGE.sub(lambda m: m.group(1), out)
     out = _MD_LINK.sub(lambda m: m.group(1), out)
+    out = _MD_STRONG_ITALIC.sub(
+        lambda m: m.group(1) if m.group(1) is not None else m.group(2), out
+    )
     out = _MD_STRONG.sub(lambda m: m.group(1) if m.group(1) is not None else m.group(2), out)
+    out = _MD_STRIKE.sub(lambda m: m.group(1), out)
+    out = _MD_SUBSCRIPT.sub(lambda m: m.group(1), out)
     out = _MD_CODE.sub(lambda m: m.group(1), out)
     return out
 
