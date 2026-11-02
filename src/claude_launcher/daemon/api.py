@@ -11010,6 +11010,14 @@ RAIL_FIELDS = {
     # this poll -- the walk itself never runs on the poll path, and the
     # breakdown behind the badge comes from /api/sessions/{name}/storage.
     "storage",
+    # Which provider the launch actually uses, what service that is, and
+    # whether its person dismissed the provider warning: the strip at the
+    # top of a session (``termProviderWarnView`` in app.js) decides from
+    # these three and nothing else. The rail is the dashboard's only
+    # session poll, so leaving them out is not a saving -- the strip was
+    # never drawn on a live page, and only the stub rows of its own check
+    # ever reached it (claunch-1ztit.1).
+    "provider", "provider_service", "provider_warning_ignored",
 }
 
 

@@ -224,6 +224,43 @@ def test_the_session_row_publishes_the_provider_and_its_service(home, tmp_path, 
     asyncio.run(run())
 
 
+def test_the_rail_poll_carries_the_warning_fields(home, tmp_path, monkeypatch):
+    """The dashboard's only session poll is ``/api/sessions?view=rail``, and
+    that view answers with a whitelist (``RAIL_FIELDS``).
+
+    A field the whitelist does not name never reaches the page. The strip was
+    therefore silent on every live session -- the fill from ``?view=rail``
+    dropped the three keys -- while this module stayed green, because the
+    other tests read the full list and the web check feeds stub rows
+    (claunch-1ztit.1). So this one asserts the rail answer itself.
+    """
+    _declare_other_provider()
+    profile_mod.create("other")
+    store.set_profile_field("other", "provider", "fw")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        client = await _serve(mgr, tmp_path)
+        try:
+            mgr.create(SessionDef(name="s1", harness="claude", profile="other:claude",
+                                  cwd=str(tmp_path)))
+            mgr.set_provider_warning_ignored("s1", True)
+            resp = await client.get("/api/sessions?view=rail", headers=BEARER)
+            assert resp.status == 200
+            rows = {row["name"]: row for row in (await resp.json())["sessions"]}
+            row = rows["s1"]
+            # The three the strip decides on, as the rail really sends them.
+            assert row["provider"] == "fw"
+            assert row["provider_service"] == providers.CUSTOM_SERVICE
+            assert row["provider_warning_ignored"] is True
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_a_borrowed_profile_decides_the_provider(home, tmp_path, monkeypatch):
     """``--borrow`` runs on the lender's auth, so the lender's provider is the
     one the classifier's calls belong to; the session's own profile is not."""
