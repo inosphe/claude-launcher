@@ -584,6 +584,28 @@ def _writing(fn):
     return run
 
 
+def _collection_dims(col) -> int:
+    """The vector width the collection itself was created with, or 0.
+
+    The sidecar beside a collection records a width, but it is a file a later
+    run can rewrite; the collection's schema is fixed when its vectors are
+    written. Asking the engine is what keeps a rewritten sidecar from making a
+    query of another width look compatible (claunch-rzepk.1).
+    """
+    try:
+        vectors = col.schema.vectors
+    except Exception:  # pragma: no cover - a collection we cannot describe
+        return 0
+    for vector in vectors or []:
+        try:
+            width = int(getattr(vector, "dimension", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - unexpected schema
+            continue
+        if width:
+            return width
+    return 0
+
+
 class VectorIndex:
     """One corpus's vectors, held in a zvec collection.
 
@@ -612,6 +634,16 @@ class VectorIndex:
         #: they already have instead of re-embedding the corpus.
         self.model_key = model_key
         self.dims = dims
+        #: The width the collection on disk actually holds, learned when it is
+        #: opened (:meth:`load`). ``dims`` is the configured width (0 means the
+        #: model's own); this is what the stored vectors were written with, and
+        #: the value a query or a write is checked against.
+        self.index_dims = 0
+        #: Why this collection cannot serve the configured model, when the
+        #: vectors on disk were written at another width. Empty while the index
+        #: is usable; a query or a write raises it instead of letting the
+        #: storage engine answer with its own error (claunch-rzepk.1).
+        self.stale_reason = ""
         self.entries: Dict[str, Entry] = {}
         self.keywords = search_keywords.KeywordIndex()
         self.updated_at: Optional[str] = None
@@ -709,6 +741,29 @@ class VectorIndex:
         self._col = zvec.create_and_open(path=str(self.path), schema=schema)
         return self._col
 
+    def _learn_index_dims(self, col) -> int:
+        """The width the open collection actually holds.
+
+        Read from the engine's schema, not from the sidecar: the sidecar is a
+        file a later model's ``save`` can rewrite beside vectors it did not
+        write, and the collection's width is fixed when those vectors were
+        written.
+        """
+        with self._mutex:
+            if not self.index_dims and col is not None:
+                self.index_dims = _collection_dims(col)
+            return self.index_dims
+
+    def _width_conflict(self, produced: int) -> RagError:
+        """The collection's width against the width this model produces."""
+        built = self.index_dims or self.dims
+        return RagError(
+            f"rag: index {self.path.name} holds {built}-dimension vectors but this "
+            f"model embeds at {produced} dimensions — the embedding model changed "
+            f"under the collection; rebuild the index (`claunch rag reindex`) or "
+            f"point the preset at a DB this model built"
+        )
+
     def load(self) -> None:
         with self._mutex:
             if self._loaded or self._closed:
@@ -731,15 +786,32 @@ class VectorIndex:
         # same identity the first preset names.
         file_key = str(data.get("model_key") or "") or store.rag_model_key_slug(
             str(data.get("model") or ""))
+        # Identity first, from the sidecar alone: a collection of another
+        # model is another index, and opening it here would take its exclusive
+        # lock (a switch to a new model re-embeds into it instead).
         if self.model_key:
-            if file_key != self.model_key or (self.dims and file_dims != self.dims):
+            if file_key != self.model_key:
                 return
-        elif (data.get("model") != self.model or (self.dims and file_dims != self.dims)
+        elif (data.get("model") != self.model
               or (self.signature and data.get("signature") != self.signature)):
             return
-        if not self.dims:
-            self.dims = file_dims
+        if self.dims and file_dims != self.dims:
+            return
+        # The collection's own width, asked of the engine rather than taken
+        # from the sidecar: a width is fixed when the vectors are written, and
+        # a later model's save can rewrite the sidecar beside vectors it did
+        # not make. That disagreement is what let a 768-dimension query reach
+        # a 4096-dimension collection and come back as the engine's raw
+        # "dimension mismatch" (claunch-rzepk.1). Both facts are in hand
+        # before anything is answered, so the search names the disagreement
+        # instead of returning an empty list for it.
         col = self._open(create=False)
+        built_dims = self._learn_index_dims(col)
+        if built_dims and self.dims and built_dims != self.dims:
+            self.stale_reason = str(self._width_conflict(self.dims))
+            return
+        if not self.dims:
+            self.dims = built_dims or file_dims
         if col is None:
             return
         # One pass over the collection's fields rebuilds what a search needs
@@ -783,7 +855,13 @@ class VectorIndex:
             "format": FORMAT,
             "model": self.model,
             "model_key": self.model_key,
-            "dims": self.dims,
+            # The collection's width, when it has been opened: the sidecar
+            # describes the vectors beside it, and those were written at the
+            # width the collection was created with. Writing the configured
+            # width instead let a later model claim a collection it could not
+            # query, and the engine answered the mismatch itself
+            # (claunch-rzepk.1).
+            "dims": self.index_dims or self.dims,
             "signature": self.signature,
             "updated_at": self.updated_at,
         }
@@ -851,6 +929,11 @@ class VectorIndex:
             self.entries.clear()
             self.keywords = search_keywords.KeywordIndex()
             self._loaded = True
+            # The collection is gone, so its width and the refusal it raised
+            # are gone with it: a reindex creates it again at whatever width
+            # the current model produces.
+            self.index_dims = 0
+            self.stale_reason = ""
             self.updated_at = _now_iso()
 
     @_writing
@@ -866,6 +949,14 @@ class VectorIndex:
         col = self._open(create=True)
         if col is None:
             raise RagError("rag: index unavailable")
+        # An upsert into a collection of another width fails inside zvec and
+        # leaves the sync reporting the engine's sentence. Refused here, with
+        # what to do about it (claunch-rzepk.1).
+        built = self._learn_index_dims(col)
+        if self.stale_reason:
+            raise RagError(self.stale_reason)
+        if built and len(vecs[0]) != built:
+            raise self._width_conflict(len(vecs[0]))
         zvec = _zvec()
         meta = dict(doc.meta)
         text = json.dumps(meta, ensure_ascii=False)
@@ -927,9 +1018,17 @@ class VectorIndex:
     def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = (),
              include: Optional[Iterable[str]] = None) -> List[Tuple[str, float]]:
         """The ``k`` best documents by their best chunk, best first."""
+        col = self._open(create=False)
+        built = self._learn_index_dims(col)
+        # A collection this model cannot use is named before the search runs:
+        # an empty list would read as "nothing matched" and the cause would
+        # stay hidden (claunch-rzepk.1).
+        if self.stale_reason:
+            raise RagError(self.stale_reason)
+        if built and len(qvec) != built:
+            raise self._width_conflict(len(qvec))
         if self.dims and len(qvec) != self.dims:
             raise RagError("embedding dimensions changed; rebuild the index")
-        col = self._open(create=False)
         if col is None or not self.entries:
             return []
         skip = set(exclude)

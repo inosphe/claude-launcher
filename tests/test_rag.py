@@ -1344,6 +1344,95 @@ def test_a_second_holder_of_one_index_is_named_not_a_traceback(tmp_path):
     third.close()
 
 
+def test_a_sidecar_rewritten_at_another_width_is_named_not_answered_empty(tmp_path):
+    """The sidecar describes the vectors beside it, and those were written at
+    the width the collection was created with.
+
+    A later model's ``save`` rewrote the sidecar of a collection it had not
+    written, so the sidecar claimed a width the collection did not hold and a
+    768-dimension query reached a 4096-dimension collection. zvec answered
+    with its own "dimension mismatch", and the earlier code answered the same
+    disagreement with an empty hit list -- both hidden from the person who
+    asked for a search (claunch-rzepk.1).
+    """
+    path = tmp_path / "idx.zvec"
+    built = rag.VectorIndex(path, model="m", dims=3)
+    built.put(rag.Doc("a", "h1", [], {"title": "A"}), [rag.unit([1, 0, 0])])
+    built.save()
+    built.close()
+    # another model's save, beside vectors it did not write
+    path.with_suffix(".meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "m", "model_key": "k", "dims": 5,
+    }))
+    index = rag.VectorIndex(path, model="m", dims=5, model_key="k")
+    index.load()
+    # the width the collection holds, learned on open, not the sidecar's claim
+    assert index.index_dims == 3 and index.dims == 5
+    with pytest.raises(rag.RagError) as searched:
+        index.rank(rag.unit([1, 0, 0, 0, 0]), 5)
+    assert "3-dimension" in str(searched.value) and "5" in str(searched.value)
+    assert "claunch rag reindex" in str(searched.value)
+    assert "index query failed" not in str(searched.value)
+    with pytest.raises(rag.RagError) as written:
+        index.put(rag.Doc("b", "h2", [], {}), [rag.unit([0, 1, 0, 0, 0])])
+    assert str(written.value) == str(searched.value)
+    # what save records is the collection's width, so the next reader is told
+    # the truth rather than the same wrong number back
+    index.save()
+    assert json.loads(path.with_suffix(".meta.json").read_text())["dims"] == 3
+    index.close()
+
+
+def test_a_collection_without_a_sidecar_refuses_a_query_of_another_width(tmp_path):
+    """With no sidecar the index still knows the collection's width.
+
+    Before, ``self.dims`` was the only width in hand, so a query of the
+    configured width went to the engine and came back as zvec's own sentence
+    (claunch-rzepk.1).
+    """
+    path = tmp_path / "idx.zvec"
+    built = rag.VectorIndex(path, model="m", dims=3)
+    built.put(rag.Doc("a", "h1", [], {}), [rag.unit([1, 0, 0])])
+    built.save()
+    built.close()
+    path.with_suffix(".meta.json").unlink()
+    index = rag.VectorIndex(path, model="m", dims=5)
+    index.load()
+    with pytest.raises(rag.RagError) as caught:
+        index.rank(rag.unit([1, 0, 0, 0, 0]), 5)
+    assert "holds 3-dimension vectors" in str(caught.value)
+    assert "embeds at 5 dimensions" in str(caught.value)
+    assert "index query failed" not in str(caught.value)
+    # the width is in hand now, so a put of the same width is refused too
+    with pytest.raises(rag.RagError):
+        index.put(rag.Doc("b", "h2", [], {}), [rag.unit([0, 1, 0, 0, 0])])
+    index.close()
+
+
+def test_a_forced_reindex_clears_the_refusal_it_started_from(tmp_path):
+    """``clear`` drops the collection, so it drops the refusal with it.
+
+    Otherwise a reindex -- the very thing the refusal's message tells the
+    reader to run -- would be refused by the state it replaced.
+    """
+    path = tmp_path / "idx.zvec"
+    built = rag.VectorIndex(path, model="m", dims=3)
+    built.put(rag.Doc("a", "h1", [], {}), [rag.unit([1, 0, 0])])
+    built.save()
+    built.close()
+    path.with_suffix(".meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "m", "model_key": "k", "dims": 5,
+    }))
+    index = rag.VectorIndex(path, model="m", dims=5, model_key="k")
+    index.load()
+    assert index.stale_reason
+    index.clear()
+    assert index.stale_reason == "" and index.index_dims == 0
+    index.put(rag.Doc("a", "h1", [], {}), [rag.unit([1, 0, 0, 0, 0])])
+    assert index.index_dims == 5 and index.rank(rag.unit([1, 0, 0, 0, 0]), 5)[0][0] == "a"
+    index.close()
+
+
 # --------------------------------------------------------------------------- #
 # presets: config resolution, store identity, switching, self test, rate limit
 # --------------------------------------------------------------------------- #
