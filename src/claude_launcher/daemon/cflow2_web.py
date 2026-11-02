@@ -1003,8 +1003,60 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
 RAIL_PROMPT_MAX = 400
 
 
+#: What a one-line reader takes off a markdown prompt before flattening it:
+#: a v2 ask prompt is markdown (``## 일감``, ``- 하나``, ``**굵게**``,
+#: `` `경로` ``), and the terminal strip and the operator status line draw
+#: that field as plain text, so the markers used to be shown to the reader as
+#: characters (claunch-ns4kd.1). Only markers a line can be recognised by are
+#: matched, and only at the line start -- ``a_b`` and ``2*3`` are text.
+_MD_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_MD_RULE = re.compile(r"^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_QUOTE = re.compile(r"^\s{0,3}>\s?")
+_MD_BULLET = re.compile(r"^\s*[-*+]\s+")
+#: Up to two digits: a markdown ordered list runs 1., 2., … and a line that
+#: opens with four digits and a dot is a date (``2026. 11. 2. 회의``), which
+#: is text the reader wants to keep.
+_MD_ORDERED = re.compile(r"^\s{0,3}\d{1,2}[.)]\s+")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+_MD_STRONG = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+_MD_CODE = re.compile(r"`+([^`]*)`+")
+
+
+def _rail_strip_markdown(text: Any) -> str:
+    """``text`` with its markdown markers taken off, line structure kept.
+
+    The one-line readers (the terminal strip ``#term-cflow`` and the operator
+    gate, which re-reads the same field) draw plain text, so the markdown a
+    card renders has to become prose before it reaches them. What goes: fence
+    and rule lines, heading/quote/list prefixes at the line start, and the
+    paired inline markers (``**``, ``__``, backticks) with the link and image
+    syntax reduced to its text. What stays: the words, and the line breaks —
+    :func:`_rail_prompt` does the flattening.
+    """
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in src.split("\n"):
+        if _MD_FENCE.match(line) or _MD_RULE.match(line):
+            continue
+        line = _MD_HEADING.sub("", line)
+        line = _MD_QUOTE.sub("", line)
+        line = _MD_BULLET.sub("", line)
+        line = _MD_ORDERED.sub("", line)
+        lines.append(line)
+    out = "\n".join(lines)
+    out = _MD_IMAGE.sub(lambda m: m.group(1), out)
+    out = _MD_LINK.sub(lambda m: m.group(1), out)
+    out = _MD_STRONG.sub(lambda m: m.group(1) if m.group(1) is not None else m.group(2), out)
+    out = _MD_CODE.sub(lambda m: m.group(1), out)
+    return out
+
+
 def _rail_prompt(text: Any) -> str:
-    flat = " ".join(str(text or "").split())
+    """``text`` as one line a reader can take in: markdown markers off,
+    whitespace collapsed, cut at :data:`RAIL_PROMPT_MAX`."""
+    flat = " ".join(_rail_strip_markdown(text).split())
     return flat if len(flat) <= RAIL_PROMPT_MAX else flat[:RAIL_PROMPT_MAX - 1] + "…"
 
 

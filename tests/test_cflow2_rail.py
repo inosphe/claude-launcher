@@ -526,6 +526,40 @@ def test_rail_prompt_is_one_bounded_line():
     assert len(long) == cflow2_web.RAIL_PROMPT_MAX and long.endswith("…")
 
 
+def test_rail_prompt_takes_markdown_markers_off():
+    """The terminal strip and the operator gate draw `prompt` as plain text,
+    so the markdown a card renders has to reach them as prose
+    (claunch-ns4kd.1). Every marker below is one the v2 ask prompts use."""
+    text = "\n".join([
+        "## 일감",
+        "",
+        "- `app.js:63882` 를 고친다",
+        "- **굵게** 와 *기울임*",
+        "1. 순서 있는 목록",
+        "> 인용",
+        "```",
+        "const x = 1;",
+        "```",
+        "---",
+        "[문서](https://example.test/x) 와 ![그림](https://example.test/i.png)",
+    ])
+    flat = cflow2_web._rail_prompt(text)
+    for marker in ("##", "**", "```", "> ", "[", "](", "!["):
+        assert marker not in flat, (marker, flat)
+    assert flat.startswith("일감 app.js:63882")
+    assert "const x = 1;" in flat
+    assert "문서 와 그림" in flat
+    assert "\n" not in flat
+
+
+def test_rail_prompt_leaves_text_that_only_looks_like_markdown():
+    """A file name, a date and arithmetic are not markers: only what a line
+    can be recognised by is matched, and only at its start."""
+    text = "a_b_c 2*3 2026-11-02 x #12"
+    assert cflow2_web._rail_prompt(text) == text
+    assert cflow2_web._rail_prompt("2026. 11. 2. 회의") == "2026. 11. 2. 회의"
+
+
 def test_rail_markdown_keeps_the_line_structure_and_is_bounded():
     """``prompt_md`` (claunch-ns4kd) is the same question with its lines
     kept: the dashboard's ask card renders it as markdown, so joining its
@@ -542,7 +576,8 @@ def test_rail_markdown_keeps_the_line_structure_and_is_bounded():
 def test_rail_ask_carries_the_prompt_as_the_ask_wrote_it(proj):
     """The ask answer carries the markdown beside the one-line prompt: the
     card draws ``prompt_md`` (unchanged lines), the terminal strip keeps
-    reading ``prompt`` (one line, bounded) — claunch-ns4kd."""
+    reading ``prompt`` (one line, bounded, markers off) — claunch-ns4kd,
+    claunch-ns4kd.1."""
     executors.register(None)
     cwd = str(proj)
     try:
@@ -551,7 +586,10 @@ def test_rail_ask_carries_the_prompt_as_the_ask_wrote_it(proj):
         assert a["kind"] == "ask"
         assert a["prompt_md"] == ("## 일감\n\n- `app.js:63882` 를 고친다\n"
                                   "- 목록은 목록으로 보인다")
-        assert "\n" not in a["prompt"] and a["prompt"].startswith("## 일감")
+        assert "\n" not in a["prompt"]
+        for marker in ("##", "`"):
+            assert marker not in a["prompt"], a["prompt"]
+        assert a["prompt"] == "일감 app.js:63882 를 고친다 목록은 목록으로 보인다"
         assert len(a["prompt"]) <= cflow2_web.RAIL_PROMPT_MAX
     finally:
         executors.register(None)
