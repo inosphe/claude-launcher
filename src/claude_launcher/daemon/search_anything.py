@@ -452,6 +452,49 @@ def _store_rows(service, base):
     return rows
 
 
+def _preset_db(preset):
+    """The store identity a saved preset reads: ``db``, else its model key.
+
+    The same rule ``store.rag_config`` applies to the preset in force, so
+    the DB panel's rename and delete see a preset that never named a ``db``
+    reading the collection its model built (claunch-r4796).
+    """
+    named = store.rag_model_key_slug(str(preset.get("db") or ""))
+    if named:
+        return named
+    return store.rag_model_key_slug(
+        str(preset.get("model_key") or "") or str(preset.get("embedding_model") or ""))
+
+
+def _db_files(base, identity):
+    """Every collection directory and sidecar of one named DB.
+
+    A DB is a store identity shared by one collection per corpus
+    (``<corpus>.<identity>.zvec`` with its ``.meta.json``). A sidecar can
+    exist without its directory -- the corpus was configured but never
+    embedded -- and it still names the DB, so it moves and goes with it.
+    """
+    out = []
+    if not identity:
+        return out
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return out
+    for path in entries:
+        name = path.name
+        if name.endswith(".zvec") and path.is_dir():
+            stem = name[: -len(".zvec")]
+        elif name.endswith(".meta.json") and path.is_file():
+            stem = name[: -len(".meta.json")]
+        else:
+            continue
+        _corpus, _, ident = stem.partition(".")
+        if ident == identity:
+            out.append(path)
+    return out
+
+
 def _db_width_conflict(doc, base):
     """Why the active preset's named DB cannot hold this model's vectors.
 
@@ -703,6 +746,9 @@ def install(app):
             body = {}
         if not isinstance(body, dict):
             return web.json_response({"error": "body must be an object"}, status=400)
+        db = str(body.get("db") or "").strip()
+        if db:
+            return await _delete_db(db)
         name = str(body.get("name") or "").strip()
         row = next((r for r in _store_rows(service, _rag_base(service)) if r["name"] == name), None)
         if row is None:
@@ -732,10 +778,134 @@ def install(app):
             return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
         return web.json_response({"deleted": name, "dbs": _store_rows(service, _rag_base(service))})
 
+    def _db_readers(base, identity):
+        """The presets (and the running config) reading one named DB."""
+        try:
+            doc = store.load()
+        except (OSError, ValueError, store.StoreError):
+            doc = {}
+        names = [p["id"] for p in store.rag_presets(doc) if _preset_db(p) == identity]
+        in_use = False
+        for row in _store_rows(service, base):
+            if row["identity"] != identity:
+                continue
+            names.extend(pid for pid in row["presets"] if pid not in names)
+            in_use = in_use or row["in_use"]
+        return names, in_use
+
+    async def _delete_db(identity):
+        """Remove every collection of one named DB, sidecars included.
+
+        The panel lists a DB once however many corpora it holds, so its
+        delete takes the whole DB. The reader rule is the per-collection
+        one: a DB a preset reads stays until that preset points elsewhere
+        (claunch-r4796).
+        """
+        base = _rag_base(service)
+        files = _db_files(base, identity)
+        if not files:
+            return web.json_response({"error": f"DB {identity}을 찾지 못했습니다."}, status=400)
+        readers, in_use = _db_readers(base, identity)
+        if readers or in_use:
+            who = ", ".join(readers) if readers else "현재 활성 설정"
+            return web.json_response(
+                {"error": f"DB {identity}을 쓰는 프리셋이 있습니다: {who} — "
+                          f"그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요."}, status=400)
+        for key, index in list(service._indexes.items()):
+            if getattr(index, "path", None) in files:
+                service._indexes.pop(key, None)
+                index.close()
+        try:
+            for path in files:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                elif path.exists():
+                    path.unlink()
+        except OSError as exc:
+            return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
+        return web.json_response({"deleted": identity, "dbs": _store_rows(service, base)})
+
+    async def dbs_rename(request):
+        """Rename one named DB: its collections, sidecars and every reader.
+
+        A DB's name is the middle part of ``<corpus>.<identity>.zvec``, so a
+        rename moves each corpus's directory and sidecar to the new name and
+        rewrites ``db`` on every preset that read the old one -- a preset
+        that never named a ``db`` and read the store through its model key
+        gets the new name written down, or it would go on looking for the
+        old directory and embed the corpus again. The vectors do not change.
+        The service is stopped first (an open collection holds a lock on
+        its directory) and started again whatever happens; a move that
+        fails part-way is undone (claunch-r4796).
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be an object"}, status=400)
+        old = str(body.get("from") or "").strip()
+        new = store.rag_model_key_slug(str(body.get("to") or ""))
+        base = _rag_base(service)
+        if not old:
+            return web.json_response({"error": "이름을 바꿀 DB를 지정하세요."}, status=400)
+        if not new:
+            return web.json_response(
+                {"error": "새 DB 이름에 쓸 수 있는 글자가 없습니다 — 영문 소문자·숫자·하이픈을 쓰세요."},
+                status=400)
+        if new == old:
+            return web.json_response({"error": f"DB 이름이 이미 {old}입니다."}, status=400)
+        files = _db_files(base, old)
+        if not files:
+            return web.json_response({"error": f"DB {old}을 찾지 못했습니다."}, status=400)
+        if _db_files(base, new):
+            return web.json_response(
+                {"error": f"DB {new}이 이미 있습니다 — 다른 이름을 쓰세요."}, status=400)
+        try:
+            doc = store.load()
+        except (OSError, ValueError, store.StoreError) as exc:
+            return web.json_response({"error": f"설정 파일을 읽지 못했습니다: {exc}"}, status=400)
+        block = doc.get("rag") if isinstance(doc, dict) else None
+        moved_presets = []
+        if isinstance(block, dict) and isinstance(block.get("presets"), list):
+            for raw in block["presets"]:
+                clean = store.clean_rag_preset(raw)
+                if clean is not None and _preset_db(clean) == old:
+                    raw["db"] = new
+                    moved_presets.append(clean["id"])
+        await service.shutdown()
+        moved = []
+        try:
+            for path in files:
+                suffix = ".zvec" if path.name.endswith(".zvec") else ".meta.json"
+                corpus = path.name[: -len(suffix)].partition(".")[0]
+                target = base / f"{corpus}.{new}{suffix}"
+                os.replace(path, target)
+                moved.append((path, target))
+            if moved_presets:
+                store.save(doc)
+        except (OSError, store.StoreError) as exc:
+            for source, target in reversed(moved):
+                try:
+                    os.replace(target, source)
+                except OSError:
+                    pass
+            service.start()
+            return web.json_response({"error": f"이름을 바꾸지 못했습니다: {exc}"}, status=400)
+        service._indexes.clear()
+        service._progress.clear()
+        service.start()
+        await service.catch_up()
+        return web.json_response({
+            "renamed": old, "db": new, "presets": moved_presets,
+            "dbs": _store_rows(service, base),
+        })
+
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)
     app.router.add_get("/api/rag/dbs", dbs)
     app.router.add_post("/api/rag/dbs/delete", dbs_delete)
+    app.router.add_post("/api/rag/dbs/rename", dbs_rename)
     app.router.add_post("/api/rag/backfill/pause", backfill_pause)
     app.router.add_post("/api/rag/backfill/resume", backfill_resume)
     app.router.add_post("/api/rag/test", test)
