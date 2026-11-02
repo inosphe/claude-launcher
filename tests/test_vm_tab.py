@@ -101,3 +101,14 @@ def test_the_panel_has_the_files_section_and_its_scope():
     assert "/files_dir" in js and "api/vm/${encodeURIComponent(vm.id)}/files`" in js
     assert 'scope === "exec" &&' in js          # only exec asks first; files has no special dialog
     assert "innerHTML" not in js
+
+
+def test_the_panel_keeps_unregistering_and_deleting_apart():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    for ident in ("vm-unregister", "vm-danger", "vm-destroy", "vm-destroy-confirm", "vm-destroy-blockers"):
+        assert f'id="{ident}"' in html
+    assert "tart VM은 남음" in html and "되돌릴 수 없" in html
+    assert 'method: "DELETE"' in js and "/destroy" in js
+    assert "confirm: id" in js                    # the delete sends the typed id, as the preset delete does
+    assert "innerHTML" not in js

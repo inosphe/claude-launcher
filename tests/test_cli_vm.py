@@ -221,6 +221,27 @@ def test_template_start_confirmation_grant_warning_and_list_marker(client, capsy
     assert out.count("PRESET TEMPLATE") == 1 and "preset 'gold'" in out
 
 
+def test_rm_says_the_tart_vm_stays_and_destroy_needs_the_id_typed_again(client, capsys):
+    client.answer = {"ok": True, "unregistered": "a", "tart_kept": "a"}
+    assert run("rm", "a") == 0
+    out = capsys.readouterr().out
+    assert client.calls[-1][:2] == ("DELETE", "/api/vm/a") and "stay on this host" in out and "vm destroy a --confirm a" in out
+    client.answer = {"id": "a", "tart_name": "a", "state": "stopped", "size_gb": 93,
+                     "blockers": [{"code": "vm_locked", "reason": "locked"}], "warnings": ["presets: gold"]}
+    for extra in ([], ["--confirm", "b"]):
+        assert run("destroy", "a", *extra) == 0
+        out = capsys.readouterr().out
+        assert client.calls[-1][:2] == ("GET", "/api/vm/a/destroy")        # nothing is deleted
+        assert "93 GB" in out and "REFUSED  vm_locked" in out and "WARNING  presets: gold" in out
+        assert "nothing deleted" in out and "--confirm a" in out
+    client.answer = {"ok": True, "destroyed": "a", "tart_name": "a", "size_gb": 93}
+    assert run("destroy", "a", "--confirm", "a") == 0
+    assert client.calls[-1] == ("POST", "/api/vm/a/destroy", {"confirm": "a"})
+    assert "destroyed a" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        run("destroy")                              # the id is required
+
+
 def test_share_ls_shows_where_each_share_came_from(client, capsys):
     client.answer = {"shares_pending": True, "shares_skipped": {},
                      "share_rows": [{"name": "a1", "mode": "ro", "host_path": "/p", "guest_path": "/G/a1",

@@ -354,7 +354,34 @@ def _preset_new(args) -> int:
 
 
 def _cmd_rm(args) -> int:
-    return _call(args, "DELETE", f"/api/vm/{args.vm}")
+    return _call(args, "DELETE", f"/api/vm/{args.vm}",
+                 show=lambda out: print(f"unregistered {out.get('unregistered', args.vm)}: the tart VM "
+                                        f"{out.get('tart_kept', args.vm)!r} and its disk stay on this host "
+                                        f"('claunch vm destroy {args.vm} --confirm {args.vm}' deletes them for good)"))
+
+
+def _destroy_show(out: dict) -> None:
+    size = f"{out['size_gb']} GB" if out.get("size_gb") else "size unknown"
+    print(f"VM {out['id']} (tart {out['tart_name']!r}, {out['state']}, {size})")
+    for blocker in out.get("blockers") or []:
+        print(f"  REFUSED  {blocker['code']}: {blocker['reason']}")
+    for warning in out.get("warnings") or []:
+        print(f"  WARNING  {warning}")
+
+
+def _cmd_destroy(args) -> int:
+    """``claunch vm destroy ID [--confirm ID]``: show what deleting the tart VM would do
+    and, with ``--confirm`` equal to the id, delete it (disk image included, no undo)."""
+    path = f"/api/vm/{args.vm}/destroy"
+    if args.confirm != args.vm:
+        rc = _call(args, "GET", path, show=_destroy_show)
+        if rc == 0:
+            print(f"nothing deleted. To delete the tart VM and its disk for good: "
+                  f"claunch vm destroy {args.vm} --confirm {args.vm}")
+        return rc
+    return _call(args, "POST", path, {"confirm": args.confirm},
+                 show=lambda out: print(f"destroyed {out['destroyed']}: tart VM {out['tart_name']!r} deleted"
+                                        + (f" ({out['size_gb']} GB)" if out.get("size_gb") else "")))
 
 
 def _cmd_reconcile(args) -> int:
@@ -424,9 +451,18 @@ def register(sub) -> None:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=_cmd_add)
 
-    sp = v.add_parser("rm", help="forget a stopped VM (tart keeps it)")
+    sp = v.add_parser("rm", help="UNREGISTER a stopped VM: the daemon forgets it (grants, shares, requests); "
+                                 "the tart VM and its disk stay on the host. To delete them use 'destroy'")
     vm_arg(sp)
     sp.set_defaults(func=_cmd_rm)
+
+    sp = v.add_parser("destroy", help="DELETE a VM for good (tart delete: the disk image is gone, no undo). Without "
+                                      "--confirm it only shows what would happen; --confirm must repeat the VM id. "
+                                      "Only a stopped, unlocked VM no session holds a grant on")
+    vm_arg(sp)
+    sp.add_argument("--confirm", default="", metavar="ID", help="the VM id, typed again")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_destroy)
 
     for name, text in (("start", "start it, or resume a suspended one (refused while the host screen is locked)"),
                        ("stop", "shut the guest down and wait (never a forced stop)"),
@@ -534,7 +570,7 @@ def register(sub) -> None:
     sp.add_argument("name")
     sp.add_argument("description")
     sp.set_defaults(func=_preset_describe)
-    sp = ps.add_parser("rm", help="delete a preset and its tart copy (nothing else)")
+    sp = ps.add_parser("rm", help="PRESET delete: remove a preset and its tart copy preset-<name> (nothing else; deleting a VM is 'vm destroy')")
     sp.add_argument("name")
     sp.add_argument("--yes", action="store_true", help="confirm deleting the named preset")
     sp.set_defaults(func=_preset_rm)
