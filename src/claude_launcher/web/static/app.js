@@ -40576,7 +40576,8 @@ function webdebugSettingCard() {
    PUT shows the server's reason and re-GETs to restore stored state. */
 let modelTiers = {
   block: { version: 1, tiers: [], active: {} },
-  profiles: [], harnesses: {}, models: {}, presets: [], max_tiers: 5,
+  profiles: [], harnesses: {}, models: {}, models_by_harness: {},
+  presets: [], max_tiers: 5,
   loaded: false, error: "", busy: false,
 };
 let modelTiersTierDraft = "";
@@ -40590,6 +40591,7 @@ function takeModelTiers(data) {
     profiles: data.profiles || [],
     harnesses: data.harnesses || {},
     models: data.models || {},
+    models_by_harness: data.models_by_harness || {},
     presets: data.presets || [],
     max_tiers: data.max_tiers || 5,
     loaded: true, error: "",
@@ -40648,8 +40650,17 @@ function modelTierEntrySelect(current, choices, emptyLabel, onChange) {
   return select;
 }
 
-function modelTiersEntryModelChoices(profile) {
-  return [...new Set([...modelTiers.presets, ...(modelTiers.models[profile] || [])])];
+function modelTiersEntryModelChoices(profile, harness) {
+  // validate() reads the ENTRY's harness (the profile's effective harness only
+  // when the entry names none), so the list is per (profile, harness): a
+  // codex-default profile still offers claude's presets to a claude entry, and
+  // never offers codex-only names to it (claunch-61vj3 review). Presets are
+  // the fallback only when the server could not list the profile.
+  const perProfile = (modelTiers.models_by_harness || {})[profile] || {};
+  const listed = perProfile[harness || ""];
+  if (listed) return listed;
+  const fallback = modelTiers.models[profile] || [];
+  return fallback.length ? fallback : modelTiers.presets;
 }
 
 function modelTiersEntryHarnessChoices(profile) {
@@ -40741,7 +40752,8 @@ function modelTierSection(tier) {
     ));
     const model = el("label", "delegate-field", " Model ");
     model.appendChild(modelTierEntrySelect(
-      entry.model || "", modelTiersEntryModelChoices(entry.profile), "(default)",
+      entry.model || "",
+      modelTiersEntryModelChoices(entry.profile, entry.harness || ""), "(default)",
       (v) => modelTiersSetEntry(tier, index, "model", v)
     ));
     const remove = el("button", "wf-btn danger", "Delete");

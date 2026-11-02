@@ -21,10 +21,12 @@ What each list holds -- what the value will be accepted as further on:
     aliases resolved through the profile's environment, and ``subagent``
     falls back to ``small`` -- no preset is ever refused. Plus the harness's
     model choices (``haiku``, ``sonnet``...).
-  * codex (:func:`codex_models`): only the presets the profile's provider
-    declares a model for (role fallbacks applied). Codex never reads the
-    provider's models itself (``translators.codex``), so spawn refuses an
-    undeclared preset instead of launching ``-c model=small``. Plus the
+  * codex (:func:`codex_models`): ``default``, then only the presets the
+    profile's provider declares a model for (role fallbacks applied). Codex
+    never reads the provider's models itself (``translators.codex``), so
+    spawn refuses an undeclared preset instead of launching
+    ``-c model=small``; ``default`` needs no id, because it launches with no
+    model argument (the harness's own default, claunch-61vj3). Plus the
     harness's model choices (``luna``, ``sol``... and ``model_choices:``
     overrides).
   * any other harness (:func:`declared_models`): spawn's non-claude path,
@@ -72,8 +74,17 @@ def codex_models(spec: providers.ProviderSpec, entry: Optional[harnesses.Harness
 
 
 def declared_models(spec: providers.ProviderSpec, entry: Optional[harnesses.Harness]) -> List[str]:
-    """Spawn's non-claude rule: a preset counts only with a declared model."""
-    return _join([role for role in provider_spec.MODEL_ROLES if spec.model(role)], entry)
+    """Spawn's non-claude rule: a preset counts only with a declared model.
+
+    ``default`` is the exception and is always listed: it is not a slot the
+    harness has an id for, it is the harness's own default, which spawn
+    launches with no model argument at all (claunch-61vj3). A provider that
+    declares ``models.default`` still resolves that id first.
+    """
+    return _join(
+        ["default"] + [role for role in provider_spec.MODEL_ROLES if spec.model(role)],
+        entry,
+    )
 
 
 def _join(presets, entry: Optional[harnesses.Harness]) -> List[str]:
@@ -134,16 +145,29 @@ class Catalog:
             return None
 
     def models(self, profile: Optional[str]) -> Optional[List[str]]:
+        return self.models_for(profile)
+
+    def models_for(self, profile: Optional[str],
+                   harness: Optional[str] = None) -> Optional[List[str]]:
+        """The models ``harness`` may be asked for under ``profile``.
+
+        ``harness`` empty means the profile's effective harness (what
+        :meth:`models` answers). The model_tiers editor asks per (profile,
+        entry harness): ``validate`` reads the entry's own harness, so one
+        list per profile would hide valid presets for an entry that names
+        another allowed harness and offer invalid ones from the default
+        (claunch-61vj3 review).
+        """
         p = self._by_name().get(str(profile or ""))
         if p is None:
             return None
         try:
-            harness = lineage.effective_harness(p, self._doc)
+            name = str(harness or "").strip() or lineage.effective_harness(p, self._doc)
             spec = providers.spec_for(p, doc=self._doc)
         except _READ_ERRORS:
             return None
-        rule = _MODEL_RULES.get(harness, declared_models)
-        return rule(spec, self._harnesses().get(harness))
+        rule = _MODEL_RULES.get(name, declared_models)
+        return rule(spec, self._harnesses().get(name))
 
     def empty_profile(self, meaning: str) -> Optional[str]:
         if meaning == "delegate":

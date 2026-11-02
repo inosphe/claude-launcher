@@ -122,7 +122,7 @@ model_tiers:
 | --- | --- | --- |
 | `profile` | 존재하는 프로파일이어야 함 | `profile_mod.require` — 거절 메시지에 entry 위치와 사유 |
 | `harness` | 프로파일이 허용하는 하네스여야 함 | `harness_policy.allowed_names` |
-| `model` | 그 하네스가 프로파일에 대해 받는 모델 집합 | spawn 게이트와 같은 규칙(`input_options._MODEL_RULES`): claude는 모든 프리셋 + 하네스 선택지, 그 밖은 선언 모델 + 선택지 |
+| `model` | 그 하네스가 프로파일에 대해 받는 모델 집합 | spawn 게이트와 같은 규칙(`input_options._MODEL_RULES`): claude는 모든 프리셋 + 하네스 선택지, 그 밖은 `default` + 선언 모델 + 선택지(`default`는 id가 없어도 실행 가능 — 5.3) |
 | entry 전체 | 동일 티어 안 (profile, harness, model) 조합의 중복 금지 | 하네스·모델은 폰백 적용 후 값으로 비교 |
 | `id` | 소문자 영숫자와 하이픈, 고유 | `TIER_ID_RE` |
 | 티어 수 | 1~5개 | `MAX_TIERS` |
@@ -132,6 +132,8 @@ model_tiers:
 ### 5.3 기본값 규칙
 
 - `model` 생략 → `default` 역할 → 그 프로파일의 default 모델.
+  - 프로파일(provider)이 `default` 역할의 id를 선언했으면 그 id로 실행한다.
+  - 선언하지 않았으면(예: `codex` 하네스) 하네스 자체의 기본 모델로 실행한다 — 모델 인자를 싣지 않는다. 그래서 설정 페이지에서 model을 비운 tier 항목은 모든 프로파일에서 저장되고 해석된다(claunch-61vj3).
 - `harness` 생략 → 프로파일의 기본 하네스(`lineage.effective_harness`).
 
 ### 5.4 저장과 편집

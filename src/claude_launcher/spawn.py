@@ -590,7 +590,9 @@ def _resolve_model_preset(child: dict) -> None:
     * every other harness (codex): the id the profile declares for the role.
       Codex never reads ``spec.models`` (translators.codex), so an undeclared
       slot has no answer, and passing the word through would launch
-      ``-c model=small``. That is refused, naming the profile.
+      ``-c model=small``. That is refused, naming the profile — except
+      ``default``, which is the harness's own default and is reached by
+      passing no model at all (claunch-61vj3).
 
     A child that borrows reads the slot from the **lender**: the launch runs
     on that profile's backend, so its ``models:`` table is the one that names
@@ -636,6 +638,11 @@ def _resolve_model_preset(child: dict) -> None:
     if claude:
         # subagent with no declared id: the env's own fallback is small
         child["model"] = _CLAUDE_ROLE_ALIASES.get(provider_spec.ROLE_FALLBACKS.get(role, ""))
+        return
+    if role == "default":
+        # No id to ask the harness for: its own default is what a launch
+        # with no model argument runs (claunch-61vj3).
+        child["model"] = None
         return
     where = f"profile {selector!r}" if selector else "this session's provider"
     raise SpawnDenied(
