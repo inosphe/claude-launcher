@@ -318,11 +318,21 @@ const CACHED_LIVE = { ...CACHED, live: { window_s: 2, bin_s: 0.5,
    with nothing under it. */
 const LIVE_ONLY = { live: { window_s: 2, bin_s: 0.5, inflight: 1,
                             state: "waiting", rate: 0, since_s: 0.5 } };
+/* A live board with no call out, on a session whose harness is still in a
+   turn: the state that used to read "idle" although the session was busy
+   with a local tool (claunch-i6xl2.1). */
+const LIVE_IDLE = { ...CACHED, live: { window_s: 2, bin_s: 0.5, inflight: 0,
+                                      state: "idle", rate: 0 } };
 ctx.setSessions([PI, CLAUDE, BROKEN, QUIET, GONE, WHOLEBODY, OAUTH,
                  { name: "cached", harness: "claude", tps: CACHED },
                  { name: "livec", harness: "claude", tps: CACHED_LIVE },
                  { name: "liveonly", harness: "claude", tps: LIVE_ONLY },
-                 { name: "rate", harness: "claude", tps: RATE }]);
+                 { name: "rate", harness: "claude", tps: RATE },
+                 { name: "busyidle", harness: "claude", status: "busy", tps: LIVE_IDLE },
+                 { name: "busywait", harness: "claude", status: "busy", tps: LIVE_ONLY },
+                 { name: "busyflat", harness: "claude", status: "busy", tps: CACHED },
+                 { name: "busygone", harness: "claude", status: "busy", tps: IDLE },
+                 { name: "idleflat", harness: "claude", status: "idle", tps: CACHED }]);
 check("the chip is the glance with the story on hover",
       [ctx.chip("pi").textContent, ctx.chip("pi").className, ctx.chip("pi").title === tip],
       ["38.1 tok/s · ttft 715ms", "sess-brief-tps", true]);
@@ -424,6 +434,55 @@ check("a live call with no finished call behind it keeps the live area alone",
       [["term-tps-live",
         [["term-tps-big", "waiting 0.5s"],
          ["term-tps-chart", ""]]]]);
+
+/* ---- endpoint wait vs. local work vs. idle (claunch-i6xl2.1) ----
+   The shim's live board sees only its own calls. "idle" there means no call
+   is out, which a harness running a local tool also is; the session's own
+   status separates that from a session waiting for a prompt. */
+ctx.setCurrent("busywait");
+ctx.render();
+check("a call out with nothing back yet is the endpoint's wait, even while busy",
+      overlayAreas(),
+      [["term-tps-live",
+        [["term-tps-big", "waiting 0.5s"],
+         ["term-tps-chart", ""]]]]);
+
+ctx.setCurrent("busyidle");
+ctx.render();
+check("no call out and a busy harness reads working, not idle",
+      overlayAreas(),
+      [["term-tps-live",
+        [["term-tps-big", "working"],
+         ["term-tps-chart", ""]]],
+       ["term-tps-last",
+        [["term-tps-small term-tps-when", "deepseek flash · last 38.1 tok/s · 45s ago"],
+         ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]);
+
+ctx.setCurrent("busyflat");
+ctx.render();
+check("a busy session with no live board keeps its last rate beside working",
+      overlayAreas(),
+      [["term-tps-last",
+        [["term-tps-big", "working"],
+         ["term-tps-small term-tps-when", "deepseek flash · last 38.1 tok/s · 45s ago"],
+         ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]);
+
+ctx.setCurrent("busygone");
+ctx.render();
+check("...and a busy session whose last call fell out of the window has no rate to keep",
+      overlayAreas(),
+      [["term-tps-last",
+        [["term-tps-big", "working"],
+         ["term-tps-small term-tps-when", "deepseek flash · 1h00m ago"]]]]);
+
+ctx.setCurrent("idleflat");
+ctx.render();
+check("a genuinely idle session still reads idle",
+      overlayAreas(),
+      [["term-tps-last",
+        [["term-tps-big", "38.1 tok/s"],
+         ["term-tps-small term-tps-when", "deepseek flash · 45s ago"],
+         ["term-tps-small term-tps-metrics", "ttft 715ms · cache 97%"]]]]);
 
 ctx.setCurrent("whole");
 ctx.render();

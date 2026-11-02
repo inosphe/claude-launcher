@@ -10503,6 +10503,17 @@ function renderTermTps() {
     const err = t && typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
     const rateShown = !!(t && !t.idle && t.counted && Number.isFinite(t.tps));
     const errCls = t && typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+    /* What the big line means when no rate is being drawn (claunch-i6xl2.1).
+       The shim's live board knows only its own calls: "idle" there means no
+       call is out, not that the harness has nothing to do. A turn running a
+       local tool (bash, a build, a test run) has no call in flight for
+       minutes, and read as "idle" -- the same word a session waiting for a
+       prompt gets. `status` is the harness turn signal, so the two are read
+       together: a call out is the endpoint's wait, no call but busy is local
+       work, neither is idle. */
+    const liveCall = !!(t && t.live &&
+      (t.live.state === "waiting" || t.live.state === "streaming"));
+    const working = !liveCall && !!(s && s.status === "busy");
     let parts = null;
     if (show && !t) {
       parts = { live: false, usageOnly: true, cls: "term-tps-overlay" };
@@ -10514,7 +10525,7 @@ function renderTermTps() {
       parts = {
         live: true,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: tpsLiveText(l),
+        big: working ? "working" : tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
         when: [model ? modelShort(model) : "",
           rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
@@ -10525,8 +10536,10 @@ function renderTermTps() {
       parts = {
         live: false,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
-        when: [t.model ? modelShort(t.model) : "", rateShown ? err : "", age]
+        big: working ? "working" : (rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
+        when: [t.model ? modelShort(t.model) : "",
+          working && rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          rateShown ? err : "", age]
           .filter(Boolean).join(" · "),
         metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
         title: tpsTooltip(t),
