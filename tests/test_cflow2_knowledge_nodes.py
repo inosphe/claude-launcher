@@ -83,6 +83,26 @@ def test_wrapup_nodes_draft_instead_of_writing_the_stores():
     assert sch["glossary_draft"]["default"] is True and sch["glossary_draft"]["set_by"] == ["user"]
 
 
+def test_rounds_retroactively_fix_the_drafts_earlier_rounds_left():
+    """claunch-oqn6t: the three draft nodes carry one shared retro-fix
+    procedure, so a later round corrects or withdraws an earlier round's
+    still-open draft instead of only appending a new one."""
+    doc = _doc()
+    frag = doc["fragments"]["retro-fix"]
+    for phrase in ('wrapup_list {settled: true}', 'wrapup_update {id, revision, payload}',
+                   'wrapup_withdraw {id, revision}', 'OPEN = ("draft", "failed")'):
+        assert phrase in frag, phrase
+    for name in ("category-refresh", "knowledge-record", "glossary-draft"):
+        assert "${frag:retro-fix}" in doc["nodes"][name]["prompt"], name
+    # The reference alone proves nothing about what a session reads: the
+    # compiled prompt must carry the procedure's text.
+    compiled = {n.label: n for n in layers.load("improv-worker-v2").nodes.values()}
+    for name in ("category-refresh", "knowledge-record", "glossary-draft"):
+        prompt = compiled[name].props["prompt"]
+        assert "소급 점검: 앞 회차가 남긴 임시본" in prompt, name
+        assert "wrapup_withdraw {id, revision}" in prompt, name
+
+
 def _run(tmp_path, monkeypatch, values):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = _doc()
