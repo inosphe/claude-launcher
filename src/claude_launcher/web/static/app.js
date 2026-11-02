@@ -14096,12 +14096,40 @@ function lineageAncestors(base, list) {
 
 /* The sessions the rail draws: the cache, narrowed to the picked project,
    plus the ancestors and descendants of those sessions that are filed under
-   another one (lineageAncestors, lineageDescendants). */
+   another one (lineageAncestors, lineageDescendants).
+
+   Rows are ordered by the position of their lineage's root session in `list`
+   (the daemon's creation order), so a row never stands above the family it
+   belongs to and appended kin never land at the end of the list
+   (claunch-20j1s.1). Rows under one root keep `list` order, which keeps the
+   root above its descendants for byLineage. */
 function railSessions(list = sessionsCache) {
-  const base = (list || []).filter(sessionInCurrentProject);
+  const all = (list || []).filter(Boolean);
+  const base = all.filter(sessionInCurrentProject);
   if (!currentProject || typeof lineageDescendants !== "function") return base;
   const above = typeof lineageAncestors === "function" ? lineageAncestors(base, list) : [];
-  return [...base, ...above, ...lineageDescendants(base, list)];
+  const kin = [...above, ...lineageDescendants(base, list)];
+  if (!kin.length) return base;
+  const want = new Set(base.map((s) => s.name));
+  for (const s of kin) want.add(s.name);
+  const at = new Map(all.map((s, i) => [s.name, i]));
+  const byName = new Map(all.map((s) => [s.name, s]));
+  const rootAt = (s) => {
+    let cur = s;
+    const seen = new Set([s.name]);
+    while (cur.parent && cur.parent !== cur.name && byName.has(cur.parent)
+           && !seen.has(cur.parent)) {
+      seen.add(cur.parent);
+      cur = byName.get(cur.parent);
+    }
+    return at.get(cur.name);
+  };
+  return all
+    .map((s, i) => [s, i])
+    .filter(([s]) => want.has(s.name))
+    .map(([s, i]) => [s, rootAt(s), i])
+    .sort((a, b) => (a[1] - b[1]) || (a[2] - b[2]))
+    .map(([s]) => s);
 }
 
 /* Whether the rail draws `s` only because it is in the lineage of a session
