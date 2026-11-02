@@ -75,8 +75,8 @@ function el(tag, cls, text) {
 const fmtAge = (s) => Math.round(s / 60) + "m", usageShort = (n) => String(n);
 ${src.slice(constStart, constEnd)}
 ${["termSeriesTotal", "termSeriesIndexAt", "termSeriesScale", "termSeriesTicks", "termSeriesTick",
-    "termSeriesTickLabelY", "termSeriesChart", "termSeriesPointerCheck", "termSeriesRelease",
-    "termSeriesMaker"].map(slice).join("\n")}
+    "termSeriesTickLabelY", "termSeriesCostText", "termSeriesChart", "termSeriesPointerCheck",
+    "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n")}
 /* 30 requests, one every 120 s; the context grows to request 15, is
    compacted at 1800 s (the summary is the next request's context) and grows
    again. */

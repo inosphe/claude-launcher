@@ -614,9 +614,14 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
 
     A request's context is what it sent to the model: fresh input, cache read
     and cache write added. Subagent requests run in their own context and are
-    left out (``sides`` is accepted for the callers that pass the followers),
-    as is the output. After a compaction the next request's context is the
-    summary, so the series falls there.
+    left out (``sides`` is accepted for the callers that pass the followers).
+    The output is not part of the context the chart draws, but each point
+    carries it too, so the caller can price the request from the same rows
+    (the overlay's ``≈`` estimate), and ``totals`` sums every component over
+    the window's requests — not over the drawn points, which past ``points``
+    requests are the largest of their group and would undercount. After a
+    compaction the next request's context is the summary, so the series falls
+    there.
 
     Each point is one request (``n`` = its number from the start of the
     conversation). Past ``points`` requests, consecutive requests are grouped
@@ -631,7 +636,9 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
     requests = sorted(r for r in main.requests if not r[5])
     if not requests:
         return {"window": window, "points": [], "compactions": [], "count": 0,
-                "since": None, "until": end}
+                "since": None, "until": end,
+                "totals": {"input": 0, "cache_read": 0, "cache_write": 0,
+                           "output": 0}}
     first = requests[0][0]
     numbered = list(enumerate(requests, 1))
     if window == "cap":
@@ -640,20 +647,27 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
     end = max(end, requests[-1][0])
     start = min(start, end - 60.0)
     step = max(1, -(-len(numbered) // points))
+    totals = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    for _n, (_at, fresh_in, cache_read, cache_write, output, _side) in numbered:
+        totals["input"] += fresh_in
+        totals["cache_read"] += cache_read
+        totals["cache_write"] += cache_write
+        totals["output"] += output
     rows = []
     for i in range(0, len(numbered), step):
         group = numbered[i:i + step]
-        n, (at, fresh, cache_read, cache_write, _out, _side) = max(
+        n, (at, fresh, cache_read, cache_write, output, _side) = max(
             group, key=lambda g: g[1][1] + g[1][2] + g[1][3])
         rows.append({"t": group[0][1][0], "n": group[0][0], "count": len(group),
                      "input": fresh, "cache_read": cache_read,
-                     "cache_write": cache_write})
+                     "cache_write": cache_write, "output": output})
     return {
         "window": window,
         "since": first,
         "until": end,
         "start": start,
         "points": rows,
+        "totals": totals,
         "compactions": [b for b in sorted(main.bounds) if start <= b <= end],
         "requests": len(requests),
         "count": len(numbered),

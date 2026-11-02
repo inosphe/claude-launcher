@@ -186,6 +186,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-ytick { fill: var(--term
 html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-strong); stroke: var(--term-halo); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
+html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term-strong); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
@@ -10886,6 +10887,15 @@ a.category-ref:hover { text-decoration: underline; }
 #term-tps-overlay .term-series-key.swap::before {
   background: #39c5cf; width: 6px; height: 6px; margin-right: 5px; border-radius: 0;
   transform: rotate(45deg);
+}
+/* What the charted requests are estimated to have cost at Settings → Model
+   prices (claunch-i6xl2). A caption under the small chart, and under the
+   zoomed chart's legend; the number is right-aligned so its last digit sits
+   over the plot's right edge. Nothing is drawn where the table has no rates
+   for the session's model -- the chart's tooltip says so instead. */
+#term-tps-overlay .term-series-cost {
+  font-size: 10px; line-height: 12px; color: #c9d1d9; text-align: right;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 /* The zoomed chart is exactly as wide as its plot, and two fixed rows under
    the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
