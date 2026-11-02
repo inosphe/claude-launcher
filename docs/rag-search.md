@@ -169,6 +169,43 @@ orders of magnitude under its measured breaking point (~205 bytes per
 preset row, so the aiohttp 1 MiB default body ceiling falls at roughly
 5,100 presets — the 20-preset ceiling binds far earlier).
 
+The card's storage follow-ups (claunch-fhs7f.1) make three things explicit.
+The save button reads **"선택한 프리셓 저장"** and its result line names the row
+it overwrote: the form writes the *selected preset's* row (`saveBody`), not a
+loose block of settings, and plain "저장" read as a settings save. The backfill
+line under the title tells the two empty states apart — "프리셓 <id>의 색인은
+아직 없습니다 …" when a preset is in force and has no collection of its own,
+and "색인 미구동 — 아직 임베딩된 문서가 없습니다." only when no preset is
+active. The line right after a save is the first case, which is what the old
+single sentence got wrong: it read as "there are no documents". A preset can
+be **renamed in place**: the card writes the renamed row with
+`renamed_from: <old id>` and moves the pointer with it, and the daemon carries
+the saved `api_key` over from the old id. The secret is filed under the preset
+id, so without that hint a rename would silently drop the key.
+`renamed_from` is a save-time input and is dropped before the row is written;
+it never appears in the settings file.
+
+A preset may also **name the collection** it reads and writes: `db:
+<store-name>`. Omitting it keeps the previous rule — the preset's `model_key`,
+which itself derives from `embedding_model` — so every preset written before
+the field existed resolves to exactly the directory it did before. Naming one
+decouples the vectors from the model: point a second preset at the same `db`
+— another provider, another model alias — and it answers from the vectors
+already on disk, which is what makes a provider change cheap without moving
+the data. The directory is `<corpus>.<db>.zvec`; its sidecar
+(`<corpus>.<db>.meta.json`) records the model and width the vectors were made
+with, and the resolved name is in `active.json` as `db`. `GET /api/rag/dbs`
+lists what is on disk — name, width, model, byte size, and the presets that
+read it — and the card shows that list under the DB field.
+
+A collection's width is fixed when its vectors are written, so pointing a
+model at a `db` of a different width fails at the first query with
+`dimension mismatch`. The settings PUT refuses that save instead and names
+both numbers. Both come from sidecars already on disk — the target's, and one
+this same model built earlier; when the model's width is not recorded
+anywhere yet, the save goes through and the connection test is what reports
+it.
+
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the
 process only as the `Authorization` header; status and error messages never
@@ -294,6 +331,7 @@ write-up matches on any part.
 | `GET /api/search?q=&kind=beads\|sessions&cwd=\|parent=&limit=&rerank=&wait=` | ranked results + `index: {total, indexed, pending, syncing, error}` + `timing` |
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
+| `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 

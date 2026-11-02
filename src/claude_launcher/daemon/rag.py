@@ -1026,6 +1026,46 @@ def _stored_meta(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) and data.get("format") == FORMAT else None
 
 
+def rag_stores(base: Path) -> List[dict]:
+    """Every collection directory under ``base``, as the DB panel reads them.
+
+    A store is ``<corpus>.<name>.zvec``, or ``<corpus>.zvec`` for one built
+    before presets existed. Its sidecar carries the width and the model the
+    vectors were made with — the two facts a preset has to match before it
+    can use the collection (claunch-fhs7f.1). ``identity`` is the part a
+    preset's ``db`` names; it is empty for a pre-preset collection, which is
+    adopted by a preset whose key matches its model.
+    """
+    rows: List[dict] = []
+    try:
+        dirs = sorted(p for p in base.glob("*.zvec") if p.is_dir())
+    except OSError:
+        return rows
+    for path in dirs:
+        meta = _stored_meta(path) or {}
+        name = path.name[: -len(".zvec")]
+        corpus, _, identity = name.partition(".")
+        total = 0
+        try:
+            for child in path.rglob("*"):
+                if child.is_file():
+                    total += child.stat().st_size
+        except OSError:
+            total = 0
+        rows.append({
+            "name": name,
+            "corpus": corpus,
+            "identity": identity,
+            "path": str(path),
+            "dims": int(meta.get("dims") or 0),
+            "model": str(meta.get("model") or ""),
+            "model_key": str(meta.get("model_key") or ""),
+            "updated_at": meta.get("updated_at"),
+            "bytes": total,
+        })
+    return rows
+
+
 class _RateLimiter:
     """A sliding window on embedding requests (see ``rag.rate_limit``).
 
@@ -1253,20 +1293,23 @@ class RagService:
         key = self._key(kind, root)
         model = str(cfg.get("embedding_model") or "")
         model_key = str(cfg.get("model_key") or "")
+        # The collection's identity: the preset's ``db`` when it names one,
+        # else the model key (claunch-fhs7f.1).
+        store_key = str(cfg.get("db") or "") or model_key
         dims = int(cfg.get("dimensions") or 0)
         signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
         self._roots[key] = root
         self._record_active(cfg)
         while True:
             index = self._indexes.get(key)
-            if _index_fits(index, model, dims, signature, model_key):
+            if _index_fits(index, model, dims, signature, store_key):
                 return index
             task = self._loading.get(key)
             if task is None:
                 base = self._root_dir if self._root_dir is not None else paths.rag_dir()
                 fresh = VectorIndex(
                     self._index_path(base, key, cfg),
-                    model=model, dims=dims, signature=signature, model_key=model_key)
+                    model=model, dims=dims, signature=signature, model_key=store_key)
                 # Out of the table before the thread starts: the old
                 # collection is closed there, and nothing should pick it up
                 # meanwhile.
@@ -1283,15 +1326,17 @@ class RagService:
 
         Without a preset the path is what it always was (``<key>.zvec``) —
         existing collections keep serving. With one, the store's identity is
-        the preset's ``model_key``: same key, same directory, so presets that
-        reach the same real model through different providers or name aliases
-        reuse one collection instead of embedding the corpus again. A preset
-        whose key matches the collection built before presets existed adopts
-        that directory rather than starting a second copy of the same model's
-        vectors.
+        the preset's ``db`` when it names one and its ``model_key`` otherwise:
+        same key, same directory, so presets that reach the same real model
+        through different providers or name aliases reuse one collection
+        instead of embedding the corpus again, and a preset whose ``db``
+        outlives a model swap keeps reading the vectors it already has
+        (claunch-fhs7f.1). A preset whose key matches the collection built
+        before presets existed adopts that directory rather than starting a
+        second copy of the same model's vectors.
         """
         legacy = base / f"{key}.zvec"
-        slug = str(cfg.get("model_key") or "").strip()
+        slug = str(cfg.get("db") or cfg.get("model_key") or "").strip()
         if not slug:
             return legacy
         slugged = base / f"{key}.{slug}.zvec"
@@ -1320,6 +1365,7 @@ class RagService:
             return
         record = {
             "model_key": str(cfg.get("model_key") or ""),
+            "db": str(cfg.get("db") or ""),
             "preset": str(cfg.get("preset") or ""),
             "embedding_model": str(cfg.get("embedding_model") or ""),
             "source": str(cfg.get("source") or "custom"),
@@ -1336,6 +1382,7 @@ class RagService:
             existing = None
         stale = {
             "model_key": str(existing.get("model_key") or ""),
+            "db": str(existing.get("db") or ""),
             "preset": str(existing.get("preset") or ""),
             "embedding_model": str(existing.get("embedding_model") or ""),
             "source": str(existing.get("source") or "custom"),
@@ -1343,7 +1390,7 @@ class RagService:
             "recorded_at": str(existing.get("recorded_at") or ""),
         } if isinstance(existing, dict) else None
         if stale is not None and all(stale[k] == record[k] for k in (
-            "model_key", "preset", "embedding_model", "source", "connection"
+            "model_key", "db", "preset", "embedding_model", "source", "connection"
         )):
             record["recorded_at"] = stale["recorded_at"]
         try:
@@ -2331,6 +2378,7 @@ class RagService:
             "rate_limit": int(cfg.get("rate_limit") or 0),
             "preset": cfg.get("preset") or "",
             "model_key": cfg.get("model_key") or "",
+            "db": cfg.get("db") or "",
             "active": self.active_record(),
             "rate": self._limiter.view(),
             "indexes": indexes,

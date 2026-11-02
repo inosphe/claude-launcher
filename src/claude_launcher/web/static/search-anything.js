@@ -28,8 +28,17 @@ globalThis.SearchAnything = (() => {
       return { state: "paused", text: `소급 임베딩 일시정지됨 · 남은 문서 ${totals.pending} / ${totals.total}건` };
     if (syncing || totals.pending > 0)
       return { state: "running", text: `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건` };
-    if (rows.length === 0 || totals.total === 0)
+    if (rows.length === 0 || totals.total === 0) {
+      // No rows is two different states. With a preset in force it means this
+      // preset has no collection under its name yet -- the case right after a
+      // save, when the old text read as "there are no documents at all"
+      // (claunch-fhs7f.1).
+      if (!activeEmpty) {
+        const which = active && active.preset ? `프리셓 ${active.preset}의 ` : "";
+        return { state: "idle", text: `${which}색인은 아직 없습니다 — 소급 임베딩이 시작되면 진행률이 여기에 표시됩니다.` };
+      }
       return { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." };
+    }
     const activeText = ragActiveText(active);
     if (activeEmpty) return { state: "done", text: "색인 갱신 완료" };
     return { state: "done", text: `${activeText} · 색인 갱신 완료` };
@@ -517,6 +526,67 @@ globalThis.SearchAnything = (() => {
           status.textContent = `프리셓 삭제 실패 · ${error.message}`;
         } finally { save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = false; }
       };
+      // The collection this preset reads and writes. Empty keeps the
+      // pre-db rule: the preset's model identity. Naming one is what lets a
+      // preset change its model or provider and still answer from the
+      // vectors it already has (claunch-fhs7f.1).
+      const dbRow = node("p", "rag-preset-db");
+      const dbInput = document.createElement("input");
+      dbInput.placeholder = "DB 이름 (비우면 모델 이름에서 유도)";
+      dbRow.append(node("span", "DB "), dbInput); presetBox.append(dbRow);
+      const dbList = node("p", "", "rag-db-list"); presetBox.append(dbList);
+      async function loadDbs() {
+        try {
+          const data = await request("api/rag/dbs", undefined, "GET");
+          const rows = Array.isArray(data.dbs) ? data.dbs : [];
+          if (!rows.length) {
+            dbList.textContent = "저장된 DB가 없습니다 — 첫 프리셓을 저장하면 이 모델의 DB가 만들어집니다.";
+            return;
+          }
+          dbList.textContent = "DB: " + rows.map(r => {
+            const bits = [];
+            if (r.dims) bits.push(`${r.dims}차원`);
+            if (r.presets && r.presets.length) bits.push(r.presets.join(", "));
+            const name = r.identity || r.name;
+            return bits.length ? `${name} (${bits.join(" · ")})` : name;
+          }).join(" · ");
+        } catch { dbList.textContent = ""; }
+      }
+      // Rename a preset. The id is the name and also the key its saved secret
+      // is filed under, so the row carries renamed_from and the daemon moves
+      // the secret across. The vectors do not move: the collection is named
+      // by db/model_key, not by the preset id (claunch-fhs7f.1).
+      const renameRow = node("p", "rag-preset-rename");
+      const renameTo = document.createElement("input");
+      renameTo.placeholder = "새 프리셓 이름 (소문자·숫자·하이픈)";
+      const renameBtn = node("button", "이름 변경"); renameBtn.type = "button";
+      renameRow.append(renameTo, renameBtn); presetBox.append(renameRow);
+      renameBtn.onclick = async () => {
+        const from = presetSelect.value, to = renameTo.value.trim();
+        if (!from) { status.textContent = "이름을 바꿀 프리셓을 먼저 선택하세요."; return; }
+        if (!/^[a-z0-9-]+$/.test(to)) { status.textContent = "프리셓 이름은 소문자·숫자·하이픈만 씁니다."; return; }
+        if (to === from) { renameTo.value = ""; return; }
+        if (presets.some(p => p.id === to)) { status.textContent = `프리셓 ${to}이 이미 있습니다 — 다른 이름을 쓰세요.`; return; }
+        const at = presets.findIndex(p => p.id === from);
+        if (at < 0) { status.textContent = `프리셓 ${from}을 찾지 못했습니다.`; return; }
+        const rows = presets.map((p, i) => i === at ? { ...p, id: to, renamed_from: from } : p);
+        renameBtn.disabled = save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = true;
+        status.textContent = `프리셓 ${from}의 이름을 ${to}으로 바꾸는 중…`;
+        try {
+          const data = await request("api/rag/settings", { ...values(), presets: rows, preset: to }, "PUT");
+          afterSave(data);
+          presetSelect.length = 0;
+          for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
+          presetSelect.value = typeof data.preset === "string" ? data.preset : to;
+          presetCount.textContent = ` ${presets.length}/${presetMax}`;
+          renameTo.value = "";
+          showPreset();
+          loadPreset(presets.find(p => p.id === presetSelect.value));
+          status.textContent = `프리셓 ${from}의 이름을 ${to}으로 바꿨습니다 — 저장된 API key와 연결 값은 그대로입니다.`;
+        } catch (error) {
+          status.textContent = `이름 변경 실패 · ${error.message}`;
+        } finally { renameBtn.disabled = save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = false; }
+      };
       form.append(presetBox);
       form.append(sourceBox);
       const customBox = document.createElement("fieldset"); customBox.append(node("legend", "Custom API"));
@@ -576,6 +646,7 @@ globalThis.SearchAnything = (() => {
         fields.embedding_model.value = model;
         fields.rerank_model.value = p.rerank_model || "";
         fields.root_serving.checked = p.root_serving === true;
+        dbInput.value = p.db || "";
         showSource();
       }
       // The screen values as one preset row. ``model_key`` survives an edit
@@ -592,12 +663,17 @@ globalThis.SearchAnything = (() => {
         }
         const old = presets.find(p => p.id === id);
         if (old && old.model_key && old.embedding_model === preset.embedding_model) preset.model_key = old.model_key;
+        // An empty field clears it: the preset goes back to its model
+        // identity, which is what every preset written before db existed
+        // meant (claunch-fhs7f.1).
+        const db = dbInput.value.trim();
+        if (db) preset.db = db;
         return preset;
       }
       // After a save the daemon's reply is the new truth: mirror the rows
       // and the preset list (secrets stay stripped) into the card's state.
       function afterSave(data) {
-        backfillPolls = 0; watchBackfill();
+        backfillPolls = 0; watchBackfill(); loadDbs();
         fields.api_key.value = ""; fields.api_key.placeholder = data.api_key_set ? "설정됨 · 비워두면 유지" : "API key";
         Object.assign(saved, data.sources || {});
         if (Array.isArray(data.presets)) {
@@ -622,7 +698,10 @@ globalThis.SearchAnything = (() => {
       for (const [key, title] of [["candidates", "검색 후보 수"], ["rerank_top", "Rerank 대상 수"], ["batch", "Embedding 배치 크기"], ["timeout", "요청 제한 시간 (초)"], ["watch_interval", "변경 확인 주기 (초)"]]) field(key, title, "number", advanced);
       field("verify_tls", "TLS 인증서 검증", "checkbox", advanced); form.append(advanced);
       form.append(node("p", "차원 수는 모델 응답에서 자동으로 읽습니다. 연결 방식, Embedding 모델이나 API 주소를 변경하면 색인을 다시 구성합니다. 선택하지 않은 방식의 값도 설정 파일에 그대로 보존됩니다."));
-      const save = node("button", "저장"), test = node("button", "연결 테스트"), selftest = node("button", "Selftest");
+      // The label says what the button does: this form writes the SELECTED
+      // preset's row and makes it active (saveBody), so "저장" alone read as a
+      // settings save rather than a preset save (claunch-fhs7f.1).
+      const save = node("button", "선택한 프리셓 저장"), test = node("button", "연결 테스트"), selftest = node("button", "Selftest");
       save.type = "submit"; test.type = "button"; selftest.type = "button";
       pauseBtn = node("button", "일시정지"); pauseBtn.type = "button";
       const selftestResult = node("p", "", "rag-selftest-result"); selftestResult.hidden = true; form.append(selftestResult);
@@ -691,7 +770,7 @@ globalThis.SearchAnything = (() => {
             return;
           }
           const data = await request(testOnly ? "api/rag/test" : "api/rag/settings", testOnly ? values() : saveBody(), testOnly ? "POST" : "PUT");
-          status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : `저장됨 · 프리셋 ${data.preset}이 활성화됐고 기존 문서의 임베딩을 이 모델로 소급합니다.`;
+          status.textContent = testOnly ? `연결 확인됨 · 실제 차원 ${data.dimensions} · rerank ${data.rerank ? "확인됨" : "사용 안 함"}` : `프리셓 ${data.preset}을 덮어써 저장했습니다 · 이 프리셓이 활성화됐고 기존 문서의 임베딩을 이 모델로 소급합니다.`;
           if (!testOnly) afterSave(data);
         } catch (error) { status.textContent = error.message; }
         finally { save.disabled = test.disabled = selftest.disabled = pauseBtn.disabled = false; }
@@ -714,6 +793,7 @@ globalThis.SearchAnything = (() => {
       };
       test.onclick = () => action(true); form.onsubmit = event => { event.preventDefault(); action(false); };
       form.append(save, test, selftest, pauseBtn); card.append(form); status.textContent = "현재 설정";
+      loadDbs();
     }).catch(error => { status.textContent = error.message; });
     return card;
   }
