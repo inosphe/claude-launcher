@@ -2596,6 +2596,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #profile-hint {
   margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
 }
+/* The Runs-as block's own recommendation (renderProviderHint): the Claude
+   harness on a provider that is not Claude's own still bills its permission
+   classifier to Claude, so the form points at skip permissions. Amber for
+   the same register as #profile-hint — not an error, but something that
+   would have gone wrong unnoticed — and a paragraph of its own because the
+   two can be true at once. */
+#new-provider-hint {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
+}
 
 /* What the selected credential reports, and what is left of it
    (claunch-yx2bd). A compact readout under the Profile row: the account's

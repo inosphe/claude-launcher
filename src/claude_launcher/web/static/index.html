@@ -1074,6 +1074,19 @@
           <label id="new-effort-row" class="hidden">
             Reasoning effort <select name="effort"></select>
           </label>
+          <!-- The recommendation the four rows above make by themselves.
+               On the claude harness, a provider that is not Claude's own
+               still has the harness's permission classifier billed to
+               Claude, so a session created here spends Claude usage on top
+               of the provider it was pointed at; skip permissions is the
+               switch that avoids it, and that switch sits inside the fold.
+               So the line is on the face of the form, directly under the
+               rows it is about. Silent on a Claude provider (nc, sr and the
+               built-in default), once the box is ticked, and on a child
+               whose parent's answer the spawn policy locked. Drawn by
+               renderProviderHint from profile_details[].provider and
+               .provider_service. -->
+          <p id="new-provider-hint" class="hidden"></p>
           <!-- What the selected pair cannot say by itself. Three rows still in
                the fold change what this pick MEANS — --borrow runs it on
                another profile's token, --null on none at all, and a profile

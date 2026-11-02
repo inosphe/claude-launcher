@@ -16652,46 +16652,112 @@ function markCompactProblems(select) {
 }
 
 function renderProfileHint() {
-  const box = $("profile-hint");
-  if (!box) return;  // a page that predates the row still runs
   const f = $("new-session");
   if (!f || !f.profile) return;
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const picked = newProfileSelector(f);
   const detail = picked ? newProfileDetail(f, picked) : null;
-  const shown = detail && !detail.error
-    ? profileHarnessLabel(detail.profile || picked, detail.harness)
-    : profileHarnessLabel(picked, "");
-  const choseOverride = !!f.profile.value || !!(f.harness && f.harness.value);
-  const whose = (shown && (!parent || choseOverride))
-    ? shown : (parent ? `${parent.name}'s profile` : "this profile");
-  const base = baseProfileName(picked || "") ||
-    (detail && detail.profile) || "";
-  const compact = profileCompactProblems[base];
-  let text = "";
-  if (compact) {
-    text = `A session on this profile will be refused: ${compact}`;
-  } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
-    text = `--null: it boots with no token at all — ${whose}'s config and ` +
-           `skills, but somebody has to run /login inside before it works.`;
-  } else if (speaks("borrow") && f.borrow && f.borrow.value &&
-             !borrowIsOwnToken(f, parent)) {
-    text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
-           `and provider — only the credential is theirs, the config and ` +
-           `skills stay ${whose}'s.`;
-  } else if (detail && detail.error) {
-    text = `${shown}: ${detail.error}`;
-  } else if (detail && detail.harness_available === false) {
-    text = `${detail.harness || "its harness"} is not installed on this ` +
-           `machine — a session on ${shown} will not start until it is.`;
+  // Before the box guard below: the recommendation under the Runs-as rows is
+  // a different line with a different subject, and a page that predates
+  // #profile-hint is the only thing that guard is for.
+  renderProviderHint(f, parent, picked, detail);
+  const box = $("profile-hint");
+  if (box) {
+    const shown = detail && !detail.error
+      ? profileHarnessLabel(detail.profile || picked, detail.harness)
+      : profileHarnessLabel(picked, "");
+    const choseOverride = !!f.profile.value ||
+      !!(f.harness && f.harness.value);
+    const whose = (shown && (!parent || choseOverride))
+      ? shown : (parent ? `${parent.name}'s profile` : "this profile");
+    const base = baseProfileName(picked || "") ||
+      (detail && detail.profile) || "";
+    const compact = profileCompactProblems[base];
+    let text = "";
+    if (compact) {
+      text = `A session on this profile will be refused: ${compact}`;
+    } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
+      text = `--null: it boots with no token at all — ${whose}'s config and ` +
+             `skills, but somebody has to run /login inside before it works.`;
+    } else if (speaks("borrow") && f.borrow && f.borrow.value &&
+               !borrowIsOwnToken(f, parent)) {
+      text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
+             `and provider — only the credential is theirs, the config and ` +
+             `skills stay ${whose}'s.`;
+    } else if (detail && detail.error) {
+      text = `${shown}: ${detail.error}`;
+    } else if (detail && detail.harness_available === false) {
+      text = `${detail.harness || "its harness"} is not installed on this ` +
+             `machine — a session on ${shown} will not start until it is.`;
+    }
+    box.textContent = text;
+    box.classList.toggle("hidden", !text);
   }
-  box.textContent = text;
-  box.classList.toggle("hidden", !text);
   // The usage block follows the same row and for the same reason: it answers
   // "whose token, and what is left of it". Every path that moves the pair
   // lands here, so this is the one place it has to be driven from.
   renderNewUsage();
+}
+
+/* The service name that makes a provider Claude's own (/api/profiles
+   provider_service, from providers.service). */
+const ANTHROPIC_SERVICE = "anthropic";
+
+/* The one recommendation the Runs-as rows make by themselves.
+
+   On the claude harness, a provider that is not Claude's own still has the
+   harness's permission classifier billed to Claude (Claude Code's `auto`
+   mode charges for those classifier requests), so a session created here
+   spends Claude usage on top of the provider it was pointed at. Skip
+   permissions is the switch that avoids it, and that switch is a row inside
+   the fold — so this line sits on the face of the form, directly under the
+   rows that decide it.
+
+   Silent on Claude's own service — the `claude` provider the nc and sr
+   profiles are on, and the built-in `default` — because there the classifier
+   is part of the usage those profiles exist to spend. Also silent once the
+   box is ticked, and on a child whose parent's answer the spawn policy
+   locked: the fold says that row is inherited and the parent hint says why,
+   so asking for it here would ask for something this form cannot do. */
+function renderProviderHint(f, parent, picked, detail) {
+  const box = $("new-provider-hint");
+  if (!box) return;  // a page that predates the line still runs
+  const harnessName = newProfileHarnessName(f, picked);
+  const owner = providerOwner(f, parent, picked, detail);
+  const provider = owner ? String(owner.provider || "") : "";
+  const service = owner ? String(owner.provider_service || "") : "";
+  const skip = f.skip_permissions;
+  const locked = !!parent && !!skip && !!skip.disabled;
+  let text = "";
+  if (harnessName === "claude" && provider && service &&
+      service !== ANTHROPIC_SERVICE && skip && !locked && !skip.checked) {
+    text = `${provider} is not a Claude provider: on the claude harness the ` +
+      `permission classifier is still billed to Claude, as extra usage on ` +
+      `top of ${provider}. Skip permissions is recommended here — ` +
+      `How it runs ▸ Claude runtime.`;
+  }
+  box.textContent = text;
+  box.classList.toggle("hidden", !text);
+}
+
+/* Which profile's backend the launch will actually talk to: the Borrow row's
+   lender when it names somebody else (the same rule modelIdsInPlay follows —
+   `--borrow` replaces the provider, not only the token), the selected profile
+   otherwise, and the parent's profile when a child names none of its own. */
+function providerOwner(f, parent, picked, detail) {
+  const borrow = f.borrow;
+  const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
+  const lender = speaks("borrow") && borrow && borrow.value &&
+    !borrowIsOwnToken(f, parent) ? baseProfileName(borrow.value) : "";
+  if (!lender) {
+    return detail || (parent && parent.profile
+      ? profileDetails[baseProfileName(parent.profile)] || null : null);
+  }
+  const selected = baseProfileName(picked || "") ||
+    (detail && detail.profile) || "";
+  if (lender === selected) return detail;
+  return profileDetails[lender] || null;
 }
 
 /* ---- what the selected credential reports, and what is left of it -------
