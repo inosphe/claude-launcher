@@ -1,6 +1,6 @@
 /* Session wrap-up drafts (claunch-ar8jn): the terminal's split pane (app.js
    openSplit "wrapup") over /api/wrapup. A session files glossary terms,
-   category placements and knowledge records as drafts; here the user edits,
+   category placements, knowledge records and retrospectives as drafts; here the user edits,
    deletes or confirms them, one at a time or a tab at once. Only a confirm
    writes an entry into its workspace store (daemon/wrapup_api.py). All user
    text uses textContent.
@@ -8,12 +8,17 @@
    Every write names the revision the pane last read; a 409 carries the
    current draft, which replaces the one on screen, and the user decides
    again. A draft's unsaved edits are kept per draft id across polls, and a
-   confirm with unsaved edits saves them first. */
+   confirm with unsaved edits saves them first.
+
+   A retrospective (claunch-lmnlv) filed with auto is confirmed by the daemon
+   at once: it shows here only among the settled rows, marked 자동 기록, with
+   a link to its record on the Retrospection page. */
 
 const WRAPUP_KINDS = [
   {id: "glossary", label: "Glossary"},
   {id: "category", label: "Category"},
   {id: "knowledge", label: "Knowledge"},
+  {id: "retrospection", label: "Retrospection"},
 ];
 const WRAPUP_KNOWLEDGE_KINDS = ["vision", "need", "decision", "principle", "lesson"];
 const WRAPUP_STATUS = {draft: "임시본", applying: "반영 중", confirmed: "확정됨", failed: "반영 실패", discarded: "삭제됨"};
@@ -42,6 +47,7 @@ function wrapupFormOf(kind, p) {
     return {kind: p.kind || "decision", title: p.title || "", body: p.body || "",
             tags: (p.tags || []).join(", "), refs: (p.refs || []).join(", "), source: p.source || ""};
   }
+  if (kind === "retrospection") return {title: p.title || "", body: p.body || ""};
   const op = wrapupCategoryOp(p);
   const form = {op, node_id: "", label: "", aliases: "", description: "", parent_id: "", json: ""};
   if (op === "node_id") form.node_id = p.node_id || "";
@@ -65,6 +71,10 @@ function wrapupPayloadOf(kind, form, before) {
     if (before && before.supersedes) out.supersedes = before.supersedes;
     return out;
   }
+  if (kind === "retrospection") {
+    // Only the text is the user's to edit; what it looked back on stays.
+    return {...(before || {}), title: form.title.trim(), body: form.body.trim()};
+  }
   const out = {};
   if (form.op === "node_id") out.node_id = form.node_id.trim();
   else if (form.op === "new") {
@@ -85,6 +95,7 @@ function wrapupSummary(d) {
   const p = d.payload || {};
   if (d.kind === "glossary") return p.term || "";
   if (d.kind === "knowledge") return `[${p.kind || ""}] ${p.title || ""}`;
+  if (d.kind === "retrospection") return p.title || "";
   const op = wrapupCategoryOp(p);
   if (op === "node_id") return `기존 노드 ${p.node_id}에 배치`;
   return `${op} ${(p[op] && p[op].label) || ""}`.trim();
@@ -180,6 +191,11 @@ function makeWrapupPane({root, session, request}) {
       const row = node("label", null, "wrapup-field"); row.append(node("span", "종류", "wrapup-field-label"), sel);
       box.append(row, field(f, "title", "제목"), field(f, "body", "본문", true),
                  field(f, "tags", "태그 (쉼표로 구분)"), field(f, "refs", "참조 (쉼표로 구분)"), field(f, "source", "출처"));
+    } else if (d.kind === "retrospection") {
+      const p = d.payload || {};
+      const facts = [p.trigger === "manual" ? "수동 회고" : "런 회고", p.run, p.workflow, p.issue,
+        `문제 ${p.problems || 0} · 제안 ${p.proposals || 0}`].filter(Boolean).join(" · ");
+      box.append(node("p", facts, "wrapup-muted"), field(f, "title", "제목"), field(f, "body", "본문 (markdown)", true));
     } else {
       if (f.form.op === "node_id") box.append(field(f, "node_id", "배치할 노드 id"));
       else if (f.form.op === "new") {
@@ -218,7 +234,12 @@ function makeWrapupPane({root, session, request}) {
   function settledRow(d) {
     const li = node("li", null, "wrapup-settled-row");
     li.append(node("span", WRAPUP_STATUS[d.status] || d.status, "wrapup-chip"), node("span", wrapupSummary(d)));
-    if (d.applied) li.append(node("span", "→ " + (d.applied.path ? d.applied.path.join(" / ") : (d.applied.id || "")), "wrapup-muted"));
+    if (d.settled_by === "auto") li.append(node("span", "자동 기록", "wrapup-chip"));
+    if (d.kind === "retrospection" && d.applied && d.applied.id) {
+      const a = node("a", "→ " + d.applied.id, "wrapup-muted");
+      a.href = "#/retrospection/" + encodeURIComponent(d.applied.id);
+      li.append(a);
+    } else if (d.applied) li.append(node("span", "→ " + (d.applied.path ? d.applied.path.join(" / ") : (d.applied.id || "")), "wrapup-muted"));
     return li;
   }
 

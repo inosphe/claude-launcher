@@ -662,6 +662,7 @@ CHECKS = [
         "glossarypage_check.js",
         "glossarycomposer_check.js",
         "knowledgepage_check.js",
+        "retrospectionpage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
         "simpage_check.js",

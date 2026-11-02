@@ -1,7 +1,10 @@
 /* Real wrapup-pane.js (claunch-ar8jn): the tabs and their counts, the form
    <-> payload round trip, save / confirm / delete bodies with the revision
    read, a confirm with unsaved edits saving first, a 409 replacing the
-   form with the current draft, confirm-all, and the ended-session warning. */
+   form with the current draft, confirm-all, and the ended-session warning.
+   A retrospection draft (claunch-lmnlv) edits title and body only and keeps
+   what it looked back on; an auto-confirmed one is a settled row marked
+   자동 기록 linking to its Retrospection record. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -32,7 +35,7 @@ let conflictOn = null;
 
 function listing() {
   const open = drafts.filter(d => ['draft', 'failed'].includes(d.status));
-  const counts = {glossary: 0, category: 0, knowledge: 0};
+  const counts = {glossary: 0, category: 0, knowledge: 0, retrospection: 0};
   for (const d of open) counts[d.kind]++;
   return {session: 's1', drafts, unresolved: open.length, counts, alive};
 }
@@ -140,6 +143,25 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   buttons(host, '저장')[0].onclick(); await settle();
   buttons(host, '이 탭 모두 확정 (1)')[0].onclick(); await settle();
   assert.deepStrictEqual(posts().slice(-1)[0], {path: '/api/wrapup/confirm-all', method: 'POST', body: {target: 's1', kind: 'category'}});
+
+  // Retrospection: the user edits title and body; run, issue and counts stay.
+  const retro = {title: 'R', body: '## A', trigger: 'run', run: 'run-1', workflow: 'improv-worker-v2',
+                 issue: 'claunch-x1', problems: 2, proposals: 1};
+  drafts.push({id: 'wd-r1', kind: 'retrospection', status: 'draft', revision: 1, reason: 'run-1 회고', payload: retro},
+              {id: 'wd-r2', kind: 'retrospection', status: 'confirmed', revision: 3, reason: '', settled_by: 'auto',
+               payload: {...retro, title: 'auto one'}, applied: {id: 'rt-abc', title: 'auto one'}});
+  ctx.WrapupPane._view().open(); await settle();
+  assert(tab(host, 'Retrospection (1)'));
+  tab(host, 'Retrospection').onclick();
+  assert(text(host).includes('런 회고 · run-1 · improv-worker-v2 · claunch-x1 · 문제 2 · 제안 1'));
+  const rtitle = input(host, '제목');
+  rtitle.value = 'R2'; rtitle.oninput();
+  buttons(host, '저장')[0].onclick(); await settle();
+  assert.deepStrictEqual(posts().slice(-1)[0].body, {revision: 1, payload: {...retro, title: 'R2'}});
+  const autoRow = all(host).find(n => n.tag === 'li' && all(n).some(c => c.textContent === 'auto one'));
+  assert(autoRow && all(autoRow).some(c => c.textContent === '자동 기록'));
+  assert(all(autoRow).some(c => c.tag === 'a' && c.href === '#/retrospection/rt-abc'));
+  drafts = drafts.filter(d => d.kind !== 'retrospection');
 
   // An ended session with drafts left says so.
   alive = false;

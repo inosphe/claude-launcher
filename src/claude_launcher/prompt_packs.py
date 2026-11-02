@@ -557,6 +557,16 @@ def on_demand_block(workspace: Optional[Path], pack_id: str = RETROSPECTIVE) -> 
     )
 
 
+def with_header_line(block: str, line: str) -> str:
+    """``block`` (an :func:`on_demand_block`) with ``line`` added as the last
+    line of its header, just before the closing ``---`` -- where a sender
+    states a fact the pack reads (the retrospective's ``auto record=``)."""
+    head, sep, body = block.partition("\n---\n")
+    if not sep:
+        return f"{line}\n{block}"
+    return f"{head}\n{line}{sep}{body}"
+
+
 #: The id prefix of the packs that carry a claunch tool family's guidance
 #: (``mcp-threads``, ``mcp-qa``, ``mcp-sim``). The MCP server instructions
 #: only point at them, so a session may read one when it first uses that

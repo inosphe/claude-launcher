@@ -774,6 +774,8 @@ def build_app(
     # Workspace knowledge records: decisions, vision, needs (claunch-269q1).
     from . import knowledge_api
     knowledge_api.install(app)
+    from . import retrospection_api
+    retrospection_api.install(app)
     # Fleet read of session faults (daemon/session_fault_api.py,
     # claunch-pczoc): which sessions the harness itself has stopped, read
     # off each session's screen by daemon/session_fault.py.
@@ -16032,6 +16034,14 @@ async def h_session_retrospective(request: web.Request) -> web.Response:
     ``claunch retro --print``. POST types it into the session's terminal, the
     person's door for a session whose run did not end normally. ``?pack=``
     names another on-demand pack; an opening pack is refused (400).
+
+    A POST of the retrospective pack heads the block with
+    ``retrospection: trigger=manual, auto record=<bool>`` (claunch-lmnlv): the
+    pack records the result on the Retrospection page and takes ``auto`` from
+    that line. ``?auto=0`` (``claunch retro --review``) leaves it a wrap-up
+    draft for the person; the default records it at once, since the person
+    sending it is the one who asked. A GET carries no such line: the run's
+    node gives its own input instead.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -16048,10 +16058,16 @@ async def h_session_retrospective(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     if request.method == "GET":
         return json_response({"session": name, "pack": pack_id, "block": block})
+    auto = None
+    if pack_id == prompt_packs.RETROSPECTIVE:
+        auto = request.query.get("auto", "1").strip().lower() not in ("0", "false", "no")
+        block = prompt_packs.with_header_line(
+            block, f"retrospection: trigger=manual, auto record={'true' if auto else 'false'}")
     delivered = await session.deliver(block)
-    return json_response(
-        {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
-    )
+    doc = {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
+    if auto is not None:
+        doc["auto_record"] = auto
+    return json_response(doc)
 
 
 async def h_session_packs(request: web.Request) -> web.Response:
