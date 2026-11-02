@@ -370,7 +370,7 @@ function toggleOnly(session, on) {
    from a preset carries {preset, preset_created_at}; a VM without a record, and
    one whose preset was deleted (or deleted and saved again under the same name:
    another created_at), is shown as such and never linked by guess. */
-function buildLineage(vmList, presets) {
+function lineageGraph(vmList, presets) {
   const nodes = new Map();
   const node = (key, kind, data) => { if (!nodes.has(key)) nodes.set(key, { key, kind, data, children: [], parent: null }); return nodes.get(key); };
   for (const v of vmList) node(`vm:${v.id}`, "vm", v);
@@ -402,7 +402,45 @@ function buildLineage(vmList, presets) {
   const order = { vm: 0, preset: 1, "gone-vm": 2, "gone-preset": 3 };
   const byName = (a, b) => (order[a.kind] - order[b.kind]) || a.key.localeCompare(b.key);
   for (const n of nodes.values()) n.children.sort(byName);
-  return roots.sort(byName);
+  return { roots: roots.sort(byName), nodes };
+}
+const buildLineage = (vmList, presets) => lineageGraph(vmList, presets).roots;
+/* One line for the selected VM, read off the same graph: "t01 ← 프리셋 base ← mac-01".
+   Where the records stop it says why (no record, preset deleted, source unregistered)
+   and never fills the gap. A registered copy of a preset is named as such. */
+function lineageChain(vmList, presets, vmId) {
+  const { nodes } = lineageGraph(vmList, presets);
+  const me = nodes.get(`vm:${vmId}`);
+  if (!me) return "";
+  const parts = [vmId];
+  let up = me.parent;
+  let last = null;
+  if (me.data.template) {
+    const pn = nodes.get(`preset:${me.data.template}`);
+    parts[0] = `${vmId}(프리셋 ${me.data.template}의 복사본: 프리셋 템플릿, 일반 VM이 아님)`;
+    up = pn ? pn.parent : null;
+    last = pn || null;
+    if (!pn) parts.push("그 프리셋의 기록이 없음");
+  }
+  for (let n = up; n; n = n.parent) {
+    last = n;
+    if (n.kind === "vm") parts.push(n.data.id);
+    else if (n.kind === "preset") parts.push(`프리셋 ${n.data.name}`);
+    else if (n.kind === "gone-vm") parts.push(`원본 VM ${n.data.id}(등록 해제됨)`);
+    else parts.push(`삭제된 프리셋 ${n.data.name}(이 프리셋 이전의 계보는 알 수 없음)`);
+  }
+  let text;
+  if (parts.length === 1 && !last) {
+    text = `${vmId}: 출처 기록 없음(직접 등록했거나 이 기능 이전에 만든 VM, 추측하지 않음)`;
+  } else {
+    text = parts.join(" ← ");
+    if (last && last.kind === "vm" && !last.parent) text += "(출처 기록 없음)";
+    if (last && last.kind === "preset" && !last.parent) text += "(원본 기록 없음)";
+  }
+  const made = me.children.filter((c) => c.kind === "preset")
+    .map((p) => `${p.data.name}${p.children.length ? ` → ${p.children.map((k) => k.data.id).join(", ")}` : ""}`);
+  if (made.length) text += ` · 이 VM에서 만든 프리셋: ${made.join("; ")}`;
+  return text;
 }
 const LIFE_TEXT = { running: "실행 중", stopped: "정지", suspended: "일시 중단", starting: "시작 중", stopping: "종료 중",
   saving: "일시 중단 중", restoring: "재개 중", pausing: "일시 정지 중", paused: "일시 정지", fault: "오류" };
@@ -427,14 +465,34 @@ function lineageLabel(n, isRoot) {
 function renderLineage() {
   const tree = $("vm-lineage-tree");
   tree.replaceChildren();
-  const roots = buildLineage(vms, presetsLight);
+  const graph = lineageGraph(vms, presetsLight);
+  const roots = graph.roots;
   $("vm-lineage-empty").hidden = roots.length > 0;
+  const line = vms.some((v) => v.id === selected) ? lineageChain(vms, presetsLight, selected) : "";
+  for (const id of ["vm-lineage-line", "vm-lineage-current"]) {
+    $(id).textContent = line ? (id === "vm-lineage-line" ? `계보: ${line}` : line) : "";
+    $(id).hidden = !line;
+  }
+  const mine = graph.nodes.get(`vm:${selected}`);
+  const ancestors = new Set();
+  for (let n = mine && mine.parent; n; n = n.parent) ancestors.add(n);
+  let selectedLi = null;
   const draw = (n, host, isRoot) => {
     const li = document.createElement("li");
     li.className = `vm-tree-${n.kind}`;
     const text = document.createElement("span");
     text.textContent = lineageLabel(n, isRoot);
     li.append(text);
+    if (n === mine) {
+      li.classList.add("vm-tree-selected");
+      const tag = document.createElement("b");
+      tag.className = "vm-tree-here";
+      tag.textContent = " ◀ 현재 선택";
+      text.append(tag);
+      selectedLi = li;
+    } else if (ancestors.has(n)) {
+      li.classList.add("vm-tree-ancestor");
+    }
     if (n.children.length) {
       const ul = document.createElement("ul");
       for (const child of n.children) draw(child, ul, false);
@@ -443,7 +501,16 @@ function renderLineage() {
     host.append(li);
   };
   for (const r of roots) draw(r, tree, true);
+  if ($("vm-lineage-all").open) showSelectedInTree(selectedLi);
+  tree._selected = selectedLi;
 }
+/* A long tree keeps the selected VM in view when it is open. */
+function showSelectedInTree(li) {
+  try { if (li && li.scrollIntoView) li.scrollIntoView({ block: "nearest" }); } catch (_) { /* no layout */ }
+}
+$("vm-lineage-all").addEventListener("toggle", () => {
+  if ($("vm-lineage-all").open) showSelectedInTree($("vm-lineage-tree")._selected);
+});
 function renderOnly() {
   const body = document.querySelector("#vm-only-rows tbody");
   body.replaceChildren();

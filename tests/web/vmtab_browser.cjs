@@ -50,7 +50,7 @@ const BETA = { ...VM, id: "beta", cloned_from: { kind: "preset", preset: "gold",
     origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
 const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped",
   cloned_from: { kind: "preset", preset: "old", preset_created_at: 1600000000, at: 1700000600 }, requests: [], share_rows: [], shared_dirs: [] };
-const TMPL = { ...BETA, id: "tmpl", tart_name: "preset-gold", template: "gold", state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
+const TMPL = { ...BETA, id: "tmpl", tart_name: "preset-gold", template: "gold", cloned_from: {}, state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
 const DELTA = { ...BETA, id: "delta", tart_name: "delta", state: "stopped", requests: [], share_rows: [], shared_dirs: [], cloned_from: {}, template: "" };
 const EPSILON = { ...DELTA, id: "epsilon", tart_name: "epsilon", locked: true };
 let REMOVED = [];
@@ -397,6 +397,38 @@ const server = http.createServer((req, res) => {
     // 3h. the clone lineage: always on the page, read only, no guessing
     assert.equal(await frame.locator("#vm-lineage").isVisible(), true, "the lineage section is on the page without opening anything");
     assert.match(await frame.locator("#vm-lineage-note").innerText(), /출처 기록 없음.*삭제된 프리셋/s);
+    assert.match(await frame.locator("#vm-lineage h1").innerText(), /전체 복제 계보\(모든 VM·프리셋\)/, "the title says it is not the selected VM's");
+    assert.equal(await frame.locator("#vm-lineage-all").evaluate((d) => d.open), false, "the whole tree is folded by default");
+    assert.equal(await frame.locator("#vm-lineage-tree").isVisible(), false);
+    // the selected VM's own line is on the detail and in the section, whatever the tree shows
+    const lineOf = async (id) => {
+      await frame.locator(".vm-card", { hasText: id }).first().click();
+      await frame.locator("#vm-name", { hasText: id }).waitFor({ timeout: 5000 });
+      return [(await frame.locator("#vm-lineage-line").innerText()).replace(/\s+/g, " "),
+              (await frame.locator("#vm-lineage-current").innerText()).replace(/\s+/g, " ")];
+    };
+    let [top, cur] = await lineOf("beta");
+    assert.equal(top, "계보: beta ← 프리셋 gold ← alpha(출처 기록 없음)");
+    assert.equal(cur, "beta ← 프리셋 gold ← alpha(출처 기록 없음)", "the folded section shows the selected VM's line");
+    assert.ok((await frame.locator("#vm-lineage-line").boundingBox()).y < (await frame.locator("#vm-actions").boundingBox()).y, "the line is near the title, above the buttons");
+    [top] = await lineOf("gamma");
+    assert.match(top, /^계보: gamma ← 삭제된 프리셋 old\(이 프리셋 이전의 계보는 알 수 없음\)$/);
+    [top] = await lineOf("tmpl");
+    assert.match(top, /^계보: tmpl\(프리셋 gold의 복사본: 프리셋 템플릿, 일반 VM이 아님\) ← alpha\(출처 기록 없음\)$/);
+    [top] = await lineOf("alpha");
+    assert.match(top, /^계보: alpha: 출처 기록 없음\(직접 등록했거나 이 기능 이전에 만든 VM, 추측하지 않음\) · 이 VM에서 만든 프리셋: gold → beta$/);
+    await frame.locator("#vm-lineage-all summary").click();
+    assert.equal(await frame.locator("#vm-lineage-tree").isVisible(), true, "unfolded");
+    // the selected VM stands out in the whole tree; its ancestors are marked, others are not
+    const here = frame.locator("#vm-lineage-tree li.vm-tree-selected");
+    assert.equal(await here.count(), 1);
+    assert.match(await here.first().innerText(), /VM alpha.*현재 선택/s);
+    assert.ok(Number(await here.first().locator("> span").evaluate((e) => getComputedStyle(e).fontWeight)) >= 700, "bold");
+    await lineOf("beta");
+    assert.equal(await frame.locator("#vm-lineage-tree li.vm-tree-selected").count(), 1);
+    assert.match(await frame.locator("#vm-lineage-tree li.vm-tree-selected").first().innerText(), /VM beta.*현재 선택/s, "the highlight follows the selection");
+    assert.equal(await frame.locator("#vm-lineage-tree li.vm-tree-ancestor").count(), 2, "gold and alpha are marked as its ancestors");
+    assert.equal(await frame.locator("#vm-lineage-tree li.vm-tree-selected", { hasText: "VM alpha" }).count(), 0, "only the selected VM is highlighted");
     const lin = (await frame.locator("#vm-lineage-tree").innerText()).replace(/[ \t]+/g, " ");
     assert.match(lin, /VM alpha · 실행 중 · 출처 기록 없음/, "a VM without a record says so");
     assert.match(lin, /프리셋 gold · 저장 .* · 원본 alpha · 깨끗한 설치/, "the preset shows its time, source and description");

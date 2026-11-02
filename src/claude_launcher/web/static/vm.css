@@ -119,3 +119,10 @@ button.vm-working::before { content: ""; display: inline-block; width: 10px; hei
 button.vm-danger-solid { background: var(--vm-bad); border-color: var(--vm-bad); color: #fff; font-weight: 600; }
 button.vm-danger-solid:hover:not(:disabled) { background: #da3633; }
 button.vm-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.vm-lineage-line { margin: 4px 0 8px; color: #a371f7; overflow-wrap: anywhere; }
+#vm-lineage-all > summary { cursor: pointer; margin: 6px 0; }
+#vm-lineage-tree { max-height: 360px; overflow: auto; }
+.vm-tree li.vm-tree-selected > span { background: rgba(232, 89, 12, 0.22); border-left: 3px solid var(--vm-accent); padding: 1px 6px; font-weight: 700; color: var(--vm-text); }
+.vm-tree li.vm-tree-ancestor > span { text-decoration: underline dotted; }
+.vm-tree-here { color: var(--vm-accent); }

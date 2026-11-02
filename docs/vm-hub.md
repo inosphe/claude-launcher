@@ -208,6 +208,18 @@ example `agent-mac-01` → preset `base-xcode` → `agent-t01`, `agent-share-tes
 node shows its state and lock, each preset node its saved time, source VM and description
 (and "tart 복사본 없음" when the preset copy is gone from tart).
 
+- **Reading the page.** The section is titled "전체 복제 계보(모든 VM·프리셋)": it is every VM and
+  preset, not the selected VM's. It is folded by default and shows one line for the selected VM;
+  "전체 트리 펼치기" opens the whole tree, where the selected VM is highlighted ("◀ 현재 선택", bold,
+  accent bar), its ancestors are underlined, and a long tree (the box scrolls) is scrolled to it.
+  The same line, "계보: t01 ← 프리셋 base ← mac-01", is also under the VM's title on the detail.
+  Where the records stop it says why and fills nothing: "(출처 기록 없음)" after a VM with no record,
+  "t01: 출처 기록 없음(직접 등록했거나 이 기능 이전에 만든 VM, 추측하지 않음)" for a VM with none,
+  "삭제된 프리셋 X(이 프리셋 이전의 계보는 알 수 없음)", "원본 VM X(등록 해제됨)", "(원본 기록 없음)"
+  for a preset saved without a source, "X(프리셋 P의 복사본: 프리셋 템플릿, 일반 VM이 아님)" for a
+  registered preset copy (then followed to the preset's source), and for a VM that has presets
+  of its own " · 이 VM에서 만든 프리셋: gold → kid". It is drawn from the existing `cloned_from` and
+  `presets` fields; no new field or route, so a page reload is enough (no daemon restart).
 - **What is recorded.** `Presets.create_vm` stores on the new VM record
   `cloned_from = {kind: "preset", preset, preset_created_at, at}` (saved in `vms.json`,
   `Vm.cloned_from`); a preset already records its source VM and saved time in
