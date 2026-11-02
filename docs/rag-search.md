@@ -179,9 +179,13 @@ and "색인 미구동 — 아직 임베딩된 문서가 없습니다." only when
 active. The line right after a save is the first case, which is what the old
 single sentence got wrong: it read as "there are no documents". A preset can
 be **renamed in place**: the card writes the renamed row with
-`renamed_from: <old id>` and moves the pointer with it, and the daemon carries
-the saved `api_key` over from the old id. The secret is filed under the preset
-id, so without that hint a rename would silently drop the key.
+`renamed_from: <old id>`, and the daemon carries the saved `api_key` over
+from the old id. The secret is filed under the preset id, so without that
+hint a rename would silently drop the key. The active pointer follows the
+rename only when the renamed preset is the one the daemon is running with;
+the picker's selection is not the active preset, and a settings PUT starts
+the pointed-at preset's model on the whole corpus, so moving the pointer for
+a name change alone would activate a preset the reader only renamed.
 `renamed_from` is a save-time input and is dropped before the row is written;
 it never appears in the settings file.
 
@@ -196,7 +200,13 @@ the data. The directory is `<corpus>.<db>.zvec`; its sidecar
 (`<corpus>.<db>.meta.json`) records the model and width the vectors were made
 with, and the resolved name is in `active.json` as `db`. `GET /api/rag/dbs`
 lists what is on disk — name, width, model, byte size, and the presets that
-read it — and the card shows that list under the DB field.
+read it — and the card shows that list under the DB field, one row per
+collection with a delete control. `POST /api/rag/dbs/delete` with
+`{"name": "<directory stem>"}` removes a collection and its sidecar. A store
+a preset reads, or the one the active config reads, is refused: its vectors
+would have to be asked for from the provider again, and the row already
+names the readers, so the preset is pointed elsewhere first. Deleting a
+collection nothing reads is the only case where nothing downstream changes.
 
 A collection's width is fixed when its vectors are written, so pointing a
 model at a `db` of a different width fails at the first query with
@@ -332,6 +342,7 @@ write-up matches on any part.
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
 | `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
+| `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 

@@ -1903,3 +1903,57 @@ def test_the_dbs_route_lists_collections_and_the_presets_that_read_them(tmp_path
             await server.close()
 
     asyncio.run(run())
+
+
+def test_deleting_a_collection_refuses_readers_and_removes_the_rest(tmp_path):
+    """A store a preset reads stays; one nobody reads goes, sidecar included.
+
+    Deleting a collection whose vectors a preset answers from would make
+    that preset rebuild them from the provider, so the readers are named and
+    the delete is refused until the preset points elsewhere
+    (claunch-fhs7f.1).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        _write_store(base, "sessions.orphan", dims=768, model="emb-a", model_key="orphan")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "kept"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions.kept"})
+            assert refused.status == 400
+            error = (await refused.json())["error"]
+            assert "kept" in error and "p" in error
+            assert (base / "sessions.kept.zvec").is_dir()
+
+            removed = await client.post("/api/rag/dbs/delete", json={"name": "sessions.orphan"})
+            assert removed.status == 200
+            body = await removed.json()
+            assert body["deleted"] == "sessions.orphan"
+            assert [row["name"] for row in body["dbs"]] == ["sessions.kept"]
+            assert not (base / "sessions.orphan.zvec").exists()
+            assert not (base / "sessions.orphan.meta.json").exists()
+
+            missing = await client.post("/api/rag/dbs/delete", json={"name": "no-such-db"})
+            assert missing.status == 400
+            assert "no-such-db" in (await missing.json())["error"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())

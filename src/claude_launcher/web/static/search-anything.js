@@ -439,6 +439,13 @@ globalThis.SearchAnything = (() => {
       // that preset -- selecting and editing are the same gesture, and
       // switching what is active happens on save, not on select.
       const presets = Array.isArray(cfg.presets) ? cfg.presets : [];
+      // The preset the daemon is running with -- separate from the picker's
+      // selection, because selecting only loads values into the fields
+      // (showPreset). Renaming an id has to move this pointer only when the
+      // pointer WAS that id; moving it otherwise would activate a preset the
+      // reader only renamed, and the settings PUT starts that preset's model
+      // on the whole corpus (claunch-fhs7f.1 review).
+      let activeId = typeof cfg.preset === "string" ? cfg.preset : "";
       const sourceBox = document.createElement("fieldset"); sourceBox.append(node("legend", "연결 방식"));
       const sources = {};
       for (const [value, title] of [["custom", "Custom API (직접 입력)"], ["profile", "Profile (provider)"]]) {
@@ -534,23 +541,45 @@ globalThis.SearchAnything = (() => {
       const dbInput = document.createElement("input");
       dbInput.placeholder = "DB 이름 (비우면 모델 이름에서 유도)";
       dbRow.append(node("span", "DB "), dbInput); presetBox.append(dbRow);
-      const dbList = node("p", "", "rag-db-list"); presetBox.append(dbList);
+      const dbList = node("div", "", "rag-db-list"); presetBox.append(dbList);
+      // One row per collection on disk. The delete control is the panel's
+      // management half: a collection a preset reads cannot go, because its
+      // vectors would have to be asked for again, so the button is disabled
+      // and says why. Deleting a collection nothing reads changes nothing
+      // downstream (claunch-fhs7f.1).
       async function loadDbs() {
         try {
           const data = await request("api/rag/dbs", undefined, "GET");
           const rows = Array.isArray(data.dbs) ? data.dbs : [];
+          dbList.replaceChildren();
           if (!rows.length) {
-            dbList.textContent = "저장된 DB가 없습니다 — 첫 프리셓을 저장하면 이 모델의 DB가 만들어집니다.";
+            dbList.append(node("span", "저장된 DB가 없습니다 — 첫 프리셓을 저장하면 이 모델의 DB가 만들어집니다."));
             return;
           }
-          dbList.textContent = "DB: " + rows.map(r => {
+          for (const row of rows) {
+            const name = row.identity || row.name;
             const bits = [];
-            if (r.dims) bits.push(`${r.dims}차원`);
-            if (r.presets && r.presets.length) bits.push(r.presets.join(", "));
-            const name = r.identity || r.name;
-            return bits.length ? `${name} (${bits.join(" · ")})` : name;
-          }).join(" · ");
-        } catch { dbList.textContent = ""; }
+            if (row.dims) bits.push(`${row.dims}차원`);
+            if (row.presets && row.presets.length) bits.push(row.presets.join(", "));
+            const line = node("span", bits.length ? `${name} (${bits.join(" · ")})` : name, "rag-db-row");
+            const occupied = Boolean((row.presets && row.presets.length) || row.in_use);
+            const del = node("button", "삭제", "rag-db-delete"); del.type = "button";
+            del.disabled = occupied;
+            if (occupied) del.title = "이 DB를 쓰는 프리셓이 있어 삭제할 수 없습니다 — 그 프리셓의 DB 이름을 먼저 바꾸세요.";
+            del.onclick = async () => {
+              if (!window.confirm(`DB ${name}과 그 벡터를 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`)) return;
+              del.disabled = true;
+              try {
+                await request("api/rag/dbs/delete", { name: row.name }, "POST");
+                status.textContent = `DB ${name}을 삭제했습니다 — 이 DB의 벡터는 사라졌습니다.`;
+              } catch (error) {
+                status.textContent = `DB 삭제 실패 · ${error.message}`;
+              }
+              await loadDbs();
+            };
+            const entry = node("p", "", "rag-db-entry");
+            entry.append(line, del); dbList.append(entry);
+          }        } catch { dbList.textContent = ""; }
       }
       // Rename a preset. The id is the name and also the key its saved secret
       // is filed under, so the row carries renamed_from and the daemon moves
@@ -570,19 +599,26 @@ globalThis.SearchAnything = (() => {
         const at = presets.findIndex(p => p.id === from);
         if (at < 0) { status.textContent = `프리셓 ${from}을 찾지 못했습니다.`; return; }
         const rows = presets.map((p, i) => i === at ? { ...p, id: to, renamed_from: from } : p);
+        // The pointer follows only if this preset was the active one. values()
+        // carries the picker's selection, which is not the active preset, so
+        // the rename body states the pointer explicitly (claunch-fhs7f.1).
+        const body = { ...values(), presets: rows };
+        body.preset = activeId === from ? to : activeId;
         renameBtn.disabled = save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = true;
         status.textContent = `프리셓 ${from}의 이름을 ${to}으로 바꾸는 중…`;
         try {
-          const data = await request("api/rag/settings", { ...values(), presets: rows, preset: to }, "PUT");
+          const data = await request("api/rag/settings", body, "PUT");
           afterSave(data);
           presetSelect.length = 0;
           for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id));
-          presetSelect.value = typeof data.preset === "string" ? data.preset : to;
+          presetSelect.value = to;
           presetCount.textContent = ` ${presets.length}/${presetMax}`;
           renameTo.value = "";
           showPreset();
-          loadPreset(presets.find(p => p.id === presetSelect.value));
-          status.textContent = `프리셓 ${from}의 이름을 ${to}으로 바꿨습니다 — 저장된 API key와 연결 값은 그대로입니다.`;
+          loadPreset(presets.find(p => p.id === to));
+          status.textContent = activeId === to
+            ? `프리셓 ${from}의 이름을 ${to}으로 바꿨습니다 — 저장된 API key와 연결 값은 그대로이고, 활성 프리셓도 ${to}입니다.`
+            : `프리셓 ${from}의 이름을 ${to}으로 바꿨습니다 — 저장된 API key와 연결 값은 그대로이고, 활성 프리셓은 ${activeId || "(없음)"} 그대로입니다.`;
         } catch (error) {
           status.textContent = `이름 변경 실패 · ${error.message}`;
         } finally { renameBtn.disabled = save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = false; }
@@ -680,7 +716,7 @@ globalThis.SearchAnything = (() => {
           presets.length = 0;
           presets.push(...data.presets);
         }
-        if (typeof data.preset === "string") presetSelect.value = data.preset;
+        if (typeof data.preset === "string") { presetSelect.value = data.preset; activeId = data.preset; }
       }
       showPreset();
       // Selecting a preset only loads its values. Activation -- the daemon

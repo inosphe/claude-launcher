@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import os
+import shutil
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 from aiohttp import web
 from .. import store, workspaces
@@ -406,6 +408,29 @@ def _rag_base(service):
     return root if root is not None else rag.paths.rag_dir()
 
 
+def _store_rows(cfg, base):
+    """Every collection on disk, marked with who reads it.
+
+    ``rag.rag_stores`` answers what exists; this adds the two facts the DB
+    panel's delete rule needs: which presets point at the store, and whether
+    the running config is the one reading it. A preset names its store with
+    ``db`` and falls back to its model identity — the same fallback
+    ``rag._index_path`` applies — so a preset written before ``db`` existed
+    shows up against the collection it actually uses (claunch-fhs7f.1).
+    """
+    rows = rag.rag_stores(base)
+    by_name = {}
+    for preset in store.rag_presets():
+        name = store.rag_model_key_slug(str(preset.get("db") or "")) or store.rag_model_key_slug(
+            str(preset.get("model_key") or "") or str(preset.get("embedding_model") or ""))
+        if name:
+            by_name.setdefault(name, []).append(preset["id"])
+    for row in rows:
+        row["presets"] = by_name.get(row["identity"] or row["model_key"], [])
+        row["in_use"] = bool(cfg.get("db")) and row["identity"] == cfg["db"]
+    return rows
+
+
 def _db_width_conflict(doc, base):
     """Why the active preset's named DB cannot hold this model's vectors.
 
@@ -634,25 +659,63 @@ def install(app):
         at a store it already has before a model swap (claunch-fhs7f.1).
         """
         cfg = service.config()
-        rows = rag.rag_stores(_rag_base(service))
-        by_name = {}
-        for preset in store.rag_presets():
-            name = store.rag_model_key_slug(str(preset.get("db") or "")) or store.rag_model_key_slug(
-                str(preset.get("model_key") or "") or str(preset.get("embedding_model") or ""))
-            if name:
-                by_name.setdefault(name, []).append(preset["id"])
-        for row in rows:
-            row["presets"] = by_name.get(row["identity"] or row["model_key"], [])
-            row["in_use"] = bool(cfg.get("db")) and row["identity"] == cfg["db"]
+        rows = _store_rows(cfg, _rag_base(service))
         return web.json_response({
             "dbs": rows,
             "active": cfg.get("db") or "",
             "model": cfg.get("embedding_model") or "",
         })
 
+    async def dbs_delete(request):
+        """Remove one collection and its sidecar.
+
+        A store a preset reads is refused, and so is the one the active
+        config reads: the vectors cannot be rebuilt without asking the
+        provider again, and the row already names its readers, so the
+        reader clears the pointer first. Deleting a collection nobody
+        reads is the only case where nothing downstream changes
+        (claunch-fhs7f.1).
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be an object"}, status=400)
+        name = str(body.get("name") or "").strip()
+        cfg = service.config()
+        row = next((r for r in _store_rows(cfg, _rag_base(service)) if r["name"] == name), None)
+        if row is None:
+            return web.json_response(
+                {"error": f"DB {name or '(이름 없음)'}을 찾지 못했습니다."}, status=400)
+        identity = row["identity"] or row["model_key"]
+        if row["presets"] or row["in_use"]:
+            readers = ", ".join(row["presets"]) if row["presets"] else "현재 활성 설정"
+            return web.json_response(
+                {"error": f"DB {identity or name}을 쓰는 곳이 있습니다: {readers} — "
+                          f"그 프리셓의 DB 이름을 먼저 바꾼 뒤 삭제하세요."}, status=400)
+        path = Path(row["path"])
+        # An open collection holds an exclusive lock on its directory, so it
+        # is closed before the directory goes -- and dropped from the table
+        # so a later open builds a fresh one rather than reusing a handle
+        # whose files are gone.
+        for key, index in list(service._indexes.items()):
+            if getattr(index, "path", None) == path:
+                service._indexes.pop(key, None)
+                index.close()
+        try:
+            shutil.rmtree(path)
+            sidecar = path.with_suffix(".meta.json")
+            if sidecar.exists():
+                sidecar.unlink()
+        except OSError as exc:
+            return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
+        return web.json_response({"deleted": name, "dbs": _store_rows(service.config(), _rag_base(service))})
+
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)
     app.router.add_get("/api/rag/dbs", dbs)
+    app.router.add_post("/api/rag/dbs/delete", dbs_delete)
     app.router.add_post("/api/rag/backfill/pause", backfill_pause)
     app.router.add_post("/api/rag/backfill/resume", backfill_resume)
     app.router.add_post("/api/rag/test", test)
