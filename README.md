@@ -3208,8 +3208,9 @@ approved separately from a plain push) and pulls another machine's
 (fast-forward only, no card). Peers are advisory throughout: with no
 relay, or a peer whose daemon predates reposync, the panel says so and still
 plans against the shared remote. HTTP: `GET
-/api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
-(`{remote, branch, local, upstream[, request]}`), `POST .../branch-push`
+/api/reposync/workspaces/<name>/status[?fetch=0][&remotes=<a,b>&basis=<a>]`,
+`POST .../sync`
+(`{remote, branch, local, upstream[, basis][, request]}`), `POST .../branch-push`
 (`{branch, force_with_lease[, request]}`), `POST .../branch-pull`
 (`{machine, branch[, remote]}`). A push without `request` answers 202 with the id of
 the card it filed; the same body with that `request` runs once the card is
@@ -3226,6 +3227,23 @@ separately. Opening the panel uses cached refs; **Refresh (fetch)** fetches
 each remote. A failed fetch retains an explicit error and marks its comparison
 as cached, while the other remotes remain visible. This analysis does not
 rebase, push, or change the selected sync remote.
+
+**Target remotes** checks which remotes every fetch, comparison and Sync in
+the panel touches; at least one stays checked, and the set is remembered per
+workspace in this browser. With two or more checked, the panel also picks a
+**basis**: the remote whose tip the local branch is brought onto first
+(fast-forward or rebase), after which the same branch is pushed to the rest in
+the order the daemon computed from the tips. A remote whose tip is not an
+ancestor of another's cannot share one local branch; the panel names the pair
+and refuses before anything runs, and a basis chosen behind another remote is
+refused for the same reason. With Run commands here the steps run one request
+at a time, each push keeping its own approval card, and a failure names the
+remotes already updated. Delegating passes the same set, basis and order to
+the child. The status answer carries `plans` (one row per checked remote),
+`selected_remotes`, `basis`, `sync_order`, `basis_error` and `incompatible`;
+an unchecked remote is neither fetched nor compared. Without `remotes` the
+panel picks one remote as before, which is what the CLI and MCP `repo_sync`
+still do.
 
 **How Sync and Push run** selects how the panel performs master sync and
 work-branch push; the line under the picker says what the chosen mode does:

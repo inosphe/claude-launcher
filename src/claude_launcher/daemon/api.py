@@ -9257,6 +9257,10 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
         return err
     name = request.match_info["name"]
     do_fetch = request.query.get("fetch", "1") not in ("0", "false", "no")
+    # The remotes the Sync panel has checked (claunch-y3tuk). Without them one
+    # remote is chosen as before, so the CLI and the MCP tool are unaffected.
+    selected = [r for r in (request.query.get("remotes") or "").replace(" ", "").split(",") if r]
+    basis = request.query.get("basis") or None
     if request.query.get("peers", "1") in ("0", "false", "no"):
         peers, problems, unreadable = {}, [], []
     else:
@@ -9265,13 +9269,16 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
         reposync_flow.workspace_status, path, name, peers, problems,
         do_fetch=do_fetch, remote=request.query.get("remote") or None,
         branch=request.query.get("branch") or None, machine=_machine_name(request),
+        remotes=selected or None, basis=basis,
     )
     if doc.get("repo"):
         doc["remote_comparisons"] = await asyncio.to_thread(
             reposync_flow.remote_comparisons, doc["repo"],
             branch=request.query.get("branch") or (doc.get("plan") or {}).get("branch"),
-            do_fetch=do_fetch,
+            # a checked set was already fetched by its plans; do not fetch twice
+            do_fetch=do_fetch and not selected,
             already_fetched=(doc.get("plan") or {}).get("remote") if do_fetch else None,
+            only=selected or None,
         )
     doc["machine"] = _machine_name(request)
     # the peers table shows these as unreadable rows (claunch-gjjdp)
@@ -9339,11 +9346,132 @@ def _ws_plan(path: str, name: str, body: dict, *, do_fetch: bool = True):
     return p, reposync_flow.plan_card(p, workspace=name, key=key)
 
 
-def _ws_execute(p: "reposync.Plan", card: dict) -> dict:
+def _ws_multi_sync_card(path: str, name: str, body: dict):
+    """The card for a sync delegated with several remotes checked
+    (claunch-y3tuk). The top-level fields are the basis plan, so the existing
+    assignment builder keeps working; ``remotes`` carries every selected
+    remote in execution order with its own tips, and ``basis`` names the one
+    the fast-forward/rebase lands on."""
+    repo = reposync.toplevel(path)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if not remotes:
+        raise reposync.SyncError("no remotes given")
+    out, _made = reposync_flow.selected_plans(
+        repo, remotes, do_fetch=False, branch=str(body.get("branch") or "") or None,
+        basis=str(body.get("basis") or "") or None, workspace=name)
+    if out.get("error"):
+        raise reposync.SyncError(out["error"])
+    if out.get("incompatible"):
+        pairs = ", ".join(f"{a} / {b}" for a, b in out["incompatible"])
+        raise reposync.SyncError(
+            "these remotes cannot share one local branch (their tips are not on "
+            f"one line): {pairs}")
+    if out.get("basis_error"):
+        raise reposync.SyncError(out["basis_error"])
+    rows = [r for r in out["plans"] if r.get("plan")]
+    if not rows:
+        raise reposync.SyncError("no plan for the selected remotes")
+    basis = out.get("basis") or rows[0]["remote"]
+    first = next((r["plan"] for r in rows if r["remote"] == basis), rows[0]["plan"])
+    ordered = [out["sync_order"].index(r["remote"]) if r["remote"] in out["sync_order"] else 99
+               for r in rows]
+    rows = [r for _i, r in sorted(zip(ordered, rows), key=lambda pair: pair[0])]
+    card = {
+        "repo": repo, "workspace": name, "basis": basis,
+        "remote": first["remote"], "remote_key": first.get("remote_key"),
+        "branch": first["branch"], "action": first["action"],
+        "local": first["local"], "upstream": first["upstream"],
+        "ahead": first.get("ahead"), "behind": first.get("behind"),
+        "source": first.get("source"),
+        "summary": f"sync {first['branch']} through {basis}, then push to "
+                   + ", ".join(r["remote"] for r in rows if r["remote"] != basis),
+        "remotes": [
+            {**{k: r["plan"].get(k) for k in
+                ("remote", "remote_key", "branch", "action", "local",
+                 "upstream", "ahead", "behind", "summary")},
+             "basis": r["remote"] == basis}
+            for r in rows
+        ],
+    }
+    return card
+
+
+def _ws_multi_publish_card(path: str, name: str, body: dict, machine: str) -> dict:
+    """The approval card for publishing one work branch to several remotes
+    (claunch-y3tuk). Every remote gets its own row and the same local tip."""
+    repo = reposync.toplevel(path)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if not remotes:
+        raise reposync.SyncError("no remotes given")
+    branch = str(body.get("branch") or "")
+    if not branch:
+        raise reposync.SyncError("branch is required")
+    names = reposync.remotes(repo)
+    unknown = [r for r in remotes if r not in names]
+    if unknown:
+        raise reposync.SyncError(f"no remote named {', '.join(unknown)}")
+    sha = reposync.git(repo, "rev-parse", "--verify", "-q",
+                       f"refs/heads/{branch}", check=False)
+    if not sha:
+        raise reposync.SyncError(f"no local branch {branch!r}")
+    target = reposync.shared_ref(machine, branch)
+    force = bool(body.get("force_with_lease"))
+    action = "publish-force" if force else "publish"
+    rows = [{
+        "remote": remote, "remote_key": reposync.url_key(names.get(remote, "")),
+        "branch": target, "action": action, "local": sha, "upstream": "",
+        "source": branch,
+        "summary": f"push {branch} {sha[:8]} to {remote}/{target}"
+                   + (" (force-with-lease)" if force else ""),
+    } for remote in remotes]
+    basis = str(body.get("basis") or "") or remotes[0]
+    return {
+        "repo": repo, "workspace": name, "basis": basis,
+        "remote": rows[0]["remote"], "remote_key": rows[0]["remote_key"],
+        "branch": target, "action": action, "local": sha, "upstream": "",
+        "source": branch,
+        "summary": f"push {branch} {sha[:8]} to {target} on "
+                   + ", ".join(r["remote"] for r in rows),
+        "remotes": rows,
+    }
+
+
+def _ws_plans_moved(card: dict, body: dict) -> bool:
+    """Whether a remote moved since the panel showed its tips. The panel
+    sends the ``plans`` it drew; an absent list is a first request.
+
+    Only the remotes the body names are compared (claunch-y3tuk): a remote
+    the panel left out is not evidence that it moved -- an up-to-date remote
+    carries no pending row -- while a named remote the card no longer has
+    was checked after the panel read the plans and is stale."""
+    shown = {str(p.get("remote")): (p.get("local"), p.get("upstream"))
+             for p in (body.get("plans") or []) if isinstance(p, dict)}
+    if not shown:
+        return False
+    now = {str(r.get("remote")): (r.get("local"), r.get("upstream"))
+           for r in card.get("remotes") or []}
+    if set(shown) - set(now):
+        return True
+    return any(tips != now[remote] for remote, tips in shown.items())
+
+
+def _ws_plan_rows(card: dict) -> list:
+    """A multi card's remotes in the shape the status answer uses for
+    ``plans`` (``{remote, key, plan}``), so a 409's fresh plans can be drawn
+    by the same code that draws the panel (claunch-y3tuk)."""
+    rows = []
+    for r in card.get("remotes") or []:
+        plan = {k: v for k, v in r.items() if k != "basis"}
+        rows.append({"remote": r.get("remote"), "key": r.get("remote_key"),
+                     "plan": plan})
+    return rows
+
+
+def _ws_execute(p: "reposync.Plan", card: dict, remember: str = "") -> dict:
     # the daemon has no session scratch of its own; its rebase worktrees live
     # under the daemon directory, never in the workspace
     result = reposync.execute(p, scratch=str(paths.daemon_dir() / "reposync-scratch"))
-    reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, p.remote, check=False)
+    reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, remember or p.remote, check=False)
     board = []
     if result.rewritten:
         board = reposync_flow.annotate_board(p.repo, result.rewritten, remote=p.remote, branch=p.branch)
@@ -9357,14 +9485,24 @@ async def h_reposync_ws_agent_preview(request: web.Request) -> web.Response:
         return err
     body = await _json_body(request)
     name = request.match_info["name"]
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
     try:
         if body.get("kind") == "sync":
-            p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
-            if p.local != body.get("local") or p.upstream != body.get("upstream"):
-                return json_response({"error": "The plan changed; refresh Sync before previewing.",
-                                      "stale": True, "plan": card}, status=409)
+            if remotes:
+                card = await asyncio.to_thread(_ws_multi_sync_card, path, name, body)
+                if _ws_plans_moved(card, body):
+                    return json_response(
+                        {"error": "The plans changed; refresh Sync before previewing.",
+                         "stale": True, "plans": _ws_plan_rows(card)}, status=409)
+            else:
+                p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
+                if p.local != body.get("local") or p.upstream != body.get("upstream"):
+                    return json_response({"error": "The plan changed; refresh Sync before previewing.",
+                                          "stale": True, "plan": card}, status=409)
         elif body.get("kind") == "push":
-            card = await asyncio.to_thread(_ws_publish_card, path, name, body, _machine_name(request))
+            card = await asyncio.to_thread(
+                _ws_multi_publish_card if remotes else _ws_publish_card,
+                path, name, body, _machine_name(request))
         else:
             return json_error(400, "kind must be sync or push")
     except reposync.SyncError as exc:
@@ -9504,6 +9642,26 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
         mode = await _ws_agent_options(request, body, path)
     except (ValueError, ManagerError) as exc:
         return json_error(400, str(exc))
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if remotes:
+        # A checked set runs one remote per request in commands mode: each
+        # push keeps its own approval card and its own tips (claunch-y3tuk).
+        if mode != "agent":
+            return json_error(
+                400, "commands mode runs one remote per request -- send one "
+                     "request per remote, basis first")
+        try:
+            card = await asyncio.to_thread(
+                _ws_multi_sync_card, path, request.match_info["name"], body)
+        except reposync.SyncError as exc:
+            return json_error(409, str(exc))
+        active = _ws_active_agent(request, card, mode)
+        if active is not None:
+            return active
+        if _ws_plans_moved(card, body):
+            return json_response({"error": "a remote moved since its plan was shown",
+                                  "stale": True, "plans": _ws_plan_rows(card)}, status=409)
+        return await _ws_start_agent(request, card, body)
     try:
         p, card = await asyncio.to_thread(_ws_plan, path, request.match_info["name"], body)
     except reposync.SyncError as exc:
@@ -9525,12 +9683,15 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
             return answer
         approval = _ws_approval(request, str(body.get("request") or ""))
 
+    # the basis is what the next CLI/MCP call should find, not the last mirror
+    remember = str(body.get("basis") or "")
+
     def run() -> dict:
         # history_entry runs git (repo_identity), so it stays off the event loop
         entry = reposync_flow.history_entry(
             p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
             branch=p.branch, by="web", approval=approval)
-        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card),
+        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card, remember),
                                       reposync_flow.master_done(p))
 
     try:
@@ -9589,8 +9750,15 @@ async def _h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     if not str(body.get("branch") or ""):
         return json_error(400, "branch is required")
     machine = _machine_name(request)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if remotes and mode != "agent":
+        return json_error(
+            400, "commands mode publishes to one remote per request -- send "
+                 "one request per remote")
     try:
-        card = await asyncio.to_thread(_ws_publish_card, path, request.match_info["name"], body, machine)
+        card = await asyncio.to_thread(
+            _ws_multi_publish_card if remotes else _ws_publish_card,
+            path, request.match_info["name"], body, machine)
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
     active = _ws_active_agent(request, card, mode)

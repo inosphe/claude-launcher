@@ -1553,3 +1553,171 @@ def test_pause_route_reports_the_sync_session_holding_the_repository(world, monk
         assert resp.status == 400
 
     _with_app(body)
+
+
+# --------------------------------------------------------------------------- #
+# several remotes at once (claunch-y3tuk)
+# --------------------------------------------------------------------------- #
+def _mirror(world, tmp_path):
+    """A second bare remote with the same history, fetched as ``mirror``."""
+    mirror = tmp_path / "mirror.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(world["remote"]), str(mirror)],
+                   check=True)
+    _git(world["a"], "remote", "add", "mirror", str(mirror))
+    _git(world["a"], "fetch", "-q", "mirror")
+    return mirror
+
+
+def test_status_plans_each_checked_remote_and_orders_the_basis_first(world, tmp_path):
+    """The checked set is planned one remote at a time; the newest tip is the
+    basis and the others follow as pushes (claunch-y3tuk). An unchecked
+    remote is neither planned nor fetched into the comparison table."""
+    _mirror(world, tmp_path)
+    _git(world["a"], "remote", "add", "unused", "https://git.example/unused/repo")
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+
+    async def body(client):
+        resp = await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror", headers=AUTH)
+        assert resp.status == 200
+        doc = await resp.json()
+        assert doc["selected_remotes"] == ["origin", "mirror"]
+        rows = {r["remote"]: r for r in doc["plans"]}
+        assert set(rows) == {"origin", "mirror"}
+        assert rows["origin"]["plan"]["action"] == "ff"
+        assert rows["mirror"]["plan"]["action"] == "up-to-date"
+        assert doc["basis"] == "origin", "the newest tip is the basis"
+        assert doc["sync_order"] == ["origin", "mirror"]
+        assert doc["incompatible"] == []
+        assert doc["plan"]["remote"] == "origin", "the basis plan is the legacy field"
+        # an unchecked remote is absent from the comparison table
+        assert [r["remote"] for r in doc["remote_comparisons"]] == ["origin", "mirror"]
+
+    _with_app(body)
+
+
+def test_status_names_remotes_that_are_not_on_one_line(world, tmp_path):
+    mirror = _mirror(world, tmp_path)
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+    c = _clone(mirror, tmp_path / "c", "origin")
+    _commit(c, "mirror-side.txt")
+    _git(c, "push", "-q", str(mirror), "master")
+
+    async def body(client):
+        doc = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror",
+            headers=AUTH)).json()
+        assert doc["incompatible"] == [["origin", "mirror"]]
+        assert doc["sync_order"] == [] and doc["basis"] == ""
+        assert doc["plan_error"]
+
+    _with_app(body)
+
+
+def test_checked_remotes_converge_basis_first_then_push(world, tmp_path, monkeypatch):
+    """Run what the panel would run: fast-forward onto the basis, then push
+    the same master to the mirror. Both remotes end level."""
+    from claude_launcher import reposync_flow
+
+    mirror = _mirror(world, tmp_path)
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+    monkeypatch.setattr(reposync_flow, "approval_mode", lambda: reposync_flow.AUTO)
+
+    async def body(client):
+        url = "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror"
+        doc = await (await client.get(url, headers=AUTH)).json()
+        first = next(r["plan"] for r in doc["plans"] if r["remote"] == "origin")
+        assert first["action"] == "ff"
+        resp = await client.post(
+            "/api/reposync/workspaces/proj/sync", headers=AUTH,
+            json={**{k: first[k] for k in ("remote", "branch", "local", "upstream")},
+                  "basis": "origin"})
+        assert resp.status == 200, await resp.text()
+        doc = await (await client.get(url, headers=AUTH)).json()
+        second = next(r["plan"] for r in doc["plans"] if r["remote"] == "mirror")
+        assert second["action"] == "push", "the mirror is behind the synced master"
+        resp = await client.post(
+            "/api/reposync/workspaces/proj/sync", headers=AUTH,
+            json={**{k: second[k] for k in ("remote", "branch", "local", "upstream")},
+                  "basis": "origin"})
+        assert resp.status == 200, await resp.text()
+        doc = await (await client.get(url, headers=AUTH)).json()
+        assert all(r["plan"]["action"] == "up-to-date" for r in doc["plans"])
+        assert _git(mirror, "rev-parse", "master") == _git(world["remote"], "rev-parse", "master")
+        assert (_git(world["a"], "config", "--get", "claunch.reposync.remote")
+                == "origin"), "the basis, not the last mirror, is the remembered remote"
+
+    _with_app(body)
+
+
+def test_agent_preview_carries_the_checked_remotes_and_the_basis(world, tmp_path):
+    _mirror(world, tmp_path)
+
+    async def body(client):
+        doc = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror",
+            headers=AUTH)).json()
+        plans = [{"remote": r["remote"], "local": r["plan"]["local"],
+                  "upstream": r["plan"]["upstream"]} for r in doc["plans"]]
+        body = {"kind": "sync", "agent_mode": "agent", "remotes": ["origin", "mirror"],
+                "basis": "origin", "branch": doc["plan"]["branch"], "plans": plans,
+                "local": doc["plan"]["local"], "upstream": doc["plan"]["upstream"],
+                "remote": doc["plan"]["remote"]}
+        resp = await client.post(
+            "/api/reposync/workspaces/proj/agent-preview", headers=AUTH, json=body)
+        assert resp.status == 200, await resp.text()
+        out = await resp.json()
+        assert out["plan"]["basis"] == "origin"
+        assert [r["remote"] for r in out["plan"]["remotes"]] == ["origin", "mirror"]
+        assert out["plan"]["remotes"][0]["basis"] is True
+        assert "Selected remotes, in execution order" in out["prompt"]
+        assert "Basis: origin." in out["prompt"]
+        assert "mirror" in out["prompt"]
+
+    _with_app(body)
+
+
+def test_a_checked_remote_already_level_does_not_read_as_a_stale_plan(world, tmp_path):
+    """Two checked remotes where one is already level is the ordinary case
+    (the basis is the newest tip, so once the local branch is on it the basis
+    is up to date). The panel sends every checked remote's tips; a remote it
+    left out is not evidence that it moved, and a 409's fresh plans must be
+    drawable by the same code as the panel's (claunch-y3tuk, CHANGES
+    REQUESTED @ 90bf09d4)."""
+    _mirror(world, tmp_path)
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+
+    async def body(client):
+        doc = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror",
+            headers=AUTH)).json()
+        actions = {r["remote"]: r["plan"]["action"] for r in doc["plans"]}
+        assert actions == {"origin": "ff", "mirror": "up-to-date"}, actions
+        tips = [{"remote": r["remote"], "local": r["plan"]["local"],
+                 "upstream": r["plan"]["upstream"]} for r in doc["plans"]]
+        base = {"kind": "sync", "agent_mode": "agent", "remotes": ["origin", "mirror"],
+                "basis": "origin", "branch": doc["plan"]["branch"],
+                "local": doc["plan"]["local"], "upstream": doc["plan"]["upstream"],
+                "remote": doc["plan"]["remote"]}
+        url = "/api/reposync/workspaces/proj/agent-preview"
+        # every checked remote's tips, including the one already level
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": tips})
+        assert resp.status == 200, await resp.text()
+        # a subset (the pending rows only) is not a false stale either
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": tips[:1]})
+        assert resp.status == 200, await resp.text()
+        # a tip that moved is stale, and the fresh plans are status-shaped
+        moved = [{**tips[0], "upstream": "0" * 40}, tips[1]]
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": moved})
+        assert resp.status == 409, await resp.text()
+        out = await resp.json()
+        rows = out["plans"]
+        assert [r["remote"] for r in rows] == ["origin", "mirror"], rows
+        assert all(set(r) >= {"remote", "key", "plan"} for r in rows), rows
+        assert rows[0]["plan"]["action"] in ("ff", "push", "rebase", "up-to-date"), rows[0]["plan"]
+
+    _with_app(body)
