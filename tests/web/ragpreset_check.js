@@ -114,10 +114,13 @@ check("pending above zero means running",
       api.stateLine([{ kind: "sessions", pending: 12, total: 200 }],
                     { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
       { state: "running", text: "소급 임베딩 진행 중 · 남은 문서 12 / 200건" });
-check("no index rows at all means idle",
+check("no index rows under a preset says that preset has no index yet",
       api.stateLine([], { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
+      { state: "idle", text: "프리셓 qwen8b의 색인은 아직 없습니다 — 소급 임베딩이 시작되면 진행률이 여기에 표시됩니다." });
+check("no index rows with no active record means idle",
+      api.stateLine([], null),
       { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
-check("zero total on every row means idle",
+check("zero total on every row with no active record means idle",
       api.stateLine([{ kind: "sessions", pending: 0, total: 0 }], null),
       { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
 check("a finished backfill with an active record appends the active line",
@@ -242,6 +245,58 @@ check("the preset row keeps the picker, count and delete button on one line",
       [true, true]);
 check("the stylesheet ships the selftest result line rule",
       css.includes(".search-settings .rag-selftest-result"), true);
+
+/* ---- claunch-fhs7f.1: what a save writes, renaming, and named stores ----- */
+check("the save button says it saves the selected preset",
+      src.includes('node("button", "선택한 프리셓 저장")'),
+      true);
+check("the save result names the row it overwrote",
+      src.includes("을 덮어써 저장했습니다"),
+      true);
+check("a rename control sits with the presets and refuses a taken name",
+      [src.includes('node("button", "이름 변경")'), src.includes("이미 있습니다 — 다른 이름을 쓰세요.")],
+      [true, true]);
+check("a rename carries the old id so the daemon can move the saved secret",
+      src.includes("renamed_from: from"),
+      true);
+check("a rename moves the active pointer only when that preset was the active one",
+      [src.includes("body.preset = activeId === from ? to : activeId"),
+       src.includes('request("api/rag/settings", body, "PUT")')],
+      [true, true]);
+check("the card tracks the active preset apart from the picker's selection",
+      [src.includes('let activeId = typeof cfg.preset === "string" ? cfg.preset : ""'),
+       src.includes("presetSelect.value = data.preset; activeId = data.preset;")],
+      [true, true]);
+check("a rename says whether the active preset moved",
+      [src.includes("활성 프리셓도 ${to}입니다"), src.includes("그대로입니다")],
+      [true, true]);
+check("the preset row carries a DB name field",
+      [src.includes('dbInput.placeholder = "DB 이름 (비우면 모델 이름에서 유도)"'),
+       slice("editedPreset").includes("if (db) preset.db = db;")],
+      [true, true]);
+check("selecting a preset restores its DB name",
+      slice("loadPreset").includes('dbInput.value = p.db || "";'),
+      true);
+check("the card lists the DBs the daemon has on disk",
+      [src.includes('request("api/rag/dbs", undefined, "GET")'), src.includes("loadDbs();")],
+      [true, true]);
+check("a DB row carries a delete control that asks first",
+      [src.includes('node("button", "삭제", "rag-db-delete")'), src.includes("window.confirm(`DB ${name}")],
+      [true, true]);
+check("a DB a preset reads cannot be deleted — the button is disabled and says why",
+      [src.includes("del.disabled = occupied"),
+       src.includes("이 DB를 쓰는 프리셓이 있어 삭제할 수 없습니다")],
+      [true, true]);
+check("deleting a DB posts its directory name and reloads the list",
+      [src.includes('request("api/rag/dbs/delete", { name: row.name }, "POST")'), src.includes("await loadDbs();")],
+      [true, true]);
+check("the stylesheet ships the rename, db and list rules",
+      [css.includes(".search-settings .rag-preset-rename"),
+       css.includes(".search-settings .rag-preset-db"),
+       css.includes(".search-settings .rag-db-list"),
+       css.includes(".search-settings .rag-db-entry"),
+       css.includes(".search-settings .rag-db-delete")],
+      [true, true, true, true, true]);
 
 if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
 console.log("ragpreset ok");

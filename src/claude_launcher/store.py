@@ -1194,6 +1194,12 @@ RAG_DEFAULTS = {
     #: Derived, never read from the file: the identity key the vector
     #: stores are kept under (see :func:`rag_model_key_slug`).
     "model_key": "",
+    #: Derived, never read from the file: the collection a preset points at.
+    #: A preset names one with its own ``db`` field; without one this is the
+    #: preset's ``model_key``, which is the pre-``db`` behavior. Keeping the
+    #: two apart lets a preset be renamed, or its model swapped, without
+    #: moving its vectors (claunch-fhs7f.1).
+    "db": "",
     #: Derived, never read from the file: why ``source: profile`` resolved
     #: to no endpoint (empty when it did, or when the source is ``custom``).
     "profile_error": "",
@@ -1234,10 +1240,12 @@ RAG_MAX_PRESETS = 20
 #: vector stores are kept under; empty means "derive it from
 #: ``embedding_model``" -- set it explicitly when two presets reach the same
 #: real model through different providers or name aliases and should share
-#: one store (claunch-7m5v8).
+#: one store (claunch-7m5v8). ``db`` names the collection directly and wins
+#: over ``model_key`` when set: a preset can then change model or be renamed
+#: and still read the vectors it already has (claunch-fhs7f.1).
 RAG_PRESET_FIELDS = (
     "source", "profile", "base_url", "api_key",
-    "embedding_model", "rerank_model", "model_key",
+    "embedding_model", "rerank_model", "model_key", "db",
 )
 
 #: A model key stays short enough for a directory name.
@@ -1264,7 +1272,14 @@ def clean_rag_preset(raw: object) -> Optional[dict]:
     not the picker. Values are stripped strings, and an absent one is
     simply absent. ``source`` is ``"profile"`` only when it says so.
     ``root_serving`` is the one boolean: true only when the stored row
-    says exactly that (claunch-rag-preset-always-hn5bc.1).
+    says exactly that (claunch-rag-preset-always-hn5bc.1). ``db`` is stored
+    as a store slug, the same shape :func:`rag_model_key_slug` gives a
+    model name, because it becomes a directory name (claunch-fhs7f.1).
+
+    ``renamed_from`` is a **save-time hint, not a stored field**: the card
+    sets a preset's id and puts the old one here, and the caller uses it to
+    carry the saved secret over. Callers must drop it before writing the row
+    back -- a stored ``renamed_from`` would claim the row was just renamed.
     """
     if not isinstance(raw, dict):
         return None
@@ -1272,6 +1287,9 @@ def clean_rag_preset(raw: object) -> Optional[dict]:
     if not RAG_PRESET_ID_RE.match(preset_id):
         return None
     out: dict = {"id": preset_id}
+    renamed_from = str(raw.get("renamed_from") or "").strip()
+    if renamed_from and renamed_from != preset_id and RAG_PRESET_ID_RE.match(renamed_from):
+        out["renamed_from"] = renamed_from
     if raw.get("root_serving") is True:
         out["root_serving"] = True
     for field in RAG_PRESET_FIELDS:
@@ -1283,6 +1301,13 @@ def clean_rag_preset(raw: object) -> Optional[dict]:
             # the custom connection anyway -- keep only what is meaningful
             if value.lower() == "profile":
                 out[field] = "profile"
+            continue
+        if field == "db":
+            # A directory name: refuse anything that slugs to nothing rather
+            # than keeping a value the path builder cannot use.
+            slug = rag_model_key_slug(value)
+            if slug:
+                out[field] = slug
             continue
         out[field] = value
     return out
@@ -1528,6 +1553,10 @@ def rag_config(doc: Optional[dict] = None) -> dict:
             out[key] = str(preset_row.get(key) or "").strip()
         given = str(preset_row.get("model_key") or "").strip()
         out["model_key"] = rag_model_key_slug(given or out["embedding_model"])
+        # The collection this preset reads and writes. ``db`` on the row wins;
+        # otherwise it is the model identity, which is what every preset
+        # written before ``db`` existed meant (claunch-fhs7f.1).
+        out["db"] = rag_model_key_slug(str(preset_row.get("db") or "")) or out["model_key"]
     else:
         out["source"] = "profile" if block.get("source") == "profile" else "custom"
         rows = rag_source_rows(block)
@@ -1535,6 +1564,7 @@ def rag_config(doc: Optional[dict] = None) -> dict:
             source = "profile" if key == "profile" else out["source"]
             out[key] = str(rows[source].get(key) or "").strip()
         out["model_key"] = ""
+        out["db"] = ""
     out["profile_error"] = ""
     # The /v1 correction's opt-out (claunch-rag-preset-always-hn5bc.1): a
     # root-serving endpoint (TEI) says so on the preset row in force, or on

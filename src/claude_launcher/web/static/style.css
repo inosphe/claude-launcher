@@ -8505,6 +8505,13 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings .rag-preset-row { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
 .search-settings .rag-preset-state { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
 .search-settings .rag-selftest-result { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
+/* Rename and the named-store line (claunch-fhs7f.1) — a row of controls
+   under the picker, and the list of collections the daemon has on disk. */
+.search-settings .rag-preset-rename { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
+.search-settings .rag-preset-db { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
+.search-settings .rag-db-list { display: flex; flex-direction: column; gap: 2px; color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
+.search-settings .rag-db-entry { display: flex; align-items: center; gap: 6px; margin: 0; }
+.search-settings .rag-db-delete { font-size: 11px; padding: 1px 6px; }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
 @media (max-width: 820px) {
   .search-anything input { font-size: 16px; height: 36px; }

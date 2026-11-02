@@ -1732,3 +1732,312 @@ def test_selftest_route_reports_the_sample_against_the_threshold(tmp_path):
     asyncio.run(run())
 
 
+
+
+# -- claunch-fhs7f.1: renaming a preset, and a preset that names its store ----
+
+
+def _write_store(base, name, *, dims, model, model_key=""):
+    """A collection directory plus the sidecar a preset has to match."""
+    path = base / f"{name}.zvec"
+    path.mkdir(parents=True, exist_ok=True)
+    meta = {"format": rag.FORMAT, "model": model, "model_key": model_key,
+            "dims": dims, "signature": "", "updated_at": "2026-11-02T00:00:00Z"}
+    path.with_suffix(".meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_renaming_a_preset_carries_the_saved_secret_and_stores_no_hint(tmp_path):
+    """The id names the row AND files the secret — a rename must move it.
+
+    Without ``renamed_from`` the save looks up the secret under an id nobody
+    has written yet and the API key is silently dropped (claunch-fhs7f.1).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            preset = {"id": "old-name", "source": "custom", "base_url": "http://h:1/v1",
+                      "api_key": "kept-secret", "embedding_model": "emb-a"}
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [preset], "preset": "old-name"})
+            assert response.status == 200
+            assert store.rag_presets()[0]["api_key"] == "kept-secret"
+
+            renamed = {**preset, "id": "new-name", "api_key": "",
+                       "renamed_from": "old-name"}
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [renamed], "preset": "new-name"})
+            assert response.status == 200
+            body = await response.json()
+            assert [p["id"] for p in body["presets"]] == ["new-name"]
+            assert body["preset"] == "new-name"
+            stored = store.rag_presets()
+            assert stored[0]["id"] == "new-name"
+            assert stored[0]["api_key"] == "kept-secret"
+            # the hint is a save-time input, not a field that lands on disk
+            assert "renamed_from" not in stored[0]
+            assert "renamed_from" not in json.dumps(store.load())
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_preset_named_db_decides_the_collection_path(tmp_path):
+    """``db`` wins over ``model_key``, and an absent one keeps the old rule."""
+    service = rag.RagService(root_dir=tmp_path)
+    base = tmp_path
+    assert service._index_path(base, "sessions", {"db": "kept", "model_key": "m1"}) == base / "sessions.kept.zvec"
+    assert service._index_path(base, "sessions", {"model_key": "m1"}) == base / "sessions.m1.zvec"
+    assert service._index_path(base, "sessions", {}) == base / "sessions.zvec"
+
+    block = {"preset": "p", "presets": [{"id": "p", "source": "custom",
+                                         "base_url": "http://h:1/v1", "api_key": "k",
+                                         "embedding_model": "emb-a", "db": "Shared DB"}]}
+    cfg = store.rag_config({"rag": block})
+    assert cfg["db"] == "shared-db"          # stored as a directory-safe slug
+    assert cfg["model_key"] == "emb-a"       # the model identity is unchanged
+
+    block["presets"][0].pop("db")
+    cfg = store.rag_config({"rag": block})
+    assert cfg["db"] == "emb-a"              # no db: the model identity stands in
+
+
+def test_a_named_db_that_cannot_hold_the_models_width_is_refused(tmp_path):
+    """The save is where a 4096-vs-768 mismatch is caught, not the query."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        # the model this preset uses has built a 768-dimension collection
+        _write_store(base, "sessions.emb-a", dims=768, model="emb-a")
+        # and the DB it now names holds 4096-dimension vectors
+        _write_store(base, "sessions.wide", dims=4096, model="old-model", model_key="wide")
+        block = dict(_cfg(server, watch_interval=0))
+        block.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "wide"}],
+        })
+        store.save({"rag": block})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                             "api_key": "rag-secret", "embedding_model": "emb-a", "db": "wide"}],
+                "preset": "p",
+            })
+            assert response.status == 400
+            error = (await response.json())["error"]
+            assert "4096" in error and "768" in error and "wide" in error
+
+            # the same model against a DB of its own width saves
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                             "api_key": "rag-secret", "embedding_model": "emb-a",
+                             "db": "emb-a"}],
+                "preset": "p",
+            })
+            assert response.status == 200
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_the_dbs_route_lists_collections_and_the_presets_that_read_them(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.emb-a", dims=768, model="emb-a")
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "kept"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/api/rag/dbs")
+            assert response.status == 200
+            body = await response.json()
+            rows = {row["name"]: row for row in body["dbs"]}
+            assert set(rows) == {"sessions.emb-a", "sessions.kept"}
+            assert rows["sessions.kept"]["dims"] == 768
+            assert rows["sessions.kept"]["presets"] == ["p"]
+            assert rows["sessions.kept"]["in_use"] is True
+            assert rows["sessions.emb-a"]["presets"] == []
+            assert rows["sessions.emb-a"]["in_use"] is False
+            assert body["active"] == "kept"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_collection_refuses_readers_and_removes_the_rest(tmp_path):
+    """A store a preset reads stays; one nobody reads goes, sidecar included.
+
+    Deleting a collection whose vectors a preset answers from would make
+    that preset rebuild them from the provider, so the readers are named and
+    the delete is refused until the preset points elsewhere
+    (claunch-fhs7f.1).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        _write_store(base, "sessions.orphan", dims=768, model="emb-a", model_key="orphan")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "kept"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions.kept"})
+            assert refused.status == 400
+            error = (await refused.json())["error"]
+            assert "kept" in error and "p" in error
+            assert (base / "sessions.kept.zvec").is_dir()
+
+            removed = await client.post("/api/rag/dbs/delete", json={"name": "sessions.orphan"})
+            assert removed.status == 200
+            body = await removed.json()
+            assert body["deleted"] == "sessions.orphan"
+            assert [row["name"] for row in body["dbs"]] == ["sessions.kept"]
+            assert not (base / "sessions.orphan.zvec").exists()
+            assert not (base / "sessions.orphan.meta.json").exists()
+
+            missing = await client.post("/api/rag/dbs/delete", json={"name": "no-such-db"})
+            assert missing.status == 400
+            assert "no-such-db" in (await missing.json())["error"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_a_preset_adopts_is_refused(tmp_path):
+    """The pre-preset ``<corpus>.zvec`` is adopted, not named.
+
+    Its sidecar carries no ``model_key`` and the directory carries no
+    identity suffix, so a name-based pairing found no reader beside it and
+    the delete removed a collection the preset was answering from
+    (claunch-fhs7f.1 review). The reader is the path ``_index_path`` would
+    open, which is where the adoption rule lives.
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb-a")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == ["p"]
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "p" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_the_direct_config_reads_is_refused(tmp_path):
+    """A config with no preset reads the legacy store when its model matches.
+
+    ``db`` is empty on the legacy branch, so the guard cannot ask
+    ``cfg.db`` alone — the resolved path says the running service is on that
+    collection (claunch-fhs7f.1 review).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb")
+        store.save({"rag": _cfg(server, watch_interval=0)})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == []
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "sessions" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
