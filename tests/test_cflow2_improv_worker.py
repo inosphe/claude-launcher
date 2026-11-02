@@ -3697,6 +3697,78 @@ def test_a_local_fallback_warns_the_person_before_the_branch_can_be_lost():
     assert "local-warning" in setup
 
 
+def _local_warning_flow(landing, tmp_path):
+    """`land`'s local-warning branch as a workflow of its own (claunch-ijkge.2).
+
+    The medium is decided by the round's `remote-setup` task -- an agent reads
+    the gh preflight -- so a test cannot make gh logged out. What it can do is
+    seed the decision that follows, which is where this warning lives. The
+    condition and the node come from the definition, so what is measured is
+    the engine's routing plus the reason reaching the warning text.
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    warn = _find_id(submit, "local-warning")
+    flow = {
+        "cflow": 2,
+        "name": "local-warning-flow",
+        "params": {"mode": {"default": "full"}},
+        "inputs": {"force_pr": {"type": "bool", "default": False},
+                   "force_no_pr": {"type": "bool", "default": False}},
+        "nodes": {"pr-local-notice": doc["nodes"]["pr-local-notice"],
+                  "after": {"prompt": "after"}},
+        "data": {"landing": landing, "claim": {"issue": "claunch-x"}},
+        "body": [warn, "after"],
+    }
+    return compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                        resolve_include=layers.resolver(str(tmp_path)))
+
+
+def test_a_local_landing_without_a_pr_leaves_a_warning_the_person_can_see(
+        tmp_path, monkeypatch):
+    """claunch-ijkge.2: a round that cannot publish a PR lands on a branch that
+    exists only in this machine's checkout, so it has to say so -- reason
+    included -- in a task the round actually runs. The structure test above
+    pins the branch; this one pins that the branch fires and carries the
+    reason, which is the part a person depends on."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reason = "gh not logged in"
+    chart = _local_warning_flow({"medium": "local", "reason": reason}, tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0)
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["pr-local-notice"]
+    prompt = _words(st["tasks"][0]["prompt"])
+    assert reason in prompt            # the failure reaches the person
+    assert "유실" in prompt            # next to what the local branch can lose
+    assert "gh auth login" in prompt   # and how to make the copy durable
+    assert "thread_open" in prompt     # through the channel they watch
+
+
+def test_a_person_who_chose_local_is_not_warned_about_the_branch(
+        tmp_path, monkeypatch):
+    """`force_no_pr` is the person's own answer. Warning them about the risk
+    of the option they picked would be the round arguing with that answer, so
+    the branch is gated on the switch too (not only on `medium == 'local'`)."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _local_warning_flow({"medium": "local", "reason": "user chose local"},
+                                tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0,
+                       inputs={"force_no_pr": True})
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["after"]
+
+
+def test_a_pr_landing_raises_no_local_warning(tmp_path, monkeypatch):
+    """The warning belongs to the fallback, not to every round: a round whose
+    landing record already says `pr` must not tell the person to run
+    `gh auth login`."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _local_warning_flow({"medium": "pr", "reason": "gh ok"}, tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0)
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["after"]
+
+
 def test_a_blocked_request_does_not_push_a_landing_row():
     """``_queue_triggers`` runs on every outcome (runtime._complete's
     ``-> triggers (at leave)``), so a ``when`` reading only ``relation``
