@@ -101,10 +101,16 @@ let reply = null;
 let confirmAnswer = true;
 let gateRefreshed = 0;
 let badgesRefreshed = 0;   // the row badges re-read after a sync that ran (claunch-gax44)
+const storage = {};
 const ctx = {
   el, renderWorkspaces() {}, wsOpen: true,
   Option: function (text, value) { return { tag: "option", text, value, children: [] }; },
   document: { createTextNode: (t) => ({ tag: "#text", text: t, children: [] }) },
+  localStorage: {
+    getItem: (k) => (Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null),
+    setItem: (k, v) => { storage[k] = String(v); },
+  },
+  URLSearchParams,
   confirm: (msg) => { calls.push({ confirm: msg }); return confirmAnswer; },
   setTimeout: (fn) => { timers.push(fn); },
   refreshReposyncGate: () => { gateRefreshed++; },
@@ -122,9 +128,14 @@ vm.runInContext(
   [constant("wsSyncOpen"), constant("wsSyncState"), constant("WS_SYNC_LABEL"),
    constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
    constant("WS_HISTORY_KIND"), constant("WS_SYNC_MODE_NOTE"), constant("WS_UNMERGED_SHOWN"),
-   ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
+   constant("WS_SYNC_REMOTES_KEY"), constant("WS_SYNC_BASIS_KEY"),
+   ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncSendNow", "wsSyncPoll",
+       "wsSyncWait", "wsSyncRun", "wsSyncStep", "wsSyncPending", "wsSyncOrdered",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
+       "wsSyncRemoteComparisons", "wsSyncRemotePicker", "wsSyncPanel", "wsSyncPullBody",
+       "wsSyncShared", "wsSyncUnmerged", "wsSyncSaved", "wsSyncSave", "wsSyncSavedBasis",
+       "wsSyncRemoteNames", "wsSyncPlanFor", "wsSyncInitSelection", "wsSyncToggleRemote",
+       "wsSyncToggleBasis",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
        "wsSyncWhyDisabled", "wsSyncButtonRow", "commitRef", "commitText"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncParentNote", "wsSyncPromptText",
@@ -229,8 +240,9 @@ async function tick() {
   nodes = walk(ctx.wsSyncResult(st.result)).map(deep);
   assert.ok(nodes.includes("done: master = dddddddd (pushed)"));
   assert.ok(nodes.includes("restack s1-x: git rebase --onto d a s1-x"));
-  assert.equal(calls[calls.length - 1].url, "/api/reposync/workspaces/proj/status?fetch=0",
-               "the status is read again after a sync");
+  assert.equal(calls[calls.length - 1].url,
+               "/api/reposync/workspaces/proj/status?fetch=0&remotes=origin&basis=origin",
+               "the status is read again after a sync, for the checked remote");
   assert.equal(badgesRefreshed, 1, "the row badges are read again after a sync that ran");
 
   /* ---- rejected: nothing sent again, and the panel says so -------------- */
@@ -541,5 +553,84 @@ async function tick() {
     {remote: "empty", branch: "master", state: "missing-tracking", ahead: null, behind: null, fetched: true},
   ]})).map(deep).join("\n");
   for (const text of ["origin/master", "local can fast-forward", "ahead 0 · behind 3", "Diverged", "fetch failed", "freshness unverified", "No remote-tracking branch", "ahead — · behind —"]) assert.ok(remoteText.includes(text), text);
+  /* ---- several remotes (claunch-y3tuk): checkboxes, basis, order -------- */
+  const PLAN_MIRROR = { ...PLAN, remote: "mirror",
+    remote_key: "git.example/m/p", action: "push", ahead: 1, behind: 0,
+    summary: "push 1 commit(s) to mirror/master" };
+  const DOC_MULTI = {
+    ...DOC, fetched: true,
+    remotes: { "git.example/o/p": "origin", "git.example/m/p": "mirror" },
+    plans: [
+      { remote: "origin", key: "git.example/o/p", plan: PLAN },
+      { remote: "mirror", key: "git.example/m/p", plan: PLAN_MIRROR },
+    ],
+    selected_remotes: ["origin", "mirror"],
+    basis: "origin", sync_order: ["origin", "mirror"], incompatible: [],
+    plan: PLAN,
+  };
+  st.doc = DOC_MULTI;
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  st.agentMode = "commands";
+  st.remoteNote = "";
+  nodes = walk(ctx.wsSyncPanel(W));
+  const checks = nodes.filter((n) => n.cls === "ws-sync-remote-box");
+  assert.equal(checks.length, 2, "one checkbox per remote");
+  assert.ok(checks.every((n) => n.checked), "the seeded set is checked");
+  const basisPick = nodes.find((n) => (n.attrs || {})["aria-label"] === "Basis remote");
+  assert.equal(basisPick.value, "origin");
+  const orderText = nodes.map(deep).join("\n");
+  assert.ok(orderText.includes("1. origin (basis) — rebase"), "the basis runs first");
+  assert.ok(orderText.includes("2. mirror — push"), "the mirror is pushed to after it");
+  assert.ok(nodes.some((n) => n.text === "Sync 2 remotes"), "the button names the set");
+  // the last checked remote springs back instead of emptying the set
+  st.remotes = ["origin"];
+  st.basis = "origin";
+  ctx.wsSyncToggleRemote("proj", "origin", false);
+  assert.deepEqual(st.remotes, ["origin"], "the last checked remote stays checked");
+  assert.match(st.remoteNote, /At least one/);
+
+  // two checked: one request per remote, basis first, status read between
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  st.remoteNote = "";
+  calls.length = 0;
+  reply = (url) => url.endsWith("/sync")
+    ? { status: 200, body: { ok: true, plan: PLAN, new: "d".repeat(40), pushed: true } }
+    : { status: 200, body: JSON.parse(JSON.stringify(DOC_MULTI)) };
+  await ctx.wsSyncRun("proj");
+  const syncPosts = posts().filter((p) => p.url.endsWith("/sync"));
+  assert.deepEqual(syncPosts.map((p) => p.body.remote), ["origin", "mirror"],
+                   "the basis is synced first, then the mirror");
+  assert.equal(syncPosts[0].body.basis, "origin");
+  assert.ok(calls.some((c) => c.url.includes("remotes=origin,mirror")),
+            "the checked set travels in the status query");
+  assert.ok(calls.filter((c) => c.url.includes("/status")).length >= 3,
+            "the status is read again between remotes");
+
+  // an incompatible pair refuses before anything runs
+  st.doc = { ...DOC_MULTI, incompatible: [["origin", "mirror"]], sync_order: [], basis: "" };
+  calls.length = 0;
+  await ctx.wsSyncRun("proj");
+  assert.equal(posts().filter((p) => p.url.endsWith("/sync")).length, 0,
+               "remotes that are not on one line run nothing");
+  assert.ok(walk(ctx.wsSyncPanel(W)).map(deep).join("\n").includes("not on one line"));
+
+  // delegation carries the whole set, basis and per-remote tips
+  st.doc = { ...DOC_MULTI, agent_parents: [{ name: "parent", profile: "coder" }] };
+  st.agentMode = "agent";
+  st.agentParent = "parent";
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  calls.length = 0;
+  reply = () => ({ status: 202, body: { status: "delegated",
+    agent: { session: "child", status: "busy" }, plan: PLAN } });
+  await ctx.wsSyncRun("proj");
+  const delegatedBody = posts()[0].body;
+  assert.deepEqual(delegatedBody.remotes, ["origin", "mirror"]);
+  assert.equal(delegatedBody.basis, "origin");
+  assert.deepEqual(delegatedBody.plans.map((p) => p.remote), ["origin", "mirror"]);
+  st.agentMode = "commands";
+
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

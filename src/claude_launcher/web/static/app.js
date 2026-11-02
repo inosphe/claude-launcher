@@ -42886,9 +42886,67 @@ function wsSyncSt(name) {
       loading: false, doc: null, error: "", busy: "", result: null, waiting: null,
       pushBranch: "", force: false, pullMachine: "", pullBranch: "",
       agentMode: "commands", agentParent: "",
+      // checked remotes (claunch-y3tuk): null until the first status read
+      remotes: null, basis: "", remoteNote: "", multi: null,
     });
   }
   return wsSyncState.get(name);
+}
+
+/* The checked remotes and the basis are a property of this browser, not of
+   the repository: two people may watch the same workspace and want different
+   targets. Kept per workspace; a private window simply forgets them. */
+const WS_SYNC_REMOTES_KEY = "claunch.wsSync.remotes.";
+const WS_SYNC_BASIS_KEY = "claunch.wsSync.basis.";
+
+function wsSyncSaved(name) {
+  try {
+    const raw = localStorage.getItem(WS_SYNC_REMOTES_KEY + name);
+    const got = raw ? JSON.parse(raw) : null;
+    return Array.isArray(got) ? got : null;
+  } catch {
+    return null;
+  }
+}
+
+function wsSyncSave(name, st) {
+  try {
+    localStorage.setItem(WS_SYNC_REMOTES_KEY + name, JSON.stringify(st.remotes || []));
+    localStorage.setItem(WS_SYNC_BASIS_KEY + name, st.basis || "");
+  } catch { /* private window: the selection lives for this page only */ }
+}
+
+function wsSyncSavedBasis(name) {
+  try { return localStorage.getItem(WS_SYNC_BASIS_KEY + name) || ""; } catch { return ""; }
+}
+
+function wsSyncRemoteNames(doc) {
+  return Object.values((doc && doc.remotes) || {});
+}
+
+function wsSyncPlanFor(doc, remote) {
+  return ((doc && doc.plans) || []).find((r) => r.remote === remote) || null;
+}
+
+/* Seed the checked set on the first read, or keep the one this page already
+   has. The remembered choice wins when it is still present; otherwise the
+   plan's remote, then the first remote. The basis follows a checked remote. */
+function wsSyncInitSelection(name, doc) {
+  const st = wsSyncSt(name);
+  const names = wsSyncRemoteNames(doc);
+  if (!names.length) return;
+  const saved = (wsSyncSaved(name) || []).filter((r) => names.includes(r));
+  const had = st.remotes || [];
+  const kept = had.filter((r) => names.includes(r));
+  st.remotes = kept.length ? kept
+    : (saved.length ? saved
+      : [(doc.plan && names.includes(doc.plan.remote)) ? doc.plan.remote : names[0]]);
+  if (!st.remotes.includes(st.basis)) {
+    const savedBasis = wsSyncSavedBasis(name);
+    st.basis = st.remotes.includes(savedBasis) ? savedBasis
+      : (doc.basis && st.remotes.includes(doc.basis) ? doc.basis
+        : (doc.plan && st.remotes.includes(doc.plan.remote) ? doc.plan.remote : st.remotes[0]));
+  }
 }
 
 function wsSyncToggle(w) {
@@ -42909,8 +42967,18 @@ async function wsSyncRefresh(name, fetchFirst) {
   st.loading = true;
   st.error = "";
   renderWorkspaces();
+  const sent = !!(st.remotes && st.remotes.length);
   try {
-    const q = fetchFirst ? "" : "?fetch=0";
+    // `remotes` narrows every fetch and comparison to the checked set: an
+    // unchecked remote is not fetched and is absent from plans and the
+    // comparison table (claunch-y3tuk).
+    const parts = [];
+    if (!fetchFirst) parts.push("fetch=0");
+    if (sent) {
+      parts.push("remotes=" + st.remotes.map((r) => encodeURIComponent(r)).join(","));
+      if (st.basis) parts.push("basis=" + encodeURIComponent(st.basis));
+    }
+    const q = parts.length ? `?${parts.join("&")}` : "";
     const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/status${q}`);
     const doc = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
@@ -42918,11 +42986,58 @@ async function wsSyncRefresh(name, fetchFirst) {
     if (!st.pushBranch || !(doc.branches || []).includes(st.pushBranch)) {
       st.pushBranch = (doc.branches || []).find((b) => !/^(master|main)$/.test(b)) || "";
     }
+    if (!sent && wsSyncRemoteNames(doc).length) {
+      // the first read has to name the remotes before one can be checked;
+      // read again with the seeded selection so the plans are drawn
+      wsSyncInitSelection(name, doc);
+      st.loading = false;
+      if (st.remotes && st.remotes.length) return wsSyncRefresh(name, fetchFirst);
+      return;
+    }
+    wsSyncInitSelection(name, doc);
+    // the daemon computed the basis from the graph; follow a correction it
+    // made unless the person picked another checked remote
+    if (st.remotes && st.remotes.length > 1 && doc.basis && st.remotes.includes(doc.basis)) {
+      const saved = wsSyncSavedBasis(name);
+      if (!saved || !st.remotes.includes(saved)) st.basis = doc.basis;
+    }
   } catch (err) {
     st.error = String(err.message || err);
   }
   st.loading = false;
   if (wsOpen) renderWorkspaces();
+}
+
+/* Check or uncheck one target remote. The last checked one stays checked:
+   a sync with no target has nothing to do, so the box springs back with a
+   note instead of letting the set go empty (claunch-y3tuk). */
+function wsSyncToggleRemote(name, remote, checked) {
+  const st = wsSyncSt(name);
+  const names = wsSyncRemoteNames(st.doc);
+  const next = checked
+    ? [...new Set([...st.remotes, remote])].filter((r) => names.includes(r))
+    : st.remotes.filter((r) => r !== remote);
+  if (!next.length) {
+    st.remoteNote = "At least one remote stays checked.";
+    renderWorkspaces();
+    return;
+  }
+  st.remoteNote = "";
+  st.remotes = next;
+  if (!st.remotes.includes(st.basis)) {
+    const doc = st.doc || {};
+    st.basis = doc.basis && st.remotes.includes(doc.basis) ? doc.basis : st.remotes[0];
+  }
+  wsSyncSave(name, st);
+  wsSyncRefresh(name, false);
+}
+
+function wsSyncToggleBasis(name, basis) {
+  const st = wsSyncSt(name);
+  if (!st.remotes.includes(basis)) return;
+  st.basis = basis;
+  wsSyncSave(name, st);
+  wsSyncRefresh(name, false);
 }
 
 /* Refresh all (claunch-87eqx): every present workspace's Sync status, with
@@ -43033,7 +43148,8 @@ async function wsSyncSend(name, kind, body) {
   st.busy = "";
   st.waiting = null;
   if (resp.status === 409 && doc.stale) {
-    if (st.doc) st.doc.plan = doc.plan;
+    if (st.doc && doc.plan) st.doc.plan = doc.plan;
+    if (st.doc && doc.plans) st.doc.plans = doc.plans;
     st.error = "The branch or the remote moved since this plan was shown. " +
       "Review the new plan below and press the button again.";
   } else if (!resp.ok) {
@@ -43045,6 +43161,88 @@ async function wsSyncSend(name, kind, body) {
   if (st.result) refreshWsGitSummary();
   if (st.result && kind !== "push") await wsSyncRefresh(name, false);
   else if (wsOpen) renderWorkspaces();
+}
+
+/* One request, but wait here for its approval card instead of scheduling the
+   read: the sequential multi-remote run needs the answer before it can move
+   to the next remote (claunch-y3tuk). Resolves true when the request ran. */
+async function wsSyncSendNow(name, kind, body) {
+  let request = "";
+  for (;;) {
+    const st = wsSyncSt(name);
+    st.busy = kind;
+    st.error = "";
+    st.result = null;
+    renderWorkspaces();
+    let resp, doc;
+    try {
+      resp = await api(
+        `/api/reposync/workspaces/${encodeURIComponent(name)}/${WS_SYNC_PATH[kind]}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request ? { ...body, request } : body),
+        });
+      doc = await resp.json().catch(() => ({}));
+    } catch (err) {
+      st.busy = "";
+      st.error = String(err.message || err);
+      if (wsOpen) renderWorkspaces();
+      return false;
+    }
+    if (resp.status === 202 && doc.request) {
+      st.waiting = { kind, body, request: doc.request, deadline: doc.deadline || "" };
+      if (typeof refreshReposyncGate === "function") refreshReposyncGate();
+      if (wsOpen) renderWorkspaces();
+      const rec = await wsSyncPoll(doc.request);
+      st.waiting = null;
+      if (!rec || rec.status !== "approved") {
+        st.busy = "";
+        if (rec) st.error = `The approval card was ${rec.status}; nothing was pushed.`;
+        if (wsOpen) renderWorkspaces();
+        return false;
+      }
+      request = doc.request;
+      continue;   // the daemon re-checks the tips and runs it
+    }
+    st.busy = "";
+    st.waiting = null;
+    if (resp.status === 409 && doc.stale) {
+      if (st.doc && doc.plan) st.doc.plan = doc.plan;
+      if (st.doc && doc.plans) st.doc.plans = doc.plans;
+      st.error = "The branch or the remote moved since this plan was shown. " +
+        "Review the new plan below and press the button again.";
+    } else if (!resp.ok) {
+      st.error = doc.error || `HTTP ${resp.status}`;
+      if (doc.agent && st.doc) st.doc.agent = doc.agent;
+    } else {
+      st.result = { kind, doc };
+    }
+    if (st.result) refreshWsGitSummary();
+    if (st.result && kind !== "push") await wsSyncRefresh(name, false);
+    else if (wsOpen) renderWorkspaces();
+    return !!st.result;
+  }
+}
+
+/* Read one approval request until a person answers it. */
+function wsSyncPoll(requestId) {
+  return new Promise((resolve) => {
+    const read = async () => {
+      let rec = null;
+      try {
+        const resp = await api(`/api/reposync/requests/${encodeURIComponent(requestId)}`);
+        if (resp.ok) rec = ((await resp.json()) || {}).request || null;
+      } catch {
+        rec = null;
+      }
+      if (!rec || rec.status === "pending") {
+        setTimeout(read, WS_SYNC_POLL_MS);
+        return;
+      }
+      resolve(rec);
+    };
+    read();
+  });
 }
 
 /* Read the waiting card until a person answers it. Approved: send the same
@@ -43076,42 +43274,149 @@ async function wsSyncWait(name) {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The plans the button would run, basis first. Falls back to the single
+   `plan` field an older daemon (or the CLI's status) returns. */
+function wsSyncPending(doc) {
+  const plans = (doc && doc.plans) || [];
+  if (plans.length) {
+    return plans.filter((r) => r.plan && !r.error && r.plan.action !== "up-to-date")
+      .map((r) => ({ remote: r.remote, plan: r.plan }));
+  }
+  const plan = doc && doc.plan;
+  return plan && plan.action !== "up-to-date"
+    ? [{ remote: plan.remote, plan }] : [];
+}
+
+function wsSyncOrdered(doc, pending) {
+  const order = (doc && doc.sync_order) || [];
+  if (!order.length) return pending;
+  const byRemote = new Map(pending.map((r) => [r.remote, r]));
+  const out = [];
+  for (const remote of order) {
+    const row = byRemote.get(remote);
+    if (row) out.push(row);
+  }
+  for (const row of pending) if (!out.includes(row)) out.push(row);
+  return out;
+}
+
 async function wsSyncRun(name) {
   const st = wsSyncSt(name);
-  const plan = st.doc && st.doc.plan;
-  if (!plan || plan.action === "up-to-date" || wsSyncAgentBlocked(st)) return;
+  const doc = st.doc || {};
+  if (wsSyncAgentBlocked(st)) return;
+  if ((doc.incompatible || []).length || doc.basis_error) return;
+  const pending = wsSyncOrdered(doc, wsSyncPending(doc));
+  if (!pending.length) return;
+  const multi = (doc.plans || []).filter((r) => r.plan).length > 1;
   // A fast-forward only moves the local branch and runs at once, so it asks
   // here; a push asks on the approval card instead.
-  if (st.agentMode !== "agent" && plan.action === "ff" && !confirm(
-    `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
-    `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
-  )) return;
-  await wsSyncSend(name, "sync", {
-    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
-    ...wsSyncAgentBody(st),
-  });
+  if (st.agentMode !== "agent" && pending.length === 1 && pending[0].plan.action === "ff") {
+    const plan = pending[0].plan;
+    if (!confirm(
+      `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
+      `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
+    )) return;
+  }
+  if (st.agentMode !== "commands") {
+    const first = pending[0].plan;
+    const body = {
+      kind: "sync", agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent",
+      remote: first.remote, branch: first.branch,
+      local: first.local, upstream: first.upstream,
+      ...wsSyncAgentBody(st),
+    };
+    if (multi) {
+      body.remotes = st.remotes;
+      body.basis = st.basis;
+      body.plans = pending.map((r) => ({ remote: r.remote, local: r.plan.local,
+                                         upstream: r.plan.upstream }));
+    }
+    await wsSyncSend(name, "sync", body);
+    return;
+  }
+  if (pending.length === 1) {
+    const plan = pending[0].plan;
+    const body = { remote: pending[0].remote, branch: plan.branch,
+                   local: plan.local, upstream: plan.upstream };
+    if (multi) body.basis = st.basis;
+    await wsSyncSend(name, "sync", body);
+    return;
+  }
+  // Several remotes: one request per remote, basis first. Each push keeps its
+  // own approval card; the next plan is read from the updated tips.
+  st.multi = { order: pending.map((r) => r.remote), index: 0, done: [] };
+  await wsSyncStep(name);
+}
+
+async function wsSyncStep(name) {
+  const st = wsSyncSt(name);
+  const m = st.multi;
+  if (!m) return;
+  while (m.index < m.order.length) {
+    const remote = m.order[m.index];
+    m.index += 1;
+    const row = wsSyncPlanFor(st.doc, remote);
+    const plan = row && row.plan;
+    if (!plan || plan.action === "up-to-date") continue;
+    const ok = await wsSyncSendNow(name, "sync", {
+      remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+      basis: st.basis,
+    });
+    if (!ok) {
+      st.multi = null;
+      if (m.done.length && st.error) {
+        st.error += ` Updated before the failure: ${m.done.join(", ")}.`;
+      }
+      if (wsOpen) renderWorkspaces();
+      return;
+    }
+    m.done.push(remote);
+  }
+  st.multi = null;
+  st.busy = "";
+  await wsSyncRefresh(name, false);
 }
 
 async function wsSyncBranch(name, kind) {
   const st = wsSyncSt(name);
   if (kind === "push") {
     if (!st.pushBranch || wsSyncAgentBlocked(st)) return;
-    await wsSyncSend(name, "push", {
-      branch: st.pushBranch, force_with_lease: !!st.force,
-      remote: st.doc && st.doc.plan && st.doc.plan.remote,
-      ...wsSyncAgentBody(st),
-    });
+    const doc = st.doc || {};
+    const remotes = (st.remotes && st.remotes.length)
+      ? st.remotes
+      : [doc.plan && doc.plan.remote].filter(Boolean);
+    if (st.agentMode !== "commands") {
+      await wsSyncSend(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force,
+        remote: doc.plan && doc.plan.remote, remotes, basis: st.basis,
+        ...wsSyncAgentBody(st),
+      });
+      return;
+    }
+    if (remotes.length <= 1) {
+      await wsSyncSend(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force,
+        remote: remotes[0],
+      });
+      return;
+    }
+    for (const remote of remotes) {
+      const ok = await wsSyncSendNow(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force, remote,
+      });
+      if (!ok) return;
+    }
     return;
   }
   if (!st.pullMachine || !st.pullBranch) return;
-  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch));
+  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch, st.basis));
 }
 
 /* A pull names the remote the panel planned on: a workspace with two
    remotes otherwise refuses to guess which one carries the branch. */
-function wsSyncPullBody(doc, machine, branch) {
+function wsSyncPullBody(doc, machine, branch, basis) {
   const body = { machine, branch };
-  const remote = doc && doc.plan && doc.plan.remote;
+  const remote = basis || (doc && doc.plan && doc.plan.remote);
   if (remote) body.remote = remote;
   return body;
 }
@@ -43151,7 +43456,7 @@ function wsSyncShared(name, doc, st) {
     const go = el("button", "wf-btn", st.busy === "pull" ? "Pulling…" : "Pull");
     go.disabled = !!st.busy || r.state === "same" || r.state === "diverged";
     if (r.state === "diverged") go.title = `local ${r.ref} has commits ${remote}/${r.ref} does not; a pull would refuse`;
-    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch)));
+    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch, st.basis)));
     row.appendChild(go);
     return row;
   };
@@ -43442,11 +43747,17 @@ function wsSyncPromptText(title, prompt) {
 function wsSyncPromptBody(st, kind) {
   const doc = st.doc || {};
   const plan = doc.plan;
+  const remotes = (st.remotes || []).slice();
+  const plans = (doc.plans || []).filter((r) => r.plan)
+    .map((r) => ({ remote: r.remote, local: r.plan.local, upstream: r.plan.upstream }));
+  const multi = plans.length > 1 ? { remotes, basis: st.basis, plans } : {};
   if (kind === "sync") return plan ? {
-    kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent",
+    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    ...multi,
   } : null;
   const branch = st.pushBranch || (doc.branches || [])[0];
-  return branch ? { kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", branch, remote: plan && plan.remote, force_with_lease: !!st.force } : null;
+  return branch ? { kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", branch, remote: plan && plan.remote, force_with_lease: !!st.force, ...multi } : null;
 }
 
 async function wsSyncPreviewPrompt(name, kind) {
@@ -43605,9 +43916,17 @@ function wsSyncWhyDisabled(st, kind) {
   const doc = st.doc || {};
   if (st.busy || st.loading) return "";
   if (kind === "sync") {
-    const plan = doc.plan;
-    if (plan && plan.action === "up-to-date") {
-      return `Nothing to sync: ${plan.branch} already equals ${plan.remote}/${plan.branch}.`;
+    if ((doc.incompatible || []).length) {
+      return "The checked remotes are not on one line; uncheck one to continue.";
+    }
+    if (doc.basis_error) return doc.basis_error;
+    const pending = wsSyncPending(doc);
+    if (!pending.length && (doc.plan || (doc.plans || []).length)) {
+      const plan = doc.plan;
+      if (plan) {
+        return `Nothing to sync: ${plan.branch} already equals ${plan.remote}/${plan.branch}.`;
+      }
+      return "Nothing to sync: every checked remote is already level.";
     }
   } else if (!(doc.branches || []).length) {
     return "No local branch to push.";
@@ -43626,6 +43945,73 @@ function wsSyncButtonRow(st, button, kind) {
   const why = wsSyncWhyDisabled(st, kind);
   if (why) row.appendChild(el("span", "wf-note ws-sync-why", why));
   return row;
+}
+
+/* The checked remotes, the basis, and the order the daemon computed
+   (claunch-y3tuk). The set is a multi-checkbox that cannot go empty; the
+   basis is the remote whose tip the local branch is brought onto first, and
+   the order shows what runs when (basis first, then pushes). */
+function wsSyncRemotePicker(st, name, doc) {
+  const names = wsSyncRemoteNames(doc);
+  const keys = {};
+  for (const [key, n] of Object.entries(doc.remotes || {})) keys[n] = key;
+  const box = el("section", "ws-sync-section ws-sync-targets");
+  box.setAttribute("aria-label", "Target remotes");
+  box.appendChild(el("h4", null, "Target remotes"));
+  box.appendChild(el("p", "wf-note",
+    "Fetches, comparisons and Sync run against the checked remotes only. " +
+    "At least one stays checked."));
+  if (!names.length) {
+    box.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
+    return box;
+  }
+  const list = el("div", "ws-sync-remotes");
+  for (const remote of names) {
+    const label = el("label", "wf-note ws-sync-remote");
+    const input = el("input", "ws-sync-remote-box");
+    input.type = "checkbox";
+    input.checked = (st.remotes || []).includes(remote);
+    input.addEventListener("change", () => wsSyncToggleRemote(name, remote, input.checked));
+    label.appendChild(input);
+    label.appendChild(el("span", "mono", remote));
+    if (keys[remote]) label.appendChild(el("span", "wf-note", keys[remote]));
+    if (doc.basis === remote && (st.remotes || []).length > 1) {
+      label.appendChild(el("span", "badge busy", "basis"));
+    }
+    list.appendChild(label);
+  }
+  box.appendChild(list);
+  if (st.remoteNote) box.appendChild(el("p", "wf-note wf-warning", st.remoteNote));
+  if ((st.remotes || []).length > 1) {
+    const row = el("div", "ws-sync-form");
+    const pick = el("select");
+    pick.setAttribute("aria-label", "Basis remote");
+    for (const remote of st.remotes) pick.appendChild(new Option(remote, remote));
+    pick.value = st.basis;
+    pick.addEventListener("change", () => wsSyncToggleBasis(name, pick.value));
+    row.appendChild(pick);
+    row.appendChild(el("span", "wf-note",
+      "Basis is fast-forwarded or rebased first; the others are pushed to."));
+    box.appendChild(row);
+  }
+  if (doc.basis_error) box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
+  if ((doc.incompatible || []).length) {
+    box.appendChild(el("p", "wf-note wf-warning",
+      "These remotes cannot be brought to one branch (their tips are not on one line): " +
+      doc.incompatible.map((p) => p.join(" / ")).join(", ")));
+  }
+  if ((doc.sync_order || []).length) {
+    const order = el("div", "ws-sync-order");
+    order.appendChild(el("h5", null, "Execution order"));
+    (doc.sync_order || []).forEach((remote, i) => {
+      const row = wsSyncPlanFor(doc, remote);
+      const action = row && row.plan ? row.plan.action : (row && row.error ? "error" : "?");
+      order.appendChild(el("div", "mono ws-sync-order-row",
+        `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
+    });
+    box.appendChild(order);
+  }
+  return box;
 }
 
 /* The Sync panel, top to bottom in the order it is used: how operations run,
@@ -43667,6 +44053,7 @@ function wsSyncPanel(w) {
     return panel;
   }
 
+  panel.appendChild(wsSyncRemotePicker(st, w.name, doc));
   panel.appendChild(wsSyncAgentControls(st, w.name));
 
   // master
@@ -43675,7 +44062,19 @@ function wsSyncPanel(w) {
   master.appendChild(el("h4", null, "Sync master"));
   master.appendChild(el("p", "wf-note",
     "Behind the remote: fast-forward. Ahead: push. Both: rebase the local commits and push."));
-  if (doc.plan) {
+  const planRows = (doc.plans || []).filter((r) => r.plan || r.error);
+  if (planRows.length) {
+    for (const row of planRows) {
+      if (row.error) {
+        master.appendChild(el("p", "wf-note wf-warning", `${row.remote}: ${row.error}`));
+        continue;
+      }
+      const line = el("div", "ws-sync-plan-row");
+      line.appendChild(el("strong", "mono", `${row.remote} · `));
+      line.appendChild(wsSyncPlanLine(row.plan));
+      master.appendChild(line);
+    }
+  } else if (doc.plan) {
     master.appendChild(wsSyncPlanLine(doc.plan));
     // the badge already says "up-to-date"; a longer summary is worth a line
     if (doc.plan.summary && doc.plan.summary !== doc.plan.action) {
@@ -43685,15 +44084,28 @@ function wsSyncPanel(w) {
       master.appendChild(el("p", "wf-note",
         `left on the old commits: ${doc.plan.affected.join(", ")}`));
     }
-    const go = el("button", "wf-btn",
-      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…")
-        : st.agentMode === "agent" ? "Delegate sync" : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
-    go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date" || wsSyncAgentBlocked(st);
-    go.addEventListener("click", () => wsSyncRun(w.name));
-    master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
-    master.appendChild(wsSyncButtonRow(st, go, "sync"));
   } else {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
+  }
+  if (doc.plan || planRows.length) {
+    const pending = wsSyncOrdered(doc, wsSyncPending(doc));
+    const multi = ((doc.plans || []).filter((r) => r.plan).length > 1);
+    const label = st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…")
+      : st.agentMode === "agent" ? "Delegate sync"
+        : pending.length > 1 ? `Sync ${pending.length} remotes`
+          : pending.length === 1 ? (WS_SYNC_LABEL[pending[0].plan.action] || "Sync")
+            : "Up to date";
+    const go = el("button", "wf-btn", label);
+    go.disabled = !!st.busy || st.loading || !pending.length ||
+      (doc.incompatible || []).length > 0 || !!doc.basis_error || wsSyncAgentBlocked(st);
+    go.addEventListener("click", () => wsSyncRun(w.name));
+    if (multi && st.remotes && st.remotes.length > 1) {
+      master.appendChild(el("p", "wf-note",
+        `Runs in order: ${pending.map((r) => r.remote).join(" → ")}. ` +
+        "Each push waits for its own approval card."));
+    }
+    master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
+    master.appendChild(wsSyncButtonRow(st, go, "sync"));
   }
   master.appendChild(wsSyncRemoteComparisons(doc));
   panel.appendChild(master);
@@ -43730,8 +44142,10 @@ function wsSyncPanel(w) {
   force.appendChild(box);
   force.appendChild(document.createTextNode(" force-with-lease"));
   pushRow.appendChild(force);
+  const pushTargets = (st.remotes || []).length;
   const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…")
-    : st.agentMode === "agent" ? "Delegate push" : `Push as ${doc.machine}/…`);
+    : st.agentMode === "agent" ? "Delegate push"
+      : pushTargets > 1 ? `Push to ${pushTargets} remotes` : `Push as ${doc.machine}/…`);
   push.disabled = !!st.busy || !(doc.branches || []).length || wsSyncAgentBlocked(st);
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushSection.appendChild(pushRow);

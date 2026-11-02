@@ -168,6 +168,40 @@ def common_remotes(local: Dict[str, str], peer_keys: Iterable[str]) -> List[Tupl
     return [(key, name) for key, name in local.items() if key in wanted]
 
 
+def is_ancestor(repo: str, older: str, newer: str) -> bool:
+    """Whether ``older`` is an ancestor of (or equal to) ``newer``."""
+    return _ok(repo, "merge-base", "--is-ancestor", older, newer)
+
+
+def tip_chain(repo: str, tips: Dict[str, str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """Order remote names from the oldest tip to the newest, or name the
+    pairs that cannot be put on one line.
+
+    Two remotes can be brought level with one local branch only when their
+    tips are ancestor-related: sync onto the newest tip and the others
+    fast-forward to it (claunch-y3tuk). ``incompatible`` lists every pair that
+    is not, so the caller refuses before anything runs. Names with the same
+    tip are interchangeable and keep their input order.
+    """
+    names = list(tips)
+    bad: List[Tuple[str, str]] = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if tips[a] == tips[b]:
+                continue
+            if not (is_ancestor(repo, tips[a], tips[b])
+                    or is_ancestor(repo, tips[b], tips[a])):
+                bad.append((a, b))
+    if bad:
+        return [], bad
+    ordered = sorted(
+        names,
+        key=lambda n: sum(1 for m in names
+                          if m != n and is_ancestor(repo, tips[m], tips[n])),
+    )
+    return ordered, []
+
+
 #: git config key that remembers which remote this repository syncs through.
 REMOTE_CONFIG = "claunch.reposync.remote"
 
