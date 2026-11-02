@@ -199,3 +199,9 @@ def test_a_damaged_record_reads_as_empty(tmp_path):
     assert plan_api.Aggregators(path).load() == {}
     path.write_text(json.dumps({"x": {"profile": "p"}, "y": {"session": "s"}}), encoding="utf-8")
     assert plan_api.Aggregators(path).load() == {"y": {"session": "s"}}
+
+
+def test_the_aggregator_writes_its_plan_in_korean():
+    """claunch-lp7c6: the aggregator's opening task says to write the plan in Korean, mesh or not."""
+    for mesh in (None, "claunch"):
+        assert "계획에 쓰는 글은 한국어로 쓰고" in plan_api.aggregator_task("default", mesh)

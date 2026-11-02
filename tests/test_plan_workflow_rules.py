@@ -37,3 +37,9 @@ def test_leader_rule_names_the_joint_read():
     text = yaml.safe_load((V2 / "improv-leader-v2.yaml").read_text(encoding="utf-8"))["rules"]["worker-plans"]["text"]
     assert "joint=true" in text and "claunch-7jzp8.1" in text
     assert "plan_overview" in text
+
+
+def test_worker_rule_writes_the_plan_in_korean():
+    """claunch-lp7c6: the plan pane's text is written in Korean."""
+    text = yaml.safe_load((V2 / "improv-worker-v2.yaml").read_text(encoding="utf-8"))["rules"]["plan-panel"]["text"]
+    assert "한국어로 쓴다" in text and "claunch-lp7c6" in text
