@@ -684,9 +684,13 @@
           spendAdd(runSpend, u);
           const times = (seen.get(key) || 0) + 1;
           seen.set(key, times);
+          // An ask with no unit but a known caller (classic claunch logs) is a
+          // node too, so it carries the spend for the same reason a unit does:
+          // summing spend over the nodes has to equal the header's total.
+          const own = spendAdd(null, u);
           add(keyPhase(key), "ask:" + key, {
-            key, label: askLabel(key),
-            sub: spendSub(spendAdd(null, u), ev.role || "?"),
+            key, label: askLabel(key), spend: own,
+            sub: spendSub(own, ev.role || "?"),
             status: (ev.stop && ev.stop !== "stop") || failed ? "warn" : "done",
             tip: [when, key, "role " + (ev.role || "?"),
                   `in ${u.input || 0} · cache ${u.cacheRead || 0} · out ${u.output || 0} · gen ${u.generations || 0}`,

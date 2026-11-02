@@ -174,6 +174,9 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
     넷의 합이 앞의 `토큰` 값과 같다. 내역을 만드는 식은 아래 「실행 세션」의 것과 같다 — `read`는 `usage.input`,
     `cached`는 `usage.cacheRead`, `out`은 `usage.output`, `write`는 로그에 없는 값을
     `totalTokens − (input + cacheRead + output)`로 유도한 것이다. 적중률은 `cached / (read + cached)`다.
+    적중률의 분모는 읽는 원천에 따라 다르다: 이 이벤트 로그에서는 프롬프트가 곧 `input + cacheRead`이므로 그 합이
+    분모이고, metering 원장의 `input_tokens`는 프롬프트 원값이므로 원장으로 적중률을 내면 `cacheRead /
+    input_tokens`가 되어 같은 실행이 두 화면에서 다른 비율로 보인다.
     `out`을 함께 적는 이유는 넷이 총합과 맞아떨어지게 하기 위해서다 — 셋만 적으면 `write`가 0인 실행에서
     `read + cached + write`가 `토큰`보다 작아 보이고, 그 차이가 어디로 갔는지가 화면에 없다.
     실행 하나의 실측(2026-11-02, `scenarios2-20261102-091411`, ask 82건): `토큰 5.74M` = `read 2.56M` +

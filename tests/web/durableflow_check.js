@@ -379,6 +379,21 @@ const SP = DF.model([
 assert.deepStrictEqual(plain(SP.spend), { read: 300, cached: 1200, write: 990, out: 160, total: 2650 });
 assert.strictEqual(SP.spend.read + SP.spend.cached + SP.spend.write + SP.spend.out, SP.spend.total,
   "read, cached, write and out are the total");
+// Every ask lands on exactly one node -- unit, sim2 stage group, or the plain
+// ask node a classic log draws -- so summing spend over the nodes gives the
+// header's figures back. k3 here is the plain ask node: it used to carry only
+// the drawn string, and the two levels disagreed by its whole usage.
+function nodeSpend(m) {
+  const s = { read: 0, cached: 0, write: 0, out: 0, total: 0 };
+  for (const n of m.nodes) {
+    if (!n.spend) continue;
+    for (const k of Object.keys(s)) s[k] += Number(n.spend[k]) || 0;
+  }
+  return s;
+}
+assert.deepStrictEqual(nodeSpend(SP), plain(SP.spend), "node spend sums to the header");
+assert.strictEqual(SP.spend.total, 1050 + 1200 + 400, "the header is each ask's totalTokens added up");
+assert.deepStrictEqual(nodeSpend(m), plain(m.spend), "the classic log's plain ask nodes add up too");
 const sp1 = SP.nodes.find((n) => n.id === "unit:u1");
 assert.deepStrictEqual(plain(sp1.spend), { read: 300, cached: 1200, write: 600, out: 150, total: 2250 });
 assert.strictEqual(sp1.sub, "물음 2 · read 300\ncached 1.2k (80.0%) · write 600",
@@ -393,6 +408,8 @@ assert.strictEqual(noPrompt.nodes.find((n) => n.id === "ask:n").sub, "? · read 
 // A usage that already adds up leaves nothing on the write side.
 const tight = DF.model([{ event: "ask", key: "t", usage: { input: 10, cacheRead: 90, output: 20, totalTokens: 120 } }], false);
 assert.match(tight.nodes.find((n) => n.id === "ask:t").sub, /write 0$/);
+assert.deepStrictEqual(nodeSpend(tight), plain(tight.spend), "node sum = header when write is 0");
+assert.strictEqual(tight.spend.total, 120);
 console.log("durableflow_check: spend split ok");
 
 // (a) A sequential claunch simulation keeps its chain: the edges are the
