@@ -461,7 +461,7 @@ globalThis.SearchAnything = (() => {
       // Every control that writes is locked while one write is in flight, so
       // two PUTs never race over the same preset list.
       const writers = [];
-      const busy = on => { for (const b of writers) b.disabled = on; };
+      const busy = on => { for (const b of writers) b.disabled = on; if (!on) presetLimits(); };
 
       // ---- what is in force: the active preset and the backfill ----------
       // The daemon's own record of what it serves plus the backfill progress
@@ -798,9 +798,19 @@ globalThis.SearchAnything = (() => {
         showDbResolved();
       }
       for (const radio of Object.values(sources)) radio.onchange = showSource;
+      // Rebuilds the options and keeps the selection when it still exists:
+      // the picker chooses what the fields edit, and a refill must not move
+      // the reader to another preset.
       function fillPicker() {
+        const keep = presetSelect.value;
         presetSelect.length = 0;
         for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p) + (p.id === activeId ? " (활성)" : ""), p.id));
+        if (presets.some(p => p.id === keep)) presetSelect.value = keep;
+        presetLimits();
+      }
+      // The two preset controls a list limit disables, with the reason; run
+      // after every write so the busy lock does not leave them enabled.
+      function presetLimits() {
         presetCount.textContent = `${presets.length}/${presetMax}개`;
         createOpen.disabled = presets.length >= presetMax;
         createOpen.title = createOpen.disabled ? `프리셋은 ${presetMax}개까지 저장됩니다. 먼저 하나를 삭제하세요.` : "";
@@ -1021,7 +1031,7 @@ globalThis.SearchAnything = (() => {
             status.textContent = `프리셋 ${data.preset}을 저장했고 활성 프리셋이 됐습니다. 바뀐 값에 따라 기존 문서를 이 모델로 소급 임베딩합니다.`;
           }
         } catch (error) { status.textContent = error.message; }
-        finally { busy(false); fillPicker(); }
+        finally { busy(false); }
       }
       selftest.onclick = async () => {
         busy(true); status.textContent = "Selftest 실행 중…";
@@ -1034,7 +1044,7 @@ globalThis.SearchAnything = (() => {
           selftestResult.textContent = `Selftest 실패 · ${error.message}`;
         }
         selftestResult.hidden = false; status.textContent = "";
-        busy(false); fillPicker();
+        busy(false);
       };
       test.onclick = () => action(true); form.onsubmit = event => { event.preventDefault(); action(false); };
 

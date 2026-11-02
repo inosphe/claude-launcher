@@ -399,6 +399,13 @@ const server = http.createServer(async (req,res) => {
     body = writes.at(-1).body;
     assert.equal(body.preset,'omlx');
     assert.deepEqual(body.presets.map(p=>[p.id,p.renamed_from]),[['omlx',undefined],['fw2','fw']]);
+    // Saving the second preset keeps it selected and makes it the active one.
+    await card.getByRole('button',{name:'fw2 저장하고 활성화',exact:true}).click();
+    await card.getByText(/프리셋 fw2을 저장했고 활성 프리셋이 됐습니다/).waitFor();
+    assert.equal(writes.at(-1).body.preset,'fw2');
+    assert.equal(await page.locator('select[name=preset]').inputValue(),'fw2');
+    assert.equal(await card.locator('.rag-badge-on').textContent(),'활성');
+    assert.equal(await presetBox.getByRole('button',{name:'삭제',exact:true}).isDisabled(),false);
     if (process.env.CLAUNCH_SETTINGS_SHOT) {
       await page.setViewportSize({width:900,height:2400});
       await page.screenshot({path:process.env.CLAUNCH_SETTINGS_SHOT, clip: await card.boundingBox()});
