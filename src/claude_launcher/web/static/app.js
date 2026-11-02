@@ -42973,7 +42973,10 @@ async function wsSyncRefresh(name, fetchFirst) {
     // unchecked remote is not fetched and is absent from plans and the
     // comparison table (claunch-y3tuk).
     const parts = [];
-    if (!fetchFirst) parts.push("fetch=0");
+    // Without a checked set the daemon would fetch every remote (Refresh all
+    // reaches here first, before a selection exists), so the read that only
+    // learns the names never fetches (claunch-y3tuk).
+    if (!fetchFirst || !sent) parts.push("fetch=0");
     if (sent) {
       parts.push("remotes=" + st.remotes.map((r) => encodeURIComponent(r)).join(","));
       if (st.basis) parts.push("basis=" + encodeURIComponent(st.basis));
@@ -43274,6 +43277,14 @@ async function wsSyncWait(name) {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The tips the panel drew, for every checked remote that has a plan --
+   including one already up to date, whose tips the daemon still compares
+   (claunch-y3tuk). */
+function wsSyncPlanTips(doc) {
+  return ((doc && doc.plans) || []).filter((r) => r.plan)
+    .map((r) => ({ remote: r.remote, local: r.plan.local, upstream: r.plan.upstream }));
+}
+
 /* The plans the button would run, basis first. Falls back to the single
    `plan` field an older daemon (or the CLI's status) returns. */
 function wsSyncPending(doc) {
@@ -43328,8 +43339,10 @@ async function wsSyncRun(name) {
     if (multi) {
       body.remotes = st.remotes;
       body.basis = st.basis;
-      body.plans = pending.map((r) => ({ remote: r.remote, local: r.plan.local,
-                                         upstream: r.plan.upstream }));
+      // every checked remote's tips, not only the pending ones: an
+      // up-to-date remote carries no row in `pending`, and the daemon reads
+      // the rows it is given as the tips the panel drew (claunch-y3tuk)
+      body.plans = wsSyncPlanTips(doc);
     }
     await wsSyncSend(name, "sync", body);
     return;
@@ -43748,8 +43761,7 @@ function wsSyncPromptBody(st, kind) {
   const doc = st.doc || {};
   const plan = doc.plan;
   const remotes = (st.remotes || []).slice();
-  const plans = (doc.plans || []).filter((r) => r.plan)
-    .map((r) => ({ remote: r.remote, local: r.plan.local, upstream: r.plan.upstream }));
+  const plans = wsSyncPlanTips(doc);
   const multi = plans.length > 1 ? { remotes, basis: st.basis, plans } : {};
   if (kind === "sync") return plan ? {
     kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent",

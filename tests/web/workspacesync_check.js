@@ -131,6 +131,7 @@ vm.runInContext(
    constant("WS_SYNC_REMOTES_KEY"), constant("WS_SYNC_BASIS_KEY"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncSendNow", "wsSyncPoll",
        "wsSyncWait", "wsSyncRun", "wsSyncStep", "wsSyncPending", "wsSyncOrdered",
+       "wsSyncPlanTips",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncRemotePicker", "wsSyncPanel", "wsSyncPullBody",
        "wsSyncShared", "wsSyncUnmerged", "wsSyncSaved", "wsSyncSave", "wsSyncSavedBasis",
@@ -631,6 +632,44 @@ async function tick() {
   assert.equal(delegatedBody.basis, "origin");
   assert.deepEqual(delegatedBody.plans.map((p) => p.remote), ["origin", "mirror"]);
   st.agentMode = "commands";
+
+  // a checked remote already level still carries its tips: the daemon compares
+  // every row it is given, and an up-to-date remote has no pending row
+  // (claunch-y3tuk, CHANGES REQUESTED @ 90bf09d4)
+  st.doc = {
+    ...DOC_MULTI,
+    agent_parents: [{ name: "parent", profile: "coder" }],
+    plans: [
+      { remote: "origin", key: "git.example/o/p", plan: PLAN },
+      { remote: "mirror", key: "git.example/m/p",
+        plan: { ...PLAN_MIRROR, action: "up-to-date", ahead: 0, behind: 0,
+                summary: "up-to-date" } },
+    ],
+  };
+  st.agentMode = "agent";
+  st.agentParent = "parent";
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  calls.length = 0;
+  await ctx.wsSyncRun("proj");
+  assert.deepEqual(posts()[0].body.plans.map((p) => p.remote), ["origin", "mirror"],
+                   "a remote already level still carries its tips");
+  st.agentMode = "commands";
+
+  // the read that only learns the remote names never fetches: without a
+  // checked set the daemon would fetch every remote (claunch-y3tuk)
+  st.remotes = null;
+  st.basis = "";
+  st.doc = null;
+  calls.length = 0;
+  reply = () => ({ status: 200, body: JSON.parse(JSON.stringify(DOC_MULTI)) });
+  await ctx.wsSyncRefresh("proj", true);
+  const statusReads = calls.filter((c) => c.url.includes("/status"));
+  assert.ok(statusReads.length >= 2, "the names are learned, then read again");
+  assert.ok(statusReads[0].url.includes("fetch=0"),
+            "the first read does not fetch every remote");
+  assert.ok(!statusReads[1].url.includes("fetch=0"),
+            "the narrowed read does fetch the checked set");
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

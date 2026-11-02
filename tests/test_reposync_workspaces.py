@@ -1678,3 +1678,46 @@ def test_agent_preview_carries_the_checked_remotes_and_the_basis(world, tmp_path
         assert "mirror" in out["prompt"]
 
     _with_app(body)
+
+
+def test_a_checked_remote_already_level_does_not_read_as_a_stale_plan(world, tmp_path):
+    """Two checked remotes where one is already level is the ordinary case
+    (the basis is the newest tip, so once the local branch is on it the basis
+    is up to date). The panel sends every checked remote's tips; a remote it
+    left out is not evidence that it moved, and a 409's fresh plans must be
+    drawable by the same code as the panel's (claunch-y3tuk, CHANGES
+    REQUESTED @ 90bf09d4)."""
+    _mirror(world, tmp_path)
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+
+    async def body(client):
+        doc = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror",
+            headers=AUTH)).json()
+        actions = {r["remote"]: r["plan"]["action"] for r in doc["plans"]}
+        assert actions == {"origin": "ff", "mirror": "up-to-date"}, actions
+        tips = [{"remote": r["remote"], "local": r["plan"]["local"],
+                 "upstream": r["plan"]["upstream"]} for r in doc["plans"]]
+        base = {"kind": "sync", "agent_mode": "agent", "remotes": ["origin", "mirror"],
+                "basis": "origin", "branch": doc["plan"]["branch"],
+                "local": doc["plan"]["local"], "upstream": doc["plan"]["upstream"],
+                "remote": doc["plan"]["remote"]}
+        url = "/api/reposync/workspaces/proj/agent-preview"
+        # every checked remote's tips, including the one already level
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": tips})
+        assert resp.status == 200, await resp.text()
+        # a subset (the pending rows only) is not a false stale either
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": tips[:1]})
+        assert resp.status == 200, await resp.text()
+        # a tip that moved is stale, and the fresh plans are status-shaped
+        moved = [{**tips[0], "upstream": "0" * 40}, tips[1]]
+        resp = await client.post(url, headers=AUTH, json={**base, "plans": moved})
+        assert resp.status == 409, await resp.text()
+        out = await resp.json()
+        rows = out["plans"]
+        assert [r["remote"] for r in rows] == ["origin", "mirror"], rows
+        assert all(set(r) >= {"remote", "key", "plan"} for r in rows), rows
+        assert rows[0]["plan"]["action"] in ("ff", "push", "rebase", "up-to-date"), rows[0]["plan"]
+
+    _with_app(body)

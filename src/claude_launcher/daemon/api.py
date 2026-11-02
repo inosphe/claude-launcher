@@ -9438,13 +9438,33 @@ def _ws_multi_publish_card(path: str, name: str, body: dict, machine: str) -> di
 
 def _ws_plans_moved(card: dict, body: dict) -> bool:
     """Whether a remote moved since the panel showed its tips. The panel
-    sends the ``plans`` it drew; an absent list is a first request."""
+    sends the ``plans`` it drew; an absent list is a first request.
+
+    Only the remotes the body names are compared (claunch-y3tuk): a remote
+    the panel left out is not evidence that it moved -- an up-to-date remote
+    carries no pending row -- while a named remote the card no longer has
+    was checked after the panel read the plans and is stale."""
     shown = {str(p.get("remote")): (p.get("local"), p.get("upstream"))
              for p in (body.get("plans") or []) if isinstance(p, dict)}
     if not shown:
         return False
-    return any(shown.get(r["remote"]) != (r["local"], r["upstream"])
-               for r in card.get("remotes") or [])
+    now = {str(r.get("remote")): (r.get("local"), r.get("upstream"))
+           for r in card.get("remotes") or []}
+    if set(shown) - set(now):
+        return True
+    return any(tips != now[remote] for remote, tips in shown.items())
+
+
+def _ws_plan_rows(card: dict) -> list:
+    """A multi card's remotes in the shape the status answer uses for
+    ``plans`` (``{remote, key, plan}``), so a 409's fresh plans can be drawn
+    by the same code that draws the panel (claunch-y3tuk)."""
+    rows = []
+    for r in card.get("remotes") or []:
+        plan = {k: v for k, v in r.items() if k != "basis"}
+        rows.append({"remote": r.get("remote"), "key": r.get("remote_key"),
+                     "plan": plan})
+    return rows
 
 
 def _ws_execute(p: "reposync.Plan", card: dict, remember: str = "") -> dict:
@@ -9473,7 +9493,7 @@ async def h_reposync_ws_agent_preview(request: web.Request) -> web.Response:
                 if _ws_plans_moved(card, body):
                     return json_response(
                         {"error": "The plans changed; refresh Sync before previewing.",
-                         "stale": True, "plans": card.get("remotes")}, status=409)
+                         "stale": True, "plans": _ws_plan_rows(card)}, status=409)
             else:
                 p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
                 if p.local != body.get("local") or p.upstream != body.get("upstream"):
@@ -9640,7 +9660,7 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
             return active
         if _ws_plans_moved(card, body):
             return json_response({"error": "a remote moved since its plan was shown",
-                                  "stale": True, "plans": card.get("remotes")}, status=409)
+                                  "stale": True, "plans": _ws_plan_rows(card)}, status=409)
         return await _ws_start_agent(request, card, body)
     try:
         p, card = await asyncio.to_thread(_ws_plan, path, request.match_info["name"], body)
