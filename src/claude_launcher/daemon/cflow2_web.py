@@ -1031,11 +1031,15 @@ _MD_STRONG = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
 _MD_STRIKE = re.compile(r"~~(.+?)~~")
 _MD_SUBSCRIPT = re.compile(r"(?<!~)~([^~\s]+)~(?!~)")
 _MD_CODE = re.compile(r"`+([^`]*)`+")
-#: A GFM table is recognised by its delimiter row (``|---|---|``,
+#: A GFM table is recognised by its delimiter row (``|---|``, ``|---|---|``,
 #: ``| :--- | ---: |``), which carries no text and is dropped; a row that opens
 #: with a pipe becomes its cells, separated by spaces. A table with no
 #: delimiter row still loses its outer pipes — they are table syntax either way.
-_MD_TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+#: The cell group repeats zero or more times: a one-column table's delimiter
+#: row (``|---|``) has a single cell, and requiring a second one left it in the
+#: text as ``---`` (claunch-edhbu.1). A bare ``---`` is a rule and is dropped by
+#: :data:`_MD_RULE` on its own.
+_MD_TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
 _MD_TABLE_ROW = re.compile(r"^\s*\|")
 
 

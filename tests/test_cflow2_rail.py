@@ -565,6 +565,12 @@ def test_rail_prompt_takes_markdown_markers_off():
     assert cflow2_web._rail_prompt("___굵게기울임___") == "굵게기울임"
     assert cflow2_web._rail_prompt("~~지운 글~~") == "지운 글"
     assert cflow2_web._rail_prompt("H~2~O") == "H2O"
+    # A one-column table's delimiter row has a single cell (claunch-edhbu.1).
+    # The two-cell form above would pass even if only the multi-cell
+    # delimiter matched, so each shape is asserted exactly.
+    assert cflow2_web._rail_prompt("| a |\n|---|\n| 1 |") == "a 1"
+    assert cflow2_web._rail_prompt("| a |\n| :---: |\n| 1 |") == "a 1"
+    assert cflow2_web._rail_prompt("| a | b |\n|---|---|\n| 1 | 2 |") == "a b 1 2"
 
 
 def test_rail_prompt_leaves_text_that_only_looks_like_markdown():
