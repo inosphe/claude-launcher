@@ -170,9 +170,10 @@ preset row, so the aiohttp 1 MiB default body ceiling falls at roughly
 5,100 presets — the 20-preset ceiling binds far earlier).
 
 The card's storage follow-ups (claunch-fhs7f.1) make three things explicit.
-The save button reads **"선택한 프리셓 저장"** and its result line names the row
-it overwrote: the form writes the *selected preset's* row (`saveBody`), not a
-loose block of settings, and plain "저장" read as a settings save. The backfill
+The save button reads **"<id> 저장하고 활성화"** (claunch-r4796; it was
+"선택한 프리셋 저장" before) and its result line names the row it overwrote:
+the form writes the *selected preset's* row (`saveBody`) and makes it the
+active preset in the same PUT, so the label says both. The backfill
 line under the title tells the two empty states apart — "프리셓 <id>의 색인은
 아직 없습니다 …" when a preset is in force and has no collection of its own,
 and "색인 미구동 — 아직 임베딩된 문서가 없습니다." only when no preset is
@@ -200,9 +201,28 @@ the data. The directory is `<corpus>.<db>.zvec`; its sidecar
 (`<corpus>.<db>.meta.json`) records the model and width the vectors were made
 with, and the resolved name is in `active.json` as `db`. `GET /api/rag/dbs`
 lists what is on disk — name, width, model, byte size, and the presets that
-read it — and the card shows that list under the DB field, one row per
-collection with a delete control. `POST /api/rag/dbs/delete` with
-`{"name": "<directory stem>"}` removes a collection and its sidecar. A store
+read it — and the card shows that list under the DB field as a table with
+**one row per DB name** (claunch-r4796): the collections of every corpus
+that share an identity fold into one row (`ragDbGroups`), and a pre-preset
+`<corpus>.zvec` keeps a row of its own marked legacy. Clicking a row's name
+fills the DB field with it (for a legacy row, the slug of the model it was
+made with, which is the name a preset adopts it under); when the last
+connection test measured a different width the row carries a
+"차원 불일치" badge and the status line warns before anything is saved. The
+field shows the name it will actually be stored under (the same slug rule as
+`store.rag_model_key_slug`) while it is typed. Each row has 이름 변경 and 삭제.
+`POST /api/rag/dbs/rename` with `{"from": "<db>", "to": "<new name>"}`
+renames a DB: `to` is slugged, every `<corpus>.<from>.zvec` and sidecar is
+moved to `<corpus>.<to>…` after the RAG service is shut down (the index
+holds a LOCK file on its directory), every preset whose resolved DB is
+`from` gets `db: <to>` written, and the service starts again on the result.
+It is refused (400) for an unknown `from`, an empty `to`, the same name, or a
+`to` that already exists on disk; a failed move or save puts every moved file
+back. The zvec directory holds no absolute paths, so a moved directory
+opens as it was. `POST /api/rag/dbs/delete` with
+`{"name": "<directory stem>"}` removes a collection and its sidecar;
+`{"db": "<db name>"}` removes every collection of that DB name across corpora
+(the table's 삭제 sends this for a named row, `name` for a legacy row). A store
 a preset reads, or the one the active config reads, is refused: its vectors
 would have to be asked for from the provider again, and the row already
 names the readers, so the preset is pointed elsewhere first. "Reads" is the
@@ -345,7 +365,8 @@ write-up matches on any part.
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
 | `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
-| `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it |
+| `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it ; `{"db": "<db>"}` removes every collection of that DB name (claunch-r4796) |
+| `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same/taken names (claunch-r4796) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 
