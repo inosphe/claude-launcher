@@ -212,12 +212,18 @@ that directory and is named as its reader. Deleting a collection nothing
 reads is the only case where nothing downstream changes.
 
 A collection's width is fixed when its vectors are written, so pointing a
-model at a `db` of a different width fails at the first query with
-`dimension mismatch`. The settings PUT refuses that save instead and names
-both numbers. Both come from sidecars already on disk — the target's, and one
-this same model built earlier; when the model's width is not recorded
-anywhere yet, the save goes through and the connection test is what reports
-it.
+model at a `db` of a different width is refused before the query reaches the
+storage engine, with both numbers named and `claunch rag reindex` given as the
+way out. The settings PUT refuses that save instead. Both come from sidecars
+already on disk — the target's, and one this same model built earlier; when
+the model's width is not recorded anywhere yet, the save goes through and the
+connection test is what reports it. The width the index checks against is the
+one it reads from the collection itself (`col.schema.vectors[0].dimension`),
+not the sidecar's `dims`: a sidecar is a file a later run can rewrite beside
+vectors it did not write, and a rewritten one made a 768-dimension query look
+compatible with a 4096-dimension collection until the engine answered
+`dimension mismatch` (claunch-rzepk.1). `save` writes `dims` from the
+collection's width for the same reason.
 
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the
