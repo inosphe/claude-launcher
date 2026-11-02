@@ -1176,6 +1176,7 @@ RAG_DEFAULTS = {
     "embedding_model": "",
     "rerank_model": "",
     "verify_tls": True,
+    "root_serving": False,
     "dimensions": 0,
     "timeout": 120.0,
     "batch": 16,
@@ -1262,6 +1263,8 @@ def clean_rag_preset(raw: object) -> Optional[dict]:
     known fields at all is dropped: a corrupt entry must cost its own row,
     not the picker. Values are stripped strings, and an absent one is
     simply absent. ``source`` is ``"profile"`` only when it says so.
+    ``root_serving`` is the one boolean: true only when the stored row
+    says exactly that (claunch-rag-preset-always-hn5bc.1).
     """
     if not isinstance(raw, dict):
         return None
@@ -1269,6 +1272,8 @@ def clean_rag_preset(raw: object) -> Optional[dict]:
     if not RAG_PRESET_ID_RE.match(preset_id):
         return None
     out: dict = {"id": preset_id}
+    if raw.get("root_serving") is True:
+        out["root_serving"] = True
     for field in RAG_PRESET_FIELDS:
         value = str(raw.get(field) or "").strip()
         if not value:
@@ -1378,6 +1383,13 @@ def rag_migrate_legacy_preset(doc: dict) -> Optional[dict]:
             value = str(row.get(key) or "").strip()
             if value:
                 preset[key] = value
+        # The /v1 opt-out travels with the connection it describes: a
+        # hand-set legacy root_serving flag must land on the minted preset,
+        # or the preset branch would read a row without it and the
+        # correction would quietly break the endpoint again
+        # (claunch-rag-preset-always-hn5bc.1).
+        if block.get("root_serving") is True and source == "custom":
+            preset["root_serving"] = True
         out_block["presets"] = presets + [preset]
         out_block["preset"] = preset_id
     elif presets:
@@ -1388,7 +1400,7 @@ def rag_migrate_legacy_preset(doc: dict) -> Optional[dict]:
     return out
 
 
-def rag_normalize_base_url(url: str) -> str:
+def rag_normalize_base_url(url: str, root_serving: bool = False) -> str:
     """The address embedding and rerank calls actually use.
 
     The OpenAI-compatible root is the ``/v1`` root — ``/embeddings`` and
@@ -1399,11 +1411,21 @@ def rag_normalize_base_url(url: str) -> str:
     ``/v1`` when the path does not already end in a version segment turns
     both spellings into one call. The stored value keeps what the reader
     typed; this shapes only the request target.
+
+    A root-serving endpoint — TEI (Text Embeddings Inference) spells
+    ``/embeddings`` at the host root, so ``<host>/v1/embeddings`` does not
+    exist — opts out explicitly with ``root_serving`` (the preset row's
+    flag, or the legacy block's). The flag is the escape spelling the /v1
+    correction would otherwise leave no way to say
+    (claunch-rag-preset-always-hn5bc.1): set, the bare host is the call
+    target with nothing appended.
     """
     url = str(url or "").strip()
     if not url:
         return ""
     trimmed = url.rstrip("/")
+    if root_serving:
+        return trimmed
     path = urlsplit(trimmed).path or ""
     if re.search(r"/v\d+$", path):
         return trimmed
@@ -1514,6 +1536,14 @@ def rag_config(doc: Optional[dict] = None) -> dict:
             out[key] = str(rows[source].get(key) or "").strip()
         out["model_key"] = ""
     out["profile_error"] = ""
+    # The /v1 correction's opt-out (claunch-rag-preset-always-hn5bc.1): a
+    # root-serving endpoint (TEI) says so on the preset row in force, or on
+    # the legacy block when no preset resolves.
+    out["root_serving"] = (
+        preset_row.get("root_serving") is True
+        if preset_row is not None
+        else block.get("root_serving") is True
+    )
     if out["source"] == "profile":
         out["base_url"], out["api_key"], out["provider"] = "", "", ""
         if not out["profile"]:
@@ -1530,8 +1560,9 @@ def rag_config(doc: Optional[dict] = None) -> dict:
         if env_key:
             out["api_key"] = env_key.strip()
         # Call shape, not stored shape: a bare-host address gets its /v1
-        # root here so both spellings reach the same protocol paths.
-        out["base_url"] = rag_normalize_base_url(out["base_url"])
+        # root here so both spellings reach the same protocol paths, unless
+        # the row opted out as root-serving.
+        out["base_url"] = rag_normalize_base_url(out["base_url"], out["root_serving"])
     out["verify_tls"] = block.get("verify_tls", True) is not False
     for key in ("dimensions", "batch", "candidates", "rerank_top"):
         try:

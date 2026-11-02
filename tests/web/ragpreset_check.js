@@ -23,7 +23,18 @@
    the progress line polls /api/rag/status until nothing is pending, the
    pause/resume toggle POSTs the backfill endpoints, and the Selftest button
    POSTs the selftest endpoint with threshold/top_k/sample and renders the
-   verdict in its own result line. */
+   verdict in its own result line. And the follow-ups: the /v1 correction's
+   opt-out (claunch-rag-preset-always-hn5bc.1) ships as a root-serving
+   checkbox in the Custom API box whose flag rides the preset row and the
+   test probe; and the preset list is deletable (claunch-rag-preset-always-
+   hn5bc.2) — a 삭제 button next to the picker confirms, then writes the list
+   minus the row with the pointer moved to the first remaining preset, the
+   last preset cannot be deleted at all (the preset-only card keeps at
+   least one — an empty list would be re-wrapped by the read-side
+   migration and the delete would silently do nothing, so the button
+   refuses up front and points at edit-in-place), the picker shows the
+   saved count against the server's preset_max, and the add button
+   pre-empts the ceiling instead of erroring after the fact. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -189,8 +200,46 @@ check("the selftest button posts the selftest endpoint with threshold",
 check("the selftest result renders in its own line",
       [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
       [true, true]);
+check("the /v1 correction's opt-out ships as a root-serving checkbox in the custom box",
+      src.includes('field("root_serving", "루트 경로에 직접 서빙 (TEI 등 — /v1 경로 없음)", "checkbox", customBox)'),
+      true);
+check("selecting a preset restores its root-serving flag",
+      src.includes("fields.root_serving.checked = p.root_serving === true;"),
+      true);
+check("the flag is saved on the preset row only when checked",
+      slice("editedPreset").includes("if (fields.root_serving.checked) preset.root_serving = true;"),
+      true);
+check("the picker shows the saved count against the server ceiling",
+      [src.includes('node("span", ` ${presets.length}/${presetMax}`, "rag-preset-count")'),
+       src.includes("Number(cfg.preset_max) > 0 ? Number(cfg.preset_max) : 20")],
+      [true, true]);
+check("a delete button sits next to the picker and asks first",
+      [src.includes('node("button", "삭제", "rag-preset-delete")'), src.includes("window.confirm")],
+      [true, true]);
+check("deletion writes the list minus the row through the settings PUT",
+      src.includes('request("api/rag/settings", { ...values(), presets: remaining, preset: next }, "PUT")'),
+      true);
+check("deleting the active preset re-points at the first remaining row",
+      src.includes('remaining.length ? remaining[0].id : ""'),
+      true);
+check("the last preset cannot be deleted — the button refuses up front",
+      [src.includes("presets.length <= 1"), src.includes("마지막 프리셓은 삭제할 수 없습니다")],
+      [true, true]);
+check("the delete success line no longer claims a direct-input default",
+      src.includes("직접 연결 값 입력이 기본이 됩니다"),
+      false);
+check("the add button pre-empts the ceiling with a reason",
+      src.includes("프리셓은 ${presetMax}개까지 저장됩니다"),
+      true);
+check("the count line refreshes after an add and a delete",
+      (src.match(/presetCount\.textContent = /g) || []).length >= 2,
+      true);
 check("the stylesheet ships the state line rule",
       css.includes(".search-settings .rag-preset-state"), true);
+check("the preset row keeps the picker, count and delete button on one line",
+      [css.includes(".search-settings .rag-preset-row"),
+       src.includes('node("label", "프리셋", "rag-preset-row")')],
+      [true, true]);
 check("the stylesheet ships the selftest result line rule",
       css.includes(".search-settings .rag-selftest-result"), true);
 

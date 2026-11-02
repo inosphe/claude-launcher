@@ -8483,6 +8483,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings button { margin-right: 8px; }
 /* The active-model/backfill line under the card title (preset picker,
    claunch-7m5v8). */
+.search-settings .rag-preset-row { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
 .search-settings .rag-preset-state { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
 .search-settings .rag-selftest-result { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
