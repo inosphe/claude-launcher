@@ -119,6 +119,29 @@ BRIEF = {
 }
 
 
+#: A round that stops until the plan's decisions are taken (claunch-rzepk):
+#: the wait's probe is the ``plan-waiting`` gate, which is what the rail
+#: matches on. No runner is given in a test, so the probe answers "could not
+#: tell" and the wait stays open, which is the state under test.
+PLANWAIT = """\
+cflow: 2
+name: planwait
+description: a round that stops until the plan owes the user nothing
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  seq:
+    - a
+    - id: plan-wait-before-gate
+      wait:
+        probe: [claunch, gate, plan-waiting]
+        poll: 30
+        describe: plan 미결정이 해소되기를 기다린다
+      on:
+        undecidable: []
+"""
+
+
 @pytest.fixture
 def proj(home, tmp_path, monkeypatch):
     d = tmp_path / "proj"
@@ -128,6 +151,7 @@ def proj(home, tmp_path, monkeypatch):
     (v2 / "askme.yaml").write_text(ASKME, encoding="utf-8")
     (v2 / "askbrief.yaml").write_text(ASKBRIEF, encoding="utf-8")
     (v2 / "askmd.yaml").write_text(ASKMD, encoding="utf-8")
+    (v2 / "planwait.yaml").write_text(PLANWAIT, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -206,6 +230,34 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert r["status"] == "waiting_approval"
     assert r["gated"] is True
     assert any(o.startswith("loop_limit: ") for o in r["owed"])
+
+
+def test_rail_entry_flags_a_run_stopped_on_the_plan_gate(proj):
+    """A wait on the plan-waiting gate is owed to a person (claunch-rzepk).
+
+    The round is stopped until the user decides in the plan panel, and no
+    route on the run page releases it. Without the entry the rail shows the
+    session as ungated and the dashboard raises no card, so the person never
+    learns that a round is waiting on a panel they have not opened."""
+    cwd = str(proj)
+    runtime.start(layers.load("planwait", cwd), cwd=cwd, scope="s1", caps={})
+    # Step A completes; the sequence then enters the wait.
+    task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s1")
+
+    r = _rail(cwd, "s1")["s1"]
+    assert r["gated"] is True
+    assert "plan: plan-wait-before-gate" in r["owed"]
+    [answer] = r["answers"]
+    assert answer["kind"] == "plan-wait"
+    assert answer["instance"] and answer["label"] == "plan"
+    assert answer["prompt"] == "plan 미결정이 해소되기를 기다린다"
+
+    # The gate passes: the same wait node is no longer a plan wait, so it is
+    # not owed. Matched on the probe, not the id.
+    assert cflow2_web._is_plan_wait({"probe": ["claunch", "gate", "landed-check"]}) is False
+    assert cflow2_web._is_plan_wait(
+        {"probe": "claunch gate plan-waiting --json"}) is True
 
 
 def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):

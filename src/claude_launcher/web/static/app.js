@@ -24421,14 +24421,19 @@ function termCflowView() {
   const a = owed[0] || { kind: "", prompt: (r2.owed || []).join(" · ") };
   const more = owed.length > 1 ? ` (+${owed.length - 1} more)` : "";
   const question = termCflow2Question(a);
+  const presses = termCflow2Answers(r2, a, currentName);
   return {
     key: [r2.run, r2.status, a.kind, a.instance || "", owed.length],
     href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
     what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
       `${a.kind || "waiting"}${more}`,
-    question: termCflow2Answers(r2, a, currentName).length ? question
-      : `${question} — answer it on the run page`,
-    answers: termCflow2Answers(r2, a, currentName),
+    // A plan wait has no press on the run page: its decision is taken in the
+    // session's plan pane, so the strip points there instead (claunch-rzepk).
+    question: presses.length ? question
+      : a.kind === "plan-wait"
+        ? `${question} — decide it in the plan pane (☰ plan)`
+        : `${question} — answer it on the run page`,
+    answers: presses,
     after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
   };
 }
@@ -63361,7 +63366,7 @@ function noticeRowAsk(row, head, actions, rec) {
   actions.appendChild(noticePanelButton(
     "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
       "the panel stays open beside it",
-    () => runGateOpen(rec)
+    () => runGateWhere(rec)
   ));
 }
 
@@ -65526,11 +65531,16 @@ const RUN_GATE_WORDS = {
   move: "asks you to move its run", loop_limit: "reached a loop limit",
   visit_limit: "reached a visit limit", halt: "is halted",
   acceptance: "waits on its acceptance check",
+  // A run stopped until the user decides in its plan panel (claunch-rzepk).
+  "plan-wait": "waits on your plan decision",
   waiting_approval: "waits on your approval", waiting_selection: "waits on your pick",
   waiting_answer: "waits on your answer",
 };
 
 function runGateTitle(rec) {
+  // A plan wait names no step to answer: what it asks for is the plan's own
+  // decisions, and the card body carries the run's sentence about them.
+  if (rec.kind === "plan-wait") return RUN_GATE_WORDS["plan-wait"];
   return `${RUN_GATE_WORDS[rec.kind] || "waits on you"}: ${rec.label}`;
 }
 
@@ -65577,6 +65587,28 @@ function runGateOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
 }
 
+/* A plan wait's card opens the session with its plan pane up: the decisions
+   are taken there, and the run page has no press for them. The layout is
+   written for that session before the hash moves, so the pane comes up with
+   the session (syncLayout -> syncSplitPane) rather than being toggled at
+   whichever session happened to be attached. */
+function runGateOpenPlan(rec) {
+  try {
+    setSessLayout(rec.session, { split: true, pane: "plan" });
+  } catch { /* storage off */ }
+  runGateOpen(rec);
+}
+
+/* Where a record takes the reader: the plan pane for a plan wait (that is
+   where its decision is taken), the session itself for everything else. */
+function runGateWhere(rec) {
+  if (rec.kind === "plan-wait") {
+    runGateOpenPlan(rec);
+    return;
+  }
+  runGateOpen(rec);
+}
+
 /* The card's way into the session, under the nudge card's rule
    (claunch-yjm0v): the card goes exactly as its Hide press would put it away,
    and then the session opens. The gate is not answered by this -- it stays
@@ -65584,7 +65616,7 @@ function runGateOpen(rec) {
 function runGateGo(rec, key) {
   gateHide("ask", String(rec.id));
   dismissNotice(key);
-  runGateOpen(rec);
+  runGateWhere(rec);
 }
 
 function runGateButtons(rec, after) {
@@ -65606,6 +65638,9 @@ function runGateButtons(rec, after) {
 function runGateShortfall(rec) {
   const all = rec.presses || [];
   const here = runGatePresses(rec);
+  if (rec.kind === "plan-wait") {
+    return "decide it in the plan panel — clicking this card opens it";
+  }
   if (!all.length) return "this one has no press here — open the session to settle it";
   if (here.length < all.length) {
     return "an answer that needs a reason is not offered here — open the session for it";

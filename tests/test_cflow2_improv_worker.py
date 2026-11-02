@@ -268,7 +268,38 @@ def _coding_item(tmp_path, monkeypatch, approval):
         "require_coding_approval": approval,
     })
     kw = {"cwd": str(tmp_path), "scope": "coding", "now": 1.0}
-    return runtime.start(chart, caps={}, **kw), kw
+    st = runtime.start(chart, caps={}, **kw)
+    return (_start_work(st, kw) if approval is not True else st), kw
+
+
+def _plan_clear(st, kw):
+    """Let the plan stop pass: the probe answers 0, so the plan owes the user
+    nothing and the round goes on (claunch-rzepk).
+
+    A test has no probe runner of its own, so the wait would sit forever.
+    The helper asserts the run really is at a plan wait, so a route that
+    stopped stopping there is red here rather than silently passing the
+    assertion that follows."""
+    from claude_launcher.cflow2 import runtime
+
+    waits = [w for w in st.get("waits") or []
+             if "plan-wait" in str(w.get("node") or "")]
+    assert waits, f"no plan wait to clear (tasks {[t['label'] for t in st['tasks']]})"
+    return runtime.wait_tick(kw["now"], lambda cmd, cwd: (0, ""),
+                             cwd=kw["cwd"], scope=kw["scope"])
+
+
+def _start_work(st, kw):
+    """The gate-less round start: plan-seed, the plan stop, then work.
+
+    Every path that skipped ``coding-plan`` now writes the plan first and
+    waits on it (claunch-rzepk 규칙 1·3), so a test that used to find
+    ``work`` here crosses both nodes."""
+    from claude_launcher.cflow2 import runtime
+
+    if any(t["label"] == "plan-seed" for t in st["tasks"]):
+        st = runtime.report(_one(st, "plan-seed"), "ok", {"plan_waiting": 0}, **kw)
+    return _plan_clear(st, kw)
 
 
 @pytest.mark.parametrize("approval", [None, False])
@@ -286,6 +317,8 @@ def _approve_item(st, kw, visit, decision):
     assert plan["label"] == "coding-plan"
     brief = f"item {visit}: edit workflow and test true/false routing"
     st = runtime.report(plan["instance"], "ok", {"brief": brief}, **kw)
+    # the plan stop sits between the plan and the gate (claunch-rzepk)
+    st = _plan_clear(st, kw)
     assert not st["tasks"]
     [ask] = st["asks"]
     assert ask["label"] == "coding-approval"
@@ -339,11 +372,16 @@ def test_coding_approval_once_asks_again_on_the_next_item(tmp_path, monkeypatch)
 
 
 def test_coding_approval_always_skips_the_gate_for_later_items(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
     st, kw = _coding_item(tmp_path, monkeypatch, True)
     st = _approve_item(st, kw, 1, "approve-always")
     assert _approval_data(kw)["decision"] == "approve-always"
-    # the second item goes straight to work: no plan, no ask
+    # The second item skips the gate, and still stops on the plan: approve-
+    # always turns off the gate, not the plan wait (claunch-rzepk 규칙 4).
     assert not st.get("asks")
+    st = _plan_clear(runtime.report(_one(st, "plan-seed"), "ok",
+                                    {"plan_waiting": 0}, **kw), kw)
     st = _work_item(st, kw)
     assert st["status"] == "done"
 
@@ -355,11 +393,15 @@ def test_coding_approval_always_holds_after_a_reject(tmp_path, monkeypatch):
     st, kw = _coding_item(tmp_path, monkeypatch, True)
     [plan] = st["tasks"]
     st = runtime.report(plan["instance"], "ok", {"brief": "first"}, **kw)
+    st = _plan_clear(st, kw)
     runtime.approve(None, decision="reject", reason="too broad", **kw)
     st = runtime.status(**kw)
     assert _approval_data(kw)["decision"] == "reject"
     st = _approve_item(st, kw, 1, "approve-always")
     assert not st.get("asks")
+    # the next item writes its plan first and still stops on it (규칙 4)
+    st = _plan_clear(runtime.report(_one(st, "plan-seed"), "ok",
+                                    {"plan_waiting": 0}, **kw), kw)
     assert _work_item(st, kw)["status"] == "done"
 
 
@@ -372,6 +414,72 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     assert ask["otherwise"] == "human"
     assert "from" not in ask and "timeout" not in ask
     assert ask["urgent"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the plan's own decisions stop the round before the gate (claunch-rzepk)
+# --------------------------------------------------------------------------- #
+def test_the_plan_wait_is_declared_on_both_paths():
+    """One wait beside the gate, one on the path that skips ``coding-plan``.
+
+    Both probe ``claunch gate plan-waiting`` (0 clear, 1 still owed, 2 could
+    not tell), poll, and cap undecided reads -- but carry no ``seconds``:
+    the confirmed rule has no upper bound on "stop until the user decides",
+    and a failed read goes to a person instead of releasing the run
+    (docs/plan-coding-approval.md 규칙 1)."""
+    chart = _chart()
+    waits = [n for n in chart.nodes.values() if n.type == "wait"
+             and n.get("probe") == ["claunch", "gate", "plan-waiting"]]
+    assert len(waits) == 2, [n.id for n in waits]
+    for n in waits:
+        assert "plan-wait" in n.id
+        assert n.get("poll") == 30 and n.get("undecided_max") == 3
+        assert n.get("seconds") is None
+        assert "undecidable" in n.on
+
+
+def test_coding_plan_reports_the_count_the_wait_reads():
+    """The agent's report and the probe read the same number, so a reader of
+    the round can see why it stopped."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    plan = doc["nodes"]["coding-plan"]
+    assert plan["returns"]["ok"]["plan_waiting"] == "int?"
+    assert "plan_waiting" in _words(plan["done_when"])
+    assert "summary.waiting" in _words(plan["prompt"])
+
+
+def test_a_plan_decision_stops_the_round_before_the_gate(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, True)
+    [plan] = st["tasks"]
+    assert plan["label"] == "coding-plan"
+    st = runtime.report(plan["instance"], "ok",
+                        {"brief": "b", "plan_waiting": 3}, **kw)
+    # the gate does not stand while the plan still owes the user a decision
+    assert not st.get("asks")
+    [wait] = st["waits"]
+    assert "plan-wait" in wait["node"]
+    # once the plan is clear, the same item reaches the gate
+    st = _plan_clear(st, kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "coding-approval"
+
+
+def test_a_plan_decision_stops_the_gate_less_round_too(tmp_path, monkeypatch):
+    """approve-always and the routing-only path skip ``coding-plan``; the
+    plan is written first (``plan-seed``) and the round stops on it there
+    too (claunch-rzepk 규칙 1·3)."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {})
+    [seed] = st["tasks"]
+    assert seed["label"] == "plan-seed"
+    st = runtime.report(seed["instance"], "ok", {"plan_waiting": 0}, **kw)
+    [wait] = st["waits"]
+    assert "plan-wait" in wait["node"]
+    st = _plan_clear(st, kw)
+    assert [t["label"] for t in st["tasks"]] == ["work"]
 
 
 def test_pre_approval_summary_thread_opens_whenever_the_gate_stands():
@@ -503,7 +611,7 @@ def test_routing_without_a_gate_follows_the_plans_recommendation(tmp_path, monke
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
     plan = {"brief": "edit a.py", "difficulty": "easy", "recommend": "delegate", "why": "one file"}
-    st = runtime.report(_one(st, "coding-plan"), "ok", plan, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", plan, **kw), kw)
     assert not st.get("asks")  # no gate: nobody is asked
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     # the delegate does the work in place of `work`
@@ -515,8 +623,8 @@ def test_routing_hard_plan_keeps_the_work_here(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
     st = runtime.report(_one(st, "work"), "ok", {}, **kw)
     assert _finish_skip(st, kw)["status"] == "done"
@@ -533,8 +641,8 @@ def test_routing_gate_keeps_approve_always_out_of_the_per_item_promise(
 
     st, kw = _routing_item(tmp_path, monkeypatch,
                            {"session_routing": True, "require_coding_approval": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     [ask] = st["asks"]
     approvals = [o["name"] for o in ask["options"] if o["name"].startswith("approve-")]
     assert len(approvals) == 4
@@ -560,8 +668,8 @@ def test_routing_gate_offers_five_answers(tmp_path, monkeypatch, answer, route, 
 
     st, kw = _routing_item(tmp_path, monkeypatch,
                            {"session_routing": True, "require_coding_approval": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     [ask] = st["asks"]
     assert ask["label"] == "coding-approval-routing" and ask["urgent"] is True
     assert [o["name"] for o in ask["options"]][:5] == [
@@ -584,14 +692,14 @@ def test_routing_gate_always_follows_the_plan_without_asking_again(tmp_path, mon
 
     st, kw = _routing_item(tmp_path, monkeypatch,
                            {"session_routing": True, "require_coding_approval": True}, items=2)
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw), kw)
     runtime.approve(None, decision="approve-always", reason="r", **kw)
     st = runtime.report(_one(runtime.status(**kw), "route-planned"), "ok", DIRECT, **kw)
     st = _finish_skip(runtime.report(_one(st, "work"), "ok", {}, **kw), kw)
     # the second item: the plan is still written (routing needs it), the gate is not
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b2", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b2", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     assert not st.get("asks")
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
@@ -606,6 +714,7 @@ def test_reject_rewrites_the_plan(tmp_path, monkeypatch, routing):
                            {"session_routing": routing, "require_coding_approval": True})
     for visit in (1, 2):
         st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": f"plan {visit}"}, **kw)
+        st = _plan_clear(st, kw)
         [ask] = st["asks"]
         assert f"plan {visit}" in ask["prompt"]
         if visit == 1:
@@ -623,8 +732,8 @@ def test_a_stopped_delegate_asks_the_person(tmp_path, monkeypatch, outcome):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     stopped = ({"reason": "needs a design call", "commits": [], "remaining": "all"}
                if outcome == "escalated" else {"reason": "spawn refused"})
@@ -648,7 +757,7 @@ def test_a_stopped_delegate_rejected_goes_back_to_the_plan(tmp_path, monkeypatch
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "escalated",
                         {"reason": "r", "commits": [], "remaining": "x"}, **kw)
@@ -662,7 +771,7 @@ def test_a_failed_parent_test_on_delegated_work_asks_the_person(tmp_path, monkey
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
     st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
@@ -687,7 +796,7 @@ def _failed_parent_test(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
     st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
@@ -759,14 +868,17 @@ def test_delegated_work_sent_back_by_review_asks_first(tmp_path, monkeypatch):
     runtime.approve(None, decision="reject", reason="new plan", **kw)
     st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
     # rejected: back to the plan, and the gate does not reopen
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b2", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b2", "recommend": "direct"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
     assert _one(st, "work")
 
 
 def test_routing_off_keeps_todays_path_even_with_a_delegate_route(tmp_path, monkeypatch):
-    st, _ = _routing_item(tmp_path, monkeypatch, {},
-                          data={"route": DELEGATE, "land_out": {"rework": True}})
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {},
+                           data={"route": DELEGATE, "land_out": {"rework": True}})
+    st = _start_work(st, kw)
     assert [t["label"] for t in st["tasks"]] == ["work"]
     assert not st.get("asks")
 
@@ -3462,7 +3574,8 @@ def _fork_item(tmp_path, monkeypatch, parallel):
                                   resolve_include=layers.resolver())
     chart = inputs.apply(chart, {} if parallel is None else {"parallel_fork": parallel})
     kw = {"cwd": str(tmp_path), "scope": "forking", "now": 1.0}
-    return runtime.start(chart, caps={}, **kw), kw
+    st = runtime.start(chart, caps={}, **kw)
+    return _start_work(st, kw), kw
 
 
 WORK_OK = {"files": ["a.py"], "summary": "s", "tried": []}
