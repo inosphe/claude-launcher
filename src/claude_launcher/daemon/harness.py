@@ -225,6 +225,13 @@ class SessionDef:
     #: for the sake of a slot. Read live, right beside the kill, so a flag
     #: set while the end-sequence waits still protects the session.
     keep_alive: bool = False
+    #: A person's "do not tell me again" for the provider warning: set when a
+    #: session running the claude harness on a provider whose service is not
+    #: Anthropic dismissed the warning at the top of its screen (see
+    #: ``providers.service``). Absent means "not dismissed" — the warning
+    #: shows — which is also the answer for every record written before this
+    #: field existed, so the rule applies to the whole fleet without a write.
+    provider_warning_ignored: bool = False
     #: A person's standing pause for the session-level reminder service.
     #: Each source (Role, Prompt pack, Cflow, Score goal) keeps its own
     #: clock, but no repeating reminder is delivered into this session while this flag is set.
@@ -409,6 +416,11 @@ class SessionDef:
             out["kind"] = self.kind
         if self.created_by:
             out["created_by"] = dict(self.created_by)
+        # Same rule as the note above: only a dismissal writes the key, so a
+        # session that never dismissed the provider warning keeps the record
+        # it had before the field existed.
+        if self.provider_warning_ignored:
+            out["provider_warning_ignored"] = True
         return out
 
     @classmethod
@@ -442,6 +454,7 @@ class SessionDef:
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
+            provider_warning_ignored=bool(data.get("provider_warning_ignored")),
             reminder_paused=bool(data.get("reminder_paused")),
             observe_pin=bool(data.get("observe_pin")),
             score_goal=score_goal.enabled(data.get("score_goal", False)),

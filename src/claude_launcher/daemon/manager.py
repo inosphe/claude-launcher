@@ -2545,6 +2545,20 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_provider_warning_ignored(self, name: str, on: bool) -> AnySession:
+        """Record (or clear) a session's dismissal of the provider warning.
+
+        The warning asks the operator to consider running a claude-harness
+        session on yolo mode when its provider is not Anthropic's own. "Ignore"
+        is a per-session answer, so it belongs to the definition rather than to
+        a browser: it survives a reload, a daemon restart and a respawn, and a
+        record that never carried it keeps showing the warning.
+        """
+        session = self.get(name)
+        session.sdef = replace(session.sdef, provider_warning_ignored=bool(on))
+        self.persist()
+        return session
+
     def set_self_merge_allowed(self, name: str, on: bool, *, actor: str = "") -> AnySession:
         """Set (or clear) whether a quick-fork may merge on its own.
 
