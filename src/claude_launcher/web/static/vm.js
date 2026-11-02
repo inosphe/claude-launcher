@@ -492,21 +492,38 @@ function renderRequests() {
   const rows = [];
   for (const v of vms) for (const r of v.requests || []) rows.push([v, r]);
   $("vm-requests-box").hidden = !rows.length;
-  const body = document.querySelector("#vm-requests tbody");
-  body.replaceChildren();
+  $("vm-requests-title").textContent = `대기 중인 요청 ${rows.length}건`;
+  const host = $("vm-requests");
+  host.replaceChildren();
+  const line = (label, text, cls) => {
+    const p = document.createElement("p");
+    if (cls) p.className = cls;
+    const b = document.createElement("b");
+    b.textContent = label;
+    p.append(b, " ", document.createTextNode(text));
+    return p;
+  };
   for (const [vm, r] of rows) {
-    const tr = document.createElement("tr");
-    tr.append(cell(vm.id), cell(r.session), cell((r.scopes || []).join(" + ") || "-"),
-              cell((r.shares || []).map((s) => `${s.name} (${s.mode}) ${s.host_path}`).join("; ") || "-"),
-              cell(r.reason || ""));
-    const td = document.createElement("td");
+    const card = document.createElement("article");
+    card.className = "vm-request";
+    const head = document.createElement("h3");
+    head.textContent = `${r.session} → VM ${vm.id}`;
+    card.append(head, line("권한", (r.scopes || []).join(" + ") || "-"));
+    const shares = r.shares || [];
+    card.append(line("공유 폴더", shares.map((s) => `${s.name} (${s.mode}) ${s.host_path}`).join("; ") || "-"));
+    if ((r.scopes || []).includes("exec"))
+      card.append(line("주의", "exec은 게스트에서 셸 실행, 설치, 설정 변경을 허용합니다.", "vm-warn-text"));
+    const rw = shares.filter((s) => s.mode === "rw").map((s) => s.name);
+    if (rw.length)
+      card.append(line("주의", `쓰기 가능(rw) 공유: ${rw.join(", ")}. 게스트가 .git/hooks나 스크립트를 심어 호스트 세션이 실행하게 할 수 있습니다.`, "vm-warn-text"));
+    card.append(line("사유", r.reason || "-"));
     const ok = document.createElement("button");
     ok.type = "button";
     ok.textContent = "승인";
     ok.addEventListener("click", () => {
       const risky = [];
       if ((r.scopes || []).includes("exec")) risky.push("exec(게스트 셸 실행과 설치·설정 변경)");
-      for (const s of r.shares || []) if (s.mode === "rw") risky.push(`${s.name} 쓰기 가능(rw) 공유`);
+      for (const s of shares) if (s.mode === "rw") risky.push(`${s.name} 쓰기 가능(rw) 공유`);
       if (risky.length && !confirm(`${r.session}에 ${risky.join(", ")}를 줍니다. 계속합니까?`)) return;
       act(`${r.session} 요청 승인`, () => post(`api/vm/${encodeURIComponent(vm.id)}/approve`, { session: r.session, id: r.id }));
     });
@@ -515,9 +532,11 @@ function renderRequests() {
     no.textContent = "거절";
     no.addEventListener("click", () => act(`${r.session} 요청 거절`,
       () => post(`api/vm/${encodeURIComponent(vm.id)}/deny`, { session: r.session, id: r.id })));
-    td.append(ok, no);
-    tr.appendChild(td);
-    body.appendChild(tr);
+    const row = document.createElement("div");
+    row.className = "vm-row";
+    row.append(ok, no);
+    card.append(row);
+    host.append(card);
   }
 }
 

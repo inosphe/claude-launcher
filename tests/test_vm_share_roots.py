@@ -138,3 +138,24 @@ def test_a_session_does_not_get_the_roots_and_the_manager_reads_them_afresh(tmp_
             assert str(host.root) not in str(mine)
 
     run(go())
+
+
+def test_the_pending_requests_are_listed_for_the_dashboard_and_only_to_the_user(tmp_path, host):
+    from test_vm_share import S2, req
+
+    async def go():
+        async with api_for(tmp_path, host) as api:
+            assert await (await api.get("/api/vm-requests")).json() == {"requests": []}
+            body = req(share=("out", str(host.root / "other"), "rw"))
+            assert (await api.post("/api/vm/a/request", json=body, headers=S2)).status == 200
+            for hdr in (AGENT, S2, {actors.HEADER: "cflow:wf"}):
+                denied = await api.get("/api/vm-requests", headers=hdr)
+                assert denied.status == 403 and (await denied.json())["code"] == "vm_user_only"
+            got = (await (await api.get("/api/vm-requests")).json())["requests"]
+            assert len(got) == 1 and got[0]["vm"] == "a" and got[0]["session"] == "s2"
+            assert got[0]["id"] and got[0]["scopes"] == ["view", "files"] and got[0]["shares"][0]["mode"] == "rw"
+            deny = await api.post("/api/vm/a/deny", json={"session": "s2", "id": got[0]["id"]})
+            assert deny.status == 200
+            assert await (await api.get("/api/vm-requests")).json() == {"requests": []}
+
+    run(go())

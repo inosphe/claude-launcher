@@ -53,6 +53,11 @@
     </details>
   </aside>
   <div id="vm-content">
+  <section id="vm-requests-box" role="alert" aria-label="대기 중인 요청" hidden>
+    <h2 id="vm-requests-title">대기 중인 요청</h2>
+    <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 세션이 끝나면 대기 중인 요청은 사라지지만 이미 승인된 공유 폴더는 남습니다.</p>
+    <div id="vm-requests"></div>
+  </section>
   <section id="vm-detail" hidden>
     <div id="vm-head">
       <h1 id="vm-name"></h1>
@@ -216,11 +221,6 @@
     <p class="vm-muted">각 칸은 모드와 상태입니다. 적용됨: 실행 중인 VM에 마운트됨, 적용 대기: 다시 시작하면 마운트됨, 제외: 규칙이나 이름 충돌 때문에 마운트되지 않음(칸에 사유 표시).</p>
     <div class="vm-scroll"><table id="vm-matrix"><thead></thead><tbody></tbody></table></div>
     <p class="vm-muted" id="vm-matrix-empty">공유 폴더가 없습니다.</p>
-    <div id="vm-requests-box" hidden>
-      <h2>권한 요청</h2>
-      <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 세션이 끝나면 대기 중인 요청은 사라지지만 이미 승인된 공유 폴더는 남습니다.</p>
-      <table id="vm-requests"><thead><tr><th>VM</th><th>세션</th><th>권한</th><th>공유 폴더</th><th>사유</th><th></th></tr></thead><tbody></tbody></table>
-    </div>
   </section>
   <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. 왼쪽 아래 'VM 등록'에서 이 호스트의 tart VM을 골라 등록하십시오. 셸에서는 <code>claunch vm add &lt;id&gt;</code>와 <code>claunch vm reconcile</code>을 실행해도 됩니다.</p>
   </div>

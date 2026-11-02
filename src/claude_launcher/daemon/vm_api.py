@@ -24,6 +24,7 @@ User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                stop,force_stop,suspend,reconcile,grant,revoke,
                revoke_controller,extra_controller,human,files_dir,share,
                approve,deny}, POST /api/vm-share-roots (add / rm an allowed root),
+               GET /api/vm-requests (pending requests, for the dashboard),
                GET /api/vm/{id}/files
 Anyone:        GET /api/vm, GET /api/vm/{id}
 Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
@@ -257,6 +258,17 @@ async def h_list(request: web.Request) -> web.Response:
         out["share_root_rows"] = vm_share.root_rows(store.daemon_config().get("vm_share_roots"), forbidden)
         out["share_catalog"] = [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])} for e in reg.catalog]
     return web.json_response(out)
+
+
+async def h_requests(request: web.Request) -> web.Response:
+    """Every pending session request, for the dashboard's notice and badge (user
+    only). Cheaper than ``GET /api/vm``, which also asks the host about its screen
+    lock, so the dashboard can poll it."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    rows = [{"vm": vm.id, **r} for vm in reg.list() for r in reg.view(vm.id).get("requests") or []]
+    return web.json_response({"requests": rows})
 
 
 async def h_get(request: web.Request) -> web.Response:
@@ -1264,6 +1276,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/allow", h_allow)
     r.add_get("/api/vm-only", h_only)
     r.add_post("/api/vm-only", h_only)
+    r.add_get("/api/vm-requests", h_requests)
     r.add_get("/api/vm-share-roots", h_share_roots)
     r.add_post("/api/vm-share-roots", h_share_roots)
     r.add_get("/api/vm-share-catalog", h_share_catalog)
