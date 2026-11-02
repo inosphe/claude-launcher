@@ -22,12 +22,18 @@ _VM = {"vm": {"type": "string", "description": "VM id (vm_list shows the ones yo
 _EPOCH = {"epoch": {"type": "integer",
                     "description": "from vm_acquire; omitted: the last one this session got"}}
 
+INSTRUCTIONS = """\
+VMs (vm_* tools): ask for access with vm_request; the user approves. Guidance:
+prompt pack 'mcp-vm' (load it on demand, see Prompt packs).
+"""
+
 TOOLS = [
     {"name": "vm_list",
      "description": "The VMs you have a grant on: state, whether the guest channel is up, who "
                     "drives it, and your scopes (view, control, exec, files). With a files grant a VM "
                     "row also carries files.host_dir and files.guest_dir, the two folders vm_put "
-                    "and vm_get use.",
+                    "and vm_get use; shared_dirs lists host folders mounted in the guest (host_path, "
+                    "guest_path, mode) with share_guidance.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "vm_acquire",
      "description": "Take control of a VM (needs a control grant from the user, and the user "
@@ -68,6 +74,23 @@ TOOLS = [
          **_VM, **_EPOCH, "command": {"type": "string"},
          "timeout": {"type": "number", "description": "seconds, default 60, at most 600"}},
          "required": ["vm", "command"]}},
+    {"name": "vm_request",
+     "description": "Ask the user for access to a VM in one step: scopes (view, control, exec, "
+                    "files) and shared host folders (shares: name, host_path, mode ro|rw; ro "
+                    "unless you need rw). Grants nothing by itself: the request waits in the "
+                    "user's VM panel, and the user approves or denies it. A share must lie "
+                    "under a root the user allowed (daemon.vm_share_roots) and never touches "
+                    "~/.ssh, ~/Library or the daemon's state. A shared folder is mounted in the "
+                    "guest at /Volumes/My Shared Files/<name> when the VM next starts. Asking "
+                    "again replaces your earlier request.",
+     "inputSchema": {"type": "object", "properties": {
+         **_VM,
+         "scopes": {"type": "array", "items": {"type": "string", "enum": ["view", "control", "exec", "files"]}},
+         "shares": {"type": "array", "maxItems": 4, "items": {"type": "object", "properties": {
+             "name": {"type": "string"}, "host_path": {"type": "string"},
+             "mode": {"type": "string", "enum": ["ro", "rw"]}}, "required": ["name", "host_path"]}},
+         "reason": {"type": "string", "description": "shown to the user next to the request"}},
+         "required": ["vm"]}},
     {"name": "vm_put",
      "description": "Copy a file or folder from the VM's host exchange folder (files.host_dir in "
                     "vm_list; put the file there first) into the guest's work folder "
@@ -192,6 +215,10 @@ def call_tool(name: str, args: dict) -> dict:
         return _post(f"/api/vm/{vm}/exec", {
             "session": me, "command": args.get("command"),
             "epoch": _epoch(vm, args), "timeout": timeout}, timeout + 10)
+    if name == "vm_request":
+        return _post(f"/api/vm/{vm}/request", {
+            "session": me, "scopes": args.get("scopes") or [], "shares": args.get("shares") or [],
+            "reason": args.get("reason") or ""})
     if name in ("vm_put", "vm_get"):
         return _post(f"/api/vm/{vm}/files/{name[3:]}", {
             "session": me, "path": args.get("path"), "dest": args.get("dest"),
@@ -209,4 +236,5 @@ SERVER = mcp_rpc.Server(
     tools=tuple(TOOLS),
     dispatch=call_tool,
     errors=(VmMcpError, daemon_client.DaemonClientError),
+    instructions=INSTRUCTIONS,
 )

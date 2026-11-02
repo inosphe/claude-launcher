@@ -148,6 +148,127 @@ def _cmd_expose(args) -> int:
 def _cmd_allow(args) -> int:
     return _net(args, "allow", lambda v: {"cidr": v}, lambda v: {"cidr": v})
 
+def _share_show(out: dict) -> None:
+    rows = out.get("share_rows")
+    if rows is None:
+        rows = out.get("shared_dirs") or []
+    for sh in rows:
+        if not sh.get("host_path"):
+            continue
+        origin = (sh.get("origin") or {}).get("kind", "vm")
+        by = (sh.get("origin") or {}).get("by_session")
+        state = sh.get("state", "")
+        print(f"{sh['name']:<14} {sh['mode']}  {sh['host_path']}  ->  {sh['guest_path']}  "
+              f"[{origin}{' ' + by if by else ''}{', ' + state if state else ''}]")
+        if state == "left_out":
+            print(f"  left out: {sh.get('why')}")
+    if not rows:
+        print("no shared folders")
+    for name, why in (out.get("shares_skipped") or {}).items():
+        if all(r.get("name") != name for r in rows):
+            print(f"  left out at the last start: {name}: {why}")
+    if out.get("shares_pending"):
+        print("restart the VM for the change to apply")
+
+
+def _catalog_show(out: dict) -> None:
+    rows = out.get("share_catalog") or []
+    for e in rows:
+        where = "all VMs" if e["scope"] == "all" else "VMs: " + ", ".join(e["vms"])
+        print(f"{e['name']:<14} {e['mode']}  {e['host_path']}  ({where})")
+    if not rows:
+        print("the share catalog is empty")
+    print("applied to a VM at its next start")
+
+
+def _cmd_guard(args) -> int:
+    """The Claude Code PreToolUse hook (``vm_guard``): the tool call on stdin, a
+    deny decision on stdout or nothing. Any failure allows the call."""
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        from .daemon import vm_guard
+        session = os.environ.get("CLAUNCH_SESSION", "")
+        reply = vm_guard.hook_response(payload, session) if session and isinstance(payload, dict) else None
+        if reply is not None:
+            print(json.dumps(reply, ensure_ascii=False))
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+    return 0
+
+
+def _only_show(out: dict) -> None:
+    for row in out.get("sessions") or []:
+        state = "on " if row["on"] else "off"
+        extra = "" if row["can_enable"] else f"  (cannot be turned on: {row['why']})"
+        print(f"{row['session']:<20} {state}{extra}")
+        for b in row.get("blocks", [])[:3]:
+            print(f"    blocked {b['kind']} ({b['rule']}): {b['head']}")
+    if not out.get("sessions"):
+        print("no session holds a VM grant")
+
+
+def _cmd_only(args) -> int:
+    if args.action == "ls":
+        return _call(args, "GET", "/api/vm-only", show=_only_show)
+    if not args.session:
+        print("claunch vm only on|off SESSION | ls", file=sys.stderr)
+        return EXIT_REFUSED
+    return _call(args, "POST", "/api/vm-only", {"session": args.session, "on": args.action == "on"}, show=_only_show)
+
+
+def _cmd_catalog(args) -> int:
+    """``claunch vm share catalog ls | add NAME PATH [--vm ID ...] [--rw [--yes-rw]] | rm NAME``
+    (parsed with ``catalog`` in the VM position)."""
+    if args.action == "ls":
+        return _call(args, "GET", "/api/vm-share-catalog", show=_catalog_show)
+    if not args.name or (args.action == "add" and not args.path):
+        print("claunch vm share catalog add NAME PATH [--vm ID ...] [--rw [--yes-rw]] | rm NAME | ls",
+              file=sys.stderr)
+        return EXIT_REFUSED
+    if args.action == "rm":
+        return _call(args, "POST", "/api/vm-share-catalog", {"action": "rm", "name": args.name}, show=_catalog_show)
+    body = {"action": "put", "name": args.name, "host_path": os.path.abspath(os.path.expanduser(args.path)),
+            "mode": "rw" if args.rw else "ro", "scope": "vms" if args.for_vm else "all",
+            "vms": list(args.for_vm or []), "confirm_rw": bool(args.yes_rw), "replace": bool(args.replace)}
+    return _call(args, "POST", "/api/vm-share-catalog", body, show=_catalog_show)
+
+
+def _cmd_share(args) -> int:
+    if args.vm == "catalog":
+        return _cmd_catalog(args)
+    if args.action == "ls":
+        return _call(args, "GET", f"/api/vm/{args.vm}", show=_share_show)
+    if not args.name or (args.action == "add" and not args.path):
+        print("claunch vm share add NAME PATH [--rw] | rm NAME | ls", file=sys.stderr)
+        return EXIT_REFUSED
+    body = {"action": args.action, "name": args.name}
+    if args.action == "add":
+        body.update({"host_path": os.path.abspath(os.path.expanduser(args.path)),
+                     "mode": "rw" if args.rw else "ro"})
+    return _call(args, "POST", f"/api/vm/{args.vm}/share", body, show=_share_show)
+
+
+def _requests_show(out: dict) -> None:
+    rows = [(vm["id"], r) for vm in out.get("vms") or [] for r in vm.get("requests") or []]
+    for vm_id, r in rows:
+        shares = ", ".join(f"{s['name']}({s['mode']}) {s['host_path']}" for s in r.get("shares") or [])
+        print(f"{vm_id:<14} {r['session']:<16} id: {r['id']}  scopes: {'+'.join(r.get('scopes') or []) or '-'}  "
+              f"shares: {shares or '-'}  {r.get('reason') or ''}")
+    if not rows:
+        print("no pending requests")
+
+
+def _cmd_requests(args) -> int:
+    return _call(args, "GET", "/api/vm", show=_requests_show)
+
+
+def _cmd_approve(args) -> int:
+    path = f"/api/vm/{args.vm}/{args.vm_command}"
+    return _call(args, "POST", path, {"session": args.session, "id": args.id},
+                 show=lambda out: print(f"{args.vm}: " + (", ".join(
+                     f"{s}:{'+'.join(v)}" for s, v in sorted((out.get('grants') or {}).items())) or "-")))
+
+
 def _cmd_lock(args) -> int:
     def show(out):
         print(f"{out['id']}: " + ("locked" if out.get("locked") else "unlocked"))
@@ -315,6 +436,44 @@ def register(sub) -> None:
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_cmd_lock)
+
+    sp = v.add_parser("share", help="host folders mounted in the guest at /Volumes/My Shared Files/<name> "
+                                    "(tart run --dir; applied at the next start). Only paths under the "
+                                    "daemon.vm_share_roots setting; read-only unless --rw. 'share catalog ls|add|rm' "
+                                    "manages folders shared with all VMs or listed ones")
+    vm_arg(sp)
+    sp.add_argument("action", choices=("ls", "add", "rm"))
+    sp.add_argument("name", nargs="?")
+    sp.add_argument("path", nargs="?")
+    sp.add_argument("--rw", action="store_true", help="read-write (default: read-only)")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--vm", dest="for_vm", action="append", default=None, metavar="ID",
+                    help="catalog add: apply to this VM only (repeatable); default: every VM")
+    sp.add_argument("--yes-rw", action="store_true",
+                    help="catalog add: confirm a read-write entry for every VM")
+    sp.add_argument("--replace", action="store_true", help="catalog add: change the existing entry of that name")
+    sp.set_defaults(func=_cmd_share)
+    sp = v.add_parser("only", help="VM-only mode of a session: the host refuses builds, installs and program "
+                                   "runs (Bash) and says to use vm_exec. A nudge, not a security boundary; "
+                                   "takes effect on the session's next Bash call")
+    sp.add_argument("action", choices=("on", "off", "ls"))
+    sp.add_argument("session", nargs="?")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_only)
+    sp = v.add_parser("guard", help=argparse.SUPPRESS)      # the PreToolUse hook; not for people
+    sp.set_defaults(func=_cmd_guard)
+    sp = v.add_parser("requests", help="access requests sessions have made (vm_request) and not had answered")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_requests)
+    for name, text in (("approve", "grant a session's request: its scopes and shared folders, in one step"),
+                       ("deny", "drop a session's request")):
+        sp = v.add_parser(name, help=text)
+        vm_arg(sp)
+        sp.add_argument("session")
+        sp.add_argument("--id", required=True, help="the request id 'claunch vm requests' shows; "
+                        "refused when the session has asked again since")
+        sp.add_argument("--json", action="store_true")
+        sp.set_defaults(func=_cmd_approve)
 
     sp = v.add_parser("files", help="a VM's file exchange: the host folder, the guest work folder "
                                     "(--guest-dir sets it, \"\" restores the default) and recent transfers")

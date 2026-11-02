@@ -295,3 +295,104 @@ the four tools when they start.
 Not verified without a real VM: that `tart exec -i` passes binary stdin and
 stdout without alteration (and keeps stderr apart), that the guest's `bsdtar`
 takes the options used here, and the timing of a 500 MiB transfer.
+
+## Shared host folders (`shared_dirs`)
+
+A VM can mount host folders through `tart run --dir name:path[:ro]`. The guest sees
+them at `/Volumes/My Shared Files/<name>`. A session edits files at the host path;
+the VM builds from a local copy made with `vm_exec` (`rsync -a --delete
+'/Volumes/My Shared Files/<name>/' ~/work/<name>/`). Building or running git inside
+the shared folder is slower by about 10x for small files, and swiftc reports
+"modified during the build" for files written just before (run d-009).
+
+- **Record.** `Vm.shared_dirs` is a list of `{name, host_path, mode}` (`ro` default,
+  `rw` only when written), at most 4 per VM, unique names (`check_name`). Only the
+  user changes it: dashboard VM tab, `claunch vm share add|rm|ls [--rw]`, or
+  `POST /api/vm/{id}/share`. A session sees name, mode, host and guest path in
+  `vm_list` / `vm_acquire` (`shared_dirs`, `share_guidance`) and cannot change them.
+- **Allowed roots.** Daemon setting `vm_share_roots` (default empty: nothing can be
+  shared; error `vm_share_no_roots`, 409). `host_path` is resolved with `realpath`
+  and must lie under a root (`vm_share_outside_root`, 400), so a symbolic link out of
+  a root is refused. A path that is, lies under or contains `~/.ssh`, `~/.gnupg`,
+  `~/.aws`, `~/Library`, `~/.claude`, `~/.claude-launcher` or the daemon state
+  directory is refused (`vm_share_forbidden`, 400); this keeps the home folder out.
+  Paths with `:` or control characters are refused.
+- **Risk.** The guest can read everything in a shared folder (`.env` files and keys
+  included), also with `ro`. With `rw` a program in the guest can plant `.git/hooks/*`
+  or a script that the host session runs at its next `git` or build, which is why
+  `ro` is the default. Share a working tree that holds no secrets.
+- **Apply.** Mounted at the next start. A change on a running VM shows
+  `shares_pending` until it restarts. The rules are applied again at every start;
+  a share that fails then is left out and listed in `shares_skipped` (and audited).
+  A locked VM takes no share changes and does not start.
+- **One-step access request.** `vm_request(vm, scopes, shares, reason)` records a
+  request (at most 10 per VM, not saved to disk, dropped when the session exits or
+  the VM is removed). Nothing is granted. The user sees it in the VM tab or with
+  `claunch vm requests`, and `approve` / `deny` (`POST /api/vm/{id}/approve|deny`,
+  user only) grants the scopes and adds the shares together after re-checking them.
+  Each request has an `id`; `approve` and `deny` must send the id they were shown
+  with, and a session that asked again meanwhile (which replaces its request) gets
+  `vm_request_changed` (409), so the user never approves content they did not see.
+- **Session guidance.** The MCP server instructions point at the prompt pack
+  `mcp-vm`; `vm_list` and `vm_acquire` return `share_guidance`.
+- **Not verified with a real VM:** `--dir` together with `--suspendable`.
+
+### Share catalog and where a share came from
+
+The catalog (`vms.json` key `share_catalog`, the user's) lists folders shared with every
+VM (`scope: all`) or with listed VMs (`scope: vms`, `vms: [ids]`). Entries are
+`{name, host_path, mode, scope, vms, origin}`; the path rules are the ones above,
+applied again at every start. At start a VM gets its own shares followed by the
+catalog entries that apply to it, up to 4 in all (a fifth is left out with
+`over_limit`); a catalog entry whose name the VM already uses is left out with
+`name_conflict`, so the VM's own entry wins. Left-out entries and entries that fail the rules at start show
+in `share_rows` with the reason. `shares_pending` also turns on when the catalog
+changes what a running VM would get.
+
+- **Origin.** Each share carries `origin {kind, by_session, at}`: `vm` (set by the user on
+  that VM), `request` (a session asked and the user approved; `by_session` names it),
+  `catalog-all`, `catalog-vms`. An approved share stays when the session ends; only a
+  pending request is dropped at session exit.
+- **Routes** (user only): `GET|POST /api/vm-share-catalog` (`put` with optional `replace`,
+  `rm`). A read-write entry for all VMs needs `confirm_rw: true` (`vm_share_confirm_rw`
+  otherwise): the page asks with a dialog, the CLI takes `--yes-rw`.
+- **CLI.** `claunch vm share catalog ls | add NAME PATH [--rw [--yes-rw]] [--vm ID ...]
+  [--replace] | rm NAME`; `claunch vm share <vm> ls` shows each share's origin and state.
+- **Page.** The VM page shows, below the selected VM and whatever is selected, the catalog
+  (add, edit, delete, scope), the VM x share matrix (mode and state per cell, the reason for
+  a left-out share), the VMs waiting for a restart, and the pending requests of all VMs.
+- **Sessions** see in `vm_list` / `vm_acquire` only the shares that are mounted (name, mode,
+  host and guest path) and the guidance, not the origin or the catalog.
+
+## VM-only mode (`daemon/vm_guard.py`)
+
+A per-session switch, off by default. While it is on, the session's Bash calls that start a build
+(make, xcodebuild, swift build, cargo/go build|test|run, npm run|test, pytest ...), install packages
+(npm/pnpm/yarn/pip/uv/brew/gem/pod/cargo/go install ...) or run a program (python, node, `./script`,
+open, osascript, uv run ...) are refused with a message that says to use `vm_exec`. `git`,
+`claunch` and read commands pass. Chained commands, `bash -c '...'`, `$(...)` and leading
+`VAR=1`, `sudo`, `env` are looked through. **This is a nudge, not a security boundary:** the rules are
+token prefixes and are bypassed by a script file, an alias or an indirect call. A session can also
+**delete its own `vm-only.json`** (it is in the session's own directory) and so switch itself off; the daemon does not
+guard that file. Wrapper options that take an argument (`env -u X`, `sudo -u U`, `nice -n N`, `env -S '…'`) are skipped, not read as the command.
+
+- **Mechanism.** Every Claude Code spawn carries `--settings` with a `PreToolUse` hook for `Bash`
+  (`harness.REBRIEF_HOOK_SETTINGS`). Its command is `if [ -e "$CLAUNCH_SCRATCH/../vm-only.json" ]; then exec
+  claunch vm guard; fi`, so claunch starts only when the session's switch file exists. The switch is that
+  file (`<session dir>/vm-only.json`, 0600), written by the daemon; the hook reads it on every call, so the
+  change applies to the session's next Bash call and works with the daemon down. `claunch vm guard`
+  reads the tool call from stdin and prints a `permissionDecision: deny` with the reason. **Fail-open:**
+  any error in the hook allows the call.
+- **Who can switch.** Only a session started with the hook (the daemon records this at every spawn,
+  `vm-guard-hook` in the session dir). Sessions started before this version, with caller-supplied
+  `--settings`, or on another harness are refused with the reason; the page shows it. Other harnesses
+  need their own adapter: the rules, the switch and the history are in `vm_guard.py` and the Claude hook
+  is only the adapter.
+- **History.** Each block appends `{at, kind, rule, head}` (the first three words of the part
+  that matched, no later arguments) to `vm-only-blocks.jsonl`; the last 20 are shown on the page.
+- **Routes** (user only): `GET|POST /api/vm-only` (`{session, on}`; 409 `vm_only_refused`).
+  CLI: `claunch vm only on|off SESSION`, `claunch vm only ls`.
+- **Page.** A "VM 전용 모드" section on the default screen lists the sessions that hold a VM grant with
+  the switch, its state, why it cannot be turned on, and the recent blocks; each session row of the
+  permissions table has the same switch.
+

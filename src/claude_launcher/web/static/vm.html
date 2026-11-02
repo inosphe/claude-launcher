@@ -52,6 +52,7 @@
       <p id="vm-preset-note" class="vm-muted" hidden></p>
     </details>
   </aside>
+  <div id="vm-content">
   <section id="vm-detail" hidden>
     <div id="vm-head">
       <h1 id="vm-name"></h1>
@@ -98,7 +99,7 @@
       한계: 데몬은 토큰 하나로 사용자와 세션을 구분하지 못합니다. 같은 OS 사용자로 토큰을 읽을 수 있는 프로세스(관리 세션의 셸 포함)는
       이 페이지의 동작을 사용자 이름으로 호출할 수 있습니다. 그래서 이 페이지의 변경은 감사 기록에 선언된 주체(actor)와 함께 남습니다.
     </p>
-    <table id="vm-grants"><thead><tr><th>세션</th><th>view</th><th>control</th><th>exec</th><th>files</th><th></th></tr></thead><tbody></tbody></table>
+    <table id="vm-grants"><thead><tr><th>세션</th><th>view</th><th>control</th><th>exec</th><th>files</th><th>VM 전용</th><th></th></tr></thead><tbody></tbody></table>
     <div id="vm-grant-add">
       <label class="sr-only" for="vm-grant-session">권한을 줄 세션</label>
       <select id="vm-grant-session"><option value="">세션 선택</option></select>
@@ -126,6 +127,23 @@
     <p class="vm-muted">/Users/&lt;계정&gt;/&lt;폴더&gt;, /private/tmp/&lt;폴더&gt;, /tmp/&lt;폴더&gt; 아래만 지정할 수 있습니다(숨김 폴더·Library·공백 제외). 변경은 사용자만 할 수 있고 감사 기록에 남습니다.</p>
     <table id="vm-files-log"><thead><tr><th>시각</th><th>세션</th><th>작업</th><th>경로</th><th>크기</th><th>결과</th></tr></thead><tbody></tbody></table>
     <p class="vm-muted" id="vm-files-log-note">최근 전송은 데몬이 시작된 뒤의 기록이며 경로와 바이트 수만 남기고 내용은 남기지 않습니다.</p>
+    <h2>공유 폴더 (호스트 → 게스트)</h2>
+    <p class="vm-muted" id="vm-share-note">
+      호스트 폴더를 게스트의 <code>/Volumes/My Shared Files/&lt;이름&gt;</code>에 마운트합니다(<code>tart run --dir</code>). 세션은 호스트 경로에서 편집하고,
+      빌드와 git은 게스트의 로컬 사본에서 실행해야 합니다. 공유 폴더에서는 파일이 많을 때 약 10배 느리고 방금 쓴 파일에 대해 swiftc 오류가 납니다.
+      기본은 읽기 전용(ro)이며 쓰기(rw)는 명시적으로 고른 경우만 허용합니다. 변경은 VM을 다음에 시작할 때 적용됩니다.
+    </p>
+    <p class="vm-warn-text" id="vm-share-roots"></p>
+    <div id="vm-share-pending" class="vm-problem" hidden></div>
+    <table id="vm-shares"><thead><tr><th>이름</th><th>호스트 경로</th><th>게스트 경로</th><th>모드</th><th>출처</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="vm-share-add" class="vm-row">
+      <label class="sr-only" for="vm-share-name">공유 이름</label>
+      <input id="vm-share-name" type="text" maxlength="64" placeholder="이름 (예: src)" autocomplete="off" spellcheck="false">
+      <label class="sr-only" for="vm-share-path">호스트 경로</label>
+      <input id="vm-share-path" type="text" maxlength="300" placeholder="호스트 폴더의 절대 경로" autocomplete="off" spellcheck="false">
+      <label><input type="checkbox" id="vm-share-rw"> rw (쓰기 허용)</label>
+      <button id="vm-share-go" type="button">공유 추가</button>
+    </div>
     <h2>포트 노출 (softnet)</h2>
     <p class="vm-warn-text" id="vm-net-warning">
       <b>외부 포트는 호스트와 같은 LAN의 모든 기기에서 접속할 수 있습니다.</b>
@@ -148,7 +166,53 @@
       <button id="vm-allow-go" type="button">주소 추가</button>
     </div>
   </section>
+  <section id="vm-onlymode" aria-label="VM 전용 모드">
+    <h1>VM 전용 모드</h1>
+    <p class="vm-muted" id="vm-only-note">
+      켠 세션은 호스트에서 빌드(make, xcodebuild, npm run, pytest …), 패키지 설치(npm/pip/brew install …), 프로그램 실행(python, node, ./스크립트, open …)을 실행할 수 없고,
+      거절 메시지가 vm_exec로 VM에서 실행하라고 안내합니다. git, claunch, 읽기 명령은 그대로 쓸 수 있습니다. 다음 Bash 호출부터 적용됩니다.
+      <b>접두 규칙이므로 스크립트 파일, alias, 변수 치환으로 우회할 수 있고, 세션이 자기 세션 폴더의 vm-only.json을 지워 스스로 끌 수도 있습니다. 유도 장치이며 보안 경계가 아닙니다.</b>
+      Claude Code 세션 중 이 기능이 들어간 뒤 시작한(또는 다시 시작한) 세션에서만 켤 수 있습니다.
+    </p>
+    <table id="vm-only-rows"><thead><tr><th>세션</th><th>VM 전용</th><th>상태</th><th>최근 차단</th></tr></thead><tbody></tbody></table>
+    <p class="vm-muted" id="vm-only-empty">VM 권한을 가진 세션이 없습니다.</p>
+  </section>
+  <section id="vm-sharing" aria-label="공유 폴더 관리">
+    <h1>공유 폴더</h1>
+    <p class="vm-muted" id="vm-cat-note">
+      카탈로그는 모든 VM 또는 지정한 VM에 공유할 호스트 폴더 목록입니다. VM이 시작될 때 VM 자체의 공유 폴더와 합쳐 마운트하며(한 VM에 최대 4개,
+      이름이 같으면 VM 자체 항목이 우선), 변경은 실행 중인 VM에서는 다시 시작해야 적용됩니다. 기본은 읽기 전용(ro)입니다.
+      공유 폴더는 게스트에 열려 있어, ro여도 폴더 안의 비밀(.env 등)을 게스트가 읽을 수 있고, rw이면 게스트가 .git/hooks나 스크립트를 심어 호스트 세션이 실행하게 할 수 있습니다.
+    </p>
+    <p class="vm-warn-text" id="vm-cat-roots"></p>
+    <div id="vm-cat-pending" class="vm-problem" hidden></div>
+    <h2>카탈로그</h2>
+    <table id="vm-catalog"><thead><tr><th>이름</th><th>호스트 경로</th><th>모드</th><th>범위</th><th>출처</th><th></th></tr></thead><tbody></tbody></table>
+    <p class="vm-muted" id="vm-catalog-empty">카탈로그가 비어 있습니다.</p>
+    <div id="vm-cat-add" class="vm-row">
+      <label class="sr-only" for="vm-cat-name">공유 이름</label>
+      <input id="vm-cat-name" type="text" maxlength="64" placeholder="이름 (예: src)" autocomplete="off" spellcheck="false">
+      <label class="sr-only" for="vm-cat-path">호스트 경로</label>
+      <input id="vm-cat-path" type="text" maxlength="300" placeholder="호스트 폴더의 절대 경로" autocomplete="off" spellcheck="false">
+      <label><input type="checkbox" id="vm-cat-rw"> rw (쓰기 허용)</label>
+      <label><input type="radio" name="vm-cat-scope" id="vm-cat-scope-all" value="all" checked> 모든 VM</label>
+      <label><input type="radio" name="vm-cat-scope" id="vm-cat-scope-vms" value="vms"> 지정한 VM</label>
+      <span id="vm-cat-vms" class="vm-row"></span>
+      <button id="vm-cat-go" type="button">추가</button>
+      <button id="vm-cat-cancel" type="button" hidden>수정 취소</button>
+    </div>
+    <h2>VM × 공유 폴더</h2>
+    <p class="vm-muted">각 칸은 모드와 상태입니다. 적용됨: 실행 중인 VM에 마운트됨, 적용 대기: 다시 시작하면 마운트됨, 제외: 규칙이나 이름 충돌 때문에 마운트되지 않음(칸에 사유 표시).</p>
+    <div class="vm-scroll"><table id="vm-matrix"><thead></thead><tbody></tbody></table></div>
+    <p class="vm-muted" id="vm-matrix-empty">공유 폴더가 없습니다.</p>
+    <div id="vm-requests-box" hidden>
+      <h2>권한 요청</h2>
+      <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 세션이 끝나면 대기 중인 요청은 사라지지만 이미 승인된 공유 폴더는 남습니다.</p>
+      <table id="vm-requests"><thead><tr><th>VM</th><th>세션</th><th>권한</th><th>공유 폴더</th><th>사유</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
   <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. 왼쪽 아래 'VM 등록'에서 이 호스트의 tart VM을 골라 등록하십시오. 셸에서는 <code>claunch vm add &lt;id&gt;</code>와 <code>claunch vm reconcile</code>을 실행해도 됩니다.</p>
+  </div>
 </main>
 <script src="static/vm.js"></script>
 </body>

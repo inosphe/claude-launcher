@@ -128,6 +128,7 @@ function renderDetail(vm) {
   manageTouch();
   renderGrants(vm);
   renderFiles(vm);
+  renderShares(vm);
   renderNet(vm);
 }
 function renderNet(vm) {
@@ -214,6 +215,17 @@ function renderGrants(vm) {
       td.appendChild(box);
       tr.appendChild(td);
     }
+    const onlyCell = document.createElement("td");
+    const only = onlyRows.find((r) => r.session === session);
+    const onlyBox = document.createElement("input");
+    onlyBox.type = "checkbox";
+    onlyBox.checked = !!(only && only.on);
+    onlyBox.disabled = !only || (!only.on && !only.can_enable);
+    onlyBox.setAttribute("aria-label", `${session} VM 전용`);
+    onlyBox.title = only && !only.can_enable && !only.on ? only.why : "호스트에서 빌드·설치·실행을 거절하고 vm_exec로 안내합니다";
+    onlyBox.addEventListener("change", () => toggleOnly(session, onlyBox.checked));
+    onlyCell.appendChild(onlyBox);
+    tr.appendChild(onlyCell);
     const del = document.createElement("td");
     const b = document.createElement("button");
     b.type = "button";
@@ -225,6 +237,260 @@ function renderGrants(vm) {
     body.appendChild(tr);
   }
 }
+/* VM-only mode: the switch is per session (not per VM); read from /api/vm-only. */
+let onlyRows = [];
+function toggleOnly(session, on) {
+  act(`${session} VM 전용 ${on ? "켜기" : "끄기"}`, () => post("api/vm-only", { session, on }));
+}
+function renderOnly() {
+  const body = document.querySelector("#vm-only-rows tbody");
+  body.replaceChildren();
+  for (const r of onlyRows) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell(r.session));
+    const td = document.createElement("td");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = !!r.on;
+    box.disabled = !r.on && !r.can_enable;
+    box.setAttribute("aria-label", `${r.session} VM 전용 켜기`);
+    box.addEventListener("change", () => toggleOnly(r.session, box.checked));
+    td.appendChild(box);
+    tr.appendChild(td);
+    const blocks = r.blocks || [];
+    tr.append(cell(r.on ? `켜짐 (${fmtTime(r.since)}부터)` : (r.can_enable ? "꺼짐" : `켤 수 없음: ${r.why}`)),
+              cell(blocks.length
+                ? blocks.slice(0, 3).map((b) => `${fmtTime(b.at)} ${b.kind}(${b.rule}) ${b.head}`).join(" / ")
+                : "없음"));
+    body.appendChild(tr);
+  }
+  $("vm-only-rows").hidden = !onlyRows.length;
+  $("vm-only-empty").hidden = onlyRows.length > 0;
+}
+/* Shared host folders (tart run --dir) and the requests sessions made for them. */
+function renderShares(vm) {
+  const roots = $("vm-share-roots");
+  roots.textContent = shareRoots.length
+    ? `공유를 허용한 루트: ${shareRoots.join(", ")} (이 아래의 폴더만 공유할 수 있고, 홈 폴더 자체와 ~/.ssh, ~/Library, ~/.claude*, 데몬 상태 폴더는 포함할 수 없습니다.)`
+    : "공유가 꺼져 있습니다. 데몬 설정 daemon.vm_share_roots에 공유를 허용할 폴더를 적으면 켜집니다.";
+  $("vm-share-go").disabled = !shareRoots.length;
+  const pending = $("vm-share-pending");
+  const skipped = Object.entries(vm.shares_skipped || {});
+  pending.hidden = !(vm.shares_pending || skipped.length);
+  pending.textContent = [
+    vm.shares_pending ? "공유 폴더 변경은 VM을 다시 시작하면 적용됩니다." : "",
+    ...skipped.map(([n, why]) => `마지막 시작에서 제외된 공유 ${n}: ${why}`),
+  ].filter(Boolean).join(" ");
+  const body = document.querySelector("#vm-shares tbody");
+  body.replaceChildren();
+  const rows = (vm.share_rows || []).filter((r) => r.host_path);
+  for (const sh of rows) {
+    const tr = document.createElement("tr");
+    tr.append(cell(sh.name), cell(sh.host_path), cell(sh.guest_path), cell(sh.mode), cell(originText(sh.origin)),
+              cell(stateText(sh)));
+    const td = document.createElement("td");
+    if (sh.origin && (sh.origin.kind === "vm" || sh.origin.kind === "request")) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "삭제";
+      b.addEventListener("click", () => act(`공유 ${sh.name} 삭제`,
+        () => post(`api/vm/${encodeURIComponent(vm.id)}/share`, { action: "rm", name: sh.name })));
+      td.appendChild(b);
+    } else {
+      td.textContent = "카탈로그에서 변경";
+    }
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  $("vm-shares").hidden = !rows.length;
+}
+const STATE_TEXT = { applied: "적용됨", pending: "적용 대기", left_out: "제외" };
+function stateText(sh) { return (STATE_TEXT[sh.state] || sh.state || "") + (sh.why ? `: ${sh.why}` : ""); }
+function originText(o) {
+  if (!o) return "";
+  const kind = { vm: "VM 설정", request: "세션 요청", "catalog-all": "카탈로그(전체)", "catalog-vms": "카탈로그(지정)" }[o.kind] || o.kind;
+  return o.by_session ? `${kind}: ${o.by_session}` : kind;
+}
+$("vm-share-go").addEventListener("click", () => {
+  const name = $("vm-share-name").value.trim();
+  const host_path = $("vm-share-path").value.trim();
+  const mode = $("vm-share-rw").checked ? "rw" : "ro";
+  if (!selected || !name || !host_path) return;
+  if (mode === "rw" && !confirm(`${host_path}를 쓰기 가능(rw)으로 공유합니다. 게스트에서 이 폴더의 파일을 바꾸거나 지울 수 있습니다. 계속합니까?`)) return;
+  act(`공유 ${name} 추가`, async () => {
+    await post(`api/vm/${encodeURIComponent(selected)}/share`, { action: "add", name, host_path, mode });
+    $("vm-share-name").value = "";
+    $("vm-share-path").value = "";
+    $("vm-share-rw").checked = false;
+  });
+});
+/* The share catalog and the VM x share matrix: page-level, shown whatever VM is selected. */
+let shareCatalog = [];
+let catEditing = "";
+function renderSharing() {
+  $("vm-cat-roots").textContent = shareRoots.length
+    ? `공유를 허용한 루트: ${shareRoots.join(", ")} (이 아래의 폴더만 공유할 수 있고, 홈 폴더 자체와 ~/.ssh, ~/Library, ~/.claude*, 데몬 상태 폴더는 포함할 수 없습니다.)`
+    : "공유가 꺼져 있습니다. 데몬 설정 daemon.vm_share_roots에 공유를 허용할 폴더를 적으면 켜집니다.";
+  $("vm-cat-go").disabled = !shareRoots.length;
+  const waiting = vms.filter((v) => v.shares_pending).map((v) => v.id);
+  const pend = $("vm-cat-pending");
+  pend.hidden = !waiting.length;
+  pend.textContent = waiting.length ? `공유 폴더 변경이 적용되려면 다시 시작해야 하는 VM: ${waiting.join(", ")}` : "";
+  const body = document.querySelector("#vm-catalog tbody");
+  body.replaceChildren();
+  for (const e of shareCatalog) {
+    const tr = document.createElement("tr");
+    tr.append(cell(e.name), cell(e.host_path), cell(e.mode),
+              cell(e.scope === "all" ? "모든 VM" : `VM: ${(e.vms || []).join(", ")}`), cell(originText(e.origin)));
+    const td = document.createElement("td");
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "수정";
+    edit.addEventListener("click", () => startCatalogEdit(e));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "삭제";
+    del.addEventListener("click", () => act(`카탈로그 ${e.name} 삭제`, () => post("api/vm-share-catalog", { action: "rm", name: e.name })));
+    td.append(edit, del);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  $("vm-catalog").hidden = !shareCatalog.length;
+  $("vm-catalog-empty").hidden = shareCatalog.length > 0;
+  renderCatalogVms();
+  renderMatrix();
+}
+function renderCatalogVms() {
+  const box = $("vm-cat-vms");
+  const keep = new Set([...box.querySelectorAll("input:checked")].map((i) => i.value));
+  box.replaceChildren();
+  for (const v of vms) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = v.id;
+    input.checked = keep.has(v.id);
+    label.append(input, " " + v.id);
+    box.appendChild(label);
+  }
+  box.hidden = !$("vm-cat-scope-vms").checked;
+}
+for (const id of ["vm-cat-scope-all", "vm-cat-scope-vms"]) {
+  $(id).addEventListener("change", () => { $("vm-cat-vms").hidden = !$("vm-cat-scope-vms").checked; });
+}
+function startCatalogEdit(e) {
+  catEditing = e.name;
+  $("vm-cat-name").value = e.name;
+  $("vm-cat-name").disabled = true;
+  $("vm-cat-path").value = e.host_path;
+  $("vm-cat-rw").checked = e.mode === "rw";
+  $("vm-cat-scope-all").checked = e.scope === "all";
+  $("vm-cat-scope-vms").checked = e.scope === "vms";
+  renderCatalogVms();
+  for (const i of $("vm-cat-vms").querySelectorAll("input")) i.checked = (e.vms || []).includes(i.value);
+  $("vm-cat-go").textContent = "저장";
+  $("vm-cat-cancel").hidden = false;
+}
+function endCatalogEdit() {
+  catEditing = "";
+  $("vm-cat-name").value = "";
+  $("vm-cat-name").disabled = false;
+  $("vm-cat-path").value = "";
+  $("vm-cat-rw").checked = false;
+  $("vm-cat-scope-all").checked = true;
+  for (const i of $("vm-cat-vms").querySelectorAll("input")) i.checked = false;
+  $("vm-cat-vms").hidden = true;
+  $("vm-cat-go").textContent = "추가";
+  $("vm-cat-cancel").hidden = true;
+}
+$("vm-cat-cancel").addEventListener("click", endCatalogEdit);
+$("vm-cat-go").addEventListener("click", () => {
+  const name = $("vm-cat-name").value.trim();
+  const host_path = $("vm-cat-path").value.trim();
+  const mode = $("vm-cat-rw").checked ? "rw" : "ro";
+  const scope = $("vm-cat-scope-vms").checked ? "vms" : "all";
+  const picked = [...$("vm-cat-vms").querySelectorAll("input:checked")].map((i) => i.value);
+  if (!name || !host_path) return;
+  if (scope === "vms" && !picked.length) { say("지정할 VM을 하나 이상 고르십시오", true); return; }
+  let confirm_rw = false;
+  if (mode === "rw") {
+    const where = scope === "all" ? "모든 VM" : `VM ${picked.join(", ")}`;
+    if (!confirm(`${host_path}를 ${where}에 쓰기 가능(rw)으로 공유합니다. 게스트가 이 폴더의 파일을 바꾸거나 지울 수 있고, .git/hooks나 스크립트를 심어 호스트 세션이 실행하게 할 수 있습니다. 계속합니까?`)) return;
+    confirm_rw = true;
+  }
+  const replace = !!catEditing;
+  act(`카탈로그 ${name} ${replace ? "저장" : "추가"}`, async () => {
+    await post("api/vm-share-catalog", { action: "put", name, host_path, mode, scope, vms: picked, confirm_rw, replace });
+    endCatalogEdit();
+  });
+});
+function renderMatrix() {
+  const names = [];
+  for (const v of vms) for (const r of v.share_rows || []) if (!names.includes(r.name)) names.push(r.name);
+  for (const e of shareCatalog) if (!names.includes(e.name)) names.push(e.name);
+  const head = document.querySelector("#vm-matrix thead");
+  const body = document.querySelector("#vm-matrix tbody");
+  head.replaceChildren();
+  body.replaceChildren();
+  $("vm-matrix-empty").hidden = names.length > 0 && vms.length > 0;
+  $("vm-matrix").hidden = !(names.length && vms.length);
+  const hr = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.textContent = "VM";
+  hr.appendChild(corner);
+  for (const n of names) { const th = document.createElement("th"); th.textContent = n; hr.appendChild(th); }
+  head.appendChild(hr);
+  for (const v of vms) {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.textContent = v.id;
+    tr.appendChild(th);
+    for (const n of names) {
+      const r = (v.share_rows || []).find((x) => x.name === n);
+      const td = cell(r ? `${r.mode || ""} ${STATE_TEXT[r.state] || r.state}${r.why ? ` — ${r.why}` : ""}`.trim() : "-");
+      if (r) {
+        td.className = "state-" + r.state;
+        td.title = `${r.host_path || ""} (${originText(r.origin)})`;
+      }
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+}
+
+function renderRequests() {
+  const rows = [];
+  for (const v of vms) for (const r of v.requests || []) rows.push([v, r]);
+  $("vm-requests-box").hidden = !rows.length;
+  const body = document.querySelector("#vm-requests tbody");
+  body.replaceChildren();
+  for (const [vm, r] of rows) {
+    const tr = document.createElement("tr");
+    tr.append(cell(vm.id), cell(r.session), cell((r.scopes || []).join(" + ") || "-"),
+              cell((r.shares || []).map((s) => `${s.name} (${s.mode}) ${s.host_path}`).join("; ") || "-"),
+              cell(r.reason || ""));
+    const td = document.createElement("td");
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.textContent = "승인";
+    ok.addEventListener("click", () => {
+      const risky = [];
+      if ((r.scopes || []).includes("exec")) risky.push("exec(게스트 셸 실행과 설치·설정 변경)");
+      for (const s of r.shares || []) if (s.mode === "rw") risky.push(`${s.name} 쓰기 가능(rw) 공유`);
+      if (risky.length && !confirm(`${r.session}에 ${risky.join(", ")}를 줍니다. 계속합니까?`)) return;
+      act(`${r.session} 요청 승인`, () => post(`api/vm/${encodeURIComponent(vm.id)}/approve`, { session: r.session, id: r.id }));
+    });
+    const no = document.createElement("button");
+    no.type = "button";
+    no.textContent = "거절";
+    no.addEventListener("click", () => act(`${r.session} 요청 거절`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/deny`, { session: r.session, id: r.id })));
+    td.append(ok, no);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
 /* The file exchange: the two folders, the guest folder setting and the recent
    transfers. The route is the user's, so this is read from it rather than from
    the VM row (a session's row carries the folders but not the log). */
@@ -272,14 +538,21 @@ function render() {
   if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
+  renderOnly();
+  renderSharing();
+  renderRequests();
   syncPresetSave();
 }
 let hostLocked = false;
+let shareRoots = [];
 async function refresh() {
   try {
     const data = await api("api/vm");
     vms = data.vms || [];
     hostLocked = !!data.host_locked;
+    shareRoots = data.share_roots || [];
+    shareCatalog = data.share_catalog || [];
+    try { onlyRows = (await api("api/vm-only")).sessions || []; } catch (_) { onlyRows = []; }
     $("vm-link").classList.add("up");
   } catch (_) { $("vm-link").classList.remove("up"); return; }
   render();
