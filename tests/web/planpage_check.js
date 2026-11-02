@@ -50,7 +50,7 @@ const OVERVIEW = {
   counts: {user: 1, blocked: 0, closable: 1, working: 1, idle: 0},
   rows: [
     {session: 's2', stage: 'user', project: 'claunch', status: 'busy', category: 'running',
-     plan: {title: 'Child', steps: 3, done: 1, current: 'write', waiting: 2}, run: {workflow: 'improv-worker-v2', round: 1, current: ['work'], owed: ['choose: land?'], status: 'waiting_approval'}},
+     plan: {title: 'Child', steps: 3, done: 1, current: 'write', waiting: 2}, run: {workflow: 'improv-worker-v2', round: 1, round_now: 3, current: ['work'], owed: ['choose: land?'], status: 'waiting_approval'}},
     {session: 's3', stage: 'closable', project: 'other', status: 'idle', category: 'running',
      plan: {title: 'Done', steps: 2, done: 2, closable: true}, run: null},
     {session: 's1', stage: 'working', project: 'claunch', status: 'busy', category: 'running',
@@ -163,7 +163,7 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   t = text();
   for (const want of ['세션 진행 개요', '내 차례 (1)', '닫아도 됨 (1)', '진행 중 (1)',
                       'Child — 단계 1/3 · 지금: write · 내 결정 대기 2건', '런이 기다림: choose: land?',
-                      'improv-worker-v2 r1 · work · waiting_approval', 'improv-leader-v2 · standby'])
+                      'improv-worker-v2 r3 · work · waiting_approval', 'improv-leader-v2 · standby'])
     assert(t.includes(want), `missing ${want}`);
   assert.deepStrictEqual(rows(), ['s2', 's3', 's1']);
   assert.strictEqual(all(host).find(n => n.tag === 'a').href, '#/s/s2');

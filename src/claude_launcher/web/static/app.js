@@ -8098,7 +8098,10 @@ function cflow2RailLabel(r) {
   if (r.status === "done" || r.status === "failed" || r.status === "aborted")
     return r.status;
   const where = (r.current || []).join(", ");
-  const round = r.round ? ` · round ${r.round}` : "";
+  // round_now is the round a workflow that loops inside one run is in (its
+  // state round stays 1); a recurring run or an older daemon sends only round.
+  const shown = Number.isFinite(r.round_now) ? r.round_now : r.round;
+  const round = shown ? ` · round ${shown}` : "";
   return `${r.status || "running"}${round}${where ? " · " + where : ""}`;
 }
 

@@ -928,7 +928,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
                 "workflow": None, "current": [], "owed": [], "gated": False,
                 "answers": [], "urgent_asks": [], "started": None, "updated": None,
-                "entered_at": None}
+                "entered_at": None, "round": None, "round_now": None}
     inst = state.get("inst") or {}
     current = []
     owed = []
@@ -980,6 +980,11 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "status": status,
         "reason": state.get("reason"),
         "round": state.get("round"),
+        # The round a person should read: ``round`` above is the slot's run
+        # round and stays 1 for a workflow that loops its rounds inside one
+        # run (improv-worker-v2), so the rail says the loop iteration instead
+        # and the pages fall back to ``round`` when this is absent.
+        "round_now": runtime.current_round(state, chart),
         # The run's clocks: when it started, when it last moved (any write to
         # the state moves this), and when the oldest task it is in now was
         # entered (epoch seconds, the stamp the state carries per instance).

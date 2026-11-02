@@ -125,6 +125,15 @@ check("the v1 badge stays on the row", rows.s1.children.includes(v1), true);
 check("run navigation is a native link", line(rows.s1).tag, "a");
 check("run destination is explicit", line(rows.s1).children[3].textContent, "Run ↗");
 check("link href targets this run", line(rows.s1).href, "#/wf/" + encodeURIComponent("s1|F:/repo"));
+
+// A workflow that does not recur runs its rounds as iterations of a loop in
+// the same run, so the slot's `round` stays 1 and the daemon sends the round
+// the run is in as `round_now` (claunch-oxmso). The line follows that value;
+// an entry without one (a recurring run, an older daemon) keeps `round`.
+ctx.setRows({ s1: { ...running, round: 1, round_now: 3 } });
+ctx.apply();
+check("the line shows the round the run is in, not the slot round",
+      lineText(rows.s1), "improv-worker-v2 · running · round 3 · 목표 수립");
 const first = line(rows.s1);
 ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
                     owed: ["loop_limit: rounds", "choose: landing"] } });

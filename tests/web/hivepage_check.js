@@ -315,6 +315,11 @@ assert.deepStrictEqual(plain(P.cflowFacts({ workflow: 'improv-worker-v2', status
     href: '#/wf/' + encodeURIComponent('s1|/w/c') });
 assert.deepStrictEqual(plain(P.cflowFacts({ status: 'done', current: [], owed: [] }, null)),
   { rows: [['workflow', 'cflow2'], ['status', 'done']], href: '' });
+// A run that loops its rounds inside one run keeps its slot round at 1 and
+// sends the round it is in as round_now (claunch-oxmso): the pane names that.
+assert.deepStrictEqual(plain(P.cflowFacts({ workflow: 'improv-worker-v2', status: 'running', round: 1,
+                                            round_now: 3, current: ['work'], owed: [] }, null)).rows,
+  [['workflow', 'improv-worker-v2'], ['status', 'running'], ['round', '3'], ['현재', 'work']]);
 assert.deepStrictEqual(plain(P.cflowFacts(null, { workflow: 'improv', status: 'step', step_id: 'work', cwd: '/w/c' })),
   { rows: [['workflow', 'improv'], ['status', 'step'], ['step', 'work']],
     href: '#/wf/' + encodeURIComponent('default|/w/c') });
