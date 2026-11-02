@@ -35066,6 +35066,148 @@ function statsOverviewTable(d) {
   return table;
 }
 
+/* ---- provider and model ------------------------------------------- */
+/* The window's tokens one provider's model at a time. The four parts stay
+   apart because they cost differently, and each row's estimate comes from
+   the same Settings → Model prices table the rail's rows read (the daemon
+   priced it per row; a model with no row is reported as unpriced, never as
+   costing 0). A session the ledger cannot speak for (an OAuth route) has no
+   model recorded: its tokens ride its declared provider under an empty model
+   and are never priced. */
+
+/* The rows the table draws: the picked provider's models, or every model. */
+function statsModelRows(d) {
+  return (d.models || []).filter(
+    (r) => !statsProvider || r.provider === statsProvider);
+}
+
+/* The shown rows' sums, so the columns match the filter in force: a cache
+   write column appears only when a shown row has cache writes. */
+function statsModelTotals(rows) {
+  const t = { input: 0, cache_read: 0, cache_write: 0, output: 0,
+              total: 0, requests: 0 };
+  for (const r of rows) {
+    for (const k of Object.keys(t)) t[k] += r[k] || 0;
+  }
+  return t;
+}
+
+function statsModelBar(r, peak) {
+  const td = el("td", "num stats-tokens-cell");
+  if (r.total) {
+    const bar = el("span", "stats-rowbar");
+    const fill = el("span", "stats-llm-rowbar-fill");
+    fill.style.width = ((r.total / peak) * 100).toFixed(2) + "%";
+    bar.appendChild(fill);
+    td.appendChild(bar);
+  }
+  td.appendChild(el("span", "stats-rowvalue", usageShort(r.total || 0)));
+  td.title = `read ${(r.input || 0).toLocaleString()}, cached read ` +
+    `${(r.cache_read || 0).toLocaleString()}, cache write ` +
+    `${(r.cache_write || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
+  return td;
+}
+
+/* A row's estimate at the Settings → Model prices table, computed by the
+   daemon from the model that answered it. "—" where the table has no row for
+   it; a partly priced row (some of its tokens on an unpriced model — a
+   provider-filtered table keeps none of that) says what it leaves out. */
+function statsModelCost(r, currency) {
+  const unpriced = r.unpriced_tokens || 0;
+  const priced = r.priced_tokens || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = r.model
+        ? "no price row in Settings → Model prices for this model"
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(r.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices: this model's four " +
+    "token kinds at its row's rates" +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
+function statsModelTable(d) {
+  const rows = statsModelRows(d);
+  const totals = statsModelTotals(rows);
+  const parts = statsLlmParts(totals);
+  const priced = rows.some((r) => r.priced_tokens);
+  const heads = ["provider", "model", "tokens", ...parts.map(([, label]) => label)];
+  if (priced) heads.push("est. cost");
+  heads.push("requests", "sessions");
+  const table = el("table", "stats-table stats-model-table");
+  const head = el("tr");
+  for (const h of heads) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  const peak = Math.max(1, ...rows.map((r) => r.total || 0));
+  const currency = d.currency || "$";
+  for (const r of rows) {
+    const row = el("tr", "stats-model-row");
+    row.appendChild(el("td", "stats-provider-cell", r.provider || ""));
+    const model = el("td", "stats-model-cell");
+    if (r.model) {
+      model.textContent = r.model;
+    } else {
+      const none = el("span", "stats-model-unpriced", "(model not recorded)");
+      none.title = "this session never reached the routing shim, so the " +
+        "ledger has no model for it; its tokens are filed under the " +
+        "provider its profile declares";
+      model.appendChild(none);
+    }
+    row.appendChild(model);
+    row.appendChild(statsModelBar(r, peak));
+    for (const [key] of parts) {
+      row.appendChild(el("td", "num stats-llm-part", usageShort(r[key] || 0)));
+    }
+    if (priced) row.appendChild(statsModelCost(r, currency));
+    row.appendChild(el("td", "num", (r.requests || 0).toLocaleString()));
+    row.appendChild(el("td", "num", (r.sessions || 0).toLocaleString()));
+    table.appendChild(row);
+  }
+  return table;
+}
+
+/* The shown rows' estimate, for the summary tile: the provider filter
+   applies the way it does to every other tile. Null when the daemon's
+   payload has no model split (one that predates it). */
+function statsModelEstimate(d) {
+  if (!Array.isArray(d.models)) return null;
+  const rows = statsModelRows(d);
+  const out = { cost: 0, priced_tokens: 0, unpriced_tokens: 0 };
+  for (const r of rows) {
+    out.cost += r.cost || 0;
+    out.priced_tokens += r.priced_tokens || 0;
+    out.unpriced_tokens += r.unpriced_tokens || 0;
+  }
+  return out;
+}
+
+function statsModelSection(d) {
+  if (!Array.isArray(d.models)) return null;
+  const rows = statsModelRows(d);
+  const body = el("div", "stats-models");
+  body.appendChild(el("p", "wf-note",
+    "Tokens split one provider's model at a time, from the metering ledger " +
+    "the page's figures come from. Est. cost applies the rates in " +
+    "Settings → Model prices to each row; a model with no row there shows — " +
+    "and its tokens count as unpriced, not as free."));
+  if (!rows.length) {
+    body.appendChild(el("p", "wf-note",
+      statsProvider ? `no ${statsProvider} model in this window`
+                    : "no model figure in this window"));
+    return statsSection("By provider and model", 0, body);
+  }
+  body.appendChild(statsScroll(statsModelTable(d)));
+  return statsSection("By provider and model", rows.length, body);
+}
+
 /* ---- the session detail panel -------------------------------------- */
 function statsOverviewRow(name) {
   return ((statsOverview && statsOverview.sessions) || [])
@@ -35903,6 +36045,15 @@ function renderStatsOverview(main) {
     `cache write ${usageShort(totals.cache_write || 0)}`));
   summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
+  const est = statsModelEstimate(d);
+  if (est && (est.priced_tokens || est.unpriced_tokens)) {
+    const currency = d.currency || "$";
+    summary.appendChild(statsCard("Est. cost",
+      est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
+      est.unpriced_tokens
+        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : "Settings → Model prices"));
+  }
   summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
   if (!statsIncludeKilled) held.push(`${counts.killed_excluded || 0} killed`);
@@ -35941,6 +36092,9 @@ function renderStatsOverview(main) {
   main.appendChild(statsSection(`Sessions by usage`, rows.length,
     rows.length ? statsScroll(statsOverviewTable(d))
       : el("p", "wf-note", "no session worked in this window")));
+
+  const models = statsModelSection(d);
+  if (models) main.appendChild(models);
 
   main.appendChild(statsLlmSection());
 

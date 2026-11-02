@@ -12866,7 +12866,8 @@ async def h_session_token_series(request: web.Request) -> web.Response:
 
 def _stats_overview(manager: "SessionManager", window: str,
                     include_ended: bool, ledger, transcripts=None,
-                    include_killed=None, include_archived=None) -> dict:
+                    include_killed=None, include_archived=None,
+                    prices=None, currency: str = "$") -> dict:
     """The overview payload, built off the event loop.
 
     ``Session.info()`` would carry a definition, a briefing and an environment
@@ -12876,6 +12877,9 @@ def _stats_overview(manager: "SessionManager", window: str,
     parse on the loop is the cost claunch-3r94d took the transcript reading off
     the loop for. The transcript reading for OAuth sessions runs in this same
     thread for that reason.
+
+    ``prices`` is the Settings price table for the model rows' estimates
+    (``daemon.model_prices``; see :mod:`statsboard.estimate_cost`).
     """
     events = getattr(manager, "events", None)
     metas = [statsboard.session_meta(s, events) for s in manager.list()]
@@ -12886,7 +12890,8 @@ def _stats_overview(manager: "SessionManager", window: str,
         extra["include_archived"] = include_archived
     return statsboard.overview(window=window, include_ended=include_ended,
                                sessions=metas, ledger=ledger,
-                               transcripts=transcripts, **extra)
+                               transcripts=transcripts,
+                               prices=prices, currency=currency, **extra)
 
 
 async def h_stats_overview(request: web.Request) -> web.Response:
@@ -12901,7 +12906,11 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     read from its own transcript (the call the detail panel makes) and marked
     ``source: "transcript"``, or reported as ``source: "none"`` with no figure
     rather than a zero when there is no transcript to read. See
-    :mod:`statsboard` for what each field means."""
+    :mod:`statsboard` for what each field means.
+
+    ``models``/``estimate`` split the window's tokens one provider's model at
+    a time and price each row from Settings → Model prices (read live; the
+    same table ``/api/model-prices`` serves)."""
     manager: SessionManager = request.app["manager"]
     window = request.query.get("window", "today")
     if window not in statsboard.WINDOWS:
@@ -12923,10 +12932,19 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     transcripts = request.app.get("stats_transcripts")
     if transcripts is None:
         transcripts = statsboard.Transcripts()
+    # The price table is read live from the config file, as the dashboard's
+    # own cost estimate does (Settings → Model prices). A read failure leaves
+    # every model row unpriced instead of taking the page down with it.
+    try:
+        table = _model_prices()
+        prices, currency = table["prices"], table["currency"]
+    except Exception:  # noqa: BLE001 - the overview must outlive a bad table
+        log.warning("stats overview: reading the price table failed", exc_info=True)
+        prices, currency = {}, "$"
     try:
         payload = await asyncio.to_thread(
             _stats_overview, manager, window, include_ended, ledger, transcripts,
-            include_killed, include_archived)
+            include_killed, include_archived, prices, currency)
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")

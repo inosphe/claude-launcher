@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from .. import metering, providers, store
+from .. import metering, model_prices, providers, store
 from . import sessionstats, tokenusage
 
 #: The windows the page offers, and how many local days each one spans
@@ -443,10 +443,22 @@ class Ledger:
         bucket = row["days"].setdefault(day, {}).setdefault(provider, {
             "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
             "requests": 0, "first": at, "last": at,
+            # model -> its own sums. The provider bucket answers "which
+            # backend", this one "which model on it": two models under one
+            # provider carry different prices, so the page needs the split
+            # (claunch-qs2ev).
+            "models": {},
         })
         for key, value in zip(("input", "cache_read", "cache_write", "output"), parts):
             bucket[key] += value
         bucket["requests"] += 1
+        model_bucket = bucket["models"].setdefault(model, {
+            "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+            "requests": 0,
+        })
+        for key, value in zip(("input", "cache_read", "cache_write", "output"), parts):
+            model_bucket[key] += value
+        model_bucket["requests"] += 1
         bucket["first"] = min(bucket["first"], at)
         bucket["last"] = max(bucket["last"], at)
         row["first"] = min(row["first"], at)
@@ -574,11 +586,19 @@ class Ledger:
                     acc = per_provider.setdefault(provider, {
                         "input": 0, "cache_read": 0, "cache_write": 0,
                         "output": 0, "requests": 0, "first": bucket["first"],
-                        "last": bucket["last"],
+                        "last": bucket["last"], "models": {},
                     })
                     for key in ("input", "cache_read", "cache_write",
                                 "output", "requests"):
                         acc[key] += bucket[key]
+                    for model, model_bucket in (bucket.get("models") or {}).items():
+                        macc = acc["models"].setdefault(model, {
+                            "input": 0, "cache_read": 0, "cache_write": 0,
+                            "output": 0, "requests": 0,
+                        })
+                        for key in ("input", "cache_read", "cache_write",
+                                    "output", "requests"):
+                            macc[key] += model_bucket[key]
                     acc["first"] = min(acc["first"], bucket["first"])
                     acc["last"] = max(acc["last"], bucket["last"])
                     day_totals[day] = day_totals.get(day, 0) + sum(
@@ -590,6 +610,15 @@ class Ledger:
                             else max(last, bucket["last"]))
             providers_out = []
             for provider, sums in per_provider.items():
+                models_out = [{
+                    "model": model,
+                    "input": m["input"], "cache_read": m["cache_read"],
+                    "cache_write": m["cache_write"], "output": m["output"],
+                    "total": sum(m[k] for k in
+                                 ("input", "cache_read", "cache_write", "output")),
+                    "requests": m["requests"],
+                } for model, m in sums["models"].items()]
+                models_out.sort(key=lambda m: (-m["total"], m["model"]))
                 providers_out.append({
                     "provider": provider,
                     "input": sums["input"], "cache_read": sums["cache_read"],
@@ -597,6 +626,7 @@ class Ledger:
                     "total": sum(sums[k] for k in
                                  ("input", "cache_read", "cache_write", "output")),
                     "requests": sums["requests"],
+                    "models": models_out,
                 })
             providers_out.sort(key=lambda p: (-p["total"], p["provider"]))
             switches, model = self._switch_series(row, since_epoch)
@@ -1137,6 +1167,46 @@ def row_providers(row: dict) -> List[dict]:
     }]
 
 
+def _rate(rates: dict, key: str) -> float:
+    """One per-1M-token rate out of a price row, 0 where it is missing.
+
+    A rate that cannot be read counts as 0 rather than taking the page down:
+    the price table is hand-edited config, and one bad row must not hide the
+    estimates its neighbours still have.
+    """
+    try:
+        value = float(rates.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
+
+
+def estimate_cost(prices, provider: str, model: str,
+                  parts: dict) -> Optional[float]:
+    """What ``parts`` cost at the Settings price row for ``provider``/``model``.
+
+    ``prices`` is the stored table (``daemon.model_prices``, either shape);
+    :func:`model_prices.rate_for` resolves the provider's own row and then
+    the ``"*"`` row. ``None`` means "not priced" — the caller reports the
+    tokens as unpriced instead of printing a zero. The sum is the same one
+    the dashboard and :func:`daemon.llm_usage.line_cost` make: a rate the row
+    leaves unset counts as 0, except cache write, which falls back to the
+    read rate (most providers bill a cache write as plain input).
+    """
+    if not model:
+        return None
+    rates = model_prices.rate_for(prices, provider, model)
+    if not rates:
+        return None
+    write = rates.get("cache_write")
+    write_rate = (_rate(rates, "input") if write is None or write == ""
+                  else _rate(rates, "cache_write"))
+    return (_rate(rates, "input") * int(parts.get("input") or 0)
+            + _rate(rates, "cache_read") * int(parts.get("cache_read") or 0)
+            + write_rate * int(parts.get("cache_write") or 0)
+            + _rate(rates, "output") * int(parts.get("output") or 0)) / 1e6
+
+
 def _empty_row(name: str) -> dict:
     return {
         "session": name, "status": "", "category": "", "harness": "",
@@ -1155,6 +1225,7 @@ def overview(*, window: str = "today", include_ended: bool = False,
              sessions: Iterable[dict] = (), ledger: Optional[Ledger] = None,
              labels: Optional[Dict[str, str]] = None,
              doc: Optional[dict] = None,
+             prices=None, currency: str = "$",
              transcripts: Optional["Transcripts"] = None) -> dict:
     """The Stats page's overview payload for one window.
 
@@ -1172,6 +1243,13 @@ def overview(*, window: str = "today", include_ended: bool = False,
     ``include_killed`` and ``include_archived`` are the page's two boxes;
     ``include_ended`` turns both on at once and is what the older ``?ended=1``
     asked for.
+
+    ``prices`` is the Settings price table (``daemon.model_prices``, either
+    shape) and ``currency`` the symbol its estimates are written in. Every
+    ``models`` row carries its ``cost`` (``None`` when the table has no row
+    for it) and its ``priced_tokens``/``unpriced_tokens``, and ``estimate``
+    sums them for the window. A row with no price is reported as unpriced,
+    never as costing 0.
     """
     if window not in WINDOWS:
         raise ValueError(f"window must be one of: {', '.join(WINDOWS)}")
@@ -1336,6 +1414,56 @@ def overview(*, window: str = "today", include_ended: bool = False,
     for acc in by_provider.values():
         acc["cache_share"] = (acc["cache_read"] / acc["total"]
                               if acc["total"] else None)
+
+    # Provider + model, the split the page draws with the four token parts
+    # apart and an estimate from Settings → Model prices. A ledger row knows
+    # the model that answered (``providers[].models``). A transcript row -- an
+    # OAuth route, which writes no ledger line -- knows only its declared
+    # provider, so its tokens ride under the empty model and stay unpriced
+    # rather than borrowing another model's price.
+    by_model: Dict[Tuple[str, str], dict] = {}
+    for row in rows:
+        for entry in row_providers(row):
+            models = entry.get("models") or []
+            if not models and row.get("source") == "transcript":
+                models = [{
+                    "model": "", "declared": True,
+                    "input": entry["input"], "cache_read": entry["cache_read"],
+                    "cache_write": entry["cache_write"], "output": entry["output"],
+                    "total": entry["total"], "requests": entry["requests"],
+                }]
+            for item in models:
+                key = (entry["provider"], str(item.get("model") or ""))
+                acc = by_model.setdefault(key, {
+                    "provider": entry["provider"], "model": key[1],
+                    "input": 0, "cache_read": 0, "cache_write": 0,
+                    "output": 0, "total": 0, "requests": 0,
+                    "declared": bool(item.get("declared")),
+                    "_sessions": set(),
+                })
+                for k in ("input", "cache_read", "cache_write", "output",
+                          "total", "requests"):
+                    acc[k] += int(item.get(k) or 0)
+                acc["_sessions"].add(row["session"])
+    models_out: List[dict] = []
+    estimate = {"cost": 0.0, "priced_tokens": 0, "unpriced_tokens": 0,
+                "total": 0, "requests": 0}
+    for acc in by_model.values():
+        total_tokens = acc["total"]
+        cost = estimate_cost(prices, acc["provider"], acc["model"], acc)
+        acc["sessions"] = len(acc.pop("_sessions"))
+        acc["cost"] = cost
+        acc["priced_tokens"] = total_tokens if cost is not None else 0
+        acc["unpriced_tokens"] = 0 if cost is not None else total_tokens
+        estimate["total"] += total_tokens
+        estimate["requests"] += acc["requests"]
+        estimate["priced_tokens"] += acc["priced_tokens"]
+        estimate["unpriced_tokens"] += acc["unpriced_tokens"]
+        if cost is not None:
+            estimate["cost"] += cost
+        models_out.append(acc)
+    models_out.sort(key=lambda m: (-m["total"], m["provider"], m["model"]))
+
     totals = {k: sum(r[k] for r in rows) for k in
               ("input", "cache_read", "cache_write", "output", "total", "requests")}
     total = totals["total"]
@@ -1351,6 +1479,9 @@ def overview(*, window: str = "today", include_ended: bool = False,
         "include_archived": bool(include_archived),
         "totals": totals,
         "cache_share": (totals["cache_read"] / total) if total else None,
+        "currency": currency or "$",
+        "models": models_out,
+        "estimate": estimate,
         "providers": sorted(by_provider.values(),
                             key=lambda p: (-p["total"], p["provider"])),
         "sessions": rows,

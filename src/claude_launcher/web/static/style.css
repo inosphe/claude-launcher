@@ -8185,6 +8185,11 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .stats-llm-part { color: #8b949e; }
 .stats-llm-cost { white-space: nowrap; }
 .stats-llm-cost-partial::after { content: "*"; margin-left: 2px; color: #d29922; }
+/* The session overview's provider + model table (claunch-qs2ev): the same
+   split and estimate the daemon-LLM section draws, for the shim's ledger. */
+.stats-model-cost { white-space: nowrap; }
+.stats-model-cost-partial::after { content: "*"; margin-left: 2px; color: #d29922; }
+.stats-model-unpriced { color: #6e7681; }
 .stats-llm-errors { margin-left: 6px; color: #ff7b72; border-color: #4a2a2a; }
 .stats-llm-days {
   display: flex; align-items: flex-end; gap: 3px; height: 96px;
