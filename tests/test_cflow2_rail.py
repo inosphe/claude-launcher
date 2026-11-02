@@ -267,6 +267,18 @@ description: one task repeated by a while loop the run drives itself
 nodes:
   a: {title: Step A, prompt: do a}
 body:
+  loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a, rounds: true}
+"""
+
+#: The same shape without the declaration (claunch-oxmso.1). A loop is not a
+#: round because of where it sits in the tree; only ``rounds: true`` says so.
+PLAIN_LOOPY = """\
+cflow: 2
+name: plain-loopy
+description: a while loop the definition did not mark as rounds
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
   loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a}
 """
 
@@ -289,6 +301,9 @@ def test_rail_entry_shows_the_round_the_run_is_in(proj):
     The display value is the loop iteration while the loop is live, the run
     round for a recurring workflow, and absent -- not invented -- when there
     is no loop to read (the run has left it). ``round`` keeps its meaning.
+    The loop has to be the one the definition declared ``rounds: true``
+    (claunch-oxmso.1): test_rail_entry_does_not_count_a_loop_it_did_not_mark
+    covers the other direction.
     """
     cwd = str(proj)
     v2 = proj / ".claunch" / "workflows" / "v2"
@@ -322,6 +337,34 @@ def test_rail_entry_shows_the_round_the_run_is_in(proj):
     r = _rail(cwd, "s2")["s2"]
     assert (r["round"], r["round_now"]) == (1, 1)
     assert runtime.status(cwd=cwd, scope="s2")["round_now"] == 1
+
+
+def test_rail_entry_does_not_count_a_loop_it_did_not_mark(proj):
+    """The other direction of ``round_now`` (claunch-oxmso.1): a live while
+    loop is not a round just because it is the outermost loop.
+
+    The first rule here was "the outermost live while/until loop", so
+    ``operator-v2``'s ``service`` loop -- which only polls ``claunch operators
+    watch`` -- made a session's rail report its polling passes as rounds.
+    A loop counts only when the definition marks it ``rounds: true``; an
+    unmarked one leaves the display on the slot's ``round``.
+    """
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "plain-loopy.yaml").write_text(PLAIN_LOOPY, encoding="utf-8")
+
+    runtime.start(layers.load("plain-loopy", cwd), cwd=cwd, scope="s3", caps={})
+    r = _rail(cwd, "s3")["s3"]
+    assert r["status"] == "running" and r["round"] == 1
+    assert r["round_now"] is None
+    assert "round_now" not in runtime.status(cwd=cwd, scope="s3")
+    # ...and it stays absent as the loop turns: this is not "absent until the
+    # second iteration" but "never a round".
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s3")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s3")
+    r = _rail(cwd, "s3")["s3"]
+    assert r["status"] == "running" and (r["round"], r["round_now"]) == (1, None)
 
 
 def test_rail_answers_carry_when_each_gate_opened(proj):

@@ -1528,7 +1528,8 @@ def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
 
 def _loop_props(**kw: Any) -> Dict[str, Any]:
     base = {"mode": None, "guard": None, "max": None, "child": None, "between": None,
-            "every": None, "items": None, "as_name": None, "parallel": False, "carry": None}
+            "every": None, "items": None, "as_name": None, "parallel": False, "carry": None,
+            "rounds": False}
     base.update(kw)
     return base
 
@@ -1553,7 +1554,8 @@ def _b_foreach(ctx, sc, node, value, m, line):
 def _b_loop(ctx, sc, node, value, m, line):
     node.type = ir.T_LOOP
     spec = _need_map(ctx, sc.file, value, "loop", line)
-    _check_keys(ctx, sc.file, spec, ("while", "until", "max", "do", "between", "every"), "loop")
+    _check_keys(ctx, sc.file, spec, ("while", "until", "max", "do", "between", "every",
+                                     "rounds"), "loop")
     has = [k for k in ("while", "until") if k in spec]
     if len(has) != 1:
         raise ctx.err(sc.file, line, "loop needs exactly one of while / until")
@@ -1563,7 +1565,13 @@ def _b_loop(ctx, sc, node, value, m, line):
         raise ctx.err(sc.file, line, "loop needs max (every loop is bounded)")
     mx = _int(ctx, sc.file, spec["max"], "loop.max", line, 1)
     every = _number(ctx, sc.file, spec["every"], "loop.every", line) if spec.get("every") is not None else None
-    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every)
+    # ``rounds: true`` marks this loop's iterations as the workflow's rounds
+    # (docs 2.3): the display value ``round_now`` reads it (claunch-oxmso.1).
+    rounds = spec.get("rounds", False)
+    if not isinstance(rounds, bool):
+        raise ctx.err(sc.file, _key_line(spec, "rounds", line),
+                      "loop.rounds must be true or false")
+    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every, rounds=rounds)
     lsc = _loop_scope(sc, node)
     node.props["child"] = _sub(ctx, lsc, node, _require(ctx, sc, spec, "do", "loop", line), "do", line)
     if spec.get("between") is not None:

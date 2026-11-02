@@ -7404,6 +7404,9 @@ body:
         - else: []
     - id: rounds
       loop:
+        # 이 루프의 반복이 곧 회차다(claunch-oxmso.1). 표시용 round_now가 이
+        # 선언을 읽으므로, 회차 루프가 아닌 감시·대기 루프에는 붙이지 않는다.
+        rounds: true
         # max_rounds 입력이 있으면 그 수만큼만 돈다($visits.round = 끝난 회차 수).
         # 회차 수에는 상한을 두지 않는다(claunch-0b8dx). 엔진은 반복마다 양의
         # max를 요구하므로 실제로 닿지 않을 값을 둔다 — 닿으면 사람의 승인(loop_limit).
