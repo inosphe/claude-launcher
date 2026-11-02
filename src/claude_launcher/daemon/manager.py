@@ -41,7 +41,7 @@ from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
 from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
-from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
+from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events, vm_guard
 from . import session_seq
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
@@ -943,6 +943,14 @@ class SessionManager:
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
+        # VM-only mode can be switched on only for a process that carries the hook.
+        try:
+            vm_guard.mark_hooked(
+                session.sdef.name,
+                session.sdef.harness == harness_mod.CLAUDE_HARNESS and harness_mod.REBRIEF_HOOK_SETTINGS_JSON in argv,
+            )
+        except OSError:
+            log.warning("could not record the VM-only hook for %r", session.sdef.name, exc_info=True)
         # A restoring launch replays the previous run's log next (launch,
         # launch_async): the relaunched program gets a brand-new screen, and
         # the daemon's pyte history is the only scrollback the web terminal

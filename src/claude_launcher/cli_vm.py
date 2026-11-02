@@ -181,6 +181,41 @@ def _catalog_show(out: dict) -> None:
     print("applied to a VM at its next start")
 
 
+def _cmd_guard(args) -> int:
+    """The Claude Code PreToolUse hook (``vm_guard``): the tool call on stdin, a
+    deny decision on stdout or nothing. Any failure allows the call."""
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        from .daemon import vm_guard
+        session = os.environ.get("CLAUNCH_SESSION", "")
+        reply = vm_guard.hook_response(payload, session) if session and isinstance(payload, dict) else None
+        if reply is not None:
+            print(json.dumps(reply, ensure_ascii=False))
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+    return 0
+
+
+def _only_show(out: dict) -> None:
+    for row in out.get("sessions") or []:
+        state = "on " if row["on"] else "off"
+        extra = "" if row["can_enable"] else f"  (cannot be turned on: {row['why']})"
+        print(f"{row['session']:<20} {state}{extra}")
+        for b in row.get("blocks", [])[:3]:
+            print(f"    blocked {b['kind']} ({b['rule']}): {b['head']}")
+    if not out.get("sessions"):
+        print("no session holds a VM grant")
+
+
+def _cmd_only(args) -> int:
+    if args.action == "ls":
+        return _call(args, "GET", "/api/vm-only", show=_only_show)
+    if not args.session:
+        print("claunch vm only on|off SESSION | ls", file=sys.stderr)
+        return EXIT_REFUSED
+    return _call(args, "POST", "/api/vm-only", {"session": args.session, "on": args.action == "on"}, show=_only_show)
+
+
 def _cmd_catalog(args) -> int:
     """``claunch vm share catalog ls | add NAME PATH [--vm ID ...] [--rw [--yes-rw]] | rm NAME``
     (parsed with ``catalog`` in the VM position)."""
@@ -418,6 +453,15 @@ def register(sub) -> None:
                     help="catalog add: confirm a read-write entry for every VM")
     sp.add_argument("--replace", action="store_true", help="catalog add: change the existing entry of that name")
     sp.set_defaults(func=_cmd_share)
+    sp = v.add_parser("only", help="VM-only mode of a session: the host refuses builds, installs and program "
+                                   "runs (Bash) and says to use vm_exec. A nudge, not a security boundary; "
+                                   "takes effect on the session's next Bash call")
+    sp.add_argument("action", choices=("on", "off", "ls"))
+    sp.add_argument("session", nargs="?")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_only)
+    sp = v.add_parser("guard", help=argparse.SUPPRESS)      # the PreToolUse hook; not for people
+    sp.set_defaults(func=_cmd_guard)
     sp = v.add_parser("requests", help="access requests sessions have made (vm_request) and not had answered")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=_cmd_requests)

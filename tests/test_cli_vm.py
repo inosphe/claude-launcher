@@ -204,3 +204,20 @@ def test_share_ls_shows_where_each_share_came_from(client, capsys):
 def test_a_session_shell_cannot_edit_the_catalog(client, monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     assert run("share", "catalog", "add", "x", "/p") == cli_vm.EXIT_REFUSED and client.calls == []
+
+
+def test_only_commands_post_the_switch_and_list_the_state(client, capsys, monkeypatch):
+    client.answer = {"sessions": [
+        {"session": "s1", "on": True, "can_enable": True, "why": "", "blocks": [
+            {"kind": "build", "rule": "make", "head": "make deploy"}]},
+        {"session": "s2", "on": False, "can_enable": False, "why": "no hook", "blocks": []}]}
+    assert run("only", "ls") == 0
+    out = capsys.readouterr().out
+    assert "s1" in out and "on" in out and "blocked build (make): make deploy" in out
+    assert "cannot be turned on: no hook" in out
+    assert run("only", "on", "s1") == 0 and client.calls[-1] == ("POST", "/api/vm-only", {"session": "s1", "on": True})
+    assert run("only", "off", "s1") == 0 and client.calls[-1][2] == {"session": "s1", "on": False}
+    assert run("only", "on") == cli_vm.EXIT_REFUSED
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    n = len(client.calls)
+    assert run("only", "off", "s1") == cli_vm.EXIT_REFUSED and len(client.calls) == n

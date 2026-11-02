@@ -215,6 +215,17 @@ function renderGrants(vm) {
       td.appendChild(box);
       tr.appendChild(td);
     }
+    const onlyCell = document.createElement("td");
+    const only = onlyRows.find((r) => r.session === session);
+    const onlyBox = document.createElement("input");
+    onlyBox.type = "checkbox";
+    onlyBox.checked = !!(only && only.on);
+    onlyBox.disabled = !only || (!only.on && !only.can_enable);
+    onlyBox.setAttribute("aria-label", `${session} VM 전용`);
+    onlyBox.title = only && !only.can_enable && !only.on ? only.why : "호스트에서 빌드·설치·실행을 거절하고 vm_exec로 안내합니다";
+    onlyBox.addEventListener("change", () => toggleOnly(session, onlyBox.checked));
+    onlyCell.appendChild(onlyBox);
+    tr.appendChild(onlyCell);
     const del = document.createElement("td");
     const b = document.createElement("button");
     b.type = "button";
@@ -225,6 +236,36 @@ function renderGrants(vm) {
     tr.appendChild(del);
     body.appendChild(tr);
   }
+}
+/* VM-only mode: the switch is per session (not per VM); read from /api/vm-only. */
+let onlyRows = [];
+function toggleOnly(session, on) {
+  act(`${session} VM 전용 ${on ? "켜기" : "끄기"}`, () => post("api/vm-only", { session, on }));
+}
+function renderOnly() {
+  const body = document.querySelector("#vm-only-rows tbody");
+  body.replaceChildren();
+  for (const r of onlyRows) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell(r.session));
+    const td = document.createElement("td");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = !!r.on;
+    box.disabled = !r.on && !r.can_enable;
+    box.setAttribute("aria-label", `${r.session} VM 전용 켜기`);
+    box.addEventListener("change", () => toggleOnly(r.session, box.checked));
+    td.appendChild(box);
+    tr.appendChild(td);
+    const blocks = r.blocks || [];
+    tr.append(cell(r.on ? `켜짐 (${fmtTime(r.since)}부터)` : (r.can_enable ? "꺼짐" : `켤 수 없음: ${r.why}`)),
+              cell(blocks.length
+                ? blocks.slice(0, 3).map((b) => `${fmtTime(b.at)} ${b.kind}(${b.rule}) ${b.head}`).join(" / ")
+                : "없음"));
+    body.appendChild(tr);
+  }
+  $("vm-only-rows").hidden = !onlyRows.length;
+  $("vm-only-empty").hidden = onlyRows.length > 0;
 }
 /* Shared host folders (tart run --dir) and the requests sessions made for them. */
 function renderShares(vm) {
@@ -497,6 +538,7 @@ function render() {
   if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
+  renderOnly();
   renderSharing();
   renderRequests();
   syncPresetSave();
@@ -510,6 +552,7 @@ async function refresh() {
     hostLocked = !!data.host_locked;
     shareRoots = data.share_roots || [];
     shareCatalog = data.share_catalog || [];
+    try { onlyRows = (await api("api/vm-only")).sessions || []; } catch (_) { onlyRows = []; }
     $("vm-link").classList.add("up");
   } catch (_) { $("vm-link").classList.remove("up"); return; }
   render();

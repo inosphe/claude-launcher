@@ -363,3 +363,34 @@ changes what a running VM would get.
   a left-out share), the VMs waiting for a restart, and the pending requests of all VMs.
 - **Sessions** see in `vm_list` / `vm_acquire` only the shares that are mounted (name, mode,
   host and guest path) and the guidance, not the origin or the catalog.
+
+## VM-only mode (`daemon/vm_guard.py`)
+
+A per-session switch, off by default. While it is on, the session's Bash calls that start a build
+(make, xcodebuild, swift build, cargo/go build|test|run, npm run|test, pytest ...), install packages
+(npm/pnpm/yarn/pip/uv/brew/gem/pod/cargo/go install ...) or run a program (python, node, `./script`,
+open, osascript, uv run ...) are refused with a message that says to use `vm_exec`. `git`,
+`claunch` and read commands pass. Chained commands, `bash -c '...'`, `$(...)` and leading
+`VAR=1`, `sudo`, `env` are looked through. **This is a nudge, not a security boundary:** the rules are
+token prefixes and are bypassed by a script file, an alias or an indirect call.
+
+- **Mechanism.** Every Claude Code spawn carries `--settings` with a `PreToolUse` hook for `Bash`
+  (`harness.REBRIEF_HOOK_SETTINGS`). Its command is `if [ -e "$CLAUNCH_SCRATCH/../vm-only.json" ]; then exec
+  claunch vm guard; fi`, so claunch starts only when the session's switch file exists. The switch is that
+  file (`<session dir>/vm-only.json`, 0600), written by the daemon; the hook reads it on every call, so the
+  change applies to the session's next Bash call and works with the daemon down. `claunch vm guard`
+  reads the tool call from stdin and prints a `permissionDecision: deny` with the reason. **Fail-open:**
+  any error in the hook allows the call.
+- **Who can switch.** Only a session started with the hook (the daemon records this at every spawn,
+  `vm-guard-hook` in the session dir). Sessions started before this version, with caller-supplied
+  `--settings`, or on another harness are refused with the reason; the page shows it. Other harnesses
+  need their own adapter: the rules, the switch and the history are in `vm_guard.py` and the Claude hook
+  is only the adapter.
+- **History.** Each block appends `{at, kind, rule, head}` (the first three words of the part
+  that matched, no later arguments) to `vm-only-blocks.jsonl`; the last 20 are shown on the page.
+- **Routes** (user only): `GET|POST /api/vm-only` (`{session, on}`; 409 `vm_only_refused`).
+  CLI: `claunch vm only on|off SESSION`, `claunch vm only ls`.
+- **Page.** A "VM 전용 모드" section on the default screen lists the sessions that hold a VM grant with
+  the switch, its state, why it cannot be turned on, and the recent blocks; each session row of the
+  permissions table has the same switch.
+

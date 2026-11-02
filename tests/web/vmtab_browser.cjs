@@ -47,6 +47,12 @@ const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: fa
   requests: [], shares_pending: false, shares_skipped: {},
   share_rows: [{ name: "cat1", host_path: "/work/cat", mode: "ro", guest_path: "/Volumes/My Shared Files/cat1",
     origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
+let ONLY = [
+  { session: "s1", on: false, can_enable: true, why: "", since: 0, blocks: [], limits: "x" },
+  { session: "s9", on: false, can_enable: false, why: "이 세션은 VM 전용 hook 없이 시작되었습니다", since: 0, blocks: [] },
+  { session: "s7", on: true, can_enable: true, why: "", since: 1700000000,
+    blocks: [{ at: 1700000050, kind: "build", rule: "make", head: "make deploy" }] },
+];
 const CATALOG = [
   { name: "cat1", host_path: "/work/cat", mode: "ro", scope: "all", vms: [], origin: { kind: "catalog-all", by_session: "", at: 1 } },
   { name: "clash", host_path: "/work/clash", mode: "rw", scope: "vms", vms: ["alpha"], origin: { kind: "catalog-vms", by_session: "", at: 1 } },
@@ -65,11 +71,18 @@ const server = http.createServer((req, res) => {
     posts.push([p, {}]);
     return json(res, BETA);
   }
+  if (req.method === "GET" && p === "/api/vm-only") return json(res, { sessions: ONLY });
   if (req.method === "POST") {
     let data = "";
     req.on("data", (c) => { data += c; });
     req.on("end", () => {
-      posts.push([p, data ? JSON.parse(data) : {}]);
+      const body = data ? JSON.parse(data) : {};
+      posts.push([p, body]);
+      if (p === "/api/vm-only") {
+        const row = ONLY.find((r) => r.session === body.session);
+        if (row) { row.on = body.on; row.since = body.on ? 1700000200 : 0; }
+        return json(res, { sessions: ONLY });
+      }
       json(res, { ok: true, changed: [] });
     });
     return;
@@ -291,6 +304,28 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-catalog tbody tr", { hasText: "clash" }).getByRole("button", { name: "삭제" }).click();
     await frame.locator("#vm-activity", { hasText: "카탈로그 clash 삭제 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.action === "rm")[1], { action: "rm", name: "clash" });
+
+    // 3e. VM-only mode: on the default screen, per session, with the reason and the blocks
+    assert.equal(await frame.locator("#vm-onlymode").isVisible(), true, "the VM-only section is on the page without opening anything");
+    assert.match(await frame.locator("#vm-only-note").innerText(), /보안 경계가 아닙니다/, "the limit is stated");
+    const orows = (await frame.locator("#vm-only-rows tbody tr").allInnerTexts()).map((t) => t.replace(/\s+/g, " "));
+    assert.match(orows[0], /s1 꺼짐/);
+    assert.match(orows[1], /s9 켤 수 없음: 이 세션은 VM 전용 hook 없이/);
+    assert.match(orows[2], /s7 켜짐 .*build\(make\) make deploy/);
+    assert.equal(await frame.locator('#vm-only-rows input[aria-label="s9 VM 전용 켜기"]').isDisabled(), true, "a session that cannot be switched has a disabled switch");
+    assert.equal(await frame.locator('#vm-only-rows input[aria-label="s7 VM 전용 켜기"]').isChecked(), true);
+    // the same switch sits in the session row of the permissions table
+    const gbox = frame.locator('#vm-grants input[aria-label="s1 VM 전용"]');
+    assert.equal(await gbox.count(), 1, "the session row of the permissions table has the switch");
+    assert.equal(await gbox.isChecked(), false);
+    await frame.locator('#vm-only-rows input[aria-label="s1 VM 전용 켜기"]').check();
+    await frame.locator("#vm-activity", { hasText: "s1 VM 전용 켜기 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-only" && b.session === "s1")[1], { session: "s1", on: true });
+    await frame.locator("#vm-only-rows tbody tr", { hasText: /^s1.*켜짐/ }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator('#vm-grants input[aria-label="s1 VM 전용"]').isChecked(), true, "the permissions row follows");
+    await frame.locator('#vm-grants input[aria-label="s1 VM 전용"]').uncheck();
+    await frame.locator("#vm-activity", { hasText: "s1 VM 전용 끄기 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm-only").pop()[1], { session: "s1", on: false });
 
     // 3b. the file exchange
     await frame.locator("#vm-files-host", { hasText: "/vm/alpha/files" }).waitFor({ timeout: 5000 });

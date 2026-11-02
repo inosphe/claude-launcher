@@ -37,12 +37,12 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_files, vm_frames, vm_pack, vm_presets, vm_share, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_files, vm_frames, vm_guard, vm_pack, vm_presets, vm_share, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -54,7 +54,7 @@ _STATUS = {
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
-    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_share_confirm_rw": 400, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
+    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_only_refused": 409, "vm_share_confirm_rw": 400, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
@@ -529,6 +529,54 @@ async def h_share_catalog(request: web.Request) -> web.Response:
         roots = (await asyncio.to_thread(mgr.share_rules))[0]
         return web.json_response({"share_catalog": [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])}
                                                     for e in reg.catalog], "share_roots": roots})
+    except VmError as exc:
+        return _err(exc)
+
+
+def _only_rows(request: web.Request, reg: Registry) -> List[dict]:
+    """One row per session that holds a VM grant or has VM-only mode on: the switch,
+    why it cannot be turned on, and the recent blocks."""
+    manager = request.app.get("manager")
+    names = sorted({s for vm in reg.list() for s, sc in vm.grants.items() if sc})
+    rows = []
+    for name in names:
+        harness = ""
+        try:
+            harness = manager.get(name).sdef.harness if manager is not None else ""
+        except Exception:  # noqa: BLE001 - an exited or unknown session
+            harness = ""
+        row = vm_guard.status(name, harness)
+        row["limits"] = vm_guard.LIMITS
+        rows.append(row)
+    return rows
+
+
+async def h_only(request: web.Request) -> web.Response:
+    """VM-only mode (user only): GET the sessions with a VM grant and their switch;
+    POST ``{session, on}`` turns it on or off. Turning it on is refused with the
+    reason when the session's process has no guard hook. Takes effect on the
+    session's next Bash call."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    try:
+        if request.method == "POST":
+            body = await _body(request)
+            name = str(body.get("session") or "")
+            if not name or not isinstance(body.get("on"), bool):
+                raise VmError("vm_bad_request", "'session'과 불리언 'on'이 필요합니다")
+            manager = request.app.get("manager")
+            if body["on"]:
+                try:
+                    harness = manager.get(name).sdef.harness
+                except Exception:  # noqa: BLE001
+                    raise VmError("vm_bad_request", f"세션 {name[:64]}이(가) 없습니다") from None
+                ok, why = vm_guard.can_enable(name, harness)
+                if not ok:
+                    raise VmError("vm_only_refused", why)
+            _trace(request, reg, "", "vm_only_on" if body["on"] else "vm_only_off", target=name)
+            await asyncio.to_thread(vm_guard.set_on, name, body["on"])
+        return web.json_response({"sessions": await asyncio.to_thread(_only_rows, request, reg)})
     except VmError as exc:
         return _err(exc)
 
@@ -1169,6 +1217,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)
     r.add_post("/api/vm/{id}/expose", h_expose)
     r.add_post("/api/vm/{id}/allow", h_allow)
+    r.add_get("/api/vm-only", h_only)
+    r.add_post("/api/vm-only", h_only)
     r.add_get("/api/vm-share-catalog", h_share_catalog)
     r.add_post("/api/vm-share-catalog", h_share_catalog)
     r.add_post("/api/vm/{id}/share", h_share)
