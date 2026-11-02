@@ -1719,5 +1719,10 @@ def test_a_checked_remote_already_level_does_not_read_as_a_stale_plan(world, tmp
         assert [r["remote"] for r in rows] == ["origin", "mirror"], rows
         assert all(set(r) >= {"remote", "key", "plan"} for r in rows), rows
         assert rows[0]["plan"]["action"] in ("ff", "push", "rebase", "up-to-date"), rows[0]["plan"]
+        # every 409 row is drawable the way the panel draws a status row: its
+        # plan names the checkout, so the tips become commit links instead of
+        # bare hashes (claunch-y3tuk.1)
+        assert all(r["plan"]["repo"] == doc["repo"] for r in rows), rows
+        assert [r["plan"]["repo"] for r in doc["plans"]] == [doc["repo"], doc["repo"]]
 
     _with_app(body)
