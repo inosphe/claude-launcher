@@ -126,7 +126,10 @@
   "use strict";
 
   const NS = "http://www.w3.org/2000/svg";
-  const W = 168, H = 46, GAP_X = 40, GAP_Y = 12, PAD = 14, HEAD = 22;
+  // H fits three text rows: the label, and two sub rows -- the spend split
+  // takes two (W, claunch-mejc8). Every node keeps the same box so the rows
+  // stay aligned across a column.
+  const W = 168, H = 62, GAP_X = 40, GAP_Y = 12, PAD = 14, HEAD = 22;
   const POLL_MS = 2000;
 
   const PHASE_TITLE = {
@@ -210,6 +213,75 @@
     return v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(v);
   }
 
+  /* Token accounting (claunch-mejc8). An ask's ``usage`` carries ``input`` ·
+   * ``cacheRead`` · ``output`` · ``totalTokens``; the object that writes it
+   * (``conversationCost()``) drops ``cacheWrite``, so the write side is
+   * derived as ``totalTokens − (input + cacheRead + output)`` -- the
+   * derivation docs/simulation.md (「실행 세션」) states for reading the log
+   * by hand. ``totalTokens`` is the sum over the ask's generations, so the
+   * prompt side here is a sum over generations too, not one request.
+   *
+   * The four sides reconcile with the total: read + cached + write + out ==
+   * total. ``out`` is drawn as well as the three the chart was asked for --
+   * without it the header's total would not add up. On the run this was
+   * written against (2026-11-02, scenarios2-20261102-091411) the four were
+   * 2.56M / 1.74M / 0 / 1.45M over 82 asks, total 5.74M, hit 40.5%.
+   *
+   * The hit rate divides by the prompt this log reports, ``input +
+   * cacheRead``. Metering's ``input_tokens`` is a different denominator --
+   * it is the raw ``prompt``, cache included -- and the two numbers are not
+   * interchangeable: a run read through the ledger and the same run read
+   * here must not show two different ratios for the same reason. */
+  function spend() {
+    return { read: 0, cached: 0, write: 0, out: 0, total: 0 };
+  }
+  function spendAdd(into, u) {
+    const s = into || spend();
+    const read = Number(u.input) || 0, cached = Number(u.cacheRead) || 0;
+    const out = Number(u.output) || 0, total = Number(u.totalTokens) || 0;
+    s.read += read;
+    s.cached += cached;
+    s.out += out;
+    s.total += total;
+    s.write += total - (read + cached + out);
+    return s;
+  }
+  /* Percent of the prompt read from cache, or null when no prompt was
+   * counted (nothing to divide by). */
+  function cacheHit(s) {
+    const v = s || {};
+    const prompt = (Number(v.read) || 0) + (Number(v.cached) || 0);
+    return prompt > 0 ? ((Number(v.cached) || 0) / prompt) * 100 : null;
+  }
+  function hitText(s) {
+    const hit = cacheHit(s);
+    return hit === null ? "" : " (" + hit.toFixed(1) + "%)";
+  }
+  /* The split as the header's own segments: the total, then the four sides
+   * it sums to. ``out`` sits beside the three the chart was asked for so the
+   * four add up to the total on screen instead of leaving a gap the reader
+   * has to explain. */
+  function spendParts(s) {
+    const v = s || spend();
+    return ["read " + tokens(v.read), "cached " + tokens(v.cached) + hitText(v),
+            "write " + tokens(v.write), "out " + tokens(v.out)];
+  }
+  /* A node's sub line: the same split behind a prefix (a unit's question
+   * count, a stage group's role), on two lines. A node box is ``W`` wide and
+   * one line carrying all of it is clipped before ``write`` or the hit rate
+   * is on screen -- the two things this split exists to show. The suffix
+   * (a unit's run state, a result's note) rides the first line, which has
+   * the room. ``out`` stays on the header: a node reports what it read from
+   * the prompt, and every node adding its output up is not what a reader
+   * scans a column for. */
+  function spendSub(s, prefix, suffix) {
+    const v = s || spend();
+    return [
+      [prefix, "read " + tokens(v.read), suffix].filter(Boolean).join(" · "),
+      "cached " + tokens(v.cached) + hitText(v) + " · write " + tokens(v.write),
+    ].join("\n");
+  }
+
   function clock(at) {
     const d = new Date(at);
     return isNaN(d) ? "" : d.toTimeString().slice(0, 8);
@@ -273,6 +345,7 @@
     const byId = new Map();
     const seen = new Map(); // ask key -> times drawn (a resumed run asks again)
     let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
+    const runSpend = spend(); // read/cached/write over the whole log (this run)
     // A later run may reuse a unit id (gds6 scenarios: B approved again for
     // the same tuple); its unit is a node of its own in its own block. So
     // ``units`` holds the current run's units, ``earlier`` the newest node
@@ -375,7 +448,13 @@
         node = add(phase, "result:" + label, { label });
       }
       node.status = ok === true ? "ok" : ok === false ? "fail" : ok;
-      if (note) node.sub = node.sub ? node.sub + " · " + note : note;
+      if (note) {
+        // Onto the first row: a spend sub's second row is already full
+        // (claunch-mejc8), and the note is what a reader looks for.
+        const rows = String(node.sub || "").split("\n");
+        rows[0] = [rows[0], note].filter(Boolean).join(" · ");
+        node.sub = rows.join("\n");
+      }
       return node;
     }
     // A unit's node: placed once, at the depth its start's ``after`` gives.
@@ -387,7 +466,7 @@
       const after = (Array.isArray(ev && ev.after) ? ev.after : []).map(String).filter((a) => unitOf(a));
       const from = after.map(unitOf);
       const depth = from.filter((u) => u.seg === seg).reduce((d, u) => Math.max(d, u.depth + 1), 0);
-      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, from, label: id, count: 0, tok: 0,
+      node = add("unit:" + depth, "unit:" + id, { unit: id, depth, after, from, label: id, count: 0, spend: spend(),
                                                   running: 0, state: "start", status: "run", note: "" }, true);
       units.set(id, node);
       unitCount += 1;
@@ -457,9 +536,11 @@
     const UNIT_STATUS = { start: "run", done: "ok", failed: "fail", skipped: "skip", interrupted: "warn" };
     const UNIT_STATE = { skipped: "건너뜀", interrupted: "중단", failed: "실패" };
     function unitSub(node) {
-      node.sub = ["물음 " + node.count, tokens(node.tok) + " tok",
-                  node.running ? "진행 " + node.running : "", UNIT_STATE[node.state] || ""]
+      // The question count leads the read line and the run state closes it;
+      // the second line is the cached/write side (spendSub, claunch-mejc8).
+      const state = [node.running ? "진행 " + node.running : "", UNIT_STATE[node.state] || ""]
         .filter(Boolean).join(" · ");
+      node.sub = spendSub(node.spend, "물음 " + node.count, state);
     }
 
     for (const ev of events || []) {
@@ -565,7 +646,8 @@
             tokensTotal += Number(u.totalTokens) || 0;
             asks += 1;
             node.count += 1;
-            node.tok += Number(u.totalTokens) || 0;
+            spendAdd(node.spend, u);
+            spendAdd(runSpend, u);
             if ((ev.stop && ev.stop !== "stop") || failed) {
               node.cut = true;
               if (node.status === "ok") node.status = "warn";
@@ -582,13 +664,14 @@
             asks += 1;
             let node = groups.get(g.group);
             if (!node) {
-              node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done", grouped: true }, true);
+              node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, spend: spend(), status: "done", grouped: true }, true);
               groups.set(g.group, node);
             }
             node.count += 1;
-            node.tok += Number(u.totalTokens) || 0;
+            spendAdd(node.spend, u);
+            spendAdd(runSpend, u);
             node.label = g.label + " ×" + node.count;
-            node.sub = ev.askRole + " · " + tokens(node.tok) + " tok";
+            node.sub = spendSub(node.spend, ev.askRole);
             if ((ev.stop && ev.stop !== "stop") || failed) node.status = "warn";
             if (failed) node.errors = [...(node.errors || []), when + " " + String(ev.key || "") + ": " + failed];
             node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?"), ...(node.errors || [])];
@@ -598,11 +681,16 @@
           const key = String(ev.key || "");
           const u = ev.usage || {};
           tokensTotal += Number(u.totalTokens) || 0;
+          spendAdd(runSpend, u);
           const times = (seen.get(key) || 0) + 1;
           seen.set(key, times);
+          // An ask with no unit but a known caller (classic claunch logs) is a
+          // node too, so it carries the spend for the same reason a unit does:
+          // summing spend over the nodes has to equal the header's total.
+          const own = spendAdd(null, u);
           add(keyPhase(key), "ask:" + key, {
-            key, label: askLabel(key),
-            sub: (ev.role || "?") + " · " + tokens(u.totalTokens) + " tok",
+            key, label: askLabel(key), spend: own,
+            sub: spendSub(own, ev.role || "?"),
             status: (ev.stop && ev.stop !== "stop") || failed ? "warn" : "done",
             tip: [when, key, "role " + (ev.role || "?"),
                   `in ${u.input || 0} · cache ${u.cacheRead || 0} · out ${u.output || 0} · gen ${u.generations || 0}`,
@@ -831,7 +919,7 @@
       from: cols.findIndex((c) => c.seg === r.n),
       to: cols.length - 1 - [...cols].reverse().findIndex((c) => c.seg === r.n),
     })).filter((s) => s.from >= 0) : [];
-    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt, segs,
+    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, spend: runSpend, asks, first, lastAt, segs,
              count: (events || []).length, running, peak, starts, units: unitCount, plan: planned };
   }
 
@@ -1316,7 +1404,8 @@
         const rect = mk("rect", g, { width: W, height: H, rx: 6 });
         const title = mk("text", g, { x: 10, y: 18, class: "dfl-title" });
         const sub = mk("text", g, { x: 10, y: 35, class: "dfl-sub" });
-        v = { g, tip, rect, title, sub };
+        const sub2 = mk("text", g, { x: 10, y: 49, class: "dfl-sub" });
+        v = { g, tip, rect, title, sub, sub2 };
         nodes.set(n.id, v);
         g.setAttribute("data-id", n.id);
         const id = n.id;
@@ -1329,7 +1418,11 @@
       set(v.g, "class", "dfl-node st-" + n.status + (n.cls ? " " + n.cls : "") + (n.fold ? " fold" : ""));
       set(v.g, "transform", `translate(${p.x},${p.y})`);
       text(v.title, clip(n.label, 24));
-      text(v.sub, clip(n.sub, 30));
+      // A sub carrying two rows (the spend split) draws as two lines; the
+      // tooltip keeps the whole of it either way.
+      const rows = String(n.sub || "").split("\n");
+      text(v.sub, clip(rows[0], 30));
+      text(v.sub2, clip(rows[1] || "", 30));
       text(v.tip, [n.label, n.sub, ...(n.tip || [])].filter(Boolean).join("\n"));
     }
 
@@ -1800,7 +1893,11 @@
   function summary(m, data) {
     const parts = [data.sim || "", data.live ? (m.ended ? "끝남" : "실행 중") : "세션 종료"];
     if (m.plan) parts.push("단위 " + m.plan.done + "/" + m.plan.total);
+    // The total keeps its place, and the sides it sums to follow it
+    // (claunch-mejc8): the header answers "how much" and "of what" in one
+    // line, and the four add up to the token figure in front of them.
     parts.push("사건 " + m.count, "질문 " + m.asks, "토큰 " + tokens(m.tokens));
+    if (m.spend) parts.push(...spendParts(m.spend));
     if (m.starts) {
       if (data.live && !m.ended) parts.push("진행 중 " + m.running);
       parts.push("최대 동시 " + m.peak);
