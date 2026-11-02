@@ -102,6 +102,7 @@ let confirmAnswer = true;
 let gateRefreshed = 0;
 let badgesRefreshed = 0;   // the row badges re-read after a sync that ran (claunch-gax44)
 const storage = {};
+const commitLinks = [];   // what commitRef handed to the commit page (claunch-y3tuk.1)
 const ctx = {
   el, renderWorkspaces() {}, wsOpen: true,
   Option: function (text, value) { return { tag: "option", text, value, children: [] }; },
@@ -113,6 +114,9 @@ const ctx = {
   URLSearchParams,
   confirm: (msg) => { calls.push({ confirm: msg }); return confirmAnswer; },
   setTimeout: (fn) => { timers.push(fn); },
+  // a tip is a link only when the panel knows which checkout it is in, so the
+  // commit page has to exist here for that branch of commitRef to be taken
+  CommitPage: { link: (ref, full, where) => { commitLinks.push({ full, where }); } },
   refreshReposyncGate: () => { gateRefreshed++; },
   refreshWsGitSummary: () => { badgesRefreshed++; },
   encodeURIComponent,
@@ -654,6 +658,41 @@ async function tick() {
   await ctx.wsSyncRun("proj");
   assert.deepEqual(posts()[0].body.plans.map((p) => p.remote), ["origin", "mirror"],
                    "a remote already level still carries its tips");
+  st.agentMode = "commands";
+
+  // a 409 on a multi request hands back the fresh plans, and the panel draws
+  // them with its own row code: each plan names the checkout, so both tips are
+  // commit links rather than bare hashes (claunch-y3tuk.1)
+  const freshRows = [
+    { remote: "origin", key: "git.example/o/p",
+      plan: { ...PLAN, repo: "/r", upstream: "c".repeat(40), behind: 2 } },
+    { remote: "mirror", key: "git.example/m/p",
+      plan: { ...PLAN_MIRROR, repo: "/r", upstream: "d".repeat(40) } },
+  ];
+  st.doc = { ...DOC_MULTI, agent_parents: [{ name: "parent", profile: "coder" }] };
+  st.agentMode = "agent";
+  st.agentParent = "parent";
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  calls.length = 0;
+  const linksBefore = commitLinks.length;
+  reply = () => ({ status: 409,
+    body: { error: "moved", stale: true, plans: freshRows } });
+  await ctx.wsSyncRun("proj");
+  assert.match(st.error, /moved since this plan was shown/);
+  assert.deepEqual(st.doc.plans.map((r) => r.plan.repo), ["/r", "/r"],
+                   "the fresh rows keep the checkout the panel draws links from");
+  const recovered = walk(ctx.wsSyncPanel(W))
+    .filter((n) => n.cls === "ws-sync-plan")
+    .flatMap((n) => walk(n)).filter((n) => n.tag === "a");
+  assert.equal(recovered.length, 4, "both tips of both fresh rows are links");
+  const freshLinks = commitLinks.slice(linksBefore);
+  assert.equal(freshLinks.length, 4);
+  assert.ok(freshLinks.every((l) => l.where && l.where.cwd === "/r"),
+            "each link knows the checkout it points into");
+  assert.ok(freshLinks.some((l) => l.full === "c".repeat(40)) &&
+            freshLinks.some((l) => l.full === "d".repeat(40)),
+            "the links are the fresh tips, not the tips that moved");
   st.agentMode = "commands";
 
   // the read that only learns the remote names never fetches: without a

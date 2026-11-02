@@ -9458,10 +9458,17 @@ def _ws_plans_moved(card: dict, body: dict) -> bool:
 def _ws_plan_rows(card: dict) -> list:
     """A multi card's remotes in the shape the status answer uses for
     ``plans`` (``{remote, key, plan}``), so a 409's fresh plans can be drawn
-    by the same code that draws the panel (claunch-y3tuk)."""
+    by the same code that draws the panel (claunch-y3tuk).
+
+    Each ``plan`` carries the card's ``repo``, as every status plan does
+    (``reposync_flow.plan_card``): the panel draws a tip as a commit link only
+    when the plan says which checkout it is in, so rows built without it drew
+    bare hashes in the recovery screen (claunch-y3tuk.1)."""
     rows = []
     for r in card.get("remotes") or []:
         plan = {k: v for k, v in r.items() if k != "basis"}
+        if card.get("repo"):
+            plan["repo"] = card["repo"]
         rows.append({"remote": r.get("remote"), "key": r.get("remote_key"),
                      "plan": plan})
     return rows
