@@ -414,8 +414,10 @@ def test_peek_compares_the_readings_it_is_given_instead_of_the_account(
 
     assert selection.key.id == ids[1]
     assert selection.strategy == "usage-min"
-    # No second account read happened, so this is not a promise about launch.
-    assert selection.exact is True
+    # No second account read happened, so this is not a promise about launch:
+    # the launch reads the accounts again and may land on another key. The
+    # create form turns this into its "as of this read" hedge.
+    assert selection.exact is False
 
 
 def test_peek_with_unreadable_readings_falls_back_to_rotation(home):

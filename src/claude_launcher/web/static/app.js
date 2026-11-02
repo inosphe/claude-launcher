@@ -18173,18 +18173,26 @@ if ($("new-usage-refresh")) {
     if (selector) startNewUsageRead(selector, true);
   });
 }
+/* The strategy row's one write (claunch-i985h, claunch-e48es). It is about the
+   pool the block is showing, which under a borrow is the LENDER's: writing
+   the form's own profile there saved a strategy the borrowed launch never
+   reads and re-read a pool the row is not drawing, so the select and the NEXT
+   marker stayed on the old answer. `newUsageSelector` is the selector every
+   other part of the block already uses. */
+async function applyNewKeyStrategy(f, value) {
+  const selector = f ? newUsageSelector(f) : "";
+  const profileName = newUsageProfileName(selector);
+  if (!profileName) return;
+  // Choosing another strategy says which key this launch should use, so a
+  // pin pressed earlier in the same form is dropped: the panel's NEXT marker
+  // and the session about to be created must name the same key.
+  if (value !== "manual") newSessionKeyId = "";
+  await setNewKeyStrategy(profileName, selector, value);
+}
+
 if ($("new-key-strategy")) {
   $("new-key-strategy").addEventListener("change", (ev) => {
-    const f = $("new-session");
-    const selector = f ? newProfileSelector(f) : "";
-    const doc = newUsageState.selector === selector ? newUsageState.data : null;
-    const profileName = (doc && doc.profile) || baseProfileName(selector);
-    if (!profileName) return;
-    // Choosing another strategy says which key this launch should use, so a
-    // pin pressed earlier in the same form is dropped: the panel's NEXT marker
-    // and the session about to be created must name the same key.
-    if (ev.target.value !== "manual") newSessionKeyId = "";
-    setNewKeyStrategy(profileName, selector, ev.target.value);
+    applyNewKeyStrategy($("new-session"), ev.target.value);
   });
 }
 
