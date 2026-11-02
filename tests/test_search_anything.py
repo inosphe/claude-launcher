@@ -1959,6 +1959,152 @@ def test_deleting_a_collection_refuses_readers_and_removes_the_rest(tmp_path):
     asyncio.run(run())
 
 
+def _db_app(tmp_path, server, presets, active):
+    cfg = _cfg(server, watch_interval=0)
+    cfg.update({"preset": active, "presets": presets})
+    store.save({"rag": cfg})
+    service = rag.RagService(root_dir=tmp_path / "index")
+    app = web.Application()
+    app["rag"] = service
+    app["observer"] = SimpleNamespace()
+    search_anything.install(app)
+    return service, TestClient(TestServer(app))
+
+
+def test_renaming_a_db_moves_every_collection_and_repoints_its_readers(tmp_path):
+    """A DB rename moves each corpus's directory and sidecar to the new name.
+
+    Every preset that read the old name follows it -- the one that named
+    ``db`` and the one that read it through its model key alone -- so none
+    of them goes looking for the old directory and embeds the corpus again.
+    A preset reading another DB is left alone, and so is its secret
+    (claunch-r4796).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.old", dims=768, model="emb-a", model_key="old")
+        _write_store(base, "beads-abc.old", dims=768, model="emb-a", model_key="old")
+        (base / "all.old.meta.json").write_text("{}", encoding="utf-8")
+        _write_store(base, "sessions.other", dims=768, model="emb-b", model_key="other")
+        presets = [
+            {"id": "named", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "named-secret", "embedding_model": "emb-a", "db": "old"},
+            {"id": "by-model", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "model-secret", "embedding_model": "old"},
+            {"id": "elsewhere", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "other-secret", "embedding_model": "emb-b", "db": "other"},
+        ]
+        service, client = _db_app(tmp_path, server, presets, "named")
+        await client.start_server()
+        try:
+            response = await client.post("/api/rag/dbs/rename",
+                                         json={"from": "old", "to": "Kept Vectors"})
+            assert response.status == 200, await response.text()
+            body = await response.json()
+            assert body["db"] == "kept-vectors"
+            assert body["presets"] == ["named", "by-model"]
+            assert (base / "sessions.kept-vectors.zvec").is_dir()
+            assert (base / "beads-abc.kept-vectors.zvec").is_dir()
+            assert (base / "sessions.kept-vectors.meta.json").is_file()
+            assert (base / "all.kept-vectors.meta.json").is_file()
+            assert not list(base.glob("*.old.*"))
+            assert (base / "sessions.other.zvec").is_dir()
+            stored = {p["id"]: p for p in store.rag_presets()}
+            assert stored["named"]["db"] == "kept-vectors"
+            assert stored["by-model"]["db"] == "kept-vectors"
+            assert stored["elsewhere"]["db"] == "other"
+            assert stored["named"]["api_key"] == "named-secret"
+            assert store.rag_config()["db"] == "kept-vectors"
+            names = {row["identity"] for row in body["dbs"]}
+            assert names == {"kept-vectors", "other"}
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_db_rename_refuses_a_taken_unknown_or_empty_name(tmp_path):
+    """Nothing moves when the target exists on disk or is already named by
+    another preset, the source does not exist, or the new name slugs to
+    nothing (claunch-r4796)."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.a", dims=768, model="emb-a", model_key="a")
+        _write_store(base, "sessions.b", dims=768, model="emb-a", model_key="b")
+        presets = [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-a", "db": "a"},
+                   {"id": "q", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-q", "db": "planned"}]
+        service, client = _db_app(tmp_path, server, presets, "p")
+        await client.start_server()
+        try:
+            # q names "planned" before anything was embedded there: moving a's
+            # vectors under that name would hand q another model's vectors.
+            claimed = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "planned"})
+            assert claimed.status == 400
+            assert "q" in (await claimed.json())["error"]
+            assert not (base / "sessions.planned.zvec").exists()
+            taken = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "b"})
+            assert taken.status == 400
+            assert "b" in (await taken.json())["error"]
+            missing = await client.post("/api/rag/dbs/rename", json={"from": "zz", "to": "c"})
+            assert missing.status == 400
+            assert "zz" in (await missing.json())["error"]
+            empty = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "!!!"})
+            assert empty.status == 400
+            same = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "A"})
+            assert same.status == 400
+            assert (base / "sessions.a.zvec").is_dir() and (base / "sessions.b.zvec").is_dir()
+            assert store.rag_presets()[0]["db"] == "a"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_db_by_name_takes_all_its_collections_unless_read(tmp_path):
+    """``db`` deletes one DB as the panel lists it: every corpus's
+    collection and sidecar, refused while a preset reads it
+    (claunch-r4796)."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        _write_store(base, "sessions.orphan", dims=768, model="emb-a", model_key="orphan")
+        _write_store(base, "beads-abc.orphan", dims=768, model="emb-a", model_key="orphan")
+        (base / "all.orphan.meta.json").write_text("{}", encoding="utf-8")
+        presets = [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-a", "db": "kept"}]
+        service, client = _db_app(tmp_path, server, presets, "p")
+        await client.start_server()
+        try:
+            refused = await client.post("/api/rag/dbs/delete", json={"db": "kept"})
+            assert refused.status == 400
+            assert "p" in (await refused.json())["error"]
+            assert (base / "sessions.kept.zvec").is_dir()
+            removed = await client.post("/api/rag/dbs/delete", json={"db": "orphan"})
+            assert removed.status == 200
+            assert not list(base.glob("*.orphan.*"))
+            assert [row["name"] for row in (await removed.json())["dbs"]] == ["sessions.kept"]
+            missing = await client.post("/api/rag/dbs/delete", json={"db": "orphan"})
+            assert missing.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_deleting_a_legacy_collection_a_preset_adopts_is_refused(tmp_path):
     """The pre-preset ``<corpus>.zvec`` is adopted, not named.
 
