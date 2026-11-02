@@ -62,7 +62,7 @@ _STATUS = {
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
-    "vm_share_limit": 400, "vm_root_unknown": 404,
+    "vm_share_limit": 400, "vm_preset_copy": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -212,7 +212,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows", "cloned_from")
+             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows", "cloned_from", "template")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -226,6 +226,15 @@ def _for_session(row: dict, session: str) -> dict:
     if shares:
         row["share_guidance"] = vm_share.guidance(shares)
     return row
+
+
+def _template(request: web.Request, row: dict) -> dict:
+    """The user's row says when the VM is the copy a preset was saved as (it was
+    registered before registration refused such copies): starting it changes what
+    later clones of the preset start from."""
+    presets = request.app.get("vm_presets")
+    name = presets.copy_names().get(row["tart_name"], "") if presets is not None else ""
+    return {**row, "template": name}
 
 
 def _with_files(request: web.Request, row: dict, session: str) -> dict:
@@ -248,7 +257,7 @@ async def h_list(request: web.Request) -> web.Response:
         rows = [_with_files(request, _for_session(reg.view(vm.id), session), session)
                 for vm in _viewable(reg, session)]
     else:
-        rows = [reg.view(vm.id) for vm in reg.list()]
+        rows = [_template(request, reg.view(vm.id)) for vm in reg.list()]
     _, mgr = _hub(request)
     out = {"vms": rows, "slot_limit": reg.slot_limit,
            "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))}
@@ -283,6 +292,8 @@ async def h_get(request: web.Request) -> web.Response:
             if not row["grants"].get(session):
                 raise VmError("vm_no_grant", f"{session} has no grant on {row['id']}")
             row = _with_files(request, _for_session(row, session), session)
+        else:
+            row = _template(request, row)
         return web.json_response(row)
     except VmError as exc:
         return _err(exc)
@@ -297,6 +308,12 @@ async def h_register(request: web.Request) -> web.Response:
         vm_id = str(body.get("id") or "").strip()
         if not vm_id:
             raise VmError("vm_bad_request", "'id' is required")
+        tart_name = str(body.get("tart_name") or "") or vm_id
+        preset = _presets(request).copy_names().get(tart_name)
+        if preset:
+            raise VmError("vm_preset_copy",
+                          f"tart VM {tart_name!r}는 프리셋 {preset!r}의 복사본입니다. 프리셋 복사본은 VM으로 등록하지 않습니다. "
+                          f"새 VM이 필요하면 '프리셋으로 새 VM 만들기'(claunch vm preset new {preset} <id> 또는 VM 페이지의 프리셋 목록)를 쓰십시오")
         vm = reg.add(vm_id, str(body.get("tart_name") or ""),
                      ssh_user=str(body.get("ssh_user") or "admin"),
                      ssh_key=str(body.get("ssh_key") or ""))
@@ -751,7 +768,17 @@ def _lifecycle_route(action: str):
         reg, mgr = _hub(request)
         vm_id = request.match_info["id"]
         try:
-            reg.get(vm_id)
+            vm = reg.get(vm_id)
+            if action == "start":
+                preset = _template(request, {"tart_name": vm.tart_name})["template"]
+                try:
+                    confirmed = (await request.json()).get("confirm_template") is True
+                except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                    confirmed = False
+                if preset and not confirmed:
+                    raise VmError("vm_template_confirm",
+                                  f"{vm_id}는 프리셋 {preset!r}의 복사본입니다. 시작해서 쓰면 이후 이 프리셋으로 만드는 "
+                                  "복제본이 달라집니다. 정말 시작하려면 confirm_template(CLI: --yes-template)을 보내십시오")
             _trace(request, reg, vm_id, "lifecycle", action=action)
             channels: vm_channel.Hub = request.app["vm_channels"]
             if action != "start":
@@ -805,7 +832,12 @@ async def h_grant(request: web.Request) -> web.Response:
         got = reg.grant(request.match_info["id"], session, body.get("scopes") or [])
         _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got)
         await vm_pack.sync(request.app.get("manager"), reg, session)
-        return web.json_response({"ok": True, "grants": got})
+        out = {"ok": True, "grants": got}
+        preset = _template(request, {"tart_name": reg.get(request.match_info["id"]).tart_name})["template"]
+        if preset:
+            out["warning"] = (f"{request.match_info['id']}는 프리셋 {preset!r}의 복사본입니다. "
+                              "세션이 이 VM을 바꾸면 이후 그 프리셋으로 만드는 복제본이 바뀝니다")
+        return web.json_response(out)
     except VmError as exc:
         return _err(exc)
 

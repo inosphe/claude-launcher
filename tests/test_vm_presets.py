@@ -386,3 +386,61 @@ def test_the_user_page_lists_the_presets_for_the_lineage_and_a_session_gets_no_l
             mine = await (await api.get("/api/vm?session=s1", headers=AGENT)).json()
             assert all("cloned_from" not in v for v in mine["vms"]) and "presets" not in mine
     run(go())
+
+
+# ---- a preset's copy is not a VM -------------------------------------------------- #
+def test_registering_a_preset_copy_is_refused_by_the_route_with_the_reason(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            for body in ({"id": "base", "tart_name": "preset-gold"}, {"id": "preset-gold"}):
+                resp = await api.post("/api/vm", json=body)
+                got = await resp.json()
+                assert resp.status == 409 and got["code"] == "vm_preset_copy"
+                assert "gold" in got["error"] and "프리셋 복사본은 VM으로 등록하지 않습니다" in got["error"]
+                assert "preset new gold" in got["error"]
+            assert [v.id for v in api.reg.list()] == ["src"]
+            fine = await api.post("/api/vm", json={"id": "other", "tart_name": "preset-unrelated"})
+            assert fine.status == 201                              # not a recorded copy: not this rule's business
+    run(go())
+
+
+def test_a_copy_registered_before_the_rule_is_marked_a_template_and_starting_it_needs_confirmation(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            api.reg.add("preset-gold", "preset-gold")             # as `vm add` did before the rule
+            page = await (await api.get("/api/vm")).json()
+            kind = {v["id"]: v["template"] for v in page["vms"]}
+            assert kind == {"src": "", "preset-gold": "gold"}
+            assert (await (await api.get("/api/vm/preset-gold")).json())["template"] == "gold"
+            mine = await (await api.get("/api/vm?session=s1", headers=AGENT)).json()
+            assert all("template" not in v for v in mine["vms"])
+            refused = await api.post("/api/vm/preset-gold/start", json={})
+            got = await refused.json()
+            assert refused.status == 409 and got["code"] == "vm_template_confirm" and "gold" in got["error"]
+            assert api.reg.get("preset-gold").state == "stopped" and not api.fake.spawned
+            also = await api.post("/api/vm/preset-gold/start", json={"confirm_template": "yes"})
+            assert also.status == 409                              # only a JSON true confirms
+            ok = await api.post("/api/vm/preset-gold/start", json={"confirm_template": True})
+            assert ok.status == 200 and (await ok.json())["state"] == "running"
+            normal = await api.post("/api/vm/src/start", json={})
+            assert normal.status == 200                            # an ordinary VM needs nothing
+    run(go())
+
+
+def test_granting_a_template_warns_and_it_can_still_be_forgotten(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            api.reg.add("preset-gold", "preset-gold")
+            grant = await api.post("/api/vm/preset-gold/grant", json={"session": "s1", "scopes": ["view"]})
+            got = await grant.json()
+            assert grant.status == 200 and got["grants"] == ["view"] and "gold" in got["warning"]
+            plain = await api.post("/api/vm/src/grant", json={"session": "s1", "scopes": ["view"]})
+            assert "warning" not in await plain.json()
+            gone = await api.delete("/api/vm/preset-gold")
+            assert gone.status == 200 and "preset-gold" not in [v.id for v in api.reg.list()]
+            again = await api.post("/api/vm", json={"id": "preset-gold"})
+            assert again.status == 409                              # and it cannot be put back
+    run(go())

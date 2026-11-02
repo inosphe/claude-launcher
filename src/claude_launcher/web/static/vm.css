@@ -108,3 +108,7 @@ button.vm-working::before { content: ""; display: inline-block; width: 10px; hei
 #vm-lineage-tree > li::before { content: ""; }
 .vm-tree-preset > span { color: var(--vm-accent); }
 .vm-tree-gone-vm > span, .vm-tree-gone-preset > span { color: var(--vm-muted); font-style: italic; }
+
+.vm-chip.vm-template { border-color: #a371f7; color: #a371f7; font-weight: 600; }
+.vm-card.vm-template-card { border-left: 3px solid #a371f7; }
+.vm-card.vm-template-card .sub { color: #a371f7; }

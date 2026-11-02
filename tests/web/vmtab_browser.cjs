@@ -50,6 +50,7 @@ const BETA = { ...VM, id: "beta", cloned_from: { kind: "preset", preset: "gold",
     origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
 const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped",
   cloned_from: { kind: "preset", preset: "old", preset_created_at: 1600000000, at: 1700000600 }, requests: [], share_rows: [], shared_dirs: [] };
+const TMPL = { ...BETA, id: "tmpl", tart_name: "preset-gold", template: "gold", state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
 let gammaRelease = null;     // lets the held lifecycle request answer
 let gammaFail = false;
 const GAMMA_STATE = { start: "running", stop: "stopped", suspend: "suspended", force_stop: "stopped" };
@@ -114,7 +115,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG,
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA, TMPL], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG,
     presets: [{ name: "gold", source: "alpha", created_at: 1700000000, description: "깨끗한 설치" }] });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
@@ -387,6 +388,36 @@ const server = http.createServer((req, res) => {
     assert.ok(order("삭제된 프리셋 old") < order("VM gamma"), "gamma is under the deleted-preset node");
     assert.equal(await frame.locator("#vm-lineage-tree li li li").count() >= 1, true, "the tree is nested");
     assert.equal(await frame.locator("#vm-lineage button, #vm-lineage input").count(), 0, "read only");
+
+    // 3i. a preset's copy registered as a VM is marked, and starting or granting it asks first
+    const tcard = frame.locator(".vm-card", { hasText: "tmpl" });
+    assert.match(await tcard.innerText(), /프리셋 템플릿 · stopped/, "the list row says what it is");
+    assert.match(await frame.locator(".vm-card", { hasText: "alpha" }).innerText(), /VM · running/, "an ordinary VM says VM");
+    assert.match(await tcard.getAttribute("class"), /vm-template-card/);
+    await tcard.click();
+    await frame.locator("#vm-name", { hasText: "tmpl" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("#vm-template-chip").isVisible(), true, "the badge is on the detail");
+    assert.match(await frame.locator("#vm-template-note").innerText(), /프리셋 gold의 복사본.*일반 VM이 아닙니다.*복제본이 달라집니다/s);
+    const startsOf = () => posts.filter(([u]) => u === "/api/vm/tmpl/start").length;
+    let startAsk = "";
+    page.once("dialog", async (d) => { startAsk = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-start").click();
+    await page.waitForTimeout(200);
+    assert.match(startAsk, /템플릿을 시작하면 이후.*복제본이 바뀝니다/s, "starting a template asks first");
+    assert.equal(startsOf(), 0, "a dismissed confirmation starts nothing");
+    page.once("dialog", async (d) => { await d.accept(); });
+    await frame.locator("#vm-start").click();
+    await frame.locator("#vm-activity", { hasText: "시작 요청이 처리되었습니다" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm/tmpl/start")[0][1], { confirm_template: true });
+    let grantAsk = "";
+    page.once("dialog", async (d) => { grantAsk = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-grant-session-text").fill("s1").catch(() => {});
+    await frame.locator("#vm-grant").click();
+    await page.waitForTimeout(200);
+    assert.match(grantAsk, /프리셋 gold의 복사본.*복제본이 바뀝니다/s, "granting a template warns");
+    assert.match(await frame.locator("#vm-lineage-tree").innerText(), /VM tmpl · .* · 프리셋 템플릿/, "the lineage marks it too");
+    await frame.locator(".vm-card", { hasText: "alpha" }).click();
+    assert.equal(await frame.locator("#vm-template-chip").isVisible(), false, "an ordinary VM has no badge");
 
     // 3g. lifecycle buttons show at once that a press was taken, lock the conflicting ones, and
     // keep showing it until the state the press asked for is in the list

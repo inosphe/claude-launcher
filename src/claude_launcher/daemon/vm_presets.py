@@ -154,6 +154,11 @@ class Presets:
                 rows.append(row)
             return rows
 
+    def copy_names(self) -> Dict[str, str]:
+        """``{tart name: preset name}`` of the recorded preset copies (no tart query)."""
+        with self._lock:
+            return {p.tart_name: p.name for p in self._items.values()}
+
     def lineage_rows(self) -> List[dict]:
         """The presets as the lineage tree needs them: no ``tart list`` (that is
         ``list``'s ``present``), so the VM page can read it with every poll."""
