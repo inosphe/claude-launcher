@@ -67,6 +67,7 @@
       <span id="vm-template-chip" class="vm-chip vm-template" hidden>프리셋 템플릿</span>
       <span id="vm-ip" class="vm-muted"></span>
     </div>
+    <p id="vm-lineage-line" class="vm-lineage-line" hidden></p>
     <div id="vm-template-note" class="vm-warn-text" hidden></div>
     <div id="vm-guard-note" class="vm-problem" hidden></div>
     <div id="vm-problem" class="vm-problem" hidden></div>
@@ -192,13 +193,17 @@
     </section>
   </section>
   <section id="vm-lineage" aria-label="복제 계보">
-    <h1>복제 계보</h1>
+    <h1>전체 복제 계보(모든 VM·프리셋)</h1>
+    <p class="vm-lineage-line" id="vm-lineage-current" hidden></p>
     <p class="vm-muted" id="vm-lineage-note">
       프리셋과 그것으로 만든 VM의 복제 관계입니다(읽기 전용). 데몬이 프리셋으로 VM을 만들 때 어느 프리셋에서 복제했는지 기록하며,
       그 기록이 없는 VM(직접 등록했거나 이 기능 이전에 만든 VM)은 복제 출처를 추측하지 않고 "출처 기록 없음"으로 표시합니다.
       tart 이미지(OCI) 이름은 tart가 알려 주지 않아 표시하지 않습니다. 프리셋을 지우면 그 후손 VM은 "삭제된 프리셋에서 복제"로 표시됩니다.
     </p>
-    <ul id="vm-lineage-tree" class="vm-tree"></ul>
+    <details id="vm-lineage-all">
+      <summary>전체 트리 펼치기(선택한 VM은 강조됩니다)</summary>
+      <ul id="vm-lineage-tree" class="vm-tree"></ul>
+    </details>
     <p class="vm-muted" id="vm-lineage-empty">등록된 VM이나 프리셋이 없습니다.</p>
   </section>
   <section id="vm-onlymode" aria-label="VM 전용 모드">
