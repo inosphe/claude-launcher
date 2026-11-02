@@ -2433,6 +2433,54 @@ def test_mesh_get_answers_which_member_the_asking_session_is(home, tmp_path):
     asyncio.run(run())
 
 
+def test_our_own_member_stays_local_before_the_uplink_names_this_daemon(
+    home, tmp_path,
+):
+    """``machine`` is blank between ``load_all`` and the relay handshake.
+
+    ``_load`` falls back to the ``self`` written in ``mesh.json`` so rank —
+    and therefore ``primary`` — is right before the uplink resolves our name;
+    ``_is_local`` did not share that fallback, so a row the roster had
+    stamped with our own name read as another daemon's and a local
+    ``mesh send`` as that member was refused with "lives on <our own
+    name>" (claunch-pbn2e).
+    """
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = mm.create("m")
+        # What a federated roster looks like on disk: peers rank the
+        # authority first (_absolutize_roster stamped every row with it).
+        mesh.peers = ["shared-daemon-main"]
+        mesh.me = "shared-daemon-main"
+        ours = mesh_mod.Member(
+            handle="alice", session="s1", machine="shared-daemon-main")
+        mesh.members["alice"] = ours
+
+        assert mm.machine == ""      # the uplink has not named us yet ...
+        assert mesh.primary == ""    # ... and we hold rank 0
+        assert mm._is_local(mesh, ours)
+
+        # Once the uplink names us the answer cannot change.
+        mm.machine = "shared-daemon-main"
+        assert mm._is_local(mesh, ours)
+
+        # A mirror whose uplink is not up keeps the same rule: the name on
+        # disk is ours, and a row stamped for another machine is not.
+        mm.machine = ""
+        mesh.peers = ["other-box", "shared-daemon-main"]
+        assert mesh.primary == "other-box"
+        assert mm._is_local(mesh, ours)
+        assert not mm._is_local(
+            mesh, mesh_mod.Member(handle="bob", session="s2",
+                                  machine="other-box"))
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_a_dead_member_is_not_rescanned_while_the_log_is_quiet(home, tmp_path):
     """A stranded backlog never drains on its own, so the delivery tick used
     to rescan the log from the dead member's cursor every second -- on a
