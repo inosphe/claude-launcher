@@ -21,10 +21,12 @@ What each list holds -- what the value will be accepted as further on:
     aliases resolved through the profile's environment, and ``subagent``
     falls back to ``small`` -- no preset is ever refused. Plus the harness's
     model choices (``haiku``, ``sonnet``...).
-  * codex (:func:`codex_models`): only the presets the profile's provider
-    declares a model for (role fallbacks applied). Codex never reads the
-    provider's models itself (``translators.codex``), so spawn refuses an
-    undeclared preset instead of launching ``-c model=small``. Plus the
+  * codex (:func:`codex_models`): ``default``, then only the presets the
+    profile's provider declares a model for (role fallbacks applied). Codex
+    never reads the provider's models itself (``translators.codex``), so
+    spawn refuses an undeclared preset instead of launching
+    ``-c model=small``; ``default`` needs no id, because it launches with no
+    model argument (the harness's own default, claunch-61vj3). Plus the
     harness's model choices (``luna``, ``sol``... and ``model_choices:``
     overrides).
   * any other harness (:func:`declared_models`): spawn's non-claude path,
@@ -72,8 +74,17 @@ def codex_models(spec: providers.ProviderSpec, entry: Optional[harnesses.Harness
 
 
 def declared_models(spec: providers.ProviderSpec, entry: Optional[harnesses.Harness]) -> List[str]:
-    """Spawn's non-claude rule: a preset counts only with a declared model."""
-    return _join([role for role in provider_spec.MODEL_ROLES if spec.model(role)], entry)
+    """Spawn's non-claude rule: a preset counts only with a declared model.
+
+    ``default`` is the exception and is always listed: it is not a slot the
+    harness has an id for, it is the harness's own default, which spawn
+    launches with no model argument at all (claunch-61vj3). A provider that
+    declares ``models.default`` still resolves that id first.
+    """
+    return _join(
+        ["default"] + [role for role in provider_spec.MODEL_ROLES if spec.model(role)],
+        entry,
+    )
 
 
 def _join(presets, entry: Optional[harnesses.Harness]) -> List[str]:

@@ -125,6 +125,39 @@ def test_defaults_make_an_entry_valid(home):
     assert saved["tiers"][0]["entries"] == [{"profile": "a"}]
 
 
+def _codex_profile(name: str = "cx") -> None:
+    """A codex profile whose provider declares no role models.
+
+    Codex has no id for the ``default`` role here, so a ``default`` model is
+    not a preset it can launch with ``-c model=``; it is the harness's own
+    default, launched with no model argument (claunch-61vj3).
+    """
+    from claude_launcher import lineage
+
+    prof = create_profile(name)
+    lineage.set_harness(prof, "codex")
+    store.set_profile_field(name, "allowed_harnesses", ["codex"])
+
+
+def test_defaults_make_a_codex_entry_valid_too(home):
+    """The settings card's Add tier makes ``{profile}`` and saves at once;
+    the first profile in the catalog's order is a codex one on this box."""
+    _codex_profile()
+    saved = model_tiers.save(_block(_tier("misc", _entry("cx"))))
+    assert saved["tiers"][0]["entries"] == [{"profile": "cx"}]
+    assert model_tiers.resolve("misc") == ("cx", "codex", "default")
+
+
+def test_an_explicit_default_model_is_valid_for_codex(home):
+    _codex_profile()
+    saved = model_tiers.save(
+        _block(_tier("misc", _entry("cx", model="default")))
+    )
+    assert saved["tiers"][0]["entries"] == [
+        {"profile": "cx", "model": "default"}
+    ]
+
+
 # --- resolve ------------------------------------------------------------------
 
 def test_resolve_applies_the_active_pointer(home):

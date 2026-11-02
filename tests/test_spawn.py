@@ -1591,6 +1591,19 @@ def test_a_codex_preset_needs_the_id_its_profile_declares(monkeypatch):
     assert child["model"] == "gpt-mini"
 
 
+def test_a_codex_default_preset_launches_with_no_model_argument():
+    """``default`` is not a slot codex has an id for; it is the harness's own
+    default, so the child carries no model rather than ``-c model=default``."""
+    prof = profile.create("cx")
+    lineage.set_harness(prof, "codex")
+    parent = {**PARENT, "harness": "codex", "profile": "cx:codex"}
+    child = spawn.check(
+        _policy(allow_args=True), {"model": "default"},
+        parent=parent, depth=0, children=0,
+    )
+    assert child["model"] is None
+
+
 def test_a_borrowing_child_reads_its_preset_from_the_lender(home):
     """A preset names a slot of the table the launch will run on.
 

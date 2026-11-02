@@ -40641,7 +40641,11 @@ function modelTierEntrySelect(current, choices, emptyLabel, onChange) {
 }
 
 function modelTiersEntryModelChoices(profile) {
-  return [...new Set([...modelTiers.presets, ...(modelTiers.models[profile] || [])])];
+  // The server catalog is spawn's own rule for the profile, so it is exactly
+  // what validate() accepts (``default`` included, claunch-61vj3). Presets
+  // are the fallback only when the profile's list could not be read.
+  const listed = modelTiers.models[profile] || [];
+  return listed.length ? listed : modelTiers.presets;
 }
 
 function modelTiersEntryHarnessChoices(profile) {

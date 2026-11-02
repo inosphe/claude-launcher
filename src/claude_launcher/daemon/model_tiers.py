@@ -23,6 +23,9 @@ harness takes; ``harness`` defaults to the profile's effective harness and
 ``model`` to the ``default`` role. Validation refuses combinations that
 cannot launch (unknown profile, a harness the profile's policy denies, a
 model the harness has no route for) — possible combinations only.
+``default`` is always one of those combinations: a profile that declares no
+id for the role runs the harness's own default, launched with no model
+argument (claunch-61vj3).
 """
 
 from __future__ import annotations
@@ -43,7 +46,9 @@ TIER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 #: The settings editor keeps this many tiers; the request was "about three".
 MAX_TIERS = 5
 
-#: The model word an entry without one resolves to (the provider's default).
+#: The model word an entry without one resolves to: the profile's id for the
+#: role when it declares one, else the harness's own default (no model
+#: argument) — see :func:`claude_launcher.spawn._resolve_model_preset`.
 DEFAULT_MODEL = "default"
 
 

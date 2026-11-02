@@ -45,6 +45,16 @@ def _setup_profile(name: str = "a") -> None:
     store.set_profile_field(prof.name, "provider", "ds")
 
 
+def _setup_codex_profile(name: str = "cx") -> None:
+    """A codex profile whose provider declares no role models: the first
+    profile the settings card's Add tier would seed (claunch-61vj3)."""
+    from claude_launcher import lineage
+
+    prof = create_profile(name)
+    lineage.set_harness(prof, "codex")
+    store.set_profile_field(name, "allowed_harnesses", ["codex"])
+
+
 _BLOCK = {"tiers": [{"id": "economy",
                      "entries": [{"profile": "a", "model": "small"}]}],
           "active": {}}
@@ -87,6 +97,19 @@ def test_put_refuses_a_body_without_tiers(home):
     status, body = put({"active": {}})
     assert status == 400
     assert "tiers" in body["error"]
+
+
+def test_put_accepts_the_block_add_tier_makes_for_a_codex_profile(home):
+    """Add tier seeds ``entries: [{profile}]`` with no model; the PUT must
+    land instead of answering 400 (claunch-61vj3)."""
+    _setup_codex_profile()
+    status, body = put({"tiers": [{"id": "misc",
+                                   "entries": [{"profile": "cx"}]}]})
+    assert status == 200
+    assert body["block"]["tiers"][0]["entries"] == [{"profile": "cx"}]
+    # The editor's Model select is built from this list.
+    assert "default" in body["models"]["cx"]
+    assert body["block"]["tiers"][0]["id"] == "misc"
 
 
 def test_put_validation_error_does_not_touch_the_stored_block(home):
