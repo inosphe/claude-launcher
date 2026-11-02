@@ -47,6 +47,10 @@ const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: fa
   requests: [], shares_pending: false, shares_skipped: {},
   share_rows: [{ name: "cat1", host_path: "/work/cat", mode: "ro", guest_path: "/Volumes/My Shared Files/cat1",
     origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
+const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
+let gammaRelease = null;     // lets the held lifecycle request answer
+let gammaFail = false;
+const GAMMA_STATE = { start: "running", stop: "stopped", suspend: "suspended", force_stop: "stopped" };
 let ONLY = [
   { session: "s1", on: false, can_enable: true, why: "", since: 0, blocks: [], limits: "x" },
   { session: "s9", on: false, can_enable: false, why: "이 세션은 VM 전용 hook 없이 시작되었습니다", since: 0, blocks: [] },
@@ -66,9 +70,16 @@ const json = (res, body, status = 200) => {
 };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
-  const p = url.pathname
+  const p = url.pathname;
   if (p === "/api/batch") { res.statusCode = 404; return res.end("{}"); }   // the page falls back to single reads
   if (req.method === "GET" && p.startsWith("/api/vm")) hits.push(p);
+  const life = req.method === "POST" && /^\/api\/vm\/gamma\/(start|stop|suspend|force_stop)$/.exec(p);
+  if (life) {
+    posts.push([p, {}]);
+    if (gammaFail) return json(res, { ok: false, code: "vm_busy_state", error: "vm_busy_state: gamma is busy" }, 409);
+    gammaRelease = () => { GAMMA.state = GAMMA_STATE[life[1]]; json(res, GAMMA); };   // answers when the test says
+    return;
+  }
   if (req.method === "POST" && /^\/api\/vm\/beta\/(un)?lock$/.test(p)) {
     BETA.locked = p.endsWith("/lock") && !p.endsWith("/unlock");
     posts.push([p, {}]);
@@ -101,7 +112,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
       guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
@@ -359,6 +370,63 @@ const server = http.createServer((req, res) => {
     assert.match(await frame.locator("#vm-cat-roots").innerText(), /공유가 꺼져 있습니다/, "an empty list says sharing is off");
     assert.equal(await frame.locator("#vm-cat-go").isDisabled(), true);
     assert.equal(await frame.locator("#vm-roots").isVisible(), false);
+
+    // 3g. lifecycle buttons show at once that a press was taken, lock the conflicting ones, and
+    // keep showing it until the state the press asked for is in the list
+    const vmFrame = page.frames().find((f) => /\/vm\?embed=1/.test(f.url()));
+    await frame.locator(".vm-card", { hasText: "gamma" }).click();
+    await frame.locator("#vm-name", { hasText: "gamma" }).waitFor({ timeout: 5000 });
+    const start = frame.locator("#vm-start"), stop = frame.locator("#vm-stop"), suspend = frame.locator("#vm-suspend"), force = frame.locator("#vm-force");
+    assert.equal(await start.isDisabled(), false, "a stopped VM can be started");
+    const lifePosts = () => posts.filter(([u]) => /^\/api\/vm\/gamma\/(start|stop|suspend|force_stop)$/.test(u)).length;
+    // a failed press: the buttons come back and the reason is shown
+    gammaFail = true;
+    await start.click();
+    await frame.locator("#vm-activity", { hasText: "시작 실패" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-activity").innerText(), /vm_busy_state/);
+    assert.equal(await start.isDisabled(), false, "the button is back after a failed request");
+    assert.equal(await start.getAttribute("aria-busy"), "false");
+    assert.equal(lifePosts(), 1);
+    gammaFail = false;
+    // a press that is taken: label, spinner, lock, and a second click sends nothing
+    await start.click();
+    await frame.locator("#vm-start.vm-working").waitFor({ timeout: 2000 });
+    assert.match(await start.innerText(), /시작 중…/);
+    assert.equal(await start.getAttribute("aria-busy"), "true");
+    for (const b of [start, suspend, stop]) assert.equal(await b.isDisabled(), true, "conflicting buttons are locked");
+    assert.equal(await frame.locator("#vm-guard-toggle").isDisabled(), true, "the lock toggle is locked too");
+    GAMMA.state = "starting";                // the daemon now reports the transition
+    await page.waitForFunction(() => document.querySelector("iframe").contentDocument.getElementById("vm-force").disabled === false, null, { timeout: 8000 });
+    assert.equal(await force.isDisabled(), false, "force stop stays open as the way out");
+    for (const b of [start, suspend, stop]) assert.equal(await b.isDisabled(), true, "still locked while starting");
+    await start.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(150);
+    assert.equal(lifePosts(), 2, "a second click on the busy button sends no second request");
+    // the request answers; the list shows running; the progress goes and the stop button is open
+    gammaRelease();
+    await frame.locator("#vm-start.vm-working").waitFor({ state: "detached", timeout: 8000 });
+    assert.equal(await stop.isDisabled(), false);
+    assert.equal(await suspend.isDisabled(), false);
+    assert.match(await start.innerText(), /▶ 시작/);
+    // a VM the daemon reports mid-transition shows progress without a press here
+    GAMMA.state = "stopping";
+    await frame.locator("#vm-stop.vm-working").waitFor({ timeout: 8000 });
+    assert.match(await stop.innerText(), /종료 중…/);
+    for (const b of [start, suspend, stop]) assert.equal(await b.isDisabled(), true);
+    GAMMA.state = "stopped";
+    await frame.locator("#vm-stop.vm-working").waitFor({ state: "detached", timeout: 8000 });
+    // an answer whose state never shows: after the timeout the buttons come back with a notice
+    await vmFrame.evaluate(() => { window.VM_BUSY_MS = 1500; });
+    const fixed = GAMMA_STATE.start;
+    GAMMA_STATE.start = "stopped";           // the daemon says ok but the state does not change
+    await start.click();
+    await frame.locator("#vm-start.vm-working").waitFor({ timeout: 2000 });
+    gammaRelease();
+    await frame.locator("#vm-activity", { hasText: "아직 반영되지 않았습니다" }).waitFor({ timeout: 8000 });
+    assert.equal(await start.isDisabled(), false, "the button is back after the timeout");
+    GAMMA_STATE.start = fixed;
+    await vmFrame.evaluate(() => { window.VM_BUSY_MS = 0; });
+    await frame.locator(".vm-card", { hasText: "alpha" }).click();
 
     // 3e. VM-only mode: on the default screen, per session, with the reason and the blocks
     assert.equal(await frame.locator("#vm-onlymode").isVisible(), true, "the VM-only section is on the page without opening anything");
