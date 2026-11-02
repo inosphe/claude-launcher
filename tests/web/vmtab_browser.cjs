@@ -43,11 +43,13 @@ const VM = {
   requests: [{ id: "r1", session: "s2", scopes: ["files", "exec"], reason: "build it",
     shares: [{ name: "out", host_path: "/work/out", mode: "rw", guest_path: "/Volumes/My Shared Files/out" }] }],
 };
-const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false,
+VM.cloned_from = {};
+const BETA = { ...VM, id: "beta", cloned_from: { kind: "preset", preset: "gold", preset_created_at: 1700000000, at: 1700000500 }, tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false,
   requests: [], shares_pending: false, shares_skipped: {},
   share_rows: [{ name: "cat1", host_path: "/work/cat", mode: "ro", guest_path: "/Volumes/My Shared Files/cat1",
     origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
-const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
+const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped",
+  cloned_from: { kind: "preset", preset: "old", preset_created_at: 1600000000, at: 1700000600 }, requests: [], share_rows: [], shared_dirs: [] };
 let gammaRelease = null;     // lets the held lifecycle request answer
 let gammaFail = false;
 const GAMMA_STATE = { start: "running", stop: "stopped", suspend: "suspended", force_stop: "stopped" };
@@ -112,7 +114,8 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG,
+    presets: [{ name: "gold", source: "alpha", created_at: 1700000000, description: "깨끗한 설치" }] });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
       guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
@@ -370,6 +373,20 @@ const server = http.createServer((req, res) => {
     assert.match(await frame.locator("#vm-cat-roots").innerText(), /공유가 꺼져 있습니다/, "an empty list says sharing is off");
     assert.equal(await frame.locator("#vm-cat-go").isDisabled(), true);
     assert.equal(await frame.locator("#vm-roots").isVisible(), false);
+
+    // 3h. the clone lineage: always on the page, read only, no guessing
+    assert.equal(await frame.locator("#vm-lineage").isVisible(), true, "the lineage section is on the page without opening anything");
+    assert.match(await frame.locator("#vm-lineage-note").innerText(), /출처 기록 없음.*삭제된 프리셋/s);
+    const lin = (await frame.locator("#vm-lineage-tree").innerText()).replace(/[ \t]+/g, " ");
+    assert.match(lin, /VM alpha · 실행 중 · 출처 기록 없음/, "a VM without a record says so");
+    assert.match(lin, /프리셋 gold · 저장 .* · 원본 alpha · 깨끗한 설치/, "the preset shows its time, source and description");
+    assert.match(lin, /VM beta · 정지/, "the VM made from the preset is its child");
+    assert.match(lin, /삭제된 프리셋 old에서 복제/, "a VM whose preset is gone says so");
+    const order = (t) => lin.indexOf(t);
+    assert.ok(order("VM alpha") < order("프리셋 gold") && order("프리셋 gold") < order("VM beta"), "alpha > gold > beta");
+    assert.ok(order("삭제된 프리셋 old") < order("VM gamma"), "gamma is under the deleted-preset node");
+    assert.equal(await frame.locator("#vm-lineage-tree li li li").count() >= 1, true, "the tree is nested");
+    assert.equal(await frame.locator("#vm-lineage button, #vm-lineage input").count(), 0, "read only");
 
     // 3g. lifecycle buttons show at once that a press was taken, lock the conflicting ones, and
     // keep showing it until the state the press asked for is in the list

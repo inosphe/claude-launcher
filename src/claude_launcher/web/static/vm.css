@@ -99,3 +99,12 @@ button.vm-working::before { content: ""; display: inline-block; width: 10px; hei
   border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: vm-spin 0.9s linear infinite; }
 @keyframes vm-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { button.vm-working::before { animation: none; } }
+
+.vm-tree, .vm-tree ul { list-style: none; margin: 0; padding-left: 18px; }
+#vm-lineage-tree { padding-left: 0; }
+.vm-tree li { position: relative; margin: 3px 0; padding-left: 12px; border-left: 1px solid var(--vm-line); overflow-wrap: anywhere; }
+.vm-tree li::before { content: "└"; position: absolute; left: -1px; top: 0; color: var(--vm-muted); }
+#vm-lineage-tree > li { border-left: 0; padding-left: 0; }
+#vm-lineage-tree > li::before { content: ""; }
+.vm-tree-preset > span { color: var(--vm-accent); }
+.vm-tree-gone-vm > span, .vm-tree-gone-preset > span { color: var(--vm-muted); font-style: italic; }

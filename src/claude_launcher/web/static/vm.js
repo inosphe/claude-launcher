@@ -294,6 +294,83 @@ let onlyRows = [];
 function toggleOnly(session, on) {
   act(`${session} VM 전용 ${on ? "켜기" : "끄기"}`, () => post("api/vm-only", { session, on }));
 }
+/* The clone lineage: presets and the VMs made from them, read only. A VM made
+   from a preset carries {preset, preset_created_at}; a VM without a record, and
+   one whose preset was deleted (or deleted and saved again under the same name:
+   another created_at), is shown as such and never linked by guess. */
+function buildLineage(vmList, presets) {
+  const nodes = new Map();
+  const node = (key, kind, data) => { if (!nodes.has(key)) nodes.set(key, { key, kind, data, children: [], parent: null }); return nodes.get(key); };
+  for (const v of vmList) node(`vm:${v.id}`, "vm", v);
+  for (const p of presets) node(`preset:${p.name}`, "preset", p);
+  for (const p of presets) {
+    const me = nodes.get(`preset:${p.name}`);
+    if (!p.source) { me.parent = null; continue; }
+    me.parent = nodes.get(`vm:${p.source}`) || node(`gone-vm:${p.source}`, "gone-vm", { id: p.source });
+  }
+  for (const v of vmList) {
+    const me = nodes.get(`vm:${v.id}`);
+    const c = v.cloned_from;
+    if (!c || c.kind !== "preset" || !c.preset) continue;
+    const p = presets.find((x) => x.name === c.preset);
+    const same = p && (!c.preset_created_at || !p.created_at || c.preset_created_at === p.created_at);
+    me.parent = same ? nodes.get(`preset:${p.name}`)
+      : node(`gone-preset:${c.preset}:${c.preset_created_at || 0}`, "gone-preset", { name: c.preset });
+  }
+  // a link that would close a loop is dropped, so every node is reachable from a root
+  for (const n of nodes.values()) {
+    const seen = new Set([n]);
+    for (let up = n.parent; up; up = up.parent) {
+      if (seen.has(up)) { n.parent = null; break; }
+      seen.add(up);
+    }
+  }
+  const roots = [];
+  for (const n of nodes.values()) (n.parent ? n.parent.children : roots).push(n);
+  const order = { vm: 0, preset: 1, "gone-vm": 2, "gone-preset": 3 };
+  const byName = (a, b) => (order[a.kind] - order[b.kind]) || a.key.localeCompare(b.key);
+  for (const n of nodes.values()) n.children.sort(byName);
+  return roots.sort(byName);
+}
+const LIFE_TEXT = { running: "실행 중", stopped: "정지", suspended: "일시 중단", starting: "시작 중", stopping: "종료 중",
+  saving: "일시 중단 중", restoring: "재개 중", pausing: "일시 정지 중", paused: "일시 정지", fault: "오류" };
+function lineageLabel(n, isRoot) {
+  const d = n.data;
+  if (n.kind === "vm") {
+    const bits = [`VM ${d.id}`, LIFE_TEXT[d.state] || d.state];
+    if (d.locked) bits.push("🔒 잠김");
+    if (isRoot) bits.push(d.cloned_from && d.cloned_from.kind ? "" : "출처 기록 없음");
+    return bits.filter(Boolean).join(" · ");
+  }
+  if (n.kind === "preset") {
+    const when = d.created_at ? new Date(d.created_at * 1000).toLocaleString("ko-KR") : "-";
+    const full = presetRows.find((x) => x.name === d.name);
+    return [`프리셋 ${d.name}`, `저장 ${when}`, `원본 ${d.source || "기록 없음"}`, d.description || "",
+      full && full.present === false ? "tart 복사본 없음" : ""].filter(Boolean).join(" · ");
+  }
+  if (n.kind === "gone-vm") return `원본 VM ${d.id} (등록 해제됨)`;
+  return `삭제된 프리셋 ${d.name}에서 복제`;
+}
+function renderLineage() {
+  const tree = $("vm-lineage-tree");
+  tree.replaceChildren();
+  const roots = buildLineage(vms, presetsLight);
+  $("vm-lineage-empty").hidden = roots.length > 0;
+  const draw = (n, host, isRoot) => {
+    const li = document.createElement("li");
+    li.className = `vm-tree-${n.kind}`;
+    const text = document.createElement("span");
+    text.textContent = lineageLabel(n, isRoot);
+    li.append(text);
+    if (n.children.length) {
+      const ul = document.createElement("ul");
+      for (const child of n.children) draw(child, ul, false);
+      li.append(ul);
+    }
+    host.append(li);
+  };
+  for (const r of roots) draw(r, tree, true);
+}
 function renderOnly() {
   const body = document.querySelector("#vm-only-rows tbody");
   body.replaceChildren();
@@ -641,11 +718,13 @@ function render() {
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
   renderOnly();
+  renderLineage();
   renderSharing();
   renderRequests();
   syncPresetSave();
 }
 let hostLocked = false;
+let presetsLight = [];
 let shareRoots = [];
 let shareRootRows = [];
 async function refresh() {
@@ -654,6 +733,7 @@ async function refresh() {
     vms = data.vms || [];
     hostLocked = !!data.host_locked;
     shareRoots = data.share_roots || [];
+    presetsLight = data.presets || [];
     shareRootRows = data.share_root_rows || [];
     shareCatalog = data.share_catalog || [];
     try { onlyRows = (await api("api/vm-only")).sessions || []; } catch (_) { onlyRows = []; }

@@ -171,6 +171,16 @@
       <button id="vm-allow-go" type="button">주소 추가</button>
     </div>
   </section>
+  <section id="vm-lineage" aria-label="복제 계보">
+    <h1>복제 계보</h1>
+    <p class="vm-muted" id="vm-lineage-note">
+      프리셋과 그것으로 만든 VM의 복제 관계입니다(읽기 전용). 데몬이 프리셋으로 VM을 만들 때 어느 프리셋에서 복제했는지 기록하며,
+      그 기록이 없는 VM(직접 등록했거나 이 기능 이전에 만든 VM)은 복제 출처를 추측하지 않고 "출처 기록 없음"으로 표시합니다.
+      tart 이미지(OCI) 이름은 tart가 알려 주지 않아 표시하지 않습니다. 프리셋을 지우면 그 후손 VM은 "삭제된 프리셋에서 복제"로 표시됩니다.
+    </p>
+    <ul id="vm-lineage-tree" class="vm-tree"></ul>
+    <p class="vm-muted" id="vm-lineage-empty">등록된 VM이나 프리셋이 없습니다.</p>
+  </section>
   <section id="vm-onlymode" aria-label="VM 전용 모드">
     <h1>VM 전용 모드</h1>
     <p class="vm-muted" id="vm-only-note">

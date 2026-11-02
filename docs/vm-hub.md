@@ -137,6 +137,32 @@ marks (`/api/vm-presets`, `softnet` in the VM record). The panel's static files
 need only a refresh; until the restart the panel says the daemon has no preset
 API.
 
+### Clone lineage
+
+The VM page has a read-only "복제 계보" section (always on the page) that draws which preset
+each VM was cloned from and which VM each preset was saved from, as an indented tree: for
+example `agent-mac-01` → preset `base-xcode` → `agent-t01`, `agent-share-test`. Each VM
+node shows its state and lock, each preset node its saved time, source VM and description
+(and "tart 복사본 없음" when the preset copy is gone from tart).
+
+- **What is recorded.** `Presets.create_vm` stores on the new VM record
+  `cloned_from = {kind: "preset", preset, preset_created_at, at}` (saved in `vms.json`,
+  `Vm.cloned_from`); a preset already records its source VM and saved time in
+  `vm-presets.json`. Nothing else is recorded.
+- **What is not guessed.** A VM registered by hand, and every VM made before this field
+  existed, has `cloned_from = {}` and is shown as a root with "출처 기록 없음". The tart image
+  (OCI) a base VM was cloned from is not shown: `tart list --source local` does not report
+  it. A malformed record reads as no record.
+- **Deleted presets.** A VM whose preset is gone sits under "삭제된 프리셋 <name>에서 복제". The
+  record also keeps the preset's saved time, so a preset deleted and saved again under the same
+  name is not taken for the one the VM came from. A preset whose source VM is not registered
+  any more is shown under "원본 VM <id> (등록 해제됨)".
+- **API.** No new route: the user's `GET /api/vm` rows carry `cloned_from` and the response has
+  `presets` (`name`, `source`, `created_at`, `description`; read without `tart list`, so it
+  is cheap to poll). A session's rows have neither. The page is static plus these fields: the
+  daemon needs a restart to send them (until then the tree shows every VM as having no record
+  and no presets), and a VM made before the restart has no record.
+
 ## Published ports and allowed ranges (per VM)
 
 Each VM record has two lists the user sets, from the panel's "포트 노출 (softnet)"

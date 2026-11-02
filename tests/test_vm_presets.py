@@ -343,3 +343,46 @@ def test_the_tart_list_does_not_offer_a_preset_copy_for_registration(tmp_path):
             assert rows["preset-gold"]["preset"] is True and rows["preset-gold"]["usable"] is False
             assert rows["src"]["usable"] is True
     run(go())
+
+
+# ---- clone lineage -------------------------------------------------------------- #
+def test_a_vm_made_from_a_preset_records_which_preset_and_a_registered_one_records_nothing(tmp_path):
+    fake, reg, _, presets, _ = build(tmp_path)
+    presets.save("src", "gold")
+    vm = presets.create_vm("gold", "fresh")
+    assert vm.cloned_from == {"kind": "preset", "preset": "gold", "preset_created_at": 1000.0, "at": vm.cloned_from["at"]}
+    assert reg.get("src").cloned_from == {}                     # registered by hand: not guessed
+    assert reg.view("fresh")["cloned_from"]["preset"] == "gold" and reg.view("src")["cloned_from"] == {}
+
+
+def test_the_clone_record_is_saved_and_a_malformed_one_reads_as_no_record(tmp_path):
+    saved = tmp_path / "vms.json"
+    reg = Registry(saved)
+    reg.add("fresh", cloned_from={"kind": "preset", "preset": "gold", "preset_created_at": 5, "at": 6})
+    reg.add("bad", cloned_from={"kind": "preset", "preset": "a b"})
+    reg.add("odd", cloned_from={"kind": "oci", "preset": "gold"})
+    again = Registry(saved)
+    again.load()
+    assert again.get("fresh").cloned_from == {"kind": "preset", "preset": "gold", "preset_created_at": 5.0, "at": 6.0}
+    assert again.get("bad").cloned_from == {} and again.get("odd").cloned_from == {}
+    doc = json.loads(saved.read_text())
+    doc["vms"][0]["cloned_from"] = "gold"                        # a hand edit
+    saved.write_text(json.dumps(doc))
+    third = Registry(saved)
+    third.load()
+    assert third.get("fresh").cloned_from == {}
+
+
+def test_the_user_page_lists_the_presets_for_the_lineage_and_a_session_gets_no_lineage(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold", "description": "d"})
+            await api.post("/api/vm-presets/gold/create", json={"id": "fresh"})
+            page = await (await api.get("/api/vm")).json()
+            assert [(p["name"], p["source"]) for p in page["presets"]] == [("gold", "src")]
+            assert page["presets"][0]["created_at"] and "present" not in page["presets"][0]   # no tart query
+            by_id = {v["id"]: v for v in page["vms"]}
+            assert by_id["fresh"]["cloned_from"]["preset"] == "gold" and by_id["src"]["cloned_from"] == {}
+            mine = await (await api.get("/api/vm?session=s1", headers=AGENT)).json()
+            assert all("cloned_from" not in v for v in mine["vms"]) and "presets" not in mine
+    run(go())
