@@ -5161,6 +5161,10 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .wf-context { margin-top: 8px; color: #9da5b0; font-size: 13px; }
 .wf-warning { margin-top: 8px; color: #d29922; font-size: 12px; }
 .wf-note { color: #7d8590; font-size: 13px; }
+/* an ask card's "why it is open" and "who was asked" (cf2AskWhy, claunch-0rjnn) */
+.cf2-ask-why, .cf2-ask-route { border-left: 3px solid #d29922; padding: 2px 0 2px 10px; margin: 6px 0 10px; }
+.cf2-ask-why-head { font-weight: 600; margin: 0 0 4px; font-size: 13px; }
+.cf2-ask-route-list { margin: 0; padding-left: 20px; font-size: 12px; color: #7d8590; overflow-wrap: anywhere; }
 
 /* Which YAML a run came from / a pick would run. Quiet by default; the
    override half is not, because that is the line somebody needs to read. */

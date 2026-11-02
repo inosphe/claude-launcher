@@ -44928,6 +44928,47 @@ function cf2AskKind(a) {
   return a && a.kind === "decision" ? "decision" : "approval";
 }
 
+/* Why an ask card stands before you, drawn from the run's own record
+   (claunch-0rjnn): ``because`` is the choice the driver took to reach the
+   ask and the reason it gave; ``route`` is each responder group the question
+   passed through and why it moved on (nobody held the role, everyone
+   abstained, no answer in time). Without these the card showed only the
+   ask's static prompt and the cause was in the journal. Returns the nodes to
+   append, in order; nothing when the ask has neither. */
+const CF2_ROUTE_REASON_MAX = 240;
+function cf2AskWhy(a) {
+  const out = [];
+  const b = a && a.because;
+  if (b && b.option) {
+    const box = el("div", "cf2-ask-why");
+    box.appendChild(el("p", "cf2-ask-why-head",
+      `Why this is open: at ${b.choice || "a choice"}, ` +
+      `${b.by || "the driver"} chose '${b.option}'`));
+    const reason = String(b.reason || "").trim();
+    if (reason) box.appendChild(mdInto(el("div", "md cf2-body"), reason));
+    out.push(box);
+  }
+  const route = (a && a.route) || [];
+  if (route.length) {
+    const box = el("div", "cf2-ask-route");
+    box.appendChild(el("p", "cf2-ask-why-head", "Who was asked before you"));
+    const list = el("ol", "cf2-ask-route-list");
+    for (const step of route) {
+      const reason = String(step.reason || "").trim();
+      const short = reason.length > CF2_ROUTE_REASON_MAX
+        ? reason.slice(0, CF2_ROUTE_REASON_MAX) + "…" : reason;
+      const who = step.candidates || step.who || "?";
+      const li = el("li", null,
+        `${who}${step.who && step.candidates ? ` [${step.who}]` : ""}: ${short || "moved on"}`);
+      if (short !== reason) li.title = reason;
+      list.appendChild(li);
+    }
+    box.appendChild(list);
+    out.push(box);
+  }
+  return out;
+}
+
 /* The node pane: a clicked chart node in full, on the right edge of the
    view, closed with its x (or Esc). What the run page has for the node from
    the chart is drawn at once; the rest -- the prompt, done_when, returns,
@@ -46991,6 +47032,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   for (const a of run.asks || []) {
     const q = a.question || null;
     const card = cf2Card(cf2AskKind(a), a.label || a.node, a.title || "");
+    for (const n of cf2AskWhy(a)) card.appendChild(n);
     if (q) {
       // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
       // question type, in its order -- no per-type code here

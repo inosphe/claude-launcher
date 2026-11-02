@@ -483,6 +483,15 @@ ask:
 - 드라이버가 MCP로 ask에 답할 수 있는 경로는 `self` 해소 단계의 `flow_approve`
   하나다. 위의 셸 경로는 CLI 검사와 거부 규칙이 막지만, 런타임 직접 호출은 막지
   못한다.
+- 열린 이유와 거쳐 온 경로(claunch-0rjnn): ask가 어떤 `choose`의 선택지 아래에서
+  열리면, 레코드의 `because`에 가장 가까운 그 선택(`choice` 라벨, `option`, 고른
+  쪽 `by`, 그 `reason`)이 실린다(`runtime._ask_because`). 선택지 아래가 아니면
+  `null`이다. `flow_status`·`GET /api/cflow2/run`의 `asks[]`는 `because`와
+  `route`(그룹마다 `{group, candidates, who, reason}` — 그 그룹의 후보 선언, 물은
+  세션이나 후보, 다음으로 넘어간 사유, 레코드의 `skipped` 순서)를 싣는다.
+  `skipped`(사유 문자열 목록)는 그대로 둔다. 응답자 메시지(`asks.question_text`)는
+  `because`를 `Why this question is open:` 줄로, 웹 UI의 ask 카드는 둘을 「Why this
+  is open」·「Who was asked before you」 칸으로 그린다(`cf2AskWhy`).
 - 질문과 선택지를 앞 작업의 결과에서 만드는 형태(`brief`, `format`, `choices`)와
   답 `reframe`은 2.10에 있다.
 - 위임 실행 단위 아래의 작업에 `ask`가 있거나 `chooser: user` 선택이 있으면 정적
