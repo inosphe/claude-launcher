@@ -169,6 +169,8 @@ new Function(
      "setStatsProvider", "statsProviderStrip",
      "statsRowParts", "statsRowTotal", "statsRowRequests",
      "statsSummaryFigures", "statsOverviewRows",
+     "statsModelRows", "statsModelTotals", "statsModelBar", "statsModelCost",
+     "statsModelTable", "statsModelEstimate", "statsModelSection",
      "statsOverviewTable", "statsOverviewRow", "statsSwitchList",
      "statsDetailWindow", "statsReadingSections", "statsDetailPanel",
      "statsControls", "renderStatsOverview", "renderStats", "parseHash",
@@ -264,6 +266,17 @@ const overview = {
   totals: { input: 110, cache_read: 990, cache_write: 0, output: 0, total: 1100,
             requests: 5 },
   cache_share: 0.9,
+  currency: "₩",
+  models: [
+    { provider: "fireworks", model: "m1", input: 100, cache_read: 900,
+      cache_write: 0, output: 0, total: 1000, requests: 4, sessions: 1,
+      cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 0, declared: false },
+    { provider: "kimi", model: "k3", input: 10, cache_read: 90,
+      cache_write: 0, output: 0, total: 100, requests: 1, sessions: 1,
+      cost: null, priced_tokens: 0, unpriced_tokens: 100, declared: false },
+  ],
+  estimate: { cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 100,
+              total: 1100, requests: 5 },
   providers: [
     { provider: "fireworks", sessions: 1, totals: 0, total: 1000, requests: 4 },
     { provider: "kimi", sessions: 1, total: 100, requests: 1 },
@@ -460,6 +473,30 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         view.words().includes("metering ledger"),
         withClass("stats-method").length);
 
+  // ---- provider + model ------------------------------------------------
+  const modelTable = withClass("stats-model-table")[0];
+  check("the overview splits the window one provider's model at a time",
+        modelTable && withClass("stats-model-row").length === 2 &&
+        modelTable.words().includes("fireworks") &&
+        modelTable.words().includes("m1") &&
+        modelTable.words().includes("k3"), modelTable && modelTable.words());
+  const modelHeads = modelTable.all().filter((n) => n.tag === "th")
+    .map((n) => n.text);
+  check("each model row keeps read, cached read and output apart, then the estimate",
+        JSON.stringify(modelHeads) === JSON.stringify(
+          ["provider", "model", "tokens", "read", "cached read", "output",
+           "est. cost", "requests", "sessions"]), modelHeads);
+  check("a priced model shows its estimate and an unpriced one shows —, not 0",
+        withClass("stats-model-cost").some((n) => n.text === "≈ ₩0.0012") &&
+        withClass("stats-model-cost").some(
+          (n) => n.all().some((k) => k.text === "—")),
+        withClass("stats-model-cost").map((n) => n.words()));
+  check("the summary carries an Est. cost tile with what it leaves out",
+        withClass("window-summary")[0].words().includes("Est. cost") &&
+        withClass("window-summary")[0].words().includes("₩0.0012") &&
+        withClass("window-summary")[0].words().includes("100 tokens unpriced"),
+        withClass("window-summary")[0].words());
+
   // A provider narrows the table to the rows that used it.
   withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
     .handlers.click[0]();
@@ -470,10 +507,19 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("the provider card is the pressed one",
         withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
           .classes.has("active"));
+  check("picking a provider narrows the model table to its models",
+        withClass("stats-model-row").length === 1 &&
+        withClass("stats-model-row")[0].words().includes("k3"),
+        withClass("stats-model-row").map((r) => r.words()));
+  check("the narrowed Est. cost tile counts only that provider's tokens",
+        withClass("window-summary")[0].words().includes("100 tokens unpriced"),
+        withClass("window-summary")[0].words());
   withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
     .handlers.click[0]();
   check("picking it again shows every provider",
-        ctx.state().provider === "" && withClass("stats-row").length === 3);
+        ctx.state().provider === "" && withClass("stats-row").length === 3 &&
+        withClass("stats-model-row").length === 2,
+        withClass("stats-model-row").length);
 
   // The summary tiles follow the picked provider, and a transcript row is
   // filed under the provider its profile declares (statsboard.row_providers).
@@ -518,6 +564,33 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("All providers restores the window's figures",
         ctx.state().provider === "" && summaryText().includes("1.10k") &&
         withClass("stats-provider-note").length === 0, summaryText());
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
+
+  // The cache-write column appears only when a shown row has cache writes;
+  // a daemon that predates the split draws no section at all rather than an
+  // empty one.
+  ctx.setAnswer(byUrl({
+    models: [{ ...overview.models[0], cache_write: 500 }],
+  }));
+  ctx.refresh();
+  await tick();
+  const writeHeads = withClass("stats-model-table")[0].all()
+    .filter((n) => n.tag === "th").map((n) => n.text);
+  check("a cache write column appears only when a shown row has one",
+        writeHeads.includes("cache write"), writeHeads);
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200,
+        body: { ...overview, models: undefined, estimate: undefined } }
+    : url.includes("/api/stats/llm-usage")
+      ? { ok: true, status: 200, body: llm }
+      : { ok: true, status: 200, body: reading });
+  ctx.refresh();
+  await tick();
+  check("a daemon without the model split draws no section, not an empty one",
+        withClass("stats-model-table").length === 0 &&
+        !view.words().includes("By provider and model"), view.words());
   ctx.setAnswer(byUrl());
   ctx.refresh();
   await tick();

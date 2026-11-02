@@ -184,6 +184,33 @@ def test_a_first_read_sums_per_session_day_and_provider(tmp_path, ledger):
     assert sums["s1"]["days"] == {"2026-10-21": 342}
 
 
+def test_a_second_model_on_one_provider_keeps_its_own_sums(tmp_path, ledger):
+    """Two models under one provider are two prices, so they stay apart.
+
+    The provider bucket answers "which backend"; the page's provider + model
+    table needs the model tier as well (claunch-qs2ev). The two sums must add
+    up to the provider's own, and the model with more tokens sorts first.
+    """
+    write_ledger(tmp_path / "metering", [
+        record("s1", hour=9, model="m1", fresh=10, cached=100, output=5),
+        record("s1", hour=10, model="m2", fresh=20, cached=200, written=7,
+               output=1),
+        record("s1", hour=11, model="m1", fresh=1, cached=2, output=3),
+    ])
+    ledger.refresh(NOW)
+    sums = ledger.window("2026-10-21",
+                         statsboard.window_start_epoch("2026-10-21", KST))
+    provider = sums["s1"]["providers"][0]
+    assert provider["provider"] == "fireworks"
+    models = {m["model"]: m for m in provider["models"]}
+    assert models["m1"]["input"] == 11 and models["m1"]["cache_read"] == 102
+    assert models["m1"]["output"] == 8 and models["m1"]["requests"] == 2
+    assert models["m2"]["cache_write"] == 7 and models["m2"]["requests"] == 1
+    # m2 (228) outspent m1 (121), so it is drawn first.
+    assert [m["model"] for m in provider["models"]] == ["m2", "m1"]
+    assert sum(m["total"] for m in provider["models"]) == provider["total"]
+
+
 def test_a_second_read_parses_only_what_was_appended(tmp_path, ledger):
     path = write_ledger(tmp_path / "metering", [record("s1", hour=9)])
     ledger.refresh(NOW)
@@ -578,6 +605,104 @@ def test_provider_totals_sum_every_row_that_used_them(tmp_path, ledger):
     row = next(r for r in payload["sessions"] if r["session"] == "b")
     assert [p["provider"] for p in row["providers"]] == ["fireworks", "kimi"]
     assert row["provider"] == "fireworks"    # the one it spent most on
+
+
+def test_the_overview_prices_each_model_from_the_settings_table(tmp_path, ledger):
+    """The estimate uses the model's own row, then the "*" row, as the rail does.
+
+    m1 is priced under fireworks (cache write falls back to its input rate);
+    m2 has no row there and is priced by the "*" row. The tile's sum covers
+    both, and ``priced_tokens`` says the estimate covers every token.
+    """
+    write_ledger(tmp_path / "metering", [
+        record("a", hour=9, model="m1", fresh=1_000_000, cached=2_000_000,
+               written=1_000_000, output=1_000_000),
+        record("a", hour=10, model="m2", fresh=1_000_000, cached=0,
+               written=0, output=0),
+    ])
+    ledger.refresh(NOW)
+    prices = {
+        "fireworks": {"m1": {"input": 1.0, "cache_read": 0.1, "output": 2.0}},
+        "*": {"m2": {"input": 3.0, "cache_read": 0.3, "output": 4.0}},
+    }
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST, sessions=[meta("a")],
+        ledger=ledger, labels={}, prices=prices, currency="₩")
+    rows = {r["model"]: r for r in payload["models"]}
+    assert payload["currency"] == "₩"
+    assert rows["m1"]["cost"] == pytest.approx(4.2)
+    assert rows["m1"]["priced_tokens"] == 5_000_000
+    assert rows["m1"]["unpriced_tokens"] == 0
+    assert rows["m2"]["cost"] == pytest.approx(3.0)
+    assert payload["estimate"]["cost"] == pytest.approx(7.2)
+    assert payload["estimate"]["priced_tokens"] == 6_000_000
+    assert payload["estimate"]["unpriced_tokens"] == 0
+
+
+def test_a_model_with_no_price_row_is_unpriced_never_zero(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("a", hour=9, model="m1", fresh=100, cached=0, output=0),
+        record("a", hour=10, model="noprice", fresh=400, cached=0, output=0),
+    ])
+    ledger.refresh(NOW)
+    prices = {"fireworks": {"m1": {"input": 1.0}}}
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST, sessions=[meta("a")],
+        ledger=ledger, labels={}, prices=prices)
+    rows = {r["model"]: r for r in payload["models"]}
+    assert rows["noprice"]["cost"] is None
+    assert rows["noprice"]["priced_tokens"] == 0
+    assert rows["noprice"]["unpriced_tokens"] == 400
+    assert rows["m1"]["cost"] == pytest.approx(0.0001)
+    assert payload["estimate"]["priced_tokens"] == 100
+    assert payload["estimate"]["unpriced_tokens"] == 400
+    assert payload["estimate"]["cost"] == pytest.approx(0.0001)
+
+
+def test_a_model_row_counts_the_sessions_that_used_it(tmp_path, ledger):
+    write_ledger(tmp_path / "metering", [
+        record("a", hour=9, model="m1"),
+        record("b", hour=10, model="m1"),
+        record("b", hour=11, model="m2"),
+    ])
+    ledger.refresh(NOW)
+    payload = statsboard.overview(window="today", now=NOW, zone=KST,
+                                  sessions=[meta("a"), meta("b")],
+                                  ledger=ledger, labels={})
+    rows = {r["model"]: r for r in payload["models"]}
+    assert rows["m1"]["sessions"] == 2 and rows["m1"]["requests"] == 2
+    assert rows["m2"]["sessions"] == 1
+    # With no price table every row is reported unpriced, never as free.
+    assert all(r["cost"] is None for r in payload["models"])
+    assert payload["estimate"]["unpriced_tokens"] == payload["totals"]["total"]
+
+
+def test_a_transcript_rows_tokens_ride_its_declared_provider_unpriced(
+        tmp_path, ledger, monkeypatch):
+    """No ledger line means no model: the row names the provider it declares.
+
+    The tokens are still shown (the provider split would otherwise lose
+    them), but they carry no model — pricing them at some model's rate would
+    invent an answer the ledger never recorded.
+    """
+    # The test home has no real profile registry; the row's provider is the
+    # one this resolves to, and the point here is where its tokens land.
+    monkeypatch.setattr(statsboard, "declared_provider",
+                        lambda profile, borrow="", doc=None: "claude")
+    ledger.refresh(NOW)
+    reader = transcripts(oauth=reading(
+        ("2026-10-21T09:00:00+09:00", 100, 900, 50, 4)))
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth", harness="claude"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader,
+        prices={"claude": {"claude-x": {"input": 5.0}}})
+    assert [r["model"] for r in payload["models"]] == [""]
+    row = payload["models"][0]
+    assert row["provider"] == "claude" and row["declared"] is True
+    assert row["total"] == 1050 and row["sessions"] == 1
+    assert row["cost"] is None and row["unpriced_tokens"] == 1050
 
 
 def test_the_payload_names_when_the_ledger_starts(tmp_path, ledger):
