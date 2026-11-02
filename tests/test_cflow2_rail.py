@@ -529,7 +529,8 @@ def test_rail_prompt_is_one_bounded_line():
 def test_rail_prompt_takes_markdown_markers_off():
     """The terminal strip and the operator gate draw `prompt` as plain text,
     so the markdown a card renders has to reach them as prose
-    (claunch-ns4kd.1). Every marker below is one the v2 ask prompts use."""
+    (claunch-ns4kd.1, claunch-edhbu). Every marker below is one the v2 ask
+    prompts use."""
     text = "\n".join([
         "## 일감",
         "",
@@ -542,22 +543,40 @@ def test_rail_prompt_takes_markdown_markers_off():
         "```",
         "---",
         "[문서](https://example.test/x) 와 ![그림](https://example.test/i.png)",
+        "***굵게기울임***",
+        "| 왼쪽 | 오른쪽 |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+        "~~지운 글~~ 와 H~2~O",
     ])
     flat = cflow2_web._rail_prompt(text)
-    for marker in ("##", "**", "```", "> ", "[", "](", "!["):
+    for marker in ("##", "**", "```", "> ", "[", "](", "![", "~~", "|", "~"):
         assert marker not in flat, (marker, flat)
     assert flat.startswith("일감 app.js:63882")
     assert "const x = 1;" in flat
     assert "문서 와 그림" in flat
+    assert "굵게기울임" in flat
+    assert "왼쪽 오른쪽 1 2" in flat
+    assert "지운 글 와 H2O" in flat
     assert "\n" not in flat
+    # Exactly — the paired-marker rule alone would leave "*굵게기울임*", which
+    # the marker loop above cannot see (no "**" survives in the flattened line).
+    assert cflow2_web._rail_prompt("***굵게기울임***") == "굵게기울임"
+    assert cflow2_web._rail_prompt("___굵게기울임___") == "굵게기울임"
+    assert cflow2_web._rail_prompt("~~지운 글~~") == "지운 글"
+    assert cflow2_web._rail_prompt("H~2~O") == "H2O"
 
 
 def test_rail_prompt_leaves_text_that_only_looks_like_markdown():
-    """A file name, a date and arithmetic are not markers: only what a line
-    can be recognised by is matched, and only at its start."""
+    """A file name, a date, arithmetic, a path and a stray pipe are not
+    markers: only what a line can be recognised by is matched, and only at
+    its start (claunch-ns4kd.1, claunch-edhbu)."""
     text = "a_b_c 2*3 2026-11-02 x #12"
     assert cflow2_web._rail_prompt(text) == text
     assert cflow2_web._rail_prompt("2026. 11. 2. 회의") == "2026. 11. 2. 회의"
+    assert cflow2_web._rail_prompt("~/.config/claunch 경로") == "~/.config/claunch 경로"
+    assert cflow2_web._rail_prompt("10~20개 범위") == "10~20개 범위"
+    assert cflow2_web._rail_prompt("a | b 중 하나") == "a | b 중 하나"
 
 
 def test_rail_markdown_keeps_the_line_structure_and_is_bounded():
