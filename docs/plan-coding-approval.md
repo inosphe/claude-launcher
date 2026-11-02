@@ -3,7 +3,7 @@
 이슈: `claunch-rzepk`.
 이 문서는 두 신호의 관계와 순서를 정리한다. 사용자 확인은 2026-11-02에
 끝났고, 구현은 다음 회차의 몫이다. 이 회차는 코드를 바꾸지 않는다.
-1절의 파일·줄 인용은 `origin/master @ 2c71df0d`의 트리에서 셌다. 줄 번호는
+1절의 파일·줄 인용은 `origin/master @ 3223ff4d`의 트리에서 셌다. 줄 번호는
 그 트리에서만 뜻이 있으므로, master가 움직이면 같은 이름(노드 id·조건·
 `otherwise: human`)의 줄을 새 트리에서 다시 센다.
 
@@ -11,16 +11,16 @@
 
 | 항목 | 현재 동작 | 근거 |
 |---|---|---|
-| 계획과 승인 brief의 생성 | `coding-plan` 한 단계가 plan 패널 기록(`plan_set`)과 승인용 brief를 함께 만든다 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml:1649`(`coding-plan`), `:602` |
-| 계획을 쓰는 자리 | `plan-panel` 조각이 `coding-plan`(그 단계가 없으면 `work`)에서 `plan_set`을 쓰라고 정한다 | `improv-worker-v2.yaml:602`, `:627` |
-| 게이트의 조건 | `coding-approval-check`는 `require_coding_approval`과 `approve-always` 답만 본다. plan의 `waiting`은 보지 않는다 | `improv-worker-v2.yaml:5185`(`coding-approval-check`) |
-| 게이트가 서지 않는 자동 경로 | `session_routing=true`이고 `require_coding_approval=false`면 `route-planned`로 간다 | `improv-worker-v2.yaml:5185`, `:5205`(`route-planned`) |
-| approve-always 이후 | `session_routing=false`면 게이트와 `coding-plan`을 함께 건너뛰고 계획은 그때 `work`에서 처음 쓴다. `session_routing=true`면 `coding-plan`은 그대로 돌고 게이트만 서지 않는다 | `improv-worker-v2.yaml:5185`, `:5187`, `:5206` |
+| 계획과 승인 brief의 생성 | `coding-plan` 한 단계가 plan 패널 기록(`plan_set`)과 승인용 brief를 함께 만든다 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml:1750`(`coding-plan`), `:614` |
+| 계획을 쓰는 자리 | `plan-panel` 조각이 `coding-plan`(그 단계가 없으면 `work`)에서 `plan_set`을 쓰라고 정한다 | `improv-worker-v2.yaml:614`, `:639` |
+| 게이트의 조건 | `coding-approval-check`는 `require_coding_approval`과 `approve-always` 답만 본다. plan의 `waiting`은 보지 않는다 | `improv-worker-v2.yaml:5293`(`coding-approval-check`) |
+| 게이트가 서지 않는 자동 경로 | `session_routing=true`이고 `require_coding_approval=false`면 `route-planned`로 간다 | `improv-worker-v2.yaml:5293`, `:5313`(`route-planned`) |
+| approve-always 이후 | `session_routing=false`면 게이트와 `coding-plan`을 함께 건너뛰고 계획은 그때 `work`에서 처음 쓴다. `session_routing=true`면 `coding-plan`은 그대로 돌고 게이트만 서지 않는다 | `improv-worker-v2.yaml:5293`, `:5295`, `:5314` |
 | plan 결정의 전달 | 사용자가 고른 결정은 `[claunch plan]` 블록으로 세션 터미널에 온다. 계획을 그 갈래에 맞게 다시 쓰라는 안내가 붙는다 | `src/claude_launcher/daemon/plan_api.py:77` |
 | plan과 cflow의 연결 | plan 결정이 cflow ask를 닫는 코드 경로가 없다 | `grep -rn "plan_store\|\[claunch plan\]" src/claude_launcher/cflow2` 결과 0건 |
 | plan의 대기 판정 | `summary.waiting`은 사용자가 지금 답할 수 있는 항목 수다(미결정, 미확인 verify, 미처분 followup) | `src/claude_launcher/plan/store.py:280` |
 | 알림 표면 | cflow의 `urgent` ask는 대시보드 알림 카드가 된다. plan의 미결정은 레일의 ☰ plan 표시만 켠다 | `src/claude_launcher/web/static/app.js:24650`(`personGateRecords`), `:7777`(`term-planbtn`) |
-| 세션의 자기 ask 답변 | `flow_approve`는 `otherwise: self`로 떨어진 ask에만 쓸 수 있다. `coding-approval`은 `otherwise: human`이다 | `src/claude_launcher/cflow2/mcp.py:261`, `improv-worker-v2.yaml:1734`(`otherwise: human`) |
+| 세션의 자기 ask 답변 | `flow_approve`는 `otherwise: self`로 떨어진 ask에만 쓸 수 있다. `coding-approval`은 `otherwise: human`이다 | `src/claude_launcher/cflow2/mcp.py:261`, `improv-worker-v2.yaml:1835`(`otherwise: human`) |
 
 ## 2. 확정한 규칙
 
