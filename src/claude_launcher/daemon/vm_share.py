@@ -82,6 +82,46 @@ def clean_roots(raw, forbidden: Sequence[str] = ()) -> List[str]:
     return out
 
 
+ROOTS_MAX = 16
+
+
+def _root_problem(item, forbidden: Sequence[str]) -> Optional[tuple]:
+    """``(code, reason)`` when ``item`` cannot be an allowed root, else ``None``."""
+    if not isinstance(item, str) or not item.startswith("/") or len(item) > PATH_MAX or not item.isprintable():
+        return "vm_bad_request", "제어 문자 없는 절대 경로가 아닙니다"
+    real = os.path.realpath(item)
+    if real == "/" or not os.path.isdir(real):
+        return "vm_bad_request", "폴더가 없거나 폴더가 아닙니다" if real != "/" else "루트(/) 전체는 허용할 수 없습니다"
+    if ":" in real:
+        return "vm_bad_request", "경로에 ':'가 있어 공유할 수 없습니다"
+    for banned in forbidden:
+        if _within(real, banned) or _within(banned, real):
+            return "vm_share_forbidden", (f"공유할 수 없는 폴더입니다: 홈 폴더 자체이거나 {banned}를 포함하거나 그 아래입니다 "
+                                         "(.ssh, .gnupg, .aws, Library, .claude, .claude-launcher, 데몬 상태 폴더)")
+    return None
+
+
+def check_root(path, forbidden: Sequence[str]) -> str:
+    """The resolved path of a folder to allow as a share root, or a refusal."""
+    problem = _root_problem(path, forbidden)
+    if problem:
+        raise VmError(problem[0], f"{str(path)[:120]!r}: {problem[1]}")
+    return os.path.realpath(path)
+
+
+def root_rows(raw, forbidden: Sequence[str]) -> List[Dict[str, object]]:
+    """The stored ``vm_share_roots`` setting as the user sees it: every entry with
+    whether it is in effect and, if not, why."""
+    rows: List[Dict[str, object]] = []
+    for item in raw if isinstance(raw, (list, tuple)) else []:
+        if not isinstance(item, str):
+            continue
+        problem = _root_problem(item, forbidden)
+        rows.append({"path": item, "real": os.path.realpath(item) if item.startswith("/") else "",
+                     "ok": problem is None, "reason": problem[1] if problem else ""})
+    return rows
+
+
 def check_share(name, host_path, mode, roots: Sequence[str], forbidden: Sequence[str]) -> Dict[str, str]:
     """A share ready to store, or a refusal. ``roots`` are :func:`clean_roots`
     output."""

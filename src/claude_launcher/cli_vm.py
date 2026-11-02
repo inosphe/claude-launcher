@@ -181,6 +181,27 @@ def _catalog_show(out: dict) -> None:
     print("applied to a VM at its next start")
 
 
+def _roots_show(out: dict) -> None:
+    for r in out.get("roots") or []:
+        print(f"{'ok ' if r['ok'] else 'OFF'}  {r['path']}" + ("" if r["ok"] else f"  -- {r['reason']}"))
+    if not out.get("roots"):
+        print("no share roots: sharing host folders is off")
+    elif not out.get("enabled"):
+        print("none of the roots is in effect: sharing host folders is off")
+
+
+def _cmd_share_roots(args) -> int:
+    """``claunch vm share-roots ls | add PATH | rm PATH``: the folders shares may
+    come from (``daemon.vm_share_roots``); the user's, read afresh by the daemon."""
+    if args.action == "ls":
+        return _call(args, "GET", "/api/vm-share-roots", show=_roots_show)
+    if not args.path:
+        print("claunch vm share-roots add PATH | rm PATH | ls", file=sys.stderr)
+        return EXIT_REFUSED
+    return _call(args, "POST", "/api/vm-share-roots",
+                 {"action": args.action, "path": os.path.abspath(os.path.expanduser(args.path))}, show=_roots_show)
+
+
 def _cmd_guard(args) -> int:
     """The Claude Code PreToolUse hook (``vm_guard``): the tool call on stdin, a
     deny decision on stdout or nothing. Any failure allows the call."""
@@ -453,6 +474,13 @@ def register(sub) -> None:
                     help="catalog add: confirm a read-write entry for every VM")
     sp.add_argument("--replace", action="store_true", help="catalog add: change the existing entry of that name")
     sp.set_defaults(func=_cmd_share)
+    sp = v.add_parser("share-roots", help="the host folders shares may come from (daemon.vm_share_roots); empty "
+                                          "means sharing is off. The home folder, ~/.ssh, ~/Library and the like "
+                                          "are refused. Takes effect at the next share or start, no restart")
+    sp.add_argument("action", choices=("ls", "add", "rm"))
+    sp.add_argument("path", nargs="?")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_share_roots)
     sp = v.add_parser("only", help="VM-only mode of a session: the host refuses builds, installs and program "
                                    "runs (Bash) and says to use vm_exec. A nudge, not a security boundary; "
                                    "takes effect on the session's next Bash call")

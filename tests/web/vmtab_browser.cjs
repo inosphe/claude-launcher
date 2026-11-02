@@ -57,6 +57,8 @@ const CATALOG = [
   { name: "cat1", host_path: "/work/cat", mode: "ro", scope: "all", vms: [], origin: { kind: "catalog-all", by_session: "", at: 1 } },
   { name: "clash", host_path: "/work/clash", mode: "rw", scope: "vms", vms: ["alpha"], origin: { kind: "catalog-vms", by_session: "", at: 1 } },
 ];
+let ROOTS = [{ path: "/work", real: "/work", ok: true, reason: "" },
+  { path: "/old", real: "/old", ok: false, reason: "폴더가 없거나 폴더가 아닙니다" }];
 const json = (res, body, status = 200) => {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -71,6 +73,7 @@ const server = http.createServer((req, res) => {
     posts.push([p, {}]);
     return json(res, BETA);
   }
+  if (req.method === "GET" && p === "/api/vm-share-roots") return json(res, { roots: ROOTS, enabled: ROOTS.some((r) => r.ok) });
   if (req.method === "GET" && p === "/api/vm-only") return json(res, { sessions: ONLY });
   if (req.method === "POST") {
     let data = "";
@@ -78,6 +81,15 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       const body = data ? JSON.parse(data) : {};
       posts.push([p, body]);
+      if (p === "/api/vm-share-roots") {
+        if (body.action === "add") {
+          if (body.path === "/home/u") return json(res, { ok: false, code: "vm_share_forbidden", error: "vm_share_forbidden: 공유할 수 없는 폴더입니다" }, 400);
+          ROOTS.push({ path: body.path, real: body.path, ok: true, reason: "" });
+        } else {
+          ROOTS = ROOTS.filter((r) => r.path !== body.path);
+        }
+        return json(res, { roots: ROOTS, enabled: ROOTS.some((r) => r.ok) });
+      }
       if (p === "/api/vm-only") {
         const row = ONLY.find((r) => r.session === body.session);
         if (row) { row.on = body.on; row.since = body.on ? 1700000200 : 0; }
@@ -87,7 +99,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ["/work"], share_catalog: CATALOG });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
       guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
@@ -304,6 +316,28 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-catalog tbody tr", { hasText: "clash" }).getByRole("button", { name: "삭제" }).click();
     await frame.locator("#vm-activity", { hasText: "카탈로그 clash 삭제 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.action === "rm")[1], { action: "rm", name: "clash" });
+
+    // 3f. the allowed roots: listed with their state, added, refused with the reason, removed
+    const roots = (await frame.locator("#vm-roots tbody tr").allInnerTexts()).map((t) => t.replace(/\s+/g, " "));
+    assert.equal(roots.length, 2);
+    assert.match(roots[0], /^\/work 적용 중/);
+    assert.match(roots[1], /^\/old 적용 안 됨: 폴더가 없거나/);
+    await frame.locator("#vm-root-path").fill("/home/u");
+    await frame.locator("#vm-root-go").click();
+    await frame.locator("#vm-activity", { hasText: "공유 루트 /home/u 추가 실패" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-activity").innerText(), /공유할 수 없는 폴더/, "the refusal reason is shown");
+    await frame.locator("#vm-root-path").fill("/work/more");
+    await frame.locator("#vm-root-go").click();
+    await frame.locator("#vm-activity", { hasText: "공유 루트 /work/more 추가 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-roots" && b.path === "/work/more")[1], { action: "add", path: "/work/more" });
+    assert.equal(await frame.locator("#vm-roots tbody tr").count(), 3);
+    for (const gone of ["/work/more", "/old", "/work"]) {
+      await frame.locator("#vm-roots tbody tr", { hasText: gone }).first().getByRole("button", { name: "삭제" }).click();
+      await frame.locator("#vm-activity", { hasText: `공유 루트 ${gone} 삭제 완료` }).waitFor({ timeout: 5000 });
+    }
+    assert.match(await frame.locator("#vm-cat-roots").innerText(), /공유가 꺼져 있습니다/, "an empty list says sharing is off");
+    assert.equal(await frame.locator("#vm-cat-go").isDisabled(), true);
+    assert.equal(await frame.locator("#vm-roots").isVisible(), false);
 
     // 3e. VM-only mode: on the default screen, per session, with the reason and the blocks
     assert.equal(await frame.locator("#vm-onlymode").isVisible(), true, "the VM-only section is on the page without opening anything");

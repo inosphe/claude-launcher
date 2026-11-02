@@ -184,7 +184,18 @@
       이름이 같으면 VM 자체 항목이 우선), 변경은 실행 중인 VM에서는 다시 시작해야 적용됩니다. 기본은 읽기 전용(ro)입니다.
       공유 폴더는 게스트에 열려 있어, ro여도 폴더 안의 비밀(.env 등)을 게스트가 읽을 수 있고, rw이면 게스트가 .git/hooks나 스크립트를 심어 호스트 세션이 실행하게 할 수 있습니다.
     </p>
+    <h2>공유 허용 루트</h2>
+    <p class="vm-muted" id="vm-root-note">
+      공유할 수 있는 폴더는 여기에 등록한 루트 아래로 제한됩니다. 비어 있으면 공유가 꺼져 있습니다. 홈 폴더 자체, ~/.ssh, ~/.gnupg, ~/.aws, ~/Library, ~/.claude*, 데몬 상태 폴더는 등록할 수 없습니다.
+      변경은 다음 공유/시작부터 적용되며 데몬을 다시 시작할 필요가 없습니다. 세션은 이 목록을 바꿀 수 없습니다.
+    </p>
     <p class="vm-warn-text" id="vm-cat-roots"></p>
+    <table id="vm-roots"><thead><tr><th>경로</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="vm-root-add" class="vm-row">
+      <label class="sr-only" for="vm-root-path">허용할 루트 경로</label>
+      <input id="vm-root-path" type="text" maxlength="300" placeholder="허용할 폴더의 절대 경로" autocomplete="off" spellcheck="false">
+      <button id="vm-root-go" type="button">루트 추가</button>
+    </div>
     <div id="vm-cat-pending" class="vm-problem" hidden></div>
     <h2>카탈로그</h2>
     <table id="vm-catalog"><thead><tr><th>이름</th><th>호스트 경로</th><th>모드</th><th>범위</th><th>출처</th><th></th></tr></thead><tbody></tbody></table>

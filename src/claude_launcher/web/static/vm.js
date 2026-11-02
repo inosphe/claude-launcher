@@ -272,7 +272,7 @@ function renderShares(vm) {
   const roots = $("vm-share-roots");
   roots.textContent = shareRoots.length
     ? `공유를 허용한 루트: ${shareRoots.join(", ")} (이 아래의 폴더만 공유할 수 있고, 홈 폴더 자체와 ~/.ssh, ~/Library, ~/.claude*, 데몬 상태 폴더는 포함할 수 없습니다.)`
-    : "공유가 꺼져 있습니다. 데몬 설정 daemon.vm_share_roots에 공유를 허용할 폴더를 적으면 켜집니다.";
+    : "공유가 꺼져 있습니다. 공유 폴더 영역의 \"공유 허용 루트\"에 폴더를 추가하면 켜집니다.";
   $("vm-share-go").disabled = !shareRoots.length;
   const pending = $("vm-share-pending");
   const skipped = Object.entries(vm.shares_skipped || {});
@@ -327,10 +327,40 @@ $("vm-share-go").addEventListener("click", () => {
 /* The share catalog and the VM x share matrix: page-level, shown whatever VM is selected. */
 let shareCatalog = [];
 let catEditing = "";
+function renderRoots() {
+  const body = document.querySelector("#vm-roots tbody");
+  body.replaceChildren();
+  for (const r of shareRootRows) {
+    const tr = document.createElement("tr");
+    const path = document.createElement("td");
+    path.textContent = r.path + (r.real && r.real !== r.path ? ` → ${r.real}` : "");
+    const state = document.createElement("td");
+    state.textContent = r.ok ? "적용 중" : `적용 안 됨: ${r.reason}`;
+    if (!r.ok) state.className = "vm-warn-text";
+    const act_ = document.createElement("td");
+    const del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "삭제";
+    del.addEventListener("click", () => act(`공유 루트 ${r.path} 삭제`, () => post("api/vm-share-roots", { action: "rm", path: r.path })));
+    act_.append(del);
+    tr.append(path, state, act_);
+    body.append(tr);
+  }
+  $("vm-roots").hidden = !shareRootRows.length;
+}
+$("vm-root-go").addEventListener("click", () => {
+  const path = $("vm-root-path").value.trim();
+  if (!path) return;
+  act(`공유 루트 ${path} 추가`, async () => {
+    await post("api/vm-share-roots", { action: "add", path });
+    $("vm-root-path").value = "";
+  });
+});
 function renderSharing() {
+  renderRoots();
   $("vm-cat-roots").textContent = shareRoots.length
     ? `공유를 허용한 루트: ${shareRoots.join(", ")} (이 아래의 폴더만 공유할 수 있고, 홈 폴더 자체와 ~/.ssh, ~/Library, ~/.claude*, 데몬 상태 폴더는 포함할 수 없습니다.)`
-    : "공유가 꺼져 있습니다. 데몬 설정 daemon.vm_share_roots에 공유를 허용할 폴더를 적으면 켜집니다.";
+    : "공유가 꺼져 있습니다. 공유 폴더 영역의 \"공유 허용 루트\"에 폴더를 추가하면 켜집니다.";
   $("vm-cat-go").disabled = !shareRoots.length;
   const waiting = vms.filter((v) => v.shares_pending).map((v) => v.id);
   const pend = $("vm-cat-pending");
@@ -545,12 +575,14 @@ function render() {
 }
 let hostLocked = false;
 let shareRoots = [];
+let shareRootRows = [];
 async function refresh() {
   try {
     const data = await api("api/vm");
     vms = data.vms || [];
     hostLocked = !!data.host_locked;
     shareRoots = data.share_roots || [];
+    shareRootRows = data.share_root_rows || [];
     shareCatalog = data.share_catalog || [];
     try { onlyRows = (await api("api/vm-only")).sessions || []; } catch (_) { onlyRows = []; }
     $("vm-link").classList.add("up");
