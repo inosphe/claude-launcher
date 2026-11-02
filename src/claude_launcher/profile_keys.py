@@ -914,7 +914,13 @@ def _pick(
                     "key-based usage reader)"
                 )
         if index is not None:
-            return Selection(pool.keys[index], strategy, index, owner_profile)
+            # The launch reads the accounts again; this key is what THIS read
+            # says it would take. `exact` is the promise that a preview names
+            # the relaunch's key, and a usage strategy cannot make it (the
+            # create form shows the hedge this sets, claunch-i985h).
+            return Selection(
+                pool.keys[index], strategy, index, owner_profile, exact=False
+            )
         index = _rotation_index(pool)
         return Selection(
             pool.keys[index],
