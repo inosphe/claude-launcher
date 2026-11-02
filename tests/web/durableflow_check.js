@@ -246,6 +246,10 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   assert.strictEqual(view.view.nodes.get("ask:formalize:1").g, f1);
   assert.strictEqual(cleared, 1, "the poll stops once the session is gone");
   assert.match(host.children[0].children[1].textContent, /sim-998894 · 세션 종료 · 사건 18 · 질문 6/);
+  // The header carries the whole split, out included, so the four sides add
+  // up to the token figure in front of them (claunch-mejc8).
+  assert.match(host.children[0].children[1].textContent,
+    /· 토큰 36\.8k · read 6 · cached 0 \(0\.0%\) · write 36\.8k · out 6/);
   view.unmount();
 
   // A run that continued an earlier one: the first poll's `ancestors` are
@@ -308,7 +312,7 @@ assert.ok(by2.start.tip.some((t) => /run_start quick · 1 rounds/.test(t)));
 assert.strictEqual(by2["grp:B:clash"].label, "충돌 ×2");
 assert.strictEqual(by2["grp:B:clash"].status, "warn", "a cut-off answer marks its stage");
 assert.strictEqual(by2["grp:B:effects"].label, "효과 ×2");
-assert.strictEqual(by2["grp:B:effects"].sub, "B · 3.0k tok");
+assert.strictEqual(by2["grp:B:effects"].sub, "B · read 2\ncached 0 (0.0%) · write 3.0k");
 assert.strictEqual(by2["grp:B:effects"].col, by2["grp:B:clash"].col, "a stage keeps the column it opened");
 assert.strictEqual(by2["grp:A:1:p1"].label, "플레이 p1 ×1");
 assert.strictEqual(by2["grp:C:r1:j"].col, by2["grp:A:1:p1"].col);
@@ -346,6 +350,7 @@ console.log("durableflow_check: sim2 ok");
 // -- parallel work: unit / ask_start (claunch-qk2nc) -------------------------
 const ids = (mm) => Array.from(mm.edges, (e) => e.id).filter((x) => x !== "live-edge");
 const plain = (x) => JSON.parse(JSON.stringify(x));   // out of the vm realm, for deepStrictEqual
+
 // Every prefix keeps the places AND the edges the whole log gives.
 function stable(log, name) {
   const full = DF.model(log, false);
@@ -357,6 +362,38 @@ function stable(log, name) {
     for (const e of ids(part)) assert.ok(all.has(e), `${name} prefix ${k}: edge ${e} is not in the full model`);
   }
 }
+
+// -- the token split (claunch-mejc8) ----------------------------------------
+// An ask's usage carries input/cacheRead/output/totalTokens and no cacheWrite;
+// the write side is what the total leaves over. The run's own sums are the
+// same fields added up, so both levels answer with one formula.
+const SP = DF.model([
+  { event: "unit", unit: "u1", state: "start" },
+  { event: "ask", key: "k1", unit: "u1",
+    usage: { input: 100, cacheRead: 900, output: 50, totalTokens: 1050, generations: 1 } },
+  { event: "ask", key: "k2", unit: "u1",
+    usage: { input: 200, cacheRead: 300, output: 100, totalTokens: 1200, generations: 2 } },
+  { event: "ask", key: "k3",
+    usage: { input: 0, cacheRead: 0, output: 10, totalTokens: 400, generations: 1 } },
+], true);
+assert.deepStrictEqual(plain(SP.spend), { read: 300, cached: 1200, write: 990, out: 160, total: 2650 });
+assert.strictEqual(SP.spend.read + SP.spend.cached + SP.spend.write + SP.spend.out, SP.spend.total,
+  "read, cached, write and out are the total");
+const sp1 = SP.nodes.find((n) => n.id === "unit:u1");
+assert.deepStrictEqual(plain(sp1.spend), { read: 300, cached: 1200, write: 600, out: 150, total: 2250 });
+assert.strictEqual(sp1.sub, "물음 2 · read 300\ncached 1.2k (80.0%) · write 600",
+  "a unit shows the split and the hit rate over input+cacheRead");
+// A prompt that is all cache-read reports 100%, and one with no prompt at all
+// reports no rate rather than a division by zero.
+const allHit = DF.model([{ event: "ask", key: "c", usage: { input: 0, cacheRead: 500, output: 5, totalTokens: 505 } }], false);
+assert.match(allHit.nodes.find((n) => n.id === "ask:c").sub, /cached 500 \(100\.0%\)/);
+const noPrompt = DF.model([{ event: "ask", key: "n", usage: { output: 40, totalTokens: 40 } }], false);
+assert.strictEqual(noPrompt.nodes.find((n) => n.id === "ask:n").sub, "? · read 0\ncached 0 · write 0",
+  "no prompt counted: no rate to divide by, and nothing left on the write side");
+// A usage that already adds up leaves nothing on the write side.
+const tight = DF.model([{ event: "ask", key: "t", usage: { input: 10, cacheRead: 90, output: 20, totalTokens: 120 } }], false);
+assert.match(tight.nodes.find((n) => n.id === "ask:t").sub, /write 0$/);
+console.log("durableflow_check: spend split ok");
 
 // (a) A sequential claunch simulation keeps its chain: the edges are the
 // consecutive pairs, and ask_start before each ask changes no node or edge.
@@ -426,11 +463,13 @@ assert.deepStrictEqual(ids(mu).filter((e) => e.includes("unit:")).sort(), after.
 assert.ok(!mu.edges.some((e) => e.to.id === "grp:B:noun" || e.from.id === "start"), "the chain does not run across units");
 assert.ok(mu.pending && mu.edges.some((e) => e.id === "live-edge"), "live: a pending node after the unit-less question");
 const sys = byu["unit:items/_system"];
-assert.deepStrictEqual([sys.label, sys.count, sys.tok, sys.status], ["_system", 2, 1500, "warn"], "a cut-off answer marks its unit");
-assert.strictEqual(sys.sub, "물음 2 · 1.5k tok");
-assert.deepStrictEqual([byu["unit:01-f"].status, byu["unit:13-f"].status, byu["unit:13-f"].sub], ["ok", "fail", "물음 1 · 10 tok · 실패"]);
+assert.deepStrictEqual([sys.label, sys.count, sys.spend.total, sys.status], ["_system", 2, 1500, "warn"], "a cut-off answer marks its unit");
+assert.strictEqual(sys.sub, "물음 2 · read 2\ncached 0 (0.0%) · write 1.5k");
+assert.deepStrictEqual([byu["unit:01-f"].status, byu["unit:13-f"].status, byu["unit:13-f"].sub],
+  ["ok", "fail", "물음 1 · read 1 · 실패\ncached 0 (0.0%) · write 8"]);
 assert.ok(byu["unit:13-f"].tip.includes("no json"));
-assert.deepStrictEqual([byu["unit:01-f/card-a"].status, byu["unit:01-f/card-a"].sub], ["run", "물음 0 · 0 tok · 진행 1"]);
+assert.deepStrictEqual([byu["unit:01-f/card-a"].status, byu["unit:01-f/card-a"].sub],
+  ["run", "물음 0 · read 0 · 진행 1\ncached 0 · write 0"]);
 assert.deepStrictEqual(plain([byu["unit:02-f/card-b"].status, byu["unit:02-f/card-b"].after]), ["skip", ["02-f"]], "an unknown after is dropped");
 assert.deepStrictEqual([mu.starts, mu.peak, mu.running, mu.asks], [16, 13, 1, 16]);
 stable(U, "units");
@@ -470,7 +509,7 @@ assert.deepStrictEqual([da.running, da.nodes[0].running, da.nodes[1].running, da
 for (const end of ["run_end", "done", "error", "interrupted", "session_shutdown"]) {
   const e = dm([{ event: end, state: "failed" }]);
   assert.deepStrictEqual([e.running, e.nodes[1].running, e.peak], [0, 0, 4], end);
-  assert.strictEqual(e.nodes[1].sub, "물음 0 · 0 tok", end);
+  assert.strictEqual(e.nodes[1].sub, "물음 0 · read 0\ncached 0 · write 0", end);
 }
 // The ask that comes after its start was closed counts into the start's unit and changes nothing else.
 const late = dm([{ event: "unit", unit: "b", state: "done" }, { event: "ask", key: "kb", usage: u(7) }]);
@@ -514,7 +553,7 @@ assert.strictEqual(p0.units, 6);
 // The run: the same nodes turn real, in place; an unplanned unit lands as before.
 const pf = DF.model(P, true), bf = byOf(pf);
 assert.deepStrictEqual(plain(["01-a", "02-b", "_system", "03-c"].map((x) => bf["unit:items/" + x].status)), ["ok", "ok", "run", "plan"]);
-assert.deepStrictEqual([bf["unit:items/02-b"].count, bf["unit:items/02-b"].sub], [1, "물음 1 · 5 tok"]);
+assert.deepStrictEqual([bf["unit:items/02-b"].count, bf["unit:items/02-b"].sub], [1, "물음 1 · read 1\ncached 0 (0.0%) · write 3"]);
 assert.ok(bf["unit:items/_system"].tip[0].includes(" 계획 items/_system"), "the plan stays in the tip");
 assert.deepStrictEqual(plain([bf["unit:late"].col, bf["unit:late"].row, bf["unit:late"].status]), [1, 2, "run"]);
 assert.deepStrictEqual(plain(pf.plan), { total: 6, done: 2 });
@@ -707,7 +746,7 @@ function crossings(mm) {
   vw.draw(mm);
   const boxes = mm.nodes.map((n) => {
     const t = /translate\(([-\d.]+),([-\d.]+)\)/.exec(vw.nodes.get(n.id).g.getAttribute("transform"));
-    return { id: n.id, x: +t[1], y: +t[2], w: 168, h: 46 };
+    return { id: n.id, x: +t[1], y: +t[2], w: 168, h: 62 };
   });
   const out = [];
   for (const [id, path] of vw.edges) {
