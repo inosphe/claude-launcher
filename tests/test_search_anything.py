@@ -1957,3 +1957,87 @@ def test_deleting_a_collection_refuses_readers_and_removes_the_rest(tmp_path):
             await server.close()
 
     asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_a_preset_adopts_is_refused(tmp_path):
+    """The pre-preset ``<corpus>.zvec`` is adopted, not named.
+
+    Its sidecar carries no ``model_key`` and the directory carries no
+    identity suffix, so a name-based pairing found no reader beside it and
+    the delete removed a collection the preset was answering from
+    (claunch-fhs7f.1 review). The reader is the path ``_index_path`` would
+    open, which is where the adoption rule lives.
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb-a")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == ["p"]
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "p" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_the_direct_config_reads_is_refused(tmp_path):
+    """A config with no preset reads the legacy store when its model matches.
+
+    ``db`` is empty on the legacy branch, so the guard cannot ask
+    ``cfg.db`` alone — the resolved path says the running service is on that
+    collection (claunch-fhs7f.1 review).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb")
+        store.save({"rag": _cfg(server, watch_interval=0)})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == []
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "sessions" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())

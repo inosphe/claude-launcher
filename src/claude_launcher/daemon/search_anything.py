@@ -408,26 +408,47 @@ def _rag_base(service):
     return root if root is not None else rag.paths.rag_dir()
 
 
-def _store_rows(cfg, base):
+def _read_paths(service, base, cfg):
+    """Which collection each reading config resolves to, keyed by preset id.
+
+    The pairing has to be the runtime's own ``rag.RagService._index_path``.
+    A name-based pairing misses the pre-preset ``<corpus>.zvec``: it carries
+    no ``identity`` and its sidecar may carry no ``model_key``, while
+    ``_index_path`` adopts it whenever the sidecar's key matches the model —
+    so a preset (or a direct config) reading that collection had no entry
+    beside its name and the delete guard let it go (claunch-fhs7f.1 review).
+    ``""`` is the active config.
+    """
+    try:
+        doc = store.load()
+    except (OSError, ValueError):
+        doc = {}
+    block = dict(doc.get("rag") or {}) if isinstance(doc, dict) else {}
+    out = {"": {service._index_path(base, kind, cfg) for kind in rag.KINDS}}
+    for preset in store.rag_presets(doc):
+        conf = store.rag_config({"rag": {**block, "preset": preset["id"]}})
+        out[preset["id"]] = {service._index_path(base, kind, conf) for kind in rag.KINDS}
+    return out
+
+
+def _store_rows(service, base):
     """Every collection on disk, marked with who reads it.
 
     ``rag.rag_stores`` answers what exists; this adds the two facts the DB
-    panel's delete rule needs: which presets point at the store, and whether
-    the running config is the one reading it. A preset names its store with
-    ``db`` and falls back to its model identity — the same fallback
-    ``rag._index_path`` applies — so a preset written before ``db`` existed
-    shows up against the collection it actually uses (claunch-fhs7f.1).
+    panel's delete rule needs: which presets read the store, and whether the
+    running config is the one reading it. Both are answered by the path the
+    runtime would open — ``_index_path`` — so a collection adopted under the
+    pre-preset rule is attributed to its reader like any other
+    (claunch-fhs7f.1).
     """
+    cfg = service.config()
     rows = rag.rag_stores(base)
-    by_name = {}
-    for preset in store.rag_presets():
-        name = store.rag_model_key_slug(str(preset.get("db") or "")) or store.rag_model_key_slug(
-            str(preset.get("model_key") or "") or str(preset.get("embedding_model") or ""))
-        if name:
-            by_name.setdefault(name, []).append(preset["id"])
+    readers = _read_paths(service, base, cfg)
+    active = readers.get("", set())
     for row in rows:
-        row["presets"] = by_name.get(row["identity"] or row["model_key"], [])
-        row["in_use"] = bool(cfg.get("db")) and row["identity"] == cfg["db"]
+        path = Path(row["path"])
+        row["presets"] = [pid for pid, paths in readers.items() if pid and path in paths]
+        row["in_use"] = path in active
     return rows
 
 
@@ -659,7 +680,7 @@ def install(app):
         at a store it already has before a model swap (claunch-fhs7f.1).
         """
         cfg = service.config()
-        rows = _store_rows(cfg, _rag_base(service))
+        rows = _store_rows(service, _rag_base(service))
         return web.json_response({
             "dbs": rows,
             "active": cfg.get("db") or "",
@@ -683,8 +704,7 @@ def install(app):
         if not isinstance(body, dict):
             return web.json_response({"error": "body must be an object"}, status=400)
         name = str(body.get("name") or "").strip()
-        cfg = service.config()
-        row = next((r for r in _store_rows(cfg, _rag_base(service)) if r["name"] == name), None)
+        row = next((r for r in _store_rows(service, _rag_base(service)) if r["name"] == name), None)
         if row is None:
             return web.json_response(
                 {"error": f"DB {name or '(이름 없음)'}을 찾지 못했습니다."}, status=400)
@@ -710,7 +730,7 @@ def install(app):
                 sidecar.unlink()
         except OSError as exc:
             return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
-        return web.json_response({"deleted": name, "dbs": _store_rows(service.config(), _rag_base(service))})
+        return web.json_response({"deleted": name, "dbs": _store_rows(service, _rag_base(service))})
 
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)

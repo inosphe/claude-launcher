@@ -205,8 +205,11 @@ collection with a delete control. `POST /api/rag/dbs/delete` with
 `{"name": "<directory stem>"}` removes a collection and its sidecar. A store
 a preset reads, or the one the active config reads, is refused: its vectors
 would have to be asked for from the provider again, and the row already
-names the readers, so the preset is pointed elsewhere first. Deleting a
-collection nothing reads is the only case where nothing downstream changes.
+names the readers, so the preset is pointed elsewhere first. "Reads" is the
+path `_index_path` would open, not the name a preset carries — a preset that
+adopts a pre-preset `<corpus>.zvec` (its sidecar matching the model) reads
+that directory and is named as its reader. Deleting a collection nothing
+reads is the only case where nothing downstream changes.
 
 A collection's width is fixed when its vectors are written, so pointing a
 model at a `db` of a different width fails at the first query with
