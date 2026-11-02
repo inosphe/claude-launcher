@@ -26,8 +26,10 @@ button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-ac
 .vm-dot.up { background: var(--vm-ok); }
 .vm-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vm-muted); }
 .vm-activity.error { color: var(--vm-bad); }
-#vm-main { display: flex; flex: 1; min-height: 0; }
-#vm-side { flex: none; width: 240px; display: flex; flex-direction: column; min-height: 0;
+/* Absolutely positioned .sr-only labels count toward the document height unless a
+   positioned ancestor clips them, so each scroll container is positioned and #vm-main clips. */
+#vm-main { display: flex; flex: 1; min-height: 0; position: relative; overflow: hidden; }
+#vm-side { flex: none; width: 240px; display: flex; flex-direction: column; min-height: 0; position: relative;
   border-right: 1px solid var(--vm-line); background: var(--vm-bar); }
 #vm-list { flex: 1; min-height: 0; overflow: auto; }
 #vm-register { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); }
@@ -35,7 +37,7 @@ button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-ac
 #vm-register select, #vm-register input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px;
   font: inherit; color: inherit; background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
 #vm-register button { margin-top: 6px; }
-#vm-presets { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); max-height: 45vh; overflow: auto; }
+#vm-presets { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); max-height: 45vh; overflow: auto; position: relative; }
 #vm-presets summary { cursor: pointer; font-weight: 600; }
 #vm-presets input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px; font: inherit; color: inherit;
   background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
@@ -49,7 +51,7 @@ button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-ac
   border-radius: 0; background: none; text-align: left; }
 .vm-card[aria-current="true"] { background: var(--vm-btn); border-left: 3px solid var(--vm-accent); padding-left: 9px; }
 .vm-card .sub { display: block; color: var(--vm-muted); font-size: 11px; }
-#vm-content { flex: 1; min-width: 0; overflow: auto; }
+#vm-content { flex: 1; min-width: 0; overflow: auto; position: relative; }
 #vm-detail, #vm-sharing { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 #vm-sharing { border-top: 1px solid var(--vm-line); }
 .vm-scroll { overflow-x: auto; }

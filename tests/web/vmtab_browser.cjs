@@ -568,6 +568,21 @@ const server = http.createServer((req, res) => {
     await vmFrame.evaluate(() => { window.VM_BUSY_MS = 0; });
     await frame.locator(".vm-card", { hasText: "alpha" }).click();
 
+    // 3d2. layout: the panel fills the dashboard's content area and scrolls only where content overflows
+    {
+      const outer = await page.evaluate(() => {
+        const h = (s) => Math.round(document.querySelector(s).getBoundingClientRect().height);
+        return { win: innerHeight, main: h("#main"), view: h("#vm-view"), frame: h("#vm-view iframe"),
+          docScroll: document.documentElement.scrollHeight };
+      });
+      assert.ok(outer.frame >= outer.view - 1 && outer.view > 300, `the frame fills the VM tab (${JSON.stringify(outer)})`);
+      assert.ok(outer.docScroll <= outer.win, `the dashboard has no page scrollbar (${JSON.stringify(outer)})`);
+      const inner = await vmFrame.evaluate(() => ({
+        win: innerHeight, doc: document.documentElement.scrollHeight, body: document.body.scrollHeight,
+        side: document.getElementById("vm-side").scrollHeight, sideClient: document.getElementById("vm-side").clientHeight }));
+      assert.ok(inner.doc <= inner.win, `no document scrollbar inside the frame (${JSON.stringify(inner)})`);
+      assert.ok(inner.body <= inner.win, `body fits the frame (${JSON.stringify(inner)})`);
+    }
     // 3e. VM-only mode: on the default screen, per session, with the reason and the blocks
     assert.equal(await frame.locator("#vm-onlymode").isVisible(), true, "the VM-only section is on the page without opening anything");
     assert.match(await frame.locator("#vm-only-note").innerText(), /보안 경계가 아닙니다/, "the limit is stated");
@@ -646,6 +661,18 @@ const server = http.createServer((req, res) => {
     await again.locator("#vm-grant").click();
     await again.locator("#vm-activity", { hasText: "typed-one view 부여" }).waitFor({ timeout: 5000 });
     assert.deepEqual(errors, [], "no page errors");
+    // layout, standalone /vm: no document scrollbar at a tall and at a short window; sections scroll inside
+    {
+      const solo = await (await browser.newContext({ viewport: { width: 1300, height: 1400 } })).newPage();
+      await solo.goto(base + "vm");
+      await solo.locator(".vm-card").first().waitFor({ timeout: 8000 });
+      for (const h of [1400, 600]) {
+        await solo.setViewportSize({ width: 1300, height: h });
+        const m = await solo.evaluate(() => ({ win: innerHeight, doc: document.documentElement.scrollHeight }));
+        assert.ok(m.doc <= m.win, `standalone /vm has no document scrollbar at ${h}px (${JSON.stringify(m)})`);
+      }
+      await solo.close();
+    }
     console.log("vmtab ok");
   } finally {
     await browser.close();
