@@ -1824,6 +1824,7 @@ Finding이다.
 `end-decision`)는 같은 id의 `call: ask-user`(`choices`로 원래 옵션 이름을 고정,
 `require_reason: true`, `from` 없음)와 `$data.<bind>.decision`으로 갈라지는 `cond`로
 바뀌었다. 원래 옵션의 설명은 `topic`에 「선택지:」 줄로 옮겼다.
+예외 하나: `test-skip-gate`(claunch-dsr4o)는 `chooser: user` choose로 남는다 — 표적 테스트 루프 `tests`와 `settle: race` par로 묶인 멈춤 버튼(옵션 `skip` 하나, `raise: user-skipped` → `test-skipped`)이라 브리프가 필요한 결정이 아니고, `ask-user`로 쓰면 테스트와 나란히 `ask-frame` 작업이 하나 더 서고 테스트 내내 런이 `waiting_approval`이 된다. 허용 목록은 이 이름 하나다(`tests/test_cflow2_improv_worker.py`의 `USER_CHOOSE_ALLOWED`).
 `workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
 선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
 같은 형태의 승인 둘이 뒤에 더해졌다(claunch-101wi). 둘 다 에이전트의 자체 판정

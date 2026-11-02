@@ -1019,10 +1019,51 @@ def _asked(chart, wrapper):
     return wrapper.get("cases"), call.get("with_")
 
 
+#: The one ``chooser: user`` choose this definition keeps (claunch-dsr4o).
+#: A person's questions go through ask-user (63d53352, claunch-yq80p.8); that
+#: commit already left workspace-gate an approval because "holding is not an
+#: answer, so it is not a decision with two or more options". test-skip-gate
+#: is the same kind: a stop button open beside the running tests loop, not a
+#: decision with a brief -- ask-user would add an ask-frame task next to the
+#: tests and hold the run in waiting_approval for as long as they run. Named
+#: exactly; no pattern or prefix match.
+USER_CHOOSE_ALLOWED = frozenset({"test-skip-gate"})
+
+
+def _unlisted_user_chooses(chart):
+    return [n.label or n.id for n in chart.nodes.values()
+            if n.type == "choose" and n.get("chooser") == "user"
+            and (n.label or n.id) not in USER_CHOOSE_ALLOWED]
+
+
 def test_no_user_choose_is_left():
     chart = _chart()
-    assert [n.label or n.id for n in chart.nodes.values()
-            if n.type == "choose" and n.get("chooser") == "user"] == []
+    assert _unlisted_user_chooses(chart) == []
+    # the allowed one is really there (a rename must update the list)
+    assert [n.label for n in chart.nodes.values()
+            if n.type == "choose" and n.get("chooser") == "user"] == ["test-skip-gate"]
+
+
+def test_a_user_choose_outside_the_allowed_list_is_still_refused():
+    """The negative case: any other ``chooser: user`` choose -- including one
+    whose name only starts like the allowed one -- is reported."""
+    import json
+
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["nodes"]["work"] = {"prompt": "work"}
+    doc["body"] = [
+        {"call": "item"},
+        {"id": "test-skip-gate-2", "choose": {
+            "chooser": "user", "prompt": "p",
+            "options": {"a": {"description": "a", "then": []},
+                        "b": {"description": "b", "then": []}}}},
+    ]
+    doc.pop("spec", None)
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    assert _unlisted_user_chooses(chart) == ["test-skip-gate-2"]
 
 
 def test_user_questions_call_ask_user_with_fixed_choices_and_reasons():
@@ -2992,6 +3033,144 @@ def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, mon
         st = runtime.report(task["instance"], "ok", {}, **kw)
     assert seen[:2] == ["test-skipped", "commit"]
     assert "review" not in seen and "targeted-test" not in seen
+
+
+# -- claunch-dsr4o: a person may skip the targeted tests while they run --------
+
+
+def _skip_gate(chart):
+    [gate] = [n for n in chart.nodes.values() if n.label == "test-skip-gate"]
+    return gate
+
+
+def test_the_skip_gate_races_the_tests_loop():
+    """Static shape: the gate is a person's choose in a race par beside the
+    tests loop; its one option raises user-skipped, which the enclosing try
+    sends to test-skipped."""
+    chart = _chart()
+    gate = _skip_gate(chart)
+    assert gate.type == "choose" and gate.get("chooser") == "user"
+    assert gate.get("require_reason") is True
+    race = chart.node(gate.parent)
+    assert race.type == "par" and race.get("settle") == "race"
+    branches = race.get("branches")
+    assert set(branches) == {"tests", "skip-gate"}
+    tests = chart.node(branches["tests"])
+    assert tests.type == "loop" and tests.label == "tests"
+    [skip] = gate.get("options")
+    assert skip["name"] == "skip"
+    raised = chart.node(skip["child"])
+    assert raised.type == "control" and raised.get("op") == "raise" \
+        and raised.get("outcome") == "user-skipped"
+    guard = chart.node(race.parent)
+    while guard.type != "try":
+        guard = chart.node(guard.parent)
+    handler = chart.node(guard.get("catch")["user-skipped"])
+    assert handler.label == "test-skipped"
+    assert "replan" in guard.get("catch")
+
+
+def _to_review(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, None)
+    st = runtime.report(_one(st, "work"), "ok", {}, **kw)
+    [choice] = st["choices"]
+    st = runtime.select(choice["instance"], "run", reason="code change", **kw)
+    return st, kw
+
+
+def _gates(st):
+    return [c for c in st["choices"] if c["label"] == "test-skip-gate"]
+
+
+_REVIEWED = {"modules": ["tests/test_mesh.py"], "surfaces": "관련 표면 없음", "tried": []}
+
+
+def test_the_skip_gate_is_open_while_the_tests_run(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    assert [t["label"] for t in st["tasks"]] == ["review"]
+    [gate] = _gates(st)
+    assert gate["chooser"] == "user"
+    # the run is not held: the agent keeps reporting the test tasks
+    assert st["status"] == "running"
+    st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["targeted-test"]
+    assert [g["instance"] for g in _gates(st)] == [gate["instance"]]
+    # a new failure sends the loop round again: the same gate stays open
+    st = runtime.report(_one(st, "targeted-test"), "ok",
+                        {**_MEASURED, "failed": 1, "new_failed": 1}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["review"]
+    assert [g["instance"] for g in _gates(st)] == [gate["instance"]]
+
+
+def test_the_skip_gate_goes_away_when_the_tests_finish(tmp_path, monkeypatch):
+    """Nobody presses it: the tests loop ends, the race drops the open
+    choice, and it does not come back later in the item."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    [gate] = _gates(st)
+    st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {**_MEASURED, "failed": 0}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["commit"]
+    assert _gates(st) == []
+    with pytest.raises(runtime.FlowError):
+        runtime.select(gate["instance"], "skip", reason="too late", caller="user", **kw)
+    seen = []
+    while st["tasks"]:
+        [task] = st["tasks"]
+        if task["label"] == "work":
+            break
+        seen.append(task["label"])
+        assert _gates(st) == [], task["label"]
+        st = runtime.report(task["instance"], "ok", {}, **kw)
+    assert "test-skipped" not in seen
+    journal = runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
+    left = [e for e in journal if e.get("event") == "left"
+            and e.get("instance") == gate["instance"]]
+    assert left and left[-1]["outcome"] == "cancelled"
+
+
+@pytest.mark.parametrize("at", ["review", "targeted-test"])
+def test_a_person_skip_stops_the_tests_loop(tmp_path, monkeypatch, at):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    if at == "targeted-test":
+        st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    running = _one(st, at)
+    [gate] = _gates(st)
+    # the agent cannot press it
+    with pytest.raises(runtime.FlowError):
+        runtime.select(gate["instance"], "skip", reason="mine", **kw)
+    st = runtime.select(gate["instance"], "skip", reason="tests take 20 min; sweep covers it",
+                        caller="user", **kw)
+    assert [t["label"] for t in st["tasks"]] == ["test-skipped"]
+    assert _gates(st) == []
+    assert st["person_picks"][-1]["label"] == "test-skip-gate"
+    assert st["person_picks"][-1]["reason"] == "tests take 20 min; sweep covers it"
+    # the running test task is gone: its report is refused
+    with pytest.raises(runtime.FlowError):
+        runtime.report(running, "ok", _REVIEWED, **kw)
+    st = runtime.report(_one(st, "test-skipped"), "ok", {}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["commit"]
+
+
+def test_test_skipped_says_how_a_person_skip_is_marked():
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    nodes = doc["nodes"]
+    skipped = _flat(nodes["test-skipped"]["prompt"])
+    assert "TESTS SKIPPED @ <HEAD 해시>: user — <사람의 reason>" in skipped
+    assert "person_picks" in skipped
+    landing = _flat(V2.read_text(encoding="utf-8"))
+    assert "마커의 사유가 `user — `로 시작하면" in landing
+    stack = _flat((V2.parent / "stack-v2.yaml").read_text(encoding="utf-8"))
+    assert "`user — `로 시작하면" in stack
 
 
 # -- claunch-wuaup: the tests loop ends on new failures, not on preexisting ones
