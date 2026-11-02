@@ -6658,6 +6658,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-form { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .ws-sync-form select, .ws-sync-form input:not([type="checkbox"]) { flex: 1 1 140px; min-width: 0; }
 .ws-sync-form .wf-btn { flex: none; }
+/* target remotes, basis and execution order (claunch-y3tuk) */
+.ws-sync-remotes { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.ws-sync-remote { display: flex; align-items: center; gap: 6px; }
+.ws-sync-remote .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ws-sync-targets .ws-sync-form { margin: 4px 0 0; }
+.ws-sync-order { margin: 6px 0 0; }
+.ws-sync-order h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
+.ws-sync-order-row { font-size: 12px; padding: 1px 0; }
+.ws-sync-plan-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; }
+.ws-sync-plan-row .mono { flex: none; }
 /* Refresh all over the workspace list (claunch-87eqx) */
 .ws-refresh-all { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
 .ws-refresh-progress { flex: none; }
