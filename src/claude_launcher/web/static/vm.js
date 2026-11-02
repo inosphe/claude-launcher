@@ -290,13 +290,13 @@ function renderRequests(vm) {
       if ((r.scopes || []).includes("exec")) risky.push("exec(게스트 셸 실행과 설치·설정 변경)");
       for (const s of r.shares || []) if (s.mode === "rw") risky.push(`${s.name} 쓰기 가능(rw) 공유`);
       if (risky.length && !confirm(`${r.session}에 ${risky.join(", ")}를 줍니다. 계속합니까?`)) return;
-      act(`${r.session} 요청 승인`, () => post(`api/vm/${encodeURIComponent(vm.id)}/approve`, { session: r.session }));
+      act(`${r.session} 요청 승인`, () => post(`api/vm/${encodeURIComponent(vm.id)}/approve`, { session: r.session, id: r.id }));
     });
     const no = document.createElement("button");
     no.type = "button";
     no.textContent = "거절";
     no.addEventListener("click", () => act(`${r.session} 요청 거절`,
-      () => post(`api/vm/${encodeURIComponent(vm.id)}/deny`, { session: r.session })));
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/deny`, { session: r.session, id: r.id })));
     td.append(ok, no);
     tr.appendChild(td);
     body.appendChild(tr);

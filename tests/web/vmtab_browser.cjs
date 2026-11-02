@@ -32,7 +32,7 @@ const VM = {
   net_pending: true, net_applied_known: true, locked: false,
   shared_dirs: [{ name: "src", host_path: "/work/proj", mode: "ro", guest_path: "/Volumes/My Shared Files/src" }],
   shares_pending: true, shares_skipped: { old: "vm_share_forbidden: nope" },
-  requests: [{ session: "s2", scopes: ["files", "exec"], reason: "build it",
+  requests: [{ id: "r1", session: "s2", scopes: ["files", "exec"], reason: "build it",
     shares: [{ name: "out", host_path: "/work/out", mode: "rw", guest_path: "/Volumes/My Shared Files/out" }] }],
 };
 const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false };
@@ -215,10 +215,10 @@ const server = http.createServer((req, res) => {
     page.once("dialog", async (d) => { await d.accept(); });
     await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "승인" }).click();
     await frame.locator("#vm-activity", { hasText: "s2 요청 승인 완료" }).waitFor({ timeout: 5000 });
-    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/approve")[1], { session: "s2" });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/approve")[1], { session: "s2", id: "r1" });
     await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "거절" }).click();
     await frame.locator("#vm-activity", { hasText: "s2 요청 거절 완료" }).waitFor({ timeout: 5000 });
-    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/deny")[1], { session: "s2" });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/deny")[1], { session: "s2", id: "r1" });
 
     // 3b. the file exchange
     await frame.locator("#vm-files-host", { hasText: "/vm/alpha/files" }).waitFor({ timeout: 5000 });

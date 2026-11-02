@@ -35,6 +35,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -841,7 +842,7 @@ class Registry:
             pending = self.requests.setdefault(vm_id, {})
             if session not in pending and len(pending) >= REQUESTS_MAX:
                 raise VmError("vm_bad_request", f"{vm_id}에 대기 중인 요청이 너무 많습니다. 사용자가 처리한 뒤 다시 요청하십시오")
-            row = {"session": session, "scopes": missing, "shares": [dict(s) for s in fresh],
+            row = {"id": uuid.uuid4().hex[:12], "session": session, "scopes": missing, "shares": [dict(s) for s in fresh],
                    "reason": _plain(reason)[:200], "at": self._clock()}
             pending[session] = row
             self._log(vm_id, session, "request", scopes=missing, shares=[s["name"] for s in fresh])

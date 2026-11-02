@@ -426,17 +426,37 @@ def test_the_user_approves_scopes_and_shares_in_one_step(tmp_path, host):
         async with api_for(tmp_path, host) as api:
             await api.post("/api/vm/a/request", json=req(share=("out", str(host.root / "other"), "rw"),
                                                          scopes=("control", "files")), headers=S2)
+            rid = api.reg.request_get("a", "s2")["id"]
             for path in ("approve", "deny"):
-                denied = await api.post(f"/api/vm/a/{path}", json={"session": "s2"}, headers=S2)
+                denied = await api.post(f"/api/vm/a/{path}", json={"session": "s2", "id": rid}, headers=S2)
                 assert denied.status == 403 and (await denied.json())["code"] == "vm_user_only"
             assert api.reg.get("a").grants == {} and api.reg.request_get("a", "s2") is not None
-            ok = await api.post("/api/vm/a/approve", json={"session": "s2"})
+            ok = await api.post("/api/vm/a/approve", json={"session": "s2", "id": rid})
             row = await ok.json()
             assert ok.status == 200 and row["grants"] == {"s2": ["view", "control", "files"]}
             assert row["shared_dirs"][0]["name"] == "out" and row["shared_dirs"][0]["mode"] == "rw"
             assert row["requests"] == []
             assert any(r.get("what") == "user_approve" and r["to"] == "s2" for r in api.reg.audit_log)
-            assert (await api.post("/api/vm/a/approve", json={"session": "s2"})).status == 400   # once only
+            assert (await api.post("/api/vm/a/approve", json={"session": "s2", "id": rid})).status == 400   # once only
+    run(go())
+
+
+def test_an_answer_is_for_the_request_the_user_saw(tmp_path, host):
+    """A session that asks again replaces its request; approving by session alone
+    would grant what the user never saw."""
+    async def go():
+        async with api_for(tmp_path, host) as api:
+            await api.post("/api/vm/a/request", json=req(share=None, scopes=("files",)), headers=S2)
+            seen = (await (await api.get("/api/vm")).json())["vms"][0]["requests"][0]
+            await api.post("/api/vm/a/request", json=req(share=("out", str(host.root / "other"), "rw"),
+                                                         scopes=("exec", "files")), headers=S2)
+            assert api.reg.request_get("a", "s2")["id"] != seen["id"]
+            for path in ("approve", "deny"):
+                for body in ({"session": "s2", "id": seen["id"]}, {"session": "s2"}, {"session": "s2", "id": 5}):
+                    resp = await api.post(f"/api/vm/a/{path}", json=body)
+                    assert resp.status == 409 and (await resp.json())["code"] == "vm_request_changed", (path, body)
+            assert api.reg.get("a").grants == {} and api.reg.get("a").shared_dirs == []
+            assert api.reg.request_get("a", "s2") is not None
     run(go())
 
 
@@ -444,11 +464,12 @@ def test_a_denied_request_changes_nothing(tmp_path, host):
     async def go():
         async with api_for(tmp_path, host) as api:
             await api.post("/api/vm/a/request", json=req(share=("out", str(host.root / "other"), "ro")), headers=S2)
-            denied = await api.post("/api/vm/a/deny", json={"session": "s2"})
+            rid = api.reg.request_get("a", "s2")["id"]
+            denied = await api.post("/api/vm/a/deny", json={"session": "s2", "id": rid})
             assert denied.status == 200
             assert api.reg.get("a").grants == {} and api.reg.get("a").shared_dirs == []
             assert any(r.get("what") == "user_deny" for r in api.reg.audit_log)
-            assert (await api.post("/api/vm/a/deny", json={"session": "s2"})).status == 400
+            assert (await api.post("/api/vm/a/deny", json={"session": "s2", "id": rid})).status == 400
     run(go())
 
 
@@ -473,7 +494,8 @@ def test_approval_rechecks_the_share_and_applies_nothing_when_it_fails(tmp_path,
             await api.post("/api/vm/a/request", json=req(share=("out", str(host.root / "other"), "rw")), headers=S2)
             os.rename(host.root / "other", host.root / "other.old")
             os.symlink(host.outside, host.root / "other")                  # now leads out of the root
-            resp = await api.post("/api/vm/a/approve", json={"session": "s2"})
+            rid = api.reg.request_get("a", "s2")["id"]
+            resp = await api.post("/api/vm/a/approve", json={"session": "s2", "id": rid})
             assert resp.status == 400 and (await resp.json())["code"] == "vm_share_outside_root"
             assert api.reg.get("a").grants == {} and api.reg.get("a").shared_dirs == []
             assert api.reg.request_get("a", "s2") is not None            # still there for the user to deny

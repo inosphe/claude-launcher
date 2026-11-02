@@ -54,7 +54,7 @@ _STATUS = {
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
-    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_lock_needs_stop": 409,
+    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
@@ -524,6 +524,19 @@ async def h_request(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+def _shown_request(reg, vm_id: str, session: str, body: dict) -> dict:
+    """The pending request the user's answer is for. The answer names the request
+    by the id it was shown with: a session that asked again in the meantime
+    (the new request replaces the old one) is not approved unseen."""
+    row = reg.request_get(vm_id, session)
+    if row is None:
+        raise VmError("vm_bad_request", f"{session}의 대기 중인 요청이 없습니다")
+    if not isinstance(body.get("id"), str) or body["id"] != row["id"]:
+        raise VmError("vm_request_changed",
+                      f"{session}의 요청이 화면에 표시된 뒤 바뀌었거나 id가 없습니다. 목록을 새로 고쳐 현재 요청을 확인하십시오")
+    return row
+
+
 async def h_approve(request: web.Request) -> web.Response:
     """The user approves a session's request: its scopes are granted and its
     shared folders added in one step (re-checked now; nothing is applied when
@@ -535,9 +548,7 @@ async def h_approve(request: web.Request) -> web.Response:
     try:
         body = await _body(request)
         session = str(body.get("session") or "")
-        row = reg.request_get(vm_id, session)
-        if row is None:
-            raise VmError("vm_bad_request", f"{session}의 대기 중인 요청이 없습니다")
+        row = _shown_request(reg, vm_id, session, body)
         roots, forbidden = await asyncio.to_thread(mgr.share_rules)
         checked = [await asyncio.to_thread(vm_share.check_share, s["name"], s["host_path"], s["mode"],
                                            roots, forbidden) for s in row["shares"]]
@@ -565,8 +576,7 @@ async def h_deny(request: web.Request) -> web.Response:
     try:
         body = await _body(request)
         session = str(body.get("session") or "")
-        if reg.request_get(vm_id, session) is None:
-            raise VmError("vm_bad_request", f"{session}의 대기 중인 요청이 없습니다")
+        _shown_request(reg, vm_id, session, body)
         _trace(request, reg, vm_id, "user_deny", to=session)
         reg.request_drop(vm_id, session)
         return web.json_response(reg.view(vm_id))

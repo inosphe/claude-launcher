@@ -36,6 +36,15 @@ during the build" on files written a moment before. A `ro` share cannot be writt
 from the guest; bring results back with a `rw` share or `vm_get`. A symbolic link in
 a shared folder shows its host target as text in the guest but is not followed.
 
+### What a shared folder exposes
+A shared folder is open to the guest, and the guest runs whatever is installed in it.
+With `rw`, a program in the guest can plant a `.git/hooks/*` file or a script that
+your host session then runs the next time it uses `git` or builds there; so `rw` is
+asked for only when results must come back, and `ro` is the default. Even `ro` lets
+the guest read everything in the folder, `.env` files and keys included. Ask to
+share a working tree that holds no secrets, and read host-side files that came
+back through an `rw` share before running them.
+
 ### Moving files without a shared folder
 `vm_put` / `vm_get` / `vm_ls` / `vm_rm` (files grant) copy between the VM's host
 exchange folder (`files.host_dir` in `vm_list`) and the guest work folder. Paths are

@@ -317,6 +317,10 @@ the shared folder is slower by about 10x for small files, and swiftc reports
   `~/.aws`, `~/Library`, `~/.claude`, `~/.claude-launcher` or the daemon state
   directory is refused (`vm_share_forbidden`, 400); this keeps the home folder out.
   Paths with `:` or control characters are refused.
+- **Risk.** The guest can read everything in a shared folder (`.env` files and keys
+  included), also with `ro`. With `rw` a program in the guest can plant `.git/hooks/*`
+  or a script that the host session runs at its next `git` or build, which is why
+  `ro` is the default. Share a working tree that holds no secrets.
 - **Apply.** Mounted at the next start. A change on a running VM shows
   `shares_pending` until it restarts. The rules are applied again at every start;
   a share that fails then is left out and listed in `shares_skipped` (and audited).
@@ -326,6 +330,9 @@ the shared folder is slower by about 10x for small files, and swiftc reports
   the VM is removed). Nothing is granted. The user sees it in the VM tab or with
   `claunch vm requests`, and `approve` / `deny` (`POST /api/vm/{id}/approve|deny`,
   user only) grants the scopes and adds the shares together after re-checking them.
+  Each request has an `id`; `approve` and `deny` must send the id they were shown
+  with, and a session that asked again meanwhile (which replaces its request) gets
+  `vm_request_changed` (409), so the user never approves content they did not see.
 - **Session guidance.** The MCP server instructions point at the prompt pack
   `mcp-vm`; `vm_list` and `vm_acquire` return `share_guidance`.
 - **Not verified with a real VM:** `--dir` together with `--suspendable`.

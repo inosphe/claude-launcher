@@ -177,7 +177,7 @@ def _requests_show(out: dict) -> None:
     rows = [(vm["id"], r) for vm in out.get("vms") or [] for r in vm.get("requests") or []]
     for vm_id, r in rows:
         shares = ", ".join(f"{s['name']}({s['mode']}) {s['host_path']}" for s in r.get("shares") or [])
-        print(f"{vm_id:<14} {r['session']:<16} scopes: {'+'.join(r.get('scopes') or []) or '-'}  "
+        print(f"{vm_id:<14} {r['session']:<16} id: {r['id']}  scopes: {'+'.join(r.get('scopes') or []) or '-'}  "
               f"shares: {shares or '-'}  {r.get('reason') or ''}")
     if not rows:
         print("no pending requests")
@@ -189,7 +189,7 @@ def _cmd_requests(args) -> int:
 
 def _cmd_approve(args) -> int:
     path = f"/api/vm/{args.vm}/{args.vm_command}"
-    return _call(args, "POST", path, {"session": args.session},
+    return _call(args, "POST", path, {"session": args.session, "id": args.id},
                  show=lambda out: print(f"{args.vm}: " + (", ".join(
                      f"{s}:{'+'.join(v)}" for s, v in sorted((out.get('grants') or {}).items())) or "-")))
 
@@ -380,6 +380,8 @@ def register(sub) -> None:
         sp = v.add_parser(name, help=text)
         vm_arg(sp)
         sp.add_argument("session")
+        sp.add_argument("--id", required=True, help="the request id 'claunch vm requests' shows; "
+                        "refused when the session has asked again since")
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_cmd_approve)
 
