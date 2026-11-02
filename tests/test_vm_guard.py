@@ -38,6 +38,13 @@ def host(tmp_path):
     ("FOO=1 make", "build", "make"), ("sudo -E npm install", "install", "npm install"),
     ("env CC=gcc make", "build", "make"), ("cd src && make test", "build", "make"),
     ("git status; npm run build", "build", "npm run"), ("ls | python x.py", "run", "python"),
+    ("env -u FOO make", "build", "make"), ("env -i FOO=1 make", "build", "make"), ("env -C /tmp make", "build", "make"),
+    ("env --unset=FOO make", "build", "make"), ("env --unset FOO npm install", "install", "npm install"),
+    ("env -S 'make -j4'", "build", "make"), ("env -iu FOO python x.py", "run", "python"),
+    ("sudo -u root make", "build", "make"), ("sudo -g wheel -u root npm install x", "install", "npm install"),
+    ("sudo -Eu root -- python x.py", "run", "python"), ("sudo -h host -p 'pw: ' make", "build", "make"),
+    ("nice -n 10 make", "build", "make"), ("caffeinate -t 60 make", "build", "make"),
+    ("time -p make", "build", "make"), ("env -u A -u B sudo -u root env X=1 pytest", "build", "pytest"),
     ("bash -c 'cd x && make'", "build", "make"), ("sh -c \"python3 x.py\"", "run", "python3"),
     ("echo $(npm install x)", "install", "npm install"), ("nohup ./serve &", "run", "./*"),
 ])
@@ -50,6 +57,7 @@ def test_the_approved_deny_list_refuses(command, kind, rule):
     "git status", "git commit -m 'make build'", "git log --oneline | head", "claunch beads list",
     "claunch vm only ls", "ls -la", "cat Makefile", "grep -rn make src", "rg 'npm install' docs",
     "sed -n 1,20p x.py", "echo make", "echo 'python x.py'", "find . -name '*.py'", "head -5 package.json",
+    "env -u FOO ls", "env -i git status", "sudo -u root ls", "nice -n 5 git log", "env", "sudo",
     "cd src && git diff", "tail -f log.txt", "which python", "pwd", "", "   ",
 ])
 def test_git_claunch_and_read_commands_pass(command):
@@ -61,6 +69,10 @@ def test_the_head_kept_for_the_history_is_three_words_at_most():
     assert vm_guard.check("FOO=bar python x.py y z")[2] == "python x.py y"
     assert vm_guard.check(None) is None and vm_guard.check(5) is None
     assert vm_guard.check("echo " + "$(" * 20 + "make" + ")" * 20) in (None, ("build", "make", "make"))   # bounded, no crash
+
+
+def test_the_limits_text_says_a_session_can_remove_its_own_switch():
+    assert "vm-only.json" in vm_guard.LIMITS and "스스로 끌" in vm_guard.LIMITS and "보안 경계가 아니다" in vm_guard.LIMITS
 
 
 def test_the_message_says_to_use_vm_exec():

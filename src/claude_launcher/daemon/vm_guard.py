@@ -37,8 +37,8 @@ HISTORY = "vm-only-blocks.jsonl"
 HISTORY_KEEP = 20
 HISTORY_TRIM_BYTES = 64 * 1024
 
-LIMITS = ("접두 규칙이므로 `bash -c`·스크립트 파일·변수 치환 등으로 우회할 수 있다. "
-          "세션이 VM에서 실행하도록 유도하는 장치이며 보안 경계가 아니다.")
+LIMITS = ("접두 규칙이므로 스크립트 파일·alias·변수 치환 등으로 우회할 수 있고, 세션이 자기 세션 폴더의 "
+          "vm-only.json을 지워 스스로 끌 수도 있다. 세션이 VM에서 실행하도록 유도하는 장치이며 보안 경계가 아니다.")
 
 #: Token prefixes that are refused (the approved list). A rule matches a command
 #: segment whose leading tokens equal it; ``("make",)`` matches ``make -j8 all``.
@@ -79,16 +79,67 @@ def _tokens(segment: str) -> List[str]:
     return toks
 
 
+#: Options of a wrapper that take an argument (short letters, long names). The argument
+#: is skipped, so `env -u FOO make` is read as `make`, not as the command `FOO`.
+_OPT_ARGS = {
+    "env": ("uCS", ("--unset", "--chdir", "--split-string", "--argv0")),
+    "sudo": ("ugChprtTUDRc", ("--user", "--group", "--host", "--prompt", "--role", "--type", "--close-from",
+                              "--chdir", "--other-user", "--command-timeout", "--chroot")),
+    "nice": ("n", ("--adjustment",)),
+    "caffeinate": ("tw", ()),
+    "exec": ("a", ()),
+    "time": ("fo", ("--format", "--output")),
+    "command": ("", ()),
+    "nohup": ("", ()),
+}
+
+
+def _skip_options(wrapper: str, toks: List[str]) -> Tuple[List[str], List[str]]:
+    """``(rest, split)``: the tokens after the wrapper's options, and the text of an
+    `env -S` argument, which holds a command line of its own."""
+    short, long_ = _OPT_ARGS.get(wrapper, ("", ()))
+    split: List[str] = []
+    while toks:
+        tok = toks[0]
+        if tok == "--":
+            return toks[1:], split
+        if _ASSIGN.match(tok):
+            toks = toks[1:]
+            continue
+        if not tok.startswith("-") or tok == "-":
+            break
+        toks = toks[1:]
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in long_:
+                if not eq and toks:
+                    value, toks = toks[0], toks[1:]
+                if name == "--split-string":
+                    split.append(value)
+            continue
+        cluster = tok[1:]
+        for i, ch in enumerate(cluster):
+            if ch in short:                       # takes an argument: the rest of the cluster or the next token
+                value = cluster[i + 1:]
+                if not value and toks:
+                    value, toks = toks[0], toks[1:]
+                if wrapper == "env" and ch == "S":
+                    split.append(value)
+                break
+    return toks, split
+
+
 def _unwrap(toks: List[str]) -> List[str]:
-    """Drop leading assignments and wrapper words (``FOO=1 sudo -E make``)."""
+    """Drop leading assignments and wrapper words with their options
+    (``FOO=1 sudo -E -u root make``, ``env -i -u X make``)."""
     while toks:
         head = toks[0]
         if _ASSIGN.match(head):
             toks = toks[1:]
         elif head in WRAPPERS:
-            toks = toks[1:]
-            while toks and (toks[0].startswith("-") or _ASSIGN.match(toks[0])):
-                toks = toks[1:]
+            toks, split = _skip_options(head, toks[1:])
+            if split:                             # `env -S 'make -j4'`: the argument is the command line
+                toks = _tokens(" ".join(split)) + toks
         else:
             break
     return toks

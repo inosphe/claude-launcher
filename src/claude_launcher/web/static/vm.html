@@ -171,7 +171,7 @@
     <p class="vm-muted" id="vm-only-note">
       켠 세션은 호스트에서 빌드(make, xcodebuild, npm run, pytest …), 패키지 설치(npm/pip/brew install …), 프로그램 실행(python, node, ./스크립트, open …)을 실행할 수 없고,
       거절 메시지가 vm_exec로 VM에서 실행하라고 안내합니다. git, claunch, 읽기 명령은 그대로 쓸 수 있습니다. 다음 Bash 호출부터 적용됩니다.
-      <b>접두 규칙이므로 bash -c, 스크립트 파일, 변수 치환으로 우회할 수 있습니다. 유도 장치이며 보안 경계가 아닙니다.</b>
+      <b>접두 규칙이므로 스크립트 파일, alias, 변수 치환으로 우회할 수 있고, 세션이 자기 세션 폴더의 vm-only.json을 지워 스스로 끌 수도 있습니다. 유도 장치이며 보안 경계가 아닙니다.</b>
       Claude Code 세션 중 이 기능이 들어간 뒤 시작한(또는 다시 시작한) 세션에서만 켤 수 있습니다.
     </p>
     <table id="vm-only-rows"><thead><tr><th>세션</th><th>VM 전용</th><th>상태</th><th>최근 차단</th></tr></thead><tbody></tbody></table>

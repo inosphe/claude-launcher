@@ -372,7 +372,9 @@ A per-session switch, off by default. While it is on, the session's Bash calls t
 open, osascript, uv run ...) are refused with a message that says to use `vm_exec`. `git`,
 `claunch` and read commands pass. Chained commands, `bash -c '...'`, `$(...)` and leading
 `VAR=1`, `sudo`, `env` are looked through. **This is a nudge, not a security boundary:** the rules are
-token prefixes and are bypassed by a script file, an alias or an indirect call.
+token prefixes and are bypassed by a script file, an alias or an indirect call. A session can also
+**delete its own `vm-only.json`** (it is in the session's own directory) and so switch itself off; the daemon does not
+guard that file. Wrapper options that take an argument (`env -u X`, `sudo -u U`, `nice -n N`, `env -S '…'`) are skipped, not read as the command.
 
 - **Mechanism.** Every Claude Code spawn carries `--settings` with a `PreToolUse` hook for `Bash`
   (`harness.REBRIEF_HOOK_SETTINGS`). Its command is `if [ -e "$CLAUNCH_SCRATCH/../vm-only.json" ]; then exec
