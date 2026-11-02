@@ -216,8 +216,10 @@ renames a DB: `to` is slugged, every `<corpus>.<from>.zvec` and sidecar is
 moved to `<corpus>.<to>…` after the RAG service is shut down (the index
 holds a LOCK file on its directory), every preset whose resolved DB is
 `from` gets `db: <to>` written, and the service starts again on the result.
-It is refused (400) for an unknown `from`, an empty `to`, the same name, or a
-`to` that already exists on disk; a failed move or save puts every moved file
+It is refused (400) for an unknown `from`, an empty `to`, the same name, a
+`to` that already exists on disk, or a `to` another preset already names as
+its `db` before anything was embedded there (the moved vectors would answer
+that preset's model); a failed move or save puts every moved file
 back. The zvec directory holds no absolute paths, so a moved directory
 opens as it was. `POST /api/rag/dbs/delete` with
 `{"name": "<directory stem>"}` removes a collection and its sidecar;
@@ -366,7 +368,7 @@ write-up matches on any part.
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
 | `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
 | `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it ; `{"db": "<db>"}` removes every collection of that DB name (claunch-r4796) |
-| `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same/taken names (claunch-r4796) |
+| `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same names and for a name taken on disk or by another preset (claunch-r4796) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 

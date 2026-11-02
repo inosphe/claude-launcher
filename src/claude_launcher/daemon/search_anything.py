@@ -873,6 +873,18 @@ def install(app):
                 if clean is not None and _preset_db(clean) == old:
                     raw["db"] = new
                     moved_presets.append(clean["id"])
+            # A preset that already names the new DB but has not built it yet
+            # would, after the move, read vectors another model made.
+            claimed = [
+                clean["id"]
+                for clean in map(store.clean_rag_preset, block["presets"])
+                if clean is not None and clean["id"] not in moved_presets
+                and _preset_db(clean) == new
+            ]
+            if claimed:
+                return web.json_response(
+                    {"error": f"프리셋 {', '.join(claimed)}이 이미 DB 이름 {new}을 씁니다 — 다른 이름을 쓰세요."},
+                    status=400)
         await service.shutdown()
         moved = []
         try:

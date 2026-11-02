@@ -749,7 +749,15 @@ globalThis.SearchAnything = (() => {
           status.textContent = `DB ${g.name}의 이름을 ${to}으로 바꾸는 중…`;
           try {
             const data = await request("api/rag/dbs/rename", { from: g.name, to }, "POST");
-            if (ragDbSlug(dbInput.value) === g.name) dbInput.value = data.db;
+            // The field follows the rename whenever the preset on screen
+            // reads that DB: by the typed name, or — with the field empty —
+            // by its model name, or because the daemon re-pointed it. An
+            // empty field would otherwise be saved as "no db", and the
+            // preset would resolve back to the old name the vectors just
+            // left (claunch-r4796 review).
+            const screenDb = ragDbSlug(dbInput.value) || ragDbSlug(fields.embedding_model.value);
+            const repointed = (data.presets || []).includes(presetSelect.value);
+            if (screenDb === g.name || repointed) dbInput.value = data.db;
             for (const p of presets) if (data.presets && data.presets.includes(p.id)) p.db = data.db;
             const moved = data.presets && data.presets.length ? ` 이 DB를 쓰던 프리셋(${data.presets.join(", ")})도 새 이름을 쓰도록 바꿨습니다.` : "";
             status.textContent = `DB ${g.name}의 이름을 ${data.db}으로 바꿨습니다. 벡터는 그대로입니다.${moved}`;

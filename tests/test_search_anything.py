@@ -2028,8 +2028,9 @@ def test_renaming_a_db_moves_every_collection_and_repoints_its_readers(tmp_path)
 
 
 def test_a_db_rename_refuses_a_taken_unknown_or_empty_name(tmp_path):
-    """Nothing moves when the target exists, the source does not, or the
-    new name slugs to nothing (claunch-r4796)."""
+    """Nothing moves when the target exists on disk or is already named by
+    another preset, the source does not exist, or the new name slugs to
+    nothing (claunch-r4796)."""
     async def run():
         endpoint = Endpoint()
         server = await _start_endpoint(endpoint)
@@ -2037,10 +2038,18 @@ def test_a_db_rename_refuses_a_taken_unknown_or_empty_name(tmp_path):
         _write_store(base, "sessions.a", dims=768, model="emb-a", model_key="a")
         _write_store(base, "sessions.b", dims=768, model="emb-a", model_key="b")
         presets = [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
-                    "api_key": "s", "embedding_model": "emb-a", "db": "a"}]
+                    "api_key": "s", "embedding_model": "emb-a", "db": "a"},
+                   {"id": "q", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-q", "db": "planned"}]
         service, client = _db_app(tmp_path, server, presets, "p")
         await client.start_server()
         try:
+            # q names "planned" before anything was embedded there: moving a's
+            # vectors under that name would hand q another model's vectors.
+            claimed = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "planned"})
+            assert claimed.status == 400
+            assert "q" in (await claimed.json())["error"]
+            assert not (base / "sessions.planned.zvec").exists()
             taken = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "b"})
             assert taken.status == 400
             assert "b" in (await taken.json())["error"]

@@ -406,6 +406,24 @@ const server = http.createServer(async (req,res) => {
     assert.equal(await page.locator('select[name=preset]').inputValue(),'fw2');
     assert.equal(await card.locator('.rag-badge-on').textContent(),'활성');
     assert.equal(await presetBox.getByRole('button',{name:'삭제',exact:true}).isDisabled(),false);
+    // A preset that reads its DB through its model name (no db typed) keeps
+    // reading it after the DB is renamed: the empty field follows the rename,
+    // so saving the preset writes db: <new name> instead of dropping it and
+    // resolving back to the name the vectors just left (claunch-r4796 review).
+    await page.locator('select[name=preset]').selectOption('omlx');
+    await dbField.fill('');
+    await embed.fill('embed');
+    await card.getByRole('button',{name:'omlx 저장하고 활성화',exact:true}).click();
+    await card.getByText(/프리셋 omlx을 저장했고 활성 프리셋이 됐습니다/).waitFor();
+    assert.equal(writes.at(-1).body.presets.find(p=>p.id==='omlx').db,undefined);
+    await dbRows.filter({has: page.getByRole('button',{name:'embed',exact:true})}).getByRole('button',{name:'이름 변경'}).click();
+    await card.locator('.rag-db-rename-row input').fill('embed-two');
+    await card.locator('.rag-db-rename-row').getByRole('button',{name:'이름 변경'}).click();
+    await card.getByText(/DB embed의 이름을 embed-two으로 바꿨습니다.*\(omlx\)/).waitFor();
+    assert.equal(await dbField.inputValue(),'embed-two');
+    await card.getByRole('button',{name:'omlx 저장하고 활성화',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('.rag-status').textContent.includes('저장했고'),null);
+    assert.equal(writes.at(-1).body.presets.find(p=>p.id==='omlx').db,'embed-two');
     if (process.env.CLAUNCH_SETTINGS_SHOT) {
       await page.setViewportSize({width:900,height:2400});
       await page.screenshot({path:process.env.CLAUNCH_SETTINGS_SHOT, clip: await card.boundingBox()});
