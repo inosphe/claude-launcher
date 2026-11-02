@@ -295,3 +295,37 @@ the four tools when they start.
 Not verified without a real VM: that `tart exec -i` passes binary stdin and
 stdout without alteration (and keeps stderr apart), that the guest's `bsdtar`
 takes the options used here, and the timing of a 500 MiB transfer.
+
+## Shared host folders (`shared_dirs`)
+
+A VM can mount host folders through `tart run --dir name:path[:ro]`. The guest sees
+them at `/Volumes/My Shared Files/<name>`. A session edits files at the host path;
+the VM builds from a local copy made with `vm_exec` (`rsync -a --delete
+'/Volumes/My Shared Files/<name>/' ~/work/<name>/`). Building or running git inside
+the shared folder is slower by about 10x for small files, and swiftc reports
+"modified during the build" for files written just before (run d-009).
+
+- **Record.** `Vm.shared_dirs` is a list of `{name, host_path, mode}` (`ro` default,
+  `rw` only when written), at most 4 per VM, unique names (`check_name`). Only the
+  user changes it: dashboard VM tab, `claunch vm share add|rm|ls [--rw]`, or
+  `POST /api/vm/{id}/share`. A session sees name, mode, host and guest path in
+  `vm_list` / `vm_acquire` (`shared_dirs`, `share_guidance`) and cannot change them.
+- **Allowed roots.** Daemon setting `vm_share_roots` (default empty: nothing can be
+  shared; error `vm_share_no_roots`, 409). `host_path` is resolved with `realpath`
+  and must lie under a root (`vm_share_outside_root`, 400), so a symbolic link out of
+  a root is refused. A path that is, lies under or contains `~/.ssh`, `~/.gnupg`,
+  `~/.aws`, `~/Library`, `~/.claude`, `~/.claude-launcher` or the daemon state
+  directory is refused (`vm_share_forbidden`, 400); this keeps the home folder out.
+  Paths with `:` or control characters are refused.
+- **Apply.** Mounted at the next start. A change on a running VM shows
+  `shares_pending` until it restarts. The rules are applied again at every start;
+  a share that fails then is left out and listed in `shares_skipped` (and audited).
+  A locked VM takes no share changes and does not start.
+- **One-step access request.** `vm_request(vm, scopes, shares, reason)` records a
+  request (at most 10 per VM, not saved to disk, dropped when the session exits or
+  the VM is removed). Nothing is granted. The user sees it in the VM tab or with
+  `claunch vm requests`, and `approve` / `deny` (`POST /api/vm/{id}/approve|deny`,
+  user only) grants the scopes and adds the shares together after re-checking them.
+- **Session guidance.** The MCP server instructions point at the prompt pack
+  `mcp-vm`; `vm_list` and `vm_acquire` return `share_guidance`.
+- **Not verified with a real VM:** `--dir` together with `--suspendable`.

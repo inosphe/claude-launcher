@@ -148,6 +148,52 @@ def _cmd_expose(args) -> int:
 def _cmd_allow(args) -> int:
     return _net(args, "allow", lambda v: {"cidr": v}, lambda v: {"cidr": v})
 
+def _share_show(out: dict) -> None:
+    shares = out.get("shared_dirs") or []
+    for sh in shares:
+        print(f"{sh['name']:<14} {sh['mode']}  {sh['host_path']}  ->  {sh['guest_path']}")
+    if not shares:
+        print("no shared folders")
+    for name, why in (out.get("shares_skipped") or {}).items():
+        print(f"  left out at the last start: {name}: {why}")
+    if out.get("shares_pending"):
+        print("restart the VM for the change to apply")
+
+
+def _cmd_share(args) -> int:
+    if args.action == "ls":
+        return _call(args, "GET", f"/api/vm/{args.vm}", show=_share_show)
+    if not args.name or (args.action == "add" and not args.path):
+        print("claunch vm share add NAME PATH [--rw] | rm NAME | ls", file=sys.stderr)
+        return EXIT_REFUSED
+    body = {"action": args.action, "name": args.name}
+    if args.action == "add":
+        body.update({"host_path": os.path.abspath(os.path.expanduser(args.path)),
+                     "mode": "rw" if args.rw else "ro"})
+    return _call(args, "POST", f"/api/vm/{args.vm}/share", body, show=_share_show)
+
+
+def _requests_show(out: dict) -> None:
+    rows = [(vm["id"], r) for vm in out.get("vms") or [] for r in vm.get("requests") or []]
+    for vm_id, r in rows:
+        shares = ", ".join(f"{s['name']}({s['mode']}) {s['host_path']}" for s in r.get("shares") or [])
+        print(f"{vm_id:<14} {r['session']:<16} scopes: {'+'.join(r.get('scopes') or []) or '-'}  "
+              f"shares: {shares or '-'}  {r.get('reason') or ''}")
+    if not rows:
+        print("no pending requests")
+
+
+def _cmd_requests(args) -> int:
+    return _call(args, "GET", "/api/vm", show=_requests_show)
+
+
+def _cmd_approve(args) -> int:
+    path = f"/api/vm/{args.vm}/{args.vm_command}"
+    return _call(args, "POST", path, {"session": args.session},
+                 show=lambda out: print(f"{args.vm}: " + (", ".join(
+                     f"{s}:{'+'.join(v)}" for s, v in sorted((out.get('grants') or {}).items())) or "-")))
+
+
 def _cmd_lock(args) -> int:
     def show(out):
         print(f"{out['id']}: " + ("locked" if out.get("locked") else "unlocked"))
@@ -315,6 +361,27 @@ def register(sub) -> None:
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=_cmd_lock)
+
+    sp = v.add_parser("share", help="host folders mounted in the guest at /Volumes/My Shared Files/<name> "
+                                    "(tart run --dir; applied at the next start). Only paths under the "
+                                    "daemon.vm_share_roots setting; read-only unless --rw")
+    vm_arg(sp)
+    sp.add_argument("action", choices=("ls", "add", "rm"))
+    sp.add_argument("name", nargs="?")
+    sp.add_argument("path", nargs="?")
+    sp.add_argument("--rw", action="store_true", help="read-write (default: read-only)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_share)
+    sp = v.add_parser("requests", help="access requests sessions have made (vm_request) and not had answered")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_cmd_requests)
+    for name, text in (("approve", "grant a session's request: its scopes and shared folders, in one step"),
+                       ("deny", "drop a session's request")):
+        sp = v.add_parser(name, help=text)
+        vm_arg(sp)
+        sp.add_argument("session")
+        sp.add_argument("--json", action="store_true")
+        sp.set_defaults(func=_cmd_approve)
 
     sp = v.add_parser("files", help="a VM's file exchange: the host folder, the guest work folder "
                                     "(--guest-dir sets it, \"\" restores the default) and recent transfers")

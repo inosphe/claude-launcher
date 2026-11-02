@@ -22,12 +22,14 @@ process of the loopback connection) is a separate follow-up.
 
 User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                stop,force_stop,suspend,reconcile,grant,revoke,
-               revoke_controller,extra_controller,human,files_dir},
+               revoke_controller,extra_controller,human,files_dir,share,
+               approve,deny},
                GET /api/vm/{id}/files
 Anyone:        GET /api/vm, GET /api/vm/{id}
 Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
                the declared actor), POST /api/vm/{id}/files/{put,get,ls,rm}
-               (``files`` grant)
+               (``files`` grant), POST /api/vm/{id}/request (a session asks
+               for scopes and shared folders; the user approves)
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_files, vm_frames, vm_presets, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_files, vm_frames, vm_presets, vm_share, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -57,6 +59,7 @@ _STATUS = {
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
+    "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -206,7 +209,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running", "files_dir")
+             "net_applied_known", "locked_but_running", "files_dir", "requests")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -214,6 +217,8 @@ def _for_session(row: dict, session: str) -> dict:
     paths."""
     row = {k: v for k, v in row.items() if k not in HOST_ONLY}
     row["grants"] = {session: row["grants"].get(session, [])}
+    if row.get("shared_dirs"):
+        row["share_guidance"] = vm_share.guidance(row["shared_dirs"])
     return row
 
 
@@ -239,8 +244,11 @@ async def h_list(request: web.Request) -> web.Response:
     else:
         rows = [reg.view(vm.id) for vm in reg.list()]
     _, mgr = _hub(request)
-    return web.json_response({"vms": rows, "slot_limit": reg.slot_limit,
-                              "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))})
+    out = {"vms": rows, "slot_limit": reg.slot_limit,
+           "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))}
+    if not session and mgr is not None:     # the user's page: where a share may come from
+        out["share_roots"] = mgr.share_rules()[0]
+    return web.json_response(out)
 
 
 async def h_get(request: web.Request) -> web.Response:
@@ -459,6 +467,113 @@ async def h_lock(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+async def h_share(request: web.Request) -> web.Response:
+    """Add or remove a shared host folder (``tart run --dir``): the user's, applied
+    at the next start. The path is resolved and checked against the allowed
+    roots and the never-shared list (``vm_share``)."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        action = str(body.get("action") or "")
+        if action == "add":
+            roots, forbidden = await asyncio.to_thread(mgr.share_rules)
+            share = await asyncio.to_thread(vm_share.check_share, body.get("name"), body.get("host_path"),
+                                            body.get("mode"), roots, forbidden)
+            _trace(request, reg, vm_id, "share_add", name=share["name"], host_path=share["host_path"],
+                   mode=share["mode"])
+            reg.share_add(vm_id, share)
+        elif action == "rm":
+            _trace(request, reg, vm_id, "share_rm", name=str(body.get("name"))[:64])
+            reg.share_remove(vm_id, str(body.get("name") or ""))
+        else:
+            raise VmError("vm_bad_request", "'action' is add or rm")
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_request(request: web.Request) -> web.Response:
+    """A session asks for scopes and shared folders in one go. It grants nothing:
+    the request waits for the user (``approve`` / ``deny``). The folders are
+    checked now, against the same rules as at approval, so the user is never asked
+    about one that could not be shared."""
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = _as_session(request, body)
+        scopes, shares_in = body.get("scopes") or [], body.get("shares") or []
+        if (not isinstance(scopes, list) or not isinstance(shares_in, list)
+                or not all(isinstance(s, dict) for s in shares_in) or len(shares_in) > vm_share.SHARE_MAX):
+            raise VmError("vm_bad_request", "'scopes' is a list of scope names and 'shares' a list of {name, host_path, mode}")
+        if not scopes and not shares_in:
+            raise VmError("vm_bad_request", "scopes나 shares 중 하나는 필요합니다")
+        roots, forbidden = await asyncio.to_thread(mgr.share_rules)
+        shares = [await asyncio.to_thread(vm_share.check_share, s.get("name"), s.get("host_path"),
+                                          s.get("mode"), roots, forbidden) for s in shares_in]
+        row = reg.request_add(vm_id, session, scopes, shares, str(body.get("reason") or ""))
+        return web.json_response({
+            "ok": True, "pending": True,
+            "requested": {"scopes": row["scopes"], "shares": [vm_share.public(s) for s in row["shares"]]},
+            "message": "사용자의 승인을 기다립니다. 승인되면 vm_list에 권한과 공유 폴더가 나타납니다. "
+                       "공유 폴더는 VM을 다음에 시작할 때 마운트됩니다"})
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_approve(request: web.Request) -> web.Response:
+    """The user approves a session's request: its scopes are granted and its
+    shared folders added in one step (re-checked now; nothing is applied when
+    any check fails)."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = str(body.get("session") or "")
+        row = reg.request_get(vm_id, session)
+        if row is None:
+            raise VmError("vm_bad_request", f"{session}의 대기 중인 요청이 없습니다")
+        roots, forbidden = await asyncio.to_thread(mgr.share_rules)
+        checked = [await asyncio.to_thread(vm_share.check_share, s["name"], s["host_path"], s["mode"],
+                                           roots, forbidden) for s in row["shares"]]
+        vm = reg.get(vm_id)
+        names = {s["name"] for s in vm.shared_dirs}
+        if any(s["name"] in names for s in checked) or len(vm.shared_dirs) + len(checked) > vm_share.SHARE_MAX:
+            raise VmError("vm_bad_request", "공유 이름이 겹치거나 공유 폴더가 최대 개수를 넘습니다. 요청을 거절하고 다시 받으십시오")
+        _trace(request, reg, vm_id, "user_approve", to=session, scopes=row["scopes"],
+               shares=[f"{s['name']}:{s['mode']}" for s in checked])
+        if row["scopes"]:
+            reg.grant(vm_id, session, row["scopes"])
+        for share in checked:
+            reg.share_add(vm_id, share)
+        reg.request_drop(vm_id, session)
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_deny(request: web.Request) -> web.Response:
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = str(body.get("session") or "")
+        if reg.request_get(vm_id, session) is None:
+            raise VmError("vm_bad_request", f"{session}의 대기 중인 요청이 없습니다")
+        _trace(request, reg, vm_id, "user_deny", to=session)
+        reg.request_drop(vm_id, session)
+        return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
 async def h_remove(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
@@ -611,6 +726,10 @@ async def h_acquire(request: web.Request) -> web.Response:
     try:
         session = _as_session(request, await _body(request))
         result = reg.acquire(request.match_info["id"], session)
+        shares = reg.get(request.match_info["id"]).shared_dirs
+        if result.get("ok") and shares:
+            result["shared_dirs"] = [vm_share.public(s) for s in shares]
+            result["share_guidance"] = vm_share.guidance(shares)
         return web.json_response(result, status=200 if result.get("ok") else 409)
     except VmError as exc:
         return _err(exc)
@@ -962,6 +1081,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     app["vm_registry"] = reg
     app["vm_manager"] = manager or vm_tart.Manager(
         reg, log_dir=paths.daemon_dir() / "vm",
+        share_roots=lambda: store.daemon_config().get("vm_share_roots") or [],
+        share_forbidden=lambda: vm_share.forbidden_paths(state=paths.daemon_dir()),
         graphics=bool(cfg.get("vm_graphics", True)),
         stop_wait=float(cfg.get("vm_stop_wait", 120)),
         **dict(zip(("softnet", "softnet_block"),
@@ -993,6 +1114,10 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)
     r.add_post("/api/vm/{id}/expose", h_expose)
     r.add_post("/api/vm/{id}/allow", h_allow)
+    r.add_post("/api/vm/{id}/share", h_share)
+    r.add_post("/api/vm/{id}/request", h_request)
+    r.add_post("/api/vm/{id}/approve", h_approve)
+    r.add_post("/api/vm/{id}/deny", h_deny)
     r.add_post("/api/vm/{id}/{op:lock|unlock}", h_lock)
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)

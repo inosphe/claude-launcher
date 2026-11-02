@@ -11,6 +11,8 @@
         scopes ticked (exec asks for a confirmation first);
      3b. the file exchange section: the folders, the "not executed" text, the guest
         folder setting (user route), the recent-transfer log and the files tick;
+     3c. shared folders (roots shown, add with an rw confirmation, remove, pending
+        note) and access requests (approve with a confirmation for exec/rw, deny);
      4. leaving the tab removes the frame. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -28,6 +30,10 @@ const VM = {
   id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
   grants: { s1: ["files"] }, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
   net_pending: true, net_applied_known: true, locked: false,
+  shared_dirs: [{ name: "src", host_path: "/work/proj", mode: "ro", guest_path: "/Volumes/My Shared Files/src" }],
+  shares_pending: true, shares_skipped: { old: "vm_share_forbidden: nope" },
+  requests: [{ session: "s2", scopes: ["files", "exec"], reason: "build it",
+    shares: [{ name: "out", host_path: "/work/out", mode: "rw", guest_path: "/Volumes/My Shared Files/out" }] }],
 };
 const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false };
 const json = (res, body, status = 200) => {
@@ -53,7 +59,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ["/work"] });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
       guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
@@ -181,6 +187,39 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-activity", { hasText: "s1 view+control 부여" }).waitFor({ timeout: 5000 });
     const grant = posts.find(([u]) => u === "/api/vm/alpha/grant");
     assert.deepEqual(grant[1], { session: "s1", scopes: ["view", "control"] });
+    // 3c. shared folders and requests
+    assert.match(await frame.locator("#vm-share-roots").innerText(), /\/work/, "the allowed root is shown");
+    await frame.locator("#vm-shares tbody tr", { hasText: "/Volumes/My Shared Files/src" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-share-pending").innerText(), /다시 시작하면 적용.*제외된 공유 old/s);
+    await frame.locator("#vm-share-name").fill("out");
+    await frame.locator("#vm-share-path").fill("/work/out");
+    await frame.locator("#vm-share-rw").check();
+    let rwAsked = "";
+    page.once("dialog", async (d) => { rwAsked = d.message(); await d.accept(); });
+    await frame.locator("#vm-share-go").click();
+    await frame.locator("#vm-activity", { hasText: "공유 out 추가 완료" }).waitFor({ timeout: 5000 });
+    assert.match(rwAsked, /rw/, "rw asks first");
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm/alpha/share" && b.action === "add")[1],
+      { action: "add", name: "out", host_path: "/work/out", mode: "rw" });
+    await frame.locator("#vm-shares tbody tr", { hasText: "src" }).getByRole("button", { name: "삭제" }).click();
+    await frame.locator("#vm-activity", { hasText: "공유 src 삭제 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm/alpha/share" && b.action === "rm")[1], { action: "rm", name: "src" });
+    await frame.locator("#vm-requests tbody tr", { hasText: "s2" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-requests tbody tr").innerText(), /files \+ exec.*out \(rw\) \/work\/out.*build it/s);
+    let apAsked = "";
+    page.once("dialog", async (d) => { apAsked = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "승인" }).click();
+    await page.waitForTimeout(200);
+    assert.match(apAsked, /exec.*out 쓰기 가능\(rw\)/s, "approving exec and an rw share asks first");
+    assert.equal(posts.filter(([u]) => u === "/api/vm/alpha/approve").length, 0, "a dismissed confirmation approves nothing");
+    page.once("dialog", async (d) => { await d.accept(); });
+    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "승인" }).click();
+    await frame.locator("#vm-activity", { hasText: "s2 요청 승인 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/approve")[1], { session: "s2" });
+    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "거절" }).click();
+    await frame.locator("#vm-activity", { hasText: "s2 요청 거절 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/deny")[1], { session: "s2" });
+
     // 3b. the file exchange
     await frame.locator("#vm-files-host", { hasText: "/vm/alpha/files" }).waitFor({ timeout: 5000 });
     assert.match(await frame.locator("#vm-files-note").innerText(), /받은 파일은 실행하지 않습니다/);

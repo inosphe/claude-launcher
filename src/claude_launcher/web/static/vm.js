@@ -126,8 +126,10 @@ function renderDetail(vm) {
     ? `조작 중입니다. 세션의 조작 호출은 거절됩니다${vm.draining ? " (진행 중인 호출이 끝나기를 기다리는 중)" : ""}.`
     : (vm.needs_observe && vm.controller ? "돌려받은 세션이 화면을 다시 확인할 때까지 조작을 시작하지 않습니다." : "");
   manageTouch();
+  renderRequests(vm);
   renderGrants(vm);
   renderFiles(vm);
+  renderShares(vm);
   renderNet(vm);
 }
 function renderNet(vm) {
@@ -225,6 +227,82 @@ function renderGrants(vm) {
     body.appendChild(tr);
   }
 }
+/* Shared host folders (tart run --dir) and the requests sessions made for them. */
+function renderShares(vm) {
+  const roots = $("vm-share-roots");
+  roots.textContent = shareRoots.length
+    ? `공유를 허용한 루트: ${shareRoots.join(", ")} (이 아래의 폴더만 공유할 수 있고, 홈 폴더 자체와 ~/.ssh, ~/Library, ~/.claude*, 데몬 상태 폴더는 포함할 수 없습니다.)`
+    : "공유가 꺼져 있습니다. 데몬 설정 daemon.vm_share_roots에 공유를 허용할 폴더를 적으면 켜집니다.";
+  $("vm-share-go").disabled = !shareRoots.length;
+  const pending = $("vm-share-pending");
+  const skipped = Object.entries(vm.shares_skipped || {});
+  pending.hidden = !(vm.shares_pending || skipped.length);
+  pending.textContent = [
+    vm.shares_pending ? "공유 폴더 변경은 VM을 다시 시작하면 적용됩니다." : "",
+    ...skipped.map(([n, why]) => `마지막 시작에서 제외된 공유 ${n}: ${why}`),
+  ].filter(Boolean).join(" ");
+  const body = document.querySelector("#vm-shares tbody");
+  body.replaceChildren();
+  for (const sh of vm.shared_dirs || []) {
+    const tr = document.createElement("tr");
+    tr.append(cell(sh.name), cell(sh.host_path), cell(sh.guest_path), cell(sh.mode));
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "삭제";
+    b.addEventListener("click", () => act(`공유 ${sh.name} 삭제`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/share`, { action: "rm", name: sh.name })));
+    td.appendChild(b);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  $("vm-shares").hidden = !(vm.shared_dirs || []).length;
+}
+$("vm-share-go").addEventListener("click", () => {
+  const name = $("vm-share-name").value.trim();
+  const host_path = $("vm-share-path").value.trim();
+  const mode = $("vm-share-rw").checked ? "rw" : "ro";
+  if (!selected || !name || !host_path) return;
+  if (mode === "rw" && !confirm(`${host_path}를 쓰기 가능(rw)으로 공유합니다. 게스트에서 이 폴더의 파일을 바꾸거나 지울 수 있습니다. 계속합니까?`)) return;
+  act(`공유 ${name} 추가`, async () => {
+    await post(`api/vm/${encodeURIComponent(selected)}/share`, { action: "add", name, host_path, mode });
+    $("vm-share-name").value = "";
+    $("vm-share-path").value = "";
+    $("vm-share-rw").checked = false;
+  });
+});
+function renderRequests(vm) {
+  const rows = vm.requests || [];
+  $("vm-requests-box").hidden = !rows.length;
+  const body = document.querySelector("#vm-requests tbody");
+  body.replaceChildren();
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.append(cell(r.session), cell((r.scopes || []).join(" + ") || "-"),
+              cell((r.shares || []).map((s) => `${s.name} (${s.mode}) ${s.host_path}`).join("; ") || "-"),
+              cell(r.reason || ""));
+    const td = document.createElement("td");
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.textContent = "승인";
+    ok.addEventListener("click", () => {
+      const risky = [];
+      if ((r.scopes || []).includes("exec")) risky.push("exec(게스트 셸 실행과 설치·설정 변경)");
+      for (const s of r.shares || []) if (s.mode === "rw") risky.push(`${s.name} 쓰기 가능(rw) 공유`);
+      if (risky.length && !confirm(`${r.session}에 ${risky.join(", ")}를 줍니다. 계속합니까?`)) return;
+      act(`${r.session} 요청 승인`, () => post(`api/vm/${encodeURIComponent(vm.id)}/approve`, { session: r.session }));
+    });
+    const no = document.createElement("button");
+    no.type = "button";
+    no.textContent = "거절";
+    no.addEventListener("click", () => act(`${r.session} 요청 거절`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/deny`, { session: r.session })));
+    td.append(ok, no);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
 /* The file exchange: the two folders, the guest folder setting and the recent
    transfers. The route is the user's, so this is read from it rather than from
    the VM row (a session's row carries the folders but not the log). */
@@ -275,11 +353,13 @@ function render() {
   syncPresetSave();
 }
 let hostLocked = false;
+let shareRoots = [];
 async function refresh() {
   try {
     const data = await api("api/vm");
     vms = data.vms || [];
     hostLocked = !!data.host_locked;
+    shareRoots = data.share_roots || [];
     $("vm-link").classList.add("up");
   } catch (_) { $("vm-link").classList.remove("up"); return; }
   render();

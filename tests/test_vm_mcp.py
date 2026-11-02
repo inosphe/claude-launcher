@@ -32,7 +32,7 @@ def client(monkeypatch):
 def test_the_tools_are_in_the_merged_server_without_collisions():
     names = {t["name"] for t in mcp_server.SERVER.tools}
     assert {t["name"] for t in vm_mcp.TOOLS} <= names
-    assert len(vm_mcp.TOOLS) == 11
+    assert len(vm_mcp.TOOLS) == 12
 
 
 def test_a_vm_write_is_never_queued_for_later(client):

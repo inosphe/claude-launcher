@@ -819,12 +819,18 @@ DAEMON_DEFAULTS = {
     #     vm_softnet_block, so that the guest cannot reach the host's own ports
     #     or the LAN (d-005). With the block on, the guest's DNS must be a
     #     public one (docs/vm-hub.md); the control channel is tart exec.
+    #   vm_share_roots -- host folders a VM may share into its guest
+    #     (``tart run --dir``; daemon/vm_share.py). A list of absolute paths,
+    #     read at each share and each start. Empty: nothing can be shared. A
+    #     share must lie in or under one of them, and never touches ~/.ssh,
+    #     ~/Library, the daemon's state and the other places that file lists.
     "vm_slot_limit": 2,
     "vm_stop_wait": 120,
     "vm_human_idle": 15,
     "vm_graphics": True,
     "vm_softnet": True,
     "vm_softnet_block": "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    "vm_share_roots": [],
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.

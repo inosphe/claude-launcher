@@ -72,6 +72,7 @@ _MOVES = {
 }
 
 AUDIT_RING = 500
+REQUESTS_MAX = 10
 FILES_LOG_KEEP = 50
 REJECTED_KEEP = 50
 
@@ -293,6 +294,14 @@ class Vm:
     #: The guest folder file transfers are limited to ("": the default,
     #: ``/Users/<ssh_user>/work``). Saved; only the user sets it.
     files_dir: str = ""
+    #: Host folders mounted in the guest (``daemon/vm_share.py``): records
+    #: ``{name, host_path, mode}``, set by the user only, applied at the next
+    #: start (``tart run --dir``).
+    shared_dirs: List[dict] = field(default_factory=list)
+    #: What the running ``tart run`` was given (None: not known). Not persisted.
+    shares_applied: Optional[list] = None
+    #: Shares left out of the last start, name -> why. Not persisted.
+    shares_skipped: Dict[str, str] = field(default_factory=dict)
     #: Bumped each time the controller is asked to look again; a look counts
     #: only if it began after the last bump (not persisted).
     observe_gen: int = 0
@@ -330,8 +339,16 @@ class Vm:
             "human": self.human, "human_since": self.human_since,
             "needs_observe": self.needs_observe, "softnet": self.softnet, "locked": self.locked,
             "expose": list(self.expose), "allow": list(self.allow),
-            "files_dir": self.files_dir,
+            "files_dir": self.files_dir, "shared_dirs": [dict(s) for s in self.shared_dirs],
         }
+
+    def shares_pending(self) -> bool:
+        """The saved shares differ from what the running VM was given."""
+        if self.state not in ("starting", "restoring", "running"):
+            return False
+        if self.shares_applied is None:
+            return bool(self.shared_dirs)
+        return self.shares_applied != self.shared_dirs
 
     def net_pending(self) -> bool:
         """The saved expose/allow differ from what the running VM was given."""
@@ -357,6 +374,7 @@ class Vm:
         # would refuse is dropped here.
         vm.expose = _kept(raw.get("expose"), lambda v: check_expose(*split_expose(v)))
         vm.allow = _kept(raw.get("allow"), check_allow)
+        vm.shared_dirs = vm_share.load_shares(raw.get("shared_dirs"))
         vm.locked = raw.get("locked") is True   # anything but a JSON true reads as unlocked
         try:
             vm.files_dir = check_guest_dir(raw["files_dir"]) if raw.get("files_dir") else ""
@@ -439,6 +457,10 @@ class Registry:
         self.audit_log: List[dict] = []
         #: Recent file transfers per VM (path and byte count, never contents).
         self.files_log: Dict[str, deque] = {}
+        #: Pending requests for access, vm id -> session -> request. A request
+        #: grants nothing: the user approves it (or not). Not saved: a restarted
+        #: daemon has none, and the session asks again.
+        self.requests: Dict[str, Dict[str, dict]] = {}
 
     # ---- persistence --------------------------------------------------- #
     def load(self) -> None:
@@ -547,6 +569,7 @@ class Registry:
             if vm.state not in ("stopped", "suspended", "fault"):
                 raise VmError("vm_busy_state", f"{vm_id} is {vm.state}; stop it first")
             del self._vms[vm_id]
+            self.requests.pop(vm_id, None)
             self._save()
 
     # ---- network exposure ----------------------------------------------- #
@@ -599,6 +622,29 @@ class Registry:
             if value not in vm.allow:
                 raise VmError("vm_bad_request", f"{vm_id}는 {value}를 허용하지 않습니다")
             vm.allow.remove(value)
+            self._save()
+            return vm
+
+    # ---- shared folders (the user's) ---------------------------------------- #
+    def share_add(self, vm_id: str, share: dict) -> Vm:
+        """Store a share that ``vm_share.check_share`` accepted."""
+        with self._lock:
+            vm = self.get(vm_id)
+            if any(s["name"] == share["name"] for s in vm.shared_dirs):
+                raise VmError("vm_bad_request", f"{vm_id}에는 이미 공유 {share['name']}가 있습니다")
+            if len(vm.shared_dirs) >= vm_share.SHARE_MAX:
+                raise VmError("vm_bad_request", f"{vm_id}: 공유 폴더는 최대 {vm_share.SHARE_MAX}개입니다")
+            vm.shared_dirs.append(dict(share))
+            self._save()
+            return vm
+
+    def share_remove(self, vm_id: str, name: str) -> Vm:
+        with self._lock:
+            vm = self.get(vm_id)
+            left = [s for s in vm.shared_dirs if s["name"] != name]
+            if len(left) == len(vm.shared_dirs):
+                raise VmError("vm_bad_request", f"{vm_id}에는 공유 {name!s}가 없습니다")
+            vm.shared_dirs = left
             self._save()
             return vm
 
@@ -774,6 +820,46 @@ class Registry:
                 self._log(vm_id, session, "extra_controller", reason=reason.strip())
                 self._save()
 
+    # ---- requests for access (the session asks, the user decides) ----------- #
+    def request_add(self, vm_id: str, session: str, scopes, shares, reason: str) -> dict:
+        """A session's ask for scopes and shared folders in one go. ``shares`` are
+        records ``vm_share.check_share`` already accepted. Asking again replaces
+        the session's earlier request."""
+        with self._lock:
+            vm = self.get(vm_id)
+            if vm.locked:
+                raise locked_error(vm)
+            wanted = _normal(scopes)
+            held = set(vm.grants.get(session, []))
+            missing = [s for s in wanted if s not in held]
+            have = {s["name"] for s in vm.shared_dirs}
+            fresh = [s for s in shares if s["name"] not in have]
+            if not missing and not fresh:
+                raise VmError("vm_bad_request", "요청한 권한과 공유가 이미 모두 있습니다")
+            if len(vm.shared_dirs) + len(fresh) > vm_share.SHARE_MAX:
+                raise VmError("vm_bad_request", f"공유 폴더는 VM당 최대 {vm_share.SHARE_MAX}개입니다")
+            pending = self.requests.setdefault(vm_id, {})
+            if session not in pending and len(pending) >= REQUESTS_MAX:
+                raise VmError("vm_bad_request", f"{vm_id}에 대기 중인 요청이 너무 많습니다. 사용자가 처리한 뒤 다시 요청하십시오")
+            row = {"session": session, "scopes": missing, "shares": [dict(s) for s in fresh],
+                   "reason": _plain(reason)[:200], "at": self._clock()}
+            pending[session] = row
+            self._log(vm_id, session, "request", scopes=missing, shares=[s["name"] for s in fresh])
+            return row
+
+    def request_get(self, vm_id: str, session: str) -> Optional[dict]:
+        with self._lock:
+            self.get(vm_id)
+            return self.requests.get(vm_id, {}).get(session)
+
+    def request_drop(self, vm_id: str, session: str) -> None:
+        with self._lock:
+            self.requests.get(vm_id, {}).pop(session, None)
+
+    def request_list(self, vm_id: str) -> List[dict]:
+        with self._lock:
+            return [dict(r) for r in self.requests.get(vm_id, {}).values()]
+
     # ---- control (the session's) ----------------------------------------- #
     def acquire(self, vm_id: str, session: str) -> dict:
         with self._lock:
@@ -818,6 +904,8 @@ class Registry:
     def session_exited(self, session: str) -> None:
         """A session ended: hand back whatever it held. Grants stay."""
         with self._lock:
+            for pending in self.requests.values():
+                pending.pop(session, None)
             for vm in self._vms.values():
                 self._drop_session_control(vm, session, why="session exited")
 
@@ -953,4 +1041,13 @@ class Registry:
             return {**vm.to_dict(), "ready": vm.ready, "draining": vm.draining,
                     "inflight": vm.inflight, "net_pending": vm.net_pending(),
                     "net_applied_known": vm.net_applied is not None,
-                    "locked_but_running": vm.locked and vm.state in OCCUPIED}
+                    "locked_but_running": vm.locked and vm.state in OCCUPIED,
+                    "shared_dirs": [vm_share.public(s) for s in vm.shared_dirs],
+                    "shares_pending": vm.shares_pending(),
+                    "shares_skipped": dict(vm.shares_skipped),
+                    "requests": [{**r, "shares": [vm_share.public(s) for s in r["shares"]]}
+                                 for r in self.request_list(vm_id)]}
+
+
+# vm_share raises VmError and uses check_name, so it is imported once those exist.
+from . import vm_share  # noqa: E402
