@@ -477,7 +477,7 @@ check("...and a busy session whose last call fell out of the window has no rate 
 
 ctx.setCurrent("idleflat");
 ctx.render();
-check("a genuinely idle session still reads idle",
+check("a session that is not busy keeps the rate it last had, not working",
       overlayAreas(),
       [["term-tps-last",
         [["term-tps-big", "38.1 tok/s"],
