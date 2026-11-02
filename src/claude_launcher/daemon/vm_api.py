@@ -212,7 +212,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows")
+             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows", "cloned_from")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -256,6 +256,7 @@ async def h_list(request: web.Request) -> web.Response:
         roots, forbidden = mgr.share_rules()
         out["share_roots"] = roots
         out["share_root_rows"] = vm_share.root_rows(store.daemon_config().get("vm_share_roots"), forbidden)
+        out["presets"] = _presets(request).lineage_rows() if request.app.get("vm_presets") is not None else []
         out["share_catalog"] = [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])} for e in reg.catalog]
     return web.json_response(out)
 

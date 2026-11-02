@@ -154,6 +154,13 @@ class Presets:
                 rows.append(row)
             return rows
 
+    def lineage_rows(self) -> List[dict]:
+        """The presets as the lineage tree needs them: no ``tart list`` (that is
+        ``list``'s ``present``), so the VM page can read it with every poll."""
+        with self._lock:
+            return [{"name": p.name, "source": p.source, "created_at": p.created_at,
+                     "description": p.description} for p in sorted(self._items.values(), key=lambda p: p.name)]
+
     def get(self, name: str) -> Preset:
         item = self._items.get(name)
         if item is None:
@@ -270,7 +277,9 @@ class Presets:
             self.manager.tart_clone(item.tart_name, vm_id)
             try:
                 vm = self.registry.add(vm_id, vm_id, ssh_user=item.ssh_user,
-                                       softnet=True, cua_path=item.cua_path)
+                                       softnet=True, cua_path=item.cua_path,
+                                       cloned_from={"kind": "preset", "preset": name,
+                                                    "preset_created_at": item.created_at, "at": time.time()})
             except Exception:
                 # The copy was made by this call: only it is taken back.
                 try:

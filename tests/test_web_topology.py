@@ -415,6 +415,7 @@ CHECKS = [
         "layout_check.js",
         "bootreads_check.js",
         "vmnotice_check.js",
+        "vmlineage_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
         "p2p_check.js",

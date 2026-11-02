@@ -292,6 +292,11 @@ class Vm:
     #: by anything the daemon runs (docs/vm-hub.md). Saved; set only while the
     #: VM is stopped, and only by the user.
     locked: bool = False
+    #: Where this VM's disk was cloned from, when the daemon did the cloning:
+    #: ``{"kind": "preset", "preset": name, "preset_created_at": ts, "at": ts}``
+    #: (a VM made from a preset). ``{}`` is "no record": registered VMs, and
+    #: everything made before this field, are not guessed at. Saved.
+    cloned_from: dict = field(default_factory=dict)
     #: The guest folder file transfers are limited to ("": the default,
     #: ``/Users/<ssh_user>/work``). Saved; only the user sets it.
     files_dir: str = ""
@@ -341,6 +346,7 @@ class Vm:
             "needs_observe": self.needs_observe, "softnet": self.softnet, "locked": self.locked,
             "expose": list(self.expose), "allow": list(self.allow),
             "files_dir": self.files_dir, "shared_dirs": [dict(s) for s in self.shared_dirs],
+            "cloned_from": dict(self.cloned_from),
         }
 
     def shares_pending(self, effective: Optional[list] = None) -> bool:
@@ -378,6 +384,7 @@ class Vm:
         vm.expose = _kept(raw.get("expose"), lambda v: check_expose(*split_expose(v)))
         vm.allow = _kept(raw.get("allow"), check_allow)
         vm.shared_dirs = vm_share.load_shares(raw.get("shared_dirs"))
+        vm.cloned_from = clean_cloned_from(raw.get("cloned_from"))
         vm.locked = raw.get("locked") is True   # anything but a JSON true reads as unlocked
         try:
             vm.files_dir = check_guest_dir(raw["files_dir"]) if raw.get("files_dir") else ""
@@ -389,6 +396,19 @@ class Vm:
             for s, v in (raw.get("grants") or {}).items()
         }
         return vm
+
+
+def clean_cloned_from(raw) -> dict:
+    """A stored clone record, or ``{}`` when it is not a well-formed preset record."""
+    if not isinstance(raw, dict) or raw.get("kind") != "preset":
+        return {}
+    name = raw.get("preset")
+    try:
+        check_name("preset", name)
+        return {"kind": "preset", "preset": name,
+                "preset_created_at": float(raw.get("preset_created_at") or 0.0), "at": float(raw.get("at") or 0.0)}
+    except (TypeError, ValueError, VmError):
+        return {}
 
 
 def _kept(items, check) -> List[str]:
@@ -546,7 +566,8 @@ class Registry:
 
     # ---- records ------------------------------------------------------- #
     def add(self, vm_id: str, tart_name: str = "", *, ssh_user: str = "admin",
-            ssh_key: str = "", softnet: Optional[bool] = None, cua_path: str = "") -> Vm:
+            ssh_key: str = "", softnet: Optional[bool] = None, cua_path: str = "",
+            cloned_from: Optional[dict] = None) -> Vm:
         check_name("id", vm_id)
         check_name("tart_name", tart_name or vm_id)
         check_user(ssh_user)
@@ -558,6 +579,7 @@ class Registry:
                     ssh_key=ssh_key, softnet=softnet)
             if cua_path:
                 vm.cua_path = check_path("cua_path", cua_path)
+            vm.cloned_from = clean_cloned_from(cloned_from)
             self._vms[vm_id] = vm
             self._save()
             return vm
