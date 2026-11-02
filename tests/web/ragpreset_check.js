@@ -34,7 +34,11 @@
    migration and the delete would silently do nothing, so the button
    refuses up front and points at edit-in-place), the picker shows the
    saved count against the server's preset_max, and the add button
-   pre-empts the ceiling instead of erroring after the fact. */
+   pre-empts the ceiling instead of erroring after the fact. The redesign
+   (claunch-r4796) adds: the DB name slug shown before a save, the preset id
+   rule checked as typed, and the DB panel folded by name -- one row per
+   named DB across its corpora, a name that fills the DB field when clicked,
+   and rename/delete acting on the whole DB. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -59,7 +63,10 @@ const api = {};
 new Function("exports",
   slice("ragPresetOptionLabel") + "\n" + slice("ragPresetSummary") + "\n" +
   slice("ragBackfillTotals") + "\n" + slice("ragBackfillStateLine") + "\n" +
-  slice("ragActiveText") + "\n" +
+  slice("ragActiveText") + "\n" + slice("ragDbSlug") + "\n" + slice("ragPresetDb") + "\n" +
+  slice("ragPresetIdProblem") + "\n" + slice("ragDbGroups") + "\n" +
+  "exports.dbSlug = ragDbSlug; exports.presetDb = ragPresetDb;\n" +
+  "exports.idProblem = ragPresetIdProblem; exports.dbGroups = ragDbGroups;\n" +
   "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n" +
   "exports.totals = ragBackfillTotals; exports.stateLine = ragBackfillStateLine;\n" +
   "exports.active = ragActiveText;")(api);
@@ -145,158 +152,122 @@ check("no active record means no line",
       [api.active(null), api.active({}), api.active({ preset: "", embedding_model: "", model_key: "" })],
       ["", "", ""]);
 
-/* ---- the card wiring (source-text contract) ------------------------------ */
-check("the picker has no direct-rows option",
-      src.includes('new Option("직접 설정'), false);
-check("the picker lists the saved presets",
-      src.includes("for (const p of presets) presetSelect.append(new Option(ragPresetOptionLabel(p), p.id))"),
-      true);
-check("switching the picker only loads values — no PUT on change",
-      !slice("settingsCard").includes("presetSelect.onchange = async"),
-      true);
-check("switching reloads the fields from the chosen preset",
-      [src.includes("presetSelect.onchange = () => {"),
-       src.includes("loadPreset(presets.find(p => p.id === presetSelect.value));")],
-      [true, true]);
-check("the fieldsets stay editable under a preset",
-      !src.includes("sourceBox.disabled = customBox.disabled = profileBox.disabled = Boolean(active)"),
-      true);
-check("a save replaces the selected preset row with the screen values",
-      src.includes("body.presets = presets.map(p => p.id === id ? editedPreset(id) : p);"),
-      true);
-check("a save carries the pointer too",
-      src.includes("out.preset = presetSelect.value;"),
-      true);
-check("a save with no preset selected is refused with a hint",
-      src.includes("선택된 프리셓이 없습니다"),
-      true);
-check("model_key survives an edit only while the model is untouched",
-      src.includes('old.embedding_model === preset.embedding_model'),
-      true);
-check("a new preset appends through the settings PUT and activates",
-      src.includes("request(\"api/rag/settings\", { ...values(), presets: [...presets, preset], preset: id }, \"PUT\")"),
-      true);
-check("the save flow uses the replace-row body",
-      src.includes("testOnly ? values() : saveBody()"),
-      true);
-check("a save restarts the progress watch",
-      slice("afterSave").includes("backfillPolls = 0; watchBackfill();"),
-      true);
-check("the connection test posts the screen rows",
-      src.includes('request(testOnly ? "api/rag/test" : "api/rag/settings"'),
-      true);
-check("the progress line polls the status endpoint",
-      [src.includes('request("api/rag/status")'), src.includes("setTimeout(watchBackfill, 3000)")],
-      [true, true]);
-check("the poll gives up after a bounded number of rounds",
-      src.includes("backfillPolls < 200"),
-      true);
-check("the pause toggle posts the backfill endpoints",
-      [src.includes('"api/rag/backfill/pause"'), src.includes('"api/rag/backfill/resume"')],
-      [true, true]);
-check("the pause button reflects the polled state",
-      src.includes('pauseBtn.textContent = backfillPaused ? "재개" : "일시정지"'),
-      true);
-check("the selftest button posts the selftest endpoint with threshold",
-      src.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'),
-      true);
-check("the selftest result renders in its own line",
-      [src.includes('node("p", "", "rag-selftest-result")'), src.includes("selftestResult.hidden = false;")],
-      [true, true]);
-check("the /v1 correction's opt-out ships as a root-serving checkbox in the custom box",
-      src.includes('field("root_serving", "루트 경로에 직접 서빙 (TEI 등 — /v1 경로 없음)", "checkbox", customBox)'),
-      true);
-check("selecting a preset restores its root-serving flag",
-      src.includes("fields.root_serving.checked = p.root_serving === true;"),
-      true);
-check("the flag is saved on the preset row only when checked",
-      slice("editedPreset").includes("if (fields.root_serving.checked) preset.root_serving = true;"),
-      true);
-check("the picker shows the saved count against the server ceiling",
-      [src.includes('node("span", ` ${presets.length}/${presetMax}`, "rag-preset-count")'),
-       src.includes("Number(cfg.preset_max) > 0 ? Number(cfg.preset_max) : 20")],
-      [true, true]);
-check("a delete button sits next to the picker and asks first",
-      [src.includes('node("button", "삭제", "rag-preset-delete")'), src.includes("window.confirm")],
-      [true, true]);
-check("deletion writes the list minus the row through the settings PUT",
-      src.includes('request("api/rag/settings", { ...values(), presets: remaining, preset: next }, "PUT")'),
-      true);
-check("deleting the active preset re-points at the first remaining row",
-      src.includes('remaining.length ? remaining[0].id : ""'),
-      true);
-check("the last preset cannot be deleted — the button refuses up front",
-      [src.includes("presets.length <= 1"), src.includes("마지막 프리셓은 삭제할 수 없습니다")],
-      [true, true]);
-check("the delete success line no longer claims a direct-input default",
-      src.includes("직접 연결 값 입력이 기본이 됩니다"),
-      false);
-check("the add button pre-empts the ceiling with a reason",
-      src.includes("프리셓은 ${presetMax}개까지 저장됩니다"),
-      true);
-check("the count line refreshes after an add and a delete",
-      (src.match(/presetCount\.textContent = /g) || []).length >= 2,
-      true);
-check("the stylesheet ships the state line rule",
-      css.includes(".search-settings .rag-preset-state"), true);
-check("the preset row keeps the picker, count and delete button on one line",
-      [css.includes(".search-settings .rag-preset-row"),
-       src.includes('node("label", "프리셋", "rag-preset-row")')],
-      [true, true]);
-check("the stylesheet ships the selftest result line rule",
-      css.includes(".search-settings .rag-selftest-result"), true);
+/* ---- claunch-r4796: DB names, preset ids and the DB panel's rows ---------- */
+check("a DB name slugs the way the daemon stores it",
+      [api.dbSlug("My DB"), api.dbSlug("bambocher--embeddinggemma-2-oQ8"), api.dbSlug("  -x-  "), api.dbSlug("!!!"),
+       api.dbSlug("a".repeat(60)).length],
+      ["my-db", "bambocher-embeddinggemma-2-oq8", "x", "", 48]);
+check("a preset's DB is its db, else its model key, else its model's slug",
+      [api.presetDb({ db: "Kept", model_key: "k", embedding_model: "m" }),
+       api.presetDb({ model_key: "k", embedding_model: "m" }),
+       api.presetDb({ embedding_model: "Qwen/Qwen3-8B" }), api.presetDb(null)],
+      ["kept", "k", "qwen-qwen3-8b", ""]);
+check("a preset id follows the daemon's rule and the list's limits",
+      [api.idProblem("ok-1", [], 20), api.idProblem("", [], 20) !== "",
+       api.idProblem("Bad", [], 20) !== "", api.idProblem("-x", [], 20) !== "",
+       api.idProblem("a".repeat(33), [], 20) !== "",
+       api.idProblem("p", [{ id: "p" }], 20), api.idProblem("q", [{ id: "p" }], 1),
+       api.idProblem("p", [{ id: "p" }], 0, "p"), api.idProblem("q", [{ id: "p" }], 0, "p")],
+      ["", true, true, true, true,
+       "프리셋 p이 이미 있습니다. 다른 이름을 쓰세요.", "프리셋은 1개까지 저장됩니다. 프리셋을 삭제한 뒤 다시 시도하세요.",
+       "", ""]);
+const groups = api.dbGroups([
+  { name: "sessions.embed", identity: "embed", dims: 768, model: "embed", presets: ["a"], in_use: true, bytes: 10 },
+  { name: "all.embed", identity: "embed", dims: 768, model: "embed", presets: ["a", "b"], in_use: false, bytes: 5 },
+  { name: "sessions.old", identity: "old", dims: 1024, model: "x", presets: [], in_use: false, bytes: 1 },
+  { name: "sessions", identity: "", dims: 768, model: "Legacy M", model_key: "", presets: [], bytes: 2 },
+  null]);
+check("a named DB's corpora fold into one row; a legacy collection keeps its own",
+      groups.map(g => [g.name, g.legacy, g.fill, g.collections.length, g.dims, g.presets, g.in_use, g.bytes]),
+      [["embed", false, "embed", 2, [768], ["a", "b"], true, 15],
+       ["old", false, "old", 1, [1024], [], false, 1],
+       ["sessions", true, "legacy-m", 1, [768], [], false, 2]]);
+check("a missing list folds to no rows", api.dbGroups(undefined), []);
 
-/* ---- claunch-fhs7f.1: what a save writes, renaming, and named stores ----- */
-check("the save button says it saves the selected preset",
-      src.includes('node("button", "선택한 프리셓 저장")'),
-      true);
-check("the save result names the row it overwrote",
-      src.includes("을 덮어써 저장했습니다"),
-      true);
-check("a rename control sits with the presets and refuses a taken name",
-      [src.includes('node("button", "이름 변경")'), src.includes("이미 있습니다 — 다른 이름을 쓰세요.")],
+/* ---- the card wiring (source-text contract) ------------------------------ */
+const card = slice("settingsCard");
+check("the picker has no direct-rows option", src.includes('new Option("직접 설정'), false);
+check("switching the picker only loads values — no PUT on change",
+      [card.includes("presetSelect.onchange = async"), card.includes("presetSelect.onchange = () => {"),
+       card.includes("loadPreset(presets.find(p => p.id === presetSelect.value));")],
+      [false, true, true]);
+check("the card shows the active preset apart from the picker's selection",
+      [card.includes('let activeId = typeof cfg.preset === "string" ? cfg.preset : ""'),
+       card.includes('"활성 프리셋", "rag-summary-key"'), card.includes('selected.id === activeId ? "활성" : "비활성"')],
+      [true, true, true]);
+check("a save replaces the selected preset row with the screen values and carries the pointer",
+      [card.includes("body.presets = presets.map(p => p.id === id ? editedPreset(id) : p);"),
+       card.includes("out.preset = presetSelect.value;"), card.includes("testOnly ? values() : saveBody()")],
+      [true, true, true]);
+check("the save button names the preset it writes and that it activates it",
+      card.includes("saveBtn.textContent = selected ? `${selected.id} 저장하고 활성화` : \"저장하고 활성화\";"), true);
+check("a save with no preset selected is refused with a hint", card.includes("선택된 프리셋이 없습니다"), true);
+check("model_key survives an edit only while the model is untouched",
+      slice("editedPreset").includes("old.embedding_model === preset.embedding_model"), true);
+check("a new preset appends through the settings PUT and activates",
+      card.includes('request("api/rag/settings", { ...values(), presets: [...presets, preset], preset: id }, "PUT")'), true);
+check("preset ids are checked as typed, before any request",
+      [card.includes("ragPresetIdProblem(id, presets, presetMax)"), card.includes("sub.input.oninput")], [true, true]);
+check("the add button is disabled at the ceiling and says why",
+      [card.includes("createOpen.disabled = presets.length >= presetMax;"), card.includes("개까지 저장됩니다. 먼저 하나를 삭제하세요.")],
       [true, true]);
-check("a rename carries the old id so the daemon can move the saved secret",
-      src.includes("renamed_from: from"),
-      true);
-check("a rename moves the active pointer only when that preset was the active one",
-      [src.includes("body.preset = activeId === from ? to : activeId"),
-       src.includes('request("api/rag/settings", body, "PUT")')],
+check("the last preset cannot be deleted — disabled with a reason and refused",
+      [card.includes("deletePresetBtn.disabled = presets.length <= 1;"), card.includes("마지막 프리셋은 삭제할 수 없습니다")],
       [true, true]);
-check("the card tracks the active preset apart from the picker's selection",
-      [src.includes('let activeId = typeof cfg.preset === "string" ? cfg.preset : ""'),
-       src.includes("presetSelect.value = data.preset; activeId = data.preset;")],
+check("deletion writes the list minus the row, re-pointing only when the active one went",
+      [card.includes('request("api/rag/settings", { ...values(), presets: remaining, preset: next }, "PUT")'),
+       card.includes('wasActive ? (remaining.length ? remaining[0].id : "") : activeId')],
       [true, true]);
-check("a rename says whether the active preset moved",
-      [src.includes("활성 프리셓도 ${to}입니다"), src.includes("그대로입니다")],
+check("a preset rename carries the old id and moves the pointer only when it was active",
+      [card.includes("renamed_from: from"), card.includes("body.preset = activeId === from ? to : activeId")],
       [true, true]);
-check("the preset row carries a DB name field",
-      [src.includes('dbInput.placeholder = "DB 이름 (비우면 모델 이름에서 유도)"'),
-       slice("editedPreset").includes("if (db) preset.db = db;")],
+check("the connection test posts the screen rows and keeps the width it measured",
+      [card.includes('request(testOnly ? "api/rag/test" : "api/rag/settings"'), card.includes("testedDims = Number(data.dimensions) || 0;")],
       [true, true]);
-check("selecting a preset restores its DB name",
-      slice("loadPreset").includes('dbInput.value = p.db || "";'),
-      true);
-check("the card lists the DBs the daemon has on disk",
-      [src.includes('request("api/rag/dbs", undefined, "GET")'), src.includes("loadDbs();")],
+check("the progress line polls the status endpoint, bounded",
+      [card.includes('request("api/rag/status")'), card.includes("setTimeout(watchBackfill, 3000)"), card.includes("backfillPolls < 200")],
+      [true, true, true]);
+check("the pause toggle posts the backfill endpoints and mirrors the polled state",
+      [card.includes('"api/rag/backfill/pause"'), card.includes('"api/rag/backfill/resume"'),
+       card.includes('pauseBtn.textContent = backfillPaused ? "재개" : "일시정지"')],
+      [true, true, true]);
+check("the selftest button posts threshold/top_k/sample and renders its own line",
+      [card.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'),
+       card.includes('node("p", "", "rag-selftest-result")')],
       [true, true]);
-check("a DB row carries a delete control that asks first",
-      [src.includes('node("button", "삭제", "rag-db-delete")'), src.includes("window.confirm(`DB ${name}")],
+check("the root-serving opt-out sits in the custom box and rides the preset row",
+      [card.includes('field("root_serving", "루트 경로에 직접 서빙 (TEI 등 — /v1 경로 없음)", "checkbox", customBox,'),
+       slice("loadPreset").includes("fields.root_serving.checked = p.root_serving === true;"),
+       slice("editedPreset").includes("if (fields.root_serving.checked) preset.root_serving = true;")],
+      [true, true, true]);
+check("the DB field restores per preset and shows the name a save will store",
+      [slice("loadPreset").includes('dbInput.value = p.db || "";'), slice("editedPreset").includes("if (db) preset.db = db;"),
+       slice("showDbResolved").includes("ragDbSlug(fields.embedding_model.value)")],
+      [true, true, true]);
+check("the DB list is read from the daemon and folded by name",
+      [card.includes('request("api/rag/dbs", undefined, "GET")'), card.includes("dbGroups = ragDbGroups(data.dbs);")],
       [true, true]);
-check("a DB a preset reads cannot be deleted — the button is disabled and says why",
-      [src.includes("del.disabled = occupied"),
-       src.includes("이 DB를 쓰는 프리셓이 있어 삭제할 수 없습니다")],
+check("clicking a DB name fills the DB field",
+      [card.includes('button(g.legacy ? `${g.name} (이전 형식)` : g.name, "rag-db-use")'),
+       card.includes("dbInput.value = g.fill; showDbResolved();")],
       [true, true]);
-check("deleting a DB posts its directory name and reloads the list",
-      [src.includes('request("api/rag/dbs/delete", { name: row.name }, "POST")'), src.includes("await loadDbs();")],
+check("a DB rename posts from/to and the field follows the old name",
+      [card.includes('request("api/rag/dbs/rename", { from: g.name, to }, "POST")'),
+       card.includes("if (ragDbSlug(dbInput.value) === g.name) dbInput.value = data.db;")],
       [true, true]);
-check("the stylesheet ships the rename, db and list rules",
-      [css.includes(".search-settings .rag-preset-rename"),
-       css.includes(".search-settings .rag-preset-db"),
-       css.includes(".search-settings .rag-db-list"),
-       css.includes(".search-settings .rag-db-entry"),
-       css.includes(".search-settings .rag-db-delete")],
-      [true, true, true, true, true]);
+check("a DB delete asks first, takes the whole named DB and is disabled while read",
+      [card.includes("window.confirm(`DB ${g.name}"), card.includes("g.legacy ? { name: g.name } : { db: g.name }"),
+       card.includes("del.disabled = occupied;"), card.includes("이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다")],
+      [true, true, true, true]);
+check("no node() call passes a class name as its text (the 'rag-preset-db' label leak)",
+      /node\("(?:p|div|span)", "rag-[a-z-]+"\)/.test(src), false);
+check("the stylesheet ships the card's rules",
+      [".search-settings .rag-summary", ".search-settings .rag-hint", ".search-settings .rag-preset-row",
+       ".search-settings .rag-preset-state", ".search-settings .rag-selftest-result", ".search-settings .rag-db-table",
+       ".search-settings .rag-db-use", ".search-settings .rag-db-scroll"].map(rule => css.includes(rule)),
+      [true, true, true, true, true, true, true, true]);
+check("the stale per-entry flex rule is gone (it broke the table rows)",
+      css.includes(".search-settings .rag-db-entry { display: flex"), false);
 
 if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
 console.log("ragpreset ok");

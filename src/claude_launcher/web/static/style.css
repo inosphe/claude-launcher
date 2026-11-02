@@ -8531,26 +8531,62 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
 }
 .search-anything-filter-count { font-variant-numeric: tabular-nums; opacity: .75; }
-.search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+/* Search settings card (claunch-r4796): numbered sections, a summary of what
+   is in force at the top, a hint line under every field that says its rule,
+   and the DB panel as a table whose names fill the DB field when clicked. */
+.search-settings .rag-summary { display: flex; flex-direction: column; gap: 6px; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+.search-settings .rag-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; }
+.search-settings .rag-summary-key { flex: none; width: 88px; color: #9da5b0; font-size: 12px; }
+.search-settings .rag-summary-value { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.search-settings .rag-status { min-height: 1em; margin: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+.search-settings .rag-status:empty { display: none; }
+.search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 2px; }
+.search-settings .rag-field-title { font-size: 13px; font-weight: 600; }
 .search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
-.search-settings input[type=checkbox] { align-self: flex-start; }
-.search-settings fieldset { border: 1px solid var(--border, #ccc); border-radius: 6px; margin: 10px 0; padding: 4px 12px; min-width: 0; }
-.search-settings fieldset[hidden] { display: none; }
-.search-settings label:has(> input[type=radio]) { flex-direction: row; align-items: center; gap: 6px; }
-.search-settings select { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
-.search-settings button { margin-right: 8px; }
-/* The active-model/backfill line under the card title (preset picker,
-   claunch-7m5v8). */
-.search-settings .rag-preset-row { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
-.search-settings .rag-preset-state { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
+.search-settings select { max-width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; font-size: 16px; }
+.search-settings fieldset.rag-section, .search-settings details.rag-section { border: 1px solid var(--border, #30363d); border-radius: 6px; margin: 12px 0; padding: 4px 12px 10px; min-width: 0; }
+.search-settings legend, .search-settings details.rag-section > summary { font-weight: 600; font-size: 14px; padding: 0 4px; }
+.search-settings details.rag-section > summary { cursor: pointer; padding: 6px 0; }
+.search-settings [hidden] { display: none !important; }
+.search-settings .rag-hint { color: var(--muted, #9da5b0); font-size: 12px; margin: 2px 0 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.search-settings .rag-hint-inline { color: var(--muted, #9da5b0); font-size: 12px; }
+.search-settings .rag-problem { color: #f0883e; font-size: 12px; margin: 2px 0; }
+.search-settings .rag-problem:empty { display: none; }
+.search-settings .rag-check { flex-direction: row; align-items: center; gap: 8px; }
+.search-settings .rag-check input { flex: none; margin: 0; }
+.search-settings .rag-radio { flex-direction: row; align-items: flex-start; gap: 8px; margin: 8px 0; }
+.search-settings .rag-radio input { flex: none; margin-top: 3px; }
+.search-settings .rag-source-box { border-left: 2px solid #30363d; padding-left: 12px; margin: 4px 0 4px 4px; }
+.search-settings .rag-preset-row { flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
+.search-settings .rag-preset-row select { flex: 1 1 220px; }
+.search-settings .rag-preset-count { color: var(--muted, #9da5b0); font-size: 12px; }
+.search-settings .rag-badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid #30363d; color: #9da5b0; }
+.search-settings .rag-badge:empty { display: none; }
+.search-settings .rag-badge-on { border-color: #238636; color: #3fb950; }
+.search-settings .rag-badge-warn { display: block; width: max-content; border-color: #9e6214; color: #f0883e; margin-top: 2px; }
+.search-settings .rag-actions-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.search-settings .rag-actions-row .wf-btn { margin: 0; }
+.search-settings .rag-actions-row input { flex: 1 1 160px; min-width: 0; }
+.search-settings .rag-subform { border: 1px dashed #30363d; border-radius: 6px; padding: 4px 10px 6px; margin: 6px 0; }
+.search-settings .rag-footer { margin-top: 12px; }
+.search-settings .wf-btn:disabled { opacity: .5; cursor: default; }
+.search-settings .rag-preset-state { flex: 1 1 200px; min-width: 0; color: inherit; font-size: 13px; }
 .search-settings .rag-selftest-result { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
-/* Rename and the named-store line (claunch-fhs7f.1) — a row of controls
-   under the picker, and the list of collections the daemon has on disk. */
-.search-settings .rag-preset-rename { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
-.search-settings .rag-preset-db { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
-.search-settings .rag-db-list { display: flex; flex-direction: column; gap: 2px; color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
-.search-settings .rag-db-entry { display: flex; align-items: center; gap: 6px; margin: 0; }
-.search-settings .rag-db-delete { font-size: 11px; padding: 1px 6px; }
+.search-settings .rag-preset-db input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.search-settings .rag-db-list { margin: 6px 0 0; }
+.search-settings .rag-db-scroll { overflow-x: auto; }
+.search-settings .rag-db-table { width: 100%; min-width: 600px; border-collapse: collapse; font-size: 12px; }
+.search-settings .rag-db-table th { text-align: left; font-weight: 600; color: #9da5b0; padding: 4px 6px; border-bottom: 1px solid #30363d; white-space: nowrap; }
+.search-settings .rag-db-table td { padding: 4px 6px; border-bottom: 1px solid #21262d; vertical-align: middle; overflow-wrap: anywhere; }
+.search-settings .rag-db-entry td:nth-child(2), .search-settings .rag-db-entry td:nth-child(5) { white-space: nowrap; }
+.search-settings .rag-db-use { white-space: nowrap; background: none; border: none; padding: 0; margin: 0; color: #58a6ff; cursor: pointer; font: inherit; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.search-settings .rag-db-use:hover:not(:disabled) { text-decoration: underline; }
+.search-settings .rag-db-use:disabled { color: inherit; cursor: default; }
+.search-settings .rag-db-use[aria-pressed="true"] { font-weight: 700; }
+.search-settings .rag-db-use[aria-pressed="true"] { box-shadow: inset 0 -2px 0 #3fb950; }
+.search-settings .rag-db-actions { white-space: nowrap; text-align: right; }
+.search-settings .rag-db-actions .wf-btn { margin: 0 0 0 4px; }
+.search-settings .rag-db-rename-row td { background: rgba(110, 118, 129, .08); }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
 @media (max-width: 820px) {
   .search-anything input { font-size: 16px; height: 36px; }

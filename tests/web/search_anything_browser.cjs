@@ -31,7 +31,21 @@ const cfg = {source:'custom', profile:'', profiles:[{name:'ds4', base_url:'https
   // claunch-pxxn4: each connection path keeps its own model ids, so switching
   // the radio restores that path's pair instead of showing the other one's.
   sources:{custom:{base_url:'http://omlx/v1', embedding_model:'embed', rerank_model:'rank'},
-           profile:{profile:'', embedding_model:'fw-embed', rerank_model:''}}};
+           profile:{profile:'', embedding_model:'fw-embed', rerank_model:''}},
+  // The card is preset-only (claunch-rag-preset-always-hn5bc): the picker
+  // addresses one preset and the save writes it back and makes it active.
+  presets:[{id:'omlx', source:'custom', base_url:'http://omlx/v1', embedding_model:'embed', rerank_model:'rank'},
+           {id:'fw', source:'profile', profile:'ds4', embedding_model:'fw-embed', db:'shared'}],
+  preset:'omlx', preset_max:20};
+// The collections on disk as GET api/rag/dbs reports them: one named DB spread
+// over two corpora, one per other preset, one nobody reads, and one built
+// before presets existed (claunch-r4796).
+let dbs = [
+  {name:'sessions.embed', corpus:'sessions', identity:'embed', dims:2560, model:'embed', model_key:'embed', presets:['omlx'], in_use:true, bytes:1048576},
+  {name:'all.embed', corpus:'all', identity:'embed', dims:2560, model:'embed', model_key:'embed', presets:['omlx'], in_use:true, bytes:2048},
+  {name:'sessions.shared', corpus:'sessions', identity:'shared', dims:768, model:'fw-embed', model_key:'fw-embed', presets:['fw'], in_use:false, bytes:4096},
+  {name:'sessions.old', corpus:'sessions', identity:'old', dims:768, model:'x', model_key:'x', presets:[], in_use:false, bytes:10},
+  {name:'sessions', corpus:'sessions', identity:'', dims:768, model:'Legacy M', model_key:'', presets:[], in_use:false, bytes:10}];
 const server = http.createServer(async (req,res) => {
   if (req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); res.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body>
     <aside style="width:260px">${rail}</aside><input id="editor"><div class="xterm"><textarea id="terminal"></textarea></div><div id="settings"></div>
@@ -104,7 +118,19 @@ const server = http.createServer(async (req,res) => {
     }
     cfg.source = writes.at(-1).body.source;
     cfg.profile = cfg.sources.profile.profile || '';
+    const body = writes.at(-1).body;
+    if (Array.isArray(body.presets)) cfg.presets = body.presets.map(({api_key, renamed_from, ...row}) => row);
+    if (typeof body.preset === 'string') cfg.preset = body.preset;
     res.end(JSON.stringify(cfg));return;
+  }
+  if(req.url==='/api/rag/status') {res.end(JSON.stringify({indexes:[{kind:'sessions',pending:3,total:10}],active:{preset:cfg.preset},backfill_paused:false}));return;}
+  if(req.url==='/api/rag/dbs') {res.end(JSON.stringify({dbs}));return;}
+  if(req.url==='/api/rag/dbs/rename') {
+    const {from, to} = writes.at(-1).body;
+    dbs = dbs.map(row => row.identity === from ? {...row, identity: to, name: `${row.corpus}.${to}`} : row);
+    const moved = cfg.presets.filter(p => (p.db || p.embedding_model) === from).map(p => p.id);
+    for (const p of cfg.presets) if (moved.includes(p.id)) p.db = to;
+    res.end(JSON.stringify({renamed: from, db: to, presets: moved, dbs}));return;
   }
   if(req.url==='/api/rag/settings') {res.end(JSON.stringify(cfg));return;}
   if(req.url==='/api/rag/test') {res.end(JSON.stringify({ok:true,dimensions:2560,rerank:true}));return;}
@@ -268,39 +294,123 @@ const server = http.createServer(async (req,res) => {
     }
     await page.keyboard.press('Escape');
     await page.evaluate(()=>document.querySelector('#settings').append(SearchAnything.settingsCard()));
-    await page.locator('input[name=embedding_model]').waitFor();await page.locator('input[name=embedding_model]').fill('replacement');
-    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'replacement');
+    const card = page.locator('.search-settings');
+    const embed = page.locator('input[name=embedding_model]'), dbField = page.locator('input[name=db]');
+    await embed.waitFor();
+    // The active preset loads first and is marked active; the summary names it.
+    assert.equal(await page.locator('select[name=preset]').inputValue(),'omlx');
+    assert.equal(await embed.inputValue(),'embed');
+    assert.equal(await card.locator('.rag-badge-on').textContent(),'활성');
+    await card.locator('.rag-summary-value').filter({hasText:'omlx'}).waitFor();
+    await card.locator('.rag-preset-state').filter({hasText:'남은 문서 3 / 10건'}).waitFor();
+    // No stray class names leak into the text (the old card printed
+    // "rag-preset-db" and "rag-preset-rename" as labels).
+    assert.equal(/rag-preset-|rag-db-/.test(await card.innerText()),false);
+    await embed.fill('replacement');
     await page.evaluate(()=>{document.querySelector('#settings').replaceChildren();document.querySelector('#settings').append(SearchAnything.settingsCard());});
-    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'replacement');
+    assert.equal(await embed.inputValue(),'replacement');
     assert.equal(await page.locator('input[name=dimensions]').count(),0);
-    await page.getByRole('button',{name:'연결 테스트',exact:true}).click();await page.getByText(/실제 차원 2560/).waitFor();
-    await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
+    // An empty DB field says the name the model gives it.
+    await card.getByText('저장되는 DB: replacement (Embedding 모델 이름에서 만든 이름)').waitFor();
+    // The DB list folds a DB's corpora into one row; a legacy collection is its own row.
+    const dbRows = card.locator('.rag-db-entry');
+    await dbRows.first().waitFor();
+    assert.deepEqual(await card.locator('.rag-db-use').allTextContents(),['embed','shared','old','sessions (이전 형식)']);
+    assert.equal(await dbRows.filter({hasText:'shared'}).locator('.rag-db-delete').isDisabled(),true);
+    assert.equal(await dbRows.filter({hasText:'old'}).locator('.rag-db-delete').isDisabled(),false);
+    // The connection test reports the model's width and marks DBs of another width.
+    await card.getByRole('button',{name:'연결 테스트',exact:true}).click();
+    await card.getByText(/이 모델의 차원 2560/).waitFor();
+    assert.equal(await dbRows.filter({hasText:'shared'}).getByText('차원 불일치').count(),1);
+    assert.equal(await dbRows.nth(0).getByText('차원 불일치').count(),0);
+    // Clicking a DB name fills the field; the legacy row fills its model's slug.
+    await card.getByRole('button',{name:'shared',exact:true}).click();
+    assert.equal(await dbField.inputValue(),'shared');
+    await card.getByText(/DB 이름 칸에 shared을 채웠습니다.*2560차원이라 저장이 거절됩니다/).waitFor();
+    assert.equal(await card.getByRole('button',{name:'shared',exact:true}).getAttribute('aria-pressed'),'true');
+    await card.getByRole('button',{name:'sessions (이전 형식)',exact:true}).click();
+    assert.equal(await dbField.inputValue(),'legacy-m');
+    await dbField.fill('My DB');
+    await card.getByText('저장되는 DB: my-db (입력한 이름을 변환함)').waitFor();
+    await card.getByRole('button',{name:'omlx 저장하고 활성화',exact:true}).click();
+    await card.getByText(/프리셋 omlx을 저장했고 활성 프리셋이 됐습니다/).waitFor();
     // claunch-pxxn4: the save carries both rows, the picked one taking what is
-    // on screen and the other keeping what it had.
-    assert.equal(writes.at(-1).body.embedding_model,undefined);
-    assert.equal(writes.at(-1).body.sources.custom.embedding_model,'replacement');
-    assert.equal(writes.at(-1).body.sources.custom.api_key,undefined);
-    assert.equal(writes.at(-1).body.source,'custom');
-    // claunch-dkrqf: the profile path hides the typed endpoint and sends both paths' values.
+    // on screen; the selected preset's row is replaced and stays active.
+    let body = writes.at(-1).body;
+    assert.equal(writes.at(-1).url,'/api/rag/settings');
+    assert.equal(body.embedding_model,undefined);
+    assert.equal(body.sources.custom.embedding_model,'replacement');
+    assert.equal(body.sources.custom.api_key,undefined);
+    assert.equal(body.source,'custom');
+    assert.equal(body.preset,'omlx');
+    assert.deepEqual(body.presets.map(p=>[p.id,p.embedding_model,p.db]),[['omlx','replacement','My DB'],['fw','fw-embed','shared']]);
+    // claunch-dkrqf: the profile path hides the typed endpoint.
     assert.equal(await page.locator('select[name=profile]').isVisible(),false);
-    await page.getByLabel('Profile (provider)').check();
+    await page.locator('input[name=rag-source][value=profile]').check();
     assert.equal(await page.locator('input[name=base_url]').isVisible(),false);
-    // Switching the radio shows that path's own model ids.
-    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'fw-embed');
     await page.locator('select[name=profile]').selectOption('ds4');
-    await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
-    assert.equal(writes.at(-1).body.source,'profile');
-    assert.equal(writes.at(-1).body.sources.profile.profile,'ds4');
-    assert.equal(writes.at(-1).body.sources.profile.embedding_model,'fw-embed');
-    // The custom path keeps the value typed before the switch.
-    assert.equal(writes.at(-1).body.sources.custom.base_url,'http://omlx/v1');
-    assert.equal(writes.at(-1).body.sources.custom.embedding_model,'replacement');
-    // Switching back restores the custom pair rather than the profile's.
-    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'fw-embed');
-    await page.getByLabel('Custom API (직접 입력)').check();
-    assert.equal(await page.locator('input[name=embedding_model]').inputValue(),'replacement');
-    await page.getByLabel('Custom API (직접 입력)').check();
+    await card.getByRole('button',{name:'omlx 저장하고 활성화',exact:true}).click();
+    await page.waitForFunction(n=>document.querySelector('.rag-status').textContent.includes('저장했고'),null);
+    body = writes.at(-1).body;
+    assert.equal(body.source,'profile');
+    assert.equal(body.sources.profile.profile,'ds4');
+    assert.equal(body.presets[0].source,'profile');
+    assert.equal(body.presets[0].profile,'ds4');
+    await page.locator('input[name=rag-source][value=custom]').check();
     assert.equal(await page.locator('input[name=base_url]').isVisible(),true);
+    // Picking another preset only loads it: no write, and it reads as not active.
+    const writesBefore = writes.length;
+    await page.locator('select[name=preset]').selectOption('fw');
+    assert.equal(writes.length, writesBefore);
+    assert.equal(await card.locator('.rag-badge').first().textContent(),'비활성');
+    assert.equal(await embed.inputValue(),'fw-embed');
+    assert.equal(await dbField.inputValue(),'shared');
+    await card.getByRole('button',{name:'fw 저장하고 활성화',exact:true}).waitFor();
+    // Renaming a DB: the slug shows as it is typed, a taken name is refused
+    // before the request, and the field follows when it held the old name.
+    await dbRows.filter({hasText:'shared'}).getByRole('button',{name:'이름 변경'}).click();
+    const renameRow = card.locator('.rag-db-rename-row');
+    await renameRow.locator('input').fill('Old');
+    await renameRow.getByText('DB old이 이미 있습니다.').waitFor();
+    assert.equal(await renameRow.getByRole('button',{name:'이름 변경'}).isDisabled(),true);
+    await renameRow.locator('input').fill('Shared Two');
+    await renameRow.getByText('저장되는 이름: shared-two').waitFor();
+    await renameRow.getByRole('button',{name:'이름 변경'}).click();
+    await card.getByText(/DB shared의 이름을 shared-two으로 바꿨습니다.*\(fw\)/).waitFor();
+    assert.deepEqual(writes.at(-1),{url:'/api/rag/dbs/rename',body:{from:'shared',to:'shared-two'}});
+    assert.equal(await dbField.inputValue(),'shared-two');
+    await card.getByRole('button',{name:'shared-two',exact:true}).waitFor();
+    // Deleting a DB nobody reads takes the whole DB by name.
+    page.once('dialog', dialog => dialog.accept());
+    await dbRows.filter({hasText:'old'}).locator('.rag-db-delete').click();
+    await page.waitForFunction(()=>document.querySelector('.rag-status').textContent.includes('삭제'),null);
+    assert.deepEqual(writes.at(-1),{url:'/api/rag/dbs/delete',body:{db:'old'}});
+    // Renaming a preset: the rule shows before the request; the active pointer stays.
+    const presetBox = card.locator('fieldset.rag-section').first();
+    await presetBox.getByRole('button',{name:'이름 변경',exact:true}).click();
+    const presetRename = presetBox.locator('.rag-subform').first();
+    await presetRename.locator('input').fill('Bad Name');
+    await presetRename.getByText(/영문 소문자·숫자로 시작하고/).first().waitFor();
+    await presetRename.locator('input').fill('omlx');
+    await presetRename.getByText('프리셋 omlx이 이미 있습니다. 다른 이름을 쓰세요.').waitFor();
+    await presetRename.locator('input').fill('fw2');
+    await presetRename.getByRole('button',{name:'이름 변경',exact:true}).click();
+    await card.getByText(/프리셋 fw의 이름을 fw2으로 바꿨습니다.*활성 프리셋은 omlx 그대로입니다/).waitFor();
+    body = writes.at(-1).body;
+    assert.equal(body.preset,'omlx');
+    assert.deepEqual(body.presets.map(p=>[p.id,p.renamed_from]),[['omlx',undefined],['fw2','fw']]);
+    if (process.env.CLAUNCH_SETTINGS_SHOT) {
+      await page.setViewportSize({width:900,height:2400});
+      await page.screenshot({path:process.env.CLAUNCH_SETTINGS_SHOT, clip: await card.boundingBox()});
+    }
+    // At phone width the card does not scroll sideways; the DB table scrolls in its own box.
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await card.evaluate(n=>n.scrollWidth<=n.clientWidth+1));
+    if (process.env.CLAUNCH_SETTINGS_SHOT) {
+      await page.setViewportSize({width:390,height:3200});
+      await page.screenshot({path:process.env.CLAUNCH_SETTINGS_SHOT.replace(/\.png$/,'-mobile.png'), clip: await card.boundingBox()});
+    }
+    await page.setViewportSize({width:1280,height:720});
     await page.locator('#search-anything-open').click();
     await page.locator('dialog input[type=search]').fill('grouped');await page.keyboard.press('Enter');
     await page.locator('dialog .search-anything-matches').waitFor();
