@@ -149,7 +149,8 @@ def test_confirm_writes_each_kind_into_its_store(home, tmp_path):
         assert category.where(ws(), "session", "s1").get("node") is None
 
         listed = await call("/api/wrapup?session=s1")
-        assert listed["unresolved"] == 3 and listed["counts"] == {"glossary": 1, "category": 1, "knowledge": 1}
+        assert listed["unresolved"] == 3 and listed["counts"] == {"glossary": 1, "category": 1, "knowledge": 1,
+                                                            "retrospection": 0}
 
         await call(f"/api/wrapup/{g['id']}/confirm", {"session": "s1", "revision": 1}, status=403)
         done = (await call(f"/api/wrapup/{g['id']}/confirm", {"revision": 1}))["draft"]

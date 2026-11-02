@@ -1133,13 +1133,25 @@ def _cmd_retro(args: argparse.Namespace) -> int:
     run did not end normally, so it was never asked by the run's last node.
     ``--print`` writes the same text to stdout instead and touches nothing:
     that is how a run's node has the agent read it in its own turn.
+
+    The pack ends by recording the retrospective on the dashboard's
+    Retrospection page (claunch-lmnlv). Sent bare, the daemon heads the block
+    with ``auto record=true``: the person who sent it asked for it, so it is
+    recorded at once; ``--review`` makes it a wrap-up draft the person
+    confirms. ``--print`` (the run's node) names no value: the node gives its
+    run input ``retrospection_auto_record``.
     """
     name = _resolve_session(args)
     if not name:
         return 2
     path = f"/api/sessions/{quote(name, safe='')}/retrospective"
+    query = {}
     if args.pack:
-        path += "?" + urlencode({"pack": args.pack})
+        query["pack"] = args.pack
+    if getattr(args, "review", False) and not args.print:
+        query["auto"] = "0"
+    if query:
+        path += "?" + urlencode(query)
     try:
         client = daemon_client.ensure_running()
         if args.print:
@@ -3884,6 +3896,11 @@ def register(sub) -> None:
     p_retro.add_argument(
         "--pack", default="",
         help="another on-demand pack id (default: retrospective)",
+    )
+    p_retro.add_argument(
+        "--review", action="store_true",
+        help="leave the Retrospection record as a wrap-up draft for you to "
+             "confirm instead of recording it at once (the default)",
     )
     p_retro.set_defaults(func=_cmd_retro)
 

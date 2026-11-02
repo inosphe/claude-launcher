@@ -1,9 +1,11 @@
 """MCP tools for session wrap-up drafts (claunch-ar8jn).
 
 Thin clients of the daemon's ``/api/wrapup`` routes. A session files a
-glossary term, a category placement or a knowledge record as a draft; the
-user edits, discards or confirms it in the session's wrap-up pane, and only
-a confirm writes it into the workspace store. A session cannot confirm.
+glossary term, a category placement, a knowledge record or a retrospective
+as a draft; the user edits, discards or confirms it in the session's wrap-up
+pane, and only a confirm writes it into the workspace store. A session
+cannot confirm -- except that a retrospective filed with ``auto`` is
+confirmed by the daemon at once (claunch-lmnlv).
 """
 
 from __future__ import annotations
@@ -22,19 +24,27 @@ _PAYLOAD = {
                    "glossary = glossary_suggest {term, definition, aliases?, source?}; "
                    "knowledge = knowledge_record {kind, title, body, tags?, refs?, source?, supersedes?}; "
                    "category = category_assign {node_id | new | fold | split | group, items?, reason?} "
-                   "(items default to this session and its issue)",
+                   "(items default to this session and its issue); "
+                   "retrospection = {title, body (markdown), trigger? run|manual, run?, workflow?, issue?, "
+                   "problems?, proposals?, tags?}",
 }
 
 TOOLS = [
     {"name": "wrapup_draft",
-     "description": "File a wrap-up draft for the user to confirm: a glossary term, a category placement or "
-                    "a knowledge record. Nothing reaches the workspace store until the user confirms it in "
-                    "your wrap-up pane; what the user does to it (edit, delete, confirm) arrives as a "
-                    "\"[claunch wrapup]\" block. Returns the draft (id, revision).",
+     "description": "File a wrap-up draft for the user to confirm: a glossary term, a category placement, "
+                    "a knowledge record or a session retrospective. Nothing reaches the workspace store until "
+                    "the user confirms it in your wrap-up pane; what the user does to it (edit, delete, "
+                    "confirm) arrives as a \"[claunch wrapup]\" block. A retrospection filed with auto=true "
+                    "is confirmed by the daemon at once, without the user (the reply's draft.status says "
+                    "confirmed, or failed and why). Returns the draft (id, revision, status).",
      "inputSchema": {"type": "object", "properties": {
-         "kind": {"type": "string", "enum": ["glossary", "category", "knowledge"]},
+         "kind": {"type": "string", "enum": ["glossary", "category", "knowledge", "retrospection"]},
          "payload": _PAYLOAD,
          "reason": {"type": "string", "description": "one line for the user: why this entry"},
+         "auto": {"type": "boolean",
+                  "description": "retrospection only: confirm it at once, without the user (default false). "
+                                 "Give the value your instructions name (a run's retrospection_auto_record, "
+                                 "a sent block's 'auto record:' line); refused for the other kinds"},
      }, "required": ["kind", "payload"]}},
     {"name": "wrapup_update",
      "description": "Rewrite one of your drafts while it waits on the user (draft or failed). "
@@ -105,7 +115,7 @@ def _call(c, me: str, name: str, args: dict) -> dict:
         q = {"session": me, "settled": "1" if args.get("settled") else "0"}
         return c.get("/api/wrapup?" + urllib.parse.urlencode(q))
     if name == "wrapup_draft":
-        body = {k: args[k] for k in ("kind", "payload", "reason") if k in args}
+        body = {k: args[k] for k in ("kind", "payload", "reason", "auto") if k in args}
         return c.post("/api/wrapup", {**body, "session": me})
     if name == "wrapup_update":
         body = {k: args[k] for k in ("revision", "payload", "reason") if k in args}

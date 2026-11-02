@@ -994,7 +994,10 @@ def test_routes_keep_on_demand_packs_out_of_openings_and_send_them_later(home, t
             mgr.get("r1").deliver = deliver
             resp = await client.post("/api/sessions/r1/retrospective", headers=BEARER)
             assert (await resp.json())["delivered"] is True
-            assert typed == [doc["block"]]
+            # The sent block is the read one plus the header line the pack's
+            # record step reads (claunch-lmnlv): a person's send records at once.
+            assert typed == [prompt_packs.with_header_line(
+                doc["block"], "retrospection: trigger=manual, auto record=true")]
             # Sent, not recorded: the session's reminders do not restate it.
             assert all(r["id"] != "retrospective"
                        for r in mgr.get("r1").sdef.prompt_packs or ())

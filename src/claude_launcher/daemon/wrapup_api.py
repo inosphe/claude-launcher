@@ -1,10 +1,10 @@
 """Session wrap-up routes (claunch-ar8jn): drafts a session files for the
-workspace glossary, category tree and knowledge records, confirmed by the
-user in the session's wrap-up pane.
+workspace glossary, category tree, knowledge records and retrospectives,
+confirmed by the user in the session's wrap-up pane.
 
   GET  /api/wrapup?session=<name>[&settled=0]  one session's drafts
   GET  /api/wrapup/rail                        per session: unresolved counts, ended_at, alive
-  POST /api/wrapup                             file     {session, kind, payload, reason?}
+  POST /api/wrapup                             file     {session, kind, payload, reason?, auto?}
   POST /api/wrapup/confirm-all                 confirm  {target, kind?}               (the user)
   POST /api/wrapup/{id}                        edit     {session?, revision, payload?, reason?}
   POST /api/wrapup/{id}/discard                discard  {session?, revision}
@@ -16,11 +16,17 @@ the user (the dashboard). A session files, edits and withdraws its own
 drafts; only the user confirms.
 
 A confirm writes the draft's payload into its store -- glossary.create,
-knowledge.create, or the category operation category_assign would have run
-(:func:`category_assign.apply_body`) -- in the workspace the session stood
+knowledge.create, retrospection.create, or the category operation
+category_assign would have run (:func:`category_assign.apply_body`) -- in the workspace the session stood
 in when it filed the draft. A store that refuses it (a label already taken,
 a node that moved) leaves the draft ``failed`` with the store's message;
 the user edits it and confirms again.
+
+``auto`` (retrospection drafts only, claunch-lmnlv): the filing itself is
+followed by the daemon's confirm, as ``auto`` rather than the user, so the
+record is written with no one at the pane. The session gets the result in
+the filing's reply (``draft.status`` confirmed or failed), not as a typed
+block: it is its own request. A failed one waits on the user as usual.
 
 What the user does to a draft is typed into the owning session as a
 ``[claunch wrapup]`` block while it runs, so the agent does not file the
@@ -40,7 +46,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import category, glossary, knowledge, workspaces
+from .. import category, glossary, knowledge, retrospection, workspaces
 from ..wrapup import store as wrapup_store
 from . import category_assign, paths
 from .qa_api import Outbox
@@ -56,6 +62,8 @@ def _payload_line(d: dict) -> str:
         return f"term \"{p.get('term', '')}\""
     if d["kind"] == "knowledge":
         return f"{p.get('kind', '')} \"{p.get('title', '')}\""
+    if d["kind"] == "retrospection":
+        return f"retrospective \"{p.get('title', '')}\""
     for op in wrapup_store.CATEGORY_OPS:
         if op in p:
             target = p[op] if op == "node_id" else (p[op].get("label") or "")
@@ -100,6 +108,10 @@ def apply(d: dict) -> dict:
         ws = knowledge.workspace(name=d["workspace"])
         rec = knowledge.create(ws, payload, author=d["session"])
         return {"workspace": ws.name, "id": rec["id"], "title": rec["title"]}
+    if d["kind"] == "retrospection":
+        rec = retrospection.create(workspace=d["workspace"], session=d["session"], payload=payload,
+                                   draft=d["id"], auto=bool(d.get("_auto")))
+        return {"workspace": rec["workspace"], "id": rec["id"], "title": rec["title"]}
     ws = category.workspace(name=d["workspace"])
     items = payload.pop("items", None) or [{"kind": "session", "ref": d["session"]}]
     reason = payload.pop("reason", "") or d.get("reason") or ""
@@ -107,7 +119,8 @@ def apply(d: dict) -> dict:
     return {"workspace": ws.name, "items": items, **result}
 
 
-STORE_ERRORS = (glossary.GlossaryError, knowledge.KnowledgeError, category.CategoryError,
+STORE_ERRORS = (glossary.GlossaryError, knowledge.KnowledgeError, retrospection.RetrospectionError,
+                category.CategoryError,
                 category_assign.AssignError, wrapup_store.WrapupError)
 
 
@@ -179,16 +192,17 @@ def install(app, store: Optional[wrapup_store.WrapupStore] = None):
                 doc["current"] = exc.current
             return None, web.json_response(doc, status=exc.status, dumps=dumps)
 
-    async def confirm_one(d: dict) -> dict:
-        """Claimed draft ``d`` (status applying) written and settled."""
+    async def confirm_one(d: dict, by: str = wrapup_store.USER) -> dict:
+        """Claimed draft ``d`` (status applying) written and settled, by the
+        user or (``by`` AUTO) the daemon's own confirm of an ``auto`` draft."""
         try:
-            applied = await asyncio.to_thread(apply, d)
+            applied = await asyncio.to_thread(apply, {**d, "_auto": by == wrapup_store.AUTO})
         except STORE_ERRORS as exc:
             return await asyncio.to_thread(wrap.settle, d["id"], error=str(exc))
         except Exception as exc:  # noqa: BLE001 -- settle it rather than leave it applying
             log.exception("wrapup: applying %s failed", d["id"])
             return await asyncio.to_thread(wrap.settle, d["id"], error=f"{type(exc).__name__}: {exc}")
-        return await asyncio.to_thread(wrap.settle, d["id"], applied=applied)
+        return await asyncio.to_thread(wrap.settle, d["id"], applied=applied, by=by)
 
     async def h_list(request):
         session = request.query.get("session") or ""
@@ -226,9 +240,17 @@ def install(app, store: Optional[wrapup_store.WrapupStore] = None):
             # What "this session" means in the tree, fixed now: the issue the
             # session holds at filing time, not at the user's confirm.
             payload = {**payload, "items": category_assign.items_for(s)}
+        auto = body.get("auto", False)
         res, err = await call(wrap.draft, actor, kind=body.get("kind"), payload=payload,
-                              workspace=ws, reason=body.get("reason"))
-        return err or web.json_response({"draft": res}, dumps=dumps)
+                              workspace=ws, reason=body.get("reason"), auto=auto)
+        if err:
+            return err
+        if auto is True:
+            claimed, err = await call(wrap.claim, wrapup_store.AUTO, res["id"], res["revision"])
+            if err:
+                return err
+            res = await confirm_one(claimed, by=wrapup_store.AUTO)
+        return web.json_response({"draft": res}, dumps=dumps)
 
     async def h_update(request):
         body = await body_of(request)

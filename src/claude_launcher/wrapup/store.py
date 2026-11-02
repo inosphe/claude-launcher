@@ -1,8 +1,8 @@
 """Session wrap-up drafts (claunch-ar8jn).
 
-A session's round leaves entries for three workspace-wide stores: glossary
-terms (glossary.py), category placements (category.py) and knowledge records
-(knowledge.py). Those stores are shared by every session of the workspace,
+A session's round leaves entries for four workspace-wide stores: glossary
+terms (glossary.py), category placements (category.py), knowledge records
+(knowledge.py) and retrospectives (retrospection.py, claunch-lmnlv). Those stores are shared by every session of the workspace,
 so an entry a session writes straight into them is a change nobody looked
 at. Here the session files a *draft* instead: a row the dashboard draws in
 the session's wrap-up pane, where the user edits it, discards it or confirms
@@ -24,6 +24,15 @@ Status:
   failed     the store refused it (``error`` says why); editable, and a
              confirm tries again
   discarded  the user deleted it, or the session withdrew it
+
+Automatic confirm. A retrospection draft may be filed with ``auto``: the
+daemon confirms it at once as :data:`AUTO` instead of waiting on the user
+(the run input ``retrospection_auto_record``, claunch-lmnlv). The row goes
+through the same ``applying`` -> ``confirmed``/``failed`` steps and keeps
+``settled_by = 'auto'``, so the pane shows it was written without a person;
+a store refusal leaves it ``failed`` for the user like any other. The other
+kinds take no ``auto``: what reaches the shared glossary, category tree and
+knowledge records is the user's call (claunch-ar8jn).
 
 ``draft`` and ``failed`` are unresolved: they light the pane's button and,
 once the session has ended, raise the dashboard card. A row left
@@ -49,10 +58,12 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 USER = "user"
-KINDS = ("glossary", "category", "knowledge")
+AUTO = "auto"
+KINDS = ("glossary", "category", "knowledge", "retrospection")
+AUTO_KINDS = ("retrospection",)  # the kinds a draft may be filed with ``auto``
 UNRESOLVED = ("draft", "failed")
 OPEN = ("draft", "failed")  # the statuses an edit, discard or confirm accepts
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MAX_REASON = 2_000
 MAX_ERROR = 2_000
@@ -82,12 +93,16 @@ class Conflict(WrapupError):
     status = 409
 
 
-_SCHEMA = """
+_KIND_CHECK = "kind IN (" + ", ".join(f"'{k}'" for k in KINDS) + ")"
+
+# One statement per entry: the version-1 migration runs them inside its own
+# transaction, which ``executescript`` would commit.
+_TABLE = f"""
 CREATE TABLE IF NOT EXISTS drafts (
     id TEXT PRIMARY KEY,
     session TEXT NOT NULL CHECK (length(session) > 0),
     workspace TEXT NOT NULL CHECK (length(workspace) > 0),
-    kind TEXT NOT NULL CHECK (kind IN ('glossary', 'category', 'knowledge')),
+    kind TEXT NOT NULL CHECK ({_KIND_CHECK}),
     payload TEXT NOT NULL CHECK (json_valid(payload)),
     reason TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'draft'
@@ -100,26 +115,53 @@ CREATE TABLE IF NOT EXISTS drafts (
     updated_at TEXT NOT NULL,
     settled_by TEXT,
     CHECK ((status = 'confirmed') = (applied IS NOT NULL))
-);
-CREATE INDEX IF NOT EXISTS drafts_session ON drafts (session, status);
-CREATE TABLE IF NOT EXISTS ended (
-    session TEXT PRIMARY KEY,
-    at TEXT NOT NULL
-);
-CREATE TRIGGER IF NOT EXISTS drafts_revision_advances
+)"""
+_TABLE_EXTRAS = (
+    "CREATE INDEX IF NOT EXISTS drafts_session ON drafts (session, status)",
+    """CREATE TRIGGER IF NOT EXISTS drafts_revision_advances
 BEFORE UPDATE ON drafts
 WHEN NEW.revision <> OLD.revision + 1
 BEGIN
     SELECT RAISE(ABORT, 'wrapup: a write must advance revision by exactly one');
-END;
-CREATE TRIGGER IF NOT EXISTS drafts_identity_fixed
+END""",
+    """CREATE TRIGGER IF NOT EXISTS drafts_identity_fixed
 BEFORE UPDATE OF id, session, workspace, kind, created_at ON drafts
 WHEN NEW.id <> OLD.id OR NEW.session <> OLD.session OR NEW.workspace <> OLD.workspace
      OR NEW.kind <> OLD.kind OR NEW.created_at <> OLD.created_at
 BEGIN
     SELECT RAISE(ABORT, 'wrapup: a draft keeps its id, owner, workspace, kind and creation time');
-END;
-"""
+END""",
+)
+_ENDED = """
+CREATE TABLE IF NOT EXISTS ended (
+    session TEXT PRIMARY KEY,
+    at TEXT NOT NULL
+)"""
+_SCHEMA = (_TABLE, *_TABLE_EXTRAS, _ENDED)
+
+
+def _migrate_v1(db: sqlite3.Connection) -> None:
+    """Version 1's ``drafts`` table, whose CHECK names three kinds, rebuilt
+    with the current CHECK (SQLite cannot alter a CHECK in place). Every row
+    keeps its columns as they were; the index and triggers are dropped first
+    and made again on the new table, so none of them stays bound to the old
+    one and goes with it."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("DROP TRIGGER IF EXISTS drafts_revision_advances")
+        db.execute("DROP TRIGGER IF EXISTS drafts_identity_fixed")
+        db.execute("DROP INDEX IF EXISTS drafts_session")
+        db.execute("ALTER TABLE drafts RENAME TO drafts_v1")
+        db.execute(_TABLE)
+        db.execute("INSERT INTO drafts SELECT * FROM drafts_v1")
+        db.execute("DROP TABLE drafts_v1")
+        for stmt in _TABLE_EXTRAS:
+            db.execute(stmt)
+        db.execute("PRAGMA user_version = 2")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("COMMIT")
 
 
 def _now() -> str:
@@ -176,8 +218,8 @@ def category_payload(value) -> dict:
 
 
 def clean_payload(kind: str, payload) -> dict:
-    """The payload as its store will take it. Glossary and knowledge are
-    checked by their own ``clean`` now, so a draft that could never be
+    """The payload as its store will take it. Glossary, knowledge and
+    retrospection are checked by their own ``clean`` now, so a draft that could never be
     confirmed is refused when it is filed, not when the user presses
     confirm."""
     if kind not in KINDS:
@@ -190,12 +232,18 @@ def clean_payload(kind: str, payload) -> dict:
             out = glossary.clean(payload)
         except glossary.GlossaryError as exc:
             raise WrapupError(f"glossary: {exc}") from None
-    else:
+    elif kind == "knowledge":
         from .. import knowledge
         try:
             out = knowledge.clean(payload)
         except knowledge.KnowledgeError as exc:
             raise WrapupError(f"knowledge: {exc}") from None
+    else:
+        from .. import retrospection
+        try:
+            out = retrospection.clean(payload)
+        except retrospection.RetrospectionError as exc:
+            raise WrapupError(f"retrospection: {exc}") from None
     if len(json.dumps(out, ensure_ascii=False)) > MAX_PAYLOAD:
         raise WrapupError(f"payload is larger than {MAX_PAYLOAD} characters")
     return out
@@ -217,7 +265,12 @@ class WrapupStore:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise WrapupError(f"{self.path} has schema version {version}; this claunch knows {SCHEMA_VERSION}")
-            db.executescript(_SCHEMA)
+            has_table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='drafts'").fetchone()
+            if has_table and version < 2:
+                _migrate_v1(db)
+            for stmt in _SCHEMA:
+                db.execute(stmt)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             db.execute(
                 "UPDATE drafts SET status='failed', revision=revision+1, updated_at=?, "
@@ -321,9 +374,18 @@ class WrapupStore:
 
     # -- writes ------------------------------------------------------------
 
-    def draft(self, actor: str, *, kind: str, payload, workspace: str, reason=None) -> dict:
-        if not actor or actor == USER:
+    def draft(self, actor: str, *, kind: str, payload, workspace: str, reason=None,
+              auto: bool = False) -> dict:
+        """File a draft. ``auto`` (retrospection only) says the daemon will
+        confirm it at once (:meth:`claim` as :data:`AUTO`); it is refused for
+        the other kinds here, before a row exists."""
+        if not actor or actor in (USER, AUTO):
             raise Forbidden("drafts are filed by a session")
+        if not isinstance(auto, bool):
+            raise WrapupError("auto must be true or false")
+        if auto and kind not in AUTO_KINDS:
+            raise WrapupError(f"only {', '.join(AUTO_KINDS)} drafts may be confirmed automatically "
+                              f"(auto); a {kind} draft waits on the user")
         value = clean_payload(kind, payload)
         workspace = _text(workspace, "workspace", 500)
         if not workspace:
@@ -372,18 +434,23 @@ class WrapupStore:
     def claim(self, actor: str, did: str, revision) -> dict:
         """The user's confirm, first half: the row moves to ``applying`` so a
         second confirm (another tab, a double click) is refused while the
-        daemon writes it."""
-        if actor != USER:
+        daemon writes it. :data:`AUTO` claims too, only an untouched
+        revision-1 draft of an :data:`AUTO_KINDS` kind: the daemon's own
+        confirm of a draft filed with ``auto``."""
+        if actor not in (USER, AUTO):
             raise Forbidden("only the user confirms a wrap-up draft")
         with self._write() as db:
             d = self._load(db, did)
             self._expect(d, revision)
+            if actor == AUTO and (d["kind"] not in AUTO_KINDS or d["revision"] != 1):
+                raise Forbidden(f"draft {did} is not one the daemon confirms by itself")
             db.execute(
                 "UPDATE drafts SET status='applying', error='', revision=revision+1, updated_at=? WHERE id=?",
                 (_now(), did))
             return self._load(db, did)
 
-    def settle(self, did: str, *, applied: Optional[dict] = None, error: str = "") -> dict:
+    def settle(self, did: str, *, applied: Optional[dict] = None, error: str = "",
+               by: str = USER) -> dict:
         """The confirm's second half: ``applied`` (where the entry went) or
         ``error`` (why its store refused it)."""
         with self._write() as db:
@@ -394,7 +461,7 @@ class WrapupStore:
                 db.execute(
                     "UPDATE drafts SET status='confirmed', applied=?, revision=revision+1, updated_at=?, "
                     "settled_by=? WHERE id=?",
-                    (json.dumps(applied, ensure_ascii=False), _now(), USER, did))
+                    (json.dumps(applied, ensure_ascii=False), _now(), by, did))
             else:
                 db.execute(
                     "UPDATE drafts SET status='failed', error=?, revision=revision+1, updated_at=? WHERE id=?",
