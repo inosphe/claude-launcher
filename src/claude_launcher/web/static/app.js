@@ -18317,10 +18317,11 @@ function newSkipPermissionsAnswer(f, parent) {
 }
 
 /* A session that starts with permission skipping off keeps Claude asking
-   before each tool use, and on a provider that is not Anthropic's own those
-   permission checks are usage on that provider — what the provider hint above
-   the form warns about. So a create that would go out with the box unticked
-   is asked about once more (claunch-1ztit.1.1).
+   before each tool use, and on a provider that is not Claude's own its
+   permission classifier still calls Claude, which can add Claude usage — the
+   same fact the provider hint above the form and the running session's strip
+   state. So a create that would go out with the box unticked is asked about
+   once more (claunch-1ztit.1.1).
 
    "No" is the form, not an error: nothing is sent, the rows keep what was
    typed, and #create-error stays empty. Escape and a backdrop press are the
@@ -18332,8 +18333,9 @@ async function confirmStartWithoutSkipPermissions(f, parent) {
   const answer = await showModal({
     title: "Start without skip permissions?",
     body: "This session starts with permission skipping off, so Claude asks " +
-      "before each tool use. On a provider that is not Anthropic's own those " +
-      "permission checks are usage on that provider. Start it anyway?",
+      "before each tool use. On a provider that is not Claude's own, its " +
+      "permission classifier still calls Claude, and those calls can add " +
+      "Claude usage. Start it anyway?",
     actions: [
       { label: "Back to the form", value: null },
       { label: "Start without skip permissions", value: true },

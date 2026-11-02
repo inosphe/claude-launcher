@@ -2,11 +2,12 @@
    shipped handler and the shipped judgement.
 
    A session started with permission skipping off keeps Claude's permission
-   classifier on, and on a provider that is not Anthropic's own those checks
-   are usage on that provider — the cost the provider hint above the form
-   warns about. So a create that would go out with the box unticked is asked
-   about once more (claunch-1ztit.1.1), and the two answers are opposite
-   actions: "Yes" starts it as it stands, "No" is the form, with nothing sent.
+   classifier on, and on a provider that is not Claude's own that classifier
+   still calls Claude, which can add Claude usage on top of that provider —
+   the cost the provider hint above the form and the running session's strip
+   name. So a create that would go out with the box unticked is asked about
+   once more (claunch-1ztit.1.1), and the two answers are opposite actions:
+   "Yes" starts it as it stands, "No" is the form, with nothing sent.
 
    Four things can break silently here:
 
@@ -150,11 +151,16 @@ function harness() {
           ["Start without skip permissions?",
            [["Back to the form", null],
             ["Start without skip permissions", true]]]);
-    check("...and it names the cost it is about, without asserting a charge",
+    check("...and it names the cost with the attribution the page already uses",
           [/permission skipping off/.test(asked.body),
-           /not Anthropic's own/.test(asked.body),
+           /not Claude's own/.test(asked.body),
+           /still calls Claude/.test(asked.body),
+           /can add\s+Claude usage/.test(asked.body),
+           /usage on that provider/.test(asked.body),
            /charged|billed/.test(asked.body)],
-          [true, true, false]);
+          [true, true, true, true, false, false]);
+    check("...and a Yes does not tick the box for the operator",
+          [h.state.checked, h.ctx.answer(h.form, null)], [false, false]);
 
     h.state.answer = null;
     check("No keeps the form and sends nothing",
@@ -186,6 +192,22 @@ function harness() {
           /create-error/.test(body), false);
     check("the modal is the page's, not the browser's",
           [/showModal\(/.test(body), /window\.confirm/.test(body)], [true, false]);
+
+    /* The fourth item of the issue: after a Yes the request does go out, and
+       it goes out without the skip-permission args. One line adds them, and
+       only when the box is ticked — which the confirm leaves as it found it,
+       so a Yes on an unticked row sends the body the form was showing. */
+    check("the create body carries the skip args only when the box is ticked",
+          handler.indexOf(
+            "if (f.skip_permissions.checked) body.args.push(...permissionArgs);") > 0,
+          true);
+    check("...in the claude branch, right after the args are stripped",
+          handler.includes(
+            "body.args = withoutArgGroups(body.args, [permissionArgs]);\n" +
+            "      if (f.skip_permissions.checked) body.args.push(...permissionArgs);"),
+          true);
+    check("...because the confirm never ticks the box on the operator's behalf",
+          /skip_permissions\.checked\s*=/.test(body), false);
   }
 
   if (failures) {
