@@ -163,6 +163,43 @@ what every new clone starts from.
 - The daemon needs a restart for the refusal, the `template` field and the start
   confirmation; the page marking needs the page reloaded.
 
+### Unregister and delete
+
+Two different things, with different names everywhere (page, CLI, audit log):
+
+- **Unregister (등록 해제)**: `claunch vm rm ID`, `DELETE /api/vm/{id}`, the page's "등록 해제 (tart
+  VM은 남음)" button. The daemon forgets the VM (record, grants, requests, catalog entries). The
+  tart VM and its disk image stay on the host and can be registered again. Allowed for
+  stopped, suspended and fault VMs. Audit row `unregister` (with `tart_name`); the response says
+  `tart_kept`.
+- **Delete (물리적 삭제)**: `claunch vm destroy ID --confirm ID`, `POST /api/vm/{id}/destroy`
+  `{"confirm": "<id>"}`, the page's red "위험 영역" section (its own box at the bottom of the VM
+  detail). It runs `tart delete`: the disk image is gone, nothing can undo it.
+  - User only (a session gets 403 `vm_user_only`, also for the preview).
+  - `confirm` must repeat the VM id (as the preset delete repeats the preset name); otherwise
+    `vm_confirm` (400). The page enables the button only once the id is typed.
+  - Refused (`blockers`, nothing is deleted): VM not `stopped` (suspended, running, fault:
+    `vm_bad_state`, 409); locked (`vm_locked`, 423: unlock first); a session holds a grant or
+    the control (`vm_destroy_granted`, 409: revoke first); another registration uses the same
+    tart VM (`vm_held`); tart reports it as not stopped; a delete of it is already running
+    (`vm_busy_state`; a start is refused meanwhile).
+  - Warned about, not blocked (`warnings`, shown with the typed confirmation): presets saved from
+    this VM (their `preset-<name>` copies stay), VMs made from those presets (descendants; their
+    disks are independent), the VM being a preset template (deleting it ends that preset's
+    ability to clone), and tart no longer listing it (then only the record goes).
+  - `GET /api/vm/{id}/destroy` is the daemon's own plan: `size_gb` / `disk_gb` as tart reports
+    them, `blockers`, `warnings`, `presets`, `descendants`, `template`. The page and
+    `claunch vm destroy ID` (without `--confirm`, which deletes nothing) show it.
+  - Audit (`vm audit`, the registry's log, actor and time): `destroy` before the call
+    (`tart_name`, `size_gb`, presets, descendants), then `destroyed`, or `destroy_failed` with
+    tart's error. When `tart delete` fails the registration is kept and the error shown; it can
+    be tried again. After a success the record, grants, pending requests and the VM's entries in
+    the share catalog are gone.
+- **Preset delete** (unchanged) is the third word: it deletes tart's `preset-<name>` copy and the
+  preset record (page: "프리셋 삭제", CLI: `claunch vm preset rm`), never a VM.
+- The daemon needs a restart for the new route; the page needs a reload. Verified with the fake
+  tart only: no real `tart delete` was run.
+
 ### Clone lineage
 
 The VM page has a read-only "복제 계보" section (always on the page) that draws which preset

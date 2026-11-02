@@ -119,6 +119,7 @@ function renderDetail(vm) {
   toggle.title = !guarded && vm.state !== "stopped"
     ? "정지된 VM만 잠글 수 있습니다. 먼저 정상 종료하십시오." : toggle.title;
   renderActions(vm, guarded);
+  loadDestroyPlan(vm);
   $("vm-controller").textContent = vm.controller || "없음";
   $("vm-revoke-control").disabled = !vm.controller;
   const driving = vm.human === "driving";
@@ -190,6 +191,70 @@ function renderActions(vm, guarded) {
   const shown = { start: "vm-start", resume: "vm-start", suspend: "vm-suspend", stop: "vm-stop", force_stop: "vm-force" }[action];
   if (shown) spin(shown, label);
 }
+/* Unregister (the daemon forgets the VM; the tart VM stays) and delete for good
+   (tart delete). The delete's impact -- size, what stands in the way, what it
+   would leave behind -- is the daemon's own plan (GET /api/vm/{id}/destroy), read
+   when a VM is shown and again when its state changes, never guessed here. */
+let destroyPlan = null;
+let destroyFor = "";
+let destroyKey = "";
+async function loadDestroyPlan(vm) {
+  const key = `${vm.id}|${vm.state}|${vm.locked}|${Object.keys(vm.grants || {}).join(",")}|${vm.controller}`;
+  if (key === destroyKey) { renderDestroy(vm); return; }
+  destroyKey = key;
+  if (destroyFor !== vm.id) { destroyPlan = null; $("vm-destroy-confirm").value = ""; }
+  destroyFor = vm.id;
+  try { destroyPlan = await api(`api/vm/${encodeURIComponent(vm.id)}/destroy`); }
+  catch (e) { destroyPlan = { error: e.message }; }
+  if (destroyFor === vm.id) renderDestroy(vm);
+}
+function renderDestroy(vm) {
+  const plan = destroyPlan;
+  const unreg = ["stopped", "suspended", "fault"].includes(vm.state);
+  $("vm-unregister").disabled = !unreg || busy[vm.id] !== undefined;
+  $("vm-unregister-why").textContent = unreg ? "" : `${vm.state} 상태에서는 해제할 수 없습니다. 먼저 종료하십시오.`;
+  const blockers = $("vm-destroy-blockers"), warnings = $("vm-destroy-warnings"), size = $("vm-destroy-size");
+  const fill = (ul, rows) => { ul.replaceChildren(...rows.map((t) => { const li = document.createElement("li"); li.textContent = t; return li; })); ul.hidden = !rows.length; };
+  if (!plan || plan.error) {
+    size.textContent = plan ? `삭제 정보를 읽지 못했습니다: ${plan.error}` : "삭제 정보를 읽는 중입니다…";
+    fill(blockers, []); fill(warnings, []);
+    $("vm-destroy").disabled = true;
+    return;
+  }
+  size.textContent = plan.tart_present
+    ? `tart VM ${plan.tart_name}: 디스크 사용량 ${plan.size_gb} GB(디스크 크기 ${plan.disk_gb} GB)가 삭제됩니다.`
+    : `tart에 ${plan.tart_name}가 없습니다. 등록 기록만 지워집니다.`;
+  fill(blockers, plan.blockers.map((b) => `삭제할 수 없음: ${b.reason}`));
+  fill(warnings, plan.warnings);
+  $("vm-destroy").disabled = plan.blockers.length > 0 || $("vm-destroy-confirm").value.trim() !== vm.id;
+}
+$("vm-destroy-confirm").addEventListener("input", () => {
+  const vm = vms.find((v) => v.id === selected);
+  if (vm) renderDestroy(vm);
+});
+$("vm-unregister").addEventListener("click", () => {
+  const vm = vms.find((v) => v.id === selected);
+  if (!vm) return;
+  const gone = [
+    `세션 권한 ${Object.keys(vm.grants || {}).length}건`,
+    `공유 폴더 ${(vm.shared_dirs || []).length}개`,
+    `대기 요청 ${(vm.requests || []).length}건`,
+  ].join(", ");
+  if (!confirm(`${vm.id}의 등록만 해제합니다. tart VM ${vm.tart_name}와 디스크 이미지는 호스트에 그대로 남습니다.\n해제되는 기록: ${gone}(공유 카탈로그의 이 VM 지정도 빠집니다).\n계속합니까?`)) return;
+  act(`${vm.id} 등록 해제`, () => api(`api/vm/${encodeURIComponent(vm.id)}`, { method: "DELETE" }));
+});
+$("vm-destroy").addEventListener("click", () => {
+  const vm = vms.find((v) => v.id === selected);
+  if (!vm || $("vm-destroy-confirm").value.trim() !== vm.id) return;
+  const id = vm.id;
+  $("vm-destroy").disabled = true;
+  act(`${id} 물리적 삭제`, async () => {
+    await post(`api/vm/${encodeURIComponent(id)}/destroy`, { confirm: id });
+    destroyKey = ""; destroyPlan = null;
+    $("vm-destroy-confirm").value = "";
+  });
+});
+
 function renderNet(vm) {
   const pending = $("vm-net-pending");
   const listed = (vm.expose || []).length + (vm.allow || []).length > 0;
@@ -876,7 +941,8 @@ function renderPresets() {
     const del = document.createElement("button");
     del.type = "button";
     del.className = "vm-danger";
-    del.textContent = "삭제";
+    del.textContent = "프리셋 삭제";
+    del.title = `tart의 preset-${p.name} 복사본과 프리셋 기록을 삭제합니다(VM 삭제가 아닙니다)`;
     del.addEventListener("click", () => deletePreset(p.name));
     li.append(head, sub, make, del);
     ul.appendChild(li);

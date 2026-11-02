@@ -25,6 +25,7 @@ User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                revoke_controller,extra_controller,human,files_dir,share,
                approve,deny}, POST /api/vm-share-roots (add / rm an allowed root),
                GET /api/vm-requests (pending requests, for the dashboard),
+               GET|POST /api/vm/{id}/destroy (delete the tart disk; confirm = the id),
                GET /api/vm/{id}/files
 Anyone:        GET /api/vm, GET /api/vm/{id}
 Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
@@ -62,7 +63,7 @@ _STATUS = {
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
-    "vm_share_limit": 400, "vm_preset_copy": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
+    "vm_share_limit": 400, "vm_preset_copy": 409, "vm_destroy_granted": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -746,17 +747,111 @@ async def h_deny(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+def _destroy_plan(request: web.Request, vm_id: str, tart_row) -> dict:
+    """What deleting the VM's tart disk would do and what stands in the way. ``tart_row``
+    is tart's own row for it (``None``: tart does not list it). ``blockers`` refuse the
+    delete; ``warnings`` are shown and need the typed confirmation, nothing more."""
+    reg, _ = _hub(request)
+    vm = reg.get(vm_id)
+    presets = request.app.get("vm_presets")
+    lineage = presets.lineage_rows() if presets is not None else []
+    copies = presets.copy_names() if presets is not None else {}
+    mine = [p for p in lineage if p["source"] == vm_id]
+    kids = [v.id for v in reg.list() if v.id != vm_id and v.cloned_from.get("kind") == "preset"
+            and any(v.cloned_from.get("preset") == p["name"] for p in mine)]
+    template = copies.get(vm.tart_name, "")
+    blockers: List[dict] = []
+
+    def block(code: str, reason: str) -> None:
+        blockers.append({"code": code, "reason": reason})
+
+    if vm_id in request.app.get("vm_destroying", ()):
+        block("vm_busy_state", "이 VM의 삭제가 이미 진행 중입니다")
+    if vm.state != "stopped":
+        block("vm_bad_state", f"{vm_id}는 {vm.state} 상태입니다. 정상 종료해 stopped가 된 VM만 삭제할 수 있습니다"
+                              "(일시 중단·실행 중·오류 상태는 삭제하지 않습니다)")
+    if vm.locked:
+        block("vm_locked", f"{vm_id}는 잠겨 있습니다. 먼저 잠금을 해제하십시오")
+    if vm.grants or vm.controller:
+        who = ", ".join(sorted(set(vm.grants) | ({vm.controller} if vm.controller else set())))
+        block("vm_destroy_granted", f"세션이 이 VM의 권한을 가지고 있습니다({who}). 먼저 부여를 회수하십시오")
+    if any(o.id != vm_id and o.tart_name == vm.tart_name for o in reg.list()):
+        block("vm_held", f"같은 tart VM {vm.tart_name!r}를 다른 등록이 쓰고 있습니다")
+    if tart_row is not None and tart_row.state != "stopped":
+        block("vm_bad_state", f"tart는 {vm.tart_name}를 {tart_row.state}로 보고합니다")
+    warnings: List[str] = []
+    if tart_row is None:
+        warnings.append(f"tart에 {vm.tart_name!r}가 없습니다. 등록 기록만 지워집니다")
+    if template:
+        warnings.append(f"이 VM은 프리셋 템플릿입니다: 프리셋 {template!r}의 복사본입니다. 삭제하면 이 프리셋으로 더 이상 새 VM을 "
+                        "만들 수 없습니다(프리셋 삭제는 프리셋 목록에서 합니다)")
+    if mine:
+        warnings.append("이 VM에서 만든 프리셋: " + ", ".join(p["name"] for p in mine)
+                        + ". 프리셋의 복사본(preset-<이름>)은 남지만 원본 VM이 사라집니다")
+    if kids:
+        warnings.append("이 VM에서 만든 프리셋으로 만든 VM(후손): " + ", ".join(kids)
+                        + ". 후손의 디스크는 독립이라 영향이 없습니다")
+    return {"id": vm_id, "tart_name": vm.tart_name, "state": vm.state, "locked": vm.locked,
+            "size_gb": tart_row.size_gb if tart_row is not None else 0,
+            "disk_gb": tart_row.disk_gb if tart_row is not None else 0,
+            "tart_present": tart_row is not None, "template": template,
+            "presets": [p["name"] for p in mine], "descendants": kids,
+            "blockers": blockers, "warnings": warnings}
+
+
+async def h_destroy(request: web.Request) -> web.Response:
+    """Delete a VM's tart disk for good (user only). GET shows what that would do and
+    what stands in the way; POST needs ``confirm`` equal to the VM's id. Only a stopped,
+    unlocked VM nobody holds a grant on; tart's failure leaves the registration as it is."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        vm = reg.get(vm_id)
+        body = await _body(request) if request.method == "POST" else {}
+        if request.method == "POST" and body.get("confirm") != vm_id:
+            raise VmError("vm_confirm", f"say which VM to delete: confirm must be {vm_id!r}")
+        tart_row = await asyncio.to_thread(mgr.tart_find, vm.tart_name)
+        plan = _destroy_plan(request, vm_id, tart_row)
+        if request.method == "GET":
+            return web.json_response(plan)
+        if plan["blockers"]:
+            first = plan["blockers"][0]
+            raise VmError(first["code"], first["reason"])
+        flight: set = request.app.setdefault("vm_destroying", set())
+        flight.add(vm_id)
+        try:
+            _trace(request, reg, vm_id, "destroy", tart_name=vm.tart_name, size_gb=plan["size_gb"],
+                   presets=plan["presets"], descendants=plan["descendants"], template=plan["template"])
+            try:
+                if plan["tart_present"]:
+                    await asyncio.to_thread(mgr.tart_delete, vm.tart_name)
+            except VmError as exc:
+                reg.note(vm_id, "destroy_failed", error=str(exc)[:300])
+                raise
+            reg.remove(vm_id)               # the record, grants, requests and catalog entries go with it
+            reg.note(vm_id, "destroyed", tart_name=vm.tart_name, size_gb=plan["size_gb"])
+        finally:
+            flight.discard(vm_id)
+        return web.json_response({"ok": True, "destroyed": vm_id, "tart_name": vm.tart_name,
+                                  "size_gb": plan["size_gb"], "warnings": plan["warnings"]})
+    except VmError as exc:
+        return _err(exc)
+
+
 async def h_remove(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
     reg, _ = _hub(request)
     try:
         held_by = list(reg.get(request.match_info["id"]).grants)
+        tart_name = reg.get(request.match_info["id"]).tart_name
         reg.remove(request.match_info["id"])
-        _trace(request, reg, request.match_info["id"], "remove")
+        _trace(request, reg, request.match_info["id"], "unregister", tart_name=tart_name)
         for sess in held_by:
             await vm_pack.sync(request.app.get("manager"), reg, sess)
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "unregistered": request.match_info["id"], "tart_kept": tart_name})
     except VmError as exc:
         return _err(exc)
 
@@ -769,6 +864,8 @@ def _lifecycle_route(action: str):
         vm_id = request.match_info["id"]
         try:
             vm = reg.get(vm_id)
+            if action == "start" and vm_id in request.app.get("vm_destroying", ()):
+                raise VmError("vm_busy_state", f"{vm_id}의 삭제가 진행 중입니다")
             if action == "start":
                 preset = _template(request, {"tart_name": vm.tart_name})["template"]
                 try:
@@ -1309,6 +1406,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/allow", h_allow)
     r.add_get("/api/vm-only", h_only)
     r.add_post("/api/vm-only", h_only)
+    r.add_get("/api/vm/{id}/destroy", h_destroy)
+    r.add_post("/api/vm/{id}/destroy", h_destroy)
     r.add_get("/api/vm-requests", h_requests)
     r.add_get("/api/vm-share-roots", h_share_roots)
     r.add_post("/api/vm-share-roots", h_share_roots)

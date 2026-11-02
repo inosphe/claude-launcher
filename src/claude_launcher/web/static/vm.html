@@ -172,6 +172,24 @@
       <input id="vm-allow-cidr" type="text" maxlength="18" placeholder="/32 주소 (예: 192.168.1.213)" autocomplete="off" spellcheck="false">
       <button id="vm-allow-go" type="button">주소 추가</button>
     </div>
+    <h2>등록 해제</h2>
+    <p class="vm-muted">데몬이 이 VM을 잊습니다(권한 부여, 공유 폴더, 대기 요청 기록이 사라짐). <b>tart VM과 디스크 이미지는 호스트에 그대로 남고</b>, 다시 등록할 수 있습니다. 정지·일시 중단·오류 상태의 VM만 해제할 수 있습니다.</p>
+    <div class="vm-row">
+      <button id="vm-unregister" type="button">등록 해제 (tart VM은 남음)</button>
+      <span id="vm-unregister-why" class="vm-muted"></span>
+    </div>
+    <section id="vm-danger" class="vm-danger-zone" aria-label="위험 영역: 물리적 삭제">
+      <h2>위험 영역: 물리적 삭제</h2>
+      <p><b>tart delete로 이 VM의 디스크 이미지까지 영구 삭제합니다. 되돌릴 수 없습니다.</b> 정지된 VM만, 잠금이 풀려 있고 세션이 권한을 가지고 있지 않을 때만 삭제할 수 있습니다. 등록 기록, 권한, 공유 폴더 카탈로그의 이 VM 항목, 대기 요청도 함께 정리됩니다. 삭제는 호스트 audit 로그에 남습니다. (프리셋 삭제는 프리셋 목록에서 하며 tart의 preset-&lt;이름&gt; 복사본을 지웁니다.)</p>
+      <p id="vm-destroy-size" class="vm-muted"></p>
+      <ul id="vm-destroy-blockers" class="vm-problem" hidden></ul>
+      <ul id="vm-destroy-warnings" class="vm-warn-text" hidden></ul>
+      <div class="vm-row">
+        <label class="sr-only" for="vm-destroy-confirm">삭제할 VM id를 그대로 입력</label>
+        <input id="vm-destroy-confirm" type="text" maxlength="64" placeholder="확인: VM id를 그대로 입력" autocomplete="off" spellcheck="false">
+        <button id="vm-destroy" type="button" class="vm-danger-solid" disabled>물리적 삭제 (tart delete, 되돌릴 수 없음)</button>
+      </div>
+    </section>
   </section>
   <section id="vm-lineage" aria-label="복제 계보">
     <h1>복제 계보</h1>

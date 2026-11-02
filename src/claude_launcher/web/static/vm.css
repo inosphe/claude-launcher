@@ -112,3 +112,10 @@ button.vm-working::before { content: ""; display: inline-block; width: 10px; hei
 .vm-chip.vm-template { border-color: #a371f7; color: #a371f7; font-weight: 600; }
 .vm-card.vm-template-card { border-left: 3px solid #a371f7; }
 .vm-card.vm-template-card .sub { color: #a371f7; }
+
+.vm-danger-zone { margin-top: 18px; padding: 10px 14px; border: 2px solid var(--vm-bad); border-radius: 6px; }
+.vm-danger-zone h2 { margin-top: 0; color: var(--vm-bad); }
+.vm-danger-zone ul { margin: 6px 0; padding-left: 20px; }
+button.vm-danger-solid { background: var(--vm-bad); border-color: var(--vm-bad); color: #fff; font-weight: 600; }
+button.vm-danger-solid:hover:not(:disabled) { background: #da3633; }
+button.vm-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }

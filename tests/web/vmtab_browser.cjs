@@ -51,6 +51,16 @@ const BETA = { ...VM, id: "beta", cloned_from: { kind: "preset", preset: "gold",
 const GAMMA = { ...BETA, id: "gamma", tart_name: "gamma", state: "stopped",
   cloned_from: { kind: "preset", preset: "old", preset_created_at: 1600000000, at: 1700000600 }, requests: [], share_rows: [], shared_dirs: [] };
 const TMPL = { ...BETA, id: "tmpl", tart_name: "preset-gold", template: "gold", state: "stopped", requests: [], share_rows: [], shared_dirs: [] };
+const DELTA = { ...BETA, id: "delta", tart_name: "delta", state: "stopped", requests: [], share_rows: [], shared_dirs: [], cloned_from: {}, template: "" };
+const EPSILON = { ...DELTA, id: "epsilon", tart_name: "epsilon", locked: true };
+let REMOVED = [];
+const PLANS = {
+  delta: { id: "delta", tart_name: "delta", state: "stopped", locked: false, size_gb: 93, disk_gb: 100, tart_present: true, template: "",
+    presets: ["gold"], descendants: ["kid"], blockers: [],
+    warnings: ["이 VM에서 만든 프리셋: gold. 프리셋의 복사본(preset-<이름>)은 남지만 원본 VM이 사라집니다", "이 VM에서 만든 프리셋으로 만든 VM(후손): kid. 후손의 디스크는 독립이라 영향이 없습니다"] },
+  epsilon: { id: "epsilon", tart_name: "epsilon", state: "stopped", locked: true, size_gb: 12, disk_gb: 50, tart_present: true, template: "",
+    presets: [], descendants: [], blockers: [{ code: "vm_locked", reason: "epsilon는 잠겨 있습니다. 먼저 잠금을 해제하십시오" }], warnings: [] },
+};
 let gammaRelease = null;     // lets the held lifecycle request answer
 let gammaFail = false;
 const GAMMA_STATE = { start: "running", stop: "stopped", suspend: "suspended", force_stop: "stopped" };
@@ -89,6 +99,14 @@ const server = http.createServer((req, res) => {
     return json(res, BETA);
   }
   if (req.method === "GET" && p === "/api/vm-share-roots") return json(res, { roots: ROOTS, enabled: ROOTS.some((r) => r.ok) });
+  const planOf = /^\/api\/vm\/(delta|epsilon)\/destroy$/.exec(p);
+  if (planOf && req.method === "GET") return json(res, PLANS[planOf[1]]);
+  if (req.method === "DELETE" && /^\/api\/vm\/(delta|epsilon)$/.test(p)) {
+    const id = p.split("/").pop();
+    posts.push(["DELETE " + p, {}]);
+    REMOVED.push(id);
+    return json(res, { ok: true, unregistered: id, tart_kept: id });
+  }
   if (req.method === "GET" && p === "/api/vm-requests") return json(res, { requests: VM.requests.map((r) => ({ vm: "alpha", ...r })) });
   if (req.method === "GET" && p === "/api/vm-only") return json(res, { sessions: ONLY });
   if (req.method === "POST") {
@@ -97,6 +115,7 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       const body = data ? JSON.parse(data) : {};
       posts.push([p, body]);
+      if (planOf) { REMOVED.push(planOf[1]); return json(res, { ok: true, destroyed: planOf[1], tart_name: planOf[1], size_gb: 93, warnings: [] }); }
       if (p === "/api/vm-share-roots") {
         if (body.action === "add") {
           if (body.path === "/home/u") return json(res, { ok: false, code: "vm_share_forbidden", error: "vm_share_forbidden: 공유할 수 없는 폴더입니다" }, 400);
@@ -115,7 +134,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA, TMPL], slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG,
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA, GAMMA, TMPL, DELTA, EPSILON].filter((v) => !REMOVED.includes(v.id)), slot_limit: 2, host_locked: false, share_roots: ROOTS.filter((r) => r.ok).map((r) => r.path), share_root_rows: ROOTS, share_catalog: CATALOG,
     presets: [{ name: "gold", source: "alpha", created_at: 1700000000, description: "깨끗한 설치" }] });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
@@ -418,6 +437,47 @@ const server = http.createServer((req, res) => {
     assert.match(await frame.locator("#vm-lineage-tree").innerText(), /VM tmpl · .* · 프리셋 템플릿/, "the lineage marks it too");
     await frame.locator(".vm-card", { hasText: "alpha" }).click();
     assert.equal(await frame.locator("#vm-template-chip").isVisible(), false, "an ordinary VM has no badge");
+
+    // 3j. unregister and physical delete: two separate things, the delete in its own red zone
+    await frame.locator(".vm-card", { hasText: "delta" }).click();
+    await frame.locator("#vm-name", { hasText: "delta" }).waitFor({ timeout: 5000 });
+    assert.equal(await frame.locator("#vm-danger").isVisible(), true, "the danger zone is on the detail");
+    assert.match(await frame.locator("#vm-danger").innerText(), /디스크 이미지까지 영구 삭제.*되돌릴 수 없습니다/s);
+    assert.match(await frame.locator("#vm-unregister").innerText(), /등록 해제 \(tart VM은 남음\)/);
+    assert.match(await frame.locator("#vm-danger h2").innerText(), /위험 영역: 물리적 삭제/);
+    await frame.locator("#vm-destroy-size", { hasText: "93 GB" }).waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-destroy-warnings").innerText(), /프리셋: gold.*후손\): kid/s, "presets and descendants are listed");
+    const destroy = frame.locator("#vm-destroy");
+    assert.equal(await destroy.isDisabled(), true, "nothing typed: disabled");
+    await frame.locator("#vm-destroy-confirm").fill("delt");
+    assert.equal(await destroy.isDisabled(), true, "a wrong id: disabled");
+    await frame.locator("#vm-destroy-confirm").fill("delta");
+    assert.equal(await destroy.isDisabled(), false, "the id typed again: enabled");
+    const destroysOf = () => posts.filter(([u]) => /\/destroy$/.test(u)).length;
+    await destroy.click();
+    await frame.locator("#vm-activity", { hasText: "delta 물리적 삭제 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/delta/destroy")[1], { confirm: "delta" });
+    assert.equal(destroysOf(), 1);
+    await frame.locator(".vm-card", { hasText: "delta" }).waitFor({ state: "detached", timeout: 8000 });
+    // a VM the daemon says cannot be deleted: the reason is shown and the button stays off even with the id typed
+    await frame.locator(".vm-card", { hasText: "epsilon" }).click();
+    await frame.locator("#vm-name", { hasText: "epsilon" }).waitFor({ timeout: 5000 });
+    await frame.locator("#vm-destroy-blockers", { hasText: "잠겨 있습니다" }).waitFor({ timeout: 5000 });
+    await frame.locator("#vm-destroy-confirm").fill("epsilon");
+    assert.equal(await destroy.isDisabled(), true, "a refused VM cannot be deleted from the page");
+    // unregister: asks, says the tart VM stays, and only unregisters
+    let unregAsk = "";
+    page.once("dialog", async (d) => { unregAsk = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-unregister").click();
+    await page.waitForTimeout(200);
+    assert.match(unregAsk, /등록만 해제.*그대로 남습니다.*세션 권한 \d+건, 공유 폴더 \d+개, 대기 요청 \d+건/s, "the confirmation lists what is released");
+    assert.equal(posts.filter(([u]) => u.startsWith("DELETE")).length, 0, "a dismissed confirmation unregisters nothing");
+    page.once("dialog", async (d) => { await d.accept(); });
+    await frame.locator("#vm-unregister").click();
+    await frame.locator("#vm-activity", { hasText: "epsilon 등록 해제 완료" }).waitFor({ timeout: 5000 });
+    assert.equal(posts.filter(([u]) => u === "DELETE /api/vm/epsilon").length, 1);
+    assert.equal(destroysOf(), 1, "unregistering never calls the delete route");
+    await frame.locator(".vm-card", { hasText: "alpha" }).click();
 
     // 3g. lifecycle buttons show at once that a press was taken, lock the conflicting ones, and
     // keep showing it until the state the press asked for is in the list
