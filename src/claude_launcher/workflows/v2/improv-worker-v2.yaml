@@ -705,28 +705,33 @@ fragments:
     다른 항목이 쌓인다. 이 점검은 이번 회차에 남길 종류만 보지 않고 이 세션의
     임시본 전부를 본다 — 카테고리·지식·용어집은 같은 변경을 서로 다른 자리에서
     말한다.
-    1. MCP `wrapup_list {settled: true}`로 이 세션이 남긴 임시본을 id, 종류,
-       상태(draft·applying·confirmed·failed·discarded), revision과 함께 읽는다.
-    2. 항목마다 이번 회차의 변경이 그 내용을 틀리게 했는지 판정한다.
-       · 고친다 — 상태가 draft·failed이고 이번 회차가 그 내용(정의·결정·배치·
-         범위)을 바꿨다. `wrapup_update {id, revision, payload}`로 payload
-         전체를 다시 써서 고친다. 필드 하나만 바꾸는 경로는 없으므로 지금도
-         맞는 값도 함께 적는다.
-       · 철회한다 — 상태가 draft·failed이고 이번 회차로 그 내용이 더 이상
-         사실이 아니며 대신할 내용도 없다. `wrapup_withdraw {id, revision}`.
-       · 손대지 않는다 — 상태가 confirmed·applying·discarded인 항목. 확정된
-         기록은 사용자의 것이고 세션은 그것을 고치거나 철회할 수 없다
-         (`wrapup/store.py`의 `OPEN = ("draft", "failed")`). 지금과 어긋나면
-         지식은 새 기록에 `supersedes: <그 id>`를 주어 대체를 표시하고, 다른
-         종류는 그 id와 어긋난 점을 note에 적는다.
-       · 그대로 둔다 — 이번 회차가 건드리지 않은 항목. 내용을 못 박지 않은
-         항목을 습관적으로 철회하지 않는다.
-    3. 고친·철회한 항목은 보고에 `id: 무엇을 왜` 한 줄씩 적는다. 손대지 않은
-       확정 항목이 있으면 그 id와 어긋난 점도 한 줄 적는다. 판정이 끝나면
-       `wrapup_list`로 미확정 임시본 수를 다시 세어 pending에 적는다.
-    4. 이 점검은 회차를 막지 않는다 — `wrapup_list`·`wrapup_update`가 없거나
-       (「unknown tool」, 「not configured」) 데몬에 닿지 않으면 사유를 한 줄
-       적고 다음 단계로 간다.
+    · 읽는다 — MCP `wrapup_list {settled: true}`로 이 세션이 남긴 임시본을 id,
+      종류, 상태(draft·applying·confirmed·failed·discarded), revision과 함께
+      읽는다. 확정된 항목은 그 확정이 남긴 `applied`(어디에 쓰였는가)도 함께
+      온다.
+    · 고친다 — 상태가 draft·failed이고 이번 회차가 그 내용(정의·결정·배치·
+      범위)을 바꿨다. `wrapup_update {id, revision, payload}`로 payload 전체를
+      다시 써서 고친다. 필드 하나만 바꾸는 경로는 없으므로 지금도 맞는 값도
+      함께 적는다.
+    · 철회한다 — 상태가 draft·failed이고 이번 회차로 그 내용이 더 이상 사실이
+      아니며 대신할 내용도 없다. `wrapup_withdraw {id, revision}`.
+    · 손대지 않는다 — 상태가 confirmed·applying·discarded인 항목. 확정된 기록은
+      사용자의 것이고 세션은 그것을 고치거나 철회할 수 없다
+      (`wrapup/store.py`의 `OPEN = ("draft", "failed")`). 지금과 어긋나면 새 기록을
+      남기며 대체를 표시한다: 확정된 knowledge 임시본이 쓴 기록 id는 그 항목의
+      `applied.id`다(확정이 `{"workspace","id","title"}`을 남긴다 — `wd-…`인
+      임시본 id가 아니다). 새 knowledge 기록의 `supersedes`에는 그 `applied.id`를
+      준다. `applied.id`가 없거나 `md:`로 시작하면(파일 기록) 대체 표시가 되지
+      않는다 — 없는 id를 주면 `knowledge._supersede`가 에러 없이 넘어가 옛
+      기록이 active로 남으므로, 그때는 `supersedes`를 주지 않고 그 id와 어긋난
+      점을 note에 적는다. 다른 종류도 그 id와 어긋난 점을 note에 적는다.
+    · 그대로 둔다 — 이번 회차가 건드리지 않은 항목. 내용을 못 박지 않은 항목을
+      습관적으로 철회하지 않는다.
+    · 보고에 `id: 무엇을 왜` 한 줄씩 적는다 — 고친·철회한 항목과, 손대지 않은
+      확정 항목 가운데 어긋난 것이 있으면 그 id와 어긋난 점이다.
+    · 이 점검은 회차를 막지 않는다 — `wrapup_list`·`wrapup_update`·
+      `wrapup_withdraw` 가운데 하나라도 없거나(「unknown tool」, 「not
+      configured」) 데몬에 닿지 않으면 사유를 한 줄 적고 다음 단계로 간다.
 
 nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────

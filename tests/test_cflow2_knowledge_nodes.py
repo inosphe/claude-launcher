@@ -90,8 +90,15 @@ def test_rounds_retroactively_fix_the_drafts_earlier_rounds_left():
     doc = _doc()
     frag = doc["fragments"]["retro-fix"]
     for phrase in ('wrapup_list {settled: true}', 'wrapup_update {id, revision, payload}',
-                   'wrapup_withdraw {id, revision}', 'OPEN = ("draft", "failed")'):
+                   'wrapup_withdraw {id, revision}', 'OPEN = ("draft", "failed")',
+                   '`wrapup_withdraw` 가운데'):
         assert phrase in frag, phrase
+    # claunch-oqn6t review: supersedes takes the record id a confirm wrote
+    # (applied.id), not the draft id -- knowledge._supersede ignores an id it
+    # cannot find, so the old record would stay active and say nothing.
+    assert 'applied.id' in frag and 'wd-…' in frag
+    assert 'knowledge._supersede' in frag
+    assert 'supersedes: <그 id>' not in frag
     for name in ("category-refresh", "knowledge-record", "glossary-draft"):
         assert "${frag:retro-fix}" in doc["nodes"][name]["prompt"], name
     # The reference alone proves nothing about what a session reads: the
