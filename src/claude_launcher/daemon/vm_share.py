@@ -133,8 +133,11 @@ def tart_arg(share: dict) -> str:
 
 def public(share: dict) -> dict:
     """The record as shown, with where it appears in the guest."""
-    return {"name": share["name"], "host_path": share["host_path"], "mode": share["mode"],
-            "guest_path": guest_path(share["name"])}
+    out = {"name": share["name"], "host_path": share["host_path"], "mode": share["mode"],
+           "guest_path": guest_path(share["name"])}
+    if "origin" in share:
+        out["origin"] = dict(share["origin"])
+    return out
 
 
 def load_shares(raw) -> List[dict]:
@@ -156,7 +159,8 @@ def load_shares(raw) -> List[dict]:
             log.warning("dropped %r from a VM record: not a valid share", item)
             continue
         if all(s["name"] != name for s in out):
-            out.append({"name": name, "host_path": path, "mode": mode})
+            out.append({"name": name, "host_path": path, "mode": mode,
+                        "origin": clean_origin(item.get("origin"))})
     return out[:SHARE_MAX]
 
 
@@ -176,3 +180,86 @@ def guidance(shares: Iterable[dict]) -> str:
         return ""
     first = shares[0]
     return GUIDANCE.format(guest=guest_path(first["name"]), name=first["name"])
+
+
+# ---- where a share came from, and the catalog -------------------------------------- #
+#: ``origin.kind``: a VM's own share set by the user, one a session asked for and the
+#: user approved, or a catalog entry (for all VMs / for listed VMs).
+ORIGIN_VM, ORIGIN_REQUEST, ORIGIN_ALL, ORIGIN_VMS = "vm", "request", "catalog-all", "catalog-vms"
+ORIGIN_KINDS = (ORIGIN_VM, ORIGIN_REQUEST, ORIGIN_ALL, ORIGIN_VMS)
+SCOPE_ALL, SCOPE_VMS = "all", "vms"
+CATALOG_MAX = 32
+
+
+def make_origin(kind: str, by_session: str = "", at: Optional[float] = None) -> Dict[str, object]:
+    """``{kind, by_session, at}``: ``by_session`` is the session whose request was
+    approved (empty when the user added it), ``at`` when the share was added."""
+    import time
+    return {"kind": kind, "by_session": by_session[:64], "at": time.time() if at is None else float(at)}
+
+
+def clean_origin(raw, default_kind: str = ORIGIN_VM) -> Dict[str, object]:
+    """An origin read from a file: unknown shapes read as a user-added share."""
+    if isinstance(raw, dict) and raw.get("kind") in ORIGIN_KINDS:
+        by = raw.get("by_session")
+        at = raw.get("at")
+        return {"kind": raw["kind"], "by_session": by[:64] if isinstance(by, str) else "",
+                "at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else 0.0}
+    return {"kind": default_kind, "by_session": "", "at": 0.0}
+
+
+def check_catalog_entry(body: dict, roots, forbidden, known_vms: Iterable[str]) -> Dict[str, object]:
+    """A catalog entry ready to store, or a refusal. The path rules are
+    :func:`check_share`'s. ``scope`` is ``all`` (every VM) or ``vms`` with a list
+    of known VM ids."""
+    share = check_share(body.get("name"), body.get("host_path"), body.get("mode"), roots, forbidden)
+    scope = body.get("scope", SCOPE_ALL)
+    if scope not in (SCOPE_ALL, SCOPE_VMS):
+        raise VmError("vm_bad_request", "scope는 all 또는 vms여야 합니다")
+    vms: List[str] = []
+    if scope == SCOPE_VMS:
+        raw = body.get("vms")
+        if not isinstance(raw, list) or not raw or not all(isinstance(v, str) for v in raw):
+            raise VmError("vm_bad_request", "scope vms에는 VM id 목록이 필요합니다")
+        known = set(known_vms)
+        missing = [v for v in raw if v not in known]
+        if missing:
+            raise VmError("vm_bad_request", f"알 수 없는 VM: {', '.join(m[:40] for m in missing[:3])}")
+        vms = sorted(set(raw))
+    share.update({"scope": scope, "vms": vms})
+    return share
+
+
+def load_catalog(raw) -> List[dict]:
+    """Catalog entries read from ``vms.json``: well-formed ones only, names unique.
+    Roots and the never-shared list are applied again at every VM start."""
+    out: List[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            if not isinstance(item, dict):
+                raise TypeError
+            base = load_shares([{k: item.get(k) for k in ("name", "host_path", "mode")}])
+            scope = item.get("scope")
+            vms = item.get("vms")
+            if not base or scope not in (SCOPE_ALL, SCOPE_VMS):
+                raise ValueError
+            if scope == SCOPE_VMS and (not isinstance(vms, list) or not all(isinstance(v, str) for v in vms)):
+                raise ValueError
+        except (TypeError, ValueError):
+            log.warning("dropped %r from the share catalog: not a valid entry", item)
+            continue
+        entry = dict(base[0])
+        entry.update({"scope": scope, "vms": sorted(set(vms)) if scope == SCOPE_VMS else [],
+                      "origin": clean_origin(item.get("origin"), ORIGIN_ALL if scope == SCOPE_ALL else ORIGIN_VMS)})
+        if all(e["name"] != entry["name"] for e in out):
+            out.append(entry)
+    return out[:CATALOG_MAX]
+
+
+def applies(entry: dict, vm_id: str) -> bool:
+    return entry["scope"] == SCOPE_ALL or vm_id in entry["vms"]
+
+
+def mount_key(share: dict) -> tuple:
+    """What tart is given for a share (the origin is not part of it)."""
+    return (share["name"], share["host_path"], share["mode"])

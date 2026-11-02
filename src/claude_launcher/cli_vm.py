@@ -149,18 +149,58 @@ def _cmd_allow(args) -> int:
     return _net(args, "allow", lambda v: {"cidr": v}, lambda v: {"cidr": v})
 
 def _share_show(out: dict) -> None:
-    shares = out.get("shared_dirs") or []
-    for sh in shares:
-        print(f"{sh['name']:<14} {sh['mode']}  {sh['host_path']}  ->  {sh['guest_path']}")
-    if not shares:
+    rows = out.get("share_rows")
+    if rows is None:
+        rows = out.get("shared_dirs") or []
+    for sh in rows:
+        if not sh.get("host_path"):
+            continue
+        origin = (sh.get("origin") or {}).get("kind", "vm")
+        by = (sh.get("origin") or {}).get("by_session")
+        state = sh.get("state", "")
+        print(f"{sh['name']:<14} {sh['mode']}  {sh['host_path']}  ->  {sh['guest_path']}  "
+              f"[{origin}{' ' + by if by else ''}{', ' + state if state else ''}]")
+        if state == "left_out":
+            print(f"  left out: {sh.get('why')}")
+    if not rows:
         print("no shared folders")
     for name, why in (out.get("shares_skipped") or {}).items():
-        print(f"  left out at the last start: {name}: {why}")
+        if all(r.get("name") != name for r in rows):
+            print(f"  left out at the last start: {name}: {why}")
     if out.get("shares_pending"):
         print("restart the VM for the change to apply")
 
 
+def _catalog_show(out: dict) -> None:
+    rows = out.get("share_catalog") or []
+    for e in rows:
+        where = "all VMs" if e["scope"] == "all" else "VMs: " + ", ".join(e["vms"])
+        print(f"{e['name']:<14} {e['mode']}  {e['host_path']}  ({where})")
+    if not rows:
+        print("the share catalog is empty")
+    print("applied to a VM at its next start")
+
+
+def _cmd_catalog(args) -> int:
+    """``claunch vm share catalog ls | add NAME PATH [--vm ID ...] [--rw [--yes-rw]] | rm NAME``
+    (parsed with ``catalog`` in the VM position)."""
+    if args.action == "ls":
+        return _call(args, "GET", "/api/vm-share-catalog", show=_catalog_show)
+    if not args.name or (args.action == "add" and not args.path):
+        print("claunch vm share catalog add NAME PATH [--vm ID ...] [--rw [--yes-rw]] | rm NAME | ls",
+              file=sys.stderr)
+        return EXIT_REFUSED
+    if args.action == "rm":
+        return _call(args, "POST", "/api/vm-share-catalog", {"action": "rm", "name": args.name}, show=_catalog_show)
+    body = {"action": "put", "name": args.name, "host_path": os.path.abspath(os.path.expanduser(args.path)),
+            "mode": "rw" if args.rw else "ro", "scope": "vms" if args.for_vm else "all",
+            "vms": list(args.for_vm or []), "confirm_rw": bool(args.yes_rw), "replace": bool(args.replace)}
+    return _call(args, "POST", "/api/vm-share-catalog", body, show=_catalog_show)
+
+
 def _cmd_share(args) -> int:
+    if args.vm == "catalog":
+        return _cmd_catalog(args)
     if args.action == "ls":
         return _call(args, "GET", f"/api/vm/{args.vm}", show=_share_show)
     if not args.name or (args.action == "add" and not args.path):
@@ -364,13 +404,19 @@ def register(sub) -> None:
 
     sp = v.add_parser("share", help="host folders mounted in the guest at /Volumes/My Shared Files/<name> "
                                     "(tart run --dir; applied at the next start). Only paths under the "
-                                    "daemon.vm_share_roots setting; read-only unless --rw")
+                                    "daemon.vm_share_roots setting; read-only unless --rw. 'share catalog ls|add|rm' "
+                                    "manages folders shared with all VMs or listed ones")
     vm_arg(sp)
     sp.add_argument("action", choices=("ls", "add", "rm"))
     sp.add_argument("name", nargs="?")
     sp.add_argument("path", nargs="?")
     sp.add_argument("--rw", action="store_true", help="read-write (default: read-only)")
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("--vm", dest="for_vm", action="append", default=None, metavar="ID",
+                    help="catalog add: apply to this VM only (repeatable); default: every VM")
+    sp.add_argument("--yes-rw", action="store_true",
+                    help="catalog add: confirm a read-write entry for every VM")
+    sp.add_argument("--replace", action="store_true", help="catalog add: change the existing entry of that name")
     sp.set_defaults(func=_cmd_share)
     sp = v.add_parser("requests", help="access requests sessions have made (vm_request) and not had answered")
     sp.add_argument("--json", action="store_true")

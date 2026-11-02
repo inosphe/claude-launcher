@@ -54,7 +54,7 @@ _STATUS = {
     "vm_timeout": 504, "vm_guest_error": 502, "vm_observe_first": 409,
     "vm_bad_scope": 400, "vm_bad_request": 400, "vm_duplicate_unavailable": 501,
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
-    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
+    "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_share_confirm_rw": 400, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
@@ -209,16 +209,19 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running", "files_dir", "requests")
+             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows")
 
 
 def _for_session(row: dict, session: str) -> dict:
     """A session sees its own scopes, not the other sessions', and no host
     paths."""
+    shares = [{k: r[k] for k in ("name", "host_path", "mode", "guest_path")}
+              for r in row.get("share_rows") or [] if r["state"] != "left_out"]
     row = {k: v for k, v in row.items() if k not in HOST_ONLY}
     row["grants"] = {session: row["grants"].get(session, [])}
-    if row.get("shared_dirs"):
-        row["share_guidance"] = vm_share.guidance(row["shared_dirs"])
+    row["shared_dirs"] = shares
+    if shares:
+        row["share_guidance"] = vm_share.guidance(shares)
     return row
 
 
@@ -248,6 +251,7 @@ async def h_list(request: web.Request) -> web.Response:
            "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))}
     if not session and mgr is not None:     # the user's page: where a share may come from
         out["share_roots"] = mgr.share_rules()[0]
+        out["share_catalog"] = [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])} for e in reg.catalog]
     return web.json_response(out)
 
 
@@ -495,6 +499,40 @@ async def h_share(request: web.Request) -> web.Response:
         return _err(exc)
 
 
+async def h_share_catalog(request: web.Request) -> web.Response:
+    """The share catalog (user only): GET lists it with the allowed roots; POST
+    ``put`` (add; ``replace`` changes an entry) or ``rm`` by name. An entry
+    for all VMs that is read-write needs ``confirm_rw: true`` -- the page asks, the
+    CLI has ``--yes-rw``. Applied to a VM at its next start."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    try:
+        if request.method == "POST":
+            body = await _body(request)
+            action = str(body.get("action") or "")
+            if action == "put":
+                roots, forbidden = await asyncio.to_thread(mgr.share_rules)
+                entry = await asyncio.to_thread(vm_share.check_catalog_entry, body, roots, forbidden,
+                                                [v.id for v in reg.list()])
+                if entry["scope"] == vm_share.SCOPE_ALL and entry["mode"] == "rw" and body.get("confirm_rw") is not True:
+                    raise VmError("vm_share_confirm_rw",
+                                  "모든 VM에 쓰기 가능(rw)으로 공유하려면 확인이 필요합니다(confirm_rw / --yes-rw)")
+                _trace(request, reg, "", "catalog_put", name=entry["name"], host_path=entry["host_path"],
+                       mode=entry["mode"], scope=entry["scope"], vms=entry["vms"])
+                reg.catalog_put(entry, replace=body.get("replace") is True)
+            elif action == "rm":
+                _trace(request, reg, "", "catalog_rm", name=str(body.get("name"))[:64])
+                reg.catalog_remove(str(body.get("name") or ""))
+            else:
+                raise VmError("vm_bad_request", "'action' is put or rm")
+        roots = (await asyncio.to_thread(mgr.share_rules))[0]
+        return web.json_response({"share_catalog": [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])}
+                                                    for e in reg.catalog], "share_roots": roots})
+    except VmError as exc:
+        return _err(exc)
+
+
 async def h_request(request: web.Request) -> web.Response:
     """A session asks for scopes and shared folders in one go. It grants nothing:
     the request waits for the user (``approve`` / ``deny``). The folders are
@@ -561,7 +599,7 @@ async def h_approve(request: web.Request) -> web.Response:
         if row["scopes"]:
             reg.grant(vm_id, session, row["scopes"])
         for share in checked:
-            reg.share_add(vm_id, share)
+            reg.share_add(vm_id, {**share, "origin": vm_share.make_origin(vm_share.ORIGIN_REQUEST, session)})
         reg.request_drop(vm_id, session)
         await vm_pack.sync(request.app.get("manager"), reg, session)
         return web.json_response(reg.view(vm_id))
@@ -742,9 +780,10 @@ async def h_acquire(request: web.Request) -> web.Response:
     try:
         session = _as_session(request, await _body(request))
         result = reg.acquire(request.match_info["id"], session)
-        shares = reg.get(request.match_info["id"]).shared_dirs
+        shares = [{k: r[k] for k in ("name", "host_path", "mode", "guest_path")}
+                  for r in reg.session_shares(request.match_info["id"])]
         if result.get("ok") and shares:
-            result["shared_dirs"] = [vm_share.public(s) for s in shares]
+            result["shared_dirs"] = shares
             result["share_guidance"] = vm_share.guidance(shares)
         return web.json_response(result, status=200 if result.get("ok") else 409)
     except VmError as exc:
@@ -1130,6 +1169,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)
     r.add_post("/api/vm/{id}/expose", h_expose)
     r.add_post("/api/vm/{id}/allow", h_allow)
+    r.add_get("/api/vm-share-catalog", h_share_catalog)
+    r.add_post("/api/vm-share-catalog", h_share_catalog)
     r.add_post("/api/vm/{id}/share", h_share)
     r.add_post("/api/vm/{id}/request", h_request)
     r.add_post("/api/vm/{id}/approve", h_approve)

@@ -52,6 +52,7 @@
       <p id="vm-preset-note" class="vm-muted" hidden></p>
     </details>
   </aside>
+  <div id="vm-content">
   <section id="vm-detail" hidden>
     <div id="vm-head">
       <h1 id="vm-name"></h1>
@@ -87,11 +88,6 @@
         <button id="vm-return" type="button" hidden>세션에 돌려주기</button>
         <span id="vm-human" class="vm-muted"></span>
       </div>
-    </div>
-    <div id="vm-requests-box" hidden>
-      <h2>권한 요청</h2>
-      <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 공유 폴더는 VM을 다음에 시작할 때 마운트됩니다.</p>
-      <table id="vm-requests"><thead><tr><th>세션</th><th>권한</th><th>공유 폴더</th><th>사유</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <h2>세션 권한</h2>
     <p class="vm-muted">
@@ -139,7 +135,7 @@
     </p>
     <p class="vm-warn-text" id="vm-share-roots"></p>
     <div id="vm-share-pending" class="vm-problem" hidden></div>
-    <table id="vm-shares"><thead><tr><th>이름</th><th>호스트 경로</th><th>게스트 경로</th><th>모드</th><th></th></tr></thead><tbody></tbody></table>
+    <table id="vm-shares"><thead><tr><th>이름</th><th>호스트 경로</th><th>게스트 경로</th><th>모드</th><th>출처</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>
     <div id="vm-share-add" class="vm-row">
       <label class="sr-only" for="vm-share-name">공유 이름</label>
       <input id="vm-share-name" type="text" maxlength="64" placeholder="이름 (예: src)" autocomplete="off" spellcheck="false">
@@ -170,7 +166,42 @@
       <button id="vm-allow-go" type="button">주소 추가</button>
     </div>
   </section>
+  <section id="vm-sharing" aria-label="공유 폴더 관리">
+    <h1>공유 폴더</h1>
+    <p class="vm-muted" id="vm-cat-note">
+      카탈로그는 모든 VM 또는 지정한 VM에 공유할 호스트 폴더 목록입니다. VM이 시작될 때 VM 자체의 공유 폴더와 합쳐 마운트하며(한 VM에 최대 4개,
+      이름이 같으면 VM 자체 항목이 우선), 변경은 실행 중인 VM에서는 다시 시작해야 적용됩니다. 기본은 읽기 전용(ro)입니다.
+      공유 폴더는 게스트에 열려 있어, ro여도 폴더 안의 비밀(.env 등)을 게스트가 읽을 수 있고, rw이면 게스트가 .git/hooks나 스크립트를 심어 호스트 세션이 실행하게 할 수 있습니다.
+    </p>
+    <p class="vm-warn-text" id="vm-cat-roots"></p>
+    <div id="vm-cat-pending" class="vm-problem" hidden></div>
+    <h2>카탈로그</h2>
+    <table id="vm-catalog"><thead><tr><th>이름</th><th>호스트 경로</th><th>모드</th><th>범위</th><th>출처</th><th></th></tr></thead><tbody></tbody></table>
+    <p class="vm-muted" id="vm-catalog-empty">카탈로그가 비어 있습니다.</p>
+    <div id="vm-cat-add" class="vm-row">
+      <label class="sr-only" for="vm-cat-name">공유 이름</label>
+      <input id="vm-cat-name" type="text" maxlength="64" placeholder="이름 (예: src)" autocomplete="off" spellcheck="false">
+      <label class="sr-only" for="vm-cat-path">호스트 경로</label>
+      <input id="vm-cat-path" type="text" maxlength="300" placeholder="호스트 폴더의 절대 경로" autocomplete="off" spellcheck="false">
+      <label><input type="checkbox" id="vm-cat-rw"> rw (쓰기 허용)</label>
+      <label><input type="radio" name="vm-cat-scope" id="vm-cat-scope-all" value="all" checked> 모든 VM</label>
+      <label><input type="radio" name="vm-cat-scope" id="vm-cat-scope-vms" value="vms"> 지정한 VM</label>
+      <span id="vm-cat-vms" class="vm-row"></span>
+      <button id="vm-cat-go" type="button">추가</button>
+      <button id="vm-cat-cancel" type="button" hidden>수정 취소</button>
+    </div>
+    <h2>VM × 공유 폴더</h2>
+    <p class="vm-muted">각 칸은 모드와 상태입니다. 적용됨: 실행 중인 VM에 마운트됨, 적용 대기: 다시 시작하면 마운트됨, 제외: 규칙이나 이름 충돌 때문에 마운트되지 않음(칸에 사유 표시).</p>
+    <div class="vm-scroll"><table id="vm-matrix"><thead></thead><tbody></tbody></table></div>
+    <p class="vm-muted" id="vm-matrix-empty">공유 폴더가 없습니다.</p>
+    <div id="vm-requests-box" hidden>
+      <h2>권한 요청</h2>
+      <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 세션이 끝나면 대기 중인 요청은 사라지지만 이미 승인된 공유 폴더는 남습니다.</p>
+      <table id="vm-requests"><thead><tr><th>VM</th><th>세션</th><th>권한</th><th>공유 폴더</th><th>사유</th><th></th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
   <p id="vm-empty" class="vm-muted" hidden>등록된 VM이 없습니다. 왼쪽 아래 'VM 등록'에서 이 호스트의 tart VM을 골라 등록하십시오. 셸에서는 <code>claunch vm add &lt;id&gt;</code>와 <code>claunch vm reconcile</code>을 실행해도 됩니다.</p>
+  </div>
 </main>
 <script src="static/vm.js"></script>
 </body>

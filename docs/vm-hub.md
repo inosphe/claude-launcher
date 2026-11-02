@@ -336,3 +336,30 @@ the shared folder is slower by about 10x for small files, and swiftc reports
 - **Session guidance.** The MCP server instructions point at the prompt pack
   `mcp-vm`; `vm_list` and `vm_acquire` return `share_guidance`.
 - **Not verified with a real VM:** `--dir` together with `--suspendable`.
+
+### Share catalog and where a share came from
+
+The catalog (`vms.json` key `share_catalog`, the user's) lists folders shared with every
+VM (`scope: all`) or with listed VMs (`scope: vms`, `vms: [ids]`). Entries are
+`{name, host_path, mode, scope, vms, origin}`; the path rules are the ones above,
+applied again at every start. At start a VM gets its own shares followed by the
+catalog entries that apply to it, up to 4 in all (a fifth is left out with
+`over_limit`); a catalog entry whose name the VM already uses is left out with
+`name_conflict`, so the VM's own entry wins. Left-out entries and entries that fail the rules at start show
+in `share_rows` with the reason. `shares_pending` also turns on when the catalog
+changes what a running VM would get.
+
+- **Origin.** Each share carries `origin {kind, by_session, at}`: `vm` (set by the user on
+  that VM), `request` (a session asked and the user approved; `by_session` names it),
+  `catalog-all`, `catalog-vms`. An approved share stays when the session ends; only a
+  pending request is dropped at session exit.
+- **Routes** (user only): `GET|POST /api/vm-share-catalog` (`put` with optional `replace`,
+  `rm`). A read-write entry for all VMs needs `confirm_rw: true` (`vm_share_confirm_rw`
+  otherwise): the page asks with a dialog, the CLI takes `--yes-rw`.
+- **CLI.** `claunch vm share catalog ls | add NAME PATH [--rw [--yes-rw]] [--vm ID ...]
+  [--replace] | rm NAME`; `claunch vm share <vm> ls` shows each share's origin and state.
+- **Page.** The VM page shows, below the selected VM and whatever is selected, the catalog
+  (add, edit, delete, scope), the VM x share matrix (mode and state per cell, the reason for
+  a left-out share), the VMs waiting for a restart, and the pending requests of all VMs.
+- **Sessions** see in `vm_list` / `vm_acquire` only the shares that are mounted (name, mode,
+  host and guest path) and the guidance, not the origin or the catalog.

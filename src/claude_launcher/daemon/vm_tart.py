@@ -490,7 +490,7 @@ class Manager:
                           "resumed until it is unlocked")
         # Refused before a slot is claimed: the VM stays as it was.
         allow = self._checked_allow(self.registry.get(vm_id))
-        shares = self._checked_shares(self.registry.get(vm_id))
+        shares, effective = self._checked_shares(self.registry.get(vm_id))
         vm = self.registry.claim_slot(vm_id)
         pid = 0
         try:
@@ -504,7 +504,7 @@ class Manager:
             vmhub.rotate_log(log)
             argv = self.run_argv(vm.tart_name, vm.softnet, vm.expose, allow, shares)
             vm.net_applied = {"expose": list(vm.expose), "allow": list(vm.allow)}
-            vm.shares_applied = [dict(s) for s in vm.shared_dirs]
+            vm.shares_applied = effective
             pid = self._spawn(argv, log)
             deadline = time.monotonic() + self.boot_wait
             self._wait_agent(vm, deadline, pid, log)
@@ -530,23 +530,27 @@ class Manager:
         forbidden = self._share_forbidden()
         return vm_share.clean_roots(self._share_roots(), forbidden), forbidden
 
-    def _checked_shares(self, vm: vmhub.Vm) -> List[dict]:
-        """The shares as they will be passed, each checked again against the
-        roots and the never-shared list as they are now. One that fails is left
-        out (and said so in ``shares_skipped`` and the audit log): the VM still
-        starts, and nothing the rules refuse is mounted."""
-        vm.shares_skipped = {}
-        if not vm.shared_dirs:
-            return []
+    def _checked_shares(self, vm: vmhub.Vm) -> tuple:
+        """``(to_mount, effective)``. ``effective`` is the VM's own shares followed
+        by the catalog entries that apply to it (``Registry.effective_shares``).
+        Each is checked again against the roots and the never-shared list as they
+        are now; one that fails, clashes by name or is over the limit is left out
+        (and said so in ``shares_skipped`` and the audit log): the VM still starts,
+        and nothing the rules refuse is mounted."""
+        effective, vm.shares_skipped = self.registry.effective_shares(vm.id)
+        for name in vm.shares_skipped:
+            self.registry.note(vm.id, "share_skipped", share=name, code=vm.shares_skipped[name].split(":")[0])
+        if not effective:
+            return [], []
         roots, forbidden = self.share_rules()
         ok: List[dict] = []
-        for share in vm.shared_dirs:
+        for share in effective:
             try:
                 ok.append(vm_share.recheck(share, roots, forbidden))
             except VmError as exc:
                 vm.shares_skipped[share["name"]] = f"{exc.code}: {exc}"[:300]
                 self.registry.note(vm.id, "share_skipped", share=share["name"], code=exc.code)
-        return ok
+        return ok, effective
 
     def host_locked(self) -> bool:
         return bool(self._locked())

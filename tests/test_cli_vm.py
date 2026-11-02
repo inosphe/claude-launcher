@@ -167,3 +167,40 @@ def test_lock_and_unlock_post_to_their_routes(client, capsys):
 def test_a_session_shell_cannot_lock_or_unlock(client, monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     assert run("unlock", "a") == cli_vm.EXIT_REFUSED and client.calls == []
+
+
+def test_share_catalog_commands(client, capsys):
+    client.answer = {"share_catalog": [{"name": "src", "mode": "ro", "host_path": "/p", "scope": "all", "vms": []},
+                                       {"name": "o", "mode": "rw", "host_path": "/q", "scope": "vms", "vms": ["a", "b"]}]}
+    assert run("share", "catalog", "ls") == 0
+    out = capsys.readouterr().out
+    assert "all VMs" in out and "VMs: a, b" in out and "next start" in out
+    assert run("share", "catalog", "add", "src", "/p") == 0
+    method, path, body = client.calls[-1]
+    assert (method, path) == ("POST", "/api/vm-share-catalog")
+    assert body == {"action": "put", "name": "src", "host_path": "/p", "mode": "ro", "scope": "all", "vms": [],
+                    "confirm_rw": False, "replace": False}
+    assert run("share", "catalog", "add", "o", "/q", "--rw", "--yes-rw", "--vm", "a", "--vm", "b", "--replace") == 0
+    body = client.calls[-1][2]
+    assert body["mode"] == "rw" and body["scope"] == "vms" and body["vms"] == ["a", "b"]
+    assert body["confirm_rw"] is True and body["replace"] is True
+    assert run("share", "catalog", "rm", "src") == 0
+    assert client.calls[-1][2] == {"action": "rm", "name": "src"}
+    assert run("share", "catalog", "add", "x") == cli_vm.EXIT_REFUSED
+
+
+def test_share_ls_shows_where_each_share_came_from(client, capsys):
+    client.answer = {"shares_pending": True, "shares_skipped": {},
+                     "share_rows": [{"name": "a1", "mode": "ro", "host_path": "/p", "guest_path": "/G/a1",
+                                     "origin": {"kind": "request", "by_session": "s2"}, "state": "applied"},
+                                    {"name": "c", "mode": "rw", "host_path": "/q", "guest_path": "/G/c",
+                                     "origin": {"kind": "catalog-all"}, "state": "left_out", "why": "name_conflict"}]}
+    assert run("share", "a", "ls") == 0
+    out = capsys.readouterr().out
+    assert "[request s2, applied]" in out and "[catalog-all, left_out]" in out and "left out: name_conflict" in out
+    assert "restart the VM" in out
+
+
+def test_a_session_shell_cannot_edit_the_catalog(client, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    assert run("share", "catalog", "add", "x", "/p") == cli_vm.EXIT_REFUSED and client.calls == []

@@ -185,7 +185,7 @@ def test_a_hand_edited_file_keeps_only_well_formed_shares(tmp_path):
                                         {"id": "b", "tart_name": "b", "shared_dirs": "not a list"}]}))
     reg = Registry(path)
     reg.load()
-    assert reg.get("a").shared_dirs[0] == good and len(reg.get("a").shared_dirs) == 4
+    assert reg.get("a").shared_dirs[0] == {**good, "origin": {"kind": "vm", "by_session": "", "at": 0.0}} and len(reg.get("a").shared_dirs) == 4
     assert reg.get("b").shared_dirs == []
 
 

@@ -343,13 +343,15 @@ class Vm:
             "files_dir": self.files_dir, "shared_dirs": [dict(s) for s in self.shared_dirs],
         }
 
-    def shares_pending(self) -> bool:
-        """The saved shares differ from what the running VM was given."""
+    def shares_pending(self, effective: Optional[list] = None) -> bool:
+        """The shares this VM would get now (its own, plus the catalog's when the
+        registry passes ``effective``) differ from what the running VM was given."""
         if self.state not in ("starting", "restoring", "running"):
             return False
+        now = [vm_share.mount_key(s) for s in (self.shared_dirs if effective is None else effective)]
         if self.shares_applied is None:
-            return bool(self.shared_dirs)
-        return self.shares_applied != self.shared_dirs
+            return bool(now)
+        return [vm_share.mount_key(s) for s in self.shares_applied] != now
 
     def net_pending(self) -> bool:
         """The saved expose/allow differ from what the running VM was given."""
@@ -462,6 +464,9 @@ class Registry:
         #: grants nothing: the user approves it (or not). Not saved: a restarted
         #: daemon has none, and the session asks again.
         self.requests: Dict[str, Dict[str, dict]] = {}
+        #: Shared folders for many VMs (``vm_share.load_catalog``): entries
+        #: ``{name, host_path, mode, scope, vms, origin}``, the user's, saved.
+        self.catalog: List[dict] = []
 
     # ---- persistence --------------------------------------------------- #
     def load(self) -> None:
@@ -477,6 +482,7 @@ class Registry:
             return
         with self._lock:
             self._rejected = [r for r in (doc.get("rejected") or []) if isinstance(r, dict)]
+            self.catalog = vm_share.load_catalog(doc.get("share_catalog"))
             for raw in doc.get("vms") or []:
                 try:
                     vm = Vm.from_dict(raw)
@@ -511,6 +517,8 @@ class Registry:
         doc = {"vms": [vm.to_dict() for vm in self._vms.values()]}
         if self._rejected:
             doc["rejected"] = self._rejected
+        if self.catalog:
+            doc["share_catalog"] = self.catalog
         with atomic.scratch(self.path) as tmp:
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
             atomic.replace(tmp, self.path)
@@ -571,6 +579,9 @@ class Registry:
                 raise VmError("vm_busy_state", f"{vm_id} is {vm.state}; stop it first")
             del self._vms[vm_id]
             self.requests.pop(vm_id, None)
+            for entry in self.catalog:
+                if vm_id in entry["vms"]:
+                    entry["vms"] = [v for v in entry["vms"] if v != vm_id]
             self._save()
 
     # ---- network exposure ----------------------------------------------- #
@@ -633,11 +644,62 @@ class Registry:
             vm = self.get(vm_id)
             if any(s["name"] == share["name"] for s in vm.shared_dirs):
                 raise VmError("vm_bad_request", f"{vm_id}에는 이미 공유 {share['name']}가 있습니다")
+            share = {**share, "origin": share.get("origin") or vm_share.make_origin(vm_share.ORIGIN_VM)}
             if len(vm.shared_dirs) >= vm_share.SHARE_MAX:
                 raise VmError("vm_bad_request", f"{vm_id}: 공유 폴더는 최대 {vm_share.SHARE_MAX}개입니다")
             vm.shared_dirs.append(dict(share))
             self._save()
             return vm
+
+    # ---- the share catalog (the user's) ------------------------------------- #
+    def catalog_put(self, entry: dict, replace: bool = False, by_session: str = "") -> dict:
+        """Add (or, with ``replace``, change) a catalog entry that
+        ``vm_share.check_catalog_entry`` accepted."""
+        with self._lock:
+            have = next((e for e in self.catalog if e["name"] == entry["name"]), None)
+            if have is not None and not replace:
+                raise VmError("vm_bad_request", f"카탈로그에 이미 {entry['name']}가 있습니다")
+            if have is None and replace:
+                raise VmError("vm_bad_request", f"카탈로그에 {entry['name']}가 없습니다")
+            if have is None and len(self.catalog) >= vm_share.CATALOG_MAX:
+                raise VmError("vm_bad_request", f"카탈로그는 최대 {vm_share.CATALOG_MAX}개입니다")
+            kind = vm_share.ORIGIN_ALL if entry["scope"] == vm_share.SCOPE_ALL else vm_share.ORIGIN_VMS
+            row = {**{k: entry[k] for k in ("name", "host_path", "mode", "scope", "vms")},
+                   "origin": vm_share.make_origin(kind, by_session)}
+            if have is None:
+                self.catalog.append(row)
+            else:
+                self.catalog[self.catalog.index(have)] = row
+            self._save()
+            return dict(row)
+
+    def catalog_remove(self, name: str) -> None:
+        with self._lock:
+            left = [e for e in self.catalog if e["name"] != name]
+            if len(left) == len(self.catalog):
+                raise VmError("vm_bad_request", f"카탈로그에 {name!s}가 없습니다")
+            self.catalog = left
+            self._save()
+
+    def effective_shares(self, vm_id: str) -> tuple:
+        """``(shares, left_out)``: the VM's own shares followed by the catalog
+        entries that apply to it. A catalog entry whose name is already taken by
+        the VM's own share (the VM's wins) or that would be the fifth is left out,
+        with the reason. The path rules are applied at start, not here."""
+        with self._lock:
+            vm = self.get(vm_id)
+            shares = [dict(s) for s in vm.shared_dirs]
+            left_out: Dict[str, str] = {}
+            for entry in self.catalog:
+                if not vm_share.applies(entry, vm_id):
+                    continue
+                if any(s["name"] == entry["name"] for s in shares):
+                    left_out[entry["name"]] = "name_conflict: 이 VM 자체의 공유가 같은 이름을 쓰고 있습니다(VM 자체 항목이 우선합니다)"
+                elif len(shares) >= vm_share.SHARE_MAX:
+                    left_out[entry["name"]] = f"over_limit: 한 VM에는 공유 폴더가 최대 {vm_share.SHARE_MAX}개입니다"
+                else:
+                    shares.append({k: entry[k] for k in ("name", "host_path", "mode", "origin")})
+            return shares, left_out
 
     def share_remove(self, vm_id: str, name: str) -> Vm:
         with self._lock:
@@ -1041,6 +1103,39 @@ class Registry:
                 vm.epoch += 1
             self._save()
 
+    def _share_rows(self, vm: Vm) -> List[dict]:
+        """Every share this VM has or would have, with where it came from and
+        whether the running VM has it: ``applied`` (mounted), ``pending`` (added
+        since the start, or the VM is not running) or ``left_out`` with the
+        reason (a rule at the last start, a name conflict, the limit)."""
+        shares, left_out = self.effective_shares(vm.id)
+        running = vm.state in ("starting", "restoring", "running")
+        have = {vm_share.mount_key(s) for s in vm.shares_applied or []}
+        rows = []
+        for s in shares:
+            row = vm_share.public(s)
+            if s["name"] in vm.shares_skipped:
+                row.update(state="left_out", why=vm.shares_skipped[s["name"]])
+            elif running and vm_share.mount_key(s) in have:
+                row["state"] = "applied"
+            else:
+                row["state"] = "pending"
+            rows.append(row)
+        for entry in self.catalog:
+            if entry["name"] in left_out:
+                rows.append({**vm_share.public(entry), "state": "left_out", "why": left_out[entry["name"]]})
+        for name, why in vm.shares_skipped.items():
+            if all(r["name"] != name for r in rows):
+                rows.append({"name": name, "state": "left_out", "why": why})
+        return rows
+
+    def session_shares(self, vm_id: str) -> List[dict]:
+        """The shares a session is told about: those that are (or, for a VM that is
+        not running, will be) mounted, without the ones left out."""
+        with self._lock:
+            vm = self.get(vm_id)
+            return [r for r in self._share_rows(vm) if r["state"] != "left_out" and r.get("host_path")]
+
     def view(self, vm_id: str) -> dict:
         with self._lock:
             vm = self.get(vm_id)
@@ -1049,7 +1144,8 @@ class Registry:
                     "net_applied_known": vm.net_applied is not None,
                     "locked_but_running": vm.locked and vm.state in OCCUPIED,
                     "shared_dirs": [vm_share.public(s) for s in vm.shared_dirs],
-                    "shares_pending": vm.shares_pending(),
+                    "share_rows": self._share_rows(vm),
+                    "shares_pending": vm.shares_pending(self.effective_shares(vm_id)[0]),
                     "shares_skipped": dict(vm.shares_skipped),
                     "requests": [{**r, "shares": [vm_share.public(s) for s in r["shares"]]}
                                  for r in self.request_list(vm_id)]}

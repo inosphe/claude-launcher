@@ -31,11 +31,26 @@ const VM = {
   grants: { s1: ["files"] }, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
   net_pending: true, net_applied_known: true, locked: false,
   shared_dirs: [{ name: "src", host_path: "/work/proj", mode: "ro", guest_path: "/Volumes/My Shared Files/src" }],
+  share_rows: [
+    { name: "src", host_path: "/work/proj", mode: "ro", guest_path: "/Volumes/My Shared Files/src",
+      origin: { kind: "vm", by_session: "", at: 1 }, state: "applied" },
+    { name: "cat1", host_path: "/work/cat", mode: "ro", guest_path: "/Volumes/My Shared Files/cat1",
+      origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" },
+    { name: "clash", host_path: "/work/clash", mode: "rw", guest_path: "/Volumes/My Shared Files/clash",
+      origin: { kind: "catalog-vms", by_session: "", at: 1 }, state: "left_out", why: "name_conflict: VM 자체 항목이 우선합니다" },
+  ],
   shares_pending: true, shares_skipped: { old: "vm_share_forbidden: nope" },
   requests: [{ id: "r1", session: "s2", scopes: ["files", "exec"], reason: "build it",
     shares: [{ name: "out", host_path: "/work/out", mode: "rw", guest_path: "/Volumes/My Shared Files/out" }] }],
 };
-const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false };
+const BETA = { ...VM, id: "beta", tart_name: "beta", state: "stopped", ready: false, channel: "idle", locked: false,
+  requests: [], shares_pending: false, shares_skipped: {},
+  share_rows: [{ name: "cat1", host_path: "/work/cat", mode: "ro", guest_path: "/Volumes/My Shared Files/cat1",
+    origin: { kind: "catalog-all", by_session: "", at: 1 }, state: "pending" }] };
+const CATALOG = [
+  { name: "cat1", host_path: "/work/cat", mode: "ro", scope: "all", vms: [], origin: { kind: "catalog-all", by_session: "", at: 1 } },
+  { name: "clash", host_path: "/work/clash", mode: "rw", scope: "vms", vms: ["alpha"], origin: { kind: "catalog-vms", by_session: "", at: 1 } },
+];
 const json = (res, body, status = 200) => {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
@@ -59,7 +74,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ["/work"] });
+  if (p === "/api/vm") return json(res, { vms: [VM, BETA], slot_limit: 2, host_locked: false, share_roots: ["/work"], share_catalog: CATALOG });
   if (p === "/api/vm/alpha/files") {
     return json(res, { host_dir: "/home/u/.claude-launcher/daemon/vm/alpha/files", guest_dir: "/Users/admin/work",
       guest_dir_default: "/Users/admin/work", limits: { max_bytes: 536870912, max_items: 10000, timeout: 600 },
@@ -219,6 +234,63 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "거절" }).click();
     await frame.locator("#vm-activity", { hasText: "s2 요청 거절 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/deny")[1], { session: "s2", id: "r1" });
+
+    // 3d. the share catalog and the VM x share matrix: on the default screen, editable
+    const sharing = frame.locator("#vm-sharing");
+    assert.equal(await sharing.isVisible(), true, "the sharing section is on the page without opening anything");
+    assert.match(await frame.locator("#vm-cat-roots").innerText(), /\/work/, "the allowed root is shown");
+    assert.match(await frame.locator("#vm-cat-note").innerText(), /\.env.*\.git\/hooks/s, "the risks are on the page");
+    assert.match(await frame.locator("#vm-cat-pending").innerText(), /alpha/, "VMs that need a restart are named");
+    const cat = await frame.locator("#vm-catalog tbody tr").allInnerTexts();
+    assert.equal(cat.length, 2);
+    assert.match(cat[0], /cat1\s+\/work\/cat\s+ro\s+모든 VM\s+카탈로그\(전체\)/);
+    assert.match(cat[1], /clash\s+\/work\/clash\s+rw\s+VM: alpha\s+카탈로그\(지정\)/);
+    const head = (await frame.locator("#vm-matrix thead").innerText()).replace(/\s+/g, " ");
+    assert.match(head, /VM src cat1 clash/, `matrix columns: ${head}`);
+    const mrows = await frame.locator("#vm-matrix tbody tr").allInnerTexts();
+    assert.match(mrows[0].replace(/\s+/g, " "), /alpha ro 적용됨 ro 적용 대기 rw 제외 — name_conflict/);
+    assert.match(mrows[1].replace(/\s+/g, " "), /beta - ro 적용 대기 -/);
+    assert.match(await frame.locator("#vm-matrix tbody tr:first-child td:nth-child(2)").getAttribute("title"), /\/work\/proj.*VM 설정/);
+    // a row in the VM's own table says where it came from and its state
+    const own = await frame.locator("#vm-shares tbody tr", { hasText: "clash" }).innerText();
+    assert.match(own, /카탈로그\(지정\).*제외: name_conflict/s);
+    // add for all VMs, read-write: asks first, and sends the confirmation
+    await frame.locator("#vm-cat-name").fill("tools");
+    await frame.locator("#vm-cat-path").fill("/work/tools");
+    await frame.locator("#vm-cat-rw").check();
+    let catAsked = "";
+    page.once("dialog", async (d) => { catAsked = d.message(); await d.dismiss(); });
+    await frame.locator("#vm-cat-go").click();
+    await page.waitForTimeout(200);
+    assert.match(catAsked, /모든 VM.*rw/s, "an rw entry for every VM asks first");
+    assert.equal(posts.filter(([u]) => u === "/api/vm-share-catalog").length, 0, "a dismissed confirmation sends nothing");
+    page.once("dialog", async (d) => { await d.accept(); });
+    await frame.locator("#vm-cat-go").click();
+    await frame.locator("#vm-activity", { hasText: "카탈로그 tools 추가 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.name === "tools")[1],
+      { action: "put", name: "tools", host_path: "/work/tools", mode: "rw", scope: "all", vms: [], confirm_rw: true, replace: false });
+    // for listed VMs, read-only: no dialog, the picked VMs are sent
+    await frame.locator("#vm-cat-name").fill("docs");
+    await frame.locator("#vm-cat-path").fill("/work/docs");
+    await frame.locator("#vm-cat-scope-vms").check();
+    await frame.locator("#vm-cat-vms input[value=beta]").check();
+    await frame.locator("#vm-cat-go").click();
+    await frame.locator("#vm-activity", { hasText: "카탈로그 docs 추가 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.name === "docs")[1],
+      { action: "put", name: "docs", host_path: "/work/docs", mode: "ro", scope: "vms", vms: ["beta"], confirm_rw: false, replace: false });
+    // edit: the name is fixed, the save replaces
+    await frame.locator("#vm-catalog tbody tr", { hasText: "cat1" }).getByRole("button", { name: "수정" }).click();
+    assert.equal(await frame.locator("#vm-cat-name").isDisabled(), true);
+    assert.equal(await frame.locator("#vm-cat-path").inputValue(), "/work/cat");
+    await frame.locator("#vm-cat-path").fill("/work/cat2");
+    await frame.locator("#vm-cat-go").click();
+    await frame.locator("#vm-activity", { hasText: "카탈로그 cat1 저장 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.name === "cat1")[1],
+      { action: "put", name: "cat1", host_path: "/work/cat2", mode: "ro", scope: "all", vms: [], confirm_rw: false, replace: true });
+    assert.equal(await frame.locator("#vm-cat-name").isDisabled(), false, "the form is back to adding");
+    await frame.locator("#vm-catalog tbody tr", { hasText: "clash" }).getByRole("button", { name: "삭제" }).click();
+    await frame.locator("#vm-activity", { hasText: "카탈로그 clash 삭제 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u, b]) => u === "/api/vm-share-catalog" && b.action === "rm")[1], { action: "rm", name: "clash" });
 
     // 3b. the file exchange
     await frame.locator("#vm-files-host", { hasText: "/vm/alpha/files" }).waitFor({ timeout: 5000 });
