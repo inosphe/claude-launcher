@@ -102,6 +102,12 @@ sides:
 #                            claunch-q4cqy.6)
 #   end-hold              -> end-hold (keep-alive + delivery-hold)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
+#   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
+#                            (코딩 전 사용자 협의 — worker-round의 일감 귀속 뒤,
+#                            작업 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞.
+#                            요청이 저장소를 바꾸는 작업인지 에이전트가 판정하고,
+#                            질문·협의면 브랜치도 만들지 않고 협의 단계에서 사용자의
+#                            작업 지시를 기다린다. claunch-xpnae)
 #   (v2 전용)              -> feasibility-check(choose), feasibility-gate(ask: 사람),
 #                            feasibility-hold
 #                            (착수 정당성 점검 — worker-round의 batch 첫 자리, 일감·코딩
@@ -1116,6 +1122,44 @@ nodes:
       (이슈 없는 회차면 그 사실이 보고에 있다), 상위 세션에 fyi가 나갔다
       (상위가 없거나 닿지 않으면 그 사실을 적는다).
     effects: [board.write, mesh.send]
+
+  pre-coding-consult-hold:
+    title: 코딩 전 사용자 협의 — 작업 지시를 기다린다
+    # claunch-xpnae: consult-check가 consult를 골랐을 때만 선다. 이 작업이 열린
+    # 채 남아 있는 것이 hold다 — 사용자의 다음 말이 같은 작업을 다시 깨우므로,
+    # 답을 마친 턴은 보고 없이 끝낸다(tests/test_worker_v2_pre_coding_consult.py).
+    # hold 동안 저장소는 바뀌지 않는다: 브랜치·커밋·착지 요청·wrapup이 모두
+    # 일감 처리에서 나오고, 이 자리는 일감 처리 앞이다.
+    prompt: |
+      이번 요청은 저장소를 바꾸는 작업이 아니라 질문·확인·협의로 판정됐다.
+      판정 근거는 앞 선택 consult-check의 reason에 있다(`claunch cflow2 journal
+      -n 5`). 이 작업은 사용자가 실제 작업을 지시할 때까지 이 자리에서 기다린다.
+
+      1. 질문에 답한다. 근거는 코드·보드·명령 출력으로 대고, 확인한 파일 경로와
+         명령을 함께 적는다. 답은 터미널에 쓰고, 이 회차 이슈가 있으면
+         `claunch beads comments add ${data.claim.issue} -f <본문 파일>`로 같은
+         내용을 보드에도 남긴다. 고칠 것이 보이더라도 이 자리에서는 바꾸지
+         않는다 — 사용자가 지시하면 3이 그 작업을 이어받는다.
+      2. 답을 마치면 보고하지 않고 턴을 끝낸다. 이 작업이 열린 채 남아 있는 것이
+         곧 hold이고, 사용자의 다음 말이 이 작업을 다시 깨운다. 추가 질문에는 1을
+         다시 하고 같은 방식으로 기다린다. 코드·테스트·문서·브랜치는 이 단계에서
+         바꾸지 않았으므로 기다리는 동안 잃는 것이 없다.
+         데몬의 시계는 열린 작업을 「운전자를 기다리는 중」으로 보고 10분마다
+         재알림을 보낸다(`cflow2_renudge_interval`, `# claunch cflow2: the run
+         moved`). 그 알림으로 깨어났는데 사용자의 새 말이 없으면 답을 다시 쓰지
+         않고 곧바로 턴을 끝내 같은 자리에서 계속 기다린다.
+      3. 사용자가 저장소를 바꾸는 일을 지시하면(무엇을 바꿀지 정해진 경우)
+         회차 이슈의 범위·완료 기준을 그 지시로 고치고(`claunch beads update <id>
+         --description ...`) 한 줄 요지로 이 작업을 ok로 보고한다. 그 보고 뒤에
+         이 회차는 착수 정당성 점검·일감 처리를 지나 코딩 승인 게이트로 이어진다.
+         지시가 모호하면 지어내지 않고 사용자에게 다시 묻는다.
+    done_when: |
+      사용자가 저장소를 바꾸는 일을 지시했고(무엇을 바꿀지 정해졌다), 그 지시가
+      회차 이슈의 범위·완료 기준에 반영되어 있다(이슈가 없는 회차면 그 사실이
+      보고에 있다).
+    returns:
+      ok: {work: str}
+    effects: [board.write, fs.read]
 
   feasibility-gate:
     title: 착수 정당성 부정 — 사용자 승인
@@ -6475,7 +6519,9 @@ procedures:
 
   worker-round:
     description: >-
-      회차 하나: 목표 수립 -> 일감 귀속(resolve-issue) -> 작업 위치(workspace) ->
+      회차 하나: 목표 수립 -> 일감 귀속(resolve-issue) -> 코딩 전 사용자
+      협의(pre-coding-consult; 질문·협의 요청이면 브랜치도 코드도 만들지 않고
+      협의 단계에서 사용자의 작업 지시를 기다린다) -> 작업 위치(workspace) ->
       브랜치 준비 -> 큐의 일감마다 item(배치 상한 10) -> 착지(land; rework면 배치를
       다시 돈다) -> 마감·회차 보고서. mode stack-only는 위임 전용 회차다(v1
       stack-round): 목표 수립과 일감 루프 없이 스택 컷만 착지시킨다.
@@ -6547,6 +6593,59 @@ procedures:
               - id: resolve
                 call: resolve-issue
                 bind: claim
+              # 코딩 전 사용자 협의(claunch-xpnae): 회차의 요청이 저장소를 바꾸는
+              # 작업인지 질문·협의인지 여기서 판정한다. 일감 귀속 뒤이면서 작업
+              # 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞이다 — 협의 요청은
+              # 브랜치를 만들지 않고 그 자리에서 기다린다. stack-only 회차는 이
+              # 갈래에 오지 않고(위의 then), land-only 회차는 코딩이 없으므로
+              # mode=full에서만 선다.
+              - id: pre-coding-consult
+                cond:
+                  - if: "$params.mode == 'full'"
+                    then:
+                      id: consult-check
+                      choose:
+                        chooser: agent
+                        require_reason: true
+                        prompt: |
+                          코딩 전 사용자 협의 단계다. 목표·이슈가 정해졌고 아직
+                          브랜치를 만들지 않았으며 코드도 바꾸지 않았다. 이번 요청이
+                          저장소를 바꾸는 작업인지, 질문·확인·협의인지 판정한다.
+                          판정 재료는 intake·prior-context·intake-issue의 보고,
+                          이슈 본문과 코멘트(`claunch beads show
+                          ${data.claim.issue} --json`, `claunch beads comments
+                          ${data.claim.issue}`), 오프닝 태스크와 사용자의 말이다.
+                          항목마다 확인한 것과 결과를 reason에 한 줄씩 적는다.
+
+                          다음이면 **consult**다 — 그 요청의 완료가 답이면 된다.
+                          · 의문문이거나 「알려 달라·확인해 달라·어떻게 생각하는가」의
+                            형태이고, 바꿀 대상(파일·동작·문구)이 지목되지 않았다.
+                          · 사용자가 조사·측정·원인 설명을 요청했고, 그 결과를
+                            고치라는 지시를 함께 주지 않았다.
+                          · 사용자가 이번에는 작업하지 말고 협의만 하자고 말했다.
+
+                          다음이면 **work**다 — 그 요청의 완료가 저장소의 변경이다.
+                          diff와 커밋이 결과물이고, 완료 기준을 테스트나 명령으로
+                          옮길 수 있다.
+                          · 고치기·추가하기·만들기·바꾸기·지우기 가운데 하나가
+                            지시됐다.
+                          · 이슈 본문의 범위·완료 기준이 동작이나 파일의 변경을 적고
+                            있다.
+                          · 질문 형태이지만 답이 「지금 코드가 틀렸다」로 끝나고,
+                            사용자가 그 수정을 함께 요청했다.
+
+                          판단이 서지 않으면 **consult**다. 이 자리의 consult는 작업을
+                          잃지 않는다: 사용자 협의 단계가 열려 있고, 사용자가 작업을
+                          지시하면 그 자리에서 이 회차가 이어진다. work를 잘못 고르면
+                          질문 하나에 브랜치·커밋·착지 요청이 따라온다.
+                        options:
+                          work:
+                            description: 저장소를 바꾸는 작업이다 — 착수 정당성 점검과 일감 처리(코딩 승인 게이트·작업)로 간다
+                            then: []
+                          consult:
+                            description: 질문·확인·협의다 — 코드를 바꾸지 않고 사용자 협의 단계에서 답한 뒤, 사용자가 작업을 지시할 때까지 기다린다
+                            then: [pre-coding-consult-hold]
+                  - else: []
               # 코딩 전 카테고리 배치(claunch-06fwj): intake가 일감 귀속을
               # 마쳤고 아직 작업을 시작하지 않은 자리다. 회차를 막지 않는다 —
               # 결과(assigned=false와 사유)는 노드가 보고로 낸다.
