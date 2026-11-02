@@ -128,3 +128,7 @@ button.vm-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }
 .vm-tree li.vm-tree-selected > span { background: rgba(232, 89, 12, 0.22); border-left: 3px solid var(--vm-accent); padding: 1px 6px; font-weight: 700; color: var(--vm-text); }
 .vm-tree li.vm-tree-ancestor > span { text-decoration: underline dotted; }
 .vm-tree-here { color: var(--vm-accent); }
+
+.vm-preset-manage { margin-left: 6px; }
+.vm-preset-manage-box { margin-top: 8px; padding: 8px; border: 1px solid var(--vm-bad); border-radius: 4px; }
+.vm-preset-manage-box input { margin-top: 0; }

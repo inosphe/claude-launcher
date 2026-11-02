@@ -196,7 +196,7 @@ Two different things, with different names everywhere (page, CLI, audit log):
     be tried again. After a success the record, grants, pending requests and the VM's entries in
     the share catalog are gone.
 - **Preset delete** (unchanged) is the third word: it deletes tart's `preset-<name>` copy and the
-  preset record (page: "프리셋 삭제", CLI: `claunch vm preset rm`), never a VM.
+  preset record (page: the preset's "관리 ⋯" toggle opens a row with "프리셋 삭제", which stays disabled until the preset name is typed in full; the server also requires `confirm` to repeat the name; CLI: `claunch vm preset rm`), never a VM.
 - The daemon needs a restart for the new route; the page needs a reload. Verified with the fake
   tart only: no real `tart delete` was run.
 

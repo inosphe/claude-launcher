@@ -219,11 +219,20 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-preset-list li", { hasText: "gold" }).getByRole("button", { name: "새 VM" }).click();
     await frame.locator("#vm-activity", { hasText: "gold에서 fresh 만들기 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/create")[1], { id: "fresh" });
-    let sure = "";
-    page.once("dialog", async (d) => { sure = d.message(); await d.accept(); });
-    await frame.locator("#vm-preset-list li", { hasText: "gold" }).getByRole("button", { name: "삭제" }).click();
+    const goldRow = frame.locator("#vm-preset-list li", { hasText: "gold" });
+    // delete is hidden until "관리" is opened, and then needs the name typed in full
+    assert.equal(await goldRow.getByRole("button", { name: "프리셋 삭제" }).count(), 0, "no delete button by default");
+    await goldRow.getByRole("button", { name: "관리" }).click();
+    const del = goldRow.getByRole("button", { name: "프리셋 삭제" });
+    assert.equal(await del.isDisabled(), true, "disabled until the name is typed");
+    await goldRow.locator(".vm-preset-del-confirm").fill("gol");
+    assert.equal(await del.isDisabled(), true, "a different name keeps it disabled");
+    await del.click({ force: true }).catch(() => {});
+    assert.equal(posts.some(([u]) => u === "/api/vm-presets/gold/delete"), false, "nothing sent for a mismatch");
+    await goldRow.locator(".vm-preset-del-confirm").fill("gold");
+    assert.equal(await del.isDisabled(), false, "enabled on an exact match");
+    await del.click();
     await frame.locator("#vm-activity", { hasText: "프리셋 gold 삭제 완료" }).waitFor({ timeout: 5000 });
-    assert.match(sure, /preset-gold/, "the confirmation names the copy");
     assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/delete")[1], { confirm: "gold" });
 
     // 2c. network exposure: shown, warned about, added (after a confirmation), removed
