@@ -3781,15 +3781,32 @@ header, whatever the workspace copy says.
   retrospective into the session — the person's door for a session whose
   cflow run did not end normally. The terminal header's **retro** button does
   the same. `--print` writes the text to stdout instead and touches nothing;
-  `--pack <id>` names another on-demand pack.
+  `--pack <id>` names another on-demand pack. The block the daemon types is
+  headed by the line `retrospection: trigger=manual, auto record=true`, so the
+  retrospective is recorded at once; `--review` sends `auto record=false`
+  instead, and the record waits as a wrap-up draft for the person to confirm.
 - improv-worker-v2 asks for it itself: its `settle` procedure runs the
   `retrospective` node after the settlement and before the end decision, and
-  that node has the agent run `claunch retro --print`. A failed retrospective
+  that node has the agent run `claunch retro --print`. The node gives the pack
+  `trigger: run`, the run id, the workflow, the issue and `auto` from the run
+  input `retrospection_auto_record` (default true). A failed retrospective
   does not hold up the end decision.
+- Both paths end with the pack's recording step (claunch-lmnlv): the agent
+  files `wrapup_draft kind=retrospection` with `auto`. `auto: true` is
+  confirmed by the daemon at once (actor `auto`, `settled_by: auto`); `auto:
+  false` leaves the draft in the session's wrap-up pane (Retrospection tab)
+  for the person to edit, discard or confirm. `auto` is accepted for this kind
+  only. A confirmed draft becomes a record in
+  `<launcher home>/retrospection.sqlite3`, listed on the dashboard's
+  **Retrospection** page (`#/retrospection`, read only: workspace, session and
+  text filters) and served by `GET /api/retrospection`
+  (`?workspace=&session=&q=&limit=`, newest first, body cut to an excerpt),
+  `GET /api/retrospection/facets` and `GET /api/retrospection/{id}`.
 - The text is sent, not recorded on the session definition, so session
   reminders do not restate it.
 - HTTP: `GET /api/sessions/{name}/retrospective` (`{block}`),
-  `POST` the same path (types it, `{delivered}`), `?pack=` for another
+  `POST` the same path (types it, `{delivered, auto_record}`; `?auto=0`
+  heads it with `auto record=false`), `?pack=` for another
   on-demand pack (an opening pack is a 400). `GET /api/prompt-packs` lists the
   on-demand ids under `on_demand_packs`.
 
