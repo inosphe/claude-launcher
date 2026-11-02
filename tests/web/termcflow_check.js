@@ -220,6 +220,7 @@ function cf2MovePlanView() { return pageEl("div"); }
 function cf2AnswerHeld() { return ""; }
 function cf2AnswerLegend() { return pageEl("div"); }
 function cf2AskLegendItems() { return []; }
+function cf2AskWhy() { return []; }
 function alert() {}
 function confirm() { return false; }
 function prompt() { return null; }

@@ -3343,6 +3343,10 @@ def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Opti
     option = opt["name"]
     r.inst[iid]["await"] = None
     r.inst[iid]["frame"]["option"] = option
+    # the chooser's reason travels with the option: an ask opened under it
+    # shows why it was reached (``_ask_because``, claunch-0rjnn.2)
+    r.inst[iid]["frame"]["option_reason"] = reason
+    r.inst[iid]["frame"]["option_by"] = by
     if opt.get("interval"):
         r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
     r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
@@ -6183,6 +6187,9 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "retry_at": None, "opened": store_mod.utcnow(), "opened_at": r.now,
         "visit": int((r.state.get("visits") or {}).get(node_key(node)) or 0),
     }
+    because = _ask_because(r, iid)
+    if because:
+        rec["because"] = because
     if brief is not None:
         rec.update(format=brief["format"], brief=brief["brief"],
                    question_text=brief["question_text"], intro=rec["prompt"],
@@ -6203,6 +6210,44 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
            otherwise=spec["otherwise"])
     if not spec["from"]:
         _ask_fall(r, rec, "the ask declares no 'from' candidates")
+
+
+def _ask_because(r: Run, iid: str) -> Optional[Dict[str, Any]]:
+    """Why the run reached the ask ``iid``: the nearest enclosing choice whose
+    option it sits under, with the reason its chooser gave (``None`` when no
+    choice encloses it). The card and the responders' message show it, so a
+    person does not have to read the journal to learn why the question
+    opened (claunch-0rjnn.2: s6086's landing-review stood before a person
+    with only its static prompt; the delta-0 reason was in the journal)."""
+    seen = set()
+    cur = (r.inst.get(iid) or {}).get("parent")
+    while cur and cur in r.inst and cur not in seen:
+        seen.add(cur)
+        inst = r.inst[cur]
+        frame = inst.get("frame") or {}
+        if frame.get("option"):
+            node = r.chart.nodes.get(inst.get("node"))
+            label = (shown_label(r.chart, node) if node is not None else None) \
+                or inst.get("node")
+            return {"choice": label, "instance": cur, "option": frame["option"],
+                    "reason": frame.get("option_reason") or "",
+                    "by": frame.get("option_by") or ""}
+        cur = inst.get("parent")
+    return None
+
+
+def _ask_route(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The groups the question went through before it stood where it is now,
+    each with who was in it and why it moved on (``skipped`` records, in
+    order) -- the card's "who was asked" trail (claunch-0rjnn.1)."""
+    cands = rec.get("from") or []
+    out = []
+    for s in rec.get("skipped") or []:
+        g = s.get("group")
+        group = _cand_text(cands[g]) if isinstance(g, int) and 0 <= g < len(cands) else ""
+        out.append({"group": g, "candidates": group, "who": s.get("candidate") or "",
+                    "reason": s.get("reason") or ""})
+    return out
 
 
 def _cand_text(c: Dict[str, Any]) -> str:
@@ -6519,6 +6564,8 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         # this stamp, not when a browser first saw the card (claunch-l9znm.1)
         "opened_at": rec.get("opened_at"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
+        "route": _ask_route(rec),
+        "because": rec.get("because"),
         "how": _ask_how(iid, rec),
         **(_ask_question(r, rec) if rec.get("brief") is not None else {}),
     }

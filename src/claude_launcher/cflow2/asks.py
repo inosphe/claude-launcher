@@ -112,6 +112,19 @@ def home_mesh(session: str, *, cwd: Optional[str] = None,
     return str(getattr(pool, "mesh", "") or "")
 
 
+def because_lines(rec: Dict[str, Any]) -> List[str]:
+    """Why the question opened, for the responder's message: the choice the
+    driver took to get here and the reason it gave (``runtime._ask_because``).
+    Empty when the ask sits under no choice."""
+    b = rec.get("because") or {}
+    if not b.get("option"):
+        return []
+    head = f"Why this question is open: at {b.get('choice')!r} " \
+           f"{b.get('by') or 'the driver'} chose {b.get('option')!r}"
+    reason = str(b.get("reason") or "").strip()
+    return [head + (":" if reason else "."), *([reason] if reason else []), ""]
+
+
 def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
                   scope: str) -> str:
     """The message a responder receives: the question, the answers, the tool."""
@@ -123,6 +136,7 @@ def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
         "",
         str(rec.get("prompt") or "").strip(),
         "",
+        *because_lines(rec),
         "Answer with one of:",
         opts,
         "  - abstain: you have no basis to decide -- passes it further up",
@@ -490,6 +504,7 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
             continue
         out.append({
             "ask_id": rec["id"], "kind": rec.get("kind"), "prompt": rec.get("prompt"),
+            "because": rec.get("because"),
             "options": [o["name"] for o in runtime._ask_choices(rec)] + [runtime.ASK_ABSTAIN],
             "deadline": rec.get("deadline"), "workflow": state.get("workflow"),
             "task": rec.get("label") or rec.get("node"),

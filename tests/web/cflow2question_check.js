@@ -197,6 +197,34 @@ check("the choice card draws a legend from its options",
       choiceSrc.includes("cf2AnswerLegend((c.options || []).map((o) => [o.name, o.description]))"),
       true);
 
+/* Why the ask is open and who was asked first (cf2AskWhy, claunch-0rjnn):
+   drawn from the ask's ``because`` and ``route``, nothing when it has
+   neither. A long route reason is cut with the whole text in the tooltip. */
+const whyFn = new Function("document", "mdInto",
+  [slice("el"), src.slice(src.indexOf("const CF2_ROUTE_REASON_MAX"),
+                          src.indexOf(";", src.indexOf("const CF2_ROUTE_REASON_MAX")) + 1),
+   slice("cf2AskWhy")].join("\n") + "\nreturn cf2AskWhy;")(document, mdInto);
+check("an ask with neither draws nothing", whyFn({ prompt: "…" }).length, 0);
+const longWhy = "x".repeat(300);
+const why = whyFn({
+  because: { choice: "landing", option: "escalate", by: "agent", reason: "delta 0" },
+  route: [
+    { group: 0, candidates: "worker (ancestor)", who: "worker (ancestor)", reason: longWhy },
+    { group: 2, candidates: "leader (sibling)", who: "s15", reason: "every responder abstained" },
+  ],
+});
+check("because and route are two boxes", why.map((n) => n.className),
+      ["cf2-ask-why", "cf2-ask-route"]);
+check("the because head names the choice, chooser and option", why[0].children[0].textContent,
+      "Why this is open: at landing, agent chose 'escalate'");
+check("the chooser's reason is drawn as markdown", why[0].children[1].md, "delta 0");
+const items = why[1].children[1].children;
+check("a long reason is cut and kept whole in the tooltip",
+      [items[0].textContent.length < longWhy.length, items[0].title], [true, longWhy]);
+check("a step names its group and who was in it", items[1].textContent,
+      "leader (sibling) [s15]: every responder abstained");
+check("the ask card draws cf2AskWhy", askCard.includes("cf2AskWhy(a)"), true);
+
 if (failures) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);
