@@ -373,6 +373,12 @@ ask:
   (이 필드가 생기기 전의 데몬, 그리고 v1 런 — 그쪽은 런 행의 `ask.prompt`를 쓴다)은
   지금까지대로 `prompt`를 평문으로 그린다. 두 상한은
   `cflow2_web.RAIL_PROMPT_MAX`·`RAIL_PROMPT_MD_MAX`다.
+  `prompt`는 한 줄로 접기 전에 markdown 표시자를 벗긴다(claunch-ns4kd.1) —
+  `cflow2_web._rail_strip_markdown`이 줄 머리의 제목(`#`)·인용(`>`)·목록
+  표시자와 짝지은 `**`·`__`·backtick, 링크·그림 문법을 걷어내고, 코드 펜스와
+  구분선 줄은 버린다. 터미널 스트립(`#term-cflow`)과 운영자 상태 줄은 이 필드를
+  평문으로 그리므로, 벗기지 않으면 `## 선택지`·`- **approve-once**`가 그대로
+  보인다. `prompt_md`는 벗기지 않는다 — 카드가 그리는 값이다.
 - 세션 상태(claunch-6vq2m): 세션이 끝나도 그 세션이 남긴 런은 디스크에서 계속
   사람을 기다린다. 그래서 `/api/cflow2/rail`의 행마다 그 세션의
   `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
