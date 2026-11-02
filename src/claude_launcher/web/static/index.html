@@ -757,6 +757,17 @@
          of the terminal's, which is refitted when the strip changes. -->
     <div id="term-cflow" class="hidden" role="region"
          aria-label="cflow answer needed"></div>
+    <!-- The provider warning (claunch-1ztit.1): this session runs the claude
+         harness on a provider that is not Claude's own, so the permission
+         classifier's calls can add Claude usage. Two answers: restart it on
+         yolo mode (the details panel's skip-permissions restart, here where
+         the reader is), or stop showing this for this session — the second is
+         recorded on the session's definition, so it survives a reload, a
+         daemon restart and a respawn. Every session without that record shows
+         the strip, which is how the rule reaches the sessions that existed
+         before it. Rendered by renderTermProviderWarn(). -->
+    <div id="term-provider-warn" class="hidden" role="region"
+         aria-label="provider warning"></div>
     <!-- The briefing card the top toggle folds open: the strip that belongs to
          the summary, between the header and the terminal, so the answer sits
          on top of the thing it is about. Empty and hidden except while the

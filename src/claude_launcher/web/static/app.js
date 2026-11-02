@@ -5961,6 +5961,10 @@ async function refreshSessions(options) {
     ragConfigured = data.rag_configured === true;
     if (typeof renderRestoreQueueBanner === "function") renderRestoreQueueBanner(data.restore_queue);
     forgetDeadSessions();
+    // The provider warning reads the row this poll just replaced (its
+    // provider pair and the ignore record), so it is repainted here rather
+    // than on a second request.
+    if (typeof renderTermProviderWarn === "function") renderTermProviderWarn();
     // A session opened before its record arrived (a reload on its address)
     // moves the rail to its project now that the record is here.
     if (typeof projectFollowPending === "string" && projectFollowPending &&
@@ -20182,6 +20186,9 @@ function setStatusBadge(status) {
   // Guarded like the other optional painters here: the header harnesses
   // slice this function without it.
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // The provider warning does too: it is about the session this header just
+  // named, and the attach path is where a different one becomes current.
+  if (typeof renderTermProviderWarn === "function") renderTermProviderWarn();
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -24423,6 +24430,151 @@ function renderTermCflow() {
   box.appendChild(btns);
   box.classList.remove("hidden");
   refitSoon(60);
+}
+
+/* ---- provider warning strip (#term-provider-warn) ----
+   The create form already advises skip permissions for a claude-harness
+   session whose provider is not Claude's own (#new-provider-hint). This is
+   the same advice for a session that is already running: its permission
+   classifier still calls Claude, and those calls can add Claude usage even
+   though the work itself goes to the other provider.
+
+   Two answers, and the second is a record rather than a hidden card:
+   "ignore" goes to POST /api/sessions/<name>/provider-warning and lands on
+   the session's definition, so it holds across a reload, a daemon restart and
+   a respawn. A session without that record shows the strip -- which is how
+   the rule reaches every session created before it existed, and why a new one
+   shows it until a person presses ignore once.
+
+   The provider pair rides the session row (``provider``/``provider_service``,
+   published by the daemon): a browser cannot open the config that decides it,
+   and a provider's name alone does not say whether it is Anthropic's (the
+   builtin ``default`` is Anthropic under another name). An empty service --
+   an older daemon, an unreadable config -- is "nothing to compare" and stays
+   silent rather than guessing. */
+function termProviderWarnView() {
+  const s = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((row) => row.name === currentName);
+  if (!s || s.harness !== "claude") return null;
+  const service = s.provider_service || "";
+  if (!service || service === ANTHROPIC_SERVICE) return null;
+  if (s.provider_warning_ignored) return null;
+  const capabilities = harnessDetails[s.harness] || {};
+  const group = (capabilities.skip_permissions_args || []).map(String);
+  const skipping = (typeof argvHasGroup === "function" && group.length)
+    ? argvHasGroup((s.args || []).map(String), group)
+    : false;
+  return { name: s.name, provider: s.provider || "", skipping,
+           canYolo: group.length > 0 };
+}
+
+function renderTermProviderWarn() {
+  const box = $("term-provider-warn");
+  if (!box) return;
+  const view = termProviderWarnView();
+  const sig = view
+    ? JSON.stringify([view.name, view.provider, view.skipping])
+    : "hidden";
+  // Rebuilt only when what it draws changes: the two-second poll answers the
+  // same thing on almost every tick, and replacing a button under the pointer
+  // is how a press gets lost.
+  if ((box.dataset.sig || "hidden") === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = "";
+  if (!view) {
+    box.classList.add("hidden");
+    refitSoon(60);
+    return;
+  }
+  box.appendChild(el("span", "tpw-mark", "⚠"));
+  const text = el("span", "tpw-text");
+  text.textContent =
+    (view.provider
+      ? `this session runs the claude harness on provider ${view.provider}, which is not Claude's own`
+      : "this session runs the claude harness on a provider that is not Claude's own") +
+    " — its permission classifier still calls Claude, and those calls can add Claude usage";
+  box.appendChild(text);
+  const btns = el("span", "tpw-buttons");
+  // A harness that declares no skip-permissions args has nothing to restart
+  // into: offering the press there would be a button that cannot do what it
+  // says. The warning and "ignore" still stand.
+  if (view.canYolo) {
+    const yolo = el(
+      "button", "tpw-btn tpw-yolo",
+      view.skipping ? "already on yolo mode" : "restart with yolo mode"
+    );
+    yolo.type = "button";
+    yolo.disabled = !!view.skipping;
+    yolo.title = view.skipping
+      ? "this session already runs with skip permissions"
+      : "restart it with skip permissions — same name, same conversation";
+    yolo.addEventListener("click", () => restartSessionYolo(view.name, yolo));
+    btns.appendChild(yolo);
+  }
+  const ignore = el("button", "tpw-btn", "ignore");
+  ignore.type = "button";
+  ignore.title = "stop showing this warning for this session";
+  ignore.addEventListener("click", () => ignoreProviderWarning(view.name, ignore));
+  btns.appendChild(ignore);
+  box.appendChild(btns);
+  box.classList.remove("hidden");
+  refitSoon(60);
+}
+
+async function restartSessionYolo(name, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/skip-permissions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip: true }),
+      }
+    );
+    if (!resp.ok) {
+      btn.disabled = false;   // the poll repaints the strip with the truth
+      return;
+    }
+    // The restart relaunched a fresh PTY under the same name; a terminal
+    // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      await refreshSessions();
+    }
+  } catch {
+    btn.disabled = false;   // offline — the health poll owns saying so
+  }
+}
+
+async function ignoreProviderWarning(name, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/provider-warning`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ignore: true }),
+      }
+    );
+    if (!resp.ok) {
+      btn.disabled = false;
+      return;
+    }
+    // The record is the answer: keep the cached row in step and repaint, so
+    // the strip goes now rather than on the next poll.
+    const row = (sessionsCache || []).find((r) => r.name === name);
+    if (row) row.provider_warning_ignored = true;
+    renderTermProviderWarn();
+  } catch {
+    btn.disabled = false;
+  }
 }
 
 /* ---- run gates for the notification channel (claunch-whm4e.1) ----

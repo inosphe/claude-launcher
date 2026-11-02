@@ -1399,6 +1399,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
+    r.add_post("/api/sessions/{name}/provider-warning", h_session_provider_warning)
     r.add_post("/api/sessions/{name}/note", h_session_note)
     r.add_post("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
     r.add_delete("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
@@ -11009,6 +11010,14 @@ RAIL_FIELDS = {
     # this poll -- the walk itself never runs on the poll path, and the
     # breakdown behind the badge comes from /api/sessions/{name}/storage.
     "storage",
+    # Which provider the launch actually uses, what service that is, and
+    # whether its person dismissed the provider warning: the strip at the
+    # top of a session (``termProviderWarnView`` in app.js) decides from
+    # these three and nothing else. The rail is the dashboard's only
+    # session poll, so leaving them out is not a saving -- the strip was
+    # never drawn on a live page, and only the stub rows of its own check
+    # ever reached it (claunch-1ztit.1).
+    "provider", "provider_service", "provider_warning_ignored",
 }
 
 
@@ -11235,12 +11244,56 @@ async def _sessions_list(request: web.Request) -> web.Response:
     attached, check_digests = await asyncio.to_thread(collect)
     if need_storage:
         storage_mod.STORAGE.prefetch(need_storage)
+    # Which backend each profile's launches talk to, and what service that
+    # backend is (``providers.service``) — the pair ``h_profiles`` publishes,
+    # keyed by profile so a row can name its own. Read once for the whole
+    # list: a browser cannot open the config that answers it, and a row asked
+    # by the screen is "does this session's claude harness run on a provider
+    # that is not Anthropic's" (the provider warning). One unreadable config
+    # leaves the map empty, which says "nothing to compare" — not "Claude's
+    # own" — and costs only the warning, never the list.
+    provider_of: Dict[str, str] = {}
+    provider_service_of: Dict[str, str] = {}
+    try:
+        facts = request.app["profile_facts"].facts()
+    except (KeyError, AttributeError):
+        facts = None
+    if facts is not None:
+        # Per profile rather than one all-or-nothing try: a single profile
+        # whose provider cannot be read answers "nothing to compare" for its
+        # own rows, and must not silence the warning for every other session.
+        for p in facts.profiles:
+            try:
+                provider_of[p.name] = providers.resolve_name(p, facts.doc)
+            except (providers.ProviderError, lineage.LineageError):
+                continue
+        for name in set(provider_of.values()):
+            try:
+                provider_service_of[name] = providers.service(name, facts.doc)
+            except providers.ProviderError:
+                continue
+        # The sessions that name no profile run on the global selection.
+        try:
+            provider_of[""] = providers.active(facts.doc) or providers.DEFAULT_PROVIDER
+            provider_service_of.setdefault(
+                provider_of[""], providers.service(provider_of[""], facts.doc)
+            )
+        except providers.ProviderError:
+            pass
     for s, info in zip(sessions, attached):
         # Which git branch the session's checkout is on — one fact that tells
         # two sessions in the same worktree apart without opening either. On
         # the loop, because a miss schedules its git read on the loop (see
         # _read_branch_later); the hit itself is one stat and a dict lookup.
         info["branch"] = _branch_of(info.get(work_checkout.FIELD) or _session_cwd(s))
+        # The provider this session's process is launched against: a borrowed
+        # profile's provider wins (that is the auth the launch uses), then the
+        # session's own profile, then the global default. Base names only —
+        # the definition carries ``profile:harness`` selectors.
+        lender = str(getattr(s.sdef, "borrow", None) or s.sdef.profile or "")
+        provider = provider_of.get(lender.split(":")[0], "")
+        info["provider"] = provider
+        info["provider_service"] = provider_service_of.get(provider, "")
         # The rail's observe-pin box and the observer card's read the same
         # definition field. Answering it here rather than in the observer's
         # snapshot is what lets the rail draw it off the poll it already
@@ -13829,6 +13882,27 @@ async def h_session_keep_alive(request: web.Request) -> web.Response:
     on = request.query.get("off") not in ("1", "true")
     session = manager.set_keep_alive(name, on)
     return json_response({**session.info(), "keep_alive": bool(on)})
+
+
+async def h_session_provider_warning(request: web.Request) -> web.Response:
+    """Record (or, with ``"ignore": false``, clear) a session's dismissal of
+    the provider warning.
+
+    Body: ``{"ignore": true|false}``. The warning sits at the top of a session
+    whose claude harness runs on a provider that is not Anthropic's own, and
+    offers two answers: restart it on yolo mode (the existing
+    ``/skip-permissions`` route) or stop showing this. The second is recorded
+    on the definition, so it is per session and survives a reload, a daemon
+    restart and a respawn; a session that never dismissed it keeps showing
+    the warning, which is what makes the rule retroactive across the fleet.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    ignore = body.get("ignore")
+    if not isinstance(ignore, bool):
+        return json_error(400, "pass 'ignore': true to hide it, false to show it again")
+    session = manager.set_provider_warning_ignored(request.match_info["name"], ignore)
+    return json_response({**session.info(), "provider_warning_ignored": bool(ignore)})
 
 
 async def h_session_note(request: web.Request) -> web.Response:
