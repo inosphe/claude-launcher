@@ -251,9 +251,10 @@ check("clicking a DB name fills the DB field",
       [card.includes('button(g.legacy ? `${g.name} (이전 형식)` : g.name, "rag-db-use")'),
        card.includes("dbInput.value = g.fill; showDbResolved();")],
       [true, true]);
-check("a DB rename posts from/to and the field follows the old name",
+check("a DB rename posts from/to and the field follows the DB the edited preset reads",
       [card.includes('request("api/rag/dbs/rename", { from: g.name, to }, "POST")'),
-       card.includes("if (ragDbSlug(dbInput.value) === g.name) dbInput.value = data.db;")],
+       card.includes("const screenDb = ragDbSlug(dbInput.value) || ragDbSlug(fields.embedding_model.value);") &&
+       card.includes("if (screenDb === g.name || repointed) dbInput.value = data.db;")],
       [true, true]);
 check("a DB delete asks first, takes the whole named DB and is disabled while read",
       [card.includes("window.confirm(`DB ${g.name}"), card.includes("g.legacy ? { name: g.name } : { db: g.name }"),
