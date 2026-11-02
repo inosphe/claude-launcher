@@ -221,11 +221,13 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     assert raised == {"blocked", "held"}, raised
     # the declaration's shape is what makes these land's answers, not the
     # ask procedure's: each carries the fields land declares for it. The
-    # three optionals are the recorded decision (claunch-1aj1a.1) -- they are
-    # what the next round reads to decide whether to ask again.
+    # optionals are the recorded decision (claunch-1aj1a.1) -- decision, its
+    # place (repo·relation), the receiver the evidence measured (owner) and
+    # the issue are what the next round reads to decide whether to ask again.
     fields = _doc()["procedures"]["land"]["returns"]
-    assert set(fields["blocked"]) == {"reason", "decision", "tip", "repo"}
-    assert set(fields["held"]) == {"reason", "rework", "decision", "tip", "repo"}
+    route = {"decision", "tip", "repo", "owner", "issue", "relation"}
+    assert set(fields["blocked"]) == {"reason"} | route
+    assert set(fields["held"]) == {"reason", "rework"} | route
     assert set(fields["rework"]) == {"reason", "rework"}
 
 
@@ -238,7 +240,8 @@ def test_blocked_carries_a_reason_and_no_rework_flag():
     body = _doc()["procedures"]["landing-target-gate"]["body"]
     blocked = _find(body, "return", "blocked")
     assert blocked is not None, "no return of blocked in the gate"
-    assert set(blocked["value"]) == {"reason", "decision", "tip", "repo"}, blocked["value"]
+    assert set(blocked["value"]) == {"reason", "decision", "tip", "repo",
+                                     "owner", "issue", "relation"}, blocked["value"]
     assert "rework" not in blocked["value"], (
         "the two land_out.rework consumers would read a blocked answer as a "
         "rework round")
@@ -246,10 +249,17 @@ def test_blocked_carries_a_reason_and_no_rework_flag():
     assert blocked["value"]["reason"].strip()
 
 
-def test_every_answer_records_its_decision_and_the_branch_tip():
+def test_every_answer_records_its_decision_its_place_and_the_tip_it_was_answered_at():
     """claunch-1aj1a.1: the answer is only reusable if the next round can tell
-    *which* answer it was and *what state* it was about. The tip is the fact
-    that makes the same question legitimately the same question."""
+    *which* answer it was, *where* it was about, and *what state* it was
+    answered on.
+
+    The record carries the decision name, the place the question was about
+    (``repo`` -- which repository the branch lands in -- and ``relation`` --
+    which way the request goes), the receiver the evidence measured and the
+    issue, plus the tip as it stood when the person answered. The next round
+    reuses the decision when the place is unchanged; the tip is kept as
+    evidence and is *not* a reuse condition (ANSWER 30759)."""
     cases = _the_ask().get("cases") or {}
     assert cases, "the gate has no cases"
     for name, case in cases.items():
@@ -257,6 +267,10 @@ def test_every_answer_records_its_decision_and_the_branch_tip():
         assert value["decision"] == name, (name, value)
         assert value["tip"] == "$data.commit.tip", (name, value)
         assert value["repo"] == "$data.landing.repo", (name, value)
+        assert value["relation"] == "$params.relation", (name, value)
+        assert value["owner"] == "$result['landing-target-evidence'].value.owner", (
+            name, value)
+        assert value["issue"] == "$data.claim.issue", (name, value)
 
 
 def test_rebase_and_repost_ends_the_round_instead_of_reworking():
@@ -281,12 +295,15 @@ def _land_no_target() -> dict:
     return tree
 
 
-def test_no_target_reuses_the_recorded_answer_on_the_same_tip():
-    """claunch-1aj1a.1: reaching this branch already means the sixth check
-    just said 「no target」. If the branch tip is the one the person answered
-    about, asking again is a repeat -- so the tree replays the recorded
-    answer first and only calls the gate when the tip moved or nothing is
-    recorded.
+def test_the_same_question_is_not_asked_twice_for_the_same_place():
+    """Branch 1 of the three the approved answer names: the same question is
+    not opened twice.
+
+    Reaching this branch already means this round's sixth check just said
+    「no target」. If a decision is recorded and the place it was made about
+    (``repo`` and ``relation``) is unchanged, asking again repeats a question
+    the person already answered -- so the tree replays the recorded answer
+    first and calls the gate only when the replay answers ``ask-again``.
 
     The replay returns the choice *name*, and the branch on that name is a
     ``cases`` map: the repo forbids a hand-written decision comparison
@@ -298,9 +315,10 @@ def test_no_target_reuses_the_recorded_answer_on_the_same_tip():
     replay = _find(tree, "id", "landing-target-replay")
     assert replay is not None, "no replay before the gate"
     assert replay["call"] == "landing-route-replay", replay
-    # the key is (stored route, this round's tip)
+    # the key is (stored route, this round's place) -- never the tip
     assert replay["with"] == {"previous": "$data.landing_route",
-                              "tip": "$data.commit.tip"}, replay["with"]
+                              "repo": "$data.landing.repo",
+                              "relation": "$data.inputs.relation"}, replay["with"]
     cases = replay["cases"]
     # every answer the gate can give has a case, and the unanswered key asks
     assert set(cases) == {"merge-by-person", "rebase-and-repost",
@@ -310,13 +328,38 @@ def test_no_target_reuses_the_recorded_answer_on_the_same_tip():
     assert cases["rebase-and-repost"]["return"] == "blocked"
     assert cases["freeze-and-close"]["return"] == "held"
     assert "rework" not in cases["merge-by-person"]["value"]
+    assert "rework" not in cases["rebase-and-repost"]["value"]
     assert cases["freeze-and-close"]["value"]["rework"] is False
-    # a replayed answer still carries the facts the decision was made on
+    # the replayed answer keeps the decision and the place it was made about
     for key in ("merge-by-person", "rebase-and-repost", "freeze-and-close"):
-        assert cases[key]["value"]["decision"] == key
-        assert cases[key]["value"]["tip"] == "$data.commit.tip"
+        value = cases[key]["value"]
+        assert value["decision"] == key, value
+        assert value["repo"] == "$data.landing_route.repo", value
+        assert value["relation"] == "$data.landing_route.relation", value
+        assert value["owner"] == "$data.landing_route.owner", value
+        assert value["issue"] == "$data.landing_route.issue", value
     # ask-again does nothing: the gate call after it poses the question
     assert cases["ask-again"] == []
+
+
+def test_a_moved_tip_keeps_the_decision_and_re_runs_the_action():
+    """Branch 2: a moved tip keeps the decision and re-runs only the action
+    (ANSWER 30759 -- 「tip이 바뀌면 결정은 유지하고 행동만 다시 한다」).
+
+    The tip is deliberately absent from the replay's inputs and guard; the
+    condition is the place, not the state. What moves with the tip is the
+    *value* the replayed answer carries: ``tip`` is this round's
+    ``$data.commit.tip``, not the tip stored in the record. That is the point
+    of reusing the decision -- a round that committed more work lands that
+    new tip under the person's original answer.
+    """
+    replay = _find(_land_no_target(), "id", "landing-target-replay")
+    assert set(replay["with"]) == {"previous", "repo", "relation"}, replay["with"]
+    assert "tip" not in replay["with"], replay["with"]
+    for key in ("merge-by-person", "rebase-and-repost", "freeze-and-close"):
+        value = replay["cases"][key]["value"]
+        assert value["tip"] == "$data.commit.tip", (key, value)
+        assert value["tip"] != "$data.landing_route.tip", (key, value)
 
 
 def test_the_replay_cases_name_the_same_choices_the_gate_offers():
@@ -330,35 +373,48 @@ def test_the_replay_cases_name_the_same_choices_the_gate_offers():
     assert replayed - {"ask-again"} == offered, (replayed, offered)
 
 
-def test_the_replay_reads_its_answer_only_back_onto_the_same_tip():
-    """The replay procedure itself: the tip equality and the existence test
-    are in one guard, and the miss goes to ``ask-again`` rather than to a
-    choice, so a missing record cannot be mistaken for an answer.
+def test_the_replay_guard_compares_the_place_and_asks_again_when_it_moved():
+    """Branch 3: a changed receiver or repository asks again.
 
-    ``landing_route.tip`` is null before the first answer and ``commit.tip``
-    is null in a round that committed nothing, so the tip test alone would
-    say "same tip" for two non-answers -- the two truthiness halves are what
-    keeps the question alive."""
+    The guard is the whole reuse condition, so this pins it exactly: a
+    decision exists, the repository is the same, and the request direction is
+    the same. A miss goes to ``ask-again`` rather than to a choice, so a
+    missing record cannot be mistaken for an answer.
+
+    ``repo`` and ``relation`` are strings whose default is ``""``, so the
+    truthiness half keeps two empty places from matching each other.
+
+    A change in *who can receive* the request is not compared here because
+    the record cannot decide it: reaching this branch already means this
+    round's sixth check found no receiver, and a round in which one exists
+    takes ``request`` and never arrives here. The receiver the evidence
+    measured is stored as ``owner`` for the record and for the person
+    reading the reused answer, not as a reuse condition.
+    """
     body = _doc()["procedures"]["landing-route-replay"]["body"]
     [cond] = [node for node in body if isinstance(node, dict) and "cond" in node]
     guard = cond["cond"][0]["if"]
-    assert guard.startswith("$params.tip and "), guard
-    assert "$params.previous.tip == $params.tip" in guard, guard
     assert "$params.previous.decision" in guard, guard
+    assert "$params.previous.repo == $params.repo" in guard, guard
+    assert "$params.previous.relation == $params.relation" in guard, guard
+    # the tip is not a reuse condition (ANSWER 30759)
+    assert "tip" not in guard, guard
     assert cond["cond"][0]["then"]["return"] == "ok"
     assert cond["cond"][1]["else"]["value"] == {"decision": "ask-again"}
     # and the hit hands back what was stored, not a re-worded copy
     value = cond["cond"][0]["then"]["value"]
     assert value["decision"] == "$params.previous.decision"
     assert value["reason"] == "$params.previous.reason"
+    assert value["relation"] == "$params.previous.relation"
 
 
-def test_the_commit_report_is_bound_so_the_tip_is_available():
-    """``$data.commit.tip`` is the key the replay compares against, so it has
-    to be written by something. The ``commit`` task returns ``{commits,
-    tip}``; ``item`` binds it. Pinned because the bind is one word in a long
-    procedure body and its absence is silent: an undeclared chain reads as
-    null, and null == null would make every round look like "same tip"."""
+def test_the_commit_report_is_bound_so_the_reused_answer_carries_this_rounds_tip():
+    """Every reused answer writes ``tip: "$data.commit.tip"`` (the action
+    re-run of ANSWER 30759), so that key has to be written by something. The
+    ``commit`` task returns ``{commits, tip}``; ``item`` binds it. Pinned
+    because the bind is one word in a long procedure body and its absence is
+    silent: an undeclared chain reads as null, and the reused answer would
+    then carry a tip that describes nothing."""
     assert "commit" in _doc()["data"], "data.commit is not declared"
     item = _doc()["procedures"]["item"]["body"]
     bound = [node for node in item

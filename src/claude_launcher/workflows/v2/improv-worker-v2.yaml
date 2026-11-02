@@ -480,9 +480,14 @@ data:
   # 않는다 — 런이 끝날 때까지 유지되고, 되돌리는 답은 없다.
   coding_approval: {decision: null}
   # 착지 대상 없음에 대한 사람의 마지막 결정(claunch-1aj1a.1): ask-user의 답
-  # {decision, reason, tip, repo}. land의 no-target 갈래가 묻기 전에 읽어,
-  # tip이 그대로면 같은 질문을 다시 하지 않는다. 답할 때마다 덮어쓴다.
-  landing_route: {decision: null, reason: null, tip: null, repo: null}
+  # {decision, reason, tip, repo, owner, issue, relation}. land의 no-target
+  # 갈래가 묻기 전에 읽는다. 다시 묻는 조건은 기록이 없는 것, 또는 사람이
+  # 답한 자리(repo·relation)가 바뀐 것뿐이다 — tip이 움직인 것은 질문의
+  # 근거가 아니다(ANSWER 30759: tip이 바뀌면 결정은 유지하고 행동만 다시
+  # 한다). tip·owner는 그 답이 가리키던 사실이고, 재사용할 때 행동 값에
+  # 이번 회차의 tip을 새로 싣는다.
+  landing_route: {decision: null, reason: null, tip: null, repo: null,
+                  owner: null, issue: null, relation: null}
   # 이 회차 마지막 커밋의 보고 — commit 노드가 내는 {commits, tip}이고 item이
   # 묶는다(bind: commit). landing_route.tip과 비교해 「지금 브랜치 끝에 대한
   # 결정인가」를 가른다: 끝이 움직였으면 지난 답을 다시 쓰지 않고 묻는다.
@@ -4533,6 +4538,8 @@ nodes:
       1. `claunch gate landing-target --json` — 데몬의 Router가 낸 답이다.
          `why`가 탈락 사유 전체이고, `passed`는 지나온 세션과 그 이유,
          `refused`는 거절된 후보, `undecidable`은 판정 불가 여부다.
+         `owner`·`holder`는 그 답이 가리키는 수신자다 — 종료 코드 1이면
+         둘 다 null이다. null도 그대로 옮긴다(빠뜨리지 않는다).
       2. `claunch mesh members <이 런의 메시>` — 지금 명부다. 각 구성원의
          역할이 보이고, 누가 `merger`나 `leader`를 갖는지 여기서 읽힌다.
       3. `claunch cflow2 status --json`의 `data.inputs.relation` — 이 런이
@@ -4546,10 +4553,11 @@ nodes:
       코멘트를 「상위가 멈추라고 했다」로 읽는다.
       **보드를 건드리지 않는다**: 이슈를 in_review로 전이하지 않고
       `LANDING REQUEST` 코멘트도 남기지 않는다(요청을 세우지 않는 회차다).
-      보고 형식: {why: <1의 why 그대로>, members: <2의 요약>, relation: <3>}.
+      보고 형식: {why: <1의 why 그대로>, members: <2의 요약>, relation: <3>,
+      owner: <1의 owner — null이면 null 그대로>}.
     done_when: |
-      `claunch gate landing-target --json`의 출력(특히 `why`의 문장)이 보고에
-      그대로 옮겨져 있고, 메시 명부에서 누가 무슨 역할인지가 그 출력과 함께
+      `claunch gate landing-target --json`의 출력(특히 `why`의 문장과 `owner`)이
+      보고에 그대로 옮겨져 있고, 메시 명부에서 누가 무슨 역할인지가 그 출력과 함께
       있다. 이슈에 `NO LANDING TARGET: <why>` 코멘트가 있고 그 마커에
       BLOCKED·HOLD·CHANGES REQUESTED가 없다. 보드는 in_review로 전이되지
       않았고 `LANDING REQUEST` 코멘트도 없다.
@@ -4557,7 +4565,7 @@ nodes:
     # 잰 것이고, 새 컨텍스트의 서브에이전트는 그 런을 모른다.
     executor: [inline]
     returns:
-      ok: {why: str, members: str, relation: "str?"}
+      ok: {why: str, members: str, relation: "str?", owner: "str?"}
     effects: [fs.read, board.write]
 
   landing-channel-gate:
@@ -5277,34 +5285,42 @@ procedures:
   landing-route-replay:
     description: >-
       사람이 이미 고른 착지 경로를 이번 회차의 답으로 다시 낸다(claunch-1aj1a.1).
-      저장된 결정의 브랜치 끝(landing_route.tip)이 이번 회차의 브랜치 끝과
-      같으면 그 결정 이름을 그대로 내고, 결정이 없거나 끝이 움직였으면
-      ``ask-again``을 낸다 — 호출부의 cases는 그때 아무것도 하지 않고 다음
-      노드(게이트 호출)가 묻는다. 어느 이름을 낼지는 cases의 키로만 적는다.
-      손으로 쓴 decision 문자열 비교를 쓰지 않는 이유: 선택지 이름의 오타는
-      컴파일도 런타임도 거치지 않고 조용히 어긋나는데, 그 형태는
+      다시 묻는 조건은 둘뿐이다: 기록이 없는 것, 또는 사람이 답한 자리
+      (repo·relation — 어느 저장소로 어느 방향의 요청인가)가 바뀐 것.
+      **tip은 조건이 아니다**: 새 커밋으로 브랜치 끝이 움직인 것은 그 답을
+      다시 물을 근거가 아니고(ANSWER 30759 — 「tip이 바뀌면 결정은 유지하고
+      행동만 다시 한다」), 행동은 호출부가 이번 회차의 tip으로 다시 한다.
+      수신자 구성의 변화는 이 가드가 재는 것이 아니다 — 이 갈래에 닿았다는
+      것 자체가 여섯째 확인(Router)이 방금 「받을 세션이 없다」를 새로 냈다는
+      뜻이고, 수신자가 생겼으면 그 회차는 request로 간다.
+      어느 이름을 낼지는 cases의 키로만 적는다. 손으로 쓴 decision 문자열
+      비교를 쓰지 않는 이유: 선택지 이름의 오타는 컴파일도 런타임도 거치지
+      않고 조용히 어긋나는데, 그 형태는
       tests/test_cflow2_improv_worker.py의
       test_no_ask_user_is_followed_by_a_handwritten_decision_cond가 막는다.
     params:
-      previous: {type: dict, description: "landing_route로 묶인 지난 결정 {decision, reason, tip, repo}"}
-      tip: {type: str, default: "", description: "이번 회차 브랜치 끝($data.commit.tip)"}
+      previous: {type: dict, description: "landing_route로 묶인 지난 결정"}
+      repo: {type: str, default: "", description: "이번 회차의 착지 저장소($data.landing.repo)"}
+      relation: {type: str, default: "", description: "이 런의 요청 방향($data.inputs.relation)"}
       choices: {type: list, description: "cases가 넘기는 선택지 이름들 — 본문은 쓰지 않는다"}
     returns:
-      ok: {decision: str, reason: "str?", repo: "str?"}
+      ok: {decision: str, reason: "str?", repo: "str?", owner: "str?", issue: "str?",
+           relation: "str?"}
     body:
-      # 세 가지를 함께 본다. (1) 지금 tip을 알아야 한다 — 이번 회차가 커밋을
-      # 하지 않았으면 commit.tip은 비어 있고, 빈 값끼리 비교하면 「같은 끝」이
-      # 거짓으로 성립한다. (2) 저장된 끝과 같아야 한다. (3) 저장된 결정이
-      # 있어야 한다 — 기록이 없을 때 previous.tip은 null이라 (1)·(2)만으로는
-      # 가릴 수 없다. 빈 문자열·null은 거짓이다.
+      # 저장된 답의 자리와 지금 자리가 같고 결정이 있으면 그 답이다. 빈
+      # 문자열·null은 거짓이므로, 기록이 없을 때(decision null)는 첫 항이
+      # 이미 거짓이다.
       - cond:
-          - if: "$params.tip and $params.previous.tip == $params.tip and $params.previous.decision"
+          - if: "$params.previous.decision and $params.previous.repo == $params.repo and $params.previous.relation == $params.relation"
             then:
               return: ok
               value:
                 decision: "$params.previous.decision"
                 reason: "$params.previous.reason"
                 repo: "$params.previous.repo"
+                owner: "$params.previous.owner"
+                issue: "$params.previous.issue"
+                relation: "$params.previous.relation"
           - else:
               return: ok
               value: {decision: ask-again}
@@ -5335,8 +5351,10 @@ procedures:
       # 질문을 다시 하지 않는다.
       # rework는 더 선언하지 않는다: 세 선택지가 전부 회차를 끝내므로 이
       # 프로시저가 rework로 끝나는 갈래가 없다(claunch-1aj1a.1).
-      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?"}
-      held: {reason: str, rework: bool, decision: "str?", tip: "str?", repo: "str?"}
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
+                issue: "str?", relation: "str?"}
+      held: {reason: str, rework: bool, decision: "str?", tip: "str?", repo: "str?",
+             owner: "str?", issue: "str?", relation: "str?"}
     body:
       # 근거를 먼저 만든다. 질문을 여는 노드가 스스로 잰 값을 넘기는 것이
       # ask-common의 규약이고(ask-frame → ask-pose), 물어보는 사이에 명부가
@@ -5382,13 +5400,13 @@ procedures:
             # 다음 회차가 새 명부로 다시 재게 한다.
             rebase-and-repost:
               return: blocked
-              value: {reason: "착지 대상을 만들지 못했다 — 메시 구성을 고친 뒤 다음 회차가 새 명부로 다시 잰다", decision: rebase-and-repost, tip: "$data.commit.tip", repo: "$data.landing.repo"}
+              value: {reason: "착지 대상을 만들지 못했다 — 메시 구성을 고친 뒤 다음 회차가 새 명부로 다시 잰다", decision: rebase-and-repost, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
             merge-by-person:
               return: blocked
-              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다", decision: merge-by-person, tip: "$data.commit.tip", repo: "$data.landing.repo"}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다", decision: merge-by-person, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
             freeze-and-close:
               return: held
-              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false, decision: freeze-and-close, tip: "$data.commit.tip", repo: "$data.landing.repo"}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false, decision: freeze-and-close, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
         catch:
           # 선택지 셋이 문제에 맞지 않는다는 답. 다시 물을 선택지가 이
           # 프로시저에 없으므로 사람이 경로를 정하겠다는 뜻으로 읽고
@@ -5475,7 +5493,8 @@ procedures:
       allow: {type: list, default: [request, escalate, no-target], description: "landing에서 고를 수 있는 갈래. no-target은 여섯째 확인(착지 요청을 받을 세션이 있는가)이 거짓일 때의 갈래다 — 기본값에 있어야 실제로 열린다"}
     returns:
       landed: {merge: str, tip: "str?"}
-      held: {reason: "str?", rework: "bool?", decision: "str?", tip: "str?", repo: "str?"}
+      held: {reason: "str?", rework: "bool?", decision: "str?", tip: "str?", repo: "str?",
+             owner: "str?", issue: "str?", relation: "str?"}
       rework: {reason: "str?", rework: bool}
       # claunch-improver-integration-request-blocked-o6paj: 차단 때문에 착지
       # 요청을 세우지 않는 처분. landed(머지됨)·held(마감)·rework(되감기)
@@ -5487,7 +5506,8 @@ procedures:
       # decision·tip·repo는 landing-target-gate가 남기는 값이다
       # (claunch-1aj1a.1). land가 no-target 갈래에서 그것을 landing_route로
       # 묶어 두고, 다음 회차는 tip이 그대로면 같은 질문을 건너뛴다.
-      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?"}
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
+                issue: "str?", relation: "str?"}
     body:
       - id: stack-landing
         cond:
@@ -5911,55 +5931,61 @@ procedures:
                 seq:
                   # claunch-1aj1a.1: 같은 질문을 두 번 묻지 않는다. 여기까지
                   # 왔다는 것은 여섯째 확인이 방금 「대상 없음」을 냈다는
-                  # 뜻이고, 그 질문의 답은 (사람, 저장소, 브랜치 끝)에 걸린
-                  # 결정이다. 그 셋이 그대로면 사람에게 다시 묻지 않고 저장된
-                  # 결정으로 분기한다 — 사람은 이미 답했다(merge-by-person과
-                  # rebase-and-repost는 blocked, freeze-and-close는 held).
-                  # 브랜치 끝이 바뀌었거나 결정이 없으면 ask-again이라 아래
-                  # 호출이 묻는다.
+                  # 뜻이고, 그 질문의 답은 사람이 정한 착지 경로다. 다시
+                  # 묻는 조건은 둘뿐이다: 기록이 없거나, 사람이 답한 자리
+                  # (저장소·요청 방향)가 바뀐 것.
+                  #
+                  # **tip은 조건이 아니다**(ANSWER 30759): 새 커밋으로 끝이
+                  # 움직여도 결정은 유지하고 행동만 다시 한다 — 그래서 재사용
+                  # 값의 tip은 이번 회차의 $data.commit.tip이다(사람이 답한
+                  # 시점의 tip이 아니다). 수신자 구성의 변화도 이 가드가
+                  # 재는 것이 아니다: 이 갈래에 닿았다는 것 자체가 여섯째
+                  # 확인(Router)이 「받을 세션이 없다」를 이번 회차에 새로
+                  # 냈다는 뜻이고, 수신자가 생겼으면 그 회차는 request로 간다.
                   #
                   # 분기는 cases의 키로 적는다: 선택지 이름을 cond에 손으로
                   # 비교하면 오타가 조용히 어긋난다(위 프로시저 설명). 키는
                   # 게이트가 묻는 선택지와 같아야 하고,
                   # tests/test_worker_v2_landing_target.py가 그 일치를 고정한다.
-                  #
-                  # 한계: 비교하는 끝은 $data.commit.tip — 이 회차 마지막 커밋의
-                  # tip이다. 커밋 없이 브랜치가 움직이는 회차(stack-only가 컷을
-                  # 머지하는 경우)에는 앞 회차 값이 남아, 그 끝에서 사람이 답한
-                  # 결정이 새 끝에도 그대로 쓰인다. 그때 쓰이는 답은 사람이 이미
-                  # 내린 「다시 묻지 마라」이고 회차는 blocked/held로 끝나므로
-                  # 손실은 보고의 tip 값이 낡는 것까지다. 이 값을 사람이 답한
-                  # 시점에 게이트가 다시 재게 하려면 게이트가 tip을 재는 자리로
-                  # 이 확인을 옮겨야 한다(그 자리는 evidence 뒤다).
                   - id: landing-target-replay
                     call: landing-route-replay
                     with:
                       previous: "$data.landing_route"
-                      tip: "$data.commit.tip"
+                      repo: "$data.landing.repo"
+                      relation: "$data.inputs.relation"
                     cases:
                       merge-by-person:
                         return: blocked
                         value:
-                          reason: "저장된 결정(merge-by-person)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다"
+                          reason: "저장된 결정(merge-by-person)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 브랜치 끝은 이번 회차 값으로 싣는다"
                           decision: merge-by-person
                           tip: "$data.commit.tip"
-                          repo: "$data.landing.repo"
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
                       rebase-and-repost:
                         return: blocked
                         value:
-                          reason: "저장된 결정(rebase-and-repost)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다. 메시를 고친 뒤의 착지는 다음 회차의 여섯째 확인이 새 명부로 다시 잰다"
+                          reason: "저장된 결정(rebase-and-repost)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 메시를 고친 뒤의 착지는 다음 회차의 여섯째 확인이 새 명부로 다시 잰다"
                           decision: rebase-and-repost
                           tip: "$data.commit.tip"
-                          repo: "$data.landing.repo"
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
                       freeze-and-close:
                         return: held
                         value:
-                          reason: "저장된 결정(freeze-and-close)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다"
+                          reason: "저장된 결정(freeze-and-close)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 브랜치 끝은 이번 회차 값으로 싣는다"
                           rework: false
                           decision: freeze-and-close
                           tip: "$data.commit.tip"
-                          repo: "$data.landing.repo"
-                      # 저장된 결정이 없거나 브랜치 끝이 움직였다 — 묻는다.
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
+                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 묻는다.
                       ask-again: []
                   # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
                   - id: landing-target-ask

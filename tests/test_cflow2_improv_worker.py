@@ -3551,9 +3551,13 @@ def test_land_declares_and_routes_blocked_out_of_the_batch():
     assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
     # reason is required; the route fields are what a person's answer is
     # recorded with so the next round need not ask again (claunch-1aj1a.1),
-    # and they are optional because the ``reframe`` answer carries none.
-    assert land["returns"]["blocked"] == {"reason": "str", "decision": "str?",
-                                          "tip": "str?", "repo": "str?"}
+    # and they are optional because the ``reframe`` answer carries none. The
+    # place is ``repo`` + ``relation`` (the reuse condition), ``owner`` is
+    # the receiver the evidence measured, and ``issue`` says what was
+    # answered about.
+    assert land["returns"]["blocked"] == {
+        "reason": "str", "decision": "str?", "tip": "str?", "repo": "str?",
+        "owner": "str?", "issue": "str?", "relation": "str?"}
 
     batch = _find_id(doc["procedures"]["worker-round"]["body"], "batch")
     # ``do: {try: [...], catch: {...}}`` -- a bare-key mapping, not a list
