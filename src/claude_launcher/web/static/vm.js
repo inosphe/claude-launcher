@@ -988,6 +988,30 @@ async function loadPresets() {
   }
   renderPresets();
 }
+let presetManage = "";   // the preset whose management row is open
+function presetDeleteBox(name) {
+  const box = document.createElement("div");
+  box.className = "vm-preset-manage-box";
+  const note = document.createElement("p");
+  note.className = "vm-warn-text";
+  note.textContent = `프리셋 '${name}'과 tart 복사본(preset-${name})을 삭제합니다. 다른 VM은 지우지 않습니다. 확인하려면 프리셋 이름을 그대로 입력하십시오.`;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "vm-preset-del-confirm";
+  input.placeholder = "프리셋 이름 입력";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", `삭제할 프리셋 이름 ${name}을 그대로 입력`);
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "vm-danger-solid vm-preset-del";
+  del.textContent = "프리셋 삭제";
+  del.disabled = true;
+  input.addEventListener("input", () => { del.disabled = input.value !== name; });
+  del.addEventListener("click", () => { if (input.value === name) deletePreset(name); });
+  box.append(note, input, del);
+  return box;
+}
 function renderPresets() {
   const ul = $("vm-preset-list");
   ul.replaceChildren();
@@ -1005,13 +1029,16 @@ function renderPresets() {
     make.textContent = "새 VM";
     make.disabled = p.present === false;
     make.addEventListener("click", () => createFromPreset(p.name));
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "vm-danger";
-    del.textContent = "프리셋 삭제";
-    del.title = `tart의 preset-${p.name} 복사본과 프리셋 기록을 삭제합니다(VM 삭제가 아닙니다)`;
-    del.addEventListener("click", () => deletePreset(p.name));
-    li.append(head, sub, make, del);
+    // Delete is not beside "새 VM": it sits behind a "관리" toggle, in its own row,
+    // and then asks for the preset's name typed in full.
+    const manage = document.createElement("button");
+    manage.type = "button";
+    manage.className = "vm-preset-manage";
+    manage.textContent = "관리 ⋯";
+    manage.setAttribute("aria-expanded", presetManage === p.name ? "true" : "false");
+    manage.addEventListener("click", () => { presetManage = presetManage === p.name ? "" : p.name; renderPresets(); });
+    li.append(head, sub, make, manage);
+    if (presetManage === p.name) li.appendChild(presetDeleteBox(p.name));
     ul.appendChild(li);
   }
   if (!presetRows.length) {
@@ -1054,8 +1081,8 @@ function createFromPreset(name) {
   });
 }
 function deletePreset(name) {
-  if (!confirm(`프리셋 '${name}'과 그 tart 복사본(preset-${name})을 삭제합니다. 다른 VM은 지우지 않습니다. 계속합니까?`)) return;
   act(`프리셋 ${name} 삭제`, async () => {
+    presetManage = "";
     await post(`api/vm-presets/${encodeURIComponent(name)}/delete`, { confirm: name });
     await loadPresets();
   });
