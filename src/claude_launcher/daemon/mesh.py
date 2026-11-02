@@ -1675,10 +1675,20 @@ class MeshManager:
         The roster is absolute (v2): the primary's own members carry
         ``machine == ""``, guest members carry their guest's machine name. On
         a mirror, only members stamped with our machine are ours.
+
+        "Our machine" is ``mesh.me`` until the uplink names this daemon:
+        ``machine`` is blank between ``load_all`` and the relay handshake
+        (``daemon/__main__.py``), and ``_load`` already falls back to the
+        ``self`` written in ``mesh.json`` so rank — and therefore
+        ``primary`` — is right before that. Comparing against the blank
+        ``machine`` instead read every row the roster had stamped with our
+        own name as another daemon's, and a local ``mesh send`` as that
+        member was refused with "lives on <our own name>" (claunch-pbn2e).
         """
+        me = self.machine or mesh.me
         if mesh.primary:
-            return bool(self.machine) and member.machine == self.machine
-        return member.machine in ("", self.machine)
+            return bool(me) and member.machine == me
+        return member.machine in ("", me)
 
     #: Same question, asked from outside. The rule above is subtle enough
     #: (blank machine means two different things either side of `primary`)
@@ -3696,12 +3706,13 @@ class MeshManager:
         if member is None:
             raise MeshError(f"no member {handle!r} in mesh {name!r}")
         if mesh.primary:
-            # Same shape as `_is_local`'s mirror arm, blank relay name and
-            # all: without the first clause an unnamed daemon compares "" to
-            # "" and waves a blank row through. `_peer_call` refuses that
-            # case a line later, so this is agreement rather than a fix — but
-            # a guard that reads differently from the rule it enforces is how
-            # the two got out of step to begin with.
+            # The mirror arm of `_is_local`, with our name taken strictly:
+            # without the first clause an unnamed daemon compares "" to ""
+            # and waves a blank row through. `_is_local` falls back to
+            # `mesh.me` while the uplink has not named us (claunch-pbn2e),
+            # but the peer call below needs a real relay name — so this
+            # guard keeps refusing in that window instead of letting the
+            # call fail a line later on the same missing name.
             if not (bool(self.machine) and member.machine == self.machine):
                 raise MeshError(
                     f"{handle!r} is not a member from this daemon — the "
