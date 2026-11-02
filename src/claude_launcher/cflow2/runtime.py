@@ -4327,11 +4327,18 @@ def _force_target_id(chart: ir.Chart, ref: str) -> str:
     raise FlowError(f"no node {ref!r} (force targets: {known})")
 
 
-def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any],
+          reason: Optional[str] = None, by: str = CALLER_USER) -> Optional[Dict[str, Any]]:
     """Point instance ``iid`` at the child ``slot`` names, as if it had
     reached that child on its own: the frame field that tracks the child, any
     hold of its own released. Returns the environment the child is entered
-    with (what the combinator would have given it), or ``None``."""
+    with (what the combinator would have given it), or ``None``.
+
+    A choice seated this way records the move's ``reason`` and ``by`` as its
+    option's, the way ``_take_option`` does: an ask the move opens under it
+    shows why it was reached (``_ask_because``), and a reason an earlier pick
+    of another option left on the frame does not stand next to the new
+    option (claunch-hvyof)."""
     inst = r.inst[iid]
     frame = inst["frame"]
     inst["await"] = None
@@ -4348,6 +4355,8 @@ def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dic
         frame["branch"] = slot["branch"]
     elif t == ir.T_CHOOSE:
         frame["option"] = slot["option"]
+        frame["option_reason"] = reason
+        frame["option_by"] = by
     elif t == ir.T_LOOP:
         if not frame.get("iter"):
             frame.update({"iter": 1, "base": 0, "values": [], "extra": 0, "last": None})
@@ -4420,7 +4429,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
               if granted else {}))
     moved.update(node=tid, label=node.label or None, at=r.inst[cur]["node"], left=left)
     _cancel_children(r, cur, "forced")
-    env = _seat(r, cur, r.node_of(cur), path[k][1] or {})
+    env = _seat(r, cur, r.node_of(cur), path[k][1] or {}, reason, by)
     parent = cur
     for j in range(k, len(path) - 1):
         nid, slot = path[j]
@@ -4433,7 +4442,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         _queue_triggers(r, iid, mid, AT_ENTER)
         if mid.type == ir.T_SCOPE and not _scope_params(r, iid, mid):
             return
-        env = _seat(r, iid, mid, path[j + 1][1] or {})
+        env = _seat(r, iid, mid, path[j + 1][1] or {}, reason, by)
         parent = iid
     _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
 

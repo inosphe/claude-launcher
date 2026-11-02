@@ -114,3 +114,52 @@ def test_the_route_names_each_group_and_why_it_moved_on(tmp_path):
     assert "not my repository" in route[1]["reason"]
     # the old field keeps its shape
     assert a["skipped"] == [r["reason"] for r in route]
+
+
+MOVE_CHART = """
+    nodes:
+      review:
+        prompt: wait
+        force_target: true
+        ask: {prompt: "ship it?", otherwise: human}
+      recheck:
+        prompt: wait
+        force_target: true
+        ask: {prompt: "again?", otherwise: human}
+    body:
+      - id: landing
+        choose:
+          chooser: agent
+          prompt: land?
+          options:
+            escalate: {then: [review]}
+            again: {then: [recheck]}
+"""
+
+
+def test_a_forced_move_replaces_the_reason_an_earlier_option_left(tmp_path):
+    """claunch-hvyof: a person's move seats the choice on another option; the
+    ask it opens shows the move's reason and mover, not the reason the driver
+    gave for the option it took before."""
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(MOVE_CHART))
+    kw = {"cwd": str(tmp_path), "scope": SCOPE, "now": T0}
+    runtime.start(chart, cwd=kw["cwd"], scope=SCOPE, caps={}, now=T0)
+    st = runtime.select("landing", "escalate", "delta 0: already landed", **kw)
+    assert st["asks"][0]["because"]["reason"] == "delta 0: already landed"
+    st = runtime.force_move("recheck", "measure again after the rebase", **kw)
+    (a,) = st["asks"]
+    assert a["node"] == "recheck"
+    assert a["because"]["option"] == "again"
+    assert a["because"]["reason"] == "measure again after the rebase"
+    assert a["because"]["by"] == runtime.CALLER_USER
+
+
+def test_a_forced_move_without_a_reason_leaves_no_stale_reason(tmp_path):
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent(MOVE_CHART))
+    kw = {"cwd": str(tmp_path), "scope": SCOPE, "now": T0}
+    runtime.start(chart, cwd=kw["cwd"], scope=SCOPE, caps={}, now=T0)
+    runtime.select("landing", "escalate", "delta 0: already landed", **kw)
+    (a,) = runtime.force_move("recheck", **kw)["asks"]
+    assert a["because"]["option"] == "again"
+    assert a["because"]["reason"] == ""
+    assert a["because"]["by"] == runtime.CALLER_USER
