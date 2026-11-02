@@ -349,6 +349,19 @@ the shared folder is slower by about 10x for small files, and swiftc reports
   Each request has an `id`; `approve` and `deny` must send the id they were shown
   with, and a session that asked again meanwhile (which replaces its request) gets
   `vm_request_changed` (409), so the user never approves content they did not see.
+- **Where the user sees a request.** (1) The VM page shows pending requests in a
+  bordered banner at the top, whatever VM is selected (count, session, VM, scopes, shared
+  folders with mode, a warning for `exec` and for `rw`, the reason, approve / deny; hidden
+  when none). (2) The dashboard's VM nav item shows the count. (3) The dashboard raises one
+  sticky notification card per request id (source `vm`, "VM access requests" in the
+  notification settings; the card names the session and a summary with paths cut to their
+  last two folders, and opens `#/vm`). It goes through the dashboard's existing notice
+  mechanism (`notify()` in `app.js`, the same as QA questions), fed by the light
+  `GET /api/vm-requests` (user only, no host query), and it comes down when the request is
+  approved, denied, withdrawn or its session ends; the history row stays. A browser that
+  never kept the list announces the requests already pending on its first poll. A session
+  that asks again replaces its request: the old card goes down and a new one goes up.
+  Needs the dashboard page reloaded and the daemon restarted once for the route.
 - **Session guidance.** The MCP server instructions point at the prompt pack
   `mcp-vm`; `vm_list` and `vm_acquire` return `share_guidance`.
 - **Not verified with a real VM:** `--dir` together with `--suspendable`.

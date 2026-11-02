@@ -85,3 +85,11 @@ code { font: 12px ui-monospace, monospace; }
 #vm-files-host { overflow-wrap: anywhere; }
 #vm-files-dir { min-width: 22em; max-width: 100%; }
 #vm-files-log td { overflow-wrap: anywhere; }
+
+#vm-requests-box { margin: 0 0 12px; padding: 10px 14px; border: 2px solid var(--vm-warn); border-radius: 6px; background: var(--vm-bar); }
+#vm-requests-box h2 { margin: 0 0 6px; color: var(--vm-warn); }
+.vm-request { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--vm-line); border-radius: 4px; background: var(--vm-bg); }
+.vm-request h3 { margin: 0 0 4px; font-size: 14px; }
+.vm-request p { margin: 2px 0; overflow-wrap: anywhere; }
+.vm-request .vm-warn-text { margin: 4px 0; }
+.vm-request .vm-row { margin-top: 6px; }

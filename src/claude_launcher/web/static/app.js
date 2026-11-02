@@ -59038,6 +59038,7 @@ const NOTICE_SOURCES = [
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
   { id: "fault", label: "leader faults (harness stopped)" },
   { id: "qa", label: "QA questions" },
+  { id: "vm", label: "VM access requests" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
   { id: "daemon", label: "daemon connection" },
@@ -60707,6 +60708,80 @@ function qaNoticeSync(rows) {
   }
   qaNoticed = live;
   noticeSave(QA_NOTICED_KEY, [...live]);
+}
+
+/* ------------------------------------------------------------------ */
+/* VM access requests as notices (vm-setup-8s6)                        */
+/* ------------------------------------------------------------------ */
+/* A session asks for VM scopes and shared folders with vm_request; the
+   user answers on the VM page (#/vm). The dashboard polls the light
+   GET /api/vm-requests (not GET /api/vm, which asks the host about its
+   screen lock) and, like a QA request, puts up one sticky card per request
+   id and lists it in the notification history. The card names the session
+   and what it asks for, with long paths cut to their last two folders, and
+   opens the VM page. When the request is approved, denied or withdrawn the
+   card comes down (the history row stays). The nav item counts what waits.
+   Announced keys are kept in localStorage like the QA ones; the first poll
+   of a browser announces what is pending too, since a request waiting is
+   something to answer. */
+const VM_NOTICED_KEY = "claunch.vmNoticed";
+let vmNoticed = null;     // keys announced, as of the last sync
+
+function vmRequestKey(r) { return `${r.vm}:${r.session}:${r.id}`; }
+
+function vmShortPath(p) {
+  const parts = String(p || "").split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : String(p || "");
+}
+
+function vmRequestSummary(r) {
+  const bits = [];
+  if ((r.scopes || []).length) bits.push(`scopes: ${r.scopes.join("+")}`);
+  for (const s of (r.shares || []).slice(0, 3)) {
+    bits.push(`share ${String(s.name).slice(0, 32)} (${s.mode}${s.mode === "rw" ? ", WRITE" : ""}) ${vmShortPath(s.host_path)}`);
+  }
+  if ((r.shares || []).length > 3) bits.push(`+${r.shares.length - 3} more`);
+  return `VM ${r.vm}: ${bits.join("; ") || "no scopes"}`;
+}
+
+function vmNavBadge(count) {
+  const badge = $("vm-nav-badge");
+  if (!badge) return;
+  badge.textContent = count ? String(count) : "";
+  badge.hidden = !count;
+}
+
+function vmRequestSync(rows) {
+  const saved = noticeLoad(VM_NOTICED_KEY, null);
+  const known = new Set(vmNoticed || []);
+  if (Array.isArray(saved)) for (const k of saved) known.add(k);
+  const live = new Set();
+  for (const r of rows) {
+    const key = vmRequestKey(r);
+    live.add(key);
+    if (known.has(key)) continue;
+    notify(`${r.session} asks for a VM`, vmRequestSummary(r), {
+      source: "vm", key: `vm-${key}`, sticky: true, kind: "warn", sync: `vm:${key}`,
+      open: () => { location.hash = "#/vm"; },
+    });
+  }
+  // A request no longer pending (answered, withdrawn, session ended) takes its card down.
+  for (const key of known) if (!live.has(key)) dismissNotice(`vm-${key}`);
+  vmNoticed = live;
+  noticeSave(VM_NOTICED_KEY, [...live]);
+  vmNavBadge(rows.length);
+}
+
+async function refreshVmRequests() {
+  let data;
+  try {
+    const resp = await api("/api/vm-requests");
+    if (!resp.ok) return;     // no VM hub in this daemon: nothing to announce
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  vmRequestSync(Array.isArray(data && data.requests) ? data.requests : []);
 }
 
 /* ------------------------------------------------------------------ */
@@ -62641,6 +62716,7 @@ async function boot() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshVmRequests(),
     refreshThreadsRail(),
     refreshModelPrices(),
   ]);
@@ -63318,6 +63394,7 @@ async function pollOnce() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshVmRequests(),
     refreshThreadsRail(),
     refreshTermQueued(),
     refreshTermWindow(),

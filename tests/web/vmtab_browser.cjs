@@ -66,7 +66,8 @@ const json = (res, body, status = 200) => {
 };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
-  const p = url.pathname;
+  const p = url.pathname
+  if (p === "/api/batch") { res.statusCode = 404; return res.end("{}"); }   // the page falls back to single reads
   if (req.method === "GET" && p.startsWith("/api/vm")) hits.push(p);
   if (req.method === "POST" && /^\/api\/vm\/beta\/(un)?lock$/.test(p)) {
     BETA.locked = p.endsWith("/lock") && !p.endsWith("/unlock");
@@ -74,6 +75,7 @@ const server = http.createServer((req, res) => {
     return json(res, BETA);
   }
   if (req.method === "GET" && p === "/api/vm-share-roots") return json(res, { roots: ROOTS, enabled: ROOTS.some((r) => r.ok) });
+  if (req.method === "GET" && p === "/api/vm-requests") return json(res, { requests: VM.requests.map((r) => ({ vm: "alpha", ...r })) });
   if (req.method === "GET" && p === "/api/vm-only") return json(res, { sessions: ONLY });
   if (req.method === "POST") {
     let data = "";
@@ -147,6 +149,13 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.evaluate(() => document.getElementById("hive-view").classList.contains("hidden")), true);
     assert.match(await page.getAttribute("#vm-view iframe", "src"), /vm\?embed=1$/);
     const frame = page.frameLocator("#vm-view iframe");
+
+    // 1b. the nav item counts the pending requests and the dashboard raised one card for them
+    await page.waitForFunction(() => { const b = document.getElementById("vm-nav-badge"); return b && !b.hidden && b.textContent === "1"; }, null, { timeout: 8000 });
+    await page.waitForFunction(() => /s2 asks for a VM/.test(document.getElementById("notices").innerText), null, { timeout: 8000 });
+    const cardText = await page.locator("#notices").innerText();
+    assert.match(cardText, /VM alpha: scopes: files\+exec; share out \(rw, WRITE\) \/work\/out/);
+    assert.equal(await page.locator("#notices .notice", { hasText: "s2 asks for a VM" }).count(), 1, "one card per request");
 
     // 2. the panel and the register form
     await frame.locator(".vm-card", { hasText: "alpha" }).waitFor({ timeout: 5000 });
@@ -244,19 +253,31 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-shares tbody tr", { hasText: "src" }).getByRole("button", { name: "삭제" }).click();
     await frame.locator("#vm-activity", { hasText: "공유 src 삭제 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u, b]) => u === "/api/vm/alpha/share" && b.action === "rm")[1], { action: "rm", name: "src" });
-    await frame.locator("#vm-requests tbody tr", { hasText: "s2" }).waitFor({ timeout: 5000 });
-    assert.match(await frame.locator("#vm-requests tbody tr").innerText(), /files \+ exec.*out \(rw\) \/work\/out.*build it/s);
+    // the pending request is a banner at the top of the page, above the VM detail, with its warnings
+    const card = frame.locator("#vm-requests .vm-request", { hasText: "s2" });
+    await card.waitFor({ timeout: 5000 });
+    assert.match(await frame.locator("#vm-requests-title").innerText(), /대기 중인 요청 1건/);
+    const bannerY = (await frame.locator("#vm-requests-box").boundingBox()).y;
+    const detailY = (await frame.locator("#vm-detail").boundingBox()).y;
+    assert.ok(bannerY < detailY, "the banner is above the VM detail");
+    const text = await card.innerText();
+    assert.match(text, /s2 → VM alpha/);
+    assert.match(text, /권한\s+files \+ exec/);
+    assert.match(text, /공유 폴더\s+out \(rw\) \/work\/out/);
+    assert.match(text, /exec은 게스트에서 셸 실행/, "the exec warning is on the card");
+    assert.match(text, /쓰기 가능\(rw\) 공유: out.*\.git\/hooks/s, "the rw warning is on the card");
+    assert.match(text, /사유\s+build it/);
     let apAsked = "";
     page.once("dialog", async (d) => { apAsked = d.message(); await d.dismiss(); });
-    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "승인" }).click();
+    await card.getByRole("button", { name: "승인" }).click();
     await page.waitForTimeout(200);
     assert.match(apAsked, /exec.*out 쓰기 가능\(rw\)/s, "approving exec and an rw share asks first");
     assert.equal(posts.filter(([u]) => u === "/api/vm/alpha/approve").length, 0, "a dismissed confirmation approves nothing");
     page.once("dialog", async (d) => { await d.accept(); });
-    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "승인" }).click();
+    await card.getByRole("button", { name: "승인" }).click();
     await frame.locator("#vm-activity", { hasText: "s2 요청 승인 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/approve")[1], { session: "s2", id: "r1" });
-    await frame.locator("#vm-requests tbody tr").getByRole("button", { name: "거절" }).click();
+    await card.getByRole("button", { name: "거절" }).click();
     await frame.locator("#vm-activity", { hasText: "s2 요청 거절 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/deny")[1], { session: "s2", id: "r1" });
 

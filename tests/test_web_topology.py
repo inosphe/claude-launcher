@@ -414,6 +414,7 @@ def _node_failure(script, proc, started):
 CHECKS = [
         "layout_check.js",
         "bootreads_check.js",
+        "vmnotice_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
         "p2p_check.js",
