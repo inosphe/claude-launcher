@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from claude_launcher import install, plugins, profile, settings, store
+from claude_launcher import install, plugins, profile, providers, settings, store
 from claude_launcher.daemon import api, profile_facts
 
 MODE = "permissions.defaultMode"
@@ -929,3 +929,77 @@ def test_the_declared_mode_reaches_the_launchs_settings_file(home):
     runner._write_translated_files(pi_home, translation)
     written = json.loads((pi_home / "settings.json").read_text())
     assert written == {"theme": "dark", "tuiMode": "regular"}
+
+
+# --------------------------------------------------------------------------- #
+# the Runs-as rows: whose backend this profile talks to, and whose own it is
+# --------------------------------------------------------------------------- #
+def test_a_row_publishes_the_provider_and_whether_it_is_anthropics(home):
+    """The create form's Runs-as block needs both halves, and reads neither.
+
+    On the claude harness, a provider that is not Claude's own still has the
+    harness's permission classifier billed to Claude, so the form recommends
+    skip permissions there and names the provider in that sentence. A form
+    never reads ``~/.claude-launcher/.claunch.yaml``, which is what resolves
+    the provider, and the name alone cannot settle the question (the built-in
+    ``default`` is Anthropic's service under another name) — so the row
+    carries the resolved name and its service, and the form compares the
+    service.
+    """
+    profile.create("work")
+    profile.create("own")
+    profile.create("plain")
+    doc = store.load()
+    doc.setdefault("providers", {})["fw"] = {
+        "endpoints": {"anthropic": "https://fw.invalid"},
+    }
+    store.save(doc)
+    store.set_profile_field("work", "provider", "fw")
+    store.set_profile_field("own", "provider", "claude")
+
+    body = listing()
+    work = _default_row(body, "work")
+    assert (work["provider"], work["provider_service"]) == (
+        "fw", providers.CUSTOM_SERVICE)
+    # The named Claude provider and the built-in default are both Anthropic's
+    # own service: the classifier is part of the usage they exist to spend.
+    assert (
+        _default_row(body, "own")["provider"],
+        _default_row(body, "own")["provider_service"],
+    ) == ("claude", providers.ANTHROPIC_SERVICE)
+    assert (
+        _default_row(body, "plain")["provider"],
+        _default_row(body, "plain")["provider_service"],
+    ) == ("default", providers.ANTHROPIC_SERVICE)
+    # An explicit row (the same profile on another harness) runs on the same
+    # backend, so it answers the same pair.
+    explicit = next(
+        row for row in body["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is True
+    )
+    assert (explicit["provider"], explicit["provider_service"]) == (
+        "fw", providers.CUSTOM_SERVICE)
+
+
+def test_a_provider_that_cannot_be_read_is_empty_rather_than_claudes(home):
+    """An unresolvable provider says nothing; it does not claim Claude's own.
+
+    The form suppresses the recommendation on Anthropic's service, so a row
+    that guessed ``claude`` for a profile it could not read would silence the
+    advice exactly where the config is wrong in somebody else's favor. The
+    profile's default row is the error row here (it has no resolved harness
+    to publish a pair against), and the explicit rows carry the empty pair.
+    """
+    profile.create("broken")
+    store.set_profile_field("broken", "provider", "gone")
+
+    body = listing()
+    row = _default_row(body, "broken")
+    assert row["harness"] == "?"
+    assert "unknown provider 'gone'" in row["error"]
+    assert "provider" not in row
+    explicit = next(
+        row for row in body["profile_details"]
+        if row["profile"] == "broken" and row.get("explicit") is True
+    )
+    assert (explicit["provider"], explicit["provider_service"]) == ("", "")

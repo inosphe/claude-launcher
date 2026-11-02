@@ -169,6 +169,18 @@ check("Profile, Harness, Model and effort are separate runtime choices",
       named(runsOn.text), ["profile", "harness", "model", "effort"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
+/* The recommendation those four rows make by themselves (a Claude-harness
+   session on a non-Claude provider pays Claude for its permission
+   classifier) sits directly under them, on the face of the form: the switch
+   it recommends is a row inside the fold, so a line inside the fold too
+   would be invisible at the moment it matters. */
+check("the provider recommendation sits under the rows that decide it",
+      [ids(runsOn.text).includes("new-provider-hint"),
+       runsOn.text.indexOf("new-provider-hint") >
+         runsOn.text.indexOf('name="effort"'),
+       runsOn.text.indexOf("new-provider-hint") <
+         runsOn.text.indexOf('id="new-usage"')],
+      [true, true, true]);
 const BOARD_ROWS = ["beads", "issue_text", "issue_filter", "issue"];
 check("the opening task is the last thing asked before the board",
       named(form.text).filter((n) => !BOARD_ROWS.includes(n)).slice(-1),
@@ -867,15 +879,25 @@ hintBox.classList = {
   toggle: (name, on) => { if (on) hintBox.classes.add(name);
                           else hintBox.classes.delete(name); },
 };
+/* The Runs-as recommendation under the four rows: a second line, drawn from
+   the same call, about a different subject (whose service the permission
+   classifier is billed to). */
+const providerBox = { textContent: "", classes: new Set(["hidden"]),
+                      classList: null };
+providerBox.classList = {
+  toggle: (name, on) => { if (on) providerBox.classes.add(name);
+                          else providerBox.classes.delete(name); },
+};
 const h = {
   profile: ctl("nc"), harness: ctl("claude"),
-  borrow: ctl(""), null_token: ctl(""),
+  borrow: ctl(""), null_token: ctl(""), skip_permissions: ctl(""),
 };
 const details = {};
 let hintParent = null;
 const hintCtx = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
   "let newProfileOptions = [], profileCompactProblems = {};\n" +
+  'const ANTHROPIC_SERVICE = "anthropic";\n' +
   // The usage readout is drawn from the same row and by its own harness
   // (formusage_check.js); here it is only a neighbour that must not throw
   // when the hint is run on its own.
@@ -885,15 +907,22 @@ new Function("exports", "$", "spawnParent", "profileDetails",
   sliceFrom("function newProfileUi(") +
   sliceFrom("function newProfileSelector(") +
   sliceFrom("function newProfileDetail(") +
+  sliceFrom("function newProfileHarnessName(") +
   sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function borrowIsOwnToken(") +
+  sliceFrom("function providerOwner(") +
+  sliceFrom("function renderProviderHint(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   hintCtx,
-  (id) => (id === "profile-hint" ? hintBox : id === "new-session" ? h : null),
+  (id) => (id === "profile-hint" ? hintBox
+    : id === "new-provider-hint" ? providerBox
+      : id === "new-session" ? h : null),
   () => hintParent, details);
 
 const shown = () => (hintBox.classes.has("hidden") ? "" : hintBox.textContent);
+const recommended = () =>
+  (providerBox.classes.has("hidden") ? "" : providerBox.textContent);
 
 hintCtx.hint();
 check("an ordinary profile says nothing at all", shown(), "");
@@ -961,17 +990,108 @@ hintCtx.hint();
 check("a broken profile reports its own error, not a guess at the harness",
       shown(), "nc/claude: profile nc: broken lineage");
 
+/* ---- renderProviderHint ---- */
+/* The runs-as rows recommend one thing by themselves: on the claude harness
+   a provider that is not Claude's own still has the permission classifier
+   billed to Claude, and skip permissions — a row INSIDE the fold — is the
+   switch that avoids it. The line has to say so without the fold open, and
+   has to stay quiet everywhere the advice does not apply, so both halves are
+   pinned here. */
+details.nc = { name: "nc", harness: "claude", harness_available: true,
+               provider: "claude", provider_service: "anthropic" };
+h.skip_permissions.checked = false;
+details.fw = { name: "fw", harness: "claude", harness_available: true,
+               provider: "fireworks", provider_service: "custom" };
+h.profile.value = "fw";
+hintCtx.hint();
+check("a third-party provider recommends the switch, and names the provider",
+      [/fireworks/.test(recommended()), /Skip permissions is recommended/.test(recommended())],
+      [true, true]);
+check("...and says where the switch lives",
+      /How it runs ▸ Claude runtime/.test(recommended()), true);
+check("...without disturbing the profile line it sits above", shown(), "");
+
+/* The Claude provider (nc, sr) and the built-in default are Anthropic's own
+   service: the classifier is part of the usage those profiles spend, so
+   there is nothing extra to warn about. */
+h.profile.value = "nc";
+details.nc.provider = "claude";
+details.nc.provider_service = "anthropic";
+hintCtx.hint();
+check("Claude's own service recommends nothing", recommended(), "");
+details.nc.provider = "default";
+hintCtx.hint();
+check("...and neither does the built-in default provider", recommended(), "");
+details.nc.provider = "claude";
+
+/* Once the answer is taken the recommendation is spent. */
+h.profile.value = "fw";
+h.skip_permissions.checked = true;
+hintCtx.hint();
+check("a ticked skip-permissions box ends the recommendation", recommended(), "");
+h.skip_permissions.checked = false;
+
+/* A harness other than claude has no Claude Code classifier to bill. */
+h.harness.value = "pi";
+hintCtx.hint();
+check("another harness has nothing billed to Claude", recommended(), "");
+h.harness.value = "claude";
+
+/* Borrowing somebody else's background replaces the provider as well as the
+   token (modelIdsInPlay's rule), so the advice follows the LENDER, not the
+   profile the row above names. */
+h.profile.value = "nc";
+h.borrow.value = "fw";
+hintCtx.hint();
+check("a borrow from a third-party profile is recommended on that provider",
+      /fireworks/.test(recommended()), true);
+h.borrow.value = "";
+
+/* On a child the spawn policy owns the row when it is shut: the fold says it
+   is inherited and the parent hint says why, so a recommendation this form
+   cannot act on is noise. */
+h.profile.value = "fw";
+hintParent = { name: "lead", profile: "fw", harness: "claude" };
+h.skip_permissions.disabled = true;
+hintCtx.hint();
+check("a locked skip-permissions row is the parent's, not a recommendation",
+      recommended(), "");
+h.skip_permissions.disabled = false;
+hintCtx.hint();
+check("...and the line returns once the policy hands the row back",
+      /fireworks/.test(recommended()), true);
+/* With no profile of its own a child runs as its parent: the provider is the
+   parent's, and the line still has to be right about it. */
+h.profile.value = "";
+hintCtx.hint();
+check("a child with no profile answers with the parent's provider",
+      /fireworks/.test(recommended()), true);
+hintParent = null;
+h.profile.value = "nc";
+
+/* A row from a daemon that predates the two fields says nothing rather than
+   guessing that the provider is Claude's. */
+details.old = { name: "old", harness: "claude", harness_available: true };
+h.profile.value = "old";
+hintCtx.hint();
+check("an older daemon's row draws no recommendation", recommended(), "");
+h.profile.value = "nc";
+
 /* Served against a page that predates the row, like every other rule here. */
 const bareHint = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
   "let newProfileOptions = [], profileCompactProblems = {};\n" +
+  'const ANTHROPIC_SERVICE = "anthropic";\n' +
   sliceFrom("function baseProfileName(") +
   sliceFrom("function spawnProfileSelector(") +
   sliceFrom("function newProfileUi(") +
   sliceFrom("function newProfileSelector(") +
   sliceFrom("function newProfileDetail(") +
+  sliceFrom("function newProfileHarnessName(") +
   sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function borrowIsOwnToken(") +
+  sliceFrom("function providerOwner(") +
+  sliceFrom("function renderProviderHint(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   bareHint, () => null, () => null, {});

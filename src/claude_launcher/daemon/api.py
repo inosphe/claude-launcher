@@ -3245,6 +3245,20 @@ async def h_profiles(request: web.Request) -> web.Response:
             # A profile whose provider cannot be read is reported as such by
             # its own rows below; this map simply has nothing to say.
             model_ids = {}
+        # Which backend this profile's launches talk to, and what service
+        # that backend is (``providers.service``). The create form's Runs-as
+        # block needs both: a Claude-harness session still has its permission
+        # classifier billed to Claude when the provider is not Claude's own,
+        # so the form recommends skip permissions there, and the name is what
+        # it puts in that sentence. A form never reads the config file that
+        # decides either, so they are published here.
+        try:
+            provider_name = providers.resolve_name(p, doc)
+            provider_service = providers.service(provider_name, doc)
+        except (providers.ProviderError, lineage.LineageError):
+            # The error row below already reports why the profile is unusable;
+            # an empty pair says "nothing to compare", not "Claude's own".
+            provider_name, provider_service = "", ""
         # The reasoning effort a launch of this profile applies, resolved the
         # way the launch resolves it. The session form shows it as the
         # "profile default" effort: for a harness that declares no
@@ -3276,6 +3290,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": name,
                     "harness_available": available.get(name, False),
+                    "provider": provider_name,
+                    "provider_service": provider_service,
                     "borrow_allowed": borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
                     "harness_allowed": True,
@@ -3383,6 +3399,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": harness_name,
                     "harness_available": available.get(harness_name, False),
+                    "provider": provider_name,
+                    "provider_service": provider_service,
                     "borrow_allowed": allowed and borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
                     "harness_allowed": allowed,
