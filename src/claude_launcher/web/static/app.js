@@ -18226,9 +18226,7 @@ function spawnChildFields(f, body) {
   const codexOpen = harnessName === "codex" && codexPanel &&
     !codexPanel.classList.contains("hidden") &&
     f.codex_yolo && !f.codex_yolo.disabled;
-  const claudeOpen = harnessName === "claude" && claudePanel &&
-    !claudePanel.classList.contains("hidden") &&
-    f.skip_permissions && !f.skip_permissions.disabled;
+  const claudeOpen = newClaudePermissionOpen(f, harnessName);
   if (codexOpen) {
     const original = f._codexRuntimeOriginal || { yolo: true, sandbox: false };
     const changed = f.codex_yolo.checked !== original.yolo ||
@@ -18290,6 +18288,60 @@ function spawnChildFields(f, body) {
     body.over_limit = !!f.over_limit.checked;
   }
   return body;
+}
+
+/* Whether this form is the one answering the permission-skipping row for the
+   session about to start. A child whose row the spawn policy keeps locked
+   (spawn.allow_args) inherits its parent's answer, and a harness with no
+   claude runtime panel (codex, pi) has no such row at all — neither answer is
+   given here, so neither is confirmed here. The panel's own visibility is the
+   harness test: renderNewClaudeRuntime toggles it on exactly
+   `harnessName === "claude"`, and a second spelling of that test is a second
+   definition to keep in step. */
+function newClaudePermissionOpen(f, harnessName) {
+  const panel = $("new-claude-runtime");
+  return harnessName === "claude" && !!panel &&
+    !panel.classList.contains("hidden") &&
+    !!(f.skip_permissions && !f.skip_permissions.disabled);
+}
+
+/* The permission-skipping answer this submit actually carries: false when the
+   form answers "off", true when it answers "on", and null when the answer is
+   not this form's to give (see above). */
+function newSkipPermissionsAnswer(f, parent) {
+  const harnessName = parent
+    ? newProfileHarnessName(f, newProfileSelector(f))
+    : (newProfileHarnessName(f, newProfileSelector(f)) || "claude");
+  if (!newClaudePermissionOpen(f, harnessName)) return null;
+  return !!f.skip_permissions.checked;
+}
+
+/* A session that starts with permission skipping off keeps Claude asking
+   before each tool use, and on a provider that is not Claude's own its
+   permission classifier still calls Claude, which can add Claude usage — the
+   same fact the provider hint above the form and the running session's strip
+   state. So a create that would go out with the box unticked is asked about
+   once more (claunch-1ztit.1.1).
+
+   "No" is the form, not an error: nothing is sent, the rows keep what was
+   typed, and #create-error stays empty. Escape and a backdrop press are the
+   same answer as "No", which is the direction showModal already resolves an
+   unanswered question in. An answer this form does not give — a locked child
+   row, another harness — is not asked about. */
+async function confirmStartWithoutSkipPermissions(f, parent) {
+  if (newSkipPermissionsAnswer(f, parent) !== false) return true;
+  const answer = await showModal({
+    title: "Start without skip permissions?",
+    body: "This session starts with permission skipping off, so Claude asks " +
+      "before each tool use. On a provider that is not Claude's own, its " +
+      "permission classifier still calls Claude, and those calls can add " +
+      "Claude usage. Start it anyway?",
+    actions: [
+      { label: "Back to the form", value: null },
+      { label: "Start without skip permissions", value: true },
+    ],
+  });
+  return answer === true;
 }
 
 document
@@ -18658,6 +18710,10 @@ $("new-session").addEventListener("submit", async (e) => {
     err.classList.remove("hidden");
     return;
   }
+  // Asked last: every row above is settled, and nothing has been sent yet, so
+  // "No" leaves the form exactly as it was typed (claunch-1ztit.1.1). It is
+  // not an error, so #create-error is not written to.
+  if (!(await confirmStartWithoutSkipPermissions(f, parent))) return;
   const payload = sessionFormPayload(sessionFormView().mode, body);
   createBusy = true;
   setCreatePending(f, true, parent);

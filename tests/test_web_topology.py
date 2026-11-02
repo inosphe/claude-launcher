@@ -689,6 +689,7 @@ CHECKS = [
         "cflow2graph_check.js",
         "safe_listen_check.js",
         "pollstuck_check.js",
+        "skipconfirm_check.js",
 ]
 
 
