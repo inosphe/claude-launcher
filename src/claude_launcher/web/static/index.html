@@ -696,6 +696,10 @@
            and opened by itself when the session changes a question. This
            and 🗪 threads open one conversation pane (talk-pane.js) whose
            tabs show threads, QA, or both side by side. -->
+      <!-- The same pane, showing the VMs connected to this session: the VM
+           page's session mode in a frame (vm-session-pane.js, vm.js). -->
+      <button id="term-vmbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="the VMs connected to this session">🖥 vm</button>
       <button id="term-qabtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="questions this session put to you">? qa</button>
       <!-- The same pane, holding this session's sub-topic threads
@@ -1770,6 +1774,7 @@
 <script src="static/chart-page.js"></script>
 <script src="static/hive-page.js"></script>
 <script src="static/vm-page.js"></script>
+<script src="static/vm-session-pane.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/knowledge-page.js"></script>
 <script src="static/spec-page.js"></script>

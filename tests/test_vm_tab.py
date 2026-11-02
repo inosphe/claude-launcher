@@ -112,3 +112,26 @@ def test_the_panel_keeps_unregistering_and_deleting_apart():
     assert 'method: "DELETE"' in js and "/destroy" in js
     assert "confirm: id" in js                    # the delete sends the typed id, as the preset delete does
     assert "innerHTML" not in js
+
+
+def test_the_session_vm_pane_is_wired_into_the_dashboard_header():
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    pane = (STATIC / "vm-session-pane.js").read_text(encoding="utf-8")
+    assert 'id="term-vmbtn"' in index and "static/vm-session-pane.js" in index
+    assert 'btn: "term-vmbtn"' in app and '"packs", "cli", "vm"' in app
+    assert 'kind === "vm"' in app and 'splitKind === "vm"' in app and 'toggleSplitPane("vm")' in app
+    # the pane is the VM page in session mode: no route of its own, nothing written with innerHTML
+    assert "vm?embed=1&session=" in pane and "innerHTML" not in pane and "fetch(" not in pane
+
+
+def test_session_mode_calls_only_the_existing_user_only_routes():
+    js = (STATIC / "vm.js").read_text(encoding="utf-8")
+    html = (STATIC / "vm.html").read_text(encoding="utf-8")
+    for ident in ("vm-sess", "vm-sess-list", "vm-sess-new", "vm-sess-new-pick", "vm-sess-pick", "vm-sess-connect"):
+        assert f'id="{ident}"' in html
+    routes = set(re.findall(r"post\(`?\"?(api/[a-z/${}A-Z().,-]+)", js))
+    assert "/revoke`, { session: SESSION }" in js and "/grant`, { session: SESSION, scopes }" in js
+    assert "/create`, { id }" in js
+    assert "연결을 해제합니다. 이 세션의 권한만 회수하며, VM은 정지되거나 삭제되지 않습니다" in js
+    assert "innerHTML" not in js

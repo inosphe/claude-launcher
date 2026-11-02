@@ -23911,6 +23911,14 @@ const SPLIT_PANES = {
     on: "close this session's shell pane — the terminal takes the column back",
     off: "this session's own shell under the terminal — type in it, and run or dismiss what the session's agent proposes",
   },
+  // The VMs connected to this session (vm-session-pane.js): the VM page in
+  // its session mode, so the grants, shared folders and the one-click new VM
+  // are the page's own user-only actions, not a second implementation.
+  vm: {
+    btn: "term-vmbtn", title: "🖥 vm",
+    on: "close this session's VM pane — the terminal takes the column back",
+    off: "the VMs connected to this session — connect, disconnect, edit scopes and shared folders, or make a new one",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -23923,7 +23931,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "cli", "vm", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -26922,7 +26930,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "category", "chart", "packs", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "vm", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -26994,6 +27002,8 @@ function openSplit(name, kind = "run") {
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
+  // And the session's VMs (vm-session-pane.js): the VM page in a frame.
+  if (kind === "vm") { globalThis.VmSessionPane?.mount(splitBody, name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -27025,6 +27035,7 @@ function closeSplit() {
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
+  if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -27121,6 +27132,7 @@ $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
 $("term-clibtn").addEventListener("click", () => toggleSplitPane("cli"));
+$("term-vmbtn").addEventListener("click", () => toggleSplitPane("vm"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
 

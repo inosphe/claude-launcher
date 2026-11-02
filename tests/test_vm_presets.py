@@ -490,3 +490,29 @@ def test_a_default_whose_preset_vanished_from_the_file_is_cleared_on_load(tmp_pa
     again = vm_presets.Presets(path, reg, mgr)
     info = again.default_info()
     assert info["default"] == "" and "gold" in info["default_lost"]
+
+
+def test_the_session_panel_flow_runs_on_user_only_routes_with_a_fake_manager(tmp_path):
+    """One click = preset create then grant (view+control); disconnect = revoke that session only."""
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            await api.post("/api/vm-presets-default", json={"name": "gold"})
+            # a session cannot make, connect or disconnect a VM
+            for call in (api.post("/api/vm-presets/gold/create", json={"id": "s1-vm"}, headers=AGENT),
+                         api.post("/api/vm/src/grant", json={"session": "s1", "scopes": ["view"]}, headers=AGENT),
+                         api.post("/api/vm/src/revoke", json={"session": "s1"}, headers=AGENT)):
+                resp = await call
+                assert resp.status == 403 and (await resp.json())["code"] == "vm_user_only"
+            assert "s1-vm" not in api.fake.tart
+            made = await api.post("/api/vm-presets/gold/create", json={"id": "s1-vm"})
+            assert made.status == 201
+            granted = await api.post("/api/vm/s1-vm/grant", json={"session": "s1", "scopes": ["view", "control"]})
+            assert (await granted.json())["grants"] == ["view", "control"]
+            await api.post("/api/vm/s1-vm/grant", json={"session": "s2", "scopes": ["view"]})
+            await api.post("/api/vm/s1-vm/revoke", json={"session": "s1"})
+            vm = [v for v in (await (await api.get("/api/vm")).json())["vms"] if v["id"] == "s1-vm"][0]
+            assert vm["grants"] == {"s2": ["view"]} and vm["state"] != "destroyed"
+            # the create asks tart for a clone and a start, never a delete of the VM
+            assert not deletes(api.fake)
+    run(go())
