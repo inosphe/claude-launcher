@@ -7,17 +7,42 @@
    overview grouped by stage, the stage and project filters,
    "ended sessions too" asking with all=1, and the session links; with a
    project picked, its aggregation session's pane (kept across redraws) or
-   the start button (claunch-7jzp8.3). */
+   the start button (claunch-7jzp8.3). The 10 s poll (claunch-nerp0.1): a
+   field being typed in is not redrawn, a page control the user was on gets
+   the focus back by its data-plan-key, and the page's scroll position comes
+   back. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.textContent = ''; this.value = ''; this.parent = null; }
+  constructor(tag, doc) {
+    this.tag = tag; this.doc = doc || null;
+    this.children = []; this.attributes = {}; this.textContent = ''; this.value = '';
+    this.parent = null; this.scrollTop = 0; this.listeners = {};
+  }
+  get tagName() { return this.tag.toUpperCase(); }
   append(...items) { for (const i of items) { if (typeof i === 'object') i.parent = this; this.children.push(i); } }
-  replaceChildren(...items) { this.children = []; this.append(...items); }
+  /* A redraw detaches what was in it -- and with it the focus, as the browser
+     does -- and clears the container's scroll position. */
+  replaceChildren(...items) {
+    const hadFocus = this.doc && this.doc.activeElement && this.contains(this.doc.activeElement);
+    this.children = []; this.scrollTop = 0;
+    if (hadFocus) this.doc.activeElement = null;
+    this.append(...items);
+  }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
+  contains(other) { for (let n = other; n; n = n.parent) if (n === this) return true; return false; }
+  addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+  removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter(f => f !== fn); }
+  focus() { if (this.doc) this.doc.activeElement = this; }
+  blur() {
+    if (this.doc && this.doc.activeElement === this) this.doc.activeElement = null;
+    this.dispatch('focusout');
+  }
+  dispatch(type) { for (let n = this; n; n = n.parent) (n.listeners[type] || []).forEach(fn => fn({type, target: this})); }
 }
 
 const calls = [];
@@ -54,15 +79,19 @@ async function request(raw, method, body) {
   throw new Error('unexpected ' + raw);
 }
 
-const host = new Element('div');
+const doc = {createElement: tag => new Element(tag, doc), getElementById: id => (id === 'plan-view' ? host : null),
+             activeElement: null};
+const host = new Element('div', doc);
 const panes = [];
+const timers = [];
+const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
 const ctx = vm.createContext({
-  document: {createElement: tag => new Element(tag), getElementById: id => (id === 'plan-view' ? host : null)},
+  document: doc,
   api: async () => { throw new Error('the page must use the injected request'); },
   URL, console, JSON, Object, Promise, Set,
   makePlanPane: (opts) => { panes.push({opts, stopped: false}); const me = panes[panes.length - 1];
     return {open: () => { me.opened = true; }, stop: () => { me.stopped = true; }}; },
-  setTimeout: () => 0, clearTimeout: () => {},
+  setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {},
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/plan-page.js'), 'utf8'), ctx);
 
@@ -191,6 +220,46 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   // ended sessions too
   buttons('끝난 세션 포함')[0].onclick(); await settle();
   assert(calls.includes('/api/plan/overview?all=1'));
+
+  // The 10 s poll does not take the focus (claunch-nerp0.1). A field inside
+  // the aggregation pane: the poll draws nothing while it is focused, and the
+  // held-back draw happens once the field is left.
+  projectPick().value = 'other'; projectPick().onchange(); await settle();
+  const aggHost = all(host).find(n => n.className === 'plan-host');
+  assert(aggHost, 'the aggregation pane is mounted');
+  const field = new Element('textarea', doc);
+  field.value = 'half typed';
+  aggHost.append(field);
+  field.focus();
+  assert.strictEqual(doc.activeElement, field, 'the fake DOM holds the focus');
+  OVERVIEW.rows.push({session: 's9', stage: 'working', project: 'other', status: 'busy', category: 'running', plan: null, run: null});
+  OVERVIEW.counts.working += 1;
+  ctx.PlanPage._view().open(); await settle();
+  assert.strictEqual(doc.activeElement, field, 'a field being typed in keeps the focus');
+  assert(!text().includes('s9'), 'the poll waited for the field to be left');
+  timers.length = 0;                                  // drop the pending polls; keep only the settle
+  field.blur(); runTimers(); await settle();
+  assert(text().includes('s9'), 'the held-back poll draws once the field is left');
+  assert.strictEqual(field.value, 'half typed', 'the field keeps what was typed in it');
+
+  // A control keeps the focus across a redraw: the element is new, and the
+  // focus is on it because the redraw found it by its data-plan-key.
+  const stageToggle = buttons('단계별')[0];
+  assert.strictEqual(stageToggle.getAttribute('data-plan-key'), 'by:stage');
+  stageToggle.focus();
+  OVERVIEW.counts.working += 1;
+  ctx.PlanPage._view().open(); await settle();
+  const redrawn = buttons('단계별')[0];
+  assert.notStrictEqual(redrawn, stageToggle, 'the poll redrew the button');
+  assert.strictEqual(doc.activeElement, redrawn, 'the redrawn control has the focus');
+
+  // The page's scroll position comes back too: the redraw clears it.
+  doc.activeElement = null;
+  host.scrollTop = 180;
+  OVERVIEW.counts.working += 1;
+  ctx.PlanPage._view().open(); await settle();
+  assert.strictEqual(host.scrollTop, 180, 'the scroll position is put back');
+
   ctx.PlanPage.stop();
   console.log('ok');
 })().catch(error => { console.error(error); process.exit(1); });

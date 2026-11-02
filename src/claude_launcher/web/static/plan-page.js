@@ -12,7 +12,15 @@
    ☰ plan pane. With a project picked, the page shows that project's
    aggregation session (claunch-7jzp8.3): its plan -- the project plan -- in
    a plan pane decided here, or a start button when none runs. All session
-   text uses textContent. */
+   text uses textContent.
+
+   The 10 s poll redraws the page whole and that redraw no longer takes the
+   user's focus with it (claunch-nerp0.1): a poll that arrives while a field
+   of the page is focused draws nothing (the next one after the field is
+   left does), and the control the user was on is found again by its
+   data-plan-key after a redraw -- the aggregation pane's controls carry the
+   keys plan-pane.js gives them. The page's scroll position comes back the
+   same way. */
 const PLAN_STAGE = {
   user: "내 차례",
   blocked: "막힘",
@@ -35,7 +43,48 @@ function makePlanPage({root, request}) {
   let data = null, joint = null, error = "", seq = 0, timer = null;
   let everyone = false, by = "tree", project = "", only = "";
   let profiles = null, profile = "", starting = false, startError = "", agg = null;
+  let deferred = false;                         // a poll held back while a field is focused
   const folded = new Set();                     // sessions whose steps are hidden in the tree
+
+  // Focus across a redraw (claunch-nerp0.1). The page is redrawn whole every
+  // 10 s, and the aggregation session's pane -- whose element paneOf() keeps
+  // -- is detached with the rest, which drops the focus. So every control a
+  // user can land on carries a data-plan-key (the attribute plan-pane.js
+  // uses, so the pane's own controls are found here too), the redraw puts
+  // the focus back on the control that replaces it, and a text field being
+  // typed into is not redrawn at all: the poll that arrives meanwhile waits
+  // for the field to be left. These helpers stay inside the factory because
+  // plan-pane.js shares this page's global scope.
+  function keyOf(el) {
+    if (!el || !el.getAttribute) return null;
+    return el.getAttribute("data-plan-key") || null;
+  }
+  function keyed(n, key) {
+    n.setAttribute("data-plan-key", key);
+    return n;
+  }
+  function byKey(root, key) {
+    if (!root) return null;
+    if (keyOf(root) === key) return root;
+    for (const child of root.children || []) {
+      const hit = byKey(child, key);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  /* The element of this page that holds the focus, or null. */
+  function focusedEl(el) {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    if (!el || !active || active === el) return null;
+    return el.contains && el.contains(active) ? active : null;
+  }
+  /* A field the user is typing into: redrawing it would end an IME
+     composition mid-word, so the poll waits for the field to be left. */
+  function isField(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || el.tag || "").toLowerCase();
+    return tag === "textarea" || tag === "input";
+  }
 
   async function load() {
     const mine = ++seq;
@@ -47,14 +96,31 @@ function makePlanPage({root, request}) {
       if (mine !== seq) return;
       data = o; joint = j; error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
-    if (mine === seq) { render(); clearTimeout(timer); timer = setTimeout(load, 10000); }
+    if (mine === seq) {
+      if (isField(focusedEl(root()))) deferred = true;
+      else { deferred = false; render(); }
+      clearTimeout(timer); timer = setTimeout(load, 10000);
+    }
   }
 
-  function button(label, fn, pressed) {
+  /* A poll that arrived while a field was focused drew nothing; draw once
+     the field is left, so the user's own blur is what updates the screen.
+     The draw waits for the next task: a click that takes the focus away from
+     a field would otherwise find the control it pressed already replaced. */
+  function settle() {
+    if (!deferred || typeof setTimeout !== "function") return;
+    setTimeout(() => {
+      if (!isField(focusedEl(root()))) { deferred = false; render(); }
+    }, 0);
+  }
+  const onFocusOut = () => settle();
+  { const el = root(); if (el && el.addEventListener) el.addEventListener("focusout", onFocusOut); }
+
+  function button(label, fn, pressed, key) {
     const b = node("button", label, "wf-btn" + (pressed ? " plan-page-on" : ""));
     b.type = "button"; b.onclick = fn;
     b.setAttribute("aria-pressed", pressed ? "true" : "false");
-    return b;
+    return key ? keyed(b, key) : b;
   }
 
   // A session's head and its plan/run lines, shared by the stage list's
@@ -63,6 +129,7 @@ function makePlanPage({root, request}) {
     const head = node("div", null, "plan-item-head");
     const link = node("a", session, "plan-page-session");
     link.href = "#/s/" + encodeURIComponent(session);
+    keyed(link, "link:" + session);
     head.append(node("span", r ? PLAN_STAGE[r.stage] || r.stage : "목록 밖", "plan-chip"), link);
     box.append(head);
     if (!r) return head;
@@ -153,7 +220,7 @@ function makePlanPage({root, request}) {
       const t = button(open ? "단계 접기" : `단계 펼치기 (${m.tree.length})`, () => {
         if (open) folded.add(m.session); else folded.delete(m.session);
         render();
-      }, false);
+      }, false, "fold:" + m.session);
       t.setAttribute("aria-expanded", open ? "true" : "false");
       head.append(t);
     }
@@ -314,7 +381,8 @@ function makePlanPage({root, request}) {
     const pick = node("select"); pick.setAttribute("aria-label", "집계 세션 프로필");
     for (const v of profiles || []) { const o = node("option", v); o.value = v; o.selected = v === profile; pick.append(o); }
     pick.onchange = () => { profile = pick.value; };
-    const go = button(starting ? "시작 중…" : "집계 세션 시작", start, false);
+    keyed(pick, "agg-profile");
+    const go = button(starting ? "시작 중…" : "집계 세션 시작", start, false, "agg-start");
     go.disabled = starting || !profile;
     row.append(pick, go);
     box.append(row);
@@ -324,7 +392,16 @@ function makePlanPage({root, request}) {
 
   function render() {
     const el = root(); if (!el) return;
+    const active = focusedEl(el);
+    const state = {scrollTop: el.scrollTop || 0, key: keyOf(active)};
     el.replaceChildren();
+    draw(el);
+    if (state.scrollTop) el.scrollTop = state.scrollTop;
+    const target = state.key ? byKey(el, state.key) : null;
+    if (target && target.focus) target.focus();
+  }
+
+  function draw(el) {
     const shell = node("div", null, "plan-pane plan-page");
     shell.append(node("h3", "세션 진행 개요"));
     if (error) { const a = node("p", error, "plan-error"); a.setAttribute("role", "alert"); shell.append(a); }
@@ -333,7 +410,7 @@ function makePlanPage({root, request}) {
     const bar = node("div", null, "plan-joint-bar");
     for (const [stage, label] of Object.entries(PLAN_STAGE)) {
       bar.append(button(`${label} ${data.counts[stage] || 0}`, () => { only = only === stage ? "" : stage; render(); },
-                        only === stage));
+                        only === stage, "stage:" + stage));
     }
     shell.append(bar);
 
@@ -344,12 +421,13 @@ function makePlanPage({root, request}) {
       const o = node("option", v || "모든 프로젝트"); o.value = v; o.selected = v === project; pick.append(o);
     }
     pick.onchange = () => { project = pick.value; render(); };
+    keyed(pick, "project");
     tools.append(pick,
-      button("트리", () => { by = "tree"; load(); }, by === "tree"),
-      button("단계별", () => { by = "stage"; render(); }, by === "stage"),
-      button("끝난 세션 포함", () => { everyone = !everyone; load(); }, everyone));
-    if (by === "tree") tools.append(button("모두 펼치기", () => foldAll(false), false),
-                                    button("모두 접기", () => foldAll(true), false));
+      button("트리", () => { by = "tree"; load(); }, by === "tree", "by:tree"),
+      button("단계별", () => { by = "stage"; render(); }, by === "stage", "by:stage"),
+      button("끝난 세션 포함", () => { everyone = !everyone; load(); }, everyone, "all"));
+    if (by === "tree") tools.append(button("모두 펼치기", () => foldAll(false), false, "expand-all"),
+                                    button("모두 접기", () => foldAll(true), false, "collapse-all"));
     shell.append(tools, aggregatorBlock());
 
     const rows = filtered();
@@ -358,7 +436,11 @@ function makePlanPage({root, request}) {
     el.append(shell);
   }
 
-  return {open: load, stop: () => { ++seq; clearTimeout(timer); timer = null; stopPane(); },
+  return {open: load, stop: () => {
+            ++seq; clearTimeout(timer); timer = null; stopPane();
+            const el = root();
+            if (el && el.removeEventListener) el.removeEventListener("focusout", onFocusOut);
+          },
           _state: () => ({data, by, project, only, folded: [...folded]})};
 }
 
