@@ -658,6 +658,7 @@ CHECKS = [
         "commitpage_check.js",
         "chartpage_check.js",
         "hivepage_check.js",
+        "prpage_check.js",
         "profileusage_check.js",
         "glossarypage_check.js",
         "glossarycomposer_check.js",

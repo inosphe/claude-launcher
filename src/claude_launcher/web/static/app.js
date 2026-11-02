@@ -27832,6 +27832,7 @@ const VIEWS = {
   stats: "stats-view",
   chart: "chart-view",
   hive: "hive-view",
+  pr: "pr-view",
   "profile-usage": "profile-usage-view",
   sysperf: "sysperf-view",
   cli: "cli-view",
@@ -28700,6 +28701,8 @@ function parseHash(h) {
   if (parts[0] === "settings") {
     return { page: "settings", section: parts[1] || "" };
   }
+  // Recorded pull requests, grouped by project on a date timeline (#/pr).
+  if (parts[0] === "pr") return { page: "pr" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
 
@@ -28746,6 +28749,7 @@ function route() {
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "chart") globalThis.ChartPage?.stop();
   if (r.page !== "hive") globalThis.HivePage?.stop();
+  if (r.page !== "pr") globalThis.PrPage?.stop();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
@@ -28836,6 +28840,7 @@ function route() {
     case "stats": openStatsPage(r.name, r.compare); break;
     case "chart": showView("chart"); globalThis.ChartPage.open(); break;
     case "hive": showView("hive"); globalThis.HivePage.open(); break;
+    case "pr": showView("pr"); globalThis.PrPage.open(); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
     case "cli": openCli(); break;

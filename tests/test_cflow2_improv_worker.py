@@ -850,7 +850,10 @@ def test_land_returns_landed_held_rework():
     # blocked is the fourth (claunch-improver-integration-request-blocked-o6paj):
     # "the landing request was not raised because it is blocked" had no
     # declared outcome, so it could only be reported as the engine's fail.
-    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
+    # pr-submitted is the fifth (claunch-ijkge): auto_merge=false stops at PR
+    # submission and the person merges, so that ending needs its own outcome
+    # rather than leaving the round as a merge the workflow did not do.
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked", "pr-submitted"}
     assert set(land["params"]) == {"mode", "allow"}
 
 
@@ -1227,7 +1230,8 @@ _NONE = {"remote": None, "repo": None, "base": None, "pr_url": None, "pr_number"
 MEDIUM_SCENARIOS = {
     "landing-ok": (False, [("remote-setup", "ok", _SETUP), ("pr-open", "ok", _PR)],
                    ["remote-setup", "pr-open", "after"],
-                   {"landing": _LANDED, "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+                   {"landing": _LANDED,
+                    "published": {**_SETUP, "pr_url": "u", "pr_number": 7, "tip": "t"}}),
     "landing-retry-ok": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                                  ("answer", "retry", None), ("remote-setup", "ok", _SETUP),
                                  ("pr-open", "failed", {"reason": "F1"})],
@@ -1252,7 +1256,8 @@ MEDIUM_SCENARIOS = {
                               ("pr-open", "ok", _PR)],
                        ["remote-setup", "pr-open", "ask-frame", "pr-open", "after"],
                        {"landing": _LANDED,
-                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7,
+                                      "tip": "t"}}),
     # a brief spelling 'Local' answers the definition's 'local' (Z2)
     "case-Local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                            ("answer", "Local", ("retry", "Local"))],
@@ -1803,9 +1808,12 @@ def test_the_landing_request_is_gated_on_a_bound_issue():
     assert seq is not None
     labels = [n.get("id") if isinstance(n, dict) else n for n in seq]
     # claunch-101wi: the landing-channel check stands between the issue gate
-    # and the request; nothing else may.
+    # and the request; nothing else may raise a request there. claunch-ijkge
+    # adds pr-submitted-route after the gate: auto_merge=false ends the round
+    # at PR submission, so it must not reach the request either — and it runs
+    # after the gate so the marker task has the bound issue.
     between = labels[labels.index("issue-gate") + 1:labels.index("integration-request")]
-    assert between == ["landing-channel"]
+    assert between == ["pr-submitted-route", "landing-channel"]
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
@@ -3196,8 +3204,12 @@ def test_chart_prose_reaches_a_procedure_description():
     fails if the collection reads only the definition's own file.
     """
     chart = _chart()
+    # claunch-ijkge added the fifth outcome to this sentence; the anchor is
+    # the sentence as it stands, so the test keeps failing when the prose
+    # collection stops reading procedures.
     anchor = ("결과는 landed(머지 해시), held(동결로 마감), rework(작업으로 "
-              "되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다")
+              "되돌아감), blocked(차단으로 요청을 세우지 않음), pr-submitted(PR만 제출, "
+              "머지는 사용자가 함 — auto_merge=false) 다섯 중 하나다")
     included = "회차 도중 발견한 범위 밖 결함 하나를 이슈로 남긴다"
 
     # not reachable from nodes: this is the gap the collection had to close,
@@ -3548,7 +3560,10 @@ def test_land_declares_and_routes_blocked_out_of_the_batch():
     as ``fail``."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     land = doc["procedures"]["land"]
-    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
+    # pr-submitted (claunch-ijkge) is the auto_merge=false ending: the round
+    # stops at PR submission and the person merges, so it is a declared
+    # outcome too and has to leave the batch the same way.
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked", "pr-submitted"}
     # reason is required; the route fields are what a person's answer is
     # recorded with so the next round need not ask again (claunch-1aj1a.1),
     # and they are optional because the ``reframe`` answer carries none. The
@@ -3564,11 +3579,122 @@ def test_land_declares_and_routes_blocked_out_of_the_batch():
     [try_node] = [batch["loop"]["do"]] if isinstance(batch["loop"]["do"], dict) \
         else [c for c in batch["loop"]["do"] if isinstance(c, dict) and "try" in c]
     catch = try_node["catch"]
-    assert set(catch) == {"rework", "landed", "held", "blocked"}
+    assert set(catch) == {"rework", "landed", "held", "blocked", "pr-submitted"}
     # a blocked round is over: continuing would re-run the work that was just
     # refused a request, so it leaves the batch loop like held does.
     assert catch["blocked"] == {"break": "batch"}
     assert catch["rework"] == {"continue": "batch"}
+    # a submitted round is over too: the PR is open and the merge is the
+    # person's, so the batch must not re-run the work under another request.
+    assert catch["pr-submitted"] == {"break": "batch"}
+
+
+# --------------------------------------------------------------------------- #
+# PR 제출에서 끝나는 회차: auto_merge (claunch-ijkge)
+# --------------------------------------------------------------------------- #
+def test_auto_merge_is_a_pr_input_defaulting_to_the_current_behaviour():
+    """The user's shape for the variable: the default keeps today's path
+    (landing request, parent's merge, landed), and the manual-merge path is
+    the opt-in. A default of ``false`` would have changed every existing run
+    into a run that stops at the PR."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    spec = doc["inputs"]["auto_merge"]
+    assert spec["type"] == "bool"
+    assert spec["default"] is True
+    assert spec["group"] == "PR"
+    assert spec["set_by"] == ["user"]
+    # the two switches it qualifies read the same inputs dict, so the help
+    # text has to say it applies to the PR path only
+    assert "로컬 착지에는 적용되지 않는다" in _words(spec["help"])
+
+
+def test_auto_merge_false_ends_the_round_at_pr_submission():
+    """``land``'s submit loop publishes the PR and, when auto_merge is off,
+    ends the landing right there with its own outcome -- not by continuing to
+    the landing request, which would put the parent back in the merge seat
+    the person just took."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    ids = [n.get("id") for n in submit["loop"]["do"] if isinstance(n, dict)]
+    assert ids.index("publish") < ids.index("pr-submitted-route")
+    route = _find_id(submit, "pr-submitted-route")
+    branch = route["cond"][0]           # the if-branch; the second is the else
+    assert "$data.landing.medium == 'pr'" in branch["if"]
+    assert "$data.inputs.auto_merge == false" in branch["if"]
+    # a stack-only round carries no work branch and no claim; the marker there
+    # would have no issue to write to
+    assert "$params.mode == 'full'" in branch["if"]
+    mark, stop = branch["then"]
+    assert mark == "pr-submitted-mark"
+    assert stop["return"] == "pr-submitted"
+    # the value is the PR the person merges, not a merge hash
+    assert set(stop["value"]) == {"url", "number", "tip"}
+    assert "pr_url" in stop["value"]["url"]
+    assert "pr_number" in stop["value"]["number"]
+
+
+def test_the_submitted_pr_marker_is_what_leaves_the_issue_in_review():
+    """The board is the record the workflow and the person both read, so the
+    marker has to be written by the round that submitted, and the round must
+    not close the issue itself -- the merge has not happened yet."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    task = doc["nodes"]["pr-submitted-mark"]
+    prose = _words(task["prompt"])
+    for anchor in ("PR SUBMITTED @ <tip> <url>", "--status in_review",
+                   "PR SUBMITTED @ <tip> (batch of", "하지 않는 것"):
+        assert anchor in prose, anchor
+    # the work the round does not do is named, so a session does not infer it
+    for anchor in ("gh pr merge", "이슈 close"):
+        assert anchor in prose, anchor
+    assert set(task["returns"]["ok"]) == {"url", "number", "tip"}
+
+
+def test_wrapup_does_not_close_a_submitted_pr_issue():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    wrap = _words(doc["nodes"]["wrapup"]["prompt"])
+    assert "PR만 제출하고 끝난 회차로 왔으면" in wrap
+    assert "닫지 않는다" in wrap
+    assert "PR SUBMITTED @ <tip> <url>" in wrap
+
+
+def test_settle_reads_a_submitted_pr_as_settled_for_this_session():
+    """A session whose PR waits on a person's merge must still be able to
+    end: the branch is pushed, the PR is the durable record, and the merge is
+    not this session's act. The exception is narrow -- in_review plus this
+    session's own marker -- so a stale in_review from another cause still
+    blocks."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    check = _find_id(doc["procedures"]["settle"]["body"], "settle-check")
+    prose = _words(check["choose"]["prompt"])
+    assert "PR만 제출하고 머지를 남긴 이슈" in prose
+    assert "PR SUBMITTED @" in prose
+    assert "author`가 이 세션" in prose
+    assert "in_review" in prose
+
+
+def test_a_local_fallback_warns_the_person_before_the_branch_can_be_lost():
+    """When PR submission is impossible (gh missing or logged out) the round
+    falls back to a local branch. That branch lives only in this machine's
+    checkout, so the person has to see the warning -- a board comment alone
+    does not reach them."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    warn = _find_id(submit, "local-warning")
+    branch = warn["cond"][0]
+    assert "$data.landing.medium == 'local'" in branch["if"]
+    assert "$params.mode == 'full'" in branch["if"]
+    # a person who chose local already knows; this warning is for the
+    # automatic fallback only
+    assert "force_pr != true" in branch["if"]
+    assert "force_no_pr != true" in branch["if"]
+    assert branch["then"] == ["pr-local-notice"]
+    prose = _words(doc["nodes"]["pr-local-notice"]["prompt"])
+    for anchor in ("thread_open", "thread_reply", "유실"):
+        assert anchor in prose, anchor
+    # remote-setup keeps the board marker and defers the visible warning
+    setup = _words(doc["nodes"]["remote-setup"]["prompt"])
+    assert "LANDING MEDIUM: local (PR 불가: <reason>)" in setup
+    assert "local-warning" in setup
 
 
 def test_a_blocked_request_does_not_push_a_landing_row():

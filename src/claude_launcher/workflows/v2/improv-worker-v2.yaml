@@ -252,6 +252,18 @@ inputs:
     label: PR 금지(force not to make PR)
     group: PR
     help: PR을 만들지 않고 기존의 로컬 착지(리더의 --no-ff 머지)만 쓴다. 둘 다 끄면 PR을 먼저 시도하고, 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다
+  # PR을 제출한 뒤 자동 머지까지 갈지, 제출에서 회차를 끝낼지 고른다. 기본
+  # true는 지금 구조 그대로다(착지 요청 → 상위/리더의 머지 → 착지 확인).
+  # false면 PR만 열고 이슈를 in_review + `PR SUBMITTED` 마커로 남긴 뒤 회차를
+  # 끝낸다 — 머지는 사용자가 PR에서 직접 한다. 로컬 착지(PR 없음)에는 적용하지
+  # 않는다. 사람이 런 도중에 바꿀 수 있다(set_by: [user]).
+  auto_merge:
+    type: bool
+    default: true
+    label: PR 자동 머지(auto merge)
+    group: PR
+    help: 켜면(기본) PR을 제출한 뒤 착지 요청을 올리고 상위/리더의 머지까지 간다. 끄면 PR 제출에서 회차를 끝내고 사용자가 PR을 직접 머지한다(이슈는 in_review + PR SUBMITTED 마커로 남는다). 로컬 착지에는 적용되지 않는다
+    set_by: [user]
   relation:
     type: enum
     choices: [stacked, independent]
@@ -1350,7 +1362,9 @@ nodes:
       · ready가 아니고 force_pr가 꺼져 있고 원격 편성이 아니면 **local**. reason은
         blockers를 `; `로 이은 것이다. 이 회차 이슈에 `LANDING MEDIUM: local
         (PR 불가: <reason>)` 코멘트를 남긴다 — PR이 기본인데 이 회차가 로컬로
-        간 이유가 보드에 남아야 한다.
+        간 이유가 보드에 남아야 한다. 사용자에게 보이는 경고(스레드)는 이
+        자리에서 열지 않는다 — 착지 절차의 local-warning이 같은 사실과
+        「로컬 브랜치 유실 위험」을 한 번 남긴다(claunch-ijkge).
       · ready가 아니고 force_pr가 켜져 있거나 원격 편성이면 outcome **blocked**.
         reason은 blockers다. 이슈에 `BLOCKED: remote-setup (<reason>)`을 남긴다.
         설치·로그인은 사용자가 한다 — 세션은 대화형 로그인을 할 수 없고 토큰을
@@ -1457,6 +1471,91 @@ nodes:
                                issues: "$result['pr-open'].value.issues"}}
         when: "$outcome == 'ok'"
     effects: [fs.write, git.push, board.write]
+
+  pr-submitted-mark:
+    title: PR 제출 마감 (수동 머지, auto_merge=false)
+    prompt: |
+      이 회차는 PR 제출에서 끝난다 — 시작 입력 auto_merge=false다. PR은 열렸고
+      (url=${data.landing.pr_url}, 번호=${data.landing.pr_number},
+      tip=${data.landing.tip}), 이 세션은 머지를 하지 않는다. 머지는 사용자가
+      PR 페이지에서 직접 한다. 이 스텝은 그 사실을 보드에 남긴다.
+
+      ── 실린 이슈 ──
+      주 이슈: ${data.claim.issue}
+      함께 실린 이슈: ${result['items-pass'].value}
+      이 값은 `items-pass` 노드의 것이고 회차마다 완료된다. `[]`면 이 회차는
+      단일 일감이다 — 대상은 주 이슈 하나다. 항목의 `issue`가 이슈 id다.
+      이 목록의 id를 그대로 쓴다. 보드 목록에서 고르지 않는다 — 같은 세션이
+      다른 이슈(HOLD된 앞 회차 이슈 등)를 in_progress로 쥐고 있을 수 있다.
+      주 이슈가 null이면(이슈 없이 가기로 한 회차, claim.how=none) 보드에
+      쓸 것이 없다 — 3번만 한다.
+
+      1. 대상 이슈를 전부 in_review로 옮긴다:
+         `claunch beads update <id> --status in_review`
+         하나라도 옮기지 못하면 그 id와 오류를 보고의 reason에 적는다.
+
+      2. 주 이슈에 마커 코멘트를 한 번 남긴다
+         (`claunch beads comments add <id> -f <파일>`; 파일은 $CLAUNCH_SCRATCH에
+         쓴다). 첫 줄은 정확히 이 형식이다:
+         `PR SUBMITTED @ <tip> <url>`
+         배치면 첫 줄 끝에 ` batch: <id1,id2,...>`를 붙인다. 이어서:
+         · `머지: 하지 않음(auto_merge=false) — 사용자가 PR에서 직접 머지한다`
+         · `증거: 이 회차의 다른 코멘트(표적 테스트 수치·리뷰 판정)에 있다`
+         나머지 이슈에는 한 줄만 남긴다:
+         `PR SUBMITTED @ <tip> (batch of <주 이슈 id>)`
+         이 마커는 settle-check가 이 회차의 이슈를 정산된 것으로 읽는 근거다 —
+         빠뜨리면 세션이 종료 정산에서 이 이슈 때문에 막힌다.
+
+      3. 상위에 fyi 한 줄을 보낸다(relation=${data.inputs.relation}): stacked면
+         부모 워커, independent면 리더. 형식:
+         `PR SUBMITTED <이슈 id들> <url> — auto_merge=false, 이 회차는 머지하지
+         않았다(사용자가 머지한다)`. 핸들을 모르거나 채널이 없으면 보내지
+         않는다 — 본체는 보드의 마커이고 이 알림은 회차를 막지 않는다.
+
+      하지 않는 것: `gh pr merge`, base 브랜치 push, 이슈 close. 이 셋은
+      사용자와 상위의 몫이다. PR을 닫거나 다시 만들지도 않는다.
+    done_when: |
+      실린 이슈가 전부 in_review이고, 주 이슈에 `PR SUBMITTED @ <tip> <url>`
+      마커가 있으며, 보고에 url·번호·tip과 「머지하지 않았다」가 있다.
+    returns:
+      ok: {url: "str?", number: "int?", tip: "str?"}
+    effects: [board.write, mesh.send]
+
+  pr-local-notice:
+    title: 로컬 착지 경고 (PR 제출 불가)
+    prompt: |
+      이 회차의 착지 매체가 local로 내려왔다. 사유: ${data.landing.reason}
+      이 회차는 PR 없이 로컬 브랜치로만 남는다. 로컬 브랜치는 이 머신의
+      체크아웃에만 있고, 세션·워크트리가 정리되거나 머신이 사라지면 커밋이
+      유실될 수 있다. 그 사실을 사용자에게 보이게 한 번 알린다.
+
+      1. 같은 주제의 스레드가 있으면 `thread_reply`, 없으면 `thread_open`으로
+         한 통을 남긴다. 제목: `PR 제출 불가 — 로컬 브랜치로만 남음`. 본문:
+         · 로컬로 내려온 사유(위 값 — gh 미설치·미로그인·원격 없음, 또는
+           사용자가 고른 local)
+         · 이 회차의 브랜치는 ${result['branch-setup'].value.branch}이고,
+           착지는 상위 세션의 --no-ff 머지로 이뤄진다
+         · 로컬 브랜치는 이 머신의 체크아웃에만 있다 — 세션·워크트리 정리,
+           머신 교체·초기화로 커밋이 유실될 수 있다
+         · 복구: `gh auth login`(또는 원격 설정)을 마친 뒤 이 브랜치를
+           push하고 PR을 열면 원격에 사본이 남는다. 상위가 다른 머신이면
+           로컬 착지가 서지 않으므로 그 전에 알린다
+      2. 이슈에 `LANDING MEDIUM: local (PR 불가: <사유>)` 코멘트가 이미 있는지
+         본다(`claunch beads comments <id>`). 없으면 같은 형식으로 한 줄
+         남기고, 있으면 다시 쓰지 않는다. 이슈가 없으면(claim.issue null)
+         생략한다.
+      3. 경고는 회차를 막지 않는다. thread_open이 실패하면 그 사유를 보고의
+         reason에 적고 계속한다 — 로컬 착지 절차는 그대로 진행한다.
+    done_when: |
+      사용자에게 보이는 경고(스레드)에 사유와 로컬 브랜치 유실 위험이 있고,
+      이슈에 LANDING MEDIUM 코멘트가 있거나 이미 있었다. thread id 또는 실패
+      사유가 보고에 있다.
+    # 둘 다 선택이다: 경고가 서지 못해도 회차는 계속 가므로(위 3번) 보고가
+    # 값 없이도 성립해야 한다. thread_id가 null이면 실패한 것이고 그 사유는
+    # 보고의 reason에 있다.
+    returns:
+      ok: {thread_id: "str?", warned: "bool?"}
+    effects: [fs.read, board.write, thread.write]
 
   # ── 일감 하나 (item) ─────────────────────────────────────────────────
   # ── 시뮬레이션(claunch-qrh0a) ─────────────────────────────────────────
@@ -4012,6 +4111,12 @@ nodes:
         hold로 동결했으면 닫지 않는다 — `claunch beads comments add <id> "HOLD:
         <이유>, <브랜치> @ <tip>"`(상태는 그대로 in_progress — 상위가 본다;
         배치면 실린 이슈마다).
+        PR만 제출하고 끝난 회차로 왔으면(auto_merge=false — land_out에 url·
+        번호·tip이 있고 머지 해시가 없다) 닫지 않는다. 이슈는 이미
+        in_review이고 `PR SUBMITTED @ <tip> <url>` 마커가 있다 — 여기서
+        상태를 다시 옮기거나 마커를 중복으로 쓰지 않고, `HOLD:` 코멘트도
+        쓰지 않는다. 머지는 사용자가 PR 페이지에서 직접 한다. 마감 fyi에는
+        PR url과 「머지 대기(사용자 수동)」를 한 줄로 적는다.
         사용자가 착수를 거절해 왔으면(feasibility-gate의 거절 → feasibility-hold)
         `HOLD: feasibility rejected by user` 코멘트가 이미 있다 — 닫지 않고
         HOLD를 다시 쓰지 않는다. 이 회차에는 착지도 착지 요청도 없다.
@@ -4832,7 +4937,7 @@ procedures:
       force_pr: {type: bool, default: false}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", tip: "str?"}
     body:
       id: publish-blocked
       call: pr-or-local
@@ -4854,7 +4959,8 @@ procedures:
                     remote: "$params.landing.remote", repo: "$params.landing.repo",
                     base: "$result['pr-open'].value.base",
                     pr_url: "$result['pr-open'].value.url",
-                    pr_number: "$result['pr-open'].value.number"}
+                    pr_number: "$result['pr-open'].value.number",
+                    tip: "$result['pr-open'].value.tip"}
 
   resolve-issue:
     description: >-
@@ -5509,7 +5615,8 @@ procedures:
       배치 하나의 착지(v1 stack-cut ... landed). 스택 컷(스택이 서 있을 때) ->
       착지 결정(깨끗하면 스스로 요청, 아니면 상위) -> 정렬·리뷰·통합 요청 ->
       착지 대기. 결과는 landed(머지 해시), held(동결로 마감), rework(작업으로
-      되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다.
+      되돌아감), blocked(차단으로 요청을 세우지 않음), pr-submitted(PR만 제출,
+      머지는 사용자가 함 — auto_merge=false) 다섯 중 하나다.
     params:
       mode: {type: str, default: full, description: "full | stack-only(위임 전용 회차: 스택 컷을 반드시 받는다)"}
       allow: {type: list, default: [request, escalate, no-target], description: "landing에서 고를 수 있는 갈래. no-target은 여섯째 확인(착지 요청을 받을 세션이 있는가)이 거짓일 때의 갈래다 — 기본값에 있어야 실제로 열린다"}
@@ -5530,6 +5637,15 @@ procedures:
       # 묶어 두고, 다음 회차는 tip이 그대로면 같은 질문을 건너뛴다.
       blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
                 issue: "str?", relation: "str?"}
+      # auto_merge=false로 PR만 제출하고 회차를 끝낸 처분(claunch-ijkge).
+      # 머지는 사용자가 PR 페이지에서 직접 한다. landed(머지 해시가 있다)도
+      # held(동결 마감)도 아니다 — PR은 열렸고 이슈는 in_review + `PR
+      # SUBMITTED` 마커로 남는다. worker-round의 catch가 이 결과를 받아
+      # 배치 루프를 나오고, wrapup은 이슈를 닫지 않는다. 값의 필드는 선택으로
+      # 둔다 — 머지 대신 보드의 마커가 정본이고, 값 검사에서 거절되면 이
+      # 결과가 fail로 탈출해 queue-recheck를 건너뛰기 때문이다(blocked가
+      # 그랬던 경로).
+      pr-submitted: {url: "str?", number: "int?", tip: "str?"}
     body:
       - id: stack-landing
         cond:
@@ -6147,6 +6263,19 @@ procedures:
                     bind: landing
                     with: {landing: "$data.landing", force_pr: "$data.inputs.force_pr"}
                 - else: []
+            # PR 불가로 로컬 착지로 내려온 회차의 사용자 경고(claunch-ijkge).
+            # 로컬 브랜치는 이 머신의 체크아웃에만 있으므로, 세션·워크트리가
+            # 정리되면 커밋이 유실될 수 있다는 사실을 사용자에게 보이게 한다.
+            # 사용자가 직접 로컬을 고른 회차(force_pr·force_no_pr)는 경고하지
+            # 않는다 — 그 선택은 이미 사람의 것이다. board의
+            # `LANDING MEDIUM: local` 코멘트는 remote-setup이 남긴 것이고
+            # 이 스텝은 중복으로 쓰지 않는다. 스택만 싣는 회차(mode=stack-only)는
+            # 이 세션의 작업 브랜치가 없으므로 경고하지 않는다.
+            - id: local-warning
+              cond:
+                - if: "$params.mode == 'full' and $data.landing.medium == 'local' and $data.inputs.force_pr != true and $data.inputs.force_no_pr != true"
+                  then: [pr-local-notice]
+                - else: []
             # 방어 게이트(claunch-jx4xx): 이슈 없이 착지 요청을 올리지 않는다.
             # 귀속된 이슈가 비면 요청이 큐에 실리지 않는다(NOT queued). 사용자가
             # 명시적으로 이슈 없이 가기로 한 회차(how = none)는 그 동의를 존중한다.
@@ -6157,6 +6286,26 @@ procedures:
                     id: late-issue
                     call: ensure-issue
                     bind: claim
+                - else: []
+            # PR 제출로 회차를 끝내는 갈래(claunch-ijkge): 시작 입력
+            # auto_merge=false면 PR을 연 뒤 착지 요청을 세우지 않고 여기서
+            # 회차를 닫는다. 머지는 사용자가 PR 페이지에서 직접 한다. 이슈는
+            # in_review + `PR SUBMITTED @ <tip> <url>` 마커로 남는다 —
+            # integration-request가 하던 전이를 이 갈래가 대신한다. 로컬
+            # 착지에는 적용하지 않는다(auto_merge는 PR 경로에만 걸린다).
+            # 위임 전용 회차(mode=stack-only)는 이 세션의 작업 브랜치가 아니라
+            # 스택 브랜치를 싣는 회차이고 이슈 귀속 단계도 지나지 않으므로
+            # 두지 않는다 — 거기서 마커를 쓰면 주 이슈가 없어 보드에 아무것도
+            # 남지 않는다.
+            - id: pr-submitted-route
+              cond:
+                - if: "$params.mode == 'full' and $data.landing.medium == 'pr' and $data.inputs.auto_merge == false"
+                  then:
+                    - pr-submitted-mark
+                    - return: pr-submitted
+                      value: {url: "$data.landing.pr_url",
+                              number: "$data.landing.pr_number",
+                              tip: "$data.landing.tip"}
                 - else: []
             # 착지 요청 수신자와의 메시지 채널 점검(claunch-101wi). 채널이 없다는
             # 사실은 await-landing의 재촉이 실패하거나 상위의 통지가 오지 않는
@@ -6747,6 +6896,13 @@ procedures:
               # round·rounds가 차례로 fail이 되어 queue-recheck가 통째로
               # 건너뛰어졌다(런 20261027-164135-3ad031 저널 02:33:08).
               blocked: {break: batch}
+              # auto_merge=false로 PR 제출에서 끝난 회차(claunch-ijkge). 머지를
+              # 하지 않고 마감하므로 rework처럼 배치를 다시 돌지 않고, held·
+              # blocked와 같이 배치 루프를 나와 wrapup·회차 보고를 지난다.
+              # 이 갈래가 없으면 pr-submitted가 catch되지 않아 이 try 밖으로
+              # fail로 탈출하고 queue-recheck가 통째로 건너뛰어진다(blocked와
+              # 같은 이유).
+              pr-submitted: {break: batch}
       - wrapup
       # wrapup 뒤 카테고리 재확인(claunch-06fwj): 회차가 실제로 무엇이었는지가
       # 마감 기록까지 끝난 이 자리에서 가장 정확하다. 앞의 category-tag와 같은
@@ -6806,13 +6962,19 @@ procedures:
                       print(json.dumps([i for i in d if i.get('status') not in ('closed',
                       'tombstone') and me in (i.get('created_by'), i.get('assignee'))],
                       ensure_ascii=False))"`. 목록이 비어야 완료다.
-                      남은 항목은 하나뿐인 예외를 빼고 전부 미정산이다 — 예외는 **상위의
+                      남은 항목은 두 예외를 빼고 전부 미정산이다 — 첫째는 **상위의
                       HOLD**다: `claunch beads comments <id> --json`에서 `author`가 이
                       세션이 아닌(상위·리더가 쓴) `HOLD:` 코멘트가 있고 그 뒤에 해소
                       코멘트가 없다. 이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold,
-                      wrapup의 hold 동결)는 예외가 아니다. 살아 있는 다른 세션이
-                      assignee라는 것도 정산이 아니다: 그 세션이 닫을 때까지 기다린다
-                      (자식에게 넘긴 일감도 같다).
+                      wrapup의 hold 동결)는 예외가 아니다. 둘째는 **이 세션이 PR만
+                      제출하고 머지를 남긴 이슈**다(claunch-ijkge): 상태가 in_review이고,
+                      `claunch beads comments <id> --json`에 `author`가 이 세션인
+                      `PR SUBMITTED @` 코멘트가 있다. auto_merge=false로 돈 회차는
+                      머지를 사용자가 PR에서 직접 하므로, 그 이슈가 in_review로 남은
+                      것은 유실이 아니라 정상 종료 상태다. 두 조건이 함께 서지 않으면
+                      (마커가 다른 세션의 것, 상태가 in_progress 등) 미정산이다.
+                      살아 있는 다른 세션이 assignee라는 것도 정산이 아니다: 그 세션이
+                      닫을 때까지 기다린다(자식에게 넘긴 일감도 같다).
                       정산 대상에서 빼는 것이 하나 더 있다 — **사용자가 보드 풀에 남기기로
                       승인한 self-improve 이슈**(claunch-c4e6f, 리더 승인 msg-74aacd2fcfd6).
                       세 조건을 모두 만족할 때만이다: (1) label에 `self-improve`가 있다,

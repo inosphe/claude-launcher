@@ -9,7 +9,7 @@ import threading
 from urllib.parse import urlsplit
 
 from .. import atomic
-from ..cflow2.store import RunStore, StoreError
+from ..cflow2.store import RunStore, StoreError, utcnow
 from . import paths
 
 _cache: dict = {}
@@ -40,6 +40,16 @@ def clean(value) -> dict | None:
         out["draft"] = draft
     if isinstance(value.get("issues"), list):
         out["issues"] = [v for v in value["issues"] if isinstance(v, str)]
+    # A v2 collection record stamps the push time (`at`) and its sequence
+    # (`seq`); the PR page's date timeline reads `at`. Records written before
+    # this kept neither, and the page shows those under "date unknown" rather
+    # than inventing one.
+    at = value.get("at")
+    if isinstance(at, str) and at:
+        out["at"] = at
+    seq = value.get("seq")
+    if isinstance(seq, int) and not isinstance(seq, bool):
+        out["seq"] = seq
     return out
 
 
@@ -56,7 +66,7 @@ def record(name: str, result: dict, request: dict) -> None:
         return
     row = clean({**(result.get("pr") or {}), "branch": result.get("branch"),
                  "base": result.get("base"), "title": request.get("title"),
-                 "source": "PR wizard"})
+                 "source": "PR wizard", "at": utcnow()})
     if row is None:
         return
     path = paths.session_dir(name) / "prs.json"
@@ -119,7 +129,14 @@ def for_session(cwd: str, name: str) -> list[dict]:
         row = clean(candidate)
         if row:
             merged[row["url"]] = {**merged.get(row["url"], {}), **row}
+    # Newest recorded first: rows that carry a collection `at` sort by it,
+    # and rows written before the stamp existed keep the old reversed order
+    # after them (the PR page puts those under "date unknown").
     rows = list(reversed(list(merged.values())))
+    dated = [r for r in rows if r.get("at")]
+    undated = [r for r in rows if not r.get("at")]
+    dated.sort(key=lambda r: r["at"], reverse=True)
+    rows = dated + undated
     with _lock:
         # Bound the cache when sessions are removed from the daemon.
         if len(_cache) >= 1024:
