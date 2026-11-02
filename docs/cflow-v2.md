@@ -114,13 +114,17 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
   시작은 드라이버가 한다.
 - 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
   `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
-- 표시용 회차 `round_now` (claunch-oxmso): `recur`하지 않고 같은 런 안의 루프로
-  회차를 도는 정의(`improv-worker-v2`의 `rounds`)는 `round`가 1에 머물므로,
-  `flow_status`·`rail_entry`·`run_detail`이 표시용 값 `round_now`를 따로 싣는다.
-  `recur` 정의에서는 `round`와 같고, 그 밖에는 살아 있는 가장 바깥 `while`/`until`
-  루프 인스턴스의 `frame.iter - frame.base`(지금 반복 번호)다. 살아 있는 루프가
-  없으면(정산 구간 등) 실리지 않으며, 화면은 그때 `round`로 떨어진다. `round`의
-  의미는 바뀌지 않는다 — 런 이력과 공용 API는 계속 `round`를 읽는다.
+- 표시용 회차 `round_now` (claunch-oxmso, claunch-oxmso.1): `recur`하지 않고 같은
+  런 안의 루프로 회차를 도는 정의(`improv-worker-v2`·`perf-monitor-v2`의 `rounds`)는
+  `round`가 1에 머물므로, `flow_status`·`rail_entry`·`run_detail`이 표시용 값
+  `round_now`를 따로 싣는다. `recur` 정의에서는 `round`와 같다. 그 밖에는 정의가
+  `loop`의 `rounds: true`로 선언한 루프의 살아 있는 인스턴스 가운데 가장 바깥 것의
+  `frame.iter - frame.base`(지금 반복 번호)이고, 그런 인스턴스가 없으면 실리지
+  않는다 — 화면은 그때 `round`로 떨어진다. 어떤 루프가 회차인지는 정의가 밝히고,
+  엔진은 「가장 바깥 루프」처럼 모양으로 추측하지 않는다: `operator-v2`의 `service`
+  같은 감시 루프(`claunch operators watch` 폴링)는 회차가 아니므로 선언하지 않으며,
+  그 런의 표시는 `round`(1)에 머문다. `round`의 의미는 바뀌지 않는다 — 런 이력과
+  공용 API는 계속 `round`를 읽는다.
 - `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
   `flow_status`가 `next_round`와 그 안내를 싣는다.
 - `recur: {auto: true}`: 데몬의 cflow2 clock이 끝난 슬롯에서 `next_round.auto`를
@@ -632,7 +636,7 @@ body:
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
 | `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
-| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T}` | 조건 루프. `max` 필수 |
+| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
 | `retry` | `retry: {do: T, max: N, every: SECONDS, until: EXPR, between: T}` | 재시도. `between`은 시도 사이에 실행하는 트리 |
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
@@ -2211,7 +2215,7 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `seq` | 복합 상태(순차) | `children`, `pass_prev` |
 | `cond` | 가드 전이를 가진 복합 상태 | `branches: [{guard, child}]` |
 | `choose` | 외부 선택 전이 | `prompt`, `chooser`, `options: [{name, description, guard, child}]` |
-| `loop` | 복합 상태 + 자기 전이 | `mode`(while/until/foreach/retry), `guard`, `max`, `child`, `between`, `every`, `items`, `as`, `parallel` |
+| `loop` | 복합 상태 + 자기 전이 | `mode`(while/until/foreach/retry), `guard`, `max`, `child`, `between`, `every`, `items`, `as`, `parallel`, `rounds`(선언한 루프의 반복이 회차라는 표시, 2.1) |
 | `par` | 병렬 영역 | `branches: {name: child}`, `settle` |
 | `timeout` | 시간 전이를 가진 복합 상태 | `child`, `seconds`, `else` |
 | `try` | 복합 상태 + 결과 전이 | `child`, `catch: {outcome: child}`, `finally` |

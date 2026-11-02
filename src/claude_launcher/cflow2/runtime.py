@@ -5564,12 +5564,19 @@ def current_round(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
     Two workflows count rounds in two ways, and the display has to follow the
     one the definition uses. A recurring workflow (``recur``) ends its run each
     round and starts the next one, so its round is the slot's ``round``
-    (:func:`_new_run`). One that does not recur (improv-worker-v2) runs its
-    rounds as iterations of a loop inside the same run -- ``state["round"]``
-    stays 1 there -- so its round is the iteration of the outermost live
-    ``while``/``until`` loop. ``None`` when neither applies: a run outside a
-    recurring round and outside a loop has no round to show, and the caller
-    falls back to ``state["round"]``.
+    (:func:`_new_run`). One that does not recur (improv-worker-v2,
+    perf-monitor-v2) runs its rounds as iterations of a loop inside the same
+    run -- ``state["round"]`` stays 1 there -- so its round is the iteration of
+    the loop its definition marked ``rounds: true`` (docs 2.3, ``loop``).
+    ``None`` when neither applies: a run outside a recurring round and outside
+    a round loop has no round to show, and the caller falls back to
+    ``state["round"]``.
+
+    The declaration is what makes this readable. Before it (claunch-oxmso) the
+    rule was "the outermost live while/until loop", which named the iteration
+    of a watch loop -- ``operator-v2``'s ``service`` polls ``claunch operators
+    watch`` and has no rounds at all -- so a session's rail counted its polling
+    passes as rounds (claunch-oxmso.1).
     """
     if (chart.meta or {}).get("recur"):
         value = state.get("round")
@@ -5583,6 +5590,8 @@ def current_round(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
         except ir.IRError:
             continue
         if node.type != "loop" or node.get("mode") not in (ir.LOOP_WHILE, ir.LOOP_UNTIL):
+            continue
+        if node.get("rounds") is not True:
             continue
         frame = rec.get("frame") or {}
         try:
