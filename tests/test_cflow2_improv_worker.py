@@ -3549,7 +3549,11 @@ def test_land_declares_and_routes_blocked_out_of_the_batch():
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     land = doc["procedures"]["land"]
     assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
-    assert land["returns"]["blocked"] == {"reason": "str"}
+    # reason is required; the route fields are what a person's answer is
+    # recorded with so the next round need not ask again (claunch-1aj1a.1),
+    # and they are optional because the ``reframe`` answer carries none.
+    assert land["returns"]["blocked"] == {"reason": "str", "decision": "str?",
+                                          "tip": "str?", "repo": "str?"}
 
     batch = _find_id(doc["procedures"]["worker-round"]["body"], "batch")
     # ``do: {try: [...], catch: {...}}`` -- a bare-key mapping, not a list

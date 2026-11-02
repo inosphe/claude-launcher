@@ -479,6 +479,14 @@ data:
   # decision이 approve-always면 이 런의 이후 일감·회차에서 게이트가 서지
   # 않는다 — 런이 끝날 때까지 유지되고, 되돌리는 답은 없다.
   coding_approval: {decision: null}
+  # 착지 대상 없음에 대한 사람의 마지막 결정(claunch-1aj1a.1): ask-user의 답
+  # {decision, reason, tip, repo}. land의 no-target 갈래가 묻기 전에 읽어,
+  # tip이 그대로면 같은 질문을 다시 하지 않는다. 답할 때마다 덮어쓴다.
+  landing_route: {decision: null, reason: null, tip: null, repo: null}
+  # 이 회차 마지막 커밋의 보고 — commit 노드가 내는 {commits, tip}이고 item이
+  # 묶는다(bind: commit). landing_route.tip과 비교해 「지금 브랜치 끝에 대한
+  # 결정인가」를 가른다: 끝이 움직였으면 지난 답을 다시 쓰지 않고 묻는다.
+  commit: {}
   round: {}
   # 이 회차의 선행 맥락 검색 결과(prior-context, 그것이 실패하면
   # prior-context-fallback). intake-issue가 읽는다. 회차마다 덮어쓴다.
@@ -5213,7 +5221,11 @@ procedures:
                     description: 셀프 게이트 셋이 전부 참 — 표적 테스트를 생략하고 사유를 보드에 기록한 뒤 착지 요청으로 간다.
                     then: test-skipped
             - {break: plan-work}
-      - commit
+      # 보고의 tip을 런 데이터에 남긴다(claunch-1aj1a.1): land의 no-target 갈래가
+      # 「사람이 답한 브랜치 끝」과 「지금 브랜치 끝」을 비교해 같은 질문을 다시
+      # 서지 않게 한다. 회차가 커밋 없이 끝나면 앞 회차의 값이 남는데, 그때는
+      # 브랜치도 앞 회차 그대로다.
+      - {seq: [commit], bind: commit}
 
   confirm-landed:
     description: >-
@@ -5262,14 +5274,51 @@ procedures:
               timeout: {call: landed-unclear, with: {why: timeout}}
           record: landed
 
+  landing-route-replay:
+    description: >-
+      사람이 이미 고른 착지 경로를 이번 회차의 답으로 다시 낸다(claunch-1aj1a.1).
+      저장된 결정의 브랜치 끝(landing_route.tip)이 이번 회차의 브랜치 끝과
+      같으면 그 결정 이름을 그대로 내고, 결정이 없거나 끝이 움직였으면
+      ``ask-again``을 낸다 — 호출부의 cases는 그때 아무것도 하지 않고 다음
+      노드(게이트 호출)가 묻는다. 어느 이름을 낼지는 cases의 키로만 적는다.
+      손으로 쓴 decision 문자열 비교를 쓰지 않는 이유: 선택지 이름의 오타는
+      컴파일도 런타임도 거치지 않고 조용히 어긋나는데, 그 형태는
+      tests/test_cflow2_improv_worker.py의
+      test_no_ask_user_is_followed_by_a_handwritten_decision_cond가 막는다.
+    params:
+      previous: {type: dict, description: "landing_route로 묶인 지난 결정 {decision, reason, tip, repo}"}
+      tip: {type: str, default: "", description: "이번 회차 브랜치 끝($data.commit.tip)"}
+      choices: {type: list, description: "cases가 넘기는 선택지 이름들 — 본문은 쓰지 않는다"}
+    returns:
+      ok: {decision: str, reason: "str?", repo: "str?"}
+    body:
+      # 세 가지를 함께 본다. (1) 지금 tip을 알아야 한다 — 이번 회차가 커밋을
+      # 하지 않았으면 commit.tip은 비어 있고, 빈 값끼리 비교하면 「같은 끝」이
+      # 거짓으로 성립한다. (2) 저장된 끝과 같아야 한다. (3) 저장된 결정이
+      # 있어야 한다 — 기록이 없을 때 previous.tip은 null이라 (1)·(2)만으로는
+      # 가릴 수 없다. 빈 문자열·null은 거짓이다.
+      - cond:
+          - if: "$params.tip and $params.previous.tip == $params.tip and $params.previous.decision"
+            then:
+              return: ok
+              value:
+                decision: "$params.previous.decision"
+                reason: "$params.previous.reason"
+                repo: "$params.previous.repo"
+          - else:
+              return: ok
+              value: {decision: ask-again}
+
   landing-target-gate:
     description: >-
       착지 요청을 받을 세션이 아무도 없을 때(claunch-od1mx.1) 그 사실을 사람에게
       올리고 이 런의 착지 경로를 사람이 정하게 한다. 근거는 추측이 아니라
       라우팅 판정 그 자체다 — 데몬의 Router가 낸 탈락 사유를 그대로 싣는다.
       보드를 건드리지 않는다: in_review 전이도, LANDING REQUEST 코멘트도 없다.
-      결과는 land의 셋 중 하나로 낸다: rework(메시를 고쳐 다시 올린다),
-      blocked(사람이 직접 머지한다), held(동결하고 마감한다).
+      결과는 land의 둘 중 하나로 낸다: blocked(사람이 직접 머지하거나, 메시를
+      고친 뒤 다음 회차가 다시 잰다), held(동결하고 마감한다). 사람의 답은
+      land가 landing_route로 묶어 다음 회차가 같은 브랜치 끝에서 다시 묻지
+      않게 한다(claunch-1aj1a.1).
 
       ``reframe``은 ask-user가 세 번 다시 물은 뒤에도 선택지가 문제에 맞지
       않는다고 답한 경우다(ask-common). 이것을 선언하지 않으면 이 프로시저가
@@ -5280,9 +5329,14 @@ procedures:
     params:
       relation: {type: str, default: "", description: "이 런의 시작 입력 relation — 프로브가 어느 방향으로 재는지"}
     returns:
-      rework: {reason: str, rework: bool}
-      blocked: {reason: str}
-      held: {reason: str, rework: bool}
+      # decision·tip·repo는 이 선택을 런 데이터(landing_route)에 남기기 위한
+      # 값이다(claunch-1aj1a.1). decision은 어느 선택지였는지, tip은 그 결정을
+      # 내린 시점의 브랜치 끝이다 — 다음 회차의 land가 tip이 그대로면 같은
+      # 질문을 다시 하지 않는다.
+      # rework는 더 선언하지 않는다: 세 선택지가 전부 회차를 끝내므로 이
+      # 프로시저가 rework로 끝나는 갈래가 없다(claunch-1aj1a.1).
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?"}
+      held: {reason: str, rework: bool, decision: "str?", tip: "str?", repo: "str?"}
     body:
       # 근거를 먼저 만든다. 질문을 여는 노드가 스스로 잰 값을 넘기는 것이
       # ask-common의 규약이고(ask-frame → ask-pose), 물어보는 사이에 명부가
@@ -5317,15 +5371,24 @@ procedures:
                 추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
               셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
           cases:
+            # rebase-and-repost는 rework가 아니라 blocked다(claunch-1aj1a.1).
+            # rework는 배치 루프를 다시 돌 뿐 이 게이트의 입력(런 cwd 저장소)을
+            # 바꾸지 못하므로, 같은 exit 1이 서고 같은 질문이 다시 열린다 —
+            # s6086에서 두 회차에 걸쳐 실측된 반복이다(claunch-i8cj4 코멘트
+            # 30083 → 30727 → 30737). 그 반복은 landing-declined의 재작업
+            # 예산도 세지 않는다(rework-budget은 landing의 declined 갈래에만
+            # 있다). 메시
+            # 구성은 워크플로 밖에서 사람이 고치는 일이므로, 회차를 끝내고
+            # 다음 회차가 새 명부로 다시 재게 한다.
             rebase-and-repost:
-              return: rework
-              value: {reason: "착지 대상을 만들지 못했다 — 사람이 메시 구성을 고쳐 다시 올린다", rework: true}
+              return: blocked
+              value: {reason: "착지 대상을 만들지 못했다 — 메시 구성을 고친 뒤 다음 회차가 새 명부로 다시 잰다", decision: rebase-and-repost, tip: "$data.commit.tip", repo: "$data.landing.repo"}
             merge-by-person:
               return: blocked
-              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다"}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다", decision: merge-by-person, tip: "$data.commit.tip", repo: "$data.landing.repo"}
             freeze-and-close:
               return: held
-              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false, decision: freeze-and-close, tip: "$data.commit.tip", repo: "$data.landing.repo"}
         catch:
           # 선택지 셋이 문제에 맞지 않는다는 답. 다시 물을 선택지가 이
           # 프로시저에 없으므로 사람이 경로를 정하겠다는 뜻으로 읽고
@@ -5412,7 +5475,7 @@ procedures:
       allow: {type: list, default: [request, escalate, no-target], description: "landing에서 고를 수 있는 갈래. no-target은 여섯째 확인(착지 요청을 받을 세션이 있는가)이 거짓일 때의 갈래다 — 기본값에 있어야 실제로 열린다"}
     returns:
       landed: {merge: str, tip: "str?"}
-      held: {reason: "str?", rework: "bool?"}
+      held: {reason: "str?", rework: "bool?", decision: "str?", tip: "str?", repo: "str?"}
       rework: {reason: "str?", rework: bool}
       # claunch-improver-integration-request-blocked-o6paj: 차단 때문에 착지
       # 요청을 세우지 않는 처분. landed(머지됨)·held(마감)·rework(되감기)
@@ -5421,7 +5484,10 @@ procedures:
       # 표현할 선언된 결과가 없어 엔진 자신의 실패 결과(fail)로 보고할 수밖에
       # 없고, catch가 없는 위층(round·rounds)을 그대로 탈출해 queue-recheck를
       # 건너뛴다(런 20261027-164135-3ad031 저널 02:33:08 실측).
-      blocked: {reason: str}
+      # decision·tip·repo는 landing-target-gate가 남기는 값이다
+      # (claunch-1aj1a.1). land가 no-target 갈래에서 그것을 landing_route로
+      # 묶어 두고, 다음 회차는 tip이 그대로면 같은 질문을 건너뛴다.
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?"}
     body:
       - id: stack-landing
         cond:
@@ -5842,8 +5908,64 @@ procedures:
               when: "'no-target' in $params.allow"
               then:
                 id: landing-target
-                call: landing-target-gate
-                with: {relation: "$data.inputs.relation"}
+                seq:
+                  # claunch-1aj1a.1: 같은 질문을 두 번 묻지 않는다. 여기까지
+                  # 왔다는 것은 여섯째 확인이 방금 「대상 없음」을 냈다는
+                  # 뜻이고, 그 질문의 답은 (사람, 저장소, 브랜치 끝)에 걸린
+                  # 결정이다. 그 셋이 그대로면 사람에게 다시 묻지 않고 저장된
+                  # 결정으로 분기한다 — 사람은 이미 답했다(merge-by-person과
+                  # rebase-and-repost는 blocked, freeze-and-close는 held).
+                  # 브랜치 끝이 바뀌었거나 결정이 없으면 ask-again이라 아래
+                  # 호출이 묻는다.
+                  #
+                  # 분기는 cases의 키로 적는다: 선택지 이름을 cond에 손으로
+                  # 비교하면 오타가 조용히 어긋난다(위 프로시저 설명). 키는
+                  # 게이트가 묻는 선택지와 같아야 하고,
+                  # tests/test_worker_v2_landing_target.py가 그 일치를 고정한다.
+                  #
+                  # 한계: 비교하는 끝은 $data.commit.tip — 이 회차 마지막 커밋의
+                  # tip이다. 커밋 없이 브랜치가 움직이는 회차(stack-only가 컷을
+                  # 머지하는 경우)에는 앞 회차 값이 남아, 그 끝에서 사람이 답한
+                  # 결정이 새 끝에도 그대로 쓰인다. 그때 쓰이는 답은 사람이 이미
+                  # 내린 「다시 묻지 마라」이고 회차는 blocked/held로 끝나므로
+                  # 손실은 보고의 tip 값이 낡는 것까지다. 이 값을 사람이 답한
+                  # 시점에 게이트가 다시 재게 하려면 게이트가 tip을 재는 자리로
+                  # 이 확인을 옮겨야 한다(그 자리는 evidence 뒤다).
+                  - id: landing-target-replay
+                    call: landing-route-replay
+                    with:
+                      previous: "$data.landing_route"
+                      tip: "$data.commit.tip"
+                    cases:
+                      merge-by-person:
+                        return: blocked
+                        value:
+                          reason: "저장된 결정(merge-by-person)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다"
+                          decision: merge-by-person
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing.repo"
+                      rebase-and-repost:
+                        return: blocked
+                        value:
+                          reason: "저장된 결정(rebase-and-repost)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다. 메시를 고친 뒤의 착지는 다음 회차의 여섯째 확인이 새 명부로 다시 잰다"
+                          decision: rebase-and-repost
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing.repo"
+                      freeze-and-close:
+                        return: held
+                        value:
+                          reason: "저장된 결정(freeze-and-close)을 그대로 쓴다 — 브랜치 끝이 그대로라 같은 질문을 다시 서지 않는다"
+                          rework: false
+                          decision: freeze-and-close
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing.repo"
+                      # 저장된 결정이 없거나 브랜치 끝이 움직였다 — 묻는다.
+                      ask-again: []
+                  # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
+                  - id: landing-target-ask
+                    call: landing-target-gate
+                    with: {relation: "$data.inputs.relation"}
+                    bind: landing_route
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"

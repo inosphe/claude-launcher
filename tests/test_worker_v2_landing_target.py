@@ -76,18 +76,22 @@ def _options() -> Dict[str, dict]:
 
 
 def _gate_subtree() -> List[Any]:
-    """The compiled nodes the ``no-target`` option leads to.
+    """The compiled nodes the gate procedure expands to.
 
-    A procedure body is compiled under ``<id>/...`` while its call site's own
-    children are ``<id>.<n>``, so both separators are prefixes here -- the
-    alternative is naming each path, which goes stale the moment the body
-    gains a node.
+    The ``no-target`` option's tree is a ``seq`` now (claunch-1aj1a.1 put the
+    reuse guard in front of the call), so the gate is located by what it is
+    -- the scope whose ``proc`` is ``landing-target-gate`` -- rather than by
+    being the option's direct child. A procedure body compiles under
+    ``<id>/...`` while a call site's own children are ``<id>.<n>``; both
+    separators are prefixes here, the alternative being to name each path,
+    which goes stale the moment the body gains a node.
     """
     chart = _chart()
-    child = _options()["no-target"]["child"]
-    prefixes = (child + ".", child + "/")
+    scope = next(n.id for n in chart.nodes.values()
+                 if n.get("proc") == "landing-target-gate")
+    prefixes = (scope + ".", scope + "/")
     return [chart.nodes[n] for n in sorted(chart.nodes)
-            if n == child or n.startswith(prefixes)]
+            if n == scope or n.startswith(prefixes)]
 
 
 def _find(tree: Any, key: str, value: Any) -> Any:
@@ -173,9 +177,9 @@ def test_no_target_asks_the_person_and_does_not_route_upward():
     chart = _chart()
     child = _options()["no-target"]["child"]
     assert child, "no-target has no tree -- it must lead to the person's gate"
-    # the option's subtree is a call of the gate procedure...
-    assert chart.nodes[child].type == "scope"
-    assert chart.nodes[child].get("proc") == "landing-target-gate"
+    # the option's subtree reaches the gate procedure...
+    procs = {n.get("proc") for n in _gate_subtree()}
+    assert "landing-target-gate" in procs, procs
     # ...which asks a person (ask-user compiles to these)
     labels = {n.label for n in _gate_subtree() if n.label}
     assert "ask-pose" in labels
@@ -209,27 +213,176 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     raised = {n.get("outcome") for n in _gate_subtree()
               if n.type == "control" and n.get("op") == "return"} - {"ok", "reframe"}
     assert raised <= declared, f"a return names {raised - declared}, which land does not declare"
-    assert raised == {"rework", "blocked", "held"}, raised
+    # claunch-1aj1a.1: rebase-and-repost stopped returning rework. A rework
+    # re-runs the batch without changing the probe's input (the run's cwd
+    # repository), so the same exit 1 stands and the question reopens --
+    # measured on s6086 across two rounds (claunch-i8cj4 30083 -> 30727 ->
+    # 30737). Every answer the gate gives now ends the round.
+    assert raised == {"blocked", "held"}, raised
     # the declaration's shape is what makes these land's answers, not the
-    # ask procedure's: each carries the fields land declares for it
+    # ask procedure's: each carries the fields land declares for it. The
+    # three optionals are the recorded decision (claunch-1aj1a.1) -- they are
+    # what the next round reads to decide whether to ask again.
     fields = _doc()["procedures"]["land"]["returns"]
-    assert set(fields["blocked"]) == {"reason"}
-    assert set(fields["held"]) == {"reason", "rework"}
+    assert set(fields["blocked"]) == {"reason", "decision", "tip", "repo"}
+    assert set(fields["held"]) == {"reason", "rework", "decision", "tip", "repo"}
     assert set(fields["rework"]) == {"reason", "rework"}
 
 
-def test_blocked_carries_only_a_reason():
-    """``land``'s declaration is ``blocked: {reason: str}``. A ``rework`` field
-    smuggled in here would be dropped by the engine (fill_optional keeps the
-    declared shape) -- and the two consumers of ``land_out.rework`` would read
-    null, which is falsy, so the behaviour would be right for the wrong
+def test_blocked_carries_a_reason_and_no_rework_flag():
+    """``land``'s declaration is ``blocked: {reason: str, ...}``. A ``rework``
+    field smuggled in here would be dropped by the engine (fill_optional keeps
+    the declared shape) -- and the two consumers of ``land_out.rework`` would
+    read null, which is falsy, so the behaviour would be right for the wrong
     reason. Pinned so it stays a conscious choice rather than an accident."""
     body = _doc()["procedures"]["landing-target-gate"]["body"]
     blocked = _find(body, "return", "blocked")
     assert blocked is not None, "no return of blocked in the gate"
-    assert set(blocked["value"]) == {"reason"}, blocked["value"]
+    assert set(blocked["value"]) == {"reason", "decision", "tip", "repo"}, blocked["value"]
+    assert "rework" not in blocked["value"], (
+        "the two land_out.rework consumers would read a blocked answer as a "
+        "rework round")
     # ...and it carries a sentence, which is what the person reads next round
     assert blocked["value"]["reason"].strip()
+
+
+def test_every_answer_records_its_decision_and_the_branch_tip():
+    """claunch-1aj1a.1: the answer is only reusable if the next round can tell
+    *which* answer it was and *what state* it was about. The tip is the fact
+    that makes the same question legitimately the same question."""
+    cases = _the_ask().get("cases") or {}
+    assert cases, "the gate has no cases"
+    for name, case in cases.items():
+        value = case["value"]
+        assert value["decision"] == name, (name, value)
+        assert value["tip"] == "$data.commit.tip", (name, value)
+        assert value["repo"] == "$data.landing.repo", (name, value)
+
+
+def test_rebase_and_repost_ends_the_round_instead_of_reworking():
+    """The choice this issue is named for. ``rework`` cannot change the
+    probe's input, so it can only reproduce the same verdict -- and its
+    repetition is not counted by ``landing-declined``'s rework budget
+    (``rework-budget`` belongs to ``landing``'s ``declined`` branch). It ends
+    the round as blocked
+    instead, and the next round re-measures with whatever the person
+    changed outside the workflow."""
+    case = (_the_ask().get("cases") or {})["rebase-and-repost"]
+    assert case["return"] == "blocked", case
+    assert "rework" not in case["value"], case["value"]
+    assert "다음 회차가 새 명부로 다시 잰다" in case["value"]["reason"]
+
+
+def _land_no_target() -> dict:
+    """The ``then:`` tree of ``land``'s ``no-target`` option, from the yaml."""
+    land = _doc()["procedures"]["land"]
+    tree = _find(land["body"], "id", "landing-target")
+    assert tree is not None, "land's no-target branch moved"
+    return tree
+
+
+def test_no_target_reuses_the_recorded_answer_on_the_same_tip():
+    """claunch-1aj1a.1: reaching this branch already means the sixth check
+    just said 「no target」. If the branch tip is the one the person answered
+    about, asking again is a repeat -- so the tree replays the recorded
+    answer first and only calls the gate when the tip moved or nothing is
+    recorded.
+
+    The replay returns the choice *name*, and the branch on that name is a
+    ``cases`` map: the repo forbids a hand-written decision comparison
+    (test_cflow2_improv_worker.py::
+    test_no_ask_user_is_followed_by_a_handwritten_decision_cond), because a
+    misspelt choice in a cond is never compiled or reported.
+    """
+    tree = _land_no_target()
+    replay = _find(tree, "id", "landing-target-replay")
+    assert replay is not None, "no replay before the gate"
+    assert replay["call"] == "landing-route-replay", replay
+    # the key is (stored route, this round's tip)
+    assert replay["with"] == {"previous": "$data.landing_route",
+                              "tip": "$data.commit.tip"}, replay["with"]
+    cases = replay["cases"]
+    # every answer the gate can give has a case, and the unanswered key asks
+    assert set(cases) == {"merge-by-person", "rebase-and-repost",
+                          "freeze-and-close", "ask-again"}, cases
+    # the replayed answers go to the same outcomes the gate returns for them
+    assert cases["merge-by-person"]["return"] == "blocked"
+    assert cases["rebase-and-repost"]["return"] == "blocked"
+    assert cases["freeze-and-close"]["return"] == "held"
+    assert "rework" not in cases["merge-by-person"]["value"]
+    assert cases["freeze-and-close"]["value"]["rework"] is False
+    # a replayed answer still carries the facts the decision was made on
+    for key in ("merge-by-person", "rebase-and-repost", "freeze-and-close"):
+        assert cases[key]["value"]["decision"] == key
+        assert cases[key]["value"]["tip"] == "$data.commit.tip"
+    # ask-again does nothing: the gate call after it poses the question
+    assert cases["ask-again"] == []
+
+
+def test_the_replay_cases_name_the_same_choices_the_gate_offers():
+    """The replay's case keys and the gate's ask options are two lists of the
+    same three names, and a mismatch fails at runtime rather than at compile
+    time: a name the replay emits with no case makes the ``cases`` cond fail
+    ("no cond branch matched"), which would leave ``land`` as a failure and
+    skip ``queue-recheck`` -- the accident ``blocked`` exists to prevent."""
+    offered = set(_the_ask()["cases"])
+    replayed = set(_find(_land_no_target(), "id", "landing-target-replay")["cases"])
+    assert replayed - {"ask-again"} == offered, (replayed, offered)
+
+
+def test_the_replay_reads_its_answer_only_back_onto_the_same_tip():
+    """The replay procedure itself: the tip equality and the existence test
+    are in one guard, and the miss goes to ``ask-again`` rather than to a
+    choice, so a missing record cannot be mistaken for an answer.
+
+    ``landing_route.tip`` is null before the first answer and ``commit.tip``
+    is null in a round that committed nothing, so the tip test alone would
+    say "same tip" for two non-answers -- the two truthiness halves are what
+    keeps the question alive."""
+    body = _doc()["procedures"]["landing-route-replay"]["body"]
+    [cond] = [node for node in body if isinstance(node, dict) and "cond" in node]
+    guard = cond["cond"][0]["if"]
+    assert guard.startswith("$params.tip and "), guard
+    assert "$params.previous.tip == $params.tip" in guard, guard
+    assert "$params.previous.decision" in guard, guard
+    assert cond["cond"][0]["then"]["return"] == "ok"
+    assert cond["cond"][1]["else"]["value"] == {"decision": "ask-again"}
+    # and the hit hands back what was stored, not a re-worded copy
+    value = cond["cond"][0]["then"]["value"]
+    assert value["decision"] == "$params.previous.decision"
+    assert value["reason"] == "$params.previous.reason"
+
+
+def test_the_commit_report_is_bound_so_the_tip_is_available():
+    """``$data.commit.tip`` is the key the replay compares against, so it has
+    to be written by something. The ``commit`` task returns ``{commits,
+    tip}``; ``item`` binds it. Pinned because the bind is one word in a long
+    procedure body and its absence is silent: an undeclared chain reads as
+    null, and null == null would make every round look like "same tip"."""
+    assert "commit" in _doc()["data"], "data.commit is not declared"
+    item = _doc()["procedures"]["item"]["body"]
+    bound = [node for node in item
+             if isinstance(node, dict) and node.get("bind") == "commit"]
+    assert bound, "nothing binds the commit report"
+    assert bound[-1]["seq"] == ["commit"], bound[-1]
+
+
+def test_the_gate_call_binds_the_answer_for_the_next_round():
+    tree = _land_no_target()
+    call = _find(tree, "call", "landing-target-gate")
+    assert call is not None, "the gate is no longer called here"
+    assert call.get("bind") == "landing_route", call
+    # and the data key is declared, so a reader sees it in flow_status
+    assert "landing_route" in _doc()["data"]
+
+
+def test_the_gate_is_still_asked_when_nothing_is_recorded():
+    """The replay must not swallow the first question: the call sits in the
+    same seq, after it, and its ``ask-again`` case is an empty tree."""
+    tree = _land_no_target()
+    seq = tree.get("seq") or []
+    ids = [n.get("id") for n in seq if isinstance(n, dict)]
+    assert ids == ["landing-target-replay", "landing-target-ask"], ids
 
 
 def test_the_two_rework_consumers_read_a_blocked_result_as_no_rework():
@@ -301,8 +454,11 @@ def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
     which is what the answer says.
     """
     proc = _doc()["procedures"]["landing-target-gate"]
-    # the outcome is declared, so the engine has a value shape for it...
-    assert set(proc["returns"]) == {"rework", "blocked", "held"}
+    # the outcome is declared, so the engine has a value shape for it. There
+    # is no ``rework`` any more: claunch-1aj1a.1 made every choice end the
+    # round (rework could only re-run the batch), so the declaration would
+    # name an outcome nothing raises.
+    assert set(proc["returns"]) == {"blocked", "held"}
     # ...and the try's catch handles it
     choice = _find(proc["body"], "id", "landing-target-choice")
     assert choice is not None and "try" in choice, choice
