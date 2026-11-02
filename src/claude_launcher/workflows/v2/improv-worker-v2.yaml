@@ -563,6 +563,9 @@ rules:
       사용자는 수십 개 세션을 함께 본다. 산문 보고를 읽게 하지 않고, 이
       세션의 plan 패널(대시보드의 ☰ plan)에서 계획을 읽고 갈래를 고르게 한다.
       쓰는 길은 plan_* MCP 도구다(plan_set, plan_node, plan_get).
+      · plan에 쓰는 글(title, goal, detail, 선택지의 label·effect·risk)은
+        한국어로 쓴다(claunch-lp7c6). 명령·경로·식별자·오류 메시지 인용은
+        원문 그대로 둔다.
       · 착수할 때(coding-plan, 그 단계가 없으면 work를 시작할 때) plan_set으로
         쓴다: title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈.
         steps는 단계마다 한 줄이고 detail은 몇 줄까지다. 사용자가 정해야 하는

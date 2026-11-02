@@ -44,3 +44,11 @@ def test_calls_carry_the_session(monkeypatch):
     assert client.calls[-1] == ("GET", "/api/plan/overview?project=claunch&all=1")
     plan_mcp.call_tool("plan_clear", {"revision": 3})
     assert client.calls[-1] == ("POST", "/api/plan/clear", {"revision": 3, "session": "s7", "by": "s7"})
+
+
+def test_writing_tools_ask_for_korean_text():
+    """claunch-lp7c6: every tool that writes text into the plan pane says to write it in Korean."""
+    by_name = {t["name"]: t for t in plan_mcp.TOOLS}
+    for name in ("plan_set", "plan_node"):
+        assert plan_mcp.LANGUAGE in by_name[name]["description"]
+    assert "Korean" in plan_mcp.LANGUAGE

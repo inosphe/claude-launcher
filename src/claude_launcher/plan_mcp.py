@@ -20,6 +20,11 @@ import urllib.parse
 
 from . import daemon_client, mcp_rpc
 
+# claunch-lp7c6: the plan pane is read by the user, who reads Korean. Every
+# tool that writes text into it carries this sentence.
+LANGUAGE = ("Write every text the user reads (title, goal, detail, an option's label, effect and risk) "
+            "in Korean; keep commands, paths, identifiers and quoted errors as written.")
+
 _NODE_COMMON = {
     "id": {"type": "string", "description": "stable id (letters, digits, _ . -); reuse the ids plan_get returns "
                                             "when you rewrite the plan, or the user's decisions are lost"},
@@ -58,7 +63,7 @@ TOOLS = [
                     "Closure: the verify items a person must test by hand and the followup candidates -- what "
                     "keeps the session open; the pane says when it may close. The user's choices arrive as "
                     "'[claunch plan]' blocks. revision: the plan's revision as you last read it (0 for the "
-                    "first plan); a refusal carries the current plan -- the user may have just decided.",
+                    "first plan); a refusal carries the current plan -- the user may have just decided. " + LANGUAGE,
      "inputSchema": {"type": "object", "properties": {
          "revision": {"type": "integer"},
          "title": {"type": "string", "description": "the plan's name: the goal in a few words"},
@@ -70,7 +75,7 @@ TOOLS = [
     {"name": "plan_node",
      "description": "Change one node of your plan: a step's status as you work (no revision needed), or its "
                     "title, detail or options. Changing what the user decides on (title, detail, options) "
-                    "asks the user again: a decision or check made on the old text is set aside.",
+                    "asks the user again: a decision or check made on the old text is set aside. " + LANGUAGE,
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "the node id"},
          "status": {"type": "string", "enum": ["todo", "doing", "done", "skipped", "blocked", "open"]},
