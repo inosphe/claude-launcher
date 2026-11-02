@@ -73,6 +73,23 @@ left, which also ends the panel's refresh, screen and takeover-heartbeat loops.
 Nothing in the daemon sets `X-Frame-Options` or a frame-blocking CSP on the
 dashboard or the panel.
 
+Lifecycle buttons (start / resume, suspend, stop, force stop) show a press at once.
+The request returns only when the guest has booted or tart reports the state, and the
+list is polled every 2 s, so the page keeps its own per-VM record of the press
+(`busy` in `vm.js`) from the click until the state the press asked for shows in the
+list (`running` after start or resume, `suspended`, `stopped`), the request fails, or
+120 s pass. Meanwhile the pressed button is disabled with a spinner and "시작 중…" /
+"재개 중…" / "일시 중단 중…" / "종료 중…" / "강제 종료 중…", the other buttons of that VM and
+the lock toggle are disabled (a second click sends nothing), and force stop stays
+enabled except during a force stop, as the way out of a guest that does not answer. A
+failed request restores the buttons and shows the error (for example `vm_busy_state`
+from the daemon). After the timeout the buttons come back with "아직 반영되지 않았습니다.
+상태를 확인하십시오". A VM the daemon reports in `starting`, `restoring`, `saving`,
+`pausing` or `stopping` shows the same progress and locks even when this page did not
+send the request (a page opened mid-transition, another tab, the CLI). The daemon is not
+changed: its duplicate-request answers (`vm_busy_state`, `vm_bad_state`) are shown as
+they are. Static files only; the daemon serves them from disk, no restart is needed.
+
 Registering a VM from the panel: "VM 등록" lists the VMs `tart list` reports on
 this host (`GET /api/vm-tart`, the user's only; registered names and names the
 registry would refuse are shown and not selectable). Registering posts the VM

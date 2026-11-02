@@ -93,3 +93,9 @@ code { font: 12px ui-monospace, monospace; }
 .vm-request p { margin: 2px 0; overflow-wrap: anywhere; }
 .vm-request .vm-warn-text { margin: 4px 0; }
 .vm-request .vm-row { margin-top: 6px; }
+
+button.vm-working { border-color: var(--vm-warn); color: var(--vm-warn); }
+button.vm-working::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: vm-spin 0.9s linear infinite; }
+@keyframes vm-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { button.vm-working::before { animation: none; } }

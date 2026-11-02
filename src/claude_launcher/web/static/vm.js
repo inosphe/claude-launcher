@@ -111,11 +111,7 @@ function renderDetail(vm) {
   toggle.disabled = !guarded && vm.state !== "stopped";
   toggle.title = !guarded && vm.state !== "stopped"
     ? "정지된 VM만 잠글 수 있습니다. 먼저 정상 종료하십시오." : toggle.title;
-  $("vm-start").disabled = guarded || !(vm.state === "stopped" || (vm.state === "suspended" && !hostLocked));
-  $("vm-start").textContent = vm.state === "suspended" ? "▶ 재개" : "▶ 시작";
-  $("vm-suspend").disabled = !running;
-  $("vm-stop").disabled = !(running || vm.state === "stopping" || vm.state === "starting");
-  $("vm-force").disabled = vm.state === "stopped" || vm.state === "suspended";
+  renderActions(vm, guarded);
   $("vm-controller").textContent = vm.controller || "없음";
   $("vm-revoke-control").disabled = !vm.controller;
   const driving = vm.human === "driving";
@@ -130,6 +126,62 @@ function renderDetail(vm) {
   renderFiles(vm);
   renderShares(vm);
   renderNet(vm);
+}
+/* Lifecycle buttons. A start, stop, suspend or force stop takes seconds to minutes
+   (the request returns when the guest has booted or tart reports the state), and
+   the list is polled every 2 s, so a press has to show at once that it was taken.
+   `busy` holds the press per VM from the click until the state it asked for shows
+   in the list, the request fails, or BUSY_MS passes. While it is held every
+   conflicting button of that VM is locked (force stop stays open except during a force stop,
+   as the way out of a guest that does not answer). A VM the daemon reports
+   in a transition (starting, stopping ...) shows the same progress without a
+   press, so a page opened mid-transition does not invite a second one. */
+const BUSY_MS = 120000;
+const busyMs = () => Number(window.VM_BUSY_MS) || BUSY_MS;     // the page harness shortens it
+const busy = {};
+const BUSY_LABEL = { start: "시작 중…", resume: "재개 중…", suspend: "일시 중단 중…", stop: "종료 중…", force_stop: "강제 종료 중…" };
+const BUSY_TARGET = { start: ["running"], suspend: ["suspended"], stop: ["stopped"], force_stop: ["stopped"] };
+const PHASE_ACTION = { starting: "start", restoring: "resume", saving: "suspend", pausing: "suspend", stopping: "stop" };
+function activeAction(vm) {
+  const held = busy[vm.id];
+  return held ? held.action : PHASE_ACTION[vm.state] || "";
+}
+/* Drop the presses whose state arrived or whose time ran out. */
+function settleBusy() {
+  for (const [id, held] of Object.entries(busy)) {
+    const vm = vms.find((v) => v.id === id);
+    const arrived = vm && (BUSY_TARGET[held.action] || []).includes(vm.state) && vm.state !== held.from;
+    if (held.done && arrived) { delete busy[id]; continue; }
+    if (Date.now() - held.since > busyMs()) {
+      delete busy[id];
+      say(`${id} ${held.label}: ${busyMs() / 1000}초 안에 상태가 바뀌지 않았습니다. 아직 반영되지 않았습니다. 상태를 확인하십시오`, true);
+    }
+  }
+}
+function renderActions(vm, guarded) {
+  const running = vm.state === "running";
+  const action = activeAction(vm);
+  const working = !!action;
+  const label = action === "start" && vm.state === "suspended" ? BUSY_LABEL.resume : BUSY_LABEL[action];
+  const spin = (id, text) => {
+    const b = $(id);
+    b.classList.toggle("vm-working", !!text);
+    b.setAttribute("aria-busy", text ? "true" : "false");
+    if (text) b.textContent = text;
+  };
+  $("vm-start").disabled = working || guarded || !(vm.state === "stopped" || (vm.state === "suspended" && !hostLocked));
+  $("vm-start").textContent = vm.state === "suspended" ? "▶ 재개" : "▶ 시작";
+  $("vm-suspend").disabled = working || !running;
+  $("vm-suspend").textContent = "⏸ 일시 중단 (선택)";
+  // force stop stays open during any other press: the way out of a guest that does not answer
+  $("vm-stop").disabled = working || !(running || vm.state === "stopping" || vm.state === "starting");
+  $("vm-stop").textContent = "■ 종료";
+  $("vm-force").disabled = action === "force_stop" || vm.state === "stopped" || vm.state === "suspended";
+  $("vm-force").textContent = "⏻ 강제 종료";
+  $("vm-guard-toggle").disabled = working || (!guarded && vm.state !== "stopped");
+  for (const id of ["vm-start", "vm-suspend", "vm-stop", "vm-force"]) spin(id, "");
+  const shown = { start: "vm-start", resume: "vm-start", suspend: "vm-suspend", stop: "vm-stop", force_stop: "vm-force" }[action];
+  if (shown) spin(shown, label);
 }
 function renderNet(vm) {
   const pending = $("vm-net-pending");
@@ -584,6 +636,7 @@ async function saveFilesDir(dir) {
 $("vm-files-save").addEventListener("click", () => saveFilesDir($("vm-files-dir").value.trim()));
 $("vm-files-default").addEventListener("click", () => saveFilesDir(""));
 function render() {
+  settleBusy();
   if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
   renderList();
   renderDetail(vms.find((v) => v.id === selected) || null);
@@ -785,9 +838,23 @@ function deletePreset(name) {
 }
 
 /* ---- actions ---- */
-const lifecycle = (action, label, ask) => $(`vm-${action === "force_stop" ? "force" : action}`).addEventListener("click", () => {
-  if (!selected || (ask && !confirm(ask))) return;
-  act(label, () => post(`api/vm/${encodeURIComponent(selected)}/${action}`));
+const lifecycle = (action, label, ask) => $(`vm-${action === "force_stop" ? "force" : action}`).addEventListener("click", async () => {
+  const id = selected;
+  const vm = vms.find((v) => v.id === id);
+  if (!id || !vm || busy[id] || (ask && !confirm(ask))) return;
+  const held = { action, label, from: vm.state, since: Date.now(), done: false };
+  busy[id] = held;
+  render();
+  say(`${id} ${BUSY_LABEL[action === "start" && vm.state === "suspended" ? "resume" : action]}`);
+  try {
+    await post(`api/vm/${encodeURIComponent(id)}/${action}`);
+    if (busy[id] === held) held.done = true;
+    say(`${label} 요청이 처리되었습니다. 상태 반영을 기다립니다`);
+  } catch (e) {
+    if (busy[id] === held) delete busy[id];     // the buttons come back, with the reason
+    say(`${label} 실패: ${e.message}`, true);
+  }
+  await refresh();
 });
 $("vm-guard-toggle").addEventListener("click", () => {
   const vm = vms.find((v) => v.id === selected);
