@@ -486,7 +486,10 @@ ask:
 - 열린 이유와 거쳐 온 경로(claunch-0rjnn): ask가 어떤 `choose`의 선택지 아래에서
   열리면, 레코드의 `because`에 가장 가까운 그 선택(`choice` 라벨, `option`, 고른
   쪽 `by`, 그 `reason`)이 실린다(`runtime._ask_because`). 선택지 아래가 아니면
-  `null`이다. `flow_status`·`GET /api/cflow2/run`의 `asks[]`는 `because`와
+  `null`이다. 사람의 강제 이동(force move, 2.11)이 그 선택을 다른 선택지에
+  앉히면 `by`와 `reason`은 이동한 쪽과 이동 사유로 바뀐다(사유 없이 이동하면
+  빈 값, claunch-hvyof). 앞서 다른 선택지를 고를 때 남은 사유는 남지 않는다.
+  `flow_status`·`GET /api/cflow2/run`의 `asks[]`는 `because`와
   `route`(그룹마다 `{group, candidates, who, reason}` — 그 그룹의 후보 선언, 물은
   세션이나 후보, 다음으로 넘어간 사유, 레코드의 `skipped` 순서)를 싣는다.
   `skipped`(사유 문자열 목록)는 그대로 둔다. 응답자 메시지(`asks.question_text`)는
