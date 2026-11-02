@@ -42,7 +42,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store
-from . import actors, paths, vm_channel, vm_files, vm_frames, vm_presets, vm_share, vm_tart, vmhub
+from . import actors, paths, vm_channel, vm_files, vm_frames, vm_pack, vm_presets, vm_share, vm_tart, vmhub
 from .vmhub import Registry, VmError
 
 _STATUS = {
@@ -563,6 +563,7 @@ async def h_approve(request: web.Request) -> web.Response:
         for share in checked:
             reg.share_add(vm_id, share)
         reg.request_drop(vm_id, session)
+        await vm_pack.sync(request.app.get("manager"), reg, session)
         return web.json_response(reg.view(vm_id))
     except VmError as exc:
         return _err(exc)
@@ -589,8 +590,11 @@ async def h_remove(request: web.Request) -> web.Response:
         return refused
     reg, _ = _hub(request)
     try:
+        held_by = list(reg.get(request.match_info["id"]).grants)
         reg.remove(request.match_info["id"])
         _trace(request, reg, request.match_info["id"], "remove")
+        for sess in held_by:
+            await vm_pack.sync(request.app.get("manager"), reg, sess)
         return web.json_response({"ok": True})
     except VmError as exc:
         return _err(exc)
@@ -656,6 +660,7 @@ async def h_grant(request: web.Request) -> web.Response:
             raise VmError("vm_bad_request", "'session' is required")
         got = reg.grant(request.match_info["id"], session, body.get("scopes") or [])
         _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got)
+        await vm_pack.sync(request.app.get("manager"), reg, session)
         return web.json_response({"ok": True, "grants": got})
     except VmError as exc:
         return _err(exc)
@@ -672,6 +677,7 @@ async def h_revoke(request: web.Request) -> web.Response:
             raise VmError("vm_bad_request", "'session' is required")
         left = reg.revoke(request.match_info["id"], session, body.get("scopes"))
         _trace(request, reg, request.match_info["id"], "user_revoke", to=session, left=left)
+        await vm_pack.sync(request.app.get("manager"), reg, session)
         return web.json_response({"ok": True, "grants": left})
     except VmError as exc:
         return _err(exc)

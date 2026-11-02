@@ -54,3 +54,20 @@ relative to those folders; nothing received is executed.
 `vm_acquire` (control grant) gives you the VM and an epoch; look first with
 `vm_screenshot`, then act with `vm_cua`. While the user is driving, calls are
 refused with `vm_busy`; a locked VM refuses everything (`vm_locked`).
+
+### Order of use
+1. `vm_list`: which VMs you hold, with scopes, shared folders, `files` and lock state.
+   Missing scope or folder: `vm_request` (the user approves), then wait.
+2. Edit files at the host path (shared folder) or `vm_put` them.
+3. `vm_acquire` (control/exec), then `vm_exec` for builds, installs and runs inside the
+   guest; copy the shared folder to a guest-local directory first (see above).
+4. `vm_get` or an `rw` share for results; `vm_release` when done.
+
+### Limits
+- The guest is on softnet with the private ranges blocked: it reaches the internet but
+  not the host's LAN. Host ports are published only by the user (`expose`).
+- A locked VM refuses every call (`vm_locked`); only the user unlocks it.
+- The host's own `cua-driver` is not used for VM work; the screen is driven only
+  through `vm_screenshot` and `vm_cua`.
+- Do not run builds, package installs or the app on the host when a VM was given for
+  that; use `vm_exec`.

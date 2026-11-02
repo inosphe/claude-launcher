@@ -773,6 +773,11 @@ class Registry:
             self._save()
             return got
 
+    def has_grant(self, session: str) -> bool:
+        """Whether ``session`` holds any scope on any VM."""
+        with self._lock:
+            return any(vm.grants.get(session) for vm in self._vms.values())
+
     def revoke(self, vm_id: str, session: str, scopes=None) -> List[str]:
         """Drop ``scopes`` (all when omitted). Losing ``control`` ends the
         control the session holds; losing ``view`` loses control and exec too
