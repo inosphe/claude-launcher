@@ -486,9 +486,18 @@ globalThis.SearchAnything = (() => {
       // values ride along as the legacy rows, so the deleted preset's
       // connection stays as the visible fallback rather than a dangling
       // pointer over empty rows.
+      // preset-only card: the list never holds zero presets. Deleting the
+      // last one is refused up front — if an empty list ever reached the
+      // server, the read-side migration would immediately re-wrap the
+      // legacy rows into a fresh preset, so the delete would appear to do
+      // nothing. Edit-in-place is the honest path for the last preset.
       deletePresetBtn.onclick = async () => {
         const id = presetSelect.value;
         if (!id) { status.textContent = "삭제할 프리셓을 먼저 선택하세요."; return; }
+        if (presets.length <= 1) {
+          status.textContent = "마지막 프리셓은 삭제할 수 없습니다 — 이 카드는 프리셓을 하나 이상 유지합니다. 연결 값을 바꾸려면 이 프리셓을 고쳐 저장하세요.";
+          return;
+        }
         if (!window.confirm(`프리셓 ${id}을 삭제합니다. 저장된 연결 값과 API key가 지워집니다.`)) return;
         const remaining = presets.filter(p => p.id !== id);
         const next = presetSelect.value === id ? (remaining.length ? remaining[0].id : "") : presetSelect.value;
@@ -503,9 +512,7 @@ globalThis.SearchAnything = (() => {
           presetCount.textContent = ` ${presets.length}/${presetMax}`;
           showPreset();
           loadPreset(presets.find(p => p.id === presetSelect.value));
-          status.textContent = presets.length
-            ? `프리셓 ${id}을 삭제했습니다.`
-            : `프리셓 ${id}을 삭제했습니다 — 남은 프리셓이 없어 직접 연결 값 입력이 기본이 됩니다.`;
+          status.textContent = `프리셓 ${id}을 삭제했습니다.`;
         } catch (error) {
           status.textContent = `프리셓 삭제 실패 · ${error.message}`;
         } finally { save.disabled = test.disabled = selftest.disabled = deletePresetBtn.disabled = savePresetBtn.disabled = false; }

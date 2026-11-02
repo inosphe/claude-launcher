@@ -29,8 +29,12 @@
    test probe; and the preset list is deletable (claunch-rag-preset-always-
    hn5bc.2) — a 삭제 button next to the picker confirms, then writes the list
    minus the row with the pointer moved to the first remaining preset, the
-   picker shows the saved count against the server's preset_max, and the
-   add button pre-empts the ceiling instead of erroring after the fact. */
+   last preset cannot be deleted at all (the preset-only card keeps at
+   least one — an empty list would be re-wrapped by the read-side
+   migration and the delete would silently do nothing, so the button
+   refuses up front and points at edit-in-place), the picker shows the
+   saved count against the server's preset_max, and the add button
+   pre-empts the ceiling instead of erroring after the fact. */
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..", "..");
@@ -218,6 +222,12 @@ check("deletion writes the list minus the row through the settings PUT",
 check("deleting the active preset re-points at the first remaining row",
       src.includes('remaining.length ? remaining[0].id : ""'),
       true);
+check("the last preset cannot be deleted — the button refuses up front",
+      [src.includes("presets.length <= 1"), src.includes("마지막 프리셓은 삭제할 수 없습니다")],
+      [true, true]);
+check("the delete success line no longer claims a direct-input default",
+      src.includes("직접 연결 값 입력이 기본이 됩니다"),
+      false);
 check("the add button pre-empts the ceiling with a reason",
       src.includes("프리셓은 ${presetMax}개까지 저장됩니다"),
       true);

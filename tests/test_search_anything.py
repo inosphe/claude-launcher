@@ -1572,10 +1572,12 @@ def test_settings_delete_one_preset_drops_only_that_row_and_repoints_the_pointer
             assert store.rag_presets()[0]["api_key"] == "secret-1"  # empty key preserves it
             assert store.rag_config()["preset"] == "one"
             assert "secret-2" not in json.dumps(store.load())
-            # deleting down to none is the same contract: empty list, empty
-            # pointer. The preset-only card never shows zero presets, though
-            # — the read-side migration re-wraps the still-alive legacy
-            # connection as a model-named preset on the same read.
+            # an empty list that ever reaches the server is NOT a deletion
+            # either — the read-side migration immediately re-wraps the
+            # still-alive legacy connection as a model-named preset, so the
+            # stored result is one fresh preset, not zero. The card knows
+            # this and refuses to delete the last preset up front; this
+            # block pins the read-side safety net the refusal text cites.
             response = await client.put("/api/rag/settings", json={"presets": [], "preset": ""})
             assert response.status == 200
             rows = store.rag_presets()

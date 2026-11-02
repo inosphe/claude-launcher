@@ -156,7 +156,13 @@ through the settings API (`presets` in the payload, secrets reported as
 `api_key_set` only). A preset is deleted by writing the list without that
 row (`presets` minus the row, `preset` re-pointed at the first remaining
 row) — the card's 삭제 button does exactly that, moving the deleted row's
-screen values into the legacy fallback rows. The saved list holds at most
+screen values into the legacy fallback rows. The last preset cannot be
+deleted: the preset-only card keeps at least one, and the button refuses
+up front with that reason. Deletion is honest about the read-side safety
+net — if an empty list ever reached the server, the migration would
+immediately re-wrap the still-alive legacy connection as a model-named
+preset, so a "delete to zero" would silently do nothing; editing the last
+preset in place is the supported path for changing it. The saved list holds at most
 `store.RAG_MAX_PRESETS` (20) presets; the card shows the count as `N/20`
 and the server refuses a longer list, which keeps the settings PUT body two
 orders of magnitude under its measured breaking point (~205 bytes per
