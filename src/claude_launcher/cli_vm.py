@@ -81,6 +81,8 @@ def _show_list(out: dict) -> None:
           f"   (slots: {out.get('slot_limit')})")
     for vm in vms:
         print(_row(vm))
+        if vm.get("template"):
+            print(f"{'':<16} PRESET TEMPLATE: the tart copy of preset {vm['template']!r}; starting it changes later clones")
         if vm.get("fault_reason"):
             print(f"{'':<16} fault: {vm['fault_reason']}")
         if vm.get("channel_error"):
@@ -113,7 +115,8 @@ def _cmd_add(args) -> int:
 
 def _lifecycle(args) -> int:
     path = f"/api/vm/{args.vm}/{args.vm_command.replace('-', '_')}"
-    return _call(args, "POST", path, {},
+    body = {"confirm_template": True} if getattr(args, "yes_template", False) else {}
+    return _call(args, "POST", path, body,
                  show=lambda out: print(f"{out['id']}: {out['state']}"))
 
 
@@ -362,7 +365,8 @@ def _cmd_reconcile(args) -> int:
 def _cmd_grant(args) -> int:
     return _call(args, "POST", f"/api/vm/{args.vm}/grant",
                  {"session": args.session, "scopes": args.scopes},
-                 show=lambda out: print(f"{args.session}: {', '.join(out['grants'])}"))
+                 show=lambda out: (print(f"{args.session}: {', '.join(out['grants'])}"),
+                                   out.get("warning") and print(f"warning: {out['warning']}")))
 
 
 def _cmd_revoke(args) -> int:
@@ -431,6 +435,9 @@ def register(sub) -> None:
         sp = v.add_parser(name, help=text)
         vm_arg(sp)
         sp.add_argument("--json", action="store_true")
+        if name == "start":
+            sp.add_argument("--yes-template", action="store_true",
+                            help="confirm starting a VM that is the copy of a preset (it changes later clones)")
         sp.set_defaults(func=_lifecycle)
 
     sp = v.add_parser("expose", help="TCP ports of the guest published on this host's LAN address "

@@ -137,6 +137,32 @@ marks (`/api/vm-presets`, `softnet` in the VM record). The panel's static files
 need only a refresh; until the restart the panel says the daemon has no preset
 API.
 
+### A preset's copy is not a VM
+
+The tart copy `preset-<name>` is the source of later clones; running it as a VM would change
+what every new clone starts from.
+
+- **Registration is refused.** `POST /api/vm` (and `claunch vm add`) with a tart name that is
+  a recorded preset copy (`vm-presets.json`, `tart_name`), including the default tart name
+  equal to the id, fails with `vm_preset_copy` (409) and a Korean reason that names the
+  preset and points to "프리셋으로 새 VM 만들기" (`claunch vm preset new <preset> <id>`). The
+  register form already listed such copies as not usable.
+- **A copy registered before the rule** (e.g. by an earlier `vm add`) is a template: the
+  user's `GET /api/vm` and `GET /api/vm/{id}` rows carry `template: "<preset>"` (`""` for an
+  ordinary VM; sessions get no such field). The VM page marks it in purple: the list row says
+  "프리셋 템플릿" (ordinary rows say "VM"), the detail has a badge and a note, and the
+  lineage tree adds "프리셋 템플릿".
+- **Starting a template needs confirmation.** `POST /api/vm/{id}/start` without
+  `confirm_template: true` (only a JSON `true`) fails with `vm_template_confirm` (409); the
+  page asks "템플릿을 시작하면 이후 복제본이 바뀝니다" and sends it, the CLI has
+  `claunch vm start ID --yes-template`. Other lifecycle actions are not asked.
+- **Granting a template** is allowed (the user decides), with a confirmation on the page and a
+  `warning` in the grant response (the CLI prints it).
+- **Forgetting it** (`claunch vm rm`, `DELETE /api/vm/{id}`) keeps working; it cannot be
+  registered again.
+- The daemon needs a restart for the refusal, the `template` field and the start
+  confirmation; the page marking needs the page reloaded.
+
 ### Clone lineage
 
 The VM page has a read-only "복제 계보" section (always on the page) that draws which preset

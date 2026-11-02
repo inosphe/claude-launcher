@@ -206,6 +206,21 @@ def test_share_roots_commands(client, capsys, tmp_path):
     assert "sharing host folders is off" in capsys.readouterr().out
 
 
+def test_template_start_confirmation_grant_warning_and_list_marker(client, capsys):
+    assert run("start", "preset-gold") == 0
+    assert client.calls[-1][2] == {}
+    assert run("start", "preset-gold", "--yes-template") == 0
+    assert client.calls[-1] == ("POST", "/api/vm/preset-gold/start", {"confirm_template": True})
+    client.answer = {"ok": True, "grants": ["view"], "warning": "preset-gold는 프리셋 'gold'의 복사본입니다"}
+    assert run("grant", "preset-gold", "s1", "view") == 0
+    assert "warning: preset-gold" in capsys.readouterr().out
+    client.answer = {"vms": [{"id": "preset-gold", "state": "stopped", "template": "gold", "grants": {}},
+                             {"id": "a", "state": "stopped", "template": "", "grants": {}}], "slot_limit": 2}
+    assert run("list") == 0
+    out = capsys.readouterr().out
+    assert out.count("PRESET TEMPLATE") == 1 and "preset 'gold'" in out
+
+
 def test_share_ls_shows_where_each_share_came_from(client, capsys):
     client.answer = {"shares_pending": True, "shares_skipped": {},
                      "share_rows": [{"name": "a1", "mode": "ro", "host_path": "/p", "guest_path": "/G/a1",

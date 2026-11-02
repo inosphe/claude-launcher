@@ -74,7 +74,8 @@ function renderList() {
     name.textContent = vm.id;
     const sub = document.createElement("span");
     sub.className = "sub";
-    sub.textContent = `${vm.state}${vm.locked ? " · 🔒" : ""}${vm.controller ? " · " + vm.controller : ""}`;
+    sub.textContent = `${vm.template ? "프리셋 템플릿" : "VM"} · ${vm.state}${vm.locked ? " · 🔒" : ""}${vm.controller ? " · " + vm.controller : ""}`;
+    if (vm.template) b.classList.add("vm-template-card");
     b.append(name, sub);
     b.addEventListener("click", () => { selected = vm.id; showFrame(null); render(); startFrames(); });
     nav.appendChild(b);
@@ -98,6 +99,12 @@ function renderDetail(vm) {
   problem.hidden = !why;
   problem.textContent = why || "";
   const running = vm.state === "running";
+  $("vm-template-chip").hidden = !vm.template;
+  const tnote = $("vm-template-note");
+  tnote.hidden = !vm.template;
+  tnote.textContent = vm.template
+    ? `이 VM은 프리셋 ${vm.template}의 복사본(preset-${vm.template})입니다. 일반 VM이 아닙니다. 시작해서 쓰면 이후 이 프리셋으로 만드는 복제본이 달라집니다. 새 VM이 필요하면 프리셋 목록의 "새 VM"을 쓰십시오. 등록 해제(claunch vm rm)는 계속 할 수 있습니다.`
+    : "";
   $("vm-lock").hidden = !(hostLocked && vm.state === "suspended");
   const guarded = !!vm.locked;
   $("vm-guard-chip").hidden = !guarded;
@@ -339,6 +346,7 @@ function lineageLabel(n, isRoot) {
   if (n.kind === "vm") {
     const bits = [`VM ${d.id}`, LIFE_TEXT[d.state] || d.state];
     if (d.locked) bits.push("🔒 잠김");
+    if (d.template) bits.push("프리셋 템플릿");
     if (isRoot) bits.push(d.cloned_from && d.cloned_from.kind ? "" : "출처 기록 없음");
     return bits.filter(Boolean).join(" · ");
   }
@@ -771,6 +779,9 @@ $("vm-grant").addEventListener("click", () => {
   const session = ($("vm-grant-session").hidden ? $("vm-grant-session-text").value : $("vm-grant-session").value).trim();
   if (!session || !selected) return;
   const scopes = grantScopes();
+  const target = vms.find((v) => v.id === selected);
+  if (target && target.template &&
+      !confirm(`${selected}는 프리셋 ${target.template}의 복사본입니다. ${session}이 이 VM을 바꾸면 이후 그 프리셋으로 만드는 복제본이 바뀝니다. 그래도 부여합니까?`)) return;
   if (scopes.includes("exec") &&
       !confirm(`${session}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return;
   act(`${session} ${scopes.join("+")} 부여`,
@@ -922,12 +933,17 @@ const lifecycle = (action, label, ask) => $(`vm-${action === "force_stop" ? "for
   const id = selected;
   const vm = vms.find((v) => v.id === id);
   if (!id || !vm || busy[id] || (ask && !confirm(ask))) return;
+  const body = {};
+  if (action === "start" && vm.template) {
+    if (!confirm(`${id}는 프리셋 ${vm.template}의 복사본입니다. 템플릿을 시작하면 이후 이 프리셋으로 만드는 복제본이 바뀝니다. 계속합니까?`)) return;
+    body.confirm_template = true;
+  }
   const held = { action, label, from: vm.state, since: Date.now(), done: false };
   busy[id] = held;
   render();
   say(`${id} ${BUSY_LABEL[action === "start" && vm.state === "suspended" ? "resume" : action]}`);
   try {
-    await post(`api/vm/${encodeURIComponent(id)}/${action}`);
+    await post(`api/vm/${encodeURIComponent(id)}/${action}`, body);
     if (busy[id] === held) held.done = true;
     say(`${label} 요청이 처리되었습니다. 상태 반영을 기다립니다`);
   } catch (e) {
