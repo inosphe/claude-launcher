@@ -12831,7 +12831,10 @@ async def h_session_token_series(request: web.Request) -> web.Response:
     the overlay's hover view asks for ``full``; ``?points=`` bounds the number
     of points, past which consecutive requests are grouped) and the times the
     session swapped its profile's token for a borrowed one or back
-    (``swaps``). See :func:`sessionstats.series`."""
+    (``swaps``). Each point also carries its request's ``output`` tokens (not
+    drawn; the overlay prices the request with them) and ``totals`` sums the
+    four components over the window's requests. See
+    :func:`sessionstats.series`."""
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     window = request.query.get("window", "cap")

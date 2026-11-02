@@ -10028,7 +10028,38 @@ function termSeriesTick(v) {
   return Number.isInteger(v) ? String(v) : String(Math.round(v * 10) / 10);
 }
 
-function termSeriesChart(data, zoom) {
+/* The rates the overlay prices this session's requests at, or null rates
+   where the table has none for it. The pair is the detail panel's own
+   (ctxCostDetailRow): the model the last context reading names — or, with no
+   reading yet, the model the token usage totals name — under the provider the
+   session's profile resolves to. Reusing readingCost/priceRateFor is what
+   keeps this estimate and the rail rows' from ever disagreeing
+   (claunch-i6xl2). */
+function termSeriesPrice(s) {
+  const c = s && s.context;
+  const usage = s && s.token_usage;
+  const model = (c && c.model) || (usage && usage.model) || "";
+  const provider = typeof sessionPriceProvider === "function" ? sessionPriceProvider(s) : "";
+  const rates = typeof priceRateFor === "function" ? priceRateFor(model, provider) : null;
+  return { rates, model, provider };
+}
+
+/* What a set of billed buckets costs at those rates, as the chart writes it:
+   "≈ $0.0123", or "" where there is nothing to price. `tokens` is a
+   window's totals or one request's point — readingCost takes either. Below a
+   cent the four decimals costText fixes would round a real estimate to
+   $0.0000, which reads as free; those get six decimals instead
+   (claunch-i6xl2). */
+function termSeriesCostText(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const cost = readingCost(tokens, price.rates);
+  if (cost === null) return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+  return `≈ ${currency}${amount}`;
+}
+
+function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
      picker derives its label-clearance floor from that height and the inset
@@ -10181,10 +10212,23 @@ function termSeriesChart(data, zoom) {
   const last = pts[pts.length - 1];
   const asked = data.count || pts.length;
   const of = data.requests > asked ? `the last ${asked} of ${data.requests}` : String(asked);
+  /* What the requests this chart stands for are estimated to have cost at
+     the Settings → Model prices rates (claunch-i6xl2). It prices the window's
+     totals, not the drawn points: past `points` requests a point is the
+     largest of its group, so summing points would undercount. With no rates
+     the chart says so in its tooltip rather than writing a $0. */
+  const cost = termSeriesCostText(price, data.totals);
+  const costOf = price && price.model
+    ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
+  const costLine = cost
+    ? `; ${cost} estimated for ${asked} request${asked > 1 ? "s" : ""} at Settings → Model prices${costOf}`
+    : (price && price.model && !price.rates
+        ? `; not priced — set rates for ${price.model} in Settings → Model prices` : "");
   box.title = `context of ${of} request${asked > 1 ? "s" : ""} over ${fmtAge(span)}; ` +
     `last ${usageShort(termSeriesTotal(last))}, largest ${usageShort(peak)}` +
     (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
     (swaps.length ? `; ${swaps.length} profile swap${swaps.length > 1 ? "s" : ""}` : "") +
+    costLine +
     (zoom ? "" : "\nhover for the whole conversation");
   if (zoom) {
     const axis = el("div", "term-series-axis");
@@ -10205,7 +10249,9 @@ function termSeriesChart(data, zoom) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. */
+       pointer. The request's own estimate rides on the first line
+       (claunch-i6xl2): it names a request, so its cost belongs beside the
+       number, and the second line's token figures are the long one. */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -10215,7 +10261,9 @@ function termSeriesChart(data, zoom) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
+      const pcost = termSeriesCostText(price, p);
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
+        (pcost ? ` · ${pcost}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -10230,8 +10278,12 @@ function termSeriesChart(data, zoom) {
       when.textContent = " ";
       what.textContent = " ";
     });
-    box.append(axis, legend, readout);
+    /* The window's estimate under the legend, where it describes the whole
+       plot rather than the request under the pointer. */
+    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
+  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
   return box;
 }
 
@@ -10262,9 +10314,9 @@ function termSeriesRelease() {
   if (typeof renderTermTps === "function") renderTermTps();
 }
 
-function termSeriesMaker(small, zoomed, hover) {
+function termSeriesMaker(small, zoomed, hover, price) {
   const make = (slot) => {
-    const box = termSeriesChart(hover === slot ? zoomed : small, hover === slot);
+    const box = termSeriesChart(hover === slot ? zoomed : small, hover === slot, price);
     box.addEventListener("mouseenter", () => {
       if (termSeriesHover === slot) return;
       termSeriesHover = slot;
@@ -10451,6 +10503,17 @@ function renderTermTps() {
     const err = t && typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
     const rateShown = !!(t && !t.idle && t.counted && Number.isFinite(t.tps));
     const errCls = t && typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+    /* What the big line means when no rate is being drawn (claunch-i6xl2.1).
+       The shim's live board knows only its own calls: "idle" there means no
+       call is out, not that the harness has nothing to do. A turn running a
+       local tool (bash, a build, a test run) has no call in flight for
+       minutes, and read as "idle" -- the same word a session waiting for a
+       prompt gets. `status` is the harness turn signal, so the two are read
+       together: a call out is the endpoint's wait, no call but busy is local
+       work, neither is idle. */
+    const liveCall = !!(t && t.live &&
+      (t.live.state === "waiting" || t.live.state === "streaming"));
+    const working = !liveCall && !!(s && s.status === "busy");
     let parts = null;
     if (show && !t) {
       parts = { live: false, usageOnly: true, cls: "term-tps-overlay" };
@@ -10462,7 +10525,7 @@ function renderTermTps() {
       parts = {
         live: true,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: tpsLiveText(l),
+        big: working ? "working" : tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
         when: [model ? modelShort(model) : "",
           rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
@@ -10473,8 +10536,10 @@ function renderTermTps() {
       parts = {
         live: false,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
-        when: [t.model ? modelShort(t.model) : "", rateShown ? err : "", age]
+        big: working ? "working" : (rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
+        when: [t.model ? modelShort(t.model) : "",
+          working && rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          rateShown ? err : "", age]
           .filter(Boolean).join(" · "),
         metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
         title: tpsTooltip(t),
@@ -10488,8 +10553,15 @@ function renderTermTps() {
       ? termSeriesData(currentName, !!seriesHover) : null;
     const seriesSmall = seriesHover && seriesData ? termSeriesData(currentName, false) || seriesData
       : seriesData;
+    /* The rates to price the charted requests at, from the session's model
+       and provider (claunch-i6xl2). Recomputed every pass: the table is read
+       once and can change under Settings → Model prices, and the key below
+       makes that repaint the overlay. */
+    const seriesPrice = parts && typeof termSeriesPrice === "function"
+      ? termSeriesPrice(s) : null;
     if (parts && seriesData) {
-      parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}`;
+      parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}` +
+        `|${typeof modelPricesKey === "string" ? modelPricesKey : ""}`;
     }
     const key = parts ? JSON.stringify(parts) : null;
     if (parts && overlay._tpsKey !== key) {
@@ -10516,7 +10588,7 @@ function renderTermTps() {
           }
         }
       }
-      const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover) : null;
+      const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover, seriesPrice) : null;
       /* One chart for the whole overlay, under the last block: the token
          series belongs to the session, so drawing it under each block showed
          the same chart twice. */

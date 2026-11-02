@@ -440,19 +440,23 @@ def read_series(path, window="cap", points=12, now=None):
 def test_series_is_the_context_of_each_request_in_order_and_marks_compactions(tmp_path):
     path = write(tmp_path / "t.jsonl",
                  reply("a", at(0), fresh=1, read=10, write=100, out=7),
-                 reply("b", at(0, 30), fresh=2, read=20, write=200),
+                 reply("b", at(0, 30), fresh=2, read=20, write=200, out=11),
                  compaction(at(0, 45)),
-                 reply("c", at(1), fresh=4, read=5, write=40))
+                 reply("c", at(1), fresh=4, read=5, write=40, out=13))
     got = read_series(path, now=_epoch(at(1)))
     parts = [(p["n"], p["input"], p["cache_read"], p["cache_write"], p["count"])
              for p in got["points"]]
     # One point per request, in order, whatever the time between them; output
-    # tokens are not drawn. The request after the compaction is the summary:
-    # its context is smaller than the one before (the fall the chart shows).
+    # tokens are not drawn (the chart is the context) but each point carries
+    # its request's output so the overlay can price it (claunch-i6xl2). The
+    # request after the compaction is the summary: its context is smaller than
+    # the one before (the fall the chart shows).
     assert parts == [(1, 1, 10, 100, 1), (2, 2, 20, 200, 1), (3, 4, 5, 40, 1)]
+    assert [p["output"] for p in got["points"]] == [7, 11, 13]
     assert [p["t"] for p in got["points"]] == [_epoch(at(0)), _epoch(at(0, 30)), _epoch(at(1))]
     assert got["compactions"] == [_epoch(at(0, 45))]
     assert got["requests"] == 3 and got["count"] == 3
+    assert got["totals"] == {"input": 7, "cache_read": 35, "cache_write": 340, "output": 31}
     totals = [p["input"] + p["cache_read"] + p["cache_write"] for p in got["points"]]
     assert totals[2] < totals[1]
 
@@ -480,6 +484,19 @@ def test_series_groups_requests_past_the_point_limit_and_keeps_the_largest(tmp_p
     assert got["requests"] == 7 and got["count"] == 7
 
 
+def test_series_totals_sum_every_request_in_the_window_not_only_the_drawn_points(tmp_path):
+    path = write(tmp_path / "t.jsonl",
+                 reply("a", at(0), fresh=1, read=10, out=100),
+                 reply("b", at(1), fresh=2, read=20, out=200),
+                 reply("c", at(2), fresh=3, read=30, out=300))
+    got = read_series(path, points=2, now=_epoch(at(3)))
+    # Two drawn points stand for three requests; the totals still count all
+    # three, so the overlay prices the window rather than the drawn peaks
+    # (claunch-i6xl2).
+    assert [p["count"] for p in got["points"]] == [2, 1]
+    assert got["totals"] == {"input": 6, "cache_read": 60, "cache_write": 0, "output": 600}
+
+
 def test_series_cap_window_keeps_the_last_requests_and_full_keeps_all(tmp_path, monkeypatch):
     monkeypatch.setattr(sessionstats, "SERIES_CAP_REQUESTS", 2)
     path = write(tmp_path / "t.jsonl",
@@ -496,10 +513,13 @@ def test_series_cap_window_keeps_the_last_requests_and_full_keeps_all(tmp_path, 
     assert [(p["n"], p["cache_read"]) for p in capped["points"]] == [(2, 7), (3, 9)]
     assert capped["compactions"] == []          # the compaction is before the kept requests
     assert capped["requests"] == 3 and capped["count"] == 2
+    # The totals are the window's: only the kept requests are priced.
+    assert capped["totals"]["cache_read"] == 16
     full = read_series(path, "full", now=now)
     assert full["start"] == _epoch(at(0))
     assert [(p["n"], p["cache_read"]) for p in full["points"]] == [(1, 5), (2, 7), (3, 9)]
     assert full["compactions"] == [_epoch(at(1))]
+    assert full["totals"]["cache_read"] == 21
 
 
 def test_series_cap_window_keeps_a_compaction_between_the_kept_requests(tmp_path, monkeypatch):
