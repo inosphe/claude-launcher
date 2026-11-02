@@ -145,16 +145,29 @@ class Catalog:
             return None
 
     def models(self, profile: Optional[str]) -> Optional[List[str]]:
+        return self.models_for(profile)
+
+    def models_for(self, profile: Optional[str],
+                   harness: Optional[str] = None) -> Optional[List[str]]:
+        """The models ``harness`` may be asked for under ``profile``.
+
+        ``harness`` empty means the profile's effective harness (what
+        :meth:`models` answers). The model_tiers editor asks per (profile,
+        entry harness): ``validate`` reads the entry's own harness, so one
+        list per profile would hide valid presets for an entry that names
+        another allowed harness and offer invalid ones from the default
+        (claunch-61vj3 review).
+        """
         p = self._by_name().get(str(profile or ""))
         if p is None:
             return None
         try:
-            harness = lineage.effective_harness(p, self._doc)
+            name = str(harness or "").strip() or lineage.effective_harness(p, self._doc)
             spec = providers.spec_for(p, doc=self._doc)
         except _READ_ERRORS:
             return None
-        rule = _MODEL_RULES.get(harness, declared_models)
-        return rule(spec, self._harnesses().get(harness))
+        rule = _MODEL_RULES.get(name, declared_models)
+        return rule(spec, self._harnesses().get(name))
 
     def empty_profile(self, meaning: str) -> Optional[str]:
         if meaning == "delegate":

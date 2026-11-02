@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from claude_launcher import store
+from claude_launcher import lineage, profile as profile_mod, store
 from claude_launcher.daemon import api, model_tiers
 from claude_launcher.profile import create as create_profile
 
@@ -110,6 +110,27 @@ def test_put_accepts_the_block_add_tier_makes_for_a_codex_profile(home):
     # The editor's Model select is built from this list.
     assert "default" in body["models"]["cx"]
     assert body["block"]["tiers"][0]["id"] == "misc"
+
+
+def test_the_editor_model_choices_are_the_validation_list_per_entry_harness(home):
+    """The card's Model select asks per (profile, entry harness): ``validate``
+    reads the entry's own harness, so one list per profile would hide valid
+    presets and offer invalid ones (claunch-61vj3 review)."""
+    _setup_profile("a")
+    store.set_profile_field("a", "allowed_harnesses", ["claude", "codex"])
+    _setup_codex_profile("cx")
+    status, body = get()
+    assert status == 200
+    doc = store.load()
+    by = body["models_by_harness"]
+    for name in ("a", "cx"):
+        prof = profile_mod.require(name)
+        effective = lineage.effective_harness(prof, doc)
+        assert by[name][""] == model_tiers._model_choices(prof, effective, doc)
+        for harness in body["harnesses"][name]:
+            assert by[name][harness] == model_tiers._model_choices(prof, harness, doc)
+    # The lists really differ for 'a' (claude default, codex also allowed).
+    assert by["a"]["claude"] != by["a"]["codex"]
 
 
 def test_put_validation_error_does_not_touch_the_stored_block(home):

@@ -5514,11 +5514,22 @@ def _model_tiers_state() -> dict:
     models_by_profile = {
         name: (catalog.models(name) or []) for name in profiles
     }
+    # The editor's Model select must offer what ``validate`` accepts, and
+    # ``validate`` reads the entry's harness, not the profile default. So the
+    # list is per (profile, harness): "" is the effective harness, every
+    # allowed harness name its own list (claunch-61vj3 review).
+    models_by_harness = {}
+    for name in profiles:
+        per = {"": models_by_profile[name]}
+        for harness in harnesses_by_profile.get(name) or []:
+            per[harness] = catalog.models_for(name, harness) or []
+        models_by_harness[name] = per
     return {
         "block": model_tiers.load(),
         "profiles": profiles,
         "harnesses": harnesses_by_profile,
         "models": models_by_profile,
+        "models_by_harness": models_by_harness,
         "presets": list(provider_spec.MODEL_ROLES),
         "max_tiers": model_tiers.MAX_TIERS,
     }
