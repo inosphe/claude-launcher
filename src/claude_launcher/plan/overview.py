@@ -44,7 +44,8 @@ def row(session: dict, plan: Optional[dict], run: Optional[dict]) -> dict:
         out["plan"] = {k: plan.get(k) for k in ("title", "issue", "steps", "done", "current", "waiting",
                                                  "closable", "verify", "followups", "blocked", "updated_at")}
     if run:
-        out["run"] = {k: run.get(k) for k in ("workflow", "status", "round", "current", "owed", "entered_at",
+        out["run"] = {k: run.get(k) for k in ("workflow", "status", "round", "round_now",
+                                               "current", "owed", "entered_at",
                                                "updated")}
     return out
 

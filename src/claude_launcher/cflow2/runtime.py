@@ -5546,6 +5546,59 @@ def rule(name: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
             "deliver": body.get("deliver"), "effect": body.get("effect")}
 
 
+def _instance_depth(inst: Dict[str, Any], iid: str) -> int:
+    """How many live parents ``iid`` has inside the run (0 for a root child)."""
+    depth = 0
+    seen: Set[str] = {iid}
+    parent = (inst.get(iid) or {}).get("parent")
+    while parent and parent in inst and parent not in seen:
+        seen.add(parent)
+        depth += 1
+        parent = (inst.get(parent) or {}).get("parent")
+    return depth
+
+
+def current_round(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
+    """The round a run is in, as a person reads it off the rail and the pages.
+
+    Two workflows count rounds in two ways, and the display has to follow the
+    one the definition uses. A recurring workflow (``recur``) ends its run each
+    round and starts the next one, so its round is the slot's ``round``
+    (:func:`_new_run`). One that does not recur (improv-worker-v2) runs its
+    rounds as iterations of a loop inside the same run -- ``state["round"]``
+    stays 1 there -- so its round is the iteration of the outermost live
+    ``while``/``until`` loop. ``None`` when neither applies: a run outside a
+    recurring round and outside a loop has no round to show, and the caller
+    falls back to ``state["round"]``.
+    """
+    if (chart.meta or {}).get("recur"):
+        value = state.get("round")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    inst = state.get("inst") or {}
+    best: Optional[Tuple[int, int]] = None      # (depth, iteration)
+    for iid, rec in inst.items():
+        node_id = rec.get("node")
+        try:
+            node = chart.node(node_id)
+        except ir.IRError:
+            continue
+        if node.type != "loop" or node.get("mode") not in (ir.LOOP_WHILE, ir.LOOP_UNTIL):
+            continue
+        frame = rec.get("frame") or {}
+        try:
+            # ``iter`` counts from 1 and ``base`` is what a reset dropped;
+            # the difference is the round number a person sees.
+            iteration = int(frame.get("iter") or 0) - int(frame.get("base") or 0)
+        except (TypeError, ValueError):
+            continue
+        if iteration <= 0:
+            continue
+        depth = _instance_depth(inst, iid)
+        if best is None or depth < best[0] or (depth == best[0] and iteration > best[1]):
+            best = (depth, iteration)
+    return None if best is None else best[1]
+
+
 def status(*, cwd: Optional[str] = None, scope: Optional[str] = None,
            now: Optional[float] = None, tick: bool = True) -> Dict[str, Any]:
     """The run as the driver needs it: active tasks with rendered prompts,
@@ -5593,6 +5646,11 @@ def describe(r: Run) -> Dict[str, Any]:
         out["pending_triggers"] = len(s.get("triggers") or [])
     if s.get("round"):
         out["round"] = s["round"]
+    # ``round`` is the slot's run round (recur); a run that loops its rounds
+    # inside one run keeps that at 1, so the display value is its own field.
+    round_now = current_round(s, r.chart)
+    if round_now is not None:
+        out["round_now"] = round_now
     if s.get("side"):
         out["side"] = s["side"]
     sides = (r.chart.meta or {}).get("sides") or {}

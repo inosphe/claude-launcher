@@ -114,6 +114,13 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
   시작은 드라이버가 한다.
 - 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
   `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
+- 표시용 회차 `round_now` (claunch-oxmso): `recur`하지 않고 같은 런 안의 루프로
+  회차를 도는 정의(`improv-worker-v2`의 `rounds`)는 `round`가 1에 머물므로,
+  `flow_status`·`rail_entry`·`run_detail`이 표시용 값 `round_now`를 따로 싣는다.
+  `recur` 정의에서는 `round`와 같고, 그 밖에는 살아 있는 가장 바깥 `while`/`until`
+  루프 인스턴스의 `frame.iter - frame.base`(지금 반복 번호)다. 살아 있는 루프가
+  없으면(정산 구간 등) 실리지 않으며, 화면은 그때 `round`로 떨어진다. `round`의
+  의미는 바뀌지 않는다 — 런 이력과 공용 API는 계속 `round`를 읽는다.
 - `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
   `flow_status`가 `next_round`와 그 안내를 싣는다.
 - `recur: {auto: true}`: 데몬의 cflow2 clock이 끝난 슬롯에서 `next_round.auto`를

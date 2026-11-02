@@ -145,7 +145,7 @@ function makePlanPage({root, request}) {
         + (p.closable ? " · 닫아도 됨" : ""), "plan-page-plan"));
     }
     if (run) {
-      box.append(node("p", `${run.workflow || "런"}` + (run.round ? ` r${run.round}` : "")
+      box.append(node("p", `${run.workflow || "런"}` + ((run.round_now ?? run.round) ? ` r${run.round_now ?? run.round}` : "")
         + ((run.current || []).length ? ` · ${run.current.join(", ")}` : "")
         + (run.status && run.status !== "running" ? ` · ${run.status}` : ""), "plan-muted"));
       for (const o of run.owed || []) box.append(node("p", "런이 기다림: " + o, "plan-open"));

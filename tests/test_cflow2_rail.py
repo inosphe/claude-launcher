@@ -260,6 +260,70 @@ def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
     assert err["started"] is None and err["updated"] is None and err["entered_at"] is None
 
 
+LOOPY = """\
+cflow: 2
+name: loopy
+description: one task repeated by a while loop the run drives itself
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a}
+"""
+
+RECURRING = """\
+cflow: 2
+name: recurring
+description: a workflow that ends its run each round
+recur: true
+nodes:
+  a: {title: Step A, prompt: do a}
+body: a
+"""
+
+
+def test_rail_entry_shows_the_round_the_run_is_in(proj):
+    """``round_now`` (claunch-oxmso): a workflow that does not recur runs its
+    rounds as iterations of a loop inside the same run, so ``state["round"]``
+    stays 1 and the rail used to name round 1 for a run on its third.
+
+    The display value is the loop iteration while the loop is live, the run
+    round for a recurring workflow, and absent -- not invented -- when there
+    is no loop to read (the run has left it). ``round`` keeps its meaning.
+    """
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "loopy.yaml").write_text(LOOPY, encoding="utf-8")
+    (v2 / "recurring.yaml").write_text(RECURRING, encoding="utf-8")
+
+    runtime.start(layers.load("loopy", cwd), cwd=cwd, scope="s1", caps={})
+    r = _rail(cwd, "s1")["s1"]
+    assert (r["round"], r["round_now"]) == (1, 1)
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    assert r["round"] == 1 and r["round_now"] == 3
+    # The same value on the payload the driver and the run page read.
+    assert runtime.status(cwd=cwd, scope="s1")["round_now"] == 3
+
+    # The third report satisfies the guard, so the loop (and the run) ends.
+    # Nothing is live to read a round from: the rail says null and the driver
+    # payload leaves the key out rather than showing a number that would be
+    # wrong.
+    task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    assert r["status"] == "done" and r["round_now"] is None
+    assert "round_now" not in runtime.status(cwd=cwd, scope="s1")
+
+    # A recurring workflow counts its round per run; the display value is
+    # that same number, so nothing about recur changes.
+    runtime.start(layers.load("recurring", cwd), cwd=cwd, scope="s2", caps={})
+    r = _rail(cwd, "s2")["s2"]
+    assert (r["round"], r["round_now"]) == (1, 1)
+    assert runtime.status(cwd=cwd, scope="s2")["round_now"] == 1
+
+
 def test_rail_answers_carry_when_each_gate_opened(proj):
     """``opened_at`` (claunch-l9znm.1): every owed item the run can date
     carries the epoch second at which the run started waiting on a person.
