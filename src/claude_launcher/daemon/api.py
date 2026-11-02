@@ -1329,6 +1329,9 @@ def build_app(
     r.add_post("/api/shadows/{machine}/{session}/line", h_shadow_line)
     r.add_get("/api/shadows/{machine}/{session}/transcript", h_shadow_transcript)
     r.add_get("/api/sessions", h_sessions_list)
+    # Recorded PRs across every session, for the PR page (#/pr). Read-only and
+    # local: no gh call, so it answers without gh installed or logged in.
+    r.add_get("/api/prs", h_prs)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -10888,6 +10891,56 @@ async def h_peer_ops_lease(request: web.Request) -> web.Response:
         str(body.get("note") or ""),
     )
     return json_response(result)
+
+
+#: How long the aggregated PR answer is reused. A recorded row changes when a
+#: session opens a PR, which is not a frequent event; without the cache every
+#: page poll would walk every session's run state.
+PRS_CACHE_SECONDS = 30.0
+_prs_cache: Dict[str, Any] = {"at": 0.0, "rows": None, "projects": None}
+
+
+def _recorded_prs(manager) -> Tuple[List[dict], List[str]]:
+    """Every PR recorded by a session on this daemon, newest first.
+
+    Recorded sources only — the wizard's ``prs.json`` and each v2 run's
+    ``prs`` collection — so this reads local files and never starts a ``gh``
+    call. ``status`` and ``title`` are the values recorded when the PR was
+    opened; the PR page says so beside the list.
+    """
+    now = time.monotonic()
+    if _prs_cache["rows"] is not None and now - _prs_cache["at"] < PRS_CACHE_SECONDS:
+        return _prs_cache["rows"], _prs_cache["projects"]
+    merged: Dict[str, dict] = {}
+    seen_projects: Set[str] = set()
+    for s in manager.list():
+        name = s.sdef.name
+        project = str(s.sdef.project or "").strip() or projects.DEFAULT
+        for row in session_prs.for_session(_session_cwd(s), name):
+            url = row.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            seen_projects.add(project)
+            merged.setdefault(url, {**row, "session": name, "project": project})
+    rows = list(merged.values())
+    rows.sort(key=lambda r: (r.get("at") or "", r.get("number") or 0), reverse=True)
+    _prs_cache.update({"at": now, "rows": rows, "projects": sorted(seen_projects)})
+    return rows, _prs_cache["projects"]
+
+
+async def h_prs(request: web.Request) -> web.Response:
+    """Recorded pull requests across every session, for the PR page (#/pr).
+
+    ``?project=`` narrows the list to one project's rows. No network call:
+    the answer comes from what the sessions themselves recorded, so it works
+    without ``gh`` being installed or logged in.
+    """
+    manager: SessionManager = request.app["manager"]
+    project = str(request.query.get("project") or "").strip()
+    rows, projects = await asyncio.to_thread(_recorded_prs, manager)
+    if project:
+        rows = [r for r in rows if r.get("project") == project]
+    return json_response({"prs": rows, "projects": projects, "count": len(rows)})
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:

@@ -874,7 +874,7 @@ inputs:
 improv-worker-v2는 `코딩 승인`(require_coding_approval), `착지 승인`
 (require_merge_approval — 착지 요청 직전 사용자 승인 게이트, claunch-boxug),
 `리뷰어`(reviewer_profile·reviewer_harness), `라우팅`(session_routing·delegate_profile·
-delegate_model), `PR`(force_pr·force_no_pr) 다섯 블록을 두고, `session_routing`이
+delegate_model), `PR`(force_pr·force_no_pr·auto_merge) 다섯 블록을 두고, `session_routing`이
 `wide`다. 블록의 입력이 하나여도 그 입력은 자기 블록을 갖는다 — 종전에는
 무그룹이던 `require_coding_approval`이 회차 상한(`max_rounds`)과 한 블록에
 짝지어 섰다(claunch-kzun2).
@@ -3007,7 +3007,8 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `<sha> @ <remote>/<ref>`로 쓰고(docs/remote-commit-protocol.md), rebase 기준은
   `<remote>/<base>`(브랜치 upstream)다.
 - 결과는 `data.landing`(`medium`, `reason`, `remote`, `repo`, `base`, `pr_url`,
-  `pr_number`)에 묶인다.
+  `pr_number`, `tip`)에 묶인다. `tip`은 게시(`pr-publish`)가 PR이 가리키는
+  커밋으로 채운다(10a.1의 `PR SUBMITTED` 마커가 이 값을 쓴다).
 - 게시: 동료 리뷰 통과 뒤 `medium == 'pr'`이면 프로시저 `pr-publish`(작업
   `pr-open`)가 명시 refspec으로 push하고 `git ls-remote`로 원격 SHA를 확인한 뒤 PR을
   열거나(이미 같은 브랜치의 OPEN PR이 있으면 갱신만) 결과를 `data.landing`에 다시
@@ -3199,6 +3200,43 @@ PR은 닫고 브랜치는 지웠다.
 거절한다)도 이 표에 없다. 절차는 그 거절에서 `gh pr review --comment`로 판정을
 남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
 표에 행을 더한다.
+
+### 10a.1 PR 제출에서 회차를 끝내기 (auto_merge, claunch-ijkge)
+
+시작 입력 `auto_merge`(bool, 기본 `true`)는 PR을 연 뒤 머지까지 갈지, 제출에서
+회차를 끝낼지 정한다. 기본값은 변수 도입 전의 동작(착지 요청 → 상위/리더의 머지
+→ landed)이고, `false`가 사용자가 PR을 직접 머지하는 선택 경로다.
+
+| `auto_merge` | PR을 연 뒤 | 이슈 | 회차 결과 |
+|---|---|---|---|
+| `true`(기본) | 착지 요청(integration-request) → 상위·리더의 머지 → landed | landed에서 닫힌다 | `landed` |
+| `false` | 착지 요청을 세우지 않는다. `gh pr merge`도 하지 않는다 | `in_review` + `PR SUBMITTED @ <tip> <url>` 마커 | `pr-submitted` |
+
+- `false`의 판정 자리는 `land`의 `submit` 루프에서 `issue-gate` 뒤,
+  `publish`(`pr-publish`)가 끝난 다음이다. `data.landing.medium == 'pr'`이고
+  `land`의 `mode`가 `full`일 때만 서고, 로컬 착지와 위임 전용 회차
+  (`mode: stack-only`)에는 적용하지 않는다.
+- 마커를 쓰는 작업은 `nodes.pr-submitted-mark`다. 대상은 `items-pass`의 실린
+  이슈 전부이고(주 이슈가 증거 코멘트를 갖고 나머지는 `batch of <주 이슈>` 한 줄),
+  상태 전이는 `integration-request`가 하던 것과 같다 — 다른 점은 머지가 없다는
+  것이다.
+- `pr-submitted`는 `land.returns`에 선언된 다섯째 결과다. `worker-round`의 배치
+  `try` catch가 `break: batch`로 받으므로 배치를 다시 돌지 않고 wrapup·회차 보고를
+  지난다(선언만 하고 catch가 없으면 fail로 탈출해 queue-recheck를 건너뛴다 —
+  `blocked`가 그랬던 것과 같은 경로).
+- `wrapup`은 이 결과에서 이슈를 닫지 않는다. `settle-check`는 `in_review`이면서
+  이 세션이 쓴 `PR SUBMITTED @` 코멘트가 있는 이슈를 정산된 것으로 읽는다 — PR이
+  원격에 있으므로 세션이 끝나도 작업이 유실되지 않고, 머지는 세션의 행위가 아니다.
+  두 조건이 함께 서지 않는 `in_review`는 지금처럼 미정산이다.
+- 머지 뒤에 그 이슈를 닫는 것은 사용자 또는 후속 회차의 몫이다. 마커가 그 줄을
+  적으므로(위 요약 코멘트) in_review로 남은 이슈가 잊히지 않는다.
+- PR 불가(gh 미설치·미로그인·원격 없음)로 로컬 착지로 내려온 회차는 `land`의
+  `local-warning`이 `pr-local-notice`로 사용자에게 경고를 남긴다: 사유, 이 회차가
+  로컬 브랜치로만 남는다는 사실, 세션·워크트리 정리나 머신 교체로 커밋이 유실될 수
+  있다는 위험, `gh auth login` 뒤 push·PR로 복구하는 방법. `force_pr`·`force_no_pr`로
+  사용자가 직접 로컬을 고른 회차는 경고하지 않는다(그 선택은 이미 사람의 것이다).
+  보드의 `LANDING MEDIUM: local (PR 불가: <사유>)` 코멘트는 `remote-setup`이 그대로
+  남긴다.
 
 ## 10b. 리뷰어의 profile·harness (improv-worker-v2, claunch-gqgcz)
 

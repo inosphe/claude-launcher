@@ -330,6 +330,7 @@
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
       <a href="#/hive" data-page="hive"><span>⬢</span>Hive</a>
+      <a href="#/pr" data-page="pr"><span>⇄</span>PR</a>
       <a href="#/plan" data-page="plan"><span>☷</span>Plan</a>
       <a href="#/knowledge" data-page="knowledge"><span>◆</span>Knowledge</a>
       <a href="#/retrospection" data-page="retrospection"><span>↺</span>Retrospection</a>
@@ -1689,6 +1690,10 @@
          pan-and-zoom canvas of hexagon-cored chips; drawn by hive-page.js
          from the rail's caches and /api/beads/queues. -->
     <div id="hive-view" class="hidden"></div>
+    <!-- Pull requests the sessions recorded, per project and on a date
+         timeline, each row naming the session that opened it; drawn by
+         pr-page.js from /api/prs (recorded rows only, no gh call). -->
+    <div id="pr-view" class="hidden"></div>
     <!-- Workspace knowledge records: decisions, vision, needs, principles
          (knowledge-page.js, claunch-269q1). -->
     <div id="knowledge-view" class="hidden"></div>
@@ -1831,6 +1836,7 @@
 <script src="static/commit-page.js"></script>
 <script src="static/chart-page.js"></script>
 <script src="static/hive-page.js"></script>
+<script src="static/pr-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/plan-page.js"></script>
 <script src="static/knowledge-page.js"></script>

@@ -179,6 +179,9 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
         "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
         "parallel_fork": "병렬 작업",
         "force_pr": "PR", "force_no_pr": "PR",
+        # claunch-ijkge: the auto-merge switch belongs with the two PR
+        # switches it qualifies — it only applies to the PR landing.
+        "auto_merge": "PR",
         # claunch-269q1: the knowledge recall/record switches share a block.
         "knowledge_recall": "지식 기록", "knowledge_record": "지식 기록",
         # claunch-ar8jn: the glossary draft switch sits with them.

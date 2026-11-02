@@ -200,7 +200,7 @@ def test_the_person_gets_three_named_choices():
 
 
 def test_the_three_choices_map_onto_lands_declared_outcomes():
-    """``land`` declares four results and the packaged tests pin that set
+    """``land`` declares five results and the packaged tests pin that set
     (``tests/test_cflow2_improv_worker.py``). The gate reuses three of them
     rather than growing the procedure's interface.
 
@@ -209,7 +209,10 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     *itself* raises with an outcome ``land`` names, plus a check that every
     one of ``land``'s discarded-by-this-gate outcomes is reachable here."""
     declared = set(_doc()["procedures"]["land"]["returns"])
-    assert declared == {"landed", "held", "rework", "blocked"}
+    # pr-submitted is the fifth (claunch-ijkge): auto_merge=false ends the
+    # round at PR submission, so that landing has to name its own outcome --
+    # the gate itself never returns it.
+    assert declared == {"landed", "held", "rework", "blocked", "pr-submitted"}
     raised = {n.get("outcome") for n in _gate_subtree()
               if n.type == "control" and n.get("op") == "return"} - {"ok", "reframe"}
     assert raised <= declared, f"a return names {raised - declared}, which land does not declare"
@@ -229,6 +232,7 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     assert set(fields["blocked"]) == {"reason"} | route
     assert set(fields["held"]) == {"reason", "rework"} | route
     assert set(fields["rework"]) == {"reason", "rework"}
+    assert set(fields["pr-submitted"]) == {"url", "number", "tip"}
 
 
 def test_blocked_carries_a_reason_and_no_rework_flag():

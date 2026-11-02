@@ -2137,8 +2137,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   #rail-nav-dock {
     /* Must be at least the number of links in #rail-nav, or the rows past it
        are unreachable while the dock is hovered (the pin shows them all).
-       21 links as of claunch-v5nhp.1; keep this ahead of that count. */
-    --rail-nav-rows: 24;
+       26 links as of claunch-ijkge (the PR page added the last one); keep
+       this ahead of that count. */
+    --rail-nav-rows: 27;
     --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
     padding-right: var(--rail-nav-pin); background: #1b1e24;
@@ -11257,3 +11258,67 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-cflow-rows .hive-brief-text { white-space: pre-line; }
 .hive-detail-sec { margin: 0 0 12px; }
 .hive-detail-head { padding-top: 8px; border-top: 1px solid #262c36; color: #58a6ff; font-size: 11px; margin-bottom: 4px; }
+
+/* PR page (#/pr, pr-page.js): recorded pull requests per project, laid out
+   on a date timeline. Read-only and local (daemon/api.py's /api/prs), so the
+   list is as dense as a board rather than a card grid. */
+#pr-view {
+  flex: 1; display: flex; flex-direction: column; overflow: auto;
+  padding: 18px 22px 18px; min-height: 0;
+}
+#pr-view .pr-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; flex: none; }
+#pr-view .pr-head h2 { font-size: 17px; color: #e6edf3; }
+#pr-view .pr-head .wf-note { flex-basis: 100%; margin: 0; }
+.pr-count { color: #8b949e; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pr-controls { flex: none; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 10px 0 8px; font-size: 12px; }
+.pr-filter { display: inline-flex; align-items: center; gap: 5px; color: #c9d1d9; }
+.pr-project-select, .pr-status-select {
+  background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 6px; padding: 3px 7px; font-size: 12px;
+}
+.pr-list { display: flex; flex-direction: column; gap: 14px; }
+.pr-project {
+  border: 1px solid #262c36; border-radius: 8px; background: #0f141b;
+  padding: 10px 12px 12px;
+}
+.pr-project-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.pr-project-name { font-size: 14px; color: #e6edf3; }
+.pr-project-count { color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
+.pr-day { margin-top: 8px; }
+.pr-day-head {
+  color: #58a6ff; font-size: 11px; letter-spacing: 0.3px;
+  border-bottom: 1px solid #262c36; padding-bottom: 3px; margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.pr-rows { display: flex; flex-direction: column; }
+.pr-row { display: flex; gap: 10px; padding: 5px 2px; border-bottom: 1px solid #161b22; }
+.pr-row:last-child { border-bottom: none; }
+.pr-row:hover { background: #131922; }
+.pr-num {
+  flex: none; min-width: 52px; color: #58a6ff; font-variant-numeric: tabular-nums;
+  text-decoration: none; font-size: 12px; padding-top: 1px;
+}
+.pr-num:hover { text-decoration: underline; }
+.pr-main { min-width: 0; flex: 1; }
+.pr-title { color: #e6edf3; text-decoration: none; font-size: 12.5px; overflow-wrap: anywhere; }
+.pr-title:hover { text-decoration: underline; }
+.pr-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: #8b949e; font-size: 11px; margin-top: 2px; }
+.pr-repo, .pr-branch, .pr-issue, .pr-source { overflow-wrap: anywhere; }
+.pr-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pr-issue { color: #d2a8ff; }
+.pr-session { color: #58a6ff; text-decoration: none; }
+.pr-session:hover { text-decoration: underline; }
+.pr-state {
+  border: 1px solid #30363d; border-radius: 999px; padding: 0 7px;
+  font-size: 10px; line-height: 16px; letter-spacing: 0.4px;
+}
+.pr-state-open { color: #3fb950; border-color: #2ea04366; }
+.pr-state-merged { color: #bc8cff; border-color: #8957e566; }
+.pr-state-closed { color: #ff7b72; border-color: #f8514966; }
+.pr-state-draft { color: #8b949e; }
+.pr-state-recorded { color: #d29922; border-color: #9e6a0366; }
+.pr-empty { padding: 30px 4px; color: #8b949e; font-size: 12px; }
+.pr-error {
+  margin-top: 8px; padding: 8px 10px; border: 1px solid #f8514966;
+  border-radius: 6px; background: #2d1517; color: #ffa198; font-size: 12px;
+}
