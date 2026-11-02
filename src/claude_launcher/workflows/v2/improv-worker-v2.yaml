@@ -415,6 +415,20 @@ inputs:
       끄면 남기지 않는다
     group: 지식 기록
     set_by: [user]
+  # 세션 회고 기록(claunch-lmnlv): settle 끝의 retrospective가 회고를 Retrospection
+  # 페이지에 남긴다. 켜져 있으면 데몬이 바로 확정하고(사용자 상호작용 없음), 꺼져
+  # 있으면 다른 wrap-up 임시본처럼 사용자가 확정한다. 노드가 설 때 읽으므로 런 도중에
+  # 바꾸면 그 뒤의 회고부터 적용된다.
+  retrospection_auto_record:
+    type: bool
+    default: true
+    label: 회고 자동 기록
+    help: >-
+      켜면 세션 회고(정산 뒤, 종료 결정 전)를 Retrospection 페이지에 바로 기록한다 — 사용자가
+      확정하지 않아도 된다. 끄면 회고를 세션의 wrap-up 임시본으로 남기고, 사용자가 wrap-up
+      pane(Retrospection 탭)에서 확정할 때 기록한다
+    group: 지식 기록
+    set_by: [user]
 
 collections:
   # 이 런이 stack side 런에 보내는 신호(cut-wanted, frozen, landed, rebased). stack 런은
@@ -4296,8 +4310,14 @@ nodes:
       출력된 팩의 지시를 이 자리에서 그대로 수행한다: (A) 세션 회고,
       (B) 이 세션이 따른 cflow 정의(`improv-worker-v2` — 정본은 패키지의
       `workflows/v2/improv-worker-v2.yaml`)의 리뷰와 개선 제안, 그리고 주
-      이슈에 `RETRO @ <런 id>` 코멘트로 기록. 이 노드는 런 안에서 부른
+      이슈에 `RETRO @ <런 id>` 코멘트와 Retrospection 기록(`wrapup_draft
+      kind=retrospection`, claunch-lmnlv)으로 기록. 이 노드는 런 안에서 부른
       경우이므로, 팩의 4절대로 기록을 마친 뒤 이 노드의 결과를 보고한다.
+      팩 4절 3의 값은 이렇다: `trigger: run`, `run: <런 id — flow_status의 run>`, `workflow:
+      improv-worker-v2`, `issue: ${data.claim.issue}`, 그리고 `auto:
+      ${data.inputs.retrospection_auto_record}`(시작 입력
+      retrospection_auto_record — true면 데몬이 바로 기록하고, false면 사용자가
+      wrap-up pane에서 확정한다. 값이 비어 있으면 기본값 true다).
       회고 중에는 코드·정의 파일을 고치지 않고 이슈를 새로 만들지 않는다 —
       위의 settle-check가 이미 정산을 마쳤고, 새 이슈는 그 판정을 무효로 만든다.
       팩을 읽지 못하면(데몬 미응답, 팩 없음) 명령 출력을 그대로 보고하고
@@ -4305,13 +4325,15 @@ nodes:
     done_when: |
       `claunch retro --print`로 읽은 팩의 (A)·(B) 두 절을 담은 회고가 주 이슈에
       `RETRO @ <런 id>` 코멘트로 붙어 있고(주 이슈가 없으면 `$CLAUNCH_SCRATCH`의
-      파일 경로), 보고에 그 위치와 개선 제안 수가 있다. 제안이 0건이면 그
+      파일 경로), 같은 회고의 Retrospection wrap-up 항목(draft id와 상태 —
+      confirmed 또는 사용자 확정 대기 draft, 도구를 쓸 수 없었으면 그 사유)이
+      보고에 있다. 보고에 그 위치와 개선 제안 수가 있다. 제안이 0건이면 그
       판단의 근거가 회고에 있다.
     # 회고 대상은 이 세션의 대화 자체라서 위임하지 않는다: 새 컨텍스트의
     # 서브에이전트는 이 세션이 무엇을 겪었는지 모른다.
     executor: [inline]
     returns:
-      ok: {where: str, proposals: int, problems: int}
+      ok: {where: str, proposals: int, problems: int, record: "str?"}
     effects: [fs.read, fs.write, board.write]
 
   # ── 세션 정산 (settle) ───────────────────────────────────────────────

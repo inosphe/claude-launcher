@@ -18,6 +18,8 @@ delivery: on-demand
   정상적으로 끝나지 않았다(중단·halt·특정 스텝에 멈춤·컨텍스트 손실). 이때는
   **런을 진행시키지 않는다.** `next`·`select`·`flow_report`를 부르지 않고, 승인을
   요청하지 않으며, 멈춘 스텝의 일을 이어서 하지 않는다. 회고만 하고 턴을 끝낸다.
+  이 경우 블록 머리에 `retrospection: trigger=manual, auto record=<true|false>`
+  줄이 있다(데몬이 붙인다). 4절의 기록이 이 값을 쓴다.
 
 ### 하지 않는 것
 
@@ -114,8 +116,24 @@ delivery: on-demand
    `## A. 세션 회고`, `## B. cflow 정의 리뷰`를 둔다.
 2. 이 세션의 주 이슈가 있으면 코멘트로 붙인다:
    `claunch beads comments add <이슈 id> -f <그 파일>`. 이슈가 닫혀 있어도 코멘트는
-   붙는다. 주 이슈가 없으면 파일 경로만 보고한다.
-3. 터미널에는 다섯 줄 이내로 보고한다: 코멘트를 붙인 이슈 id(또는 파일 경로),
-   문제 수, 제안 수와 각 제안의 제목, 우선순위가 가장 높은 제안 하나.
-4. cflow 노드가 이 회고를 요청했으면 그 노드의 결과로 위 기록 위치와 제안 수를
+   붙는다. 주 이슈가 없으면 이 단계는 건너뛴다.
+3. 같은 회고를 Retrospection 기록으로 남긴다(대시보드의 Retrospection 페이지,
+   claunch-lmnlv). MCP `wrapup_draft`를 한 번 부른다:
+   - `kind`: `retrospection`
+   - `payload`: `title`(한 줄: 세션과 목표 요지), `body`(1의 파일 내용 그대로 —
+     markdown), `trigger`(cflow 노드가 요청했으면 `run`, 사용자가 보냈으면
+     `manual`), `run`(런 id, 없으면 생략), `workflow`(따른 정의 이름, 없으면 생략),
+     `issue`(주 이슈 id, 없으면 생략), `problems`(2절 4의 문제 수),
+     `proposals`(3절의 제안 수)
+   - `auto`: 노드가 요청했으면 노드 지시가 주는 값(런 입력
+     `retrospection_auto_record`), 사용자가 보냈으면 블록 머리의 `auto record=`
+     값. 그 값을 찾지 못하면 `false`다(사용자가 wrap-up 패널에서 확정한다).
+   - `reason`: 한 줄(어느 런·세션의 회고인지)
+   응답의 `draft.status`가 `confirmed`면 기록되었고, `draft`이면 사용자의 확정을
+   기다린다. `failed`면 `draft.error`를 그대로 보고한다. 도구가 없거나 데몬에 닿지
+   않으면 그 사유를 보고한다 — 1·2의 파일과 코멘트는 그대로 남는다.
+4. 터미널에는 다섯 줄 이내로 보고한다: 코멘트를 붙인 이슈 id(또는 파일 경로),
+   Retrospection 기록의 draft id와 상태, 문제 수, 제안 수와 각 제안의 제목,
+   우선순위가 가장 높은 제안 하나.
+5. cflow 노드가 이 회고를 요청했으면 그 노드의 결과로 위 기록 위치와 제안 수를
    보고한다. 사용자가 직접 요청했으면 여기서 턴을 끝낸다.
