@@ -112,3 +112,24 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 - `approve-always`의 뜻이 넓어진다. 지금은 이후 일감의 게이트를 끄고,
   확정안에서는 plan 미결정 멈춤을 끄지 않는다. 이 차이를 `approve-always`
   선택지 설명에 적어야 한다.
+
+## 6. 구현 (2회차, `claunch-rzepk.2`)
+
+3절의 지점을 다음 파일이 맡는다. 2번의 「`[claunch plan]` 블록이 올 때마다
+`plan_get`으로 다시 읽는다」는 에이전트 작업 대신 `wait` probe로 옮겼다 —
+대기 중인 회차에는 턴이 없으므로, 엔진이 `poll` 초마다 게이트를 직접
+실행하는 편이 결정이 풀린 순간을 놓치지 않는다.
+
+| 지점 | 파일 | 내용 |
+|---|---|---|
+| 1 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml` (`coding-plan`) | `returns.ok.plan_waiting`(`int?`)에 `summary.waiting`을 싣는다. 읽지 못하면 -1과 사유 |
+| 2 | 같은 파일 (`plan-wait-before-gate`) | `coding-plan` 뒤·게이트 앞의 `wait`. probe는 `claunch gate plan-waiting`(0 통과, 1 계속 대기, 그 밖은 판정 불가), `poll: 30`, `undecided_max: 3`, `seconds` 없음(상한 없음) |
+| 3 | 같은 파일 (`coding-approval-check`) | 조건은 그대로. 대기가 앞에 서므로 게이트는 미결정이 풀린 뒤에만 선다 |
+| 4 | 같은 파일 (`plan-seed`, `plan-wait-after-seed`) | `coding-plan`을 건너뛰는 갈래(`approve-always` 이후, 자동 경로)에서 계획을 먼저 확보하고 같은 대기를 `work` 앞에 둔다 |
+| 5 | `src/claude_launcher/gates/plan_waiting.py` | plan 저장소(`daemon_dir()/plan.sqlite3`)를 읽기 전용으로 열어 `waiting`을 판정한다. plan 없음·읽기 실패·값 없음은 모두 2 |
+| 6 | `src/claude_launcher/daemon/cflow2_web.py`, `src/claude_launcher/web/static/app.js` | rail의 `answers`에 `plan-wait`를 싣고(probe가 `plan-waiting` 게이트인 `wait`), 알림 카드는 그 세션의 plan 패널을 연다. 카드에는 누를 버튼이 없다 |
+
+게이트는 `claunch gate plan-waiting`으로 어떤 저장소에서도 실행되며
+(`src/claude_launcher/cli_gate.py`의 `GATES`), 판정 불가가 세 번 쌓이면
+`plan-wait-unclear`가 계속 기다릴지 진행할지 사람에게 묻는다(규칙 1의
+「모르는 값은 멈춤」).

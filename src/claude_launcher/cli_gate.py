@@ -38,6 +38,13 @@ GATES = {
     # Asked before the request is filed, so a round with nobody to route to
     # goes to a person instead of spending its wait (claunch-od1mx.1).
     "landing-target": "landing_target",
+    # Does this session's plan still wait on the user? Polled by
+    # improv-worker-v2's plan waits (plan-wait-before-gate, and
+    # plan-wait-after-seed on the path that skips coding-plan), so the run
+    # stops for the plan panel's decisions before it reaches the
+    # coding-approval gate (claunch-rzepk). 0 clear, 1 still waiting,
+    # 2 cannot tell.
+    "plan-waiting": "plan_waiting",
 }
 
 

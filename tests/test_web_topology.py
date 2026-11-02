@@ -510,6 +510,7 @@ CHECKS = [
         "linkwatch_check.js",
         "snapshot_check.js",
         "notice_check.js",
+        "planwaitcard_check.js",
         "leaderfault_check.js",
         "faultreset_check.js",
         "restartgate_check.js",

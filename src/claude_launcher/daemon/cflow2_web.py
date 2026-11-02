@@ -909,7 +909,9 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     person reading the rail -- and answers it with ``gated`` and ``owed``.
     ``owed`` names what only a person releases: the holds that put the run
     in ``waiting_approval`` (a loop or visit limit, a halt, an ask that fell
-    to a human) and every open choice whose chooser is ``user``.
+    to a human), every open choice whose chooser is ``user``, and a wait on
+    the plan-waiting gate -- the round is stopped there until the user
+    decides in the plan panel (claunch-rzepk).
 
     ``started``/``updated``/``entered_at`` are the run's own clocks
     (claunch-c2emv): the dashboard's Chart page reads them to tell a run that
@@ -971,6 +973,18 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         # driver is held until somebody answers, whatever the status says.
         what = "report" if move.get("kind") == runtime.MOVE_KIND_REPORT else "move"
         owed.append(f"{what}: {move.get('title') or move.get('label') or move.get('node')}")
+    for iid, rec in sorted(inst.items()):
+        if rec.get("await") != runtime.AW_WAIT:
+            continue
+        try:
+            node = chart.node(rec.get("node"))
+        except Exception:  # noqa: BLE001
+            continue
+        if _is_plan_wait(node):
+            # The run is stopped until the person decides in the plan panel
+            # (claunch-rzepk). Nobody else releases it, so it is owed, and
+            # owed is what makes the rail row raise a card at all.
+            owed.append(f"plan: {node.id}")
     answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
     return {
         "cwd": str(st.cwd),
@@ -1146,13 +1160,45 @@ def _rail_urgent(state: dict) -> List[dict]:
     return out[:RAIL_URGENT_MAX]
 
 
+#: The gate a plan wait polls: ``claunch gate plan-waiting`` answers whether
+#: the session's plan still holds an unchosen decision for the user
+#: (claunch-rzepk). A run stopped on it waits on the person exactly as a
+#: ``user`` choice does, so the rail counts it as owed and raises a card.
+PLAN_WAIT_GATE = "plan-waiting"
+
+
+def _probe_words(probe: Any) -> List[str]:
+    """A compiled probe as its words. ``wait.probe`` is a command string or an
+    argv list (``frontend._command``) and the chart keeps it as written."""
+    if isinstance(probe, str):
+        return probe.split()
+    if isinstance(probe, (list, tuple)):
+        return [str(x) for x in probe]
+    return []
+
+
+def _is_plan_wait(node: Any) -> bool:
+    """Is this wait node polling the plan-waiting gate?
+
+    Matched on the probe, not on the node id: an id belongs to one workflow,
+    while the command says what the wait means -- the plan still owes the
+    user a decision. Any workflow that adopts the gate gets the card."""
+    probe = node.get("probe") if hasattr(node, "get") else None
+    words = _probe_words(probe)
+    if "gate" not in words:
+        return False
+    at = words.index("gate")
+    return at + 1 < len(words) and words[at + 1] == PLAN_WAIT_GATE
+
+
 def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     """What the terminal strip (#term-cflow) needs to answer each thing
     ``owed`` names, in the shape the run page posts: the instance to name,
     the question and the presses. Read from the same ``runtime.status``
     payload the run page draws, filtered to what only a person releases (a
     ``user`` choice, an ask that fell to a human, a loop or visit limit, a
-    halt, the driver's move request). A halt and an acceptance hold carry no press -- the dashboard has
+    halt, the driver's move request, a wait on the plan-waiting gate). A halt
+    and an acceptance hold carry no press -- the dashboard has
     no endpoint for them -- only the text.
 
     ``opened_at`` (claunch-l9znm.1) is the epoch second at which the run
@@ -1192,6 +1238,18 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} {asks}: "
                                    f"{move.get('reason') or ''}"),
             **_rail_opened(move.get("at")),
+        })
+    for w in payload.get("waits") or []:
+        if not _is_plan_wait(w):
+            continue
+        # No press: a plan decision is taken in the plan pane (app.js opens
+        # it from the card), and the run page has no route for it.
+        out.append({
+            "kind": "plan-wait", "instance": w.get("instance"), "label": "plan",
+            "prompt": _rail_prompt(
+                w.get("describe")
+                or "the plan still holds a decision for you -- decide it in the "
+                   "plan panel and the round goes on"),
         })
     for c in payload.get("choices") or []:
         if c.get("chooser") != ir.CHOOSER_USER:
