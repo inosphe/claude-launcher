@@ -24817,7 +24817,7 @@ const SPLIT_PANES = {
   wrapup: {
     btn: "term-wrapupbtn", title: "✎ wrap-up",
     on: "close the wrap-up pane — the terminal takes the column back",
-    off: "this session's wrap-up drafts (glossary, category, knowledge) — edit, delete or confirm them",
+    off: "this session's wrap-up drafts (glossary, category, knowledge, retrospection) — edit, delete or confirm them",
   },
   // The session's plan (plan-pane.js, daemon/plan_api.py, claunch-7jzp8):
   // its steps, the branches it asks the user to pick and the closure items
@@ -27503,6 +27503,7 @@ function mobileTitle() {
     case "glossary": return "용어집";
     case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
+    case "retrospection": return "retrospection";
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
@@ -27678,6 +27679,7 @@ const VIEWS = {
   glossary: "glossary-view",
   plan: "plan-view",
   knowledge: "knowledge-view",
+  retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
   wf: "wf-view",
@@ -28509,6 +28511,8 @@ function parseHash(h) {
   if (parts[0] === "glossary") return { page: "glossary" };
   if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
+  // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
+  if (parts[0] === "retrospection") return { page: "retrospection", id: parts[1] || "" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
     return { page: "category", workspace: parts[1] ? decodeURIComponent(parts[1]) : "" };
@@ -28587,6 +28591,7 @@ function route() {
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "plan") globalThis.PlanPage?.stop();
   if (r.page !== "knowledge") globalThis.KnowledgePage?.stop();
+  if (r.page !== "retrospection") globalThis.RetrospectionPage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
@@ -28680,6 +28685,7 @@ function route() {
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
+    case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
@@ -63464,7 +63470,7 @@ function wrapupNoticeSync(rows) {
     if (first || known.has(key)) continue;
     const c = row.counts || {};
     notify(`${session} ended with ${row.unresolved} unconfirmed wrap-up draft(s)`,
-      `glossary ${c.glossary || 0} · category ${c.category || 0} · knowledge ${c.knowledge || 0} — confirm or delete them`,
+      `glossary ${c.glossary || 0} · category ${c.category || 0} · knowledge ${c.knowledge || 0} · retrospection ${c.retrospection || 0} — confirm or delete them`,
       {
         source: "wrapup", key: `wrapup-${session}`, sticky: true, session,
         sync: `wrapup:${key}`,
