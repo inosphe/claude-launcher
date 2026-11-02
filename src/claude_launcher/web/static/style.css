@@ -10436,8 +10436,11 @@ a.category-ref:hover { text-decoration: underline; }
    session or an issue a chip with a hexagonal core. Children nest one size
    smaller (the font shrinks per level and stops after three). Every colour
    is here so the light theme derives it. */
-#vm-view { flex: 1; display: flex; min-height: 0; padding: 0; }
-#vm-view > iframe { flex: 1; width: 100%; border: 0; background: transparent; }
+/* The frame fills #vm-view by position, not by flex stretch: a stretched
+   iframe falls back to its 150px default height in engines that do not treat
+   the flex item's height as definite, which left the panel in a short strip. */
+#vm-view { flex: 1; display: flex; min-height: 0; padding: 0; position: relative; overflow: hidden; }
+#vm-view > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; display: block; }
 #hive-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 18px 22px 12px; min-height: 0; }
 #hive-view .wf-head { display: flex; align-items: baseline; gap: 12px; flex: none; }
 .hive-muted { color: #8b949e; font-size: 12px; }
