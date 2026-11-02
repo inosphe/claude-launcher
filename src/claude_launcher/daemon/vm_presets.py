@@ -98,6 +98,10 @@ class Presets:
         #: exists and is unreadable is left as it is: no preset is known, so
         #: nothing is deleted, and nothing is written over it.
         self._unreadable = ""
+        #: The preset a one-click "new VM" uses ("" = none chosen), and the
+        #: note left when the chosen one went away (shown until the user picks again).
+        self._default = ""
+        self._default_lost = ""
         #: One preset operation at a time: they share tart names.
         self._lock = threading.RLock()
         self.load()
@@ -121,6 +125,11 @@ class Presets:
                 log.warning("vm preset record %r rejected: %s", raw, exc)
                 continue
             self._items[item.name] = item
+        self._default = str(doc.get("default") or "")
+        self._default_lost = str(doc.get("default_lost") or "")
+        if self._default and self._default not in self._items:
+            self._default_lost = f"기본 프리셋 {self._default!r}이(가) 없어 해제되었습니다"
+            self._default = ""
 
     def _writable(self) -> None:
         if self._unreadable:
@@ -132,7 +141,8 @@ class Presets:
         if self.path is None:
             return
         self._writable()
-        doc = {"presets": [p.to_dict() for p in self._items.values()]}
+        doc = {"presets": [p.to_dict() for p in self._items.values()],
+               "default": self._default, "default_lost": self._default_lost}
         with atomic.scratch(self.path) as tmp:
             tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
             os.chmod(tmp, 0o600)
@@ -151,8 +161,26 @@ class Presets:
                 row = item.to_dict()
                 row["present"] = None if present is None else item.tart_name in present
                 row["registered_as_vm"] = item.tart_name in held
+                row["default"] = item.name == self._default
                 rows.append(row)
             return rows
+
+    def default_info(self) -> dict:
+        """``{"default": name or "", "default_lost": note}`` for the page and the CLI."""
+        with self._lock:
+            return {"default": self._default, "default_lost": self._default_lost}
+
+    def set_default(self, name: str) -> dict:
+        """Choose the default preset, or clear it with an empty name."""
+        with self._lock:
+            self._writable()
+            if name:
+                self.get(name)
+            self._default = name
+            self._default_lost = ""
+            self._save()
+            self.registry.note("", "preset_default", preset=name)
+            return self.default_info()
 
     def copy_names(self) -> Dict[str, str]:
         """``{tart name: preset name}`` of the recorded preset copies (no tart query)."""
@@ -249,6 +277,9 @@ class Presets:
                     raise VmError("vm_bad_state", f"tart reports {item.tart_name} as {row.state}")
                 self.manager.tart_delete(item.tart_name)
             del self._items[name]
+            if self._default == name:
+                self._default = ""
+                self._default_lost = f"기본 프리셋 {name!r}이(가) 삭제되어 해제되었습니다"
             self._save()
             self.registry.note("", "preset_deleted", preset=name)
 

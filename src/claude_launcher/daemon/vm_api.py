@@ -267,6 +267,7 @@ async def h_list(request: web.Request) -> web.Response:
         out["share_roots"] = roots
         out["share_root_rows"] = vm_share.root_rows(store.daemon_config().get("vm_share_roots"), forbidden)
         out["presets"] = _presets(request).lineage_rows() if request.app.get("vm_presets") is not None else []
+        out["preset_default"] = _presets(request).default_info() if request.app.get("vm_presets") is not None else {}
         out["share_catalog"] = [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])} for e in reg.catalog]
     return web.json_response(out)
 
@@ -358,7 +359,21 @@ async def h_preset_list(request: web.Request) -> web.Response:
     if (refused := _user_only(request)) is not None:
         return refused
     rows = await asyncio.to_thread(_presets(request).list)
-    return web.json_response({"presets": rows})
+    return web.json_response({"presets": rows, **_presets(request).default_info()})
+
+
+async def h_preset_default(request: web.Request) -> web.Response:
+    """Choose (or, with an empty name, clear) the preset a one-click new VM uses."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    try:
+        body = await _body(request)
+        name = str(body.get("name") or "").strip()
+        _trace(request, reg, "", "preset_default", preset=name)
+        return web.json_response(await asyncio.to_thread(_presets(request).set_default, name))
+    except VmError as exc:
+        return _err(exc)
 
 
 async def h_preset_save(request: web.Request) -> web.Response:
@@ -1399,6 +1414,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_get("/api/vm-tart", h_tart_list)
     r.add_get("/api/vm-presets", h_preset_list)
     r.add_post("/api/vm-presets", h_preset_save)
+    r.add_post("/api/vm-presets-default", h_preset_default)
     r.add_post("/api/vm-presets/{name}/describe", h_preset_describe)
     r.add_post("/api/vm-presets/{name}/delete", h_preset_delete)
     r.add_post("/api/vm-presets/{name}/create", h_preset_create)

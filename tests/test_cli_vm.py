@@ -274,3 +274,15 @@ def test_only_commands_post_the_switch_and_list_the_state(client, capsys, monkey
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     n = len(client.calls)
     assert run("only", "off", "s1") == cli_vm.EXIT_REFUSED and len(client.calls) == n
+
+
+def test_preset_default_shows_sets_and_clears(client, capsys):
+    client.answer = {"default": "gold", "default_lost": "", "presets": []}
+    assert run("preset", "default") == 0
+    assert run("preset", "default", "gold") == 0
+    assert run("preset", "default", "--clear") == 0
+    assert run("preset", "default", "gold", "--clear") == cli_vm.EXIT_REFUSED
+    assert [(c[0], c[1]) for c in client.calls] == [
+        ("GET", "/api/vm-presets"), ("POST", "/api/vm-presets-default"), ("POST", "/api/vm-presets-default")]
+    assert client.calls[1][2] == {"name": "gold"} and client.calls[2][2] == {"name": ""}
+    assert "default preset: gold" in capsys.readouterr().out

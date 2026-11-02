@@ -327,6 +327,7 @@ def test_every_preset_route_is_the_users_only(tmp_path):
                 api.post("/api/vm-presets/gold/describe", json={"description": "x"}, headers=AGENT),
                 api.post("/api/vm-presets/gold/delete", json={"confirm": "gold"}, headers=AGENT),
                 api.post("/api/vm-presets/gold/create", json={"id": "fresh"}, headers=AGENT),
+                api.post("/api/vm-presets-default", json={"name": "gold"}, headers=AGENT),
             ]
             for call in calls:
                 resp = await call
@@ -444,3 +445,48 @@ def test_granting_a_template_warns_and_it_can_still_be_forgotten(tmp_path):
             again = await api.post("/api/vm", json={"id": "preset-gold"})
             assert again.status == 409                              # and it cannot be put back
     run(go())
+
+
+def test_the_default_preset_is_set_listed_cleared_and_survives_a_reload(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            assert (await (await api.get("/api/vm-presets")).json())["default"] == ""
+            bad = await api.post("/api/vm-presets-default", json={"name": "nope"})
+            assert bad.status == 404 and (await bad.json())["code"] == "vm_unknown_preset"
+            ok = await api.post("/api/vm-presets-default", json={"name": "gold"})
+            assert ok.status == 200 and (await ok.json())["default"] == "gold"
+            listed = await (await api.get("/api/vm-presets")).json()
+            assert listed["default"] == "gold" and listed["presets"][0]["default"] is True
+            # a second Presets over the same file reads it back
+            again = vm_presets.Presets(tmp_path / "vm-presets.json", api.reg, api.presets.manager)
+            assert again.default_info()["default"] == "gold"
+            cleared = await api.post("/api/vm-presets-default", json={"name": ""})
+            assert (await cleared.json()) == {"default": "", "default_lost": ""}
+    run(go())
+
+
+def test_deleting_the_default_preset_clears_it_and_says_so(tmp_path):
+    async def go():
+        async with api_for(tmp_path) as api:
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold"})
+            await api.post("/api/vm-presets-default", json={"name": "gold"})
+            await api.post("/api/vm-presets/gold/delete", json={"confirm": "gold"})
+            listed = await (await api.get("/api/vm-presets")).json()
+            assert listed["default"] == "" and "gold" in listed["default_lost"] and "삭제" in listed["default_lost"]
+            await api.post("/api/vm-presets", json={"vm": "src", "name": "gold2"})
+            await api.post("/api/vm-presets-default", json={"name": "gold2"})
+            assert (await (await api.get("/api/vm-presets")).json())["default_lost"] == ""
+    run(go())
+
+
+def test_a_default_whose_preset_vanished_from_the_file_is_cleared_on_load(tmp_path):
+    fake, reg, mgr, presets, path = build(tmp_path)
+    presets.save("src", "gold")
+    presets.set_default("gold")
+    doc = json.loads(path.read_text())
+    doc["presets"] = []
+    path.write_text(json.dumps(doc))
+    again = vm_presets.Presets(path, reg, mgr)
+    info = again.default_info()
+    assert info["default"] == "" and "gold" in info["default_lost"]

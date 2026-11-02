@@ -321,10 +321,26 @@ def _preset_list(args) -> int:
         rows = out.get("presets") or []
         for p in rows:
             gone = "" if p.get("present") is not False else "  (tart copy missing)"
-            print(f"{p['name']}\t{p.get('source') or '-'}\t{p.get('description') or ''}{gone}")
+            mark = "  (default)" if p.get("default") else ""
+            print(f"{p['name']}\t{p.get('source') or '-'}\t{p.get('description') or ''}{gone}{mark}")
         if not rows:
             print("no presets")
+        if out.get("default_lost"):
+            print(out["default_lost"])
     return _call(args, "GET", "/api/vm-presets", show=show)
+
+
+def _preset_default(args) -> int:
+    def show(out):
+        print(f"default preset: {out.get('default') or '(none)'}")
+        if out.get("default_lost"):
+            print(out["default_lost"])
+    if args.name and args.clear:
+        print("give a preset name or --clear, not both", file=sys.stderr)
+        return EXIT_REFUSED
+    if not args.name and not args.clear:
+        return _call(args, "GET", "/api/vm-presets", show=show)
+    return _call(args, "POST", "/api/vm-presets-default", {"name": "" if args.clear else args.name}, show=show)
 
 
 def _preset_save(args) -> int:
@@ -559,6 +575,11 @@ def register(sub) -> None:
     sp = ps.add_parser("list", help="the presets")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=_preset_list)
+    sp = ps.add_parser("default", help="show, set or clear (--clear) the default preset a one-click new VM uses (user only)")
+    sp.add_argument("name", nargs="?", default="")
+    sp.add_argument("--clear", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=_preset_default)
     sp = ps.add_parser("save", help="copy a stopped VM into a preset (set the guest DNS to public "
                                     "servers first; the copy keeps the source's accounts and passwords)")
     vm_arg(sp)
