@@ -189,6 +189,23 @@ def test_share_catalog_commands(client, capsys):
     assert run("share", "catalog", "add", "x") == cli_vm.EXIT_REFUSED
 
 
+def test_share_roots_commands(client, capsys, tmp_path):
+    client.answer = {"roots": [{"path": "/w", "ok": True, "reason": ""},
+                               {"path": "/h", "ok": False, "reason": "홈 폴더"}], "enabled": True}
+    assert run("share-roots", "ls") == 0
+    out = capsys.readouterr().out
+    assert "ok   /w" in out and "OFF  /h  -- 홈 폴더" in out
+    assert client.calls[-1][:2] == ("GET", "/api/vm-share-roots")
+    assert run("share-roots", "add", str(tmp_path)) == 0
+    assert client.calls[-1] == ("POST", "/api/vm-share-roots", {"action": "add", "path": str(tmp_path)})
+    assert run("share-roots", "rm", "/w") == 0
+    assert client.calls[-1][2] == {"action": "rm", "path": "/w"}
+    assert run("share-roots", "add") == cli_vm.EXIT_REFUSED
+    client.answer = {"roots": [], "enabled": False}
+    assert run("share-roots", "ls") == 0
+    assert "sharing host folders is off" in capsys.readouterr().out
+
+
 def test_share_ls_shows_where_each_share_came_from(client, capsys):
     client.answer = {"shares_pending": True, "shares_skipped": {},
                      "share_rows": [{"name": "a1", "mode": "ro", "host_path": "/p", "guest_path": "/G/a1",

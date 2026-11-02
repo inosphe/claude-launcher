@@ -317,6 +317,22 @@ the shared folder is slower by about 10x for small files, and swiftc reports
   `~/.aws`, `~/Library`, `~/.claude`, `~/.claude-launcher` or the daemon state
   directory is refused (`vm_share_forbidden`, 400); this keeps the home folder out.
   Paths with `:` or control characters are refused.
+- **Editing the roots.** The user sees and edits `vm_share_roots` without touching the
+  settings file: the "공유 허용 루트" section of the VM page (always visible; each root
+  with its state or the reason it is not in effect; an empty list says sharing is off),
+  `claunch vm share-roots ls|add PATH|rm PATH`, or `GET/POST /api/vm-share-roots`
+  (`{"action":"add"|"rm","path":...}`; user only, a session gets 403 `vm_user_only`).
+  `add` resolves the path with `realpath` and stores the resolved path; it refuses a
+  path that is not an absolute folder, is `/`, contains `:`, or is the home folder or
+  holds or lies under one of the never-shared folders (`vm_bad_request` /
+  `vm_share_forbidden`, 400); at most 16 roots (`vm_share_limit`). Only the
+  `daemon.vm_share_roots` key is written, the rest of the settings file is kept. The
+  manager reads the setting afresh at every share and start (no restart for the value;
+  the new route itself needs the daemon to have been restarted once). A stored root
+  that has since gone bad (folder removed, now forbidden) stays listed with the reason
+  and is ignored until removed. Removing a root does not unmount a running VM or drop
+  its shares; the shares are checked again at the next start and left out if they are
+  no longer under a root. Sessions never receive the root list.
 - **Risk.** The guest can read everything in a shared folder (`.env` files and keys
   included), also with `ro`. With `rw` a program in the guest can plant `.git/hooks/*`
   or a script that the host session runs at its next `git` or build, which is why

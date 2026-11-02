@@ -23,7 +23,7 @@ process of the loopback connection) is a separate follow-up.
 User routes:   POST /api/vm, DELETE /api/vm/{id}, POST /api/vm/{id}/{start,
                stop,force_stop,suspend,reconcile,grant,revoke,
                revoke_controller,extra_controller,human,files_dir,share,
-               approve,deny},
+               approve,deny}, POST /api/vm-share-roots (add / rm an allowed root),
                GET /api/vm/{id}/files
 Anyone:        GET /api/vm, GET /api/vm/{id}
 Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -60,6 +61,7 @@ _STATUS = {
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
+    "vm_share_limit": 400, "vm_root_unknown": 404,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -250,7 +252,9 @@ async def h_list(request: web.Request) -> web.Response:
     out = {"vms": rows, "slot_limit": reg.slot_limit,
            "host_locked": bool(mgr and await asyncio.to_thread(mgr.host_locked))}
     if not session and mgr is not None:     # the user's page: where a share may come from
-        out["share_roots"] = mgr.share_rules()[0]
+        roots, forbidden = mgr.share_rules()
+        out["share_roots"] = roots
+        out["share_root_rows"] = vm_share.root_rows(store.daemon_config().get("vm_share_roots"), forbidden)
         out["share_catalog"] = [vm_share.public(e) | {"scope": e["scope"], "vms": list(e["vms"])} for e in reg.catalog]
     return web.json_response(out)
 
@@ -495,6 +499,47 @@ async def h_share(request: web.Request) -> web.Response:
         else:
             raise VmError("vm_bad_request", "'action' is add or rm")
         return web.json_response(reg.view(vm_id))
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_share_roots(request: web.Request) -> web.Response:
+    """The folders shares may come from (``daemon.vm_share_roots``), user only: GET
+    lists them with whether each is in effect; POST ``add`` / ``rm`` by path. A
+    root that is the home folder, holds or lies under a never-shared folder, or is
+    not a folder is refused when added. Only that one setting is written; the
+    manager reads it afresh at every share and start, so no restart is needed."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, mgr = _hub(request)
+    try:
+        forbidden = await asyncio.to_thread(mgr.share_rules)
+        forbidden = forbidden[1]
+        raw = store.daemon_config().get("vm_share_roots")
+        stored = [r for r in raw if isinstance(r, str)] if isinstance(raw, list) else []
+        if request.method == "POST":
+            body = await _body(request)
+            action, path = str(body.get("action") or ""), body.get("path")
+            if action == "add":
+                real = await asyncio.to_thread(vm_share.check_root, path, forbidden)
+                if real not in stored and len(stored) >= vm_share.ROOTS_MAX:
+                    raise VmError("vm_share_limit", f"공유 루트는 최대 {vm_share.ROOTS_MAX}개입니다")
+                _trace(request, reg, "", "share_root_add", path=real)
+                if real not in stored:
+                    stored.append(real)
+            elif action == "rm":
+                if not isinstance(path, str) or not path:
+                    raise VmError("vm_bad_request", "'path' is required")
+                keep = [r for r in stored if r != path and os.path.realpath(r) != os.path.realpath(path)]
+                if len(keep) == len(stored):
+                    raise VmError("vm_root_unknown", f"허용 루트에 {path[:120]!r}가 없습니다")
+                _trace(request, reg, "", "share_root_rm", path=path[:300])
+                stored = keep
+            else:
+                raise VmError("vm_bad_request", "'action' is add or rm")
+            store.set_daemon_field("vm_share_roots", stored)
+        rows = vm_share.root_rows(stored, forbidden)
+        return web.json_response({"roots": rows, "enabled": any(r["ok"] for r in rows)})
     except VmError as exc:
         return _err(exc)
 
@@ -1219,6 +1264,8 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/allow", h_allow)
     r.add_get("/api/vm-only", h_only)
     r.add_post("/api/vm-only", h_only)
+    r.add_get("/api/vm-share-roots", h_share_roots)
+    r.add_post("/api/vm-share-roots", h_share_roots)
     r.add_get("/api/vm-share-catalog", h_share_catalog)
     r.add_post("/api/vm-share-catalog", h_share_catalog)
     r.add_post("/api/vm/{id}/share", h_share)
