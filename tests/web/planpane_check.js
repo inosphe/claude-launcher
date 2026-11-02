@@ -6,19 +6,45 @@
    the other session's plan. The plan is drawn as a tree in #/plan's shape
    (claunch-7jzp8.5.2): step branches with a status mark, a decision forking
    into option branches (recommended, then chosen and unchosen), its own
-   steps under it, the closure items as branches of their heading. */
+   steps under it, the closure items as branches of their heading. The 5 s
+   poll (claunch-nerp0): a field being typed in is not redrawn, a control
+   the user was on gets the focus back by its data-plan-key, and the pane's
+   scroll position comes back. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+/* Just enough of the DOM to hold a focus: focus()/blur() move
+   document.activeElement, a redraw detaches what was in it (and with it the
+   focus, as the browser does), and focusout bubbles up to the pane root,
+   which is where plan-pane.js listens for it. */
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this.textContent = ''; this.value = ''; this.parent = null; }
+  constructor(tag, doc) {
+    this.tag = tag; this.doc = doc || null;
+    this.children = []; this.attributes = {}; this.textContent = ''; this.value = '';
+    this.parent = null; this.scrollTop = 0; this.listeners = {};
+  }
+  get tagName() { return this.tag.toUpperCase(); }
+  get parentNode() { return this.parent; }
   append(...items) { for (const i of items) { if (typeof i === 'object') i.parent = this; this.children.push(i); } }
-  replaceChildren(...items) { this.children = []; this.append(...items); }
+  replaceChildren(...items) {
+    const hadFocus = this.doc && this.doc.activeElement && this.contains(this.doc.activeElement);
+    this.children = []; this.scrollTop = 0;
+    if (hadFocus) this.doc.activeElement = null;
+    this.append(...items);
+  }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
   contains(other) { for (let n = other; n; n = n.parent) if (n === this) return true; return false; }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
+  addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+  focus() { if (this.doc) this.doc.activeElement = this; }
+  blur() {
+    if (this.doc && this.doc.activeElement === this) this.doc.activeElement = null;
+    this.dispatch('focusout');
+  }
+  dispatch(type) { for (let n = this; n; n = n.parent) (n.listeners[type] || []).forEach(fn => fn({type, target: this})); }
 }
 
 const calls = [];
@@ -75,12 +101,15 @@ async function request(raw, method = 'GET', body) {
   throw new Error('unexpected ' + raw);
 }
 
+const doc = {createElement: tag => new Element(tag, doc), activeElement: null};
+const timers = [];
 const ctx = vm.createContext({
-  document: {createElement: tag => new Element(tag)},
+  document: doc,
   api: async () => { throw new Error('the pane must use the injected request'); },
   URL, console, JSON, Object,
-  setTimeout: () => 0, clearTimeout: () => {},
+  setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {},
 });
+const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/plan-pane.js'), 'utf8'), ctx);
 
 const all = (node) => [node, ...node.children.flatMap(c => typeof c === 'object' ? all(c) : [])];
@@ -175,6 +204,50 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   buttons(host, '이 세션만 보기')[0].onclick(); await settle();
   assert(text(host).includes('종료 조건'));
   jointGroup = null;
+
+  // The 5 s poll does not take the focus (claunch-nerp0).
+  plan = {
+    session: 's1', revision: 1, title: 'Ship X', goal: '', issue: 'claunch-x',
+    steps: [{id: 'd1', kind: 'decision', title: 'storage', detail: '', options: OPTS, rev: 1, result: null, children: []}],
+    closure: [{id: 'f1', kind: 'followup', title: 'follow it up', detail: '', status: 'open', rev: 1, result: null}],
+    summary: {steps: 0, done: 0, current: null, closable: false, waiting: 1, blockers: []},
+  };
+  ctx.PlanPane._view().open(); await settle();
+  const noteLabel = '선택에 붙일 메모 (선택 사항)';
+  const typed = input(host, noteLabel)[0];
+  typed.focus();
+  assert.strictEqual(doc.activeElement, typed, 'the fake DOM holds the focus');
+  typed.value = 'half typed'; typed.oninput();
+  plan = {...plan, title: 'Ship X, retitled'};       // the session moved on
+  ctx.PlanPane._view().open(); await settle();
+  assert.strictEqual(input(host, noteLabel)[0], typed, 'a field being typed in is not redrawn');
+  assert.strictEqual(doc.activeElement, typed, 'and it keeps the focus');
+  assert(!text(host).includes('Ship X, retitled'), 'the poll waited for the field to be left');
+  assert.strictEqual(ctx.PlanPane._view()._state().notes.d1, 'half typed');
+
+  // Leaving the field draws what the poll held back, and the note stays.
+  timers.length = 0;
+  typed.blur(); runTimers();
+  assert(text(host).includes('Ship X, retitled'), 'the held-back poll draws on blur');
+  assert.strictEqual(input(host, noteLabel)[0].value, 'half typed', 'the typed note survives the redraw');
+
+  // A control keeps the focus across a redraw: the element is new, the focus
+  // is on it because the redraw found it by its data-plan-key.
+  const choose = buttons(host, '이 안 선택')[0];
+  assert.strictEqual(choose.getAttribute('data-plan-key'), 'opt:d1:A');
+  choose.focus();
+  plan = {...plan, revision: 2};
+  ctx.PlanPane._view().open(); await settle();
+  const newChoose = buttons(host, '이 안 선택')[0];
+  assert.notStrictEqual(newChoose, choose, 'the poll redrew the button');
+  assert.strictEqual(doc.activeElement, newChoose, 'the redrawn control has the focus');
+
+  // The pane's scroll position comes back too.
+  doc.activeElement = null;
+  host.scrollTop = 240;
+  plan = {...plan, revision: 3};
+  ctx.PlanPane._view().open(); await settle();
+  assert.strictEqual(host.scrollTop, 240, 'the scroll position is put back');
 
   // Closable, and a session without a plan.
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};

@@ -11,6 +11,13 @@
    session reworded it, and the pane reloads so the user decides on what it
    says now. A note being typed is kept per node across polls.
 
+   The 5 s poll redraws the pane from scratch (claunch-nerp0). That redraw no
+   longer takes the user's focus with it: a poll that arrives while a field of
+   this pane is focused draws nothing (the next one after the field is left
+   does), and the control the user was on is found again by its
+   data-plan-key after a redraw, so buttons and toggles keep the focus. The
+   pane's own scroll position comes back the same way.
+
    Joint view (claunch-7jzp8.1): when the session's joint tree
    (/api/plan/joint, plan/joint.py) holds another planned session, a toggle
    lists the tree -- spawn children, sessions on the same issue or a
@@ -43,11 +50,50 @@ function planResultText(n) {
   return `처분: ${PLAN_ACTION_LABEL[r.action] || r.action}` + (n.status === "done" ? " · 처리됨" : "");
 }
 
+/* Focus across a redraw (claunch-nerp0). Every control a user can land on
+   carries a data-plan-key -- a string that names it within this pane -- so
+   the control that replaces it in the next redraw can be found again. */
+function planKey(el) {
+  if (!el) return null;
+  if (el.getAttribute) {
+    const v = el.getAttribute("data-plan-key");
+    if (v) return v;
+  }
+  const a = el.attributes && el.attributes["data-plan-key"];
+  return typeof a === "string" ? a : (a && a.value) || null;
+}
+function keyedPlanNode(el, key) {
+  el.setAttribute("data-plan-key", key);
+  return el;
+}
+function planByKey(root, key) {
+  if (!root) return null;
+  if (planKey(root) === key) return root;
+  for (const child of root.children || []) {
+    const hit = planByKey(child, key);
+    if (hit) return hit;
+  }
+  return null;
+}
+/* The element of this pane that holds the focus, or null. */
+function planFocused(root) {
+  const active = typeof document === "undefined" ? null : document.activeElement;
+  if (!root || !active || active === root) return null;
+  return root.contains && root.contains(active) ? active : null;
+}
+/* A field the user is typing into: redrawing it would end an IME
+   composition mid-word, so the poll waits for the field to be left. */
+function planIsField(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || el.tag || "").toLowerCase();
+  return tag === "textarea" || tag === "input";
+}
+
 function makePlanPane({root, session, request, onChange, nested}) {
   const node = planNode;
   const base = "/api/plan";
   let data = null, error = "", busy = false, seq = 0, timer = null, feedback = "";
-  let joint = null, jointOpen = false;
+  let joint = null, jointOpen = false, deferred = false;
   const members = {};    // session -> {el, view} of an opened joint member
   const notes = {};      // node id -> the note being typed
   const told = {};       // node id -> the last write's message
@@ -65,9 +111,40 @@ function makePlanPane({root, session, request, onChange, nested}) {
         if (mine === seq) joint = out.group;
       } catch (_exc) { if (mine === seq) joint = null; }
     }
-    if (mine === seq) { render(); schedule(); }
+    if (mine === seq) {
+      if (planIsField(planFocused(root()))) deferred = true;
+      else { deferred = false; render(); }
+      schedule();
+    }
   }
   function schedule() { clearTimeout(timer); timer = setTimeout(load, 5000); }
+
+  /* A poll that arrived while a field was focused drew nothing; draw once
+     the field is left, so the user's own blur is what updates the screen.
+     The draw waits for the next task: a click that takes the focus away from
+     a field would otherwise find the button it pressed already replaced. */
+  function settle() {
+    if (!deferred || typeof setTimeout !== "function") return;
+    setTimeout(() => {
+      if (!planIsField(planFocused(root()))) { deferred = false; render(); }
+    }, 0);
+  }
+  { const el = root(); if (el && el.addEventListener) el.addEventListener("focusout", settle); }
+
+  /* What the redraw must put back: the focus and its control, and how far
+     down the pane was scrolled. */
+  function viewState() {
+    const el = root();
+    const active = planFocused(el);
+    return {scrollTop: el ? el.scrollTop || 0 : 0, key: planKey(active)};
+  }
+  function restoreView(state) {
+    const el = root();
+    if (!el) return;
+    if (state.scrollTop) el.scrollTop = state.scrollTop;
+    const target = state.key ? planByKey(el, state.key) : null;
+    if (target && target.focus) target.focus();
+  }
 
   async function act(id, body, done) {
     if (busy) return;
@@ -97,11 +174,12 @@ function makePlanPane({root, session, request, onChange, nested}) {
     t.value = notes[n.id] || ""; t.placeholder = placeholder; t.rows = 1; t.disabled = busy;
     t.setAttribute("aria-label", placeholder);
     t.oninput = () => { notes[n.id] = t.value; };
-    return t;
+    return keyedPlanNode(t, "note:" + n.id);
   }
-  function button(label, fn, cls) {
+  function button(label, fn, cls, key) {
     const b = node("button", label, "wf-btn" + (cls ? " " + cls : ""));
     b.type = "button"; b.disabled = busy; b.onclick = fn;
+    if (key) keyedPlanNode(b, key);
     return b;
   }
   function tail(n, box) {
@@ -137,7 +215,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     card.append(head,
       node("p", "기대 효과: " + o.effect, "plan-effect"),
       node("p", "리스크: " + o.risk, "plan-risk"));
-    if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`)));
+    if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`), null, `opt:${n.id}:${o.label}`));
     li.append(card);
     return li;
   }
@@ -176,11 +254,11 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     const row = node("div", null, "plan-actions");
     if (verify) {
-      row.append(button("통과", () => act(n.id, {rev: n.rev, verdict: "passed"}, "통과로 전달했습니다")),
-                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다")));
+      row.append(button("통과", () => act(n.id, {rev: n.rev, verdict: "passed"}, "통과로 전달했습니다"), null, `verdict:${n.id}:passed`),
+                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다"), null, `verdict:${n.id}:failed`));
       li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지)"), row);
     } else {
-      for (const a of PLAN_ACTIONS) row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`)));
+      for (const a of PLAN_ACTIONS) row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`), null, `act:${n.id}:${a.id}`));
       li.append(noteBox(n, "메모 (선택 사항)"), row);
     }
     tail(n, li);
@@ -210,7 +288,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
           + ` · 내 결정 대기 ${m.waiting || 0}건 · ` + (m.closable ? "닫아도 됨" : "닫을 수 없음");
         li.append(node("p", line, m.closable ? "plan-closable" : "plan-progress"));
         if (m.session !== session) {
-          li.append(button(members[m.session] ? "접기" : "계획 펼치기", () => toggleMember(m.session)));
+          li.append(button(members[m.session] ? "접기" : "계획 펼치기", () => toggleMember(m.session), null, `joint:${m.session}`));
           if (members[m.session]) li.append(members[m.session].el);
         }
       }
@@ -228,7 +306,13 @@ function makePlanPane({root, session, request, onChange, nested}) {
 
   function render() {
     const el = root(); if (!el) return;
+    const state = viewState();
     el.replaceChildren();
+    draw(el);
+    restoreView(state);
+  }
+
+  function draw(el) {
     const shell = node("div", null, "plan-pane");
     if (error) { const a = node("p", error, "plan-error"); a.setAttribute("role", "alert"); shell.append(a); }
     if (!data) { shell.append(node("p", error ? "" : "loading…", "wf-note")); el.append(shell); return; }
@@ -246,7 +330,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if (joint && joint.sessions > 1) {
       const row = node("div", null, "plan-joint-bar");
       row.append(node("span", `연관 세션 ${joint.sessions}개 · 내 결정 대기 ${joint.waiting}건`, "plan-muted"),
-                 button(jointOpen ? "이 세션만 보기" : "연관 세션 함께 보기", () => { jointOpen = !jointOpen; render(); }));
+                 button(jointOpen ? "이 세션만 보기" : "연관 세션 함께 보기", () => { jointOpen = !jointOpen; render(); }, null, "joint-toggle"));
       shell.append(row);
       if (jointOpen) {
         shell.append(node("h4", "연관 세션", "plan-section"), jointTree());
@@ -281,7 +365,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     t.placeholder = "계획에 대한 의견 (방향 수정, 빠진 단계 등) — 세션 터미널로 전달됩니다";
     t.setAttribute("aria-label", "계획에 대한 의견");
     t.oninput = () => { feedback = t.value; };
-    fb.append(t, button("의견 보내기", send));
+    fb.append(keyedPlanNode(t, "feedback"), button("의견 보내기", send, null, "feedback-send"));
     if (told._feedback) fb.append(node("p", told._feedback, "plan-told"));
     shell.append(fb);
     el.append(shell);
