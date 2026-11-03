@@ -839,10 +839,14 @@ rules:
 
   ```yaml
   rules:
+    branch-on-main:
+      when: "$data.inputs.allow_work_on_main == true"
+      text: 새 브랜치를 만들지 않고 master에서 작업한다.
+      deliver: [branch-setup]
     no-master-commit:
-      when: "$data.inputs.allow_work_on_main != true"
+      when: "$result['branch-setup'].value.mode != 'main'"
       text: master 체크아웃에서 커밋하지 않는다.
-      deliver: [branch-setup, commit]
+      deliver: [commit]
   ```
 - `include`는 정의 이름만 받는다(1절).
 - `include`는 포함한 파일의 `collections`와 `sides`도 가져온다. 그 파일의
@@ -3398,15 +3402,22 @@ PR은 닫고 브랜치는 지웠다.
 
 - 규칙 `no-master-merge`(머지·push 금지, `effect`와 `spec.invariants`)는 그대로다.
   그 규칙에 있던 「master 체크아웃에서 커밋 금지」는 조건부 규칙
-  `no-master-commit`(`when: $data.inputs.allow_work_on_main != true`)으로 분리했다.
-- 켜진 런에는 조건부 규칙 `work-on-main`이 branch-setup·delegate-work·commit·
-  main-landed·wrapup에 전달된다. branch-setup은 통합 대상 거부와 공유·메인 체크아웃
-  판정을 둘 다 건너뛰고 `mode: main`을 보고한다(꺼진 런은 `new` 또는 `reuse`).
-  commit·stack-round·delegate-work는 이 `mode`를 읽는다. 위임 fork 자식은 부모와
-  같은 디렉터리에서 일한다.
-- `land` 절차의 첫 문장 `main-gate`는 켜진 런에서 `main-landed`(master 커밋 해시
-  확인) 뒤 `landed`를 반환한다. rebase·리뷰·착지 요청·PR·push는 돌지 않고,
-  wrapup은 그 해시로 이슈를 닫는다.
+  `no-master-commit`(`when: $result['branch-setup'].value.mode != 'main'`)으로 분리했다.
+- 입력은 branch-setup만 읽는다. 켜져 있으면 조건부 규칙 `branch-on-main`이
+  branch-setup에 전달되고, branch-setup은 통합 대상 거부와 공유·메인 체크아웃
+  판정을 둘 다 건너뛰고 `mode: main`을 보고한다(꺼져 있으면 `new` 또는 `reuse`).
+- branch-setup 뒤의 노드는 입력 대신 그 회차의 `mode`를 읽는다. mode가 main이면
+  조건부 규칙 `work-on-main`이 delegate-work·commit·main-landed·wrapup에 전달되고,
+  아니면 `no-master-commit`이 commit부터 wrapup까지에 전달된다. commit·stack-round·
+  delegate-work의 본문도 이 `mode`를 읽는다. 위임 fork 자식은 부모와 같은
+  디렉터리에서 일한다.
+- `land` 절차의 첫 문장 `main-gate`는 `mode == 'main'`인 회차에서 `main-landed`
+  (master 커밋 해시 확인) 뒤 `landed`를 반환한다. rebase·리뷰·착지 요청·PR·push는
+  돌지 않고, wrapup은 그 해시로 이슈를 닫는다.
+- 회차 도중 사람이 입력을 바꿔도 그 회차의 착지 경로와 규칙 문구는 바뀌지 않는다.
+  바뀐 값은 다음 회차의 branch-setup부터 적용된다. 착지 시점에 입력을 읽으면
+  피처 브랜치를 판 뒤 입력을 켠 회차가 착지 요청 없이 이슈를 닫는다(리뷰
+  CHANGES REQUESTED @ 347ff9c8).
 
 시작 입력 `require_plan_closure`(bool, 기본 false, `set_by: [user]`)는 `settle`
 앞의 `closure-gate`가 읽는다. 두 갈래 모두 probe는 `claunch gate plan-waiting`이다.

@@ -250,10 +250,12 @@ inputs:
     type: bool
     default: false
     label: master에서 직접 작업
-    help: 켜면 이 세션은 branch-setup의 브랜치·워크트리 판정(통합 대상 거부, 공유·메인 체크아웃 판정)을 건너뛰고 지금 서 있는 체크아웃의 master에서 커밋한다. 착지 단계(rebase·리뷰·착지 요청·push)를 건너뛰고, 마감은 master 커밋 해시로 이슈를 닫는다. 이 세션의 작업 위치에만 적용된다 — 독립 자식과 스택 자식은 지금처럼 자기 워크트리·브랜치에서 일한다
-    # 조건부 규칙 no-master-commit(꺼짐일 때)과 work-on-main(켜짐일 때)이
-    # 이 값을 읽는다(docs 2.5 when, claunch-cetzf.2). 사람이 런 도중에 바꾸면
-    # 다음 flow_status부터 두 규칙이 바뀐 값으로 렌더된다.
+    help: 켜면 이 세션은 branch-setup의 브랜치·워크트리 판정(통합 대상 거부, 공유·메인 체크아웃 판정)을 건너뛰고 지금 서 있는 체크아웃의 master에서 커밋한다. 착지 단계(rebase·리뷰·착지 요청·push)를 건너뛰고, 마감은 master 커밋 해시로 이슈를 닫는다. 이 세션의 작업 위치에만 적용된다 — 독립 자식과 스택 자식은 지금처럼 자기 워크트리·브랜치에서 일한다. 이 값은 branch-setup이 읽고, 그 뒤의 커밋·착지·마감은 branch-setup이 기록한 mode를 따른다 — 런 도중에 바꾸면 다음 회차의 branch-setup부터 적용된다
+    # 조건부 규칙 branch-on-main(켜짐일 때, branch-setup에만)이 이 값을 읽는다
+    # (docs 2.5 when, claunch-cetzf.2). branch-setup 뒤의 노드에 가는
+    # no-master-commit·work-on-main과 land의 main-gate는 입력 대신 그 회차의
+    # branch-setup mode를 읽는다 — 회차 도중 입력이 바뀌어도 착지 경로가 실제
+    # 작업 위치와 어긋나지 않게 하기 위해서다(리뷰 CHANGES REQUESTED @ 347ff9c8).
     group: 작업 위치
     set_by: [user]
   require_plan_closure:
@@ -573,11 +575,13 @@ rules:
     deliver: [branch-setup, commit, rebase, integration-request, landing-declined, landed, wrapup]
     effect: {deny: git.merge, target: master}
   # no-master-merge에 있던 「master 체크아웃 후 커밋」 금지를 떼어 낸 조건부
-  # 규칙(claunch-cetzf.2). 시작 입력 allow_work_on_main이 켜진 런에는 전달되지
-  # 않는다 — 그 런은 사용자의 명시적 지시로 master 체크아웃에 커밋한다. 머지·
-  # push 금지(no-master-merge와 spec.invariants)는 두 경우 모두 그대로다.
+  # 규칙(claunch-cetzf.2). branch-setup이 mode=main(시작 입력 allow_work_on_main을
+  # 켠 회차)을 기록한 회차에는 전달되지 않는다 — 그 회차는 사용자의 명시적
+  # 지시로 master 체크아웃에 커밋한다. 머지·push 금지(no-master-merge와
+  # spec.invariants)는 두 경우 모두 그대로다. 조건이 입력 대신 mode를 읽는
+  # 것은 회차 도중 입력이 바뀌어도 실제 작업 위치를 따르기 위해서다.
   no-master-commit:
-    when: "$data.inputs.allow_work_on_main != true"
+    when: "$result['branch-setup'].value.mode != 'main'"
     text: |
       ── 금지: master 체크아웃에서 커밋하지 않는다 ──
       master를 체크아웃한 채 커밋·리베이스·cherry-pick 하지 않는다. 이
@@ -585,18 +589,30 @@ rules:
       master를 움직였다면 그 자체가 사고다.
     why: >-
       claunch-97knp: master 반영 경로는 리더의 통합 단계 하나다. 사용자가
-      시작 입력 allow_work_on_main을 켠 런만 예외다(claunch-cetzf).
-    deliver: [branch-setup, commit, rebase, integration-request, landing-declined, landed, wrapup]
-  work-on-main:
+      시작 입력 allow_work_on_main을 켜 branch-setup이 mode=main을 기록한
+      회차만 예외다(claunch-cetzf).
+    deliver: [commit, rebase, integration-request, landing-declined, landed, wrapup]
+  branch-on-main:
     when: "$data.inputs.allow_work_on_main == true"
     text: |
-      ── 이 런은 master에서 직접 작업한다 (시작 입력 allow_work_on_main=true) ──
+      ── 이 회차는 master에서 직접 작업한다 (시작 입력 allow_work_on_main=true) ──
       사용자가 이 세션의 작업 위치를 master로 지정했다. 이 세션에만 적용된다.
-      · branch-setup: 1의 「통합 대상이 아니다」 조건과 3의 공유·메인 체크아웃
-        판정을 둘 다 건너뛴다. 새 브랜치·워크트리를 만들지 않고, 지금 서 있는
-        체크아웃에서 `git switch master`만 한다(미커밋 변경이 있으면 버리지 않고
-        소유를 확인한다). 보고는 branch=master, base=master, base_hash=지금
-        master 해시, mode=main, shared=판정하지 않았으면 false.
+      1의 「통합 대상이 아니다」 조건과 3의 공유·메인 체크아웃 판정을 둘 다
+      건너뛴다. 새 브랜치·워크트리를 만들지 않고, 지금 서 있는 체크아웃에서
+      `git switch master`만 한다(미커밋 변경이 있으면 버리지 않고 소유를
+      확인한다). 보고는 branch=master, base=master, base_hash=지금 master 해시,
+      mode=main, shared=판정하지 않았으면 false. 뒤의 커밋·착지·마감은 이
+      mode를 따른다.
+    why: >-
+      claunch-cetzf: 사용자가 명시적으로 지정한 런에서 워커가 master 작업을
+      매번 거부하던 것을 입력 하나로 건너뛴다.
+    deliver: [branch-setup]
+  work-on-main:
+    when: "$result['branch-setup'].value.mode == 'main'"
+    text: |
+      ── 이 회차는 master에서 작업 중이다 (branch-setup mode=main) ──
+      branch-setup이 시작 입력 allow_work_on_main에 따라 이 회차의 작업
+      위치를 master 체크아웃으로 기록했다. 이 세션에만 적용된다.
       · commit: master 체크아웃에 기능 커밋을 직접 쌓는다. 접을 피처 브랜치가
         없으므로 --no-ff 머지는 없다. push 하지 않는다.
       · 위임 fork 자식은 부모와 같은 자리(이 체크아웃의 master)에서 일한다.
@@ -611,7 +627,9 @@ rules:
     why: >-
       claunch-cetzf: 사용자가 명시적으로 지정한 런에서 워커가 master 작업을
       매번 거부하던 것을 입력 하나로 건너뛴다. 머지·push 금지는 유지한다.
-    deliver: [branch-setup, delegate-work, commit, main-landed, wrapup]
+      조건이 입력 대신 그 회차의 mode를 읽는 것은 회차 도중 입력이 바뀌어도
+      실제 작업 위치를 따르기 위해서다.
+    deliver: [delegate-work, commit, main-landed, wrapup]
   no-premature-rebase:
     text: |
       **작업 중에는 통합 대상을 따라가지 않는다.** base를 최신으로 맞추는
@@ -1445,12 +1463,14 @@ nodes:
            mode: "str?"}
     effects: [fs.write, git.branch]
 
-  # allow_work_on_main 런의 착지 대체(claunch-cetzf.2). land 절차의 첫 문장
-  # main-gate가 이 작업 뒤 landed로 반환한다 — 착지 요청·push·PR이 없다.
+  # branch-setup이 mode=main을 기록한 회차의 착지 대체(claunch-cetzf.2). land
+  # 절차의 첫 문장 main-gate가 이 작업 뒤 landed로 반환한다 — 착지 요청·push·
+  # PR이 없다.
   main-landed:
     title: master 커밋 확인 (착지 생략)
     prompt: |
-      시작 입력 allow_work_on_main이 켜진 런이라 착지 단계를 건너뛴다. 이
+      이 회차의 branch-setup이 mode=main(시작 입력 allow_work_on_main)으로
+      master 체크아웃에서 작업했으므로 착지 단계를 건너뛴다. 이
       회차가 master 체크아웃에 쌓은 커밋을 확인해 보고한다:
       `git log --oneline ${result['branch-setup'].value.base_hash}..master`.
       push·PR·착지 요청을 하지 않는다. 작업 트리가 깨끗한지
@@ -3036,7 +3056,8 @@ nodes:
       커밋 해시·테스트 수치가 담긴 완료 보고가 기록되고 같은 묶음이 이슈
       코멘트로도 남았다. 메시에 가입한 상태면 상위에게 nudge 한 줄이
       나갔다(큐에 일감이 남아 있으면 보내지 않았다). master는 움직이지
-      않았다 — 시작 입력 allow_work_on_main이 켜진 런만 예외로, master
+      않았다 — branch-setup이 mode=main(시작 입력 allow_work_on_main)을 기록한
+      회차만 예외로, master
       체크아웃의 로컬 커밋이 허용되고 머지·push는 없다.
     # v1 commit 스텝의 {do: checks, at: leave}. 이 작업을 떠나는 순간 데몬이
     # 상태 점검 재보고 요청을 타이핑한다(위 프롬프트 3번).
@@ -5978,12 +5999,15 @@ procedures:
       # 그랬던 경로).
       pr-submitted: {url: "str?", number: "int?", tip: "str?"}
     body:
-      # allow_work_on_main 런(claunch-cetzf.2): 착지 요청·rebase·리뷰·push를
+      # branch-setup이 mode=main을 기록한 회차(claunch-cetzf.2): 착지 요청·rebase·리뷰·push를
       # 건너뛰고 master 커밋 해시를 landed로 반환한다. worker-round의 catch
       # landed가 배치를 끝내고 wrapup이 그 해시로 이슈를 닫는다.
       - id: main-gate
         cond:
-          - if: "$data.inputs.allow_work_on_main == true"
+          # 입력이 아니라 그 회차의 mode를 읽는다: 피처 브랜치를 판 뒤 입력을
+          # 켜도 착지 요청 없이 닫히지 않고, master에 커밋한 뒤 꺼도 master
+          # 브랜치로 통합 요청을 내지 않는다(리뷰 CHANGES REQUESTED @ 347ff9c8).
+          - if: "$result['branch-setup'].value.mode == 'main'"
             then:
               - main-landed
               - return: landed
@@ -7010,8 +7034,8 @@ procedures:
                       (`<세션>-` 접두사, 이미 있으면 순번)도 그 단계와 같다.
                       이 회차는 스택을 싣는 것이 목적이므로, 재사용을 고르면
                       그 브랜치가 이미 master에 착지하지 않았는지 먼저 본다.
-                      앞 branch-setup의 mode가 main(시작 입력 allow_work_on_main=
-                      ${data.inputs.allow_work_on_main})이면 스택을 master로 머지할
+                      앞 branch-setup의 mode가 main(지금
+                      ${result['branch-setup'].value.mode})이면 스택을 master로 머지할
                       수 없다 — 회차 브랜치를 자르지 말고 사용자에게 물어 답을
                       이슈에 기록한다.
                   고를 것:
