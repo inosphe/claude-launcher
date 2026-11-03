@@ -2009,6 +2009,12 @@ function restoreSessionForm(parked) {
   const body = $("modal-body");
   body.innerText = "";
   body.appendChild($("new-session"));
+  // The question's own answers go with the question. Left in the bar they
+  // would stand over a form that never asks them again, and a press on one
+  // settles a promise that settled already — the button would only blink.
+  // openSessionModal leaves this bar empty and puts the form's Cancel inside
+  // the form, so empty is what the form's own state looks like.
+  $("modal-actions").innerHTML = "";
   // The form's own ways out, put back exactly as openSessionModal set them.
   overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
   document.addEventListener("keydown", sessionModalKey);

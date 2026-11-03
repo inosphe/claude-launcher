@@ -360,6 +360,11 @@ function overFormWorld() {
           [typeof w.doc.listeners.keydown, w.doc.listeners.keydown === undefined],
           ["function", false]);
     check("...and the session modal was never closed", w.state.closed, 0);
+    // The question's answers go with the question: left in the bar they
+    // stand over a form that never asks them again, and a press on one
+    // settles a promise that settled already (claunch-9mwba review).
+    check("...with the question's own buttons gone from the action bar",
+          w.els["modal-actions"].children.length, 0);
   }
 
   {
@@ -377,6 +382,8 @@ function overFormWorld() {
     check("...and the form is in the dialog for the launch that follows",
           w.els["modal-body"].children.includes(form), true);
     check("...with the session modal still open", w.state.closed, 0);
+    check("...and no answer of the question left behind in the bar",
+          w.els["modal-actions"].children.length, 0);
   }
 
   if (failures) {

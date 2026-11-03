@@ -110,6 +110,11 @@ const TYPED = 'form typing that must survive';
     'New session', '...under its own title, not the question’s');
   assert.equal(await page.evaluate(()=>posts.length), 0,
     '...and nothing was sent');
+  // The answer's own buttons are the question's, not the form's: a bar left
+  // holding them offers a press that only settles an already-settled promise
+  // (claunch-9mwba review).
+  assert.equal(await page.locator('#modal-actions button').count(), 0,
+    '...and the question’s buttons are gone with it');
 
   // The explicit start still launches, without the skip args.
   await submit();
