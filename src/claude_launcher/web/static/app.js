@@ -19801,6 +19801,10 @@ function configureSessionFork(source) {
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
   f.quick_fork_self_merge.checked = false;
+  // The origin's side items start unchecked: the conversation is always
+  // copied, and a copy that carried the plan or the open questions by
+  // default would change every existing fork (claunch-yydhs).
+  for (const key of ["plan", "qa", "threads"]) f[`quick_fork_copy_${key}`].checked = false;
   quickForkFill(f.quick_fork_place, [
     { value: "child", label: `As child of ${source.name} (recommended)` },
     { value: "sibling", label: inherited.parent
@@ -19954,6 +19958,10 @@ function quickForkRequestOptions(f, view) {
   if (mesh && mesh !== "-") options.mesh = mesh;
   const wf = f.quick_fork_workflow.value;
   if (wf && wf !== "-") options.workflow = wf;
+  // The origin's side items (claunch-yydhs). Omitted when nothing is
+  // ticked, so an ordinary fork sends exactly what it always sent.
+  const copy = ["plan", "qa", "threads"].filter((key) => f[`quick_fork_copy_${key}`].checked);
+  if (copy.length) options.copy = copy;
   const inputsBox = $("new-quick-fork-inputs");
   if (options.workflow && inputsBox && !inputsBox.classList.contains("hidden")) {
     options.cflow_inputs = cflowInputsValues(inputsBox);
@@ -20010,6 +20018,7 @@ async function quickForkSession(name, task, options, view = {}) {
   if (options && options.role) body.role = options.role;
   if (options && options.sibling) body.sibling = true;
   if (options && options.self_merge_allowed) body.self_merge_allowed = true;
+  if (options && options.copy && options.copy.length) body.copy = options.copy;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -55229,8 +55238,9 @@ function sessionFormConfig(mode) {
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
-        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge"],
-      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs"] },
+        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge",
+        "quick_fork_copy_plan", "quick_fork_copy_qa", "quick_fork_copy_threads"],
+      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs", "copy"] },
   };
   return modes[mode] || modes.new;
 }

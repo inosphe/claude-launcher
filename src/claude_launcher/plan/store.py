@@ -423,6 +423,27 @@ class PlanStore:
                                      "updated_at": r["updated_at"], **summary}
         return out
 
+    # -- the daemon's copy (a quick-fork, claunch-yydhs) -------------------
+
+    def copy(self, source: str, target: str, *, actor: str = "daemon") -> bool:
+        """Copy ``source``'s plan onto ``target`` as a new plan: the same
+        steps, statuses, the user's decisions and the closure items, so a
+        quick-fork that asked to carry the plan shows what the origin shows.
+        The copy starts at revision 1 with its own ids unchanged, because
+        node ids are the session's and a decision's result rides its node.
+        Nothing lands when the source has no plan or the target already has
+        one; returns whether a plan was written."""
+        with self._write() as db:
+            if self._load(db, target) is not None:
+                return False
+            src = self._load(db, source)
+            if src is None:
+                return False
+            body = {k: src.get(k) for k in ("title", "goal", "issue", "context", "steps", "closure")}
+            self._store(db, target, None, body)
+            self._event(db, target, actor, "copy", 1, data={"from": source})
+            return True
+
     # -- the session's writes ---------------------------------------------
 
     def set(self, actor: str, session: str, revision, *, title, goal=None, issue=None, steps=None, closure=None,
