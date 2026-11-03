@@ -3413,7 +3413,10 @@ PR은 닫고 브랜치는 지웠다.
   디렉터리에서 일한다.
 - `land` 절차의 첫 문장 `main-gate`는 `mode == 'main'`인 회차에서 `main-landed`
   (master 커밋 해시 확인) 뒤 `landed`를 반환한다. rebase·리뷰·착지 요청·PR·push는
-  돌지 않고, wrapup은 그 해시로 이슈를 닫는다.
+  돌지 않고, wrapup은 그 해시로 이슈를 닫는다. `land(mode=stack-only)`는 이
+  갈래에 들지 않는다. stack-only 회차는 branch-setup을 돌지 않아 `mode`가 앞
+  회차 값으로 남고, 그 회차가 할 일은 자식 스택의 착지(stack-landing)이기
+  때문이다(리뷰 CHANGES REQUESTED @ ea06fa49).
 - 회차 도중 사람이 입력을 바꿔도 그 회차의 착지 경로와 규칙 문구는 바뀌지 않는다.
   바뀐 값은 다음 회차의 branch-setup부터 적용된다. 착지 시점에 입력을 읽으면
   피처 브랜치를 판 뒤 입력을 켠 회차가 착지 요청 없이 이슈를 닫는다(리뷰

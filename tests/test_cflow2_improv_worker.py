@@ -1252,6 +1252,19 @@ def test_land_follows_the_mode_branch_setup_recorded(tmp_path, monkeypatch, flag
         assert [c["label"] for c in st["choices"]] == ["landing"]
 
 
+def test_a_stack_only_land_ignores_the_mode_a_past_round_left(tmp_path, monkeypatch):
+    """A stack-only round runs no branch-setup, so the mode is a past round's.
+    That round lands the children's stack: main-gate stays shut and the stack
+    cut is next (review CHANGES REQUESTED @ ea06fa49)."""
+    body = [{"try": ["branch-setup", {"call": "land", "with": {"mode": "stack-only"}}],
+             "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {"allow_work_on_main": True})
+    st = _branch_setup(st, kw, "main")
+    labels = [t["label"] for t in st["tasks"]]
+    assert "main-landed" not in labels
+    assert labels == ["stack-cut"]
+
+
 def test_settle_waits_for_plan_closure_without_a_deadline_when_required(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
 

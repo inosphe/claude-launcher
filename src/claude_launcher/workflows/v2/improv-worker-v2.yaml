@@ -6007,7 +6007,10 @@ procedures:
           # 입력이 아니라 그 회차의 mode를 읽는다: 피처 브랜치를 판 뒤 입력을
           # 켜도 착지 요청 없이 닫히지 않고, master에 커밋한 뒤 꺼도 master
           # 브랜치로 통합 요청을 내지 않는다(리뷰 CHANGES REQUESTED @ 347ff9c8).
-          - if: "$result['branch-setup'].value.mode == 'main'"
+          # stack-only 회차는 branch-setup을 돌지 않아 그 mode가 앞 회차 값으로
+          # 남는다. 그 회차는 자식 스택을 착지시키는 회차이므로 이 갈래에 들지
+          # 않고 stack-landing으로 간다(리뷰 CHANGES REQUESTED @ ea06fa49).
+          - if: "$params.mode != 'stack-only' and $result['branch-setup'].value.mode == 'main'"
             then:
               - main-landed
               - return: landed
