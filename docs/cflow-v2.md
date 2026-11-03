@@ -206,6 +206,14 @@ nodes:
   데몬이 verify를 실행하는 경로(사람의 report, 이동 요청 처리, 위임 결과 제출)에서
   데몬 프로세스의 값은 어느 세션도 아니므로, `tools/`의 게이트가 「내 체크아웃」
   「내 보고서」를 찾지 못했다(claunch-2yiij.2).
+- 실행 셸: 문자열 명령은 POSIX 셸에서 돈다(`runtime.shell_command`). POSIX에서는
+  `shell=True`가 그 셸이고, Windows에서는 PATH에 있는 `bash`로 `bash -c <명령>`을
+  돌린다 — `shell=True`는 cmd.exe를 골라 `"$CFLOW_IN_KEY"`를 전개하지 않으므로,
+  같은 verify가 bash에서는 통과하고 cmd.exe에서는 인용부호가 붙은 채 프로그램에
+  닿는다(claunch-2kz0r). POSIX 셸이 없는 Windows에서는 종전대로 cmd.exe로 돌아간다.
+  argv 명령(argv 목록)은 셸 없이 그대로 실행한다. `CLAUNCH_CFLOW_SHELL`로 덮어쓴다:
+  `cmd`·`cmd.exe`·`default`·`platform`은 플랫폼 셸, 그 밖의 값은 그 셸의 경로다.
+  wait·모니터의 probe도 같은 규칙이다(`daemon/cflow2_clock.run_probe`).
 - 비동기 실행: `flow_report`는 작업을 `verifying` 상태로 두고(저널
   `verify_started`) 바로 돌아온다. 응답에 `verifying`이 실린다. 명령은 MCP 서버
   프로세스의 백그라운드 스레드에서 런 잠금 밖으로 실행된다. 끝나면 잠금을 잡고, 같은
