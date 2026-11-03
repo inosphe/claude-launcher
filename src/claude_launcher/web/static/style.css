@@ -666,8 +666,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
    scroll position for a card that is already in hand.
 
    min       one line: dot, name, role. Reviewer and oneshot rows.
-   compact   two lines: name, briefing one-line, plus the status-check chips.
-             The default.
+   compact   the name line, the briefing one-line, the status-check chips,
+             and the reader's own note when the session has one. The default.
    expanded  every line the row has, plus the briefing card.
 
    `.rail-actions` belongs to expanded cards, with one named pair of
@@ -681,12 +681,21 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
    refresh labels off the identity line also keeps the profile position
    stable.
 
-   `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
-   case: they SAY something the name and the dot cannot, so both survive the
-   compact card. The chips are what the agent reported about its own work.
+   `.rail-quiet` (next paragraph), `.rail-status-checks` and `.rail-note` are
+   the opposite case: they SAY something the name and the dot cannot, so all
+   three survive the compact card. The chips are what the agent reported about
+   its own work; the note is the one line on the card the reader wrote — a
+   folded card that hid it would hide the reader's own words from the rail
+   they annotate it on (claunch-5b12o, operator request: "카드가 fold 상태일
+   때도 'note' 가 표시되도록"). A session with no note draws no line at all
+   (app.js decorateNoteRow removes it), so the extra height is paid only by
+   the rows somebody annotated.
+
+   The chips are what the agent reported about its own work.
    They do not reach the one-line card: that card exists for roles a fleet
    holds many of at once, it is specified as the dot, the name and the role,
-   and "collapsed" in the reader's request names the compact card.
+   and "collapsed" in the reader's request names the compact card. The note
+   does not reach it either, for the same reason (see the block above).
 
    Hidden with `display: none` rather than `visibility`, so an expanded row
    is the only one whose height counts these lines at all -- which is what
@@ -742,7 +751,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 #session-list li[data-rail-mode="compact"] .rail-seen,
 #session-list li[data-rail-mode="compact"] .rail-life,
 #session-list li[data-rail-mode="compact"] .rail-quiet:not(:has(.quiet-fault, .quiet-hold, .quiet-waiting)),
-#session-list li[data-rail-mode="compact"] .rail-note,
 #session-list li[data-rail-mode="compact"] .rail-progress,
 #session-list li[data-rail-mode="compact"] .rail-procs,
 #session-list li[data-rail-mode="compact"] .rail-commits,

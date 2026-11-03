@@ -7,8 +7,9 @@
      min      one line: the dot, the name, the role. Reviewer and oneshot
               rows: a fleet holds many of them and their cards differ only
               in the name.
-     compact  the name line, the briefing one-line and the status-check
-              chips. Every other row.
+     compact  the name line, the briefing one-line, the status-check
+              chips, and the reader's own note when the session has one.
+              Every other row.
      expanded every line, plus the briefing card. The session the reader is
               on — the terminal on screen, the detail panel's subject, or a
               pinned one.
@@ -251,6 +252,24 @@ for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-seen", ".sess-brief"])
 ok("a compact card keeps the briefing one-line — it is the card's summary",
    !/#session-list li\[data-rail-mode="compact"\][^{]*\.rail-brief[^{]*\{/.test(plain),
    "a rule hides .rail-brief on a compact card");
+/* The reader's own note survives the compact card (claunch-5b12o, operator
+   request). It is the one line on the row the person wrote, and the compact
+   density is what every row the reader is not on wears — hiding it there hid
+   the reader's words from the rail the note exists to annotate. Written the
+   same shape as the chips' defence below: the line is drawn because NO rule
+   hides it, so a later `display: none` added for the compact density fails
+   here rather than quietly taking the note back off the default card. The
+   one-line (min) card keeps its own hidden list, note included. */
+const compactNote = plain.match(
+  /#session-list li\[data-rail-mode="compact"\][^{]*\.rail-note[^{]*\{([^}]*)\}/);
+ok("a compact card keeps the reader's note — no rule hides it",
+   !compactNote || !/display:\s*none/.test(compactNote[1]),
+   compactNote ? compactNote[1].trim() : "no rule");
+ok("...while the one-line card still draws none of it",
+   !!plain.match(/#session-list li\[data-rail-mode="min"\][^{]*\.rail-note[^{]*\{([^}]*)\}/)
+     && /display:\s*none/.test(plain.match(
+       /#session-list li\[data-rail-mode="min"\][^{]*\.rail-note[^{]*\{([^}]*)\}/)[1]),
+   "the min card's .rail-note rule is gone");
 
 /* Compact cards hide every action EXCEPT the spawn+pin pair the operator
    asked back onto the default card (claunch-g6ecv): the `+` spawns a child
