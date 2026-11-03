@@ -233,6 +233,9 @@ def test_an_api_mismatch_is_a_placeholder_not_a_refusal(proj):
     path.write_text(REVIEW_LAYOUT.replace("api: 1", "api: 2"), encoding="utf-8")
     chart = layers.load("layout-demo", str(proj))  # still compiles
     assert chart.meta["layouts"]["df2s.review@1"]["api"] == 2
+    # docs 2.14 and layouts.py promise a compile warning here, not only the
+    # placeholder the served view model carries.
+    assert any("df2s.review@1" in w and "api 2" in w for w in chart.warnings), chart.warnings
     view = layouts.view_model(chart)
     # the payload is what this build speaks; the mismatch is visible in it
     assert view["api"] == layouts.SUPPORTED_API
@@ -303,3 +306,23 @@ def test_a_run_serves_its_layout_view_model(proj):
         assert missing.status == 404
 
     _http(go)
+
+
+def test_a_layer_changed_only_by_a_layout_reports_drift(home, tmp_path, monkeypatch):
+    """``layers._live_digests`` caches by file stamp; the stamp has to cover
+    ``layouts/`` too, or a package whose only move is a layout keeps answering
+    from the previous cache and reports no drift for it."""
+    live = tmp_path / "package-v2"
+    live.mkdir()
+    (live / "layout-demo.yaml").write_text(WORKFLOW, encoding="utf-8")
+    monkeypatch.setattr(layers, "live_package_dir", lambda: live)
+    monkeypatch.setattr(layers, "_PINNED", None)
+    monkeypatch.setattr(layers, "_LIVE", None)
+    layers.pin_package(tmp_path / "pinned")
+    # the cache is warm from this read, exactly as it is after a drift view
+    assert layers.package_drift()["added"] == []
+    (live / layouts.LAYOUT_DIR).mkdir()
+    (live / layouts.LAYOUT_DIR / "df2s.extra.yaml").write_text(
+        REVIEW_LAYOUT.replace("df2s.review", "df2s.extra"), encoding="utf-8")
+    drift = layers.package_drift()
+    assert drift["added"] == ["layouts/df2s.extra.yaml"], drift

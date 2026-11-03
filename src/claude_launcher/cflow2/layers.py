@@ -144,12 +144,15 @@ def _live_digests() -> Dict[str, str]:
     global _LIVE
     base = live_package_dir()
     stamp = []
-    try:
-        for path in sorted(base.glob("*.yaml")):
-            st = os.stat(path)
-            stamp.append((path.name, st.st_mtime_ns, st.st_size))
-    except OSError:
-        pass
+    # The stamp has to move with everything ``_digests`` folds -- the layout
+    # files under ``layouts/`` included -- or a layer whose only change is a
+    # new or edited layout keeps answering from the previous cache entry.
+    for source, name in _layer_files(base):
+        try:
+            st = os.stat(source)
+        except OSError:
+            continue
+        stamp.append((name, st.st_mtime_ns, st.st_size))
     key = tuple(stamp)
     if _LIVE is None or _LIVE[0] != key:
         _LIVE = (key, _digests(base))

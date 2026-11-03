@@ -2442,6 +2442,13 @@ def compile_text(text: str, *, source: str = "",
     for ref, entry in resolved_layouts.items():
         if entry.get("error"):
             ctx.warnings.append(f"layout {ref}: {entry.get('why') or entry['error']}")
+        elif entry.get("api", _layouts.SUPPORTED_API) != _layouts.SUPPORTED_API:
+            # Still a warning, never an error: the run starts and the served
+            # view model shows a placeholder where the layout would be
+            # (docs/cflow-v2.md 2.14, cflow2/layouts.py).
+            ctx.warnings.append(
+                f"layout {ref}: api {entry.get('api')} is not this build's api "
+                f"{_layouts.SUPPORTED_API} -- it is served as a placeholder")
 
     chart = ir.Chart(
         name=name,
