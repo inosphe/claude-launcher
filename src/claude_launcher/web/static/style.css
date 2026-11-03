@@ -4153,6 +4153,20 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: SFMono-Regular, Consolas, monospace;
 }
+/* The automatic key switch is ON for this session (claunch-d2t79). Deliberately
+   a different shape from the key chip beside it (a short word, not a masked
+   key) so the two never read as the same fact: the chip names the key, this
+   says the daemon may move the session to another one on a usage limit. */
+#session-list .sess-auto-key {
+  flex: none; background: none; border: 1px solid #9e6a03;
+  border-radius: 9px; color: #d29922; font-size: 9px; line-height: 1;
+  letter-spacing: .04em; padding: 2px 5px; cursor: pointer;
+}
+#session-list .sess-auto-key:hover { color: #e3b341; border-color: #e3b341; }
+.sess-key-section { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.key-picker-auto { margin-top: 8px; }
+.key-picker-auto-label { display: flex; align-items: center; gap: 6px; }
+.key-picker-auto-note { margin-top: 4px; }
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }

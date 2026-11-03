@@ -2597,6 +2597,21 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_auto_key_switch(self, name: str, on: bool) -> AnySession:
+        """Set (or clear) this session's permission to be switched on a limit.
+
+        A definition edit, not a restart (:meth:`set_key` is the restart
+        path): the answer only says what the daemon may do *next* time a
+        usage limit appears, so changing it now costs nothing and changes
+        nothing about the running process. The clock reads it off the live
+        session each pass (:mod:`daemon.key_switch`), so the switch applies
+        without anything else being woken.
+        """
+        session = self.get(name)
+        session.sdef = replace(session.sdef, auto_key_switch=bool(on))
+        self.persist()
+        return session
+
     def set_note(self, name: str, note: str) -> AnySession:
         """Set (or, with an empty value, clear) a session's user note.
 

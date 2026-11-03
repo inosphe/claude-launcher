@@ -50,7 +50,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import config, credentials, harnesses, lineage, metering, providers, runner, store
 from . import profile as profile_mod
@@ -1552,12 +1552,132 @@ def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
     drops the windows; :func:`report_for_token` is the same read for callers
     that display them.
     """
-    report = report_for_token(profile, token)
+    health = health_for_token(profile, token)
+    return None if health is None else health.peak
+
+
+#: Utilization (0-100) at or above which a window counts as spent. The readers
+#: report integers, so the line is the reported limit itself; a key sitting at
+#: 99% is still spent by the time a restart finishes, and the switch has no
+#: second chance to reconsider, so "about to stop" is not a useful answer here.
+AT_LIMIT = 100.0
+
+#: Window ``status`` words that mean the plan behind this key is spent whatever
+#: the percentage says. The readers pass three different vocabularies through
+#: (the OAuth header reader forwards the endpoint's own word, the balance
+#: readers set their own), so this is a set of the words seen so far and not a
+#: closed enum -- anything unrecognised is judged by its numbers instead.
+SPENT_STATUSES = ("blocked", "rejected", "rate_limited", "exceeded", "limited")
+
+
+@dataclass(frozen=True)
+class KeyHealth:
+    """One key's usage as a *selection* needs it.
+
+    ``peak`` is the highest utilization across the account's windows (the same
+    number :func:`utilization_for_token` has always answered) and is what the
+    "usage min" comparison orders by. ``blocked`` names the window that is
+    already spent, and is what makes a key unusable however low its other
+    windows are: switching onto it would run straight into the same stop.
+    """
+
+    peak: float
+    blocked: str = ""
+    #: ``(name, utilization)`` per window, in the report's own order. Kept so
+    #: two keys whose peaks tie can be told apart by the *shorter* window
+    #: first (see :func:`window_rank`): the 5-hour plan comes back within
+    #: hours and the monthly one does not, so the key that is lower on the
+    #: short window is the better bet for the next work session.
+    windows: Tuple[Tuple[str, float], ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return not self.blocked
+
+
+#: Substrings that place a window name on the 5-hour / week / month ladder.
+#: The readers name their windows freely (``five_hour``, ``7d``,
+#: ``monthly_spend``, a Codex ``duration`` spelling), so this matches substrings
+#: rather than an enum, shortest window first.
+_WINDOW_LADDER = (
+    ("five_hour", 0), ("5h", 0), ("7d", 1), ("seven_day", 1), ("week", 1),
+    ("month", 2), ("30d", 2),
+)
+
+
+def window_rank(name: str) -> int:
+    """Where a window name sits on the 5-hour(0) / week(1) / month(2) ladder.
+
+    ``3`` for a window this does not recognise (a credit balance, a per-model
+    bucket): it takes part in the "spent" test and in the peak, but sorts
+    after the three windows the operator's rule names.
+    """
+    text = str(name or "").strip().lower()
+    for needle, rank in _WINDOW_LADDER:
+        if needle in text:
+            return rank
+    return 3
+
+
+def tie_break_key(health: "KeyHealth") -> tuple:
+    """The ordering that separates two keys whose peaks are equal.
+
+    Shorter window first, then the next: a key lower on the 5-hour plan is
+    free sooner, which is what a restart is being spent on.
+    """
+    ranked = sorted(
+        (window_rank(name), float(value)) for name, value in health.windows
+    )
+    return (health.peak, tuple(ranked))
+
+
+def health_for_report(report: Optional[UsageReport]) -> Optional[KeyHealth]:
+    """The selection view of one :class:`UsageReport`, or ``None`` with none.
+
+    Peak first, then the spent windows: a key is unusable when ANY window has
+    reached its limit, because the session that lands on it will hit that
+    window next -- that is exactly the situation the switch exists to leave.
+    """
     if report is None:
         return None
     values = [
-        window.utilization
+        float(window.utilization)
         for window in report.windows
         if isinstance(window.utilization, (int, float))
     ]
-    return max(values) if values else None
+    windows = tuple(
+        (str(window.name or ""), float(window.utilization))
+        for window in report.windows
+        if isinstance(window.utilization, (int, float))
+    )
+    blocked = ""
+    for window in report.windows:
+        if _window_spent(window):
+            blocked = str(window.name or "")
+            break
+    if not values and not blocked:
+        return None
+    return KeyHealth(
+        peak=max(values) if values else AT_LIMIT, blocked=blocked, windows=windows
+    )
+
+
+def _window_spent(window: UsageWindow) -> bool:
+    status = str(window.status or "").strip().lower()
+    if status in SPENT_STATUSES:
+        return True
+    if window.remaining_dollars is not None and window.remaining_dollars <= 0:
+        return True
+    return isinstance(window.utilization, (int, float)) and float(
+        window.utilization
+    ) >= AT_LIMIT
+
+
+def health_for_token(profile: Profile, token: str) -> Optional[KeyHealth]:
+    """:func:`health_for_report` for one key's own token (see its docstring).
+
+    Same reader rules as :func:`report_for_token`: only the keyed readers can
+    answer, and the login-scoped ones answer ``None`` because their usage
+    belongs to the login.
+    """
+    return health_for_report(report_for_token(profile, token))

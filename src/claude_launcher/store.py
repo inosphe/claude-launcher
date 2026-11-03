@@ -686,6 +686,16 @@ DAEMON_DEFAULTS = {
     # resumed by a person before the reset is not paused again for the same
     # limit. Read live on every pass.
     "fault_auto_pause": True,
+    # Automatic key switch (daemon/key_switch.py, claunch-d2t79): a session
+    # whose own definition asks for it (``SessionDef.auto_key_switch``) and
+    # that hit a usage limit is restarted on another usable key of its
+    # profile's pool before the fault pause would take it. This is how many
+    # times one session may be switched for the *same* fault — the counter is
+    # per (session, fault reset) and lives in the session directory, so it
+    # survives a daemon restart. 0 turns the switch off fleet-wide without
+    # touching each session's own answer. A session that runs out falls back
+    # to the pause exactly as before. Read live on every pass.
+    "fault_key_switch_retries": 1,
     # Staggered restore (daemon/restore_queue.py, claunch-0j6gb.2): at a
     # daemon start, the sessions to bring back are not all launched at once.
     # Each one that would come back with its conversation is filed
