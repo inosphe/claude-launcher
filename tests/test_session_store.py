@@ -128,17 +128,13 @@ def test_migrate_tolerates_a_missing_or_torn_file(tmp_path):
 def _traced(store, monkeypatch):
     """Record the upserts ``store`` issues."""
     upserts = []
-    connect = store._connect
-
-    def traced():
-        conn = connect()
+    # The store keeps one connection for its lifetime (sqlite_shared), so
+    # tracing it once covers every save that follows.
+    with store._connect() as conn:
         conn.set_trace_callback(
             lambda sql: upserts.append(sql)
             if sql.lstrip().upper().startswith("INSERT INTO SESSIONS") else None
         )
-        return conn
-
-    monkeypatch.setattr(store, "_connect", traced)
     return upserts
 
 

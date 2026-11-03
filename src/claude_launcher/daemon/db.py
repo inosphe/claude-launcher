@@ -34,12 +34,12 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-import sqlite3
 import threading
 import uuid
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from .. import sqlite_shared
 from . import paths
 
 log = logging.getLogger(__name__)
@@ -74,6 +74,9 @@ class SessionStore:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # isolation_level "" keeps sqlite3's implicit BEGIN before a write,
+        # which the commit()/rollback() calls below are written against.
+        self._db = sqlite_shared.SharedConnection(self._path, isolation_level="")
         self._init_db()
         #: What this object last committed for each name, read back from the
         #: JSON it wrote (so it shares nothing with the caller's objects).
@@ -96,37 +99,32 @@ class SessionStore:
 
     # -- connection ---------------------------------------------------- #
 
-    def _connect(self) -> sqlite3.Connection:
-        # A fresh connection per operation: writes are a few per second at most,
-        # WAL keeps committed rows visible across connections, and per-op open
-        # sidesteps sharing one sqlite3 connection across the event loop's
-        # callbacks. ``busy_timeout`` is what makes two overlapping daemons wait
-        # for each other's write instead of raising.
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+    def _connect(self):
+        # The store's one connection, held by this thread for the block. It is
+        # opened once: opening and closing a WAL file on different threads at
+        # once deadlocks inside SQLite 3.51.0 (claude_launcher/sqlite_shared.py).
+        # A block that ends with its transaction still open is rolled back,
+        # which is what closing a per-operation connection did. ``busy_timeout``
+        # is what makes two overlapping daemons wait for each other's write
+        # instead of raising.
+        return self._db.use()
+
+    def close_connection(self) -> None:
+        self._db.close()
 
     def _init_db(self) -> None:
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             conn.executescript(_SCHEMA)
             conn.commit()
-        finally:
-            conn.close()
 
     # -- reads --------------------------------------------------------- #
 
     def load_all(self) -> List[dict]:
         """Every session record, oldest row first (insertion order)."""
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             rows = conn.execute(
                 "SELECT data FROM sessions ORDER BY rowid"
             ).fetchall()
-        finally:
-            conn.close()
         out: List[dict] = []
         for (data,) in rows:
             try:
@@ -139,11 +137,8 @@ class SessionStore:
         return out
 
     def count(self) -> int:
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
-        finally:
-            conn.close()
 
     # -- writes -------------------------------------------------------- #
 
@@ -187,67 +182,65 @@ class SessionStore:
         rows = [(self._name_of(e), e) for e in entries]
         rows = [(n, e) for (n, e) in rows if n]
         names = {n for (n, _e) in rows}
-        conn = self._connect()
         written = dict(self._written)
-        try:
-            existing = int(
-                conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            )
-            if prune and not names and existing and not allow_empty:
-                log.warning(
-                    "refusing to clear %d session record(s) for an empty "
-                    "snapshot nobody asked for; keeping them",
-                    existing,
+        with self._connect() as conn:
+            try:
+                existing = int(
+                    conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
                 )
-                prune = False
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key=?", (_WRITER_KEY,)
-            ).fetchone()
-            if self._token is None or (row[0] if row else None) != self._token:
-                # Another writer (an overlapping daemon, a second store on
-                # the same file) may have changed rows this object remembers:
-                # nothing remembered is evidence of what is on disk now.
-                written = {}
-            changed = False
-            for name, entry in rows:
-                if written.get(name) == entry:
-                    continue
-                blob = json.dumps(entry, ensure_ascii=False)
-                conn.execute(
-                    "INSERT INTO sessions(name, data, updated_at) "
-                    "VALUES(?,?,datetime('now')) "
-                    "ON CONFLICT(name) DO UPDATE SET "
-                    "data=excluded.data, updated_at=excluded.updated_at",
-                    (name, blob),
-                )
-                written[name] = json.loads(blob)
-                changed = True
-            if prune:
-                have = [r[0] for r in conn.execute("SELECT name FROM sessions")]
-                for n in have:
-                    if n not in names:
-                        conn.execute("DELETE FROM sessions WHERE name=?", (n,))
-                        written.pop(n, None)
-                        changed = True
-            if changed:
-                token = f"{self._token_base}:{next(self._token_seq)}"
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES(?,?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (_WRITER_KEY, token),
-                )
-                conn.commit()
-                self._token = token
-            else:
-                conn.rollback()
-            self._written = written
-        except BaseException:
-            # What was committed is unknown: the next save writes every row.
-            self._written = {}
-            self._token = None
-            raise
-        finally:
-            conn.close()
+                if prune and not names and existing and not allow_empty:
+                    log.warning(
+                        "refusing to clear %d session record(s) for an empty "
+                        "snapshot nobody asked for; keeping them",
+                        existing,
+                    )
+                    prune = False
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key=?", (_WRITER_KEY,)
+                ).fetchone()
+                if self._token is None or (row[0] if row else None) != self._token:
+                    # Another writer (an overlapping daemon, a second store on
+                    # the same file) may have changed rows this object remembers:
+                    # nothing remembered is evidence of what is on disk now.
+                    written = {}
+                changed = False
+                for name, entry in rows:
+                    if written.get(name) == entry:
+                        continue
+                    blob = json.dumps(entry, ensure_ascii=False)
+                    conn.execute(
+                        "INSERT INTO sessions(name, data, updated_at) "
+                        "VALUES(?,?,datetime('now')) "
+                        "ON CONFLICT(name) DO UPDATE SET "
+                        "data=excluded.data, updated_at=excluded.updated_at",
+                        (name, blob),
+                    )
+                    written[name] = json.loads(blob)
+                    changed = True
+                if prune:
+                    have = [r[0] for r in conn.execute("SELECT name FROM sessions")]
+                    for n in have:
+                        if n not in names:
+                            conn.execute("DELETE FROM sessions WHERE name=?", (n,))
+                            written.pop(n, None)
+                            changed = True
+                if changed:
+                    token = f"{self._token_base}:{next(self._token_seq)}"
+                    conn.execute(
+                        "INSERT INTO meta(key, value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (_WRITER_KEY, token),
+                    )
+                    conn.commit()
+                    self._token = token
+                else:
+                    conn.rollback()
+                self._written = written
+            except BaseException:
+                # What was committed is unknown: the next save writes every row.
+                self._written = {}
+                self._token = None
+                raise
 
     def delete(self, names: Iterable[str]) -> None:
         """Remove the named rows (a no-op for names not present)."""
@@ -255,22 +248,21 @@ class SessionStore:
             self._delete(names)
 
     def _delete(self, names: Iterable[str]) -> None:
-        conn = self._connect()
         try:
-            for name in names:
-                conn.execute("DELETE FROM sessions WHERE name=?", (name,))
-            # Not a save: mark the table as written by nobody, so every
-            # store's next save (this one's too) writes all its rows.
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_WRITER_KEY, uuid.uuid4().hex),
-            )
-            conn.commit()
+            with self._connect() as conn:
+                for name in names:
+                    conn.execute("DELETE FROM sessions WHERE name=?", (name,))
+                # Not a save: mark the table as written by nobody, so every
+                # store's next save (this one's too) writes all its rows.
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (_WRITER_KEY, uuid.uuid4().hex),
+                )
+                conn.commit()
         finally:
             self._written = {}
             self._token = None
-            conn.close()
 
     # -- migration ----------------------------------------------------- #
 
@@ -300,26 +292,20 @@ class SessionStore:
     # -- meta ---------------------------------------------------------- #
 
     def _meta_get(self, key: str) -> Optional[str]:
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key=?", (key,)
             ).fetchone()
-        finally:
-            conn.close()
         return row[0] if row else None
 
     def _meta_set(self, key: str, value: str) -> None:
-        conn = self._connect()
-        try:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES(?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
             conn.commit()
-        finally:
-            conn.close()
 
     # -- helpers ------------------------------------------------------- #
 
