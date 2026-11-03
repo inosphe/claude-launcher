@@ -974,10 +974,13 @@ $("vm-register-go").addEventListener("click", () => {
 
 /* ---- presets ---- */
 let presetRows = [];
+let presetDefaultLost = "";
 async function loadPresets() {
   const note = $("vm-preset-note");
   try {
-    presetRows = (await api("api/vm-presets")).presets || [];
+    const out = await api("api/vm-presets");
+    presetRows = out.presets || [];
+    presetDefaultLost = out.default_lost || "";
     note.hidden = true;
   } catch (e) {
     presetRows = [];
@@ -1019,6 +1022,12 @@ function renderPresets() {
     const li = document.createElement("li");
     const head = document.createElement("strong");
     head.textContent = p.name;
+    if (p.default) {
+      const badge = document.createElement("span");
+      badge.className = "vm-chip ok vm-preset-default-badge";
+      badge.textContent = "기본";
+      head.append(" ", badge);
+    }
     const sub = document.createElement("span");
     sub.className = "sub";
     const when = p.created_at ? new Date(p.created_at * 1000).toLocaleString("ko-KR") : "-";
@@ -1037,7 +1046,13 @@ function renderPresets() {
     manage.textContent = "관리 ⋯";
     manage.setAttribute("aria-expanded", presetManage === p.name ? "true" : "false");
     manage.addEventListener("click", () => { presetManage = presetManage === p.name ? "" : p.name; renderPresets(); });
-    li.append(head, sub, make, manage);
+    const dflt = document.createElement("button");
+    dflt.type = "button";
+    dflt.className = "vm-preset-default-btn";
+    dflt.textContent = p.default ? "기본 해제" : "기본으로 지정";
+    dflt.title = "세션 VM 패널의 '새 VM 만들어 연결'이 쓰는 프리셋";
+    dflt.addEventListener("click", () => setDefaultPreset(p.default ? "" : p.name));
+    li.append(head, sub, make, dflt, manage);
     if (presetManage === p.name) li.appendChild(presetDeleteBox(p.name));
     ul.appendChild(li);
   }
@@ -1047,7 +1062,16 @@ function renderPresets() {
     li.textContent = "프리셋이 없습니다.";
     ul.appendChild(li);
   }
+  const lost = $("vm-preset-default-note");
+  lost.hidden = !presetDefaultLost;
+  lost.textContent = presetDefaultLost;
   syncPresetSave();
+}
+function setDefaultPreset(name) {
+  act(name ? `기본 프리셋 ${name} 지정` : "기본 프리셋 해제", async () => {
+    await post("api/vm-presets-default", { name });
+    await loadPresets();
+  });
 }
 function syncPresetSave() {
   const vm = vms.find((v) => v.id === selected);

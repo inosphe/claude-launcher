@@ -137,6 +137,20 @@ marks (`/api/vm-presets`, `softnet` in the VM record). The panel's static files
 need only a refresh; until the restart the panel says the daemon has no preset
 API.
 
+### The default preset
+
+One preset can be marked as the default; the one-click "new VM" in a session's
+VM panel uses it. Only the user sets it: the page's preset card ("기본으로 지정"
+/ "기본 해제", the chosen card shows a "기본" badge) or
+`claunch vm preset default [NAME | --clear]` (no argument prints it). The route
+is `POST /api/vm-presets-default {"name": ""}` (user only; a session gets 403
+`vm_user_only`; an unknown name is 404 `vm_unknown_preset`; an empty name clears).
+The choice is stored in `vm-presets.json` as `default`. When that preset is
+deleted, or the file no longer lists it, the default is cleared and
+`default_lost` carries the reason (shown under the preset list and by
+`preset default` / `preset list`) until the user chooses again. A restart is
+needed for the new route; the page and CLI changes are picked up on reload.
+
 ### A preset's copy is not a VM
 
 The tart copy `preset-<name>` is the source of later clones; running it as a VM would change

@@ -20,6 +20,8 @@ const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
 const { safeListen } = require("./safe_listen.cjs");
+let PRESET_DEFAULT = "";
+let PRESET_LOST = "";
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
@@ -125,6 +127,11 @@ const server = http.createServer((req, res) => {
         }
         return json(res, { roots: ROOTS, enabled: ROOTS.some((r) => r.ok) });
       }
+      if (p === "/api/vm-presets-default") {
+        PRESET_DEFAULT = body.name || "";
+        PRESET_LOST = "";
+        return json(res, { default: PRESET_DEFAULT, default_lost: "" });
+      }
       if (p === "/api/vm-only") {
         const row = ONLY.find((r) => r.session === body.session);
         if (row) { row.on = body.on; row.since = body.on ? 1700000200 : 0; }
@@ -152,8 +159,9 @@ const server = http.createServer((req, res) => {
     ] });
   }
   if (p === "/api/vm-presets") {
-    return json(res, { presets: [{ name: "gold", tart_name: "preset-gold", description: "깨끗한 설치",
-      source: "alpha", created_at: 1700000000, present: true }] });
+    return json(res, { default: PRESET_DEFAULT, default_lost: PRESET_LOST,
+      presets: [{ name: "gold", tart_name: "preset-gold", description: "깨끗한 설치", default: PRESET_DEFAULT === "gold",
+        source: "alpha", created_at: 1700000000, present: true }] });
   }
   if (p === "/api/webdebug/sessions" && sessionsDown) return json(res, {}, 500);
   if (p === "/api/webdebug/sessions") return json(res, { sessions: [{ name: "s1", status: "running" }] });
@@ -220,6 +228,19 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-activity", { hasText: "gold에서 fresh 만들기 완료" }).waitFor({ timeout: 5000 });
     assert.deepEqual(posts.find(([u]) => u === "/api/vm-presets/gold/create")[1], { id: "fresh" });
     const goldRow = frame.locator("#vm-preset-list li", { hasText: "gold" });
+    // default preset: set from the card (badge), cleared again, and a lost default is announced
+    assert.equal(await goldRow.locator(".vm-preset-default-badge").count(), 0, "no default yet");
+    await goldRow.getByRole("button", { name: "기본으로 지정" }).click();
+    await goldRow.locator(".vm-preset-default-badge").waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm-presets-default").pop()[1], { name: "gold" });
+    await goldRow.getByRole("button", { name: "기본 해제" }).click();
+    await goldRow.getByRole("button", { name: "기본으로 지정" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm-presets-default").pop()[1], { name: "" });
+    PRESET_LOST = "기본 프리셋 'x'이(가) 삭제되어 해제되었습니다";
+    await frame.locator("#vm-presets summary").click();
+    await frame.locator("#vm-presets summary").click();
+    await frame.locator("#vm-preset-default-note", { hasText: "삭제되어 해제" }).waitFor({ timeout: 5000 });
+    PRESET_LOST = "";
     // delete is hidden until "관리" is opened, and then needs the name typed in full
     assert.equal(await goldRow.getByRole("button", { name: "프리셋 삭제" }).count(), 0, "no delete button by default");
     await goldRow.getByRole("button", { name: "관리" }).click();
