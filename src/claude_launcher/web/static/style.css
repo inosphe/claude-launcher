@@ -10426,6 +10426,20 @@ body.split-max #term-wf { flex: 1 1 0; }
 .th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
   border-bottom-left-radius: 3px; }
 .th-msg.th-guest .th-msg-who { color: #d2a8ff; }
+/* Guest marks (claunch-br084): with two or more guests the shared purple
+   bubble is not enough to tell them apart, so each guest also carries a
+   numbered mark whose colour cycles. The bubble background stays the same
+   for every guest; only this mark differs. */
+.th-guest-mark { display: inline-flex; align-items: center; justify-content: center; min-width: 15px;
+  height: 15px; padding: 0 4px; margin-right: 4px; border-radius: 8px; font-size: 10px; font-weight: 700;
+  line-height: 1; color: #0d1117; background: #d2a8ff; vertical-align: middle; }
+.th-guest-mark-1 { background: #d2a8ff; }
+.th-guest-mark-2 { background: #7ee787; }
+.th-guest-mark-3 { background: #79c0ff; }
+.th-guest-mark-4 { background: #ffa657; }
+.th-guest-mark-5 { background: #ff7b72; }
+.th-guest-mark-6 { background: #e3b341; }
+.th-guest-chip .th-guest-mark { margin-right: 3px; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
 /* A thread's chips never push the conversation off screen: the box holds
    at most a few rows and scrolls inside, and it gives way first when the

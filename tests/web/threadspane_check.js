@@ -39,7 +39,9 @@
                   (claunch-uaxp8).
      guests    -- the threads this session is a guest in are listed apart
                   under 초대된 쓰레드 with their owner; a guest's message
-                  shows under its name; 게스트 초대 posts {guest} to
+                  shows under its name; with two or more guests each one's
+                  message and chip carry a numbered, differently coloured
+                  mark (claunch-br084); 게스트 초대 posts {guest} to
                   /guests and a chip's × posts to /guests/<name>/remove;
                   답글 N counts the owner's messages the guest has not read
                   (claunch-p9wes, claunch-p9wes.1).
@@ -167,6 +169,14 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(P.speaker({author: "guest", guest: "s2"}, "s1"), "s2 (게스트)");
   assert.equal(P.speaker({author: "user"}, "s1"), "나");
   assert.equal(P.speaker({author: "system"}, "s1"), "알림", "a daemon notice is not the user's");
+  // claunch-br084: two guests are told apart by a numbered, differently
+  // coloured mark; one guest (or none) gets none.
+  assert.equal(P.guestTags({guests: []}).size, 0);
+  assert.equal(P.guestTags({guests: [{session: "s2"}]}).size, 0, "one guest needs no mark");
+  assert.equal(P.guestTags(null).size, 0);
+  assert.deepEqual([...P.guestTags({guests: [{session: "s2"}, {session: "s3"}, {session: "s4"}]}).values()]
+                     .map((t) => [t.n, t.name, t.cls]),
+                   [[1, "s2", "th-guest-mark-1"], [2, "s3", "th-guest-mark-2"], [3, "s4", "th-guest-mark-3"]]);
   assert.deepEqual(P.allThreads({threads: [{id: "a"}], guest_threads: [{id: "b"}]}).map((t) => t.id), ["a", "b"]);
   assert.deepEqual([...P.unseen([{id: "g", last_seq: 3, last: {author: "guest"}}], {})], ["g"],
                    "a guest's message is news too");
@@ -1022,6 +1032,90 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     gh.querySelector(".th-guest-x").fire("click");
     await settle();
     assert.deepEqual(gcalls.find((c) => c[1].endsWith("/remove")), ["POST", "/api/threads/th-g/guests/s2/remove", {}]);
+    P.unmount();
+  }
+
+  /* guest marks (claunch-br084): with two guests in one thread each guest's
+     message and chip carries a numbered mark, and the two differ; a thread
+     with a single guest keeps the plain bubble. */
+  {
+    const two = {id: "th-m2", session: "s1", title: "Two guests", status: "open", last_seq: 3,
+                 guests: [{session: "s2", invited_by: "user"}, {session: "s3", invited_by: "s2"}],
+                 last: {author: "guest", guest: "s3", body: "from s3"}};
+    const one = {id: "th-m1", session: "s1", title: "One guest", status: "open", last_seq: 1,
+                 guests: [{session: "s2", invited_by: "user"}],
+                 last: {author: "guest", guest: "s2", body: "only me"}};
+    const at = "2026-10-22T00:00:00+00:00";
+    const mapi = async (p) => {
+      let doc = {};
+      if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: [two, one], open: 2, agent_seq: 0};
+      else if (p.startsWith("/api/threads/th-m2?after=")) doc = {thread: two, messages: [
+        {seq: 1, author: "agent", body: "plan", at},
+        {seq: 2, author: "guest", guest: "s2", body: "from s2", at},
+        {seq: 3, author: "guest", guest: "s3", body: "from s3", at}]};
+      else if (p.startsWith("/api/threads/th-m1?after=")) doc = {thread: one, messages: [
+        {seq: 1, author: "guest", guest: "s2", body: "only me", at}]};
+      return {ok: true, status: 200, json: async () => doc};
+    };
+    const mh = document.createElement("div");
+    P.mount(mh, "s1", {api: mapi, storageKey: "mk"});
+    await settle();
+    const marks = mh.querySelectorAll(".th-msg .th-guest-mark");
+    assert.deepEqual(marks.map((n) => n.textContent), ["1", "2"], "each guest message carries its own number");
+    assert.ok(marks[0].classList.contains("th-guest-mark-1"));
+    assert.ok(marks[1].classList.contains("th-guest-mark-2"), "the second guest's mark differs in colour");
+    assert.ok(marks[0].title.includes("s2") && marks[1].title.includes("s3"), "the mark names its guest");
+    assert.equal(mh.querySelectorAll(".th-msg.th-agent .th-guest-mark").length, 0, "the owner's message carries none");
+    assert.deepEqual(mh.querySelectorAll(".th-guest-chip .th-guest-mark").map((n) => n.textContent), ["1", "2"],
+                     "the guest chips carry the same marks as their messages");
+    // the same thread with one guest: no marks at all
+    mh.querySelectorAll(".th-item").find((i) => i.dataset.id === "th-m1").fire("click");
+    await settle();
+    assert.equal(mh.querySelectorAll(".th-guest-mark").length, 0, "one guest is already unambiguous");
+    assert.equal(mh.querySelector(".th-msg-who").textContent, "s2 (게스트)", "the name alone stays");
+    P.unmount();
+  }
+
+  /* scroll (claunch-br084.1): a redraw that brings a new message keeps the
+     place of a reader who scrolled up, and follows it for a reader at the
+     bottom. */
+  {
+    const st = {id: "th-sc", session: "s1", title: "Scroll", status: "open", last_seq: 1,
+                last: {author: "agent", body: "one"}};
+    const at = "2026-10-23T00:00:00+00:00";
+    let messages = [{seq: 1, author: "agent", body: "one", at}];
+    const sapi = async (p) => {
+      let doc = {};
+      if (p.startsWith("/api/threads?session=")) {
+        doc = {session: "s1", open: 1, agent_seq: 0,
+               threads: [{...st, last_seq: messages.length, last: messages[messages.length - 1]}]};
+      } else if (p.startsWith("/api/threads/th-sc?after=")) {
+        doc = {thread: {...st, last_seq: messages.length}, messages};
+      }
+      return {ok: true, status: 200, json: async () => doc};
+    };
+    const sh = document.createElement("div");
+    P.mount(sh, "s1", {api: sapi, storageKey: "sk"});
+    await settle();
+    const first = sh.querySelector(".th-messages");
+    assert.ok(first, "the conversation is drawn");
+    // scrolled up: the new message must not pull the reader down
+    first.clientHeight = 100;
+    first.scrollHeight = 500;
+    first.scrollTop = 120;
+    messages = messages.concat([{seq: 2, author: "guest", guest: "s2", body: "new", at}]);
+    timers.filter(Boolean).forEach((fn) => fn());
+    await settle();
+    assert.equal(sh.querySelector(".th-messages").scrollTop, 120, "a reader above the end keeps their place");
+    // at the bottom: it follows the message
+    const box = sh.querySelector(".th-messages");
+    box.clientHeight = 100;
+    box.scrollHeight = 520;
+    box.scrollTop = 420;
+    messages = messages.concat([{seq: 3, author: "agent", body: "again", at}]);
+    timers.filter(Boolean).forEach((fn) => fn());
+    await settle();
+    assert.equal(sh.querySelector(".th-messages").scrollTop, 520, "a reader at the end follows the new message");
     P.unmount();
   }
 
