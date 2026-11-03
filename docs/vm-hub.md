@@ -151,6 +151,34 @@ deleted, or the file no longer lists it, the default is cleared and
 `preset default` / `preset list`) until the user chooses again. A restart is
 needed for the new route; the page and CLI changes are picked up on reload.
 
+### The session's VM pane (🖥 vm)
+
+The dashboard's session header has a `🖥 vm` button beside qa, threads, cli, run and
+sims. It opens the VM page in session mode (`vm?embed=1&session=<name>`) under the
+terminal. The page is the one implementation: the pane adds no route, and every call
+it makes is an existing user-only route, so a session cannot invoke any of it (403
+`vm_user_only`).
+
+- **Connected VMs**: the VMs with a grant for this session, with state, scope chips and
+  the lock / preset-template marks. "연결 해제" revokes this session's grant only
+  (`POST /api/vm/{id}/revoke {session}`); the confirmation says the VM is not stopped or
+  deleted. Other sessions' grants stay.
+- **새 VM 만들어 연결**: one press, no dialog. It clones the default preset into a VM named
+  `<session>-vm` (`-2`, `-3` ... when taken), then grants `view` + `control`; `exec` and
+  `files` only when ticked (ticking `exec` asks first). The button shows a spinner and cannot
+  be pressed again until the request ends. When the slot limit is full the VM is registered but
+  not started, and the reason is shown (the `preset new` behaviour). With no default preset the
+  button waits for a choice in the preset dropdown, with a pointer to "기본으로 지정".
+  Closing the pane while the clone runs does not stop the daemon's clone; the grant is the
+  step that would then be missing, and "기존 VM 연결" adds it.
+- **기존 VM 연결**: pick a registered VM, tick the scopes, press "연결". A preset-template copy
+  keeps its confirmation; `exec` asks first.
+- **Editing** the selected VM: its permissions row (this session only) and the shared-folder
+  editor are the page's own; the 허용 루트 and never-shared refusals appear as the page shows them,
+  and shared-folder changes apply when the VM is next started (a running VM needs a restart; the pane says so).
+
+Static files only, except the default preset's route (see above), which needs a daemon restart.
+
 ### A preset's copy is not a VM
 
 The tart copy `preset-<name>` is the source of later clones; running it as a VM would change

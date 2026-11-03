@@ -132,3 +132,16 @@ button.vm-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }
 .vm-preset-manage { margin-left: 6px; }
 .vm-preset-manage-box { margin-top: 8px; padding: 8px; border: 1px solid var(--vm-bad); border-radius: 4px; }
 .vm-preset-manage-box input { margin-top: 0; }
+
+#vm-grants-block, #vm-shares-block { display: flex; flex-direction: column; gap: 10px; }
+#vm-sess { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--vm-line); }
+#vm-sess-list { list-style: none; margin: 0; padding: 0; }
+#vm-sess-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--vm-line); }
+#vm-sess-list li[aria-current="true"] { border-left: 3px solid var(--vm-accent); padding-left: 8px; }
+#vm-sess-list .vm-sess-pick { font-weight: 600; }
+/* Session mode (vm?session=<name>): the connected VMs, then that VM's session
+   permissions and shared folders. Everything else on the page is hidden. */
+body.session-mode #vm-side, body.session-mode #vm-requests-box, body.session-mode #vm-lineage,
+body.session-mode #vm-onlymode, body.session-mode #vm-sharing, body.session-mode #vm-empty { display: none; }
+body.session-mode #vm-detail > :not(#vm-grants-block):not(#vm-shares-block) { display: none; }
+body.session-mode #vm-grant-add { display: none; }

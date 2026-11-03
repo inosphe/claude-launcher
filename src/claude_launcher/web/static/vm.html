@@ -59,6 +59,34 @@
     <p class="vm-muted">세션이 vm_request로 요청한 권한과 공유 폴더입니다. 승인하면 권한 부여와 공유 폴더 추가가 한 번에 적용되고, 거절하면 요청만 사라집니다. 세션이 끝나면 대기 중인 요청은 사라지지만 이미 승인된 공유 폴더는 남습니다.</p>
     <div id="vm-requests"></div>
   </section>
+  <section id="vm-sess" aria-label="세션에 연결된 VM" hidden>
+    <h1 id="vm-sess-title">세션의 VM</h1>
+    <p class="vm-muted">이 세션에 권한이 부여된 VM입니다. '연결 해제'는 이 세션의 권한만 회수하며 VM을 정지하거나 삭제하지 않습니다. 이 화면의 동작은 모두 사용자 전용이며 세션은 호출할 수 없습니다.</p>
+    <ul id="vm-sess-list"></ul>
+    <p id="vm-sess-empty" class="vm-muted">연결된 VM이 없습니다.</p>
+    <h2>새 VM 만들어 연결</h2>
+    <p id="vm-sess-new-note" class="vm-muted"></p>
+    <div class="vm-row">
+      <label class="sr-only" for="vm-sess-new-pick">프리셋 선택</label>
+      <select id="vm-sess-new-pick" hidden><option value="">프리셋 선택</option></select>
+      <label><input type="checkbox" checked disabled> view</label>
+      <label><input type="checkbox" checked disabled> control</label>
+      <label><input type="checkbox" id="vm-sess-new-exec"> exec</label>
+      <label><input type="checkbox" id="vm-sess-new-files"> files</label>
+      <button id="vm-sess-new" type="button">새 VM 만들어 연결</button>
+    </div>
+    <h2>기존 VM 연결</h2>
+    <div class="vm-row">
+      <label class="sr-only" for="vm-sess-pick">연결할 VM</label>
+      <select id="vm-sess-pick"><option value="">VM 선택</option></select>
+      <label><input type="checkbox" checked disabled> view</label>
+      <label><input type="checkbox" id="vm-sess-ex-control" checked> control</label>
+      <label><input type="checkbox" id="vm-sess-ex-exec"> exec</label>
+      <label><input type="checkbox" id="vm-sess-ex-files"> files</label>
+      <button id="vm-sess-connect" type="button" disabled>연결</button>
+    </div>
+    <h2 id="vm-sess-editing"></h2>
+  </section>
   <section id="vm-detail" hidden>
     <div id="vm-head">
       <h1 id="vm-name"></h1>
@@ -98,6 +126,7 @@
         <span id="vm-human" class="vm-muted"></span>
       </div>
     </div>
+    <div id="vm-grants-block">
     <h2>세션 권한</h2>
     <p class="vm-muted">
       <b>view</b> 화면 보기, <b>control</b> 화면 조작(view 포함), <b>exec</b> 게스트 셸 실행과 설치·설정 변경,
@@ -119,6 +148,7 @@
       <label><input type="checkbox" id="vm-grant-files"> files</label>
       <button id="vm-grant" type="button">권한 부여</button>
     </div>
+    </div>
     <h2>파일</h2>
     <p class="vm-muted" id="vm-files-note">
       files 권한이 있는 세션은 <code>vm_put</code>·<code>vm_get</code>·<code>vm_ls</code>·<code>vm_rm</code>으로 아래 두 폴더 사이에서만
@@ -136,7 +166,9 @@
     <p class="vm-muted">/Users/&lt;계정&gt;/&lt;폴더&gt;, /private/tmp/&lt;폴더&gt;, /tmp/&lt;폴더&gt; 아래만 지정할 수 있습니다(숨김 폴더·Library·공백 제외). 변경은 사용자만 할 수 있고 감사 기록에 남습니다.</p>
     <table id="vm-files-log"><thead><tr><th>시각</th><th>세션</th><th>작업</th><th>경로</th><th>크기</th><th>결과</th></tr></thead><tbody></tbody></table>
     <p class="vm-muted" id="vm-files-log-note">최근 전송은 데몬이 시작된 뒤의 기록이며 경로와 바이트 수만 남기고 내용은 남기지 않습니다.</p>
+    <div id="vm-shares-block">
     <h2>공유 폴더 (호스트 → 게스트)</h2>
+    <p class="vm-warn-text" id="vm-sess-share-note" hidden></p>
     <p class="vm-muted" id="vm-share-note">
       호스트 폴더를 게스트의 <code>/Volumes/My Shared Files/&lt;이름&gt;</code>에 마운트합니다(<code>tart run --dir</code>). 세션은 호스트 경로에서 편집하고,
       빌드와 git은 게스트의 로컬 사본에서 실행해야 합니다. 공유 폴더에서는 파일이 많을 때 약 10배 느리고 방금 쓴 파일에 대해 swiftc 오류가 납니다.
@@ -152,6 +184,7 @@
       <input id="vm-share-path" type="text" maxlength="300" placeholder="호스트 폴더의 절대 경로" autocomplete="off" spellcheck="false">
       <label><input type="checkbox" id="vm-share-rw"> rw (쓰기 허용)</label>
       <button id="vm-share-go" type="button">공유 추가</button>
+    </div>
     </div>
     <h2>포트 노출 (softnet)</h2>
     <p class="vm-warn-text" id="vm-net-warning">

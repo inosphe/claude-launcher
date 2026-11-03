@@ -10,6 +10,10 @@ const url = (path) => BASE + String(path).replace(/^\//, "");
 const SCOPES = ["view", "control", "exec", "files"];
 
 if (new URLSearchParams(location.search).get("embed")) document.body.classList.add("embed");
+// Session mode (vm?session=<name>, the dashboard's ▣ vm pane): the same page
+// narrowed to one session's connections; it calls the same user-only routes.
+const SESSION = new URLSearchParams(location.search).get("session") || "";
+if (SESSION) document.body.classList.add("session-mode");
 let vms = [];
 let selected = new URLSearchParams(location.search).get("vm") || "";
 let takingOver = false;
@@ -36,7 +40,7 @@ async function api(path, opts = {}) {
     throw new Error("unauthorized");
   }
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  if (!resp.ok) throw Object.assign(new Error(data.error || `HTTP ${resp.status}`), { code: data.code || "" });
   return data;
 }
 const post = (path, body) => api(path, {
@@ -119,7 +123,7 @@ function renderDetail(vm) {
   toggle.title = !guarded && vm.state !== "stopped"
     ? "정지된 VM만 잠글 수 있습니다. 먼저 정상 종료하십시오." : toggle.title;
   renderActions(vm, guarded);
-  loadDestroyPlan(vm);
+  if (!SESSION) loadDestroyPlan(vm);
   $("vm-controller").textContent = vm.controller || "없음";
   $("vm-revoke-control").disabled = !vm.controller;
   const driving = vm.human === "driving";
@@ -129,9 +133,9 @@ function renderDetail(vm) {
   $("vm-human").textContent = driving
     ? `조작 중입니다. 세션의 조작 호출은 거절됩니다${vm.draining ? " (진행 중인 호출이 끝나기를 기다리는 중)" : ""}.`
     : (vm.needs_observe && vm.controller ? "돌려받은 세션이 화면을 다시 확인할 때까지 조작을 시작하지 않습니다." : "");
-  manageTouch();
+  if (!SESSION) manageTouch();
   renderGrants(vm);
-  renderFiles(vm);
+  if (!SESSION) renderFiles(vm);
   renderShares(vm);
   renderNet(vm);
 }
@@ -318,6 +322,7 @@ function renderGrants(vm) {
   const body = document.querySelector("#vm-grants tbody");
   body.replaceChildren();
   for (const [session, scopes] of Object.entries(vm.grants || {}).sort()) {
+    if (SESSION && session !== SESSION) continue;
     const tr = document.createElement("tr");
     tr.appendChild(cell(session));
     for (const scope of SCOPES) {
@@ -854,9 +859,11 @@ $("vm-files-save").addEventListener("click", () => saveFilesDir($("vm-files-dir"
 $("vm-files-default").addEventListener("click", () => saveFilesDir(""));
 function render() {
   settleBusy();
-  if (!vms.find((v) => v.id === selected)) selected = vms.length ? vms[0].id : "";
+  const pool = SESSION ? connectedVms() : vms;
+  if (!pool.find((v) => v.id === selected)) selected = pool.length ? pool[0].id : "";
   renderList();
-  renderDetail(vms.find((v) => v.id === selected) || null);
+  renderDetail(pool.find((v) => v.id === selected) || null);
+  if (SESSION) renderSess();
   renderOnly();
   renderLineage();
   renderSharing();
@@ -907,17 +914,166 @@ function grantScopes() {
   if ($("vm-grant-files").checked) scopes.push("files");
   return scopes;
 }
+/* The one grant path: the permissions table's "권한 부여" and the session pane's
+   "연결" both end here, so the template-copy and exec confirmations are one piece. */
+function grantTo(session, vmId, scopes) {
+  const target = vms.find((v) => v.id === vmId);
+  if (target && target.template &&
+      !confirm(`${vmId}는 프리셋 ${target.template}의 복사본입니다. ${session}이 이 VM을 바꾸면 이후 그 프리셋으로 만드는 복제본이 바뀝니다. 그래도 부여합니까?`)) return null;
+  if (scopes.includes("exec") &&
+      !confirm(`${session}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return null;
+  return act(`${session} ${scopes.join("+")} 부여`,
+      () => post(`api/vm/${encodeURIComponent(vmId)}/grant`, { session, scopes }));
+}
 $("vm-grant").addEventListener("click", () => {
   const session = ($("vm-grant-session").hidden ? $("vm-grant-session-text").value : $("vm-grant-session").value).trim();
   if (!session || !selected) return;
-  const scopes = grantScopes();
-  const target = vms.find((v) => v.id === selected);
-  if (target && target.template &&
-      !confirm(`${selected}는 프리셋 ${target.template}의 복사본입니다. ${session}이 이 VM을 바꾸면 이후 그 프리셋으로 만드는 복제본이 바뀝니다. 그래도 부여합니까?`)) return;
+  grantTo(session, selected, grantScopes());
+});
+
+/* ---- session mode: the connected VMs, one-click new VM, connecting an existing one ---- */
+const connectedVms = () => vms.filter((v) => v.grants && v.grants[SESSION]);
+let sessPresets = { presets: [], default: "", default_lost: "", error: "" };
+let sessNewBusy = false;
+async function loadSessPresets() {
+  try {
+    const out = await api("api/vm-presets");
+    sessPresets = { presets: out.presets || [], default: out.default || "", default_lost: out.default_lost || "", error: "" };
+  } catch (e) {
+    sessPresets = { presets: [], default: "", default_lost: "", error: e.message };
+  }
+  if (SESSION) renderSess();
+}
+const autoVmName = () => {
+  const taken = new Set(vms.flatMap((v) => [v.id, v.tart_name]));
+  const base = (SESSION.replace(/[^A-Za-z0-9_.-]/g, "-").replace(/^[-.]+/, "") || "vm").slice(0, 50) + "-vm";
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+};
+function sessPresetChoice() {
+  const usable = (name) => sessPresets.presets.find((p) => p.name === name && p.present !== false);
+  return sessPresets.default && usable(sessPresets.default) ? sessPresets.default : $("vm-sess-new-pick").value;
+}
+/* A select is rebuilt only when its choices changed: the page re-renders every 2 s,
+   and rebuilding an open dropdown closes it. */
+function setChoices(sel, first, rows) {
+  const key = JSON.stringify([first, rows]);
+  if (sel.dataset.key === key) return;
+  const keep = sel.value;
+  sel.dataset.key = key;
+  sel.replaceChildren(new Option(first, ""));
+  for (const [value, label, disabled] of rows) { const o = new Option(label, value); o.disabled = !!disabled; sel.appendChild(o); }
+  sel.value = rows.some(([v, , d]) => v === keep && !d) ? keep : "";
+}
+function renderSess() {
+  $("vm-sess").hidden = false;
+  $("vm-sess-title").textContent = `세션 ${SESSION}의 VM`;
+  const list = $("vm-sess-list");
+  list.replaceChildren();
+  const mine = connectedVms();
+  $("vm-sess-empty").hidden = mine.length > 0;
+  for (const vm of mine) {
+    const li = document.createElement("li");
+    li.setAttribute("aria-current", String(vm.id === selected));
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "vm-sess-pick";
+    pick.textContent = vm.id;
+    pick.title = "이 VM의 권한과 공유 폴더를 아래에서 편집";
+    pick.addEventListener("click", () => { selected = vm.id; render(); });
+    const state = document.createElement("span");
+    state.className = "vm-chip " + chipClass(vm);
+    state.textContent = vm.state;
+    li.append(pick, state);
+    for (const sc of SCOPES.filter((x) => vm.grants[SESSION].includes(x))) {
+      const chip = document.createElement("span");
+      chip.className = "vm-chip";
+      chip.textContent = sc;
+      li.appendChild(chip);
+    }
+    if (vm.locked) { const c = document.createElement("span"); c.className = "vm-chip warn"; c.textContent = "🔒 잠김"; li.appendChild(c); }
+    if (vm.template) { const c = document.createElement("span"); c.className = "vm-chip vm-template"; c.textContent = "프리셋 템플릿"; li.appendChild(c); }
+    const off = document.createElement("button");
+    off.type = "button";
+    off.className = "vm-sess-disconnect";
+    off.textContent = "연결 해제";
+    off.addEventListener("click", () => {
+      if (!confirm(`${SESSION}의 ${vm.id} 연결을 해제합니다. 이 세션의 권한만 회수하며, VM은 정지되거나 삭제되지 않습니다. 계속합니까?`)) return;
+      act(`${SESSION} 연결 해제 (${vm.id})`, () => post(`api/vm/${encodeURIComponent(vm.id)}/revoke`, { session: SESSION }));
+    });
+    li.appendChild(off);
+    list.appendChild(li);
+  }
+  // new VM: the default preset, or a choice when there is none
+  const pickSel = $("vm-sess-new-pick");
+  const hasDefault = !!sessPresets.default && sessPresets.presets.some((p) => p.name === sessPresets.default && p.present !== false);
+  pickSel.hidden = hasDefault;
+  if (!hasDefault) {
+    setChoices(pickSel, "프리셋 선택", sessPresets.presets.map((p) => [p.name, p.name, p.present === false]));
+  }
+  const choice = sessPresetChoice();
+  $("vm-sess-new-note").textContent = sessPresets.error ? `프리셋을 읽지 못했습니다: ${sessPresets.error}`
+    : hasDefault ? `기본 프리셋 ${sessPresets.default}에서 ${autoVmName()}을(를) 만들어 연결합니다(복제 후 시작, 수십 초에서 수 분).`
+    : (sessPresets.default_lost ? sessPresets.default_lost + ". " : "")
+      + (sessPresets.presets.length ? "기본 프리셋이 없습니다. 아래에서 프리셋을 고르거나, VM 페이지의 프리셋 목록에서 '기본으로 지정'하십시오."
+        : "프리셋이 없습니다. VM 페이지에서 정지된 VM을 프리셋으로 저장하십시오.");
+  const nb = $("vm-sess-new");
+  nb.disabled = sessNewBusy || !choice;
+  nb.classList.toggle("vm-working", sessNewBusy);
+  nb.textContent = sessNewBusy ? "만드는 중…" : hasDefault ? `새 VM 만들어 연결 (${sessPresets.default})` : "새 VM 만들어 연결";
+  // connect an existing VM
+  const sel = $("vm-sess-pick");
+  setChoices(sel, "VM 선택", vms.filter((v) => !(v.grants && v.grants[SESSION]))
+    .map((vm) => [vm.id, `${vm.id} (${vm.state})${vm.template ? " — 프리셋 템플릿" : ""}${vm.locked ? " — 잠김" : ""}`]));
+  $("vm-sess-connect").disabled = !sel.value;
+  const cur = vms.find((v) => v.id === selected);
+  $("vm-sess-editing").textContent = cur ? `${cur.id}: ${SESSION}의 권한과 공유 폴더` : "";
+  const sn = $("vm-sess-share-note");
+  sn.hidden = !(cur && cur.state === "running");
+  sn.textContent = "이 VM은 실행 중입니다. 공유 폴더 변경은 VM을 다시 시작해야 적용됩니다.";
+}
+$("vm-sess-new-pick").addEventListener("change", () => renderSess());
+$("vm-sess-pick").addEventListener("change", () => { $("vm-sess-connect").disabled = !$("vm-sess-pick").value; });
+$("vm-sess-connect").addEventListener("click", () => {
+  const id = $("vm-sess-pick").value;
+  if (!id) return;
+  const scopes = ["view"];
+  for (const s of ["control", "exec", "files"]) if ($(`vm-sess-ex-${s}`).checked) scopes.push(s);
+  grantTo(SESSION, id, scopes);
+});
+$("vm-sess-new").addEventListener("click", async () => {
+  const preset = sessPresetChoice();
+  if (sessNewBusy || !preset) return;
+  const scopes = ["view", "control"];
+  if ($("vm-sess-new-exec").checked) scopes.push("exec");
+  if ($("vm-sess-new-files").checked) scopes.push("files");
   if (scopes.includes("exec") &&
-      !confirm(`${session}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return;
-  act(`${session} ${scopes.join("+")} 부여`,
-      () => post(`api/vm/${encodeURIComponent(selected)}/grant`, { session, scopes }));
+      !confirm(`${SESSION}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return;
+  sessNewBusy = true;
+  renderSess();
+  try {
+    let id = autoVmName();
+    let out;
+    for (let tries = 0; ; tries++) {
+      try {
+        say(`${id}: 복제하고 시작하는 중입니다 (수십 초에서 수 분 걸립니다)`);
+        out = await post(`api/vm-presets/${encodeURIComponent(preset)}/create`, { id });
+        break;
+      } catch (e) {
+        if (e.code !== "vm_name_taken" && e.code !== "vm_exists" || tries >= 5) throw e;
+        id = `${id.replace(/-\d+$/, "")}-${tries + 2}`;
+      }
+    }
+    await post(`api/vm/${encodeURIComponent(id)}/grant`, { session: SESSION, scopes });
+    selected = id;
+    say(out.started ? `${id}을(를) 만들어 ${SESSION}에 연결했습니다 (${scopes.join("+")})`
+      : `${id}을(를) 등록해 ${SESSION}에 연결했지만 시작하지 못했습니다(정지 상태): ${out.why}`, !out.started);
+  } catch (e) {
+    say(`새 VM 만들기 실패: ${e.message}`, true);
+  } finally {
+    sessNewBusy = false;
+    await refresh();
+  }
 });
 
 /* ---- registering a tart VM ---- */
@@ -1239,7 +1395,12 @@ async function startFrames() {
   }
 }
 
-refresh().then(() => { loadSessions(); startFrames(); });
+if (SESSION) {
+  refresh().then(loadSessPresets);
+  setInterval(loadSessPresets, 10000);
+} else {
+  refresh().then(() => { loadSessions(); startFrames(); });
+  setInterval(loadSessions, 10000);
+}
 setInterval(refresh, 2000);
-setInterval(loadSessions, 10000);
 })();
