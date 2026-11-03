@@ -2407,11 +2407,14 @@ def test_the_notice_runs_before_the_end_gate():
         seq = chart.nodes[node.props["child"]]
         return chart.nodes[seq.props["children"][0]].label
 
-    # after the retrospective's try, before the gate loop
-    assert try_task(children[1]) == "retrospective"
-    assert try_task(children[2]) == "end-notice"
+    # after the retrospective's try, before the gate loop. The closure gate
+    # (claunch-5sryb) stands first, ahead of settle-watch.
+    assert chart.nodes[children[0]].label == "closure-gate"
+    assert chart.nodes[children[1]].label == "settle-watch"
+    assert try_task(children[2]) == "retrospective"
+    assert try_task(children[3]) == "end-notice"
     gate = next(c for c in children if chart.nodes[c].label == "end-watch")
-    assert children.index(children[2]) < children.index(gate)
+    assert children.index(children[3]) < children.index(gate)
     # the notice is not a member of either gate's cases any more, and each
     # gate's end does its own part: the first cleans up, the second is a bare
     # break (the cleanup already ran before it).

@@ -786,7 +786,7 @@ def check(chart: ir.Chart) -> List[Finding]:
             if not t.get("effects_declared", True):
                 out.append(Finding(WARNING, "effects-undeclared",
                                    f"task {t.id} declares no effects; this chart forbids effects "
-                                   f"({', '.join(sorted({src for src, _, _ in denials}))}) and the "
+                                   f"({', '.join(sorted({src for src, _, _, _ in denials}))}) and the "
                                    f"check reads an undeclared task as doing nothing -- declare "
                                    f"effects (or effects: [] for none)", t.id))
 
