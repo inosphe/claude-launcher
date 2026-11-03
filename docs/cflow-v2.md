@@ -2195,8 +2195,10 @@ layout: df2s.review@1
 nodes:
   seed:
     prompt: 씨앗을 옮긴다
-    layout: df2s.seed@1      # 노드가 살아 있는 동안 이 참조가 이긴다
+    layout: df2s.seed@1      # task에만 붙는다; 그 노드가 살아 있는 동안 이 참조가 이긴다
 ```
+
+`layout:`은 최상위와 task에만 붙는다(조합자 매핑에는 붙지 않는다).
 
 참조는 `<id>@<version>`, 곧 이름이다(경로는 거절한다 — 정의와 같은 규칙). 파일은
 각 레이어 디렉터리(`layers.search_dirs`) 아래 `layouts/<id>.yaml`에 둔다.
