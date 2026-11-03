@@ -261,6 +261,14 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     };
     return openQuickForkModal('lead');
   });
+  // claunch-yydhs: the origin's plan/qa/threads start unticked (the
+  // conversation is always copied) and ride the request only when ticked.
+  assert.equal(await page.locator('#new-quick-fork-copy').isVisible(),true);
+  for (const k of ['plan','qa','threads']) {
+    assert.equal(await page.locator(`[name=quick_fork_copy_${k}]`).isChecked(),false,
+      `${k} starts unticked`);
+  }
+  await page.locator('[name=quick_fork_copy_plan]').check();
   await page.getByRole('button',{name:'Fork',exact:true}).click();
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#modal-overlay').isVisible(),true);
@@ -270,6 +278,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     openSpawnModal('lead');
   });
   assert.equal(await page.evaluate(()=>posts.length),2);
+  assert.deepEqual(await page.evaluate(()=>posts.at(-1).body.copy),['plan'],
+    'the ticked item is the only one the request carries');
   assert.equal(await page.evaluate(()=>sessionFormView().mode),'fork');
   await page.evaluate(()=>finishFork());
   await page.waitForFunction(()=>location.hash==='#/s/copy');

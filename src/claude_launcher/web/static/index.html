@@ -962,6 +962,27 @@
           <!-- the picked v2 workflow's start inputs, the same box as the
                new-session form's; drawn by syncQuickForkInputs -->
           <div id="new-quick-fork-inputs" class="cf2-inputs hidden"></div>
+          <!-- The origin's side items, off by default (claunch-yydhs): the
+               conversation is always copied; these three live in the
+               daemon's own stores and only travel when ticked. plan copies
+               the plan pane as it stands (steps, statuses, the user's
+               decisions), qa copies the questions still waiting on the
+               user, thread copies the open threads with their messages. -->
+          <fieldset id="new-quick-fork-copy">
+            <legend>Also copy from the original</legend>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_plan">
+              <span>plan — the plan pane's steps, statuses and decisions</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_qa">
+              <span>qa — questions still waiting on you (answered ones stay with the original)</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_threads">
+              <span>thread — open thread conversations and their messages</span>
+            </label>
+          </fieldset>
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>

@@ -14400,6 +14400,78 @@ def _origin_run_name(origin: str, cwd: str) -> str:
     return str(status.get("workflow") or "")
 
 
+#: The origin's side items a quick-fork may carry (claunch-yydhs). The
+#: conversation itself is the harness's copy; these live in the daemon's own
+#: stores and have to be carried on purpose.
+QUICK_FORK_CARRY = ("plan", "qa", "threads")
+
+
+def _quick_fork_carry(value) -> list:
+    """The ``copy`` field of a quick-fork body as a list of store names.
+
+    Omitted or empty is "carry none". A name outside :data:`QUICK_FORK_CARRY`
+    is a bad request rather than a silently dropped item: a caller that asked
+    for something the fork does not carry should hear so."""
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise QuickForkError(400, "copy must be a list of plan, qa, threads")
+    wanted = []
+    for raw in value:
+        name = str(raw or "").strip()
+        if name not in QUICK_FORK_CARRY:
+            raise QuickForkError(
+                400, f"copy names {name!r}; a quick-fork carries {', '.join(QUICK_FORK_CARRY)}"
+            )
+        if name not in wanted:
+            wanted.append(name)
+    return wanted
+
+
+def _copy_quick_fork_carry(origin: str, fork: str, wanted: list, warnings: list) -> dict:
+    """Copy the asked-for items of ``origin`` onto the freshly launched
+    ``fork``: its plan, its still-open questions, its open threads.
+
+    Each part is its own try: a store that refuses costs that part and a
+    warning line, never the fork -- the session is already running, and the
+    copy is what it asked for on top. Returns what landed, shaped
+    ``{"plan": bool, "qa": <count>, "threads": <count>}`` for the parts that
+    were asked for."""
+    out: dict = {}
+    if not wanted:
+        return out
+    if "plan" in wanted:
+        try:
+            from ..plan import store as plan_store
+
+            out["plan"] = plan_store.PlanStore(paths.plan_db()).copy(origin, fork)
+        except Exception as exc:  # noqa: BLE001 - the fork stands without it
+            log.warning("quick-fork %s: plan not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the plan was not copied from {origin}: {exc}")
+            out["plan"] = False
+    if "qa" in wanted:
+        try:
+            from ..qa import store as qa_store
+
+            out["qa"] = qa_store.QaStore(paths.qa_db()).copy_open(origin, fork)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quick-fork %s: questions not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the questions were not copied from {origin}: {exc}")
+            out["qa"] = 0
+    if "threads" in wanted:
+        try:
+            from ..threads import store as thread_store
+
+            out["threads"] = thread_store.ThreadStore(paths.threads_db()).copy_session(origin, fork)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quick-fork %s: threads not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the threads were not copied from {origin}: {exc}")
+            out["threads"] = 0
+    return out
+
+
 class QuickForkError(Exception):
     """A quick-fork that cannot be made, with the HTTP status it answers."""
 
@@ -14480,6 +14552,11 @@ async def stage_quick_fork(
     # conversation, its directory -- which is what stage_child's place_under
     # keeps apart.
     sibling = body.get("sibling") in (True, "true", "1", 1)
+    # Which of the origin's side items the copy carries (claunch-yydhs): the
+    # plan, the questions still waiting on the user, the open threads. Omitted
+    # is "none", which is what every other caller of this route has always
+    # got (the conversation is copied by the harness; these three are not).
+    carry = _quick_fork_carry(body.get("copy"))
     if self_merge_allowed is None:
         self_merge_allowed = body.get("self_merge_allowed") in (True, "true", "1", 1)
     placed = (origin.sdef.parent or "") if sibling else parent
@@ -14611,6 +14688,9 @@ async def stage_quick_fork(
         raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
         raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
+    # After the launch, so a fork that never started leaves nothing copied,
+    # and before the response, so the caller is told what landed.
+    carried = _copy_quick_fork_carry(parent, session.sdef.name, carry, warnings)
     out = {
         "session": session.info(), "origin": parent, "marker": marker,
         "forked_at": forked_at, **result,
@@ -14633,6 +14713,9 @@ async def stage_quick_fork(
         "sibling": sibling,
         "parent": placed,
         "role": fork_role if named_mesh else "",
+        # The origin's side items the copy carried (claunch-yydhs): only the
+        # parts that were asked for, and what each one actually landed.
+        "carried": carried,
     }
     if warnings:
         out["warnings"] = warnings
