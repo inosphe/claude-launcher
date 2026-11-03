@@ -172,3 +172,14 @@ def test_a_conditional_deny_is_a_warning():
     found = {f.code: f for f in check.check(_chart(text))}
     assert "never-effect" not in found
     assert found["never-effect-when"].level == check.WARNING
+
+
+def test_the_definition_view_names_a_rules_condition(tmp_path):
+    from claude_launcher.daemon import cflow2_web
+
+    st = _start(tmp_path)
+    node = _task(st)["node"]
+    detail = cflow2_web.node_detail(str(tmp_path), "t", node)
+    rules = {r["id"]: r for r in detail["fields"]["rules"]}
+    assert rules["on-main"]["when"] == "$data.inputs.on_main == true"
+    assert "when" not in rules["always"]
