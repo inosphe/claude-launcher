@@ -9912,6 +9912,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .profile-usage-bar.high > span { background: #f85149; }
 .profile-usage-pct.mid { color: #e3b341; }
 .profile-usage-pct.high { color: #ff7b72; }
+.profile-usage-keys { margin-top: 4px; border-top: 1px solid #21262d; padding-top: 4px; }
+.profile-usage-keys-head { margin: 4px 0 0; }
+.profile-usage-key { padding-left: 14px; }
+.profile-usage-key strong { font-weight: 500; }
 .profile-usage-updated { margin-top: 4px; }
 .profile-usage-other { margin: 16px 0; color: #8b949e; }
 .profile-usage-other summary { cursor: pointer; }

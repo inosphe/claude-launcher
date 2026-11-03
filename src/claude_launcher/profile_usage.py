@@ -294,6 +294,17 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
                     }
                     for item in report.windows
                 ],
+                # An account several keys share reports one total; this is
+                # what the page splits it into, and an empty list means the
+                # reader could not (or need not) rate the keys apart.
+                "api_keys": [
+                    {
+                        "key_id": item.key_id,
+                        "label": item.label,
+                        "used_dollars": item.used_dollars,
+                    }
+                    for item in report.api_keys
+                ],
             }
         except _ERRORS as exc:
             with _guard:
