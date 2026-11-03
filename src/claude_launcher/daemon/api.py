@@ -79,6 +79,7 @@ from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
+from . import pr_actions
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import inputs as cflow2_inputs, ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -1332,6 +1333,17 @@ def build_app(
     # Recorded PRs across every session, for the PR page (#/pr). Read-only and
     # local: no gh call, so it answers without gh installed or logged in.
     r.add_get("/api/prs", h_prs)
+    # One PR, read from the forge by the daemon (daemon/pr_actions.py). The
+    # page never calls gh and never leaves the daemon's origin: a browser
+    # behind a relay tunnel cannot reach github.ncsoft.com at all.
+    r.add_get("/api/prs/{host}/{owner}/{name}/{number}", h_pr_detail)
+    # The merge is the user's, from the dashboard: a cookie request and only
+    # that (see h_pr_merge), never an MCP tool and never a bearer token. The
+    # documented residue -- a token traded for a cookie -- is in that
+    # handler's docstring and docs/pr-tab.md section 4.
+    r.add_post("/api/prs/{host}/{owner}/{name}/{number}/merge", h_pr_merge)
+    r.add_post("/api/prs/{host}/{owner}/{name}/{number}/rebase-request",
+               h_pr_rebase_request)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -11117,6 +11129,260 @@ async def h_prs(request: web.Request) -> web.Response:
     if project:
         rows = [r for r in rows if r.get("project") == project]
     return json_response({"prs": rows, "projects": projects, "count": len(rows)})
+
+
+#: A repository coordinate in a PR route: host, owner and name are one path
+#: segment each, so an encoded slash cannot smuggle a second one in.
+_PR_PART = re.compile(r"^[A-Za-z0-9._-]+$")
+_PR_METHODS = ("auto", "merge", "squash", "rebase")
+
+
+def _pr_target(request: web.Request) -> Optional[tuple]:
+    """``(host, owner, name, number)`` from the route, or ``None``.
+
+    The four are separate segments rather than one ``owner/name`` slug
+    because aiohttp routes on the decoded path: ``%2F`` would be a separator
+    by the time the match ran."""
+    info = request.match_info
+    host = str(info.get("host") or "").strip()
+    owner = str(info.get("owner") or "").strip()
+    name = str(info.get("name") or "").strip()
+    try:
+        number = int(str(info.get("number") or ""))
+    except (TypeError, ValueError):
+        return None
+    if not all(_PR_PART.match(part) for part in (host, owner, name)):
+        return None
+    if number <= 0:
+        return None
+    return host, owner, name, number
+
+
+def _recorded_pr(manager, host: str, owner: str, name: str, number: int) -> dict:
+    """The row a session recorded for this PR, or ``{}``.
+
+    It is what the page already shows beside the live values: which session
+    opened the PR and which issues it names. ``_recorded_prs`` is the same
+    cached scan the list uses, so this costs nothing extra."""
+    wanted = pr_actions.slug(host, owner, name).lower()
+    try:
+        rows, _projects = _recorded_prs(manager)
+    except Exception:  # noqa: BLE001 -- a live read must not depend on records
+        return {}
+    for row in rows:
+        if (str(row.get("repo") or "").lower() == wanted
+                and row.get("number") == number):
+            return row
+    return {}
+
+
+async def h_pr_detail(request: web.Request) -> web.Response:
+    """One recorded PR, read from the forge by the daemon.
+
+    The answer is always the same shape: ``{"ok", "pr", "verdict",
+    "conflicts", "error", "recorded"}``. A failed read is ``ok: False`` with
+    ``error.kind``/``error.raw`` -- the page keeps the recorded row it
+    already has and shows the reason beside it.
+
+    Conflict paths are computed only when the verdict says the PR collides:
+    it costs a ``git fetch`` and a ``merge-tree`` in a local checkout, and a
+    PR that is clean has no use for them."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    host, owner, name, number = target
+    view = await asyncio.to_thread(pr_actions.detail, host, owner, name, number)
+    pr = view.get("pr") or {}
+    if view.get("ok") and (view.get("verdict") or {}).get("kind") == "conflict":
+        view["conflicts"] = await asyncio.to_thread(
+            pr_actions.conflict_files, host, owner, name,
+            str(pr.get("base") or ""), str(pr.get("head") or ""))
+    # Off the loop: the answer is cached for PRS_CACHE_SECONDS, and the read
+    # that fills it walks every session's run state. On a cold cache that is
+    # a filesystem walk per session, and this handler is polled per open card.
+    view["recorded"] = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
+    view["repo"] = pr_actions.slug(host, owner, name)
+    view["number"] = number
+    return json_response(view)
+
+
+async def h_pr_merge(request: web.Request) -> web.Response:
+    """Merge one PR -- the user's action from the dashboard, and only that.
+
+    Two gates before gh is run at all:
+
+    - **The dashboard's cookie.** A bearer token is how a shell and a managed
+      session reach this API, and merging master is not something an agent
+      may do (AGENTS.md). The token is not a secret from a session on this
+      host, so the check is on *how* the request authenticated
+      (``daemon/actors.py``), not on who it claims to be.
+    - **``confirm: true``.** The page asks once more before it sends this;
+      a lone POST does not merge.
+
+    What this closes is the path an agent normally takes -- CLI, MCP, the
+    daemon client all authenticate with the token. What it does NOT close is
+    a session that deliberately trades that token for a cookie at
+    ``/api/auth/session`` (a route the middleware exempts) and then posts
+    here with no ``Origin``/``Sec-Fetch-Site``: ``_foreign_origin`` lets such
+    a request through, as it does for every other cookie write on this
+    daemon. That residue is the same one AGENTS.md describes for the restart
+    gate, and it is why the rule is written down rather than claimed to be
+    enforced -- see ``docs/pr-tab.md`` section 4.
+
+    A refusal is HTTP 409 with ``error.kind`` (or 403/502 where that is the
+    truer code), never a silent no."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    if request.get(actors.AUTH_VIA_KEY) != actors.AUTH_COOKIE:
+        return json_error(
+            403, "머지는 대시보드에서만 실행합니다. 토큰으로 인증한 요청(셸·에이전트 세션)은 "
+                 "이 경로를 쓸 수 없습니다 — 워커는 master에 머지하지 않는다는 규칙이 그대로입니다.")
+    host, owner, name, number = target
+    body = await _json_body(request)
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return json_error(400, "confirm: true 를 함께 보내야 머지를 실행합니다(2단계 확인).")
+    method = str(body.get("method") or "auto").strip().lower()
+    if method not in _PR_METHODS:
+        return json_error(400, f"method 는 {', '.join(_PR_METHODS)} 가운데 하나여야 합니다.")
+    result = await asyncio.to_thread(
+        pr_actions.merge, host, owner, name, number, method)
+    if result.get("ok"):
+        await asyncio.to_thread(
+            pr_actions.record_merge, host, owner, name, number, result.get("method", method),
+            actors.from_request(request) or {}, remote=request.remote or "")
+        return json_response({**result, "repo": pr_actions.slug(host, owner, name),
+                              "number": number})
+    kind = str((result.get("error") or {}).get("kind") or "other")
+    status = {"permission": 403, "network": 502, "no-gh": 503,
+              "not-found": 404}.get(kind, 409)
+    return json_response(
+        {**result, "repo": pr_actions.slug(host, owner, name), "number": number},
+        status=status)
+
+
+async def h_pr_rebase_request(request: web.Request) -> web.Response:
+    """Ask the session that opened this PR to rebase it.
+
+    The request goes over the mesh as the operator (``external``, no sender
+    handle) to the session recorded with the PR, and it is *also* written to
+    the issue the record names -- a mesh message is delivered once and only
+    to a live member, so a session that exited, or belongs to another
+    machine, would otherwise leave no trace of the ask anywhere. The board
+    line is what the next session to pick the issue up reads.
+
+    Cookie-only, like the merge: ``external`` means "the operator typed
+    this", and a token is not a secret from a session on this host. Without
+    the gate, a session could put words in the operator's mouth into any
+    member's terminal. ``docs/pr-tab.md`` section 4 describes the residue
+    this shares with every cookie write on the daemon.
+
+    A request that was not delivered over the mesh is never reported as
+    sent; ``text`` is returned either way so the user can still pass it on."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    if request.get(actors.AUTH_VIA_KEY) != actors.AUTH_COOKIE:
+        return json_error(
+            403, "rebase 요청은 대시보드에서만 보냅니다. 토큰으로 인증한 요청(셸·에이전트 세션)은 "
+                 "운영자 이름으로 다른 세션에 메시지를 넣을 수 없습니다.")
+    host, owner, name, number = target
+    body = await _json_body(request)
+    body = body if isinstance(body, dict) else {}
+    recorded = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
+    session = str(recorded.get("session") or body.get("session") or "").strip()
+    note = str(body.get("note") or "").strip()
+    text = note or (
+        f"PR #{number} ({pr_actions.slug(host, owner, name)})이 기준선과 충돌합니다. "
+        f"브랜치를 rebase해 다시 push하고, 끝나면 이 스레드에 알려 주세요.")
+    if not session:
+        return json_response({
+            "delivered": False, "session": "", "text": text,
+            "why": "이 PR을 기록한 세션을 찾지 못했습니다.",
+            "noted": [], "noted_why": "기록된 세션이 없어 이슈도 알 수 없습니다.",
+        }, status=200)
+    delivered, why = await _ask_session(request, session, text)
+    noted, noted_why = await _note_rebase_request(
+        request, recorded, host, owner, name, number, text, delivered, why)
+    return json_response({
+        "delivered": delivered, "session": session, "text": text, "why": why,
+        "noted": noted, "noted_why": noted_why,
+    })
+
+
+async def _note_rebase_request(
+    request: web.Request, recorded: dict, host: str, owner: str, name: str,
+    number: int, text: str, delivered: bool, why: str,
+) -> tuple:
+    """Write the ask to the board the PR's session works on; ``(ids, why)``.
+
+    The record names the issues the PR was opened for (``issues`` in the
+    row). One comment per issue, so the ask survives the mesh message: a
+    member that is offline never reads a message, but the next session to
+    claim the issue reads the board. Delivery is stated in the line -- a
+    request that reached only the board must not read as one that reached
+    the session."""
+    issues = [str(i).strip() for i in (recorded.get("issues") or []) if str(i).strip()]
+    if not issues:
+        return [], "이 PR을 기록한 행이 이슈를 이름으로 남기지 않았습니다."
+    session = str(recorded.get("session") or "").strip()
+    manager = request.app.get("manager")
+    # ``list`` rather than ``get``: the row was produced by the same listing,
+    # and it keeps answering for a session that has exited -- which is
+    # exactly the case where the mesh message went nowhere.
+    live = None
+    for candidate in (manager.list() if manager is not None else []):
+        if getattr(getattr(candidate, "sdef", None), "name", "") == session:
+            live = candidate
+            break
+    if live is None:
+        return [], f"기록한 세션 '{session}'이 이 데몬에 없어 그 보드를 알 수 없습니다."
+    board = request.app.get("beads")
+    if board is None:
+        return [], "이 데몬에 보드 하위 시스템이 없습니다."
+    try:
+        root = await board.root_for(_session_cwd(live))
+    except Exception as exc:  # noqa: BLE001 -- the note is best effort
+        return [], f"보드 루트를 찾지 못했습니다: {str(exc)[:200]}"
+    if root is None:
+        return [], f"세션 '{session}'의 디렉터리에 이슈 보드가 없습니다."
+    line = f"REBASE REQUEST @ {pr_actions.slug(host, owner, name)}#{number}: {text}"
+    line += " (메시로도 전달됨)" if delivered else (
+        f" (메시 전달 실패 — {why})" if why else " (메시 미전달)")
+    noted, failed = [], []
+    for issue in issues:
+        try:
+            await board.br(root, ["comments", "add", issue, line])
+            noted.append(issue)
+        except Exception as exc:  # noqa: BLE001 -- one issue must not sink the rest
+            failed.append(f"{issue}: {str(exc)[:120]}")
+    why = "" if not failed else "일부 이슈에 남기지 못했습니다 — " + "; ".join(failed)
+    return noted, why
+
+
+async def _ask_session(request: web.Request, session: str, text: str) -> tuple:
+    """Send ``text`` to ``session`` as the operator; ``(delivered, why)``."""
+    try:
+        manager = _mesh_mgr(request)
+    except Exception:  # noqa: BLE001 -- no mesh subsystem is not a crash
+        return False, "이 데몬에 메시 하위 시스템이 없습니다."
+    for mesh in manager.list():
+        member = mesh.members.get(session) if getattr(mesh, "members", None) else None
+        if member is None:
+            for handle, candidate in (getattr(mesh, "members", {}) or {}).items():
+                if str(getattr(candidate, "session", "") or "") == session:
+                    member, session = candidate, handle
+                    break
+        if member is None:
+            continue
+        try:
+            await manager.send(mesh.name, "", session, text, external=True, type="ask")
+        except Exception as exc:  # noqa: BLE001 -- report, do not fail the read
+            return False, f"메시 전송이 거절되었습니다: {str(exc)[:300]}"
+        return True, ""
+    return False, "그 세션이 이 데몬이 아는 어느 메시에도 속해 있지 않습니다(종료되었거나 다른 머신)."
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:
