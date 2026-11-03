@@ -1123,16 +1123,18 @@ def test_stuck_pass_lets_heartbeat_go_stale(tmp_path, monkeypatch):
 
 
 def test_run_probe_env_and_timeout_kills_group(tmp_path):
-    win = sys.platform == "win32"  # cmd.exe: %VAR%, no printf, no sleep
-    # cmd.exe expands %VAR% before it parses `||`, so `set VAR` is the way to print the raw value
-    code, out = cflow2_clock.run_probe('set CFLOW_IN_TARGET' if win
-                                       else 'printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
+    # A probe is written for a POSIX shell on every platform (claunch-2kz0r:
+    # cmd.exe does not read $VAR, so Windows runs a bash where one exists).
+    # Only a machine with no POSIX shell at all still gets cmd.exe.
+    if os.name == "nt" and runtime.shell_command("true")[1]:
+        pytest.skip("no POSIX shell here: the probe would run in cmd.exe")
+    code, out = cflow2_clock.run_probe('printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
                                        env={"CFLOW_IN_TARGET": "x || true; false"})
-    assert code == 0 and out.strip().removeprefix("CFLOW_IN_TARGET=") == "x || true; false"
+    assert code == 0 and out.strip() == "x || true; false"
     code, _ = cflow2_clock.run_probe("exit 3", str(tmp_path))
     assert code == 3
     t0 = time.monotonic()
-    code, out = cflow2_clock.run_probe("ping -n 30 127.0.0.1 >NUL" if win else "sleep 30 & sleep 30",
+    code, out = cflow2_clock.run_probe("sleep 30 & sleep 30",
                                        str(tmp_path), timeout=0.5)
     assert code == 124 and time.monotonic() - t0 < 10
 

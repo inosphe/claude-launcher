@@ -80,6 +80,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -2772,13 +2773,59 @@ def expand_argv(command: Any, env: Dict[str, str]) -> Any:
     """An argv command with each ``$CFLOW_<NAME>`` replaced by that
     variable of ``env`` (empty when unset), as a shell would for the string
     form. An argv runs without a shell, so nothing else would expand it --
-    and on Windows the string form goes to cmd.exe, which does not read
-    ``$VAR`` either. Each value stays inside its one argument; it is never
-    parsed as a command. A string command is returned unchanged."""
+    and a command the author wrote for a POSIX shell may use ``$VAR`` this
+    function does not know about, which is why the string form is run by one
+    (:func:`shell_command`) rather than left to the platform's default. Each
+    value stays inside its one argument; it is never parsed as a command. A
+    string command is returned unchanged."""
     if not isinstance(command, list):
         return command
     return [_ARGV_REF.sub(lambda m: str(env.get(m.group(1), "")), str(part))
             for part in command]
+
+
+#: How a command string is handed to a shell: ``bash -c`` where one is
+#: available, the platform default otherwise. ``cmd`` forces the latter; any
+#: other value names a shell to run instead of ``bash``.
+SHELL_ENV = "CLAUNCH_CFLOW_SHELL"
+
+#: Values of :data:`SHELL_ENV` that mean "the platform's own shell".
+_PLATFORM_SHELLS = ("cmd", "cmd.exe", "default", "platform")
+
+
+def shell_command(command: Any) -> Tuple[Any, bool]:
+    """``(command, shell)`` -- what :func:`subprocess.Popen` takes for one
+    step command, so that a string command runs in a POSIX shell.
+
+    Step commands are written for a POSIX shell: ``"$CFLOW_IN_KEY"``, ``a ||
+    b``, ``true``. ``shell=True`` gives that on POSIX, and gives cmd.exe on
+    Windows, where none of those work -- a string verify reached its program
+    with the quotes still in it. Measured (claunch-2kz0r): the same
+    coordinator verify answered ``passed`` under bash and ``key must be
+    <canonical board directory>#<issue id>`` under cmd.exe, and a workflow
+    cannot be written once for both.
+
+    So a string command on Windows runs as ``bash -c <command>`` when a bash
+    is on PATH (Git for Windows ships one) and as ``shell=True`` otherwise --
+    on a machine with no POSIX shell, commands needing one could not have
+    worked under any policy. An argv command keeps running without a shell,
+    as it already does. ``CLAUNCH_CFLOW_SHELL`` overrides the choice: one of
+    ``cmd``, ``cmd.exe``, ``default``, ``platform`` keeps the platform shell;
+    anything else is a shell to run instead of ``bash``, on every platform.
+    """
+    if not isinstance(command, str):
+        return command, False
+    override = (os.environ.get(SHELL_ENV) or "").strip()
+    if override.lower() in _PLATFORM_SHELLS:
+        return command, True
+    if override:
+        return [override, "-c", command], False
+    if os.name != "nt":
+        return command, True
+    bash = shutil.which("bash")
+    if not bash:
+        return command, True
+    return [bash, "-c", command], False
 
 
 def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
@@ -2789,8 +2836,8 @@ def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
     killed (exit 124)."""
     import tempfile
 
-    shell = not isinstance(command, list)
     command = expand_argv(command, env)
+    command, shell = shell_command(command)
     kwargs: Dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
@@ -4886,8 +4933,9 @@ def default_probe_runner(probe: Any, cwd: str, timeout: float = 60.0,
     full = dict(os.environ)
     full.update(env or {})
     cmd = expand_argv(probe, full) if isinstance(probe, list) else str(probe)
+    cmd, shell = shell_command(cmd)
     try:
-        proc = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, capture_output=True,
+        proc = subprocess.run(cmd, shell=shell, cwd=cwd, capture_output=True,
                               text=True, timeout=timeout, env=full)
     except subprocess.TimeoutExpired:
         return 124, "probe timed out"
