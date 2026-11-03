@@ -3,12 +3,17 @@
    timer; this module owns the page and its rendering. A quota belongs to the
    profile's account at its provider, so the page shows one row per
    (profile, provider) pair from /api/usage/targets, whatever harnesses run
-   on that profile. Each card counts down to its key's next read and opens a
-   history chart of the samples those reads left (claunch-f5w4x.3). */
+   on that profile. A profile that holds a key pool also lists every key of
+   the pool and what each of them reports (/api/usage/keys, claunch-feb3f).
+   Each card counts down to its key's next read and opens a history chart of
+   the samples those reads left (claunch-f5w4x.3). */
 (() => {
   const state = {
     open: false, loaded: false, targets: [], active: new Map(),
     values: new Map(), busy: new Set(), error: "",
+    // row.key -> {data, error} of the profile's key pool (/api/usage/keys),
+    // read only for a row the daemon marks `pooled` (claunch-feb3f).
+    keyPools: new Map(),
     // Seconds between two reads of a key (the daemon's PERIOD_SECONDS).
     period: 900,
     // key -> epoch seconds of the key's next periodic read.
@@ -80,6 +85,21 @@
     render();
     try {
       const suffix = manual ? "&refresh=manual" : "&refresh=auto";
+      // A multi-key profile asks once, for the pool: that answer carries the
+      // profile's own reading (`usage`) for the key its token file holds, so
+      // asking /api/usage beside it would read the same account twice
+      // (claunch-feb3f). The daemon says in the targets row which profiles
+      // hold a pool.
+      if (row.pooled) await readKeyPool(row, suffix);
+      else await readAccount(row, suffix);
+    } finally {
+      state.busy.delete(row.key);
+      if (state.open) render();
+    }
+  }
+
+  async function readAccount(row, suffix) {
+    try {
       // Out of the batch: a codex read starts a subprocess, and a batch
       // answers when its slowest path does.
       const response = await globalThis.api(
@@ -94,9 +114,39 @@
       state.values.set(row.key, { data: null, error: error.message || String(error) });
       // A failed read keeps its error for one period, as the daemon does.
       state.nextAt.set(row.key, Date.now() / 1000 + state.period);
-    } finally {
-      state.busy.delete(row.key);
-      if (state.open) render();
+    }
+  }
+
+  /* Every key of the profile's pool (/api/usage/keys): each key's label, mask
+     and the windows that key itself reports, plus — in the same answer — the
+     profile's own reading (`usage`) and why it is missing (`usage_error`).
+     A pool read that fails is a line on the card, never a blank card. */
+  async function readKeyPool(row, suffix) {
+    try {
+      const response = await globalThis.api(
+        `/api/usage/keys?profile=${encodeURIComponent(row.profile)}${suffix}`, { noBatch: true });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      state.keyPools.set(row.key, { data, error: "" });
+      const account = data.usage || null;
+      if (account) {
+        const updatedAt = Number(account.updated_at) || Date.now() / 1000;
+        state.values.set(row.key,
+          { data: account, cached: !!account.cached, updatedAt, error: "" });
+        state.nextAt.set(row.key, Number(account.next_at) || updatedAt + state.period);
+        if (!account.cached && state.expanded.has(row.key)) readHistory(row);
+      } else {
+        state.values.set(row.key,
+          { data: null, error: data.usage_error || "The profile's usage could not be read." });
+        state.nextAt.set(row.key, Date.now() / 1000 + state.period);
+      }
+    } catch (error) {
+      const message = error.message || String(error);
+      state.keyPools.set(row.key, { data: null, error: message });
+      // The one request carried both answers, so the account reading fails
+      // with it.
+      state.values.set(row.key, { data: null, error: message });
+      state.nextAt.set(row.key, Date.now() / 1000 + state.period);
     }
   }
 
@@ -492,6 +542,96 @@
     return box;
   }
 
+  /* The short window names a key row lists (the chart's own labels). */
+  const KEY_WINDOW_LABELS = {
+    five_hour: "5h", seven_day: "7d", weekly: "week", monthly: "month",
+    monthly_spend: "month spend", credit: "credit",
+  };
+
+  /* One window of a key's reading as "5h 41.2%", or the money/detail the
+     window carries instead of a percentage. */
+  function keyWindowText(window) {
+    const label = KEY_WINDOW_LABELS[window.name] || String(window.name || "");
+    if (typeof window.detail === "string" && window.detail) return `${label} ${window.detail}`;
+    const amount = dollars(window.used_dollars);
+    const limit = dollars(window.limit_dollars);
+    const left = dollars(window.remaining_dollars);
+    if (Number.isFinite(amount) && !Number.isFinite(limit)) return `${label} ${money(amount)}`;
+    const pct = Number(window.utilization);
+    const parts = [Number.isFinite(pct) ? `${pct.toFixed(1)}%` : "—"];
+    if (Number.isFinite(limit)) parts.push(`of ${money(limit)}`);
+    if (Number.isFinite(left)) parts.push(`${money(left)} left`);
+    return `${label} ${parts.join(" ")}`;
+  }
+
+  /* One key of a multi-key profile's pool (claunch-feb3f): which key it is
+     (its label, else its mask), its own windows, and the fact it is the key
+     the token file holds now. A key whose read failed is that row's error —
+     the other keys keep their numbers. */
+  function keyUsageLine(item, unmeasurable) {
+    const line = node("div", "profile-usage-window profile-usage-key");
+    line.append(node("strong", "", item.label || item.masked || item.id || ""));
+    const reading = item.usage || null;
+    let text;
+    let peak = NaN;
+    if (!reading) {
+      text = unmeasurable ? `cannot be read: ${unmeasurable}` : "not reported for this key";
+    } else if (reading.error) {
+      text = `usage: ${reading.error}`;
+    } else {
+      const windows = shownWindows(reading.windows || []);
+      text = windows.length ? windows.map(keyWindowText).join(" · ") : "no windows reported";
+      const values = windows.map((w) => Number(w.utilization)).filter(Number.isFinite);
+      if (values.length) peak = Math.max(...values);
+    }
+    line.append(node("span", `profile-usage-pct ${level(peak)}`, text));
+    if (item.masked || item.current) {
+      const notes = [];
+      if (item.masked) notes.push(item.masked);
+      if (item.current) notes.push("current — the key this profile's token file holds");
+      line.append(node("small", "", notes.join(" · ")));
+    }
+    if (Number.isFinite(peak)) {
+      const bar = node("div", `profile-usage-bar ${level(peak)}`);
+      const fill = node("span");
+      fill.style.width = `${Math.max(0, Math.min(100, peak))}%`;
+      bar.append(fill);
+      line.append(bar);
+    }
+    return line;
+  }
+
+  /* Every key of the pool the profile's next launch reads, under the card's
+     own reading — which answers for one key and hides the rest. The daemon
+     words why a pool cannot be read (an unmeasurable harness, a broken pool
+     file); when it has nothing to say, waiting and empty each get their own
+     sentence instead of a blank block. */
+  function keyPoolRows(pool, busy) {
+    const box = node("div", "profile-usage-keys");
+    if (!pool) {
+      box.append(node("p", "wf-note", busy
+        ? "Reading every key in this profile's pool…"
+        : "This profile's key pool has not been read yet; Refresh reads it."));
+      return box;
+    }
+    if (pool.error) {
+      box.append(node("p", "wf-note", `This profile's keys could not be read: ${pool.error}`));
+      return box;
+    }
+    const data = pool.data || {};
+    const keys = Array.isArray(data.keys) ? data.keys : [];
+    if (!keys.length) {
+      box.append(node("p", "wf-note", data.unmeasurable
+        ? `This profile's keys cannot be read: ${data.unmeasurable}`
+        : "This profile has no keys in its pool."));
+      return box;
+    }
+    box.append(node("p", "wf-note profile-usage-keys-head",
+      `All ${keys.length} key${keys.length === 1 ? "" : "s"} in this profile's pool`));
+    for (const item of keys) box.append(keyUsageLine(item, data.unmeasurable));
+    return box;
+  }
+
   function card(row) {
     const busy = state.busy.has(row.key);
     const section = node("section", "window-section stats-section profile-usage-card");
@@ -545,6 +685,9 @@
           `${reading.cached ? "Cached" : "Updated"} ${span(ago)} ago · ${SOURCES[reading.data.source] || reading.data.source || ""}`));
       }
     }
+    // A multi-key profile lists every key of its pool under the reading
+    // above, whatever that reading answered (claunch-feb3f).
+    if (row.pooled) section.append(keyPoolRows(state.keyPools.get(row.key), busy));
     if (open) section.append(historyBlock(row));
     return section;
   }
@@ -641,8 +784,9 @@
   globalThis.ProfileUsagePage = {
     open, stop,
     _test: {
-      readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries,
+      readUsage, readFacts, readKeyPool, resetText, shownWindows, countdownText, sizeText, chartSeries,
       dollarSeries, chartPlan, niceMax, viewX, chart, windowLine, keyLine, keyRows, tick,
+      keyWindowText, keyUsageLine, keyPoolRows,
       state,
     },
   };
