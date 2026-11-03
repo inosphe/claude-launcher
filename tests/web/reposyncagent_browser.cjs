@@ -76,6 +76,12 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(await page.locator('.ws-sync-master pre').count(), 1, 'push inputs do not hide sync preview');
     await page.getByRole('button', { name: 'Preview push prompt' }).click();
     await page.locator('.ws-sync-push pre').waitFor();
+    // Two things carry `ws-sync-remotes`: the comparison rows
+    // (wsSyncRemoteComparisons) and the target-remote checkboxes
+    // (wsSyncRemotePicker). Only the comparisons carry `.ws-sync-remote-row`,
+    // so the measurement below pins that list and not the picker's.
+    const comparisons = page.locator('.ws-sync-remotes')
+      .filter({ has: page.locator('.ws-sync-remote-row') });
     for (const width of [1440, 1024, 768, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 });
       const layout = await page.locator('.ws-sync').evaluate(node => {
@@ -87,8 +93,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
           }) };
       });
       assert.deepEqual(layout, { overflow: false, outside: false }, `viewport ${width}`);
-      assert.equal(await page.locator('.ws-sync-remotes').evaluate(n => n.scrollWidth > n.clientWidth + 1), false, `remote rows viewport ${width}`);
-      assert.match(await page.locator('.ws-sync-remotes').innerText(), /Diverged[\s\S]*ahead 2 · behind 1/);
+      assert.equal(await comparisons.evaluate(n => n.scrollWidth > n.clientWidth + 1), false, `remote rows viewport ${width}`);
+      assert.match(await comparisons.innerText(), /Diverged[\s\S]*ahead 2 · behind 1/);
     }
     await mode.selectOption('commands');
     assert.equal(await page.locator('.ws-sync-operation-preview button').count(), 0);
