@@ -167,7 +167,13 @@ def test_the_landed_gate_fetches_then_asks_the_upstream(remote, worker):
     assert set(items) == set(base_items) == {"merged", "frozen"}
     assert items["frozen"] == base_items["frozen"]
     assert "--fetch" in items["merged"]
-    assert items["merged"].endswith("tools/landed_check.py --fetch --target @{upstream}")
+    # The packaged gate everyone gets, not this repository's ``tools/``
+    # script: the definition ships to repositories where that file does not
+    # exist, and python's "no such file" exits 2 -- the same code the gate
+    # means by "cannot tell" (claunch-weo4k).
+    assert items["merged"].endswith(
+        "claunch gate landed-check --fetch --target @{upstream}"
+    )
     # the rest of the gate is the base's: same door out, same prompt
     assert remote.steps["landed"].checklist.then == worker.steps["landed"].checklist.then == "wrapup"
     assert remote.steps["landed"].done_when == worker.steps["landed"].done_when
@@ -215,11 +221,32 @@ def test_the_project_copy_is_the_packaged_layer_plus_its_grafted_fields():
     strip the grafted fields and the project copy is the packaged file."""
     packaged = _bundled_doc(NAME)
     project = model.read_doc((PROJECT / f"{NAME}.yaml").read_text(encoding="utf-8"))
+    # Only the project copy loses its grafted fields: they are this
+    # repository's version of a field the packaged copy either omits or
+    # spells generically, and the drift this test is about is everything else.
     for step in project["steps"].values():
         if isinstance(step, dict):
-            step.pop("awaits", None)
-            step.pop("verify", None)
+            for field in _graft_fields():
+                step.pop(field, None)
     assert project == packaged
+
+
+def _graft_fields() -> tuple:
+    """The field names the project layer owns, from the tool that grafts them.
+
+    Loaded by path for the same reason ``tests/test_project_layer_override.py``
+    does it: pytest's ``pythonpath`` is ``src``, so ``tools`` is not on it. One
+    list, not two -- a field this test forgot to strip would report drift that
+    is not drift, and a field the tool stopped grafting would stop being
+    checked here without a word.
+    """
+    import importlib.util
+
+    sync = ROOT / "tools" / "sync_project_layer.py"
+    spec = importlib.util.spec_from_file_location("sync_project_layer", sync)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.GRAFT_FIELDS
 
 
 # --------------------------------------------------------------------------- #

@@ -2816,7 +2816,7 @@ steps:
       착지 요청을 스스로 거둔다. 상위가 이미 머지를 시작했을 수 있으므로
       순서가 중요하다:
       1. 상위의 표를 먼저 본다 — `claunch beads comments <id>`에 `merged
-         <해시>`가 있거나 landed 판정(`tools/landed_check.py`)이 0이면
+         <해시>`가 있거나 landed 판정(`claunch gate landed-check`)이 0이면
          철회할 것이 없다. 그 사실을 보고에 적고 사람에게 알린다(`claunch
          cflow goto await-landing`으로 돌아가 landed를 고르는 것은 사람의
          몫이다).
@@ -3057,13 +3057,20 @@ steps:
         # 워커 하나가 아무것도 착지하지 않은 tip을 동결해 두었는데 그 위에
         # 스택된 자식 브랜치 때문에 contains 검사가 「실렸다」고 답했다.
         # contains는 후손도 잡고, 후손은 통합이 아니다.
-        # tools/landed_check.py가 그 질문이고, 종료 코드는 0=착지 /
+        # `claunch gate landed-check`가 그 질문이고, 종료 코드는 0=착지 /
         # 1=아직 / 2=판정 불가다. 2와 타임아웃은 unknown으로 기록되고
         # unknown은 참이 아니다 — 답을 못 낸 검사가 게이트를 여는 일은
         # 없다. tests/test_landed_check.py가 그 갈래를 못박는다.
+        # 이 정의는 모든 저장소로 배포되므로 claude-launcher에만 있는
+        # tools/landed_check.py를 상대 경로로 부르지 않는다: 그 파일이
+        # 없는 저장소에서 python이 파일 없음으로 실패하고, 그 코드가
+        # 마침 2(판정 불가)와 같아 회차마다 사람에게 되묻는다
+        # (claunch-eyajw, claunch-weo4k). `claunch gate`는 체크아웃 안에서
+        # 그 체크아웃의 tools/landed_check.py를, 밖에서는 설치된 패키지의
+        # claude_launcher.gates.landed_check를 실행한다(cli_gate).
         - id: merged
           describe: 동결된 내 tip을 부모로 갖는 머지 커밋이 통합 대상에 있다
-          check: 'uv run --no-sync python tools/landed_check.py'
+          check: 'claunch gate landed-check'
         # 동결의 기계 절반. 추적 중인 파일이 수정돼 있으면 지금 트리는
         # 내가 요청한 tip이 아니고, 그러면 위 항목이 초록이어도 그것은
         # 다른 내용에 대한 초록이다.
