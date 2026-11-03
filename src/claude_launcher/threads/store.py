@@ -864,7 +864,7 @@ class ThreadStore:
             ).fetchall()
             threads = []
             for r in rows:
-                t = _thread(r, self._unread(db, r), self._last(db, r["id"]))
+                t = _thread(r, self._unread(db, r), self._last(db, r["id"]), self._guests(db, r["id"]))
                 recent = db.execute(
                     "SELECT * FROM messages WHERE thread = ? ORDER BY seq DESC LIMIT ?",
                     (r["id"], HISTORY_MESSAGES),

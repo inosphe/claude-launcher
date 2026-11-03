@@ -521,6 +521,36 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   await page.poll();
   assert.deepStrictEqual(calls, []);
 
+  // Guest marks (claunch-br084): with two guests each guest's message carries
+  // its own numbered mark, the same numbers the session's pane draws; a thread
+  // with one guest keeps the plain bubble.
+  {
+    const twoGuests = Object.assign(thread('th-g2', 's1', 'open', []), {
+      guests: [{session: 's2', invited_by: 'user'}, {session: 's3', invited_by: 's2'}],
+      messages: [
+        {seq: 1, thread: 'th-g2', author: 'guest', guest: 's2', body: 'from s2', at: '2026-10-14T10:00:00+00:00'},
+        {seq: 2, thread: 'th-g2', author: 'guest', guest: 's3', body: 'from s3', at: '2026-10-14T10:00:01+00:00'},
+      ],
+    });
+    stamp = 'S6';
+    reply = () => ({threads: [twoGuests], total: 1, page: 1, per_page: 20, pages: 1, sessions});
+    page.open('feed');
+    await settle();
+    const marks = view.byClass('thh-thread')[0].byClass('th-guest-mark');
+    assert.deepStrictEqual(marks.map(m => m.textContent), ['1', '2']);
+    assert.ok(marks[0].className.includes('th-guest-mark-1'));
+    assert.ok(marks[1].className.includes('th-guest-mark-2'), 'the second guest reads differently');
+    const oneGuest = Object.assign(thread('th-g1', 's1', 'open', []), {
+      guests: [{session: 's2', invited_by: 'user'}],
+      messages: [{seq: 1, thread: 'th-g1', author: 'guest', guest: 's2', body: 'only me', at: '2026-10-14T10:00:00+00:00'}],
+    });
+    stamp = 'S7';
+    reply = () => ({threads: [oneGuest], total: 1, page: 1, per_page: 20, pages: 1, sessions});
+    await page.poll(); await settle();
+    assert.strictEqual(view.byClass('th-guest-mark').length, 0, 'one guest is already unambiguous');
+    assert.ok(view.textContent.includes('(guest)'), 'the name is still shown');
+  }
+
   // An unknown mode falls back to tree.
   page.open('nope');
   assert.strictEqual(page.state.view, 'tree');

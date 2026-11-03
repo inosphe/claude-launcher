@@ -225,6 +225,23 @@ globalThis.ThreadsPane = (() => {
     return "나";
   }
 
+  /* The extra marker that keeps guests apart when a thread has more than one
+     (claunch-br084). Every guest keeps the same bubble background; each one
+     also gets a number by its place in the thread's guest list and a colour
+     that cycles through GUEST_MARKS, so two guests are told apart by the mark
+     rather than by re-reading the name. A thread with one guest (or none) is
+     already unambiguous: the map is empty and nothing is drawn. */
+  const GUEST_MARKS = 6;
+  function guestTags(t) {
+    const names = ((t && t.guests) || []).map((g) => g && g.session).filter(Boolean);
+    const out = new Map();
+    if (names.length < 2) return out;
+    names.forEach((name, i) => out.set(name, {
+      n: i + 1, name, cls: `th-guest-mark-${(i % GUEST_MARKS) + 1}`,
+    }));
+    return out;
+  }
+
   /* Every thread the pane can show: the session's own, then the ones it
      is a guest in. */
   function allThreads(doc) {
@@ -957,10 +974,21 @@ globalThis.ThreadsPane = (() => {
     return [again, back];
   }
 
-  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "", actions = [], flag = "") {
+  /* One guest's mark (`tag` from guestTags): the number first, so the eye
+     can follow one guest down the conversation without reading names. */
+  function guestMark(tag) {
+    if (!tag) return null;
+    const mark = node("span", `th-guest-mark ${tag.cls}`, String(tag.n));
+    mark.title = `게스트 ${tag.n} · ${tag.name}`;
+    return mark;
+  }
+
+  function bubble(author, text, when, state, images = [], files = [], tid = "", who = "", actions = [], flag = "", tag = null) {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
+    const mark = guestMark(tag);
+    if (mark) meta.append(mark);
     meta.append(node("span", "th-msg-who", who || (author === "agent" ? name : "나")));
     if (when) meta.append(node("span", "th-msg-at", when));
     if (flag) {
@@ -1271,12 +1299,26 @@ globalThis.ThreadsPane = (() => {
     return ul;
   }
 
+  /* Is the message list scrolled to its end? The slack keeps a reader who is
+     a few pixels short of the floor following new messages (claunch-br084.1).
+     A box the harness stubs without a clientHeight reads as "at the end",
+     which is the behaviour a fresh conversation has. */
+  const SCROLL_SLACK = 24;
+  function nearBottom(box) {
+    if (!box) return true;
+    const height = typeof box.scrollHeight === "number" ? box.scrollHeight : 0;
+    const shown = typeof box.clientHeight === "number" ? box.clientHeight : 0;
+    const top = typeof box.scrollTop === "number" ? box.scrollTop : 0;
+    return top + shown >= height - SCROLL_SLACK;
+  }
+
   function renderConvo(main) {
     if (!convo) {
       main.replaceChildren(node("p", "wf-note", "왼쪽에서 쓰레드를 고르거나 새 쓰레드를 여세요."));
       return;
     }
     const t = convo.thread;
+    const tags = guestTags(t);
     const head = node("div", "th-convo-head");
     if (renaming === t.id) {
       const box = node("input", "th-rename-input");
@@ -1346,7 +1388,10 @@ globalThis.ThreadsPane = (() => {
       guests = node("div", "th-guests");
       if (t.session !== name) guests.append(node("span", "th-guest-role", `${t.session}의 쓰레드 · ${name}는 게스트(리뷰·조언)`));
       for (const g of t.guests || []) {
-        const chip = node("span", "th-guest-chip", g.session);
+        const chip = node("span", "th-guest-chip");
+        const mark = guestMark(tags.get(g.session));
+        if (mark) chip.append(mark);
+        chip.append(node("span", "th-guest-name", g.session));
         chip.title = `게스트 · ${g.invited_by === "user" ? "사용자가" : g.invited_by + "가"} 초대`;
         const x = node("button", "th-guest-x", "×");
         x.type = "button";
@@ -1424,14 +1469,20 @@ globalThis.ThreadsPane = (() => {
       && (!kept._drawn || convo.messages[kept._drawn - 1].seq === kept._lastSeq)
       && kept._entrySig === sig
       && typeof main.insertBefore === "function" && typeof kept.removeChild === "function";
+    // A redraw keeps the reader's place (claunch-br084.1): someone reading
+    // further up should not be pulled to the bottom because a guest or
+    // another session wrote. Only a reader already at the bottom follows the
+    // new message; a thread opened or switched to still starts at the end.
+    const follow = keep ? nearBottom(kept) : true;
     const msgs = keep ? kept : node("div", "th-messages");
     const from = keep ? kept._drawn : 0;
     // The pending bubble and the empty note always sit after the messages.
     if (keep) while (msgs.childNodes.length > from) msgs.removeChild(msgs.lastChild);
     for (const m of convo.messages.slice(from)) {
       if (m.kind === "ask") { msgs.append(askBubble(t, m)); continue; }
+      const tag = m.author === "guest" ? tags.get(m.guest) : null;
       msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name)),
-                         m.files || [], t.id, speaker(m, t.session), msgActions(t.id, m), msgFlag(m)));
+                         m.files || [], t.id, speaker(m, t.session), msgActions(t.id, m), msgFlag(m), tag));
     }
     msgs._thread = t.id;
     msgs._drawn = n;
@@ -1473,7 +1524,8 @@ globalThis.ThreadsPane = (() => {
     } else {
       main.replaceChildren(head, ...(guests ? [guests] : []), ...(links ? [links] : []), msgs, compose);
     }
-    msgs.scrollTop = msgs.scrollHeight;
+    if (follow) msgs.scrollTop = msgs.scrollHeight;
+    else if (typeof kept.scrollTop === "number") msgs.scrollTop = kept.scrollTop;
     const last = convo.messages[convo.messages.length - 1];
     if (last) markRead(t.id, last.seq);
   }
@@ -1638,6 +1690,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, allThreads, sendKey, newlineKey, pick, linkLabel, splitLinks, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, speaker, guestTags, allThreads, sendKey, newlineKey, pick, linkLabel, splitLinks, stamp,
           imageKind, imageFiles, imageSrc, fileSrc, sizeOf, lastLine, clampSideW, deliveryNotice, FOLD_KEY, SIDE_W_KEY};
 })();
