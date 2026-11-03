@@ -469,3 +469,200 @@ def test_rail_rows_carry_the_delayed_marker_and_the_queue_place(home):
     assert "restore_queue" not in rows["crashed"]
     assert body["restore_queue"]["remaining"] == 1
     assert body["restore_queue"]["next"] == "waiting"
+
+
+class _FakeQueue:
+    def __init__(self, status, positions):
+        self._status, self._positions = status, positions
+
+    def waiting(self):
+        return list(self._positions)
+
+    @property
+    def order(self):
+        return list(self._positions)
+
+    def status(self, now=None, without=()):
+        return self._status
+
+    def positions(self, now=None, without=()):
+        return self._positions
+
+
+def test_a_host_relaunch_queue_does_not_hide_the_boot_queue():
+    """The dashboard reads one restore queue; a host relaunch's queue used to
+    replace the boot's there while the boot's was still walking its list
+    (claunch-hor3b.2). Queues answers for both."""
+    boot = _FakeQueue(
+        {"total": 4, "done": 1, "started_by_queue": 1, "remaining": 3, "next": "b2",
+         "interval": 3.0, "pace_seconds": 5.0, "eta_seconds": 15},
+        {"b2": {"rank": 2, "total": 4, "ahead": 0, "eta_seconds": 5},
+         "b3": {"rank": 3, "total": 4, "ahead": 1, "eta_seconds": 10}},
+    )
+    host = _FakeQueue(
+        {"total": 3, "done": 1, "started_by_queue": 1, "remaining": 2, "next": "h1",
+         "interval": 3.0, "pace_seconds": 3.0, "eta_seconds": 30},
+        {"h1": {"rank": 2, "total": 3, "ahead": 0, "eta_seconds": 3}},
+    )
+    view = restore_queue.Queues(boot)
+    view.add(host)
+    status = view.status()
+    assert (status["total"], status["done"], status["remaining"]) == (7, 2, 5)
+    assert status["started_by_queue"] == 2
+    assert status["next"] == "b2" and status["eta_seconds"] == 30
+    assert set(view.positions()) == {"b2", "b3", "h1"}
+
+
+def test_a_finished_queue_leaves_the_view_to_the_live_one():
+    done = _FakeQueue(None, {})
+    live = _FakeQueue(
+        {"total": 1, "done": 0, "started_by_queue": 0, "remaining": 1, "next": "h1",
+         "interval": 3.0, "pace_seconds": 3.0, "eta_seconds": 3},
+        {"h1": {"rank": 1, "total": 1, "ahead": 0, "eta_seconds": 3}},
+    )
+    assert restore_queue.Queues(done).status() is None
+    view = restore_queue.Queues(done, live)
+    assert view.status() == live.status() and list(view.positions()) == ["h1"]
+
+
+class _QueueManager:
+    """Just what :class:`RestoreQueue` reads: delayed records it wakes."""
+
+    restore_stagger = 0.0
+    restore_queue: list = []
+    resumed_busy: list = []
+
+    def __init__(self, *names):
+        self.records = {n: SimpleNamespace(exited=True, delayed_at=STAMP,
+                                           last_output_at=None) for n in names}
+
+    def get(self, name):
+        from claude_launcher.daemon.manager import ManagerError
+        if name not in self.records:
+            raise ManagerError(name)
+        return self.records[name]
+
+    def descendants(self, name):
+        return []
+
+    async def wake_async(self, name, by=None):
+        self.records[name].exited = False
+        self.records[name].delayed_at = None
+
+    def delay_again(self, name):
+        self.records[name].exited = True
+        self.records[name].delayed_at = STAMP
+
+
+def test_a_name_the_boot_queue_has_passed_is_counted_once_when_delayed_again():
+    """The boot's queue started A; a host loss then files A delayed again for
+    the relaunch's own queue. The boot's queue never comes back to A, so A
+    waits in the relaunch's queue alone: three names, three waiting, and A's
+    place is the relaunch queue's (claunch-hor3b.2, s511-rev, s648-rev)."""
+    mgr = _QueueManager("A", "B", "C")
+
+    async def go():
+        boot = restore_queue.RestoreQueue(mgr, names=["A", "B", "C"], interval=60)
+        boot.start()
+        for _ in range(100):
+            if boot.started:
+                break
+            await asyncio.sleep(0.01)
+        assert boot.started == ["A"]  # and now sleeps the interval before B
+        mgr.delay_again("A")
+        host = restore_queue.RestoreQueue(mgr, names=["A"], interval=60)
+        host.order = ["A"]  # ranked, not started: its run would wake A at once
+        view = restore_queue.Queues(boot, host)
+        try:
+            assert boot.waiting() == ["B", "C"]
+            status = view.status()
+            assert (status["total"], status["done"], status["remaining"]) == (3, 0, 3)
+            assert status["started_by_queue"] == 1
+            assert view.positions()["A"]["total"] == 1
+        finally:
+            await boot.stop()
+
+    asyncio.run(go())
+
+
+def test_a_name_woken_before_its_turn_and_delayed_again_is_counted_once():
+    """The boot's queue [B, C, A] started B; A was woken by use before its
+    turn. A host loss files A and B delayed again for the relaunch's queue
+    [A, B]. A now waits in both queues; it is counted once, in the boot's,
+    and B in the relaunch's alone: three names, three waiting
+    (claunch-hor3b.2, s511-rev, s648-rev)."""
+    mgr = _QueueManager("A", "B", "C")
+
+    async def go():
+        boot = restore_queue.RestoreQueue(mgr, names=["B", "C", "A"], interval=60)
+        boot.start()
+        for _ in range(100):
+            if boot.started:
+                break
+            await asyncio.sleep(0.01)
+        assert boot.order == ["B", "C", "A"] and boot.started == ["B"]
+        mgr.delay_again("B")
+        mgr.delay_again("A")
+        host = restore_queue.RestoreQueue(mgr, names=["A", "B"], interval=60)
+        host.order = ["A", "B"]  # ranked, not started: its run would wake A at once
+        view = restore_queue.Queues(boot, host)
+        try:
+            assert boot.waiting() == ["C", "A"] and host.waiting() == ["A", "B"]
+            status = view.status()
+            assert (status["total"], status["done"], status["remaining"]) == (3, 0, 3)
+            places = view.positions()
+            assert set(places) == {"A", "B", "C"}
+            assert places["A"] == {**places["A"], "rank": 2, "total": 2, "ahead": 1}
+            assert places["B"] == {**places["B"], "rank": 1, "total": 1, "ahead": 0}
+        finally:
+            await boot.stop()
+
+    asyncio.run(go())
+
+
+def test_a_name_both_queues_are_done_with_is_counted_once():
+    """The boot's queue [A, B, C] started A; a relaunch's queue [A, D] has A
+    awake again and D waiting. A is in both lists and waits in neither: it
+    is one name done, counted in the boot's queue (claunch-hor3b.2,
+    s648-rev)."""
+    mgr = _QueueManager("A", "B", "C", "D")
+
+    async def go():
+        boot = restore_queue.RestoreQueue(mgr, names=["A", "B", "C"], interval=60)
+        boot.start()
+        for _ in range(100):
+            if boot.started:
+                break
+            await asyncio.sleep(0.01)
+        assert boot.started == ["A"]
+        host = restore_queue.RestoreQueue(mgr, names=["A", "D"], interval=60)
+        host.order = ["A", "D"]
+        view = restore_queue.Queues(boot, host)
+        try:
+            status = view.status()
+            assert (status["total"], status["done"], status["remaining"]) == (4, 1, 3)
+            assert view.positions()["D"] == {**view.positions()["D"],
+                                             "rank": 1, "total": 1}
+        finally:
+            await boot.stop()
+
+    asyncio.run(go())
+
+
+def test_a_queue_that_walked_its_list_leaves_the_view_when_another_joins():
+    mgr = _QueueManager("A")
+
+    async def go():
+        first = restore_queue.RestoreQueue(mgr, names=["A"], interval=0)
+        first.start()
+        for _ in range(100):
+            if first.finished:
+                break
+            await asyncio.sleep(0.01)
+        assert first.finished
+        view = restore_queue.Queues(first)
+        later = restore_queue.RestoreQueue(mgr, names=[], interval=0)
+        view.add(later)
+        assert view.queues == [later]
+
+    asyncio.run(go())

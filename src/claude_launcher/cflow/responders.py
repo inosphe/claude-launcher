@@ -245,8 +245,22 @@ class Pool:
             if self.members[h].holds(candidate.role)
         ]
 
+    def pick_one(self, members: List[Responder]) -> Responder:
+        """The one member a single-responder group puts its question to.
+
+        Mechanical and repeatable: a member this session can already message
+        before one that would need a new edge, an idle one before a busy one,
+        and otherwise the group's own order (:meth:`in_scope`). ``min`` keeps
+        the first of equal keys, so the same roster always gives the same pick.
+        """
+        return min(
+            members,
+            key=lambda m: (m.handle not in self.reachable, m.reachability != "idle"),
+        )
+
     def match(
-        self, candidate: model.Candidate, *, autowire: bool = False
+        self, candidate: model.Candidate, *, autowire: bool = False,
+        one: bool = False, exclude: frozenset = frozenset(),
     ) -> Tuple[List[Responder], Optional[str]]:
         """Members this candidate names, or ``([], reason)``.
 
@@ -260,6 +274,12 @@ class Pool:
         off by default so that reading who *would* answer stays a read. Only
         the one caller that is actually opening a question passes it; the
         preview reports the missing edge and says it will be made.
+
+        ``one`` narrows the group to a single answerable member
+        (:meth:`pick_one`) before anything is wired, so the question -- and
+        any edge it needs -- reaches that member alone (claunch-v0h29.1).
+        ``exclude`` names the members of this group already asked one at a
+        time; the pick is made among the rest.
         """
         where = candidate.describe()
         if self.problem:
@@ -267,6 +287,15 @@ class Pool:
         matched = self.eligible(candidate)
         if not matched:
             return [], f"{where}: {self._nobody_holds(candidate)}"
+        if one:
+            live = [m for m in matched if m.answerable]
+            if live and exclude:
+                live = [m for m in live if m.handle not in exclude]
+                if not live:
+                    return [], (f"{where}: every answerable member was asked in turn "
+                                f"({', '.join(sorted(exclude))}) and none answered")
+            if live:
+                matched = [self.pick_one(live)]
         reachable = [m for m in matched if m.handle in self.reachable]
         # The note is built here, where both facts are known: whether wiring
         # was allowed to run at all, and what it did. Two readers need

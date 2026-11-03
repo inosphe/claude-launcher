@@ -64,6 +64,11 @@ let pressing = false;
 /* A poll's redraw that waited (a press, a field being typed in, text
    selected in the view), and what the last drawn poll read. */
 let heldRender = false, drawnRead = "";
+/* The form's lists arrived during a press. Unlike a poll's redraw they are
+   drawn on the release even with a form field focused: the press that held
+   them is usually the one that put the caret there, and render() keeps the
+   caret (claunch-iu6z2.1.1). */
+let listsHeld = false;
 /* Whether the last conversation read came back with the session panel: a
    daemon started before panel=0 existed ignores it and answers with the
    whole view, seconds of its time (claunch-fokj3). The closed operator
@@ -174,6 +179,13 @@ function refresh() {
         if(detail.unseen > 0 && !document.hidden && opts.active?.()) {
           const seen = await call(opPath(selected, "/seen"), "POST", {});
           list = list.map(o => o.id === seen.id ? {...o, ...seen} : o);
+          // The view's copy takes the new counts too. The detail is the
+          // summary plus the conversation, so the next poll reads exactly
+          // this; left at the old count it differed from what was drawn and
+          // rebuilt the whole conversation once more for no news -- under a
+          // drag-select about to start or a copy button just pressed
+          // (claunch-iu6z2.1).
+          if(detail.id === seen.id) detail = {...detail, ...seen};
         }
       } catch(err) { detail = {id: selected, error: err.message, feed: [], threads: []}; }
     } else detail = null;
@@ -218,7 +230,12 @@ async function openForm(op, message = "") {
   // The launchable selectors (profile:harness), as the new-session form offers them.
   profiles = (f.profile_options || []).map(o => ({value: o.value, label: o.label || o.value}));
   if(!profiles.length) profiles = (f.profiles || []).map(x => typeof x === "string" ? {value: x, label: x} : {value: x.name, label: x.name}).filter(x => x.value);
-  render();
+  // The two lists can come back after the form is already on screen and
+  // the reader is pressing 저장 in it -- on a loaded machine, between the
+  // pointer's down and up. That redraw waits for the release, or the button
+  // goes and the save never happens (claunch-iu6z2.1.1).
+  if(pressing) listsHeld = true;
+  else render();
 }
 function formBox() {
   const box = node("form", "", "op-form");
@@ -610,9 +627,44 @@ function render() {
   // stays at the end, so a new entry in the view's own conversation shows.
   const page = opts.scroller?.(), top = page?.scrollTop;
   const atEnd = !!page && page.scrollHeight - page.scrollTop - page.clientHeight < 24;
+  /* Where the view's height is bounded (the page's dock on a wide screen, the
+     floating dialog) the conversation — or the one pane showing in the narrow
+     layout — scrolls inside itself (claunch-vxep1), so a rebuild replaces
+     those nodes too and their scroll with them. Keep each one's place the
+     way the page scroller is kept: the conversation jumps to its end on
+     news, the list only holds its place. A scroller that was not there
+     before (the first draw) shows its end, the way the empty page scroller
+     did. */
+  const innerKeep = new Map();
+  for(const el of area.querySelectorAll(".op-thread-view, .op-thread-list, .op-threads-grid")) {
+    if(!/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+    const key = el.classList.contains("op-thread-view") ? "view" : el.classList.contains("op-thread-list") ? "list" : "grid";
+    innerKeep.set(key, {top: el.scrollTop, atEnd: el.scrollHeight - el.scrollTop - el.clientHeight < 24});
+  }
+  // A field being typed in keeps the caret. Not every redraw waits for the
+  // reader (openForm's, once the projects and profiles arrive, does not), and
+  // one that replaced the focused field dropped what came after: a name typed
+  // as the form's lists arrived lost its text, the empty required name then
+  // blocked 「만들기」 with no message (claunch-iu6z2). The fields read their
+  // values from `form`, which every keystroke updates, so the new node holds
+  // the same text.
+  const active = document.activeElement;
+  const keep = active?.id && area.contains(active) && active.matches("input,textarea,select")
+    ? {id: active.id, start: active.selectionStart, end: active.selectionEnd} : null;
   area.replaceChildren(...parts);
+  const again = keep && document.getElementById(keep.id);
+  if(again && again !== active && area.contains(again)) {
+    again.focus({preventScroll: true});
+    if(keep.start != null) try { again.setSelectionRange(keep.start, keep.end); } catch {}
+  }
   sessionBar(op);
   if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
+  for(const [key, kept] of innerKeep) {
+    const el = area.querySelector(key === "view" ? ".op-thread-view" : key === "list" ? ".op-thread-list" : ".op-threads-grid");
+    if(!el || !/auto|scroll/.test(getComputedStyle(el).overflowY)) continue;
+    const jump = key !== "list" && opts.composer && (kept ? kept.atEnd : true);
+    el.scrollTop = jump ? el.scrollHeight : kept ? kept.top : 0;
+  }
   if(input) input.send.disabled = busy || !op;
 }
 /* The press that was held back: a redraw waits while a pointer is down, and
@@ -641,7 +693,11 @@ function releaseRender() {
   pressing = false;
   // After the click, not before it: the browser dispatches it right after
   // the pointerup, and the press has to reach the node it was aimed at.
-  setTimeout(() => { if(!pressing) flushHeld(); }, 0);
+  setTimeout(() => {
+    if(pressing) return;
+    if(listsHeld) { listsHeld = false; heldRender = false; render(); }
+    else flushHeld();
+  }, 0);
 }
 /* -- what observer.js uses --------------------------------------------- */
 const TARGET = "operator:";

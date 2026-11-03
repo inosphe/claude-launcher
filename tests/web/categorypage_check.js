@@ -27,6 +27,8 @@ let tree = {
   items: [
     {kind: 'session', ref: 's1', node_id: 'n1'},
     {kind: 'session', ref: 's2', node_id: 'n2'},
+    {kind: 'session', ref: 's3', node_id: 'n1'},
+    {kind: 'session', ref: 's4', node_id: 'n1'},
     {kind: 'session', ref: 's10', node_id: 'n2'},
     {kind: 'session', ref: 's11', node_id: 'n2'},
     {kind: 'issue', ref: 'i-1', node_id: 'n3'},
@@ -37,6 +39,8 @@ let tree = {
                items: [{kind: 'session', ref: 's1', waiting_in: 'n1'}], proposed_by: 's1-cat1', created_at: '2026-10-18T00:00:00'}],
   details: {'session:s1': {status: 'idle', life: 'running', note: 'tab work', issue: 'i-2'},
             'session:s2': {status: 'busy', life: 'running', note: ''},
+            'session:s3': {status: 'exited', life: 'hold', note: ''},
+            'session:s4': {status: 'exited', life: 'delayed', note: ''},
             'session:s10': {status: 'exited', life: 'killed', note: ''},
             'session:s11': {status: 'exited', life: 'archived', note: ''},
             'issue:i-1': {title: 'An issue', status: 'open'},
@@ -155,6 +159,29 @@ const last = () => calls[calls.length - 1];
   killBox.checked = false; killBox.onchange();
   archBox.checked = false; archBox.onchange();
   assert(!shown('s10') && !shown('s11'));
+
+  // The other partitions stay visible until asked, like a record with no
+  // daemon entry at all (the loose list below).
+  assert(shown('s3') && shown('s4'));
+  assert(all().some(n => n.textContent === '트리에 없는 세션 1개'));
+
+  // "running only (hold 포함)": running and hold stay; every other partition
+  // — and a session with no daemon record at all — is hidden.
+  const liveBox = filter('live');
+  assert(liveBox && !liveBox.checked);
+  liveBox.checked = true; liveBox.onchange();
+  assert(shown('s1') && shown('s2') && shown('s3') && all().some(n => n.textContent === 'hold'));
+  assert(!shown('s4') && !shown('s10') && !shown('s11'));
+  assert(!all().some(n => n.textContent === '트리에 없는 세션 1개'), 'a session with no record is not "running" either');
+  // Issues are not sessions: the mode filters sessions only.
+  assert(shown('i-1') && shown('i-2'));
+  // The killed box cannot re-add a session the mode hides.
+  killBox.checked = true; killBox.onchange();
+  assert(!shown('s10'));
+  killBox.checked = false; killBox.onchange();
+  liveBox.checked = false; liveBox.onchange();
+  assert(shown('s1') && shown('s2') && shown('s3') && shown('s4') && !shown('s10') && !shown('s11'));
+  assert(all().some(n => n.textContent === '트리에 없는 세션 1개'));
 
   // Two sessions inside "web": extract goes under web.
   pick('session s1 선택'); pick('session s2 선택');

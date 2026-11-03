@@ -31,6 +31,7 @@ import contextlib
 import ctypes
 import os
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -437,6 +438,10 @@ class History:
         self.error = None
         self.lock = asyncio.Lock()
         self.serial = 0
+        # ``serial`` lives in memory and counts from one again in a new
+        # History, so an id means something only next to this ``epoch``: a
+        # host-copy watch compares ids within one epoch (claunch-tn5ba).
+        self.epoch = secrets.token_hex(8)
 
     async def sample(self):
         async with self.lock:
@@ -453,7 +458,7 @@ class History:
             self.last = text
             if not text:
                 return
-            self._record(text)
+            self._record(text, "host")
 
     async def add(self, text: str):
         """Record text a browser copied (an OSC 52 write the web terminal
@@ -461,12 +466,15 @@ class History:
         and ``last`` stays the host's, so the next sample still compares
         against what the host holds."""
         async with self.lock:
-            return self._record(text)
+            return self._record(text, "browser")
 
-    def _record(self, text: str):
+    def _record(self, text: str, source: str):
         self.serial += 1
         self.items = [item for item in self.items if item["text"] != text]
-        item = {"id": str(self.serial), "text": text,
+        # ``source`` says whose clipboard the text was on: ``host`` (sampled
+        # here) or ``browser`` (an OSC 52 copy the page posted). The page
+        # relays only host entries to the browser (claunch-tn5ba).
+        item = {"id": str(self.serial), "text": text, "source": source,
                 "copied_at": datetime.now(timezone.utc).isoformat()}
         self.items.insert(0, item)
         del self.items[MAX_ITEMS:]
@@ -492,7 +500,12 @@ async def lifecycle(app):
 async def get_history(request):
     history = request.app["clipboard"]
     await history.sample()
-    return web.json_response({"items": history.items, "error": history.error},
+    # ``now`` is this machine's clock, against which a host-copy watch ages
+    # ``copied_at``; ``epoch`` says which run of the ids these are
+    # (claunch-tn5ba).
+    return web.json_response({"items": history.items, "error": history.error,
+                              "epoch": history.epoch,
+                              "now": datetime.now(timezone.utc).isoformat()},
                              headers={"Cache-Control": "no-store"})
 
 

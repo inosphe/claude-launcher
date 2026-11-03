@@ -77,7 +77,7 @@ Windows), so the regular `claunch` tool is not replaced. `pyproject.toml` is not
 changed: its `zvec>=0.7,<0.8` cap conflicts with the `0.8.x` source build, which
 the override replaces. `aiortc` has no `cp314t` wheels, so the optional `p2p`
 extra needs the `libsrtp2` headers and compiles them from source: on Linux
-`libsrtp2-dev` and `pkg-config`, on macOS `brew install srtp pkg-config`
+`libsrtp2-dev`, `libssl-dev` and `pkg-config`, on macOS `brew install srtp openssl pkg-config`
 (plus the Xcode Command Line Tools for the `zvec` build), on Windows `vcpkg install
 libsrtp2:x64-windows`. The script checks for them before the `zvec` build and,
 when they are missing, prints the install commands and asks whether to finish
@@ -192,7 +192,7 @@ claunch run work:claude                  # explicit Claude selector
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
 | `set-token <name> [t]` | Store the profile's launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it (and any key pool); on a pooled profile this replaces the selected key (`--key ID` for another). |
-| `keys list\|add\|remove\|strategy\|select <name>` | Register several tokens on one profile and choose one per launch (see [several keys per profile](#several-keys-per-profile)). |
+| `keys list\|add\|remove\|strategy\|roll\|select <name>` | Register several tokens on one profile and choose one per launch (see [several keys per profile](#several-keys-per-profile)). |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name[:harness]>` | Print the profile root, or the explicit harness's namespaced home. |
@@ -545,6 +545,8 @@ claunch keys add work sk-ant-oat01-aaa --label home    # the first add adopts
 claunch keys add work sk-ant-oat01-bbb --label office  # the current set-token value
 claunch keys list work
 claunch keys strategy work rotation                    # rotation (default)
+claunch keys strategy work manual 2                    # this key, every launch
+claunch keys strategy work random && claunch keys roll work   # draw, re-draw
 claunch keys select work                               # what the next launch picks
 ```
 
@@ -552,7 +554,13 @@ The dashboard's New session / Spawn child form shows the same answers for the
 profile picked in its **Runs as** section: what that account's usage reads
 (the same windows as `claunch usage`), every key of the pool with its own
 usage, which key the next launch takes, and the strategy — editable there,
-since it decides the pick for every launch of that profile.
+since it decides the pick for every launch of that profile. The key the next
+launch takes is named for every strategy, and the form's controls change it in
+place: `roll` draws again for `random`, and each key's `use` button switches
+the profile to `manual` with that key **and** pins the session the form is
+about to create to it (the same pin the rail's key modal sets on an existing
+session — `SessionDef.key_id`, written into the token file on every launch,
+restores included).
 
 Strategies:
 
@@ -561,7 +569,15 @@ Strategies:
 | `rotation` | Keys in file order, one per launch, wrapping at the end. The default. |
 | `usage-min` | The key whose own subscription usage is lowest. |
 | `usage-max` | The key whose own subscription usage is highest. |
-| `random` | A uniformly random key. |
+| `random` | The key last drawn; the launch takes it, then the next draw is stored. `claunch keys roll` (or the form's `roll`) re-draws. |
+| `manual` | The key you name: `claunch keys strategy work manual <id-or-index>`. |
+
+`random` and `manual` store their key in the pool (`pick`), which is what lets
+`claunch keys select` and the form name the next launch's key before it runs.
+Without a stored draw (`random` on a pool written by an older claunch) the next
+launch draws and stores one, and the form says so instead of naming a key. A
+stored `manual` key that is later removed (`claunch keys remove`) makes the
+next launch fall back to `rotation` and report that in `claunch keys select`.
 
 `usage-min`/`usage-max` read each key's own usage, so they only work where the
 launcher token *is* the account credential (a Claude provider key, a Kimi
@@ -628,12 +644,26 @@ it opens a modal listing the keys, masked, with the one in use marked. Picking
 another key restarts that session on it — the same name, the same
 conversation (`--resume`), the harness relaunched on the new key.
 
+The modal states three separate facts, and the rows carry them apart: the key
+this session's process was given (`launched_key`, recorded at launch — the
+profile's token file cannot answer it, because every launch of the pool writes
+that file), the pin (`key_id`), and the key the pool's next launch will take
+(the same peek the create form shows: the cursor's next key for `rotation`, the
+reading-based answer for `usage-min`/`usage-max`, the stored draw for `random`
+and the named key for `manual`). Above the list, the pool's own **Strategy**
+select writes `POST /api/profiles/<pool>/keys/strategy` as it changes, so the
+next launch's key can be chosen from here rather than only from the create
+form; under `manual` the key marked in the list is the one it names, and
+`random` carries a **roll** button (`POST …/keys/roll`) that re-draws.
+
 The pin is part of the session's definition (`key_id`), so it holds across
 daemon restarts and every later restore writes that key into the profile's
 token file rather than taking the pool's next one; pinning one session does
-not consume another session's rotation. `No pin` in the same modal clears it,
-and the strategy picks from the next launch on. Keys themselves are still
-edited only with `claunch keys` — the modal picks, it does not edit.
+not consume another session's rotation. A pinned session ignores the pool's
+strategy, which is what the modal's note says while the pin is set. `No pin`
+in the same modal clears it, and the strategy picks from the next launch on.
+Keys themselves are still edited only with `claunch keys` — the modal picks a
+key and the strategy, it does not add or remove keys.
 
 The two routes behind it, for scripts: `GET /api/profiles/<profile>/keys`
 (id, label, masked token, strategy, which is current — never a plaintext
@@ -668,6 +698,24 @@ claunch validate         # all profiles
 and token) and reports `OK` with a snippet of the reply, or `FAIL` with the
 reason; it exits non-zero if any profile fails. Profiles without a token fail
 fast without calling the API. Tune with `--prompt` and `--timeout`.
+For a claude-harness profile it also prints `onboarding: done` or
+`onboarding: missing`; that line is informational and never fails `validate`.
+
+A profile created without a seed source (or with `--no-seed`) has no
+`hasCompletedOnboarding` in its `.claude.json`, so Claude Code opens its
+first-run theme/login screens even though `run` injects a working token.
+`claunch onboard` sets that one flag and keeps every other key:
+
+```bash
+claunch onboard work           # one profile (needs a stored credential)
+claunch onboard --all          # every claude-harness profile that has one
+claunch onboard work --check   # only report; exit 1 if missing
+```
+
+A profile with no credential is refused (log it in first: its first-run
+screens are how it gets one). `claunch run` never writes the file; when the
+flag is missing on a profile that has a credential it prints a hint naming
+`claunch onboard <name>`.
 
 ## Seeding (skip onboarding)
 
@@ -2512,7 +2560,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness (`pi/pi-durable` when a kind was declared), profile, size, cwd, and `\| <progress>` when the session published one. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
-| `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, and relaunches it there. `--children` moves the descendants standing in the same directory too; `-a` attaches. Also a **Move to worktree** picker in the web UI's session panel. |
+| `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, and relaunches it there. `--children` moves the descendants standing in the same directory too; `--project P` also re-files the session under that project (its cflow runs and future beads issues follow the new directory; followers keep their own project); `-a` attaches. Also a **Move to worktree** picker in the web UI's session panel. |
 | `reborrow S [NAME]`   | Restart a token-capable session on another answer to "whose token": base profile `NAME` borrows its shared token (`--borrow`), `--none` uses the runtime profile's own, and Claude also supports `--null`. Stops and relaunches the session — same name, same conversation, same directory. `-a` attaches. The Web detail pane's **Borrowed auth** picker includes live credential validation. |
 | `skip-permissions S on\|off` | Restart a session with claude's `--dangerously-skip-permissions` added (`on`) or removed (`off`) — the flag lives in the definition's args, so toggling it stops and relaunches the session: same name, same conversation, same directory. `-a` attaches. Also a **Permissions** toggle in the web UI's session panel. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
@@ -2550,6 +2598,13 @@ pin one with `CLAUNCH_DAEMON_PORT`), and its own relay identity (defaults to
 `<hostname>-NAME`; override with `CLAUNCH_RELAY_NAME`). The default instance
 keeps the classic `~/.claude-launcher/daemon/` directory and fixed port, so
 nothing changes unless you opt in.
+
+The default instance's id is `main` (the `@main` of a cflow2 run slot).
+`claunch -L main ...` and `CLAUNCH_DAEMON=main` select it, so `claunch -L main
+run ...` is `claunch run ...`: same launcher home, same config file
+(`~/.claude-launcher/.claunch.yaml`), same daemon. `-L main` also returns a
+shell that inherited another instance to the default one. `default` is
+refused as an instance name; it is not an alias of `main`.
 
 ```bash
 claunch -L test daemon start             # creates the 'test' instance
@@ -3154,8 +3209,9 @@ approved separately from a plain push) and pulls another machine's
 (fast-forward only, no card). Peers are advisory throughout: with no
 relay, or a peer whose daemon predates reposync, the panel says so and still
 plans against the shared remote. HTTP: `GET
-/api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
-(`{remote, branch, local, upstream[, request]}`), `POST .../branch-push`
+/api/reposync/workspaces/<name>/status[?fetch=0][&remotes=<a,b>&basis=<a>]`,
+`POST .../sync`
+(`{remote, branch, local, upstream[, basis][, request]}`), `POST .../branch-push`
 (`{branch, force_with_lease[, request]}`), `POST .../branch-pull`
 (`{machine, branch[, remote]}`). A push without `request` answers 202 with the id of
 the card it filed; the same body with that `request` runs once the card is
@@ -3172,6 +3228,23 @@ separately. Opening the panel uses cached refs; **Refresh (fetch)** fetches
 each remote. A failed fetch retains an explicit error and marks its comparison
 as cached, while the other remotes remain visible. This analysis does not
 rebase, push, or change the selected sync remote.
+
+**Target remotes** checks which remotes every fetch, comparison and Sync in
+the panel touches; at least one stays checked, and the set is remembered per
+workspace in this browser. With two or more checked, the panel also picks a
+**basis**: the remote whose tip the local branch is brought onto first
+(fast-forward or rebase), after which the same branch is pushed to the rest in
+the order the daemon computed from the tips. A remote whose tip is not an
+ancestor of another's cannot share one local branch; the panel names the pair
+and refuses before anything runs, and a basis chosen behind another remote is
+refused for the same reason. With Run commands here the steps run one request
+at a time, each push keeping its own approval card, and a failure names the
+remotes already updated. Delegating passes the same set, basis and order to
+the child. The status answer carries `plans` (one row per checked remote),
+`selected_remotes`, `basis`, `sync_order`, `basis_error` and `incompatible`;
+an unchecked remote is neither fetched nor compared. Without `remotes` the
+panel picks one remote as before, which is what the CLI and MCP `repo_sync`
+still do.
 
 **How Sync and Push run** selects how the panel performs master sync and
 work-branch push; the line under the picker says what the chosen mode does:
@@ -3563,6 +3636,42 @@ first); `POST` delivers the same block and answers `{ok, delivered, source,
 chars, images, reason}`, with `reason` saying why when it did not land (not
 running, or no delivery was confirmed within 90s).
 
+**Context items** (gds6-bfu7). The create form's Opening task (New session
+and Spawn child are one form) takes separate context items under the task box
+— **+ Add context** adds a title and a text box per item — so an error log or a
+spec excerpt is attached as its own piece instead of being pasted under the
+request. The agents' MCP `spawn` tool takes the same list as
+`opening_contexts: [{title, text}]`. The daemon checks them before anything is
+arranged (at most 20 items, 256 KiB each, 384 KiB together, none blank —
+larger logs go in as files), writes each to
+`<session dir>/contexts/NN-<slug>.txt` with an `index.json`, and ends the
+opening — after the task, ahead of uploaded files — with one line per item:
+
+```
+[claunch context] 1. pytest log (12.3 KiB, 240 lines) /…/sessions/<name>/contexts/01-pytest-log.txt
+```
+
+under a note that names the MCP tools `context_list` / `context_read`
+(`claude_launcher/contexts_mcp.py`), which read the items through the daemon
+for a harness that cannot open that path. The session definition keeps no copy
+of their text. The detail panel lists them under the Opening task and opens
+one on a press; they are read-only once the session exists and live as long
+as its state directory.
+
+Under the task text the section also shows what the opening carried besides
+it (claunch-5lro4): images as thumbnails that open full size, uploaded files
+as download links with their size. Both come from what `opening.json` names:
+the images are its `image_names` that are still in the session's
+`opening-images/` folder; the files are its `files: [{id, name, bytes}]`,
+because the session's `uploads/` folder also takes files sent later from the
+session line. A record written before `image_names` was kept lists the
+`opening-images/` folder instead, and one written before `files` existed shows
+no files.
+Routes: `GET /api/sessions/{name}/opening/attachments` returns `{images:
+[{name, type}], files: [{id, name, bytes, missing?}]}`;
+`GET .../opening/images/{image}` and `GET .../opening/files/{fid}/{fname}`
+serve the bytes (404 for anything the opening did not carry).
+
 Two settings sit under the matrix, stored in `~/.claude-launcher/.claunch.yaml` under
 `prompt_packs`:
 
@@ -3691,15 +3800,32 @@ header, whatever the workspace copy says.
   retrospective into the session — the person's door for a session whose
   cflow run did not end normally. The terminal header's **retro** button does
   the same. `--print` writes the text to stdout instead and touches nothing;
-  `--pack <id>` names another on-demand pack.
+  `--pack <id>` names another on-demand pack. The block the daemon types is
+  headed by the line `retrospection: trigger=manual, auto record=true`, so the
+  retrospective is recorded at once; `--review` sends `auto record=false`
+  instead, and the record waits as a wrap-up draft for the person to confirm.
 - improv-worker-v2 asks for it itself: its `settle` procedure runs the
   `retrospective` node after the settlement and before the end decision, and
-  that node has the agent run `claunch retro --print`. A failed retrospective
+  that node has the agent run `claunch retro --print`. The node gives the pack
+  `trigger: run`, the run id, the workflow, the issue and `auto` from the run
+  input `retrospection_auto_record` (default true). A failed retrospective
   does not hold up the end decision.
+- Both paths end with the pack's recording step (claunch-lmnlv): the agent
+  files `wrapup_draft kind=retrospection` with `auto`. `auto: true` is
+  confirmed by the daemon at once (actor `auto`, `settled_by: auto`); `auto:
+  false` leaves the draft in the session's wrap-up pane (Retrospection tab)
+  for the person to edit, discard or confirm. `auto` is accepted for this kind
+  only. A confirmed draft becomes a record in
+  `<launcher home>/retrospection.sqlite3`, listed on the dashboard's
+  **Retrospection** page (`#/retrospection`, read only: workspace, session and
+  text filters) and served by `GET /api/retrospection`
+  (`?workspace=&session=&q=&limit=`, newest first, body cut to an excerpt),
+  `GET /api/retrospection/facets` and `GET /api/retrospection/{id}`.
 - The text is sent, not recorded on the session definition, so session
   reminders do not restate it.
 - HTTP: `GET /api/sessions/{name}/retrospective` (`{block}`),
-  `POST` the same path (types it, `{delivered}`), `?pack=` for another
+  `POST` the same path (types it, `{delivered, auto_record}`; `?auto=0`
+  heads it with `auto record=false`), `?pack=` for another
   on-demand pack (an opening pack is a 400). `GET /api/prompt-packs` lists the
   on-demand ids under `on_demand_packs`.
 
@@ -4133,6 +4259,13 @@ harnesses:
     login_args: [login]      # optional interactive login argv
     image_paste_transport: clipboard # clipboard (default) or path
     image_paste_path_format: uri     # uri (default) or native; for path transport
+    copy_transport: terminal # terminal (default): its copy writes OSC 52,
+                             # which the web terminal puts on the browser
+                             # computer's clipboard. host: it writes only
+                             # the daemon machine's clipboard; after an
+                             # Enter or Ctrl+O in that session the web page
+                             # copies what the daemon's clipboard history
+                             # gained in the next few seconds.
     image_paste_keys: [M-v]  # optional; the key this harness reads a
                              # clipboard image with, in tmux key names.
                              # Alt+V on the terminal and a paste onto it
@@ -5178,7 +5311,11 @@ under a profile never reads. Before, a profile changed only which credential
 went out while both boxes went on showing the backend typed in before. The
 endpoint you typed survives in the form, so a profile tried and abandoned
 costs nothing — it is the save that drops it. An empty model under a profile
-means that profile's `models.default`. The token budget is the block's, not a
+means that profile's `models.default`. When the chosen profile holds a pool
+of keys, a **Profile key** picker appears under the profile and chooses
+which pool key the briefing call authenticates with; the default is the key
+the profile's token file holds, and switching profiles drops the pin, which
+named a key of the previous profile's pool. The token budget is the block's, not a
 preset's: changing which backend answers must not change what the call may
 spend. The key is
 never returned to the page: the field shows `stored · blank keeps it`, and
@@ -5193,8 +5330,11 @@ spends a fixed small budget, not the token budget, and it saves nothing. The
 card writes the
 `llm:` block of `~/.claude-launcher/.claunch.yaml` (`GET`/`PUT /api/briefing/llm`:
 `presets:` and `preset:` beside the four backend fields), which is
-still hand-editable; saving a different backend drops the cached briefings so
-the next card is written by the model just chosen. While endpoint, model and
+still hand-editable; saving a different backend retires the cached briefings
+so the next card is written by the model just chosen, while the rail keeps
+each old one-liner in italics until then. Each session's briefing is kept in
+its own directory (`sessions/<name>/briefing.json`), and a failed request is
+kept beside it so the row reads "Summary failed" instead of nothing. While endpoint, model and
 key are not all present the feature is off, and every briefing control says so
 and names this card. See [docs/briefing-model-presets.md](docs/briefing-model-presets.md)
 for the stored shape and the resolution rules.
@@ -5403,10 +5543,11 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it; borrowed sessions also include a secret-free live `borrowed_auth` validation |
 | GET    | `/api/sessions/{name}/stats`   | the Stats page (`#/stats/<name>`): the current conversation's token usage in `?unit=hour\|day\|week` buckets (local time), and every input it received sorted by origin (typed by a person, claunch notice by header, mesh message by sender, opening task, harness) with estimated tokens, the requests each input triggered and the text it carried as context; `partial` while the transcript is still being read; read in the stats worker process, off the daemon's event loop (`reader`: `worker`, or `thread` when the worker cannot answer) |
-| GET    | `/api/sessions/{name}/token-series` | the terminal overlay's token timeline: `?window=cap\|full` (default `cap`: the conversation's last 200 requests; `full`: the whole conversation) and `?points=` (default 600, at most 2000) — one point per request in order (`n` = its number from the start of the conversation, `t` = its time, `count` = how many requests the point stands for: 1, or the size of a group once the requests outnumber `points`, when the point is the largest context of its group) with that request's fresh input, cache read and cache write tokens (output and subagent requests are not drawn); the span (`start`, `until`, epoch seconds), `requests` in the conversation and `count` in the window, the `compactions` inside it and the `swaps` (borrow changes from the session's event history: `at`, `from`, `to`, with `(none)` for a `--null` session); `available: false` with a `reason` when there is no transcript; read in the stats worker like `/stats` |
+| GET    | `/api/sessions/{name}/token-series` | the terminal overlay's token timeline: `?window=cap\|full` (default `cap`: the conversation's last 200 requests; `full`: the whole conversation) and `?points=` (default 600, at most 2000) — one point per request in order (`n` = its number from the start of the conversation, `t` = its time, `count` = how many requests the point stands for: 1, or the size of a group once the requests outnumber `points`, when the point is the largest context of its group) with that request's fresh input, cache read, cache write and output tokens (the chart draws only the three context parts and leaves subagent requests out; `output` rides along so the overlay can price the request at Settings → Model prices), `totals` summing the four components over the window's requests — all of them, not only the drawn points, which past `points` are the largest of their group; the span (`start`, `until`, epoch seconds), `requests` in the conversation and `count` in the window, the `compactions` inside it and the `swaps` (borrow changes from the session's event history: `at`, `from`, `to`, with `(none)` for a `--null` session); `available: false` with a `reason` when there is no transcript; read in the stats worker like `/stats` |
 | GET    | `/api/stats/compare`           | the Stats page's compare mode (`#/compare/<a,b,c>`): `?sessions=a,b,c&unit=…` (at most 12) — per figure (requests, tokens, tokens per request, cache read share, active buckets, input and triggered shares by origin, ...) every session's value, the mean, median, sample standard deviation, min and max across the set, and each session's z-score and rank; the origin shares; and the sessions' tokens on one bucket timeline. Descriptive statistics only |
-| GET    | `/api/stats/overview`          | the Stats page's default reading (`#/stats`): `?window=today\|week\|month` (local days, today included), and `?killed=1` / `?archived=1` to keep the killed or archived sessions the page holds out by default (each box admits its own category; `?ended=1` still means both, which is the older spelling) — per session its usage in the window read from the metering ledger (fresh input, cache read, cache write, output, requests), split per provider (resolved from the upstream that answered each request), its per-day totals, and every provider/model change the ledger proves inside the window with its time, plus every profile change (`kind: "profile"`) the session's own event history records — a reborrow onto another profile's credentials leaves no provider change behind when both profiles reach the same upstream, so that axis comes from `session-events` rather than the ledger; plus the window totals, the cache share, per-provider totals, and `ledger_since` — the day metering starts, past which the ledger cannot speak. A session on an OAuth route (Anthropic's subscription, a Codex login) writes no ledger line: its window figures are read from its own transcript — the same `sessionstats` reading its detail panel shows — and the row carries `source: "transcript"` with its harness, and its `first_at` / `last_at` stay null because a transcript reading is bucketed by day — a bucket's start is a day boundary, not a time anything happened; when there is no transcript to read the row is `source: "none"` with no figure, never a zero. `counts` splits `metered`, `transcript`, `unmetered` and `transcript_skipped` (the per-request transcript cap), and `ended_excluded` breaks into `killed_excluded` / `archived_excluded`, the rows each box is holding out; `include_killed` / `include_archived` echo what the request asked for, and `partial` is true while a transcript reading is still being caught up. Read off the event loop (`daemon/statsboard.py`) |
-| GET    | `/api/stats/series`            | the Chart page's token series (`#/chart`): `?window=24h\|7d\|30d\|all` and the same `?project=` / `?killed=1` / `?archived=1` narrowing as the page's rows — one point per bucket, and each point is the **sum** of the four components (fresh input, cache read, cache write, output), the total and the request count in that bucket. `t`, `start` and `until` are epoch **seconds** (`time.time()`), while the page's axis is milliseconds — the model converts once at that boundary (claunch-mlrga). The bucket width is chosen from the window (`bucket_s`, 5 minutes at the narrowest) so one answer is at most `SERIES_MAX_POINTS` points, and starts are aligned to multiples of that width so consecutive polls draw the same boundaries. The page draws `total / bucket_s` as a rate on the timeline's own axis, which makes a column's area (width x height) the tokens spent in its bucket and the area under the curve the window's total — the same reading the terminal overlay's throughput line gives for a single call (claunch-x15q5). `totals` and `cache_share` are the window's, `sessions` / `unmetered` count what the ledger could and could not speak for, and `ledger_since` is the day metering starts. `by_session` carries each listed session's own four components, total and request count over the same window and filters — the figure the page's token column prints for the row, from the same read, so the row and the chart cannot disagree; a session the ledger has seen but that spent nothing inside the window is a zero there, and one it has never seen is absent, which the page draws as a dash (never a zero, claunch-ha2s9). Each `by_session` entry also lists `points`: the buckets that session spent anything in, as `[t, total, requests]` (sparse, time-ordered) on the ledger's own five-minute grid whatever the window's bucket — `points_bucket_s` names that width, so one request on a 7-day window is one five-minute column, not a whole hour (claunch-9n7g1). The page draws them as columns over the row's bar in the bar's status colour, so the stretches of a live bar with no column are the time the session was up and idle, and the row's hover card reports the share of busy buckets and the time since the last request (claunch-58pvy). Read off the event loop (`daemon/statsboard.py`) |
+| GET    | `/api/stats/overview`          | the Stats page's default reading (`#/stats`): `?window=today\|week\|month` (local days, today included), and `?killed=1` / `?archived=1` to keep the killed or archived sessions the page holds out by default (each box admits its own category; `?ended=1` still means both, which is the older spelling) — per session its usage in the window read from the metering ledger (fresh input, cache read, cache write, output, requests), split per provider (resolved from the upstream that answered each request), its per-day totals, and every provider/model change the ledger proves inside the window with its time, plus every profile change (`kind: "profile"`) the session's own event history records — a reborrow onto another profile's credentials leaves no provider change behind when both profiles reach the same upstream, so that axis comes from `session-events` rather than the ledger; plus the window totals, the cache share, per-provider totals (`providers`: each provider's sessions, fresh input, cache read, cache write, output, total, requests and cache share — the Stats page's provider filter swaps these in for the window's summary tiles; a `source: "transcript"` row has no ledger split, so it is counted under the provider its profile declares and the card's `declared` says how many sessions were counted that way), `models` — the same figures one provider and model at a time (fresh input, cache read, cache write, output, total, requests, sessions, and each row's `cost`, `priced_tokens` and `unpriced_tokens` when the daemon read the Settings price table: a model with no price row there is reported as unpriced, never as costing 0; a transcript row has no model, so its tokens ride its declared provider under `model: ""` and stay unpriced), `estimate` (the window's `cost`, `priced_tokens` and `unpriced_tokens` summed over those rows), `currency` (the symbol `estimate` and the rows are written in), and `ledger_since` — the day metering starts, past which the ledger cannot speak. A session on an OAuth route (Anthropic's subscription, a Codex login) writes no ledger line: its window figures are read from its own transcript — the same `sessionstats` reading its detail panel shows — and the row carries `source: "transcript"` with its harness, and its `first_at` / `last_at` stay null because a transcript reading is bucketed by day — a bucket's start is a day boundary, not a time anything happened; when there is no transcript to read the row is `source: "none"` with no figure, never a zero. `counts` splits `metered`, `transcript`, `unmetered` and `transcript_skipped` (the per-request transcript cap), and `ended_excluded` breaks into `killed_excluded` / `archived_excluded`, the rows each box is holding out; `include_killed` / `include_archived` echo what the request asked for, and `partial` is true while a transcript reading is still being caught up. Read off the event loop (`daemon/statsboard.py`) |
+| GET    | `/api/stats/llm-usage`         | the Stats page's "Daemon LLM calls" section: the calls the daemon makes to models itself, outside any session and outside the routing shim — `briefing` (a session's card, and `probe`, the Settings connection test), `observer` (one pass over a session), `embedding` (search index `index`, a search's `query`, the connection test `probe`), `rerank` and `jev` (purpose `qa_nudge` / `megathread`). `?window=today\|week\|month` (local days, today included), `?provider=` and `?session=` narrow every figure; `all_providers` keeps the unnarrowed list for the page's filter. Per window: `totals` (calls, failed calls, calls whose provider reported no token count, fresh input, cache read, cache write, output, total), `features` (with their purposes), `providers` (with their models and features), `sessions` (the session each call was about, `""` for none; an index embedding request is shared over its documents' sessions by text length) and `days`. Calls are counted per request: an embedding request shared over several sessions is one call in `totals`, `features`, `providers` and `days`, while each `sessions` row counts every request that session took part in, so the session rows can add up to more calls than the total — their tokens add up to it. A call with no reported count is counted as a call and carries no figure, never a zero. The ledger is `<daemon dir>/llm-usage/YYYY-MM.jsonl`, one line per call and, for a shared request, one line per session with every line after the first marked `extra` (`daemon/llm_usage.py`, claunch-60y0d); calls made before it existed are not in it. Every row also carries `cost`, `priced_tokens` and `unpriced_tokens`: each call is priced at the Settings → Model prices row (`daemon.model_prices`) for the model that answered it — the provider's row, then `'*'`, then a row keyed by model id at the top of the table (`llm_usage.rate_for`) — with an unset cache-write rate taken as the input rate, and `currency` is `daemon.model_price_currency`. A call whose model has no row adds its tokens to `unpriced_tokens` and nothing to `cost`, so the page shows `—` for a row with no priced call and marks a partly priced one (claunch-60y0d.1) |
+| GET    | `/api/stats/series`            | the Chart page's token series (`#/chart`): `?window=24h\|7d\|30d\|all` and the same `?project=` / `?killed=1` / `?archived=1` narrowing as the page's rows — one point per bucket, and each point is the **sum** of the four components (fresh input, cache read, cache write, output), the total and the request count in that bucket. `t`, `start` and `until` are epoch **seconds** (`time.time()`), while the page's axis is milliseconds — the model converts once at that boundary (claunch-mlrga). The bucket width is chosen from the window (`bucket_s`, 5 minutes at the narrowest) so one answer is at most `SERIES_MAX_POINTS` points, and starts are aligned to multiples of that width so consecutive polls draw the same boundaries. The page draws `total / bucket_s` as a rate on the timeline's own axis, which makes a column's area (width x height) the tokens spent in its bucket and the area under the curve the window's total — the same reading the terminal overlay's throughput line gives for a single call (claunch-x15q5). `totals` and `cache_share` are the window's, `sessions` / `unmetered` count what the ledger or a transcript could and could not speak for, and `ledger_since` is the day metering starts. A session the ledger has never seen (an OAuth route — Anthropic's subscription, a Codex login — writes no ledger line) is filled from its own transcript on the same five-minute grid (claunch-gbj4h): the daemon keeps one `statsboard.TranscriptBins`, whose file side is the `tokenusage` follower the Stats page also reads (a transcript is parsed once, then only from where the last read stopped) and whose bins remember how many of each reader's requests they have folded, so a poll costs only what was appended. Only sessions the window can have touched are read, at most `MAX_TRANSCRIPTS` per call — `transcript_sessions` counts those filled, `transcript_skipped` those left unmetered by the cap, and `partial` is true while a transcript is still being caught up in the background. `by_session` carries each listed session's own four components, total and request count over the same window and filters, and its `source` (`ledger` or `transcript`) — the figure the page's token column prints for the row, from the same read, so the row and the chart cannot disagree; a session measured but idle inside the window is a zero there, and one neither source can speak for is absent, which the page draws as a dash (never a zero, claunch-ha2s9). Each `by_session` entry also lists `points`: the buckets that session spent anything in, as `[t, total, requests]` (sparse, time-ordered) on the ledger's own five-minute grid whatever the window's bucket — `points_bucket_s` names that width, so one request on a 7-day window is one five-minute column, not a whole hour (claunch-9n7g1). The page draws them as columns over the row's bar in the bar's status colour, so the stretches of a live bar with no column are the time the session was up and idle, and the row's hover card reports the share of busy buckets and the time since the last request (claunch-58pvy). Read off the event loop (`daemon/statsboard.py`) |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
 | POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?, role?, sibling?}`; joins no mesh and drives no run unless named, and `"."` means this session's mesh, or the workflow its run pairs a child with; `role` is refused for an exclusive role a live member holds; `sibling: true` records the copy under this session's parent, or as a root). 201 with the child, `origin`, `marker`, `forked_at`, and `quick_fork` — `{mesh, workflow, role, sibling, parent, cwd, shared_checkout}`, what the copy actually ended up in. A fork always stands in the origin's checkout; it cannot be given a worktree |
 | POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin — or the nearest live session above it when the origin has ended, `delegated: true`; 400 when none is live) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. A merge with no live session above answers 200 with `completed: false`, `undelivered: true`, `saved` (the wrap-up's file) and `note`, and the session is kept. DELETE withdraws a pending request |
@@ -5420,6 +5561,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/uploads?name=NAME` | the session line's 📎: the body IS a file, written straight into `<session dir>/uploads/<id>/`; answered with its `path` and the `line` the page puts in the session line. Nothing is typed into the session |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET/POST | `/api/sessions/{name}/opening` | the block this session was created with: GET returns `{source, text, chars, images, recorded_at, transport}` (`recorded` = the text handed over at creation, `recomposed` = rebuilt from the definition for a session older than the record, `none`; `transport: "argv"` = the harness took it as an argument, so a re-inject is a second copy and the panel confirms first), POST types the same text in again with `force` and answers `{ok, delivered, source, chars, images, reason}` — the detail panel's **Re-inject opening** / **Copy opening** buttons (`daemon/session_opening.py`) |
+| GET    | `/api/sessions/{name}/contexts` | the context items this session was created with beside its task (gds6-bfu7): `{session, items: [{n, title, file, bytes, chars, lines, path, missing?}]}` — the detail panel's **Context items** list and MCP `context_list` (`daemon/opening_contexts.py`) |
+| GET    | `/api/sessions/{name}/contexts/{n}?offset=&max_chars=` | one item's text, a window at a time (default 60000 characters): `{…item, text, offset, total_chars, truncated, next_offset}`; 404 for an item that is not there — MCP `context_read` |
+| GET | `/api/sessions/{name}/opening/attachments`, `/api/sessions/{name}/opening/images/{image}`, `/api/sessions/{name}/opening/files/{fid}/{fname}` | what the opening carried besides its text: the list `{images: [{name, type}], files: [{id, name, bytes, missing?}]}`, then each image (inline) and file (download); only files `opening.json` names are served — the detail panel's Opening task section shows them under the task (claunch-5lro4) |
 | GET    | `/api/sessions/{name}/pr/preview` | the PR wizard's preview of the session's directory: checkout branch, HEAD, uncommitted counts, remotes (with `claunch.pr.remote` / `claunch.pr.base` honoured), `gh` install + per-host auth, `blockers` -- what would stop the push -- and `monitor_available` (whether `improv-worker-pr-monitor` is declared for that directory) |
 | POST   | `/api/sessions/{name}/pr` | push what the session's directory holds under a NEW branch and open the pull request with `gh` -- never touching its checkout. Body `{remote, base, branch, title, body, draft, include_uncommitted, force, report, monitor}`; `report` types the outcome into the session's terminal; `monitor` (needs `report`, and an opened PR) spawns a report-only child on `improv-worker-pr-monitor` with the depth/child caps lifted, answered as `monitor: {session, workflow, run_started}` or a `monitor:` warning. Always 200 with `ok` and a `steps` list (`failed`/`error` name a refused step) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |

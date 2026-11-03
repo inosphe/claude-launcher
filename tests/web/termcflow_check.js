@@ -30,8 +30,13 @@ function slice(name) {
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
-    dataset: {}, title: "", type: "", href: "",
-    appendChild(c) { this.kids.push(c); return c; },
+    dataset: {}, title: "", type: "", href: "", parent: null,
+    appendChild(c) { this.kids.push(c); c.parent = this; return c; },
+    remove() { if (this.parent) this.parent.kids = this.parent.kids.filter((k) => k !== this); },
+    querySelector(sel) {
+      const cls = String(sel).replace(/^\./, "");
+      return walk(this).find((k) => k.classes.has(cls)) || null;
+    },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     fire(k, ev) { return Promise.all((this.handlers[k] || []).map((fn) => fn(ev))); },
     get textContent() { return this.text; },
@@ -92,21 +97,31 @@ function prompt(q) { asked.push(q); return promptAnswer; }
 `;
 
 const ctx = {};
+// What refreshGateSessionStates walks: the session links on the cards.
+let pageLinks = [];
+const document = {
+  querySelectorAll: (sel) => (sel === ".gate-session[data-session]" ? pageLinks : []),
+};
 new Function(
-  "exports", "$", "el",
+  "exports", "$", "el", "document",
   stubs
   + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "sessionCategory", "gateWakeNote",
+     "sessionInfoTooltip",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
-     "personGateRecords", "railOpenedSecs", "runGateFeed"]
+     "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState",
+     "gateSessionLink", "gateSessionStateSet", "refreshGateSessionStates"]
     .map(slice).join("\n") + `
 let gateFed = null;
 function runGateSync(pending, settled) { gateFed = { pending, settled }; }
 Object.assign(exports, {
   renderTermCflow,
   personGateRecords,
+  gateSessionState,
+  gateSessionLink,
+  refreshGateSessionStates,
   runGateFeed,
   gateFed: () => gateFed,
   refits: () => refits,
@@ -122,7 +137,7 @@ Object.assign(exports, {
   setPrompt: (v) => { promptAnswer = v; },
   reset: () => { actions = []; asked = []; },
 });`
-)(ctx, $, el);
+)(ctx, $, el, document);
 
 /* ---- the run page, rendered for real (claunch-xxxsx.1) ------------------
    The wake note on the run page's presses was first checked by a source
@@ -205,6 +220,7 @@ function cf2MovePlanView() { return pageEl("div"); }
 function cf2AnswerHeld() { return ""; }
 function cf2AnswerLegend() { return pageEl("div"); }
 function cf2AskLegendItems() { return []; }
+function cf2AskWhy() { return []; }
 function alert() {}
 function confirm() { return false; }
 function prompt() { return null; }
@@ -555,14 +571,15 @@ const RUN = {
           && !ctx.asked().some((q) => q.includes("required")), [ctx.actions(), ctx.asked()]);
   ctx.reset();
 
-  /* a loop limit: allow 5 more / allow 15 more / stop */
+  /* a loop limit: the two raises scale with the loop's max (claunch-gpgw1) --
+     a 5-max loop offers 1 and 3, not the 5 / 15 a 25-max loop gets */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: round"], answers: [
     { kind: "loop_limit", instance: "round@3", label: "round", count: 5, max: 5 }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
   check("v2: loop limit presses",
-        bs.map((b) => b.text).join() === "Allow 5 more,Allow 15 more,Stop the loop",
+        bs.map((b) => b.text).join() === "Allow 1 more,Allow 3 more,Stop the loop",
         bs.map((b) => b.text));
   check("v2: loop limit question", texts(strip).includes("loop reached its max (5/5)"));
   await bs[0].fire("click");
@@ -570,23 +587,23 @@ const RUN = {
   await bs[2].fire("click");
   check("v2: limit presses post extend",
         JSON.stringify(ctx.actions()) === JSON.stringify([
-          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 5 }, "after"],
-          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 15 },
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 1 }, "after"],
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 3 },
            "after"],
           ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", stop: true },
            "after"]]), ctx.actions());
   check("v2: an allow press asks with its own count",
-        ctx.asked().some((q) => q.startsWith("Allow 15 more at ")), ctx.asked());
+        ctx.asked().some((q) => q.startsWith("Allow 3 more at ")), ctx.asked());
   ctx.reset();
 
   /* a loop limit that ran no iteration (a parallel foreach over more items
-     than max) offers the same presses */
+     than max) offers the same presses, scaled to its own max */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: fan"], answers: [
     { kind: "loop_limit", instance: "fan@2", label: "fan", count: 0, max: 3 }] } });
   ctx.renderTermCflow();
   check("v2: same presses at count 0",
-        buttons(strip).map((b) => b.text).join() === "Allow 5 more,Allow 15 more,Stop the loop",
+        buttons(strip).map((b) => b.text).join() === "Allow 1 more,Allow 2 more,Stop the loop",
         buttons(strip).map((b) => b.text));
   ctx.reset();
 
@@ -835,6 +852,86 @@ const RUN = {
     ctx.runGateFeed();
     check("gates: the feed hands the channel the whole set",
           ctx.gateFed() && ctx.gateFed().pending.length === 4, ctx.gateFed());
+
+    /* An archived session's run raises no card (claunch-6vq2m): s1065's
+       visit limit stayed on the corner for days after it was archived,
+       because the rail lists every registered session and the run file
+       still waits. */
+    ctx.setRail({
+      s30: { ...R2, scope: "s30", gated: true, owed: ["visit_limit: watch.do"],
+        urgent_asks: [], session_category: "archived", session_status: "exited",
+        answers: [{ kind: "visit_limit", instance: "watch.do@9", label: "watch.do",
+          count: 201, max: 200 }] },
+      s31: { ...R2, scope: "s31", gated: true, owed: ["visit_limit: watch.do"],
+        urgent_asks: [], session_category: "killed", session_status: "exited",
+        answers: [{ kind: "visit_limit", instance: "watch.do@9", label: "watch.do",
+          count: 201, max: 200 }] },
+      s32: { ...R2, scope: "s32", gated: false, owed: [], answers: [],
+        session_category: "archived",
+        urgent_asks: [{ id: "ask2-09", status: "answered", decision: "approve", by: "web" }] },
+    });
+    {
+      const { pending: p2, settled: s2 } = ctx.personGateRecords();
+      check("gates: an archived session's v2 gate raises no record",
+            !p2.some((r) => r.session === "s30"), p2.map((r) => r.id));
+      check("gates: an exited but not archived session's gate still does",
+            p2.some((r) => r.session === "s31" && r.kind === "visit_limit"),
+            p2.map((r) => r.id));
+      check("gates: an archived session's settled urgent ask still reaches the history",
+            s2.some((s) => s.id === "ask2-09"), s2);
+    }
+    ctx.setSessions([{ name: "s20", status: "exited",
+                       archived_at: "2026-10-26T23:25:09+00:00" }]);
+    check("gates: a v1 run of an archived session raises no record",
+          !ctx.personGateRecords().pending.some((r) => r.session === "s20"),
+          ctx.personGateRecords().pending.map((r) => r.id));
+
+    /* The word a card shows beside the session's name (claunch-6vq2m). */
+    ctx.setSessions([{ name: "s40", status: "busy" },
+                     { name: "s41", status: "exited", paused_at: "2026-10-26T00:00:00+00:00" }]);
+    check("state: a running session reads its live status",
+          ctx.gateSessionState("s40") === "busy", ctx.gateSessionState("s40"));
+    check("state: an ended session reads its category",
+          ctx.gateSessionState("s41") === "paused", ctx.gateSessionState("s41"));
+    check("state: a session the poll leaves out reads the rail row's category",
+          ctx.gateSessionState("s30") === "archived", ctx.gateSessionState("s30"));
+    ctx.setRail({ s42: { ...R2, scope: "s42", session_category: "running",
+                         session_status: "idle" } });
+    check("state: a running rail row reads its live status",
+          ctx.gateSessionState("s42") === "idle", ctx.gateSessionState("s42"));
+    check("state: a name nobody knows reads nothing",
+          ctx.gateSessionState("nobody") === "" && ctx.gateSessionState("") === "",
+          ctx.gateSessionState("nobody"));
+    check("state: both polls re-read the words on the cards",
+          /cflow2RailCache = rows;[\s\S]{0,600}refreshGateSessionStates\(\)/.test(src) &&
+            /reconcileKillUiState\(sessionsCache\);[\s\S]{0,200}refreshGateSessionStates\(\)/.test(src));
+    /* The word on the card itself (claunch-6vq2m.1): drawn into the link's
+       own state mark, rewritten in place by the poll's refresh (one mark,
+       never a second), and taken off when nobody knows the name any more.
+       A source regex stayed green with the refresh loop emptied. */
+    {
+      ctx.setSessions([{ name: "s40", status: "busy" }]);
+      const link = ctx.gateSessionLink("s40");
+      const marks = () => walk(link).filter((k) => k.classes.has("gate-session-state"));
+      check("state: the session link draws the word",
+            link.dataset.session === "s40" && marks().length === 1 &&
+              marks()[0].text === " · busy" && marks()[0].dataset.state === "busy",
+            marks().map((m) => [m.text, m.dataset.state]));
+      pageLinks = [link];
+      ctx.setSessions([{ name: "s40", status: "exited",
+                         archived_at: "2026-10-29T00:00:00+00:00" }]);
+      ctx.refreshGateSessionStates();
+      check("state: the refresh rewrites the word on a card already drawn",
+            marks().length === 1 && marks()[0].text === " · archived" &&
+              marks()[0].dataset.state === "archived",
+            marks().map((m) => [m.text, m.dataset.state]));
+      ctx.setSessions([]);
+      ctx.refreshGateSessionStates();
+      check("state: a session nobody knows any more loses the word",
+            marks().length === 0, marks().map((m) => m.text));
+      pageLinks = [];
+    }
+    ctx.setSessions([]);
     ctx.setRuns([]);
     ctx.setRail({});
   }

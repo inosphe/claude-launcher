@@ -21,10 +21,13 @@ import re
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .. import borrowing, harnesses as harness_registry, pytest_basetemp, session_env
-from .. import lineage, pi_provider, profile as profile_mod, profile_keys, projects, providers, routing, runner
+from .. import (
+    credentials, lineage, pi_provider, profile as profile_mod, profile_keys,
+    projects, providers, routing, runner,
+)
 from .. import store, transcripts
 from .. import config as launcher_config
 from . import instance_manifest, mcp_ready, mesh_roles, paths, pty_backend
@@ -169,8 +172,17 @@ class SessionDef:
     #: outlives neither the daemon nor necessarily the child: a parent that
     #: exited leaves its children running and still recorded, and a name is
     #: the only reference that survives that. Consumers must treat a parent
-    #: that no longer resolves as a root.
+    #: that no longer resolves as no parent: the tree walks stop there, and
+    #: the listings show the child as an orphan, not a root (see orphan_of).
     parent: Optional[str] = None
+    #: The parent this session lost when that parent's record was removed and
+    #: no session above it survived to take the child (claunch-ikiys). Such a
+    #: session has ``parent`` ``None`` like a root, but nobody started it as
+    #: one: it is an orphan, and the listings say so instead of showing it as
+    #: a session a human started. Kept as a name only — a session created
+    #: later under the same name is not its parent. Cleared by reparent and
+    #: detach, the two explicit moves that say where it belongs now.
+    orphan_of: Optional[str] = None
     #: Who this session *is*, decided at creation and true for its whole life:
     #: its mesh handle, the run it drives. Appended to Claude's system prompt;
     #: role stance follows the harness-independent opening/reminder path.
@@ -228,6 +240,13 @@ class SessionDef:
     #: for the sake of a slot. Read live, right beside the kill, so a flag
     #: set while the end-sequence waits still protects the session.
     keep_alive: bool = False
+    #: A person's "do not tell me again" for the provider warning: set when a
+    #: session running the claude harness on a provider whose service is not
+    #: Anthropic dismissed the warning at the top of its screen (see
+    #: ``providers.service``). Absent means "not dismissed" — the warning
+    #: shows — which is also the answer for every record written before this
+    #: field existed, so the rule applies to the whole fleet without a write.
+    provider_warning_ignored: bool = False
     #: A person's standing pause for the session-level reminder service.
     #: Each source (Role, Prompt pack, Cflow, Score goal) keeps its own
     #: clock, but no repeating reminder is delivered into this session while this flag is set.
@@ -384,6 +403,8 @@ class SessionDef:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
             out["quick_fork_of"] = self.quick_fork_of
+        if self.orphan_of:
+            out["orphan_of"] = self.orphan_of
         if self.deep_think:
             out["deep_think"] = dict(self.deep_think)
         if self.self_merge_allowed:
@@ -410,6 +431,11 @@ class SessionDef:
             out["kind"] = self.kind
         if self.created_by:
             out["created_by"] = dict(self.created_by)
+        # Same rule as the note above: only a dismissal writes the key, so a
+        # session that never dismissed the provider warning keeps the record
+        # it had before the field existed.
+        if self.provider_warning_ignored:
+            out["provider_warning_ignored"] = True
         return out
 
     @classmethod
@@ -434,6 +460,7 @@ class SessionDef:
             resume=_resume_field(data.get("resume")),
             fork_session=bool(data.get("fork_session")),
             parent=str(data.get("parent") or "").strip() or None,
+            orphan_of=str(data.get("orphan_of") or "").strip() or None,
             identity=str(data.get("identity") or "").strip() or None,
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
@@ -442,6 +469,7 @@ class SessionDef:
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
+            provider_warning_ignored=bool(data.get("provider_warning_ignored")),
             reminder_paused=bool(data.get("reminder_paused")),
             observe_pin=bool(data.get("observe_pin")),
             score_goal=score_goal.enabled(data.get("score_goal", False)),
@@ -1143,10 +1171,15 @@ def build_command(
     # restores included, and the rotation is not advanced. The token file is
     # shared by every launch of the pool, so a restore that simply trusted it
     # would come back on whichever key somebody else's session picked last.
-    if prof is not None and not sdef.null_token and borrow_prof is None:
+    #
+    # A borrow authenticates with the lender's token, so the pool both of
+    # those read is the lender's (claunch-e48es): its pin names a lender key
+    # and its strategy advances there, exactly as the lender's own launches do.
+    key_prof = borrow_prof if borrow_prof is not None else prof
+    if key_prof is not None and not sdef.null_token:
         try:
             if sdef.key_id:
-                if profile_keys.materialize(prof, sdef.key_id) is None:
+                if profile_keys.materialize(key_prof, sdef.key_id) is None:
                     # The pinned key is gone from the pool (removed with
                     # `claunch keys remove` while this session was pinned to
                     # it). A stale pin must not cost the session its process,
@@ -1156,14 +1189,14 @@ def build_command(
                     log.warning(
                         "session %r is pinned to key %r, which the key pool of "
                         "profile %r no longer holds; %s",
-                        sdef.name, sdef.key_id, prof.name,
+                        sdef.name, sdef.key_id, key_prof.name,
                         "falling back to the pool's strategy"
                         if not restoring else "leaving the effective token alone",
                     )
                     if not restoring:
-                        profile_keys.select_for_launch(prof)
+                        profile_keys.select_for_launch(key_prof)
             elif not restoring:
-                profile_keys.select_for_launch(prof)
+                profile_keys.select_for_launch(key_prof)
         except profile_keys.KeysError as exc:
             raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:
@@ -1437,3 +1470,55 @@ def build_command(
     if sys.platform != "win32":
         env.setdefault("TERM", "xterm-256color")
     return argv, env, sdef.cwd
+
+
+def key_pool_profile(sdef: SessionDef) -> Optional["profile_mod.Profile"]:
+    """The profile whose key pool this session's launches read, or ``None``.
+
+    The session's own profile, except under a borrow, where the token is the
+    lender's and so is the pool a pin names (claunch-e48es). A null-token
+    session injects no token and reads no pool; neither does a session with no
+    profile, or one whose profile (or lender) no longer resolves.
+    """
+    if sdef.null_token or not sdef.profile:
+        return None
+    try:
+        return profile_mod.require_selector(sdef.borrow or sdef.profile)
+    except profile_mod.ProfileError:
+        return None
+
+
+def launch_key(sdef: SessionDef, env: Mapping[str, str]) -> Optional[str]:
+    """The pool key this launch handed the child, or ``None`` when it took none.
+
+    :func:`build_command` decides the key — a pin, or the profile's strategy —
+    by writing the profile's token file, and that file cannot answer this
+    question afterwards: every launch of the pool writes it, so a read after
+    the spawn may name a key another session put there. The token the child was
+    actually given is in ``env``, and matching it back to the pool is exact.
+    The daemon keeps the answer on the session (``Session.launched_key``) so
+    the rail's key modal names the key a session is on instead of the key the
+    pool last wrote (claunch-i985h).
+
+    A null-token launch injects none. A borrow authenticates with the
+    lender's token, so its key is matched against the lender's pool
+    (:func:`key_pool_profile`, claunch-e48es).
+    """
+    prof = key_pool_profile(sdef)
+    if prof is None:
+        return None
+    names = [runner.OAUTH_TOKEN_ENV]
+    entry = harness_registry.get(sdef.harness)
+    token_env = getattr(entry, "token_env", "") if entry is not None else ""
+    if token_env:
+        names.append(token_env)
+    try:
+        for name in names:
+            key_id = profile_keys.identify(prof, env.get(name))
+            if key_id:
+                return key_id
+    except (profile_keys.KeysError, credentials.CredentialsError):
+        # A pool that cannot be read names no key; the modal says so rather
+        # than a launch failing over a display-only record.
+        return None
+    return None

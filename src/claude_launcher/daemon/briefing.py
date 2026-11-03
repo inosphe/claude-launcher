@@ -13,7 +13,7 @@ is authoritative), editable from the web dashboard's Settings page
 (``GET``/``PUT /api/briefing/llm``). The backend comes from one of two
 places: the block's own fields, or — when ``preset:`` names one — a *saved
 preset* from the block's ``presets:`` list. A preset is one whole backend
-(the same four fields), so switching which model answers is a pointer move
+(the same fields), so switching which model answers is a pointer move
 rather than a retype, and the list holds as many as the operator wants.
 
 Within whichever is in charge, the backend is said in one of two ways:
@@ -21,7 +21,9 @@ Within whichever is in charge, the backend is said in one of two ways:
 * ``profile: <name>`` — the call reuses a claunch profile's backend. That
   profile's provider chain states the OpenAI-compatible endpoint
   (``endpoints.openai``), the key that reaches it and the model ids it
-  serves; see :func:`profile_backend`.
+  serves; see :func:`profile_backend`. ``key_id:`` beside it pins one key of
+  the profile's key pool when the profile holds several; without it the call
+  uses whatever the profile's token file holds.
 * ``endpoint:`` plus ``api_key:`` typed in directly, which is what the block
   held before a profile was an option and still works.
 
@@ -57,6 +59,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -74,14 +77,14 @@ except ImportError:  # Python < 3.10, or truststore not installed
 log = logging.getLogger("claunch.daemon.briefing")
 
 from .. import atomic, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, provider_spec, providers
+from .. import lineage, profile as profile_mod, profile_keys, provider_spec, providers
 from .. import routing, store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
-from . import codex_sessions, paths
+from . import codex_sessions, llm_usage, paths
 
 #: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
 #: completion, and on a reasoning model the reasoning tokens are billed to it
@@ -117,7 +120,10 @@ MAX_PRESETS = 20
 #: The fields a preset carries. ``max_tokens``, ``params`` and the preset list
 #: itself stay on the block: switching a preset changes which backend answers,
 #: and must not quietly change how much the call is allowed to spend.
-PRESET_FIELDS = ("profile", "model", "endpoint", "api_key")
+#: ``key_id`` pins one key of the named profile's key pool
+#: (:mod:`claude_launcher.profile_keys`); it is meaningful only beside
+#: ``profile`` and says nothing without one.
+PRESET_FIELDS = ("profile", "model", "endpoint", "api_key", "key_id")
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
 #: (the tail is read from the end, never the whole file); ``EVENT_TAIL`` the
@@ -156,6 +162,13 @@ CONNECTION_PROMPT = "ping"
 #: to aiohttp's default context rather than failing.
 _OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _truststore else None
 
+#: Part of the cache key: bump it when :func:`build_prompt`'s instructions
+#: change, so a briefing written under the old wording is composed again on
+#: its next request instead of being served until the session moves.
+#: 2 — summaries describe the work and refer to nothing by id (session
+#: names, issue ids in any form, PR numbers, run ids, hashes).
+PROMPT_VERSION = 2
+
 _STATES = frozenset({"working", "blocked", "waiting", "idle", "done", "unknown"})
 
 
@@ -189,9 +202,67 @@ class Backend(NamedTuple):
     #: routing`), which the harness paths get from the shim and this one
     #: otherwise would not.
     provider: str = ""
+    #: The pool key the call authenticates with, when the profile holds a key
+    #: pool and the key could be named: the pinned ``key_id``, or the pool key
+    #: whose token is in the token file. ``""`` for a provider-key profile and
+    #: for a token file that holds no pool key. Display only — the call reads
+    #: ``api_key``.
+    key_id: str = ""
 
 
-def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
+def _pinned_pool_key(prof, key_id: str) -> Tuple[str, str]:
+    """The token of pool key ``key_id`` for a briefing call under ``prof``.
+
+    A read, not a selection: the pool is not rotated and the token file is
+    not written. The launch seams own those writes
+    (:func:`profile_keys.select_for_launch`); a briefing call that moved them
+    would spend a session's rotation on a summary.
+    """
+    source = profile_keys.owner(prof)
+    if source is None:
+        raise BriefingError(
+            f"profile {prof.name!r} holds no key pool, so key {key_id!r} "
+            "cannot be pinned — add keys with 'claunch keys add' first"
+        )
+    try:
+        pool = profile_keys.load(source)
+    except profile_keys.KeysError as exc:
+        raise BriefingError(str(exc)) from exc
+    for key in (pool.keys if pool is not None else []):
+        if key.id == key_id:
+            return key.token, key.id
+    raise BriefingError(
+        f"profile {source.name!r} holds no key {key_id!r} — it was removed "
+        "from the pool; pick another in Settings ▸ Briefing model"
+    )
+
+
+def _current_pool_key_id(prof, token: str) -> str:
+    """Which of the profile's pool keys ``token`` is — ``""`` when none.
+
+    Display half of the unpinned case: the call uses whatever the token file
+    holds, and the card can say which pool key that currently is. A pool that
+    cannot be read reports nothing here — the read error is not the
+    briefing's to surface, and the call has its token either way.
+    """
+    if not token:
+        return ""
+    source = profile_keys.owner(prof)
+    if source is None:
+        return ""
+    try:
+        pool = profile_keys.load(source)
+    except profile_keys.KeysError:
+        return ""
+    for key in (pool.keys if pool is not None else []):
+        if key.token == token:
+            return key.id
+    return ""
+
+
+def profile_backend(
+    name: str, doc: Optional[dict] = None, *, key_id: str = ""
+) -> Backend:
     """Resolve profile ``name`` into the values :func:`call_llm` needs.
 
     The same resolution the Observer performs
@@ -206,6 +277,12 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
     endpoint alone raises :class:`BriefingError` here rather than producing a
     call that fails at the endpoint later; the Settings page shows that
     message beside the profile it belongs to.
+
+    ``key_id`` pins one key of the profile's key pool: the call then
+    authenticates with that key's token instead of whatever the token file
+    holds. A pin that names no key of the pool raises
+    :class:`BriefingError` — silently falling back to the token file would
+    send a credential the operator did not choose.
 
     Model ids are returned without Claude's context-window tag
     (``deepseek-flash[1m]`` -> ``deepseek-flash``), which is a decoration
@@ -238,12 +315,19 @@ def profile_backend(name: str, doc: Optional[dict] = None) -> Backend:
         )
         if value
     )
+    key_id = str(key_id or "").strip()
+    if key_id:
+        api_key, resolved_key = _pinned_pool_key(prof, key_id)
+    else:
+        api_key = str(lineage.stored_auth_token(prof) or spec.api_key or "")
+        resolved_key = _current_pool_key_id(prof, api_key)
     return Backend(
         endpoint=endpoint,
-        api_key=str(lineage.stored_auth_token(prof) or spec.api_key or ""),
+        api_key=api_key,
         model=models[0] if models else "",
         models=models,
         provider=providers.resolve_name(prof, doc),
+        key_id=resolved_key,
     )
 
 
@@ -322,8 +406,8 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     ``GET /api/briefing/llm`` is where the reason is reported.
 
     The backend comes from the *active preset* when one is pointed at, and
-    from the block's own ``profile``/``model``/``endpoint``/``api_key``
-    otherwise. A preset is a whole saved backend, so it supplies all four of
+    from the block's own ``profile``/``model``/``endpoint``/``api_key``/
+    ``key_id`` otherwise. A preset is a whole saved backend, so it supplies all of
     its fields at once, in the same pairing the block's own two use: a preset
     that names a profile reads that profile's endpoint and key and ignores
     any typed endpoint it also holds, and a preset with no profile is the
@@ -364,15 +448,17 @@ def llm_config(doc: Optional[dict] = None) -> dict:
     api_key = fields["api_key"]
     model = fields["model"]
     provider = ""
+    key_id = ""
     if profile_name:
         try:
-            backend = profile_backend(profile_name, doc)
+            backend = profile_backend(profile_name, doc, key_id=fields["key_id"])
         except BriefingError:
             endpoint, api_key = "", ""
         else:
             endpoint, api_key = backend.endpoint, backend.api_key
             model = model or backend.model
             provider = backend.provider
+            key_id = backend.key_id
     return {
         "preset": chosen_id,
         "profile": profile_name,
@@ -380,6 +466,7 @@ def llm_config(doc: Optional[dict] = None) -> dict:
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
+        "key_id": key_id,
         "max_tokens": max_tokens,
         "params": dict(params) if isinstance(params, dict) else {},
     }
@@ -411,19 +498,21 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
         profile_name = preset.get("profile", "")
         model = preset.get("model", "")
         endpoint = preset.get("endpoint", "")
+        key_id = preset.get("key_id", "")
         row: dict = {
             "id": preset["id"],
             "profile": profile_name,
             "model": model,
             "endpoint": endpoint,
             "api_key_set": bool(preset.get("api_key")),
+            "key_id": key_id,
             "resolved": {"endpoint": "", "model": "", "has_key": False,
-                         "provider": ""},
+                         "provider": "", "key_id": ""},
             "error": "",
         }
         if profile_name:
             try:
-                backend = profile_backend(profile_name, doc)
+                backend = profile_backend(profile_name, doc, key_id=key_id)
             except BriefingError as exc:
                 row["error"] = str(exc)
             else:
@@ -432,6 +521,7 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
                     "model": model or backend.model,
                     "has_key": bool(backend.api_key),
                     "provider": backend.provider,
+                    "key_id": backend.key_id,
                 }
         else:
             row["resolved"] = {
@@ -439,6 +529,7 @@ def presets_for_display(doc: Optional[dict] = None) -> List[dict]:
                 "model": model,
                 "has_key": bool(preset.get("api_key")),
                 "provider": "",
+                "key_id": "",
             }
         rows.append(row)
     return rows
@@ -807,19 +898,38 @@ def build_prompt(
         '{"goal": "작업 목표 1~2문장", "now": "지금 하는 일 1~2문장",'
         ' "state": "working|blocked|waiting|idle|done|unknown",'
         ' "progress": "진행 정도 한 문장",'
-        ' "one-line-job-description": "이 세션이 맡은 일을 한 줄로",'
+        ' "one-line-job-description": "맡은 일의 내용을 한 줄로",'
         ' "faq": [{"question": "사용자 FAQ 질문", "answer": "현재 세션 자료에 근거한 답변"}]}',
         "opening task 안에 포함된 과거 요약 문구는 현재 상태의 근거로",
         "사용하지 않는다. live 상태와 최신 로그를 우선한다. 자료에 없는",
         "내용은 지어내지 않는다. 판단 근거가 없으면 state는",
         '"unknown"으로 둔다. state 열거값을 제외한 모든 필드 값은 자료의 언어와',
-        '관계없이 자연스럽고 정확한 한국어로 작성한다. 코드·경로·식별자 등',
-        '변경하면 안 되는 기술적 값은 원문을 유지한다.',
+        '관계없이 자연스럽고 정확한 한국어로 작성한다. 코드·경로·명령 등',
+        '변경하면 안 되는 기술적 값은 원문을 유지한다(다른 항목을 가리키는',
+        'id는 아래 규칙에 따라 쓰지 않는다).',
         "one-line-job-description은 세션이 맡은 작업 전체를 한 줄에 담는다"
         "(목표와 달라도 좋다 — 리더가 볼 한 줄짜리 설명).",
+        "goal·now·progress·one-line-job-description은 작업 내용 자체를",
+        "기술한다. 이 문장은 이미 그 세션의 이름과 이슈 배지 옆에 표시된다.",
+        "- 다른 항목을 id로 가리키지 않는다. 세션 이름(이 세션과 다른 세션",
+        "  모두, 예: s173, s29-rev), 이슈 id(접두사를 뗀 꼴과 하위 이슈 꼴",
+        "  포함, 예: claunch-4avda, 4avda, gds6-rbyq, zbu54.1), PR 번호,",
+        "  cflow 런 id, 커밋 해시, 요청·질문·스레드 id가 모두 해당한다.",
+        "  one-line-job-description은 특히 id 없이 읽혀야 한다.",
+        '- "이 세션", "~하는 세션", "~하는 리뷰어 세션", "~하는 작업" 같은',
+        "  자기 지칭 없이 무엇을 어떻게 하는지를 바로 적는다.",
+        "- 다른 세션·이슈의 일을 다루면 그 식별자 대신 그 일의 내용을",
+        "  적는다. 자료에 내용이 없으면 지어내지 않고 일반적으로 적는다.",
+        '- 나쁜 예: "s173의 변경을 최신 master 위로 재정렬하고 PR #164를 만드는 작업."',
+        '  좋은 예: "프로시저 정의 UI 변경을 최신 master 위로 재정렬하고 PR을 연다."',
+        '- 나쁜 예: "s173 런의 peer-review에 대해 보드(claunch-4avda)와 브랜치 근거로 판정하는 리뷰어 세션."',
+        '  좋은 예: "프로시저 정의 UI 변경의 동료 리뷰 — 브랜치 diff와 테스트로 판정을 내린다."',
+        '- 나쁜 예: "gds6-rbyq 변경의 리뷰 통과·master 착지·마무리 상태 점검을 처리하는 세션"',
+        '  좋은 예: "리뷰를 통과한 변경의 master 착지를 확인하고 회차 마무리 상태를 점검한다."',
+        "faq 답변에는 이 제한을 적용하지 않는다.",
         "",
         "[세션]",
-        f"이름: {sdef.name}",
+        f"이름: {sdef.name} (자료 식별용 — 요약 문장에 쓰지 않는다)",
         f"작업 디렉터리: {sdef.cwd or '(없음)'}",
     ]
     if getattr(sdef, "task", None):
@@ -920,7 +1030,8 @@ def briefing_request_headers(cfg: dict) -> Dict[str, str]:
     return headers
 
 
-async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> LlmAnswer:
+async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT,
+                   session: str = "", purpose: str = "") -> LlmAnswer:
     """POST the prompt to the OpenAI-compatible endpoint, return the answer.
 
     Any transport or shape failure becomes :class:`BriefingError`; the message
@@ -944,6 +1055,18 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
     }
     body.update(cfg.get("params") or {})
     headers = briefing_request_headers(cfg)
+    started = time.monotonic()
+
+    def meter(usage=None, error: str = "") -> None:
+        # Every call is metered, a failed one included: the endpoint may have
+        # spent the tokens before the answer turned out unusable
+        # (claunch-60y0d, daemon/llm_usage.py).
+        llm_usage.record(
+            "briefing", provider=str(cfg.get("provider") or ""),
+            endpoint=str(cfg.get("endpoint") or ""), model=str(cfg.get("model") or ""),
+            session=session, purpose=purpose, usage=usage, ok=not error,
+            error=error, seconds=time.monotonic() - started)
+
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         connector = (
@@ -957,21 +1080,31 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
             async with http.post(cfg["endpoint"], json=body, headers=headers) as resp:
                 if resp.status != 200:
                     snippet = (await resp.text())[:300]
+                    meter(error=f"HTTP {resp.status}")
                     raise BriefingError(
                         f"llm endpoint answered {resp.status}: {snippet}"
                     )
-                data = await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    # A 200 whose body is not JSON (a proxy's HTML page): the
+                    # request was still sent, so it is metered as failed.
+                    meter(error="response is not JSON")
+                    raise BriefingError(f"llm response is not JSON: {exc}") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        meter(error=type(exc).__name__)
         raise BriefingError(f"llm call failed: {exc}") from exc
+    usage = data.get("usage") if isinstance(data, dict) else None
     try:
         choice = data["choices"][0]
         content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
+        meter(usage, error="no choices[0].message.content")
         raise BriefingError("llm response has no choices[0].message.content") from None
     finish = choice.get("finish_reason") if isinstance(choice, dict) else None
-    usage = data.get("usage") if isinstance(data, dict) else None
     spent = usage.get("completion_tokens") if isinstance(usage, dict) else None
     text = str(content or "")
+    meter(usage, error="" if text.strip() else f"empty content (finish_reason={finish})")
     if not text.strip():
         # Two different things arrive here, and telling them apart is the
         # whole point of reading finish_reason: "length" is OUR budget being
@@ -1057,6 +1190,12 @@ async def probe_llm(cfg: dict, *, timeout: float = CONNECTION_TIMEOUT) -> Connec
             seconds=round(time.monotonic() - started, 3),
         )
 
+    def meter(usage=None, error: str = "") -> None:
+        llm_usage.record(
+            "briefing", provider=provider, endpoint=endpoint, model=model,
+            purpose="probe", usage=usage, ok=not error, error=error,
+            seconds=time.monotonic() - started)
+
     missing = [
         name
         for name, value in (
@@ -1102,21 +1241,25 @@ async def probe_llm(cfg: dict, *, timeout: float = CONNECTION_TIMEOUT) -> Connec
                 status = resp.status
                 text = await resp.text()
                 if status != 200:
+                    meter(error=f"HTTP {status}")
                     return result(
                         False, status, f"answered {status}: {text[:300]}"
                     )
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        meter(error=type(exc).__name__)
         return result(False, None, f"could not reach {endpoint}: {exc}")
     try:
         data = json.loads(text)
         choice = data["choices"][0]
     except (ValueError, KeyError, IndexError, TypeError):
+        meter(error="no choices[0]")
         return result(
             False,
             status,
             f"answered {status} but not with a chat completion "
             f"(no choices[0]): {text[:300]}",
         )
+    meter(data.get("usage") if isinstance(data, dict) else None)
     finish = choice.get("finish_reason") if isinstance(choice, dict) else None
     content = ""
     if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
@@ -1199,30 +1342,127 @@ def parse_briefing(text: str) -> Optional[dict]:
 # composition and cache
 # --------------------------------------------------------------------------- #
 #: session name -> (cache key, last result). The key is everything that would
-#: change the answer; the dict is mirrored to the daemon instance directory.
+#: change the answer. Each session's entry is mirrored to its own directory
+#: (:data:`BRIEFING_FILE`), so writing one briefing rewrites one file.
 _cache: Dict[str, Tuple[tuple, dict]] = {}
+#: session name -> the last composition that failed, ``{"at", "error"}``.
+#: Kept beside the briefing it did not replace, so a row can tell "never
+#: composed" from "composing failed" (claunch-lluxq) — a failure used to live
+#: only in the browser tab that asked, and a reload made it "No summary yet".
+#: Cleared by the next composition that succeeds.
+_failures: Dict[str, dict] = {}
+#: session name -> how many times :func:`forget` has dropped that name. A
+#: composition reads it before its LLM call and keeps nothing if it moved
+#: meanwhile: the record was removed while the answer was on its way, and
+#: storing it would put the removed session's summary back (claunch-lluxq).
+_forgotten: Dict[str, int] = {}
 _loaded_cache_path: Optional[Path] = None
+
+#: Appended to a retired entry's cache key so no composition matches it again.
+_RETIRED = "retired"
+
+#: A session's briefing file, beside its ``meta.json``. Per session rather
+#: than one file for the fleet (claunch-lluxq): the fleet file was rewritten
+#: whole on every composition, so one write emptied every session's summary
+#: at once; and a session's directory is what "Clear exited" removes, so a
+#: reused name does not inherit the summary of the session it replaces.
+BRIEFING_FILE = "briefing.json"
+
+
+def _session_file(name: str) -> Path:
+    return paths.session_dir(name) / BRIEFING_FILE
+
+
+def _plain_name(name: str) -> bool:
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
+
+
+def _load_row(name: str, row) -> None:
+    if not isinstance(row, dict):
+        return
+    failure = row.get("failure")
+    if isinstance(failure, dict):
+        _failures[name] = failure
+    result = row.get("result")
+    if isinstance(row.get("key"), list) and isinstance(result, dict):
+        _cache[name] = (_tupleize(row["key"]), result)
+
+
+def _read_file(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+_NEVER = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _generated_at(row) -> datetime:
+    """When ``row``'s briefing was composed, as an instant.
+
+    Compared as instants and not as text: an offset other than ``+00:00``
+    (a restore, a hand-written row) sorts by its digits, so ``09:00+09:00``
+    read as later than ``01:00+00:00`` though both are the same moment —
+    and the later of two rows is the one migration keeps. No time, or one
+    that does not parse, is the earliest.
+    """
+    result = row.get("result") if isinstance(row, dict) else None
+    raw = result.get("generated_at") if isinstance(result, dict) else None
+    try:
+        at = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return _NEVER
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _migrate_fleet_file() -> None:
+    """Split the old fleet-wide ``briefings.json`` into per-session files.
+
+    Once: the old file is renamed ``briefings.json.migrated`` afterwards. A
+    session whose directory is gone (its record was cleared) is not brought
+    back. A session that already has its own file keeps it unless the old
+    file's briefing was generated later: the per-session files written while
+    a daemon still ran the fleet file (a restore, claunch-lluxq) are older
+    than what that daemon composed meanwhile.
+    """
+    legacy = paths.briefings_json()
+    if not legacy.is_file():
+        return
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for name, row in (data.items() if isinstance(data, dict) else ()):
+        name = str(name)
+        if not isinstance(row, dict) or not _plain_name(name):
+            continue
+        if not paths.session_dir(name).is_dir():
+            continue
+        target = _session_file(name)
+        if target.exists() and _generated_at(row) <= _generated_at(_read_file(target)):
+            continue
+        _write_file(target, row)
+    try:
+        legacy.replace(legacy.with_name(legacy.name + ".migrated"))
+    except OSError:
+        log.warning("briefing: could not retire %s after migrating it", legacy)
 
 
 def _restore_cache() -> None:
     """Load durable briefings once for the active daemon instance."""
     global _loaded_cache_path
-    path = paths.briefings_json()
-    if _loaded_cache_path == path:
+    root = paths.sessions_root()
+    if _loaded_cache_path == root:
         return
-    _loaded_cache_path = path
+    _loaded_cache_path = root
+    _migrate_fleet_file()
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, ValueError):
+        files = sorted(root.glob(f"*/{BRIEFING_FILE}"))
+    except OSError:
         return
-    if not isinstance(data, dict):
-        return
-    for name, row in data.items():
-        if not isinstance(row, dict) or not isinstance(row.get("key"), list):
-            continue
-        result = row.get("result")
-        if isinstance(result, dict):
-            _cache[str(name)] = (_tupleize(row["key"]), result)
+    for path in files:
+        _load_row(path.parent.name, _read_file(path))
 
 
 def _tupleize(value):
@@ -1239,24 +1479,70 @@ def _tupleize(value):
 persist_hooks: List[Callable[[], None]] = []
 
 
-def _persist_cache() -> None:
-    path = paths.briefings_json()
-    data = {
-        name: {"key": _jsonable(key), "result": result}
-        for name, (key, result) in _cache.items()
-    }
+def _write_file(path: Path, row: dict) -> None:
+    # The session directory is the daemon's record of the session; a briefing
+    # never creates it. Without this guard, retiring every briefing after
+    # "Clear exited" removed a session's directory brought it back holding
+    # that briefing, and the next session given the same name inherited it.
+    if not path.parent.is_dir():
+        return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         with atomic.scratch(path) as tmp:
-            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
             atomic.replace(tmp, path)
     except OSError:
+        log.warning("briefing: could not write %s", path)
+
+
+#: Held while one name's entry is read and its file written. retire_all_async
+#: writes from a worker thread while compose and forget write on the loop;
+#: reading the entry under the lock means whichever write comes last carries
+#: the newest entry, so a retire never puts back what compose just replaced.
+_write_lock = threading.Lock()
+
+
+def _write(name: str) -> None:
+    """Mirror ``name``'s entry to its own file; no entry removes the file."""
+    if not _plain_name(name):
+        return
+    with _write_lock:
+        _write_locked(name)
+
+
+def _write_locked(name: str) -> None:
+    # One read each: from the worker thread the loop may drop the entry
+    # between a membership test and the lookup.
+    row: dict = {}
+    entry = _cache.get(name)
+    if entry is not None:
+        key, result = entry
+        row.update(key=_jsonable(key), result=result)
+    failure = _failures.get(name)
+    if failure is not None:
+        row["failure"] = failure
+    path = _session_file(name)
+    if row:
+        _write_file(path, row)
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
         pass
+    except OSError:
+        log.warning("briefing: could not remove %s", path)
+
+
+def _run_hooks() -> None:
     for hook in list(persist_hooks):
         try:
             hook()
         except Exception:
             log.exception("briefing: persist hook %r failed", hook)
+
+
+def _persist(name: str) -> None:
+    _write(name)
+    _run_hooks()
 
 
 def _jsonable(value):
@@ -1265,18 +1551,85 @@ def _jsonable(value):
     return value
 
 
-def forget_all() -> None:
-    """Drop every cached briefing, persisted copy included.
+def retire_all() -> None:
+    """Mark every cached briefing as the previous backend's, keeping its text.
 
     Called when the backend behind the feature changes — a different profile,
     endpoint or model. The cache key is a session's *evidence* and not the
     model that read it, so without this a briefing written by the previous
     model would stay on the card until that session's transcript moved, and
     the change the operator just saved would look like it had done nothing.
+
+    The text is kept: this used to clear the cache, and one model switch
+    emptied the one-line of every session on the rail — 636 of them, exited
+    ones included, which nothing recomposes (claunch-lluxq). A retired entry
+    gets a key no composition can match, so the next card or ⟳ composes with
+    the new model, and it carries ``stale`` so the row can say whose answer
+    it is showing until then. Recorded failures belong to the old backend
+    too and are dropped.
+    """
+    for name in _retire_entries():
+        _write(name)
+    _run_hooks()
+
+
+async def retire_all_async() -> None:
+    """:func:`retire_all` for the event loop: the files are written off it.
+
+    Retiring rewrites every session's file — 639 of them took 183ms on the
+    live daemon, all of it inside the request that saved the setting, with
+    every other handler waiting. The entries change on the loop, so the
+    rail's next poll already reads them stale; only the disk follows later.
+    """
+    names = _retire_entries()
+    await asyncio.to_thread(_write_each, names)
+    _run_hooks()
+
+
+def _retire_entries() -> List[str]:
+    """Retire the cached entries in memory; the names whose file must follow."""
+    _restore_cache()
+    changed = set(_failures)
+    for name, (key, result) in list(_cache.items()):
+        if key and key[-1] == _RETIRED:
+            continue
+        _cache[name] = ((*key, _RETIRED), {**result, "stale": True})
+        changed.add(name)
+    _failures.clear()
+    return sorted(changed)
+
+
+def _write_each(names) -> None:
+    for name in names:
+        _write(name)
+
+
+def forget(names) -> None:
+    """Drop the briefings of session records that were removed.
+
+    Called by the manager wherever a record goes (clear, remove, discard). The
+    cache is keyed by name and outlives the directory, so without this a
+    session created later under a removed one's name showed that session's
+    summary until the daemon restarted, and :func:`retire_all` wrote it into
+    the new session's directory (claunch-lluxq). The file goes too: a clear
+    without ``--logs`` keeps the directory, and the next restart would load it.
     """
     _restore_cache()
-    _cache.clear()
-    _persist_cache()
+    names = list(names)
+    for name in names:
+        _forgotten[name] = _forgotten.get(name, 0) + 1
+        _cache.pop(name, None)
+        _failures.pop(name, None)
+        _write(name)
+    # The fleet search corpus carries each session's summary; clear and remove
+    # also reach it through the registry's change hooks, discard does not.
+    if names:
+        _run_hooks()
+
+
+def _record_failure(name: str, exc: BaseException) -> None:
+    _failures[name] = {"at": _now_iso(), "error": _clip(str(exc) or exc.__class__.__name__, 300)}
+    _persist(name)
 
 
 def _now_iso() -> str:
@@ -1286,7 +1639,7 @@ def _now_iso() -> str:
 def _index_briefing(name: str, payload, at: str) -> None:
     """Mirror one composed briefing into the search index, never raising.
 
-    The index is a derived store and this runs *after* ``_persist_cache`` has
+    The index is a derived store and this runs *after* ``_persist`` has
     put the briefing on disk, so the answer the model wrote is already saved.
     Raising here does not become a ``BriefingError`` -- :func:`compose`'s
     callers catch that one and this is not one -- so it left the route as an
@@ -1343,6 +1696,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             jsonl_path = None
     cache_key = (
         name,
+        PROMPT_VERSION,
         stat_key,
         cflow_info.get("step") if cflow_info else None,
         live_info.get("status") if live_info else None,
@@ -1359,19 +1713,31 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
     prompt = build_prompt(sdef, cflow_info, events, live_info, faq)
-    answer = await call_llm(cfg, prompt)
+    generation = _forgotten.get(name, 0)
+    try:
+        answer = await call_llm(cfg, prompt, session=name, purpose="card")
+    except BriefingError as exc:
+        if _forgotten.get(name, 0) == generation:
+            _record_failure(name, exc)
+        raise
+    # The record was removed while the call was out: answer the caller, keep
+    # nothing — no cache entry, no file, no failure, no index row.
+    kept = _forgotten.get(name, 0) == generation
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":
         # Text arrived, but the endpoint says it was CUT at the budget — the
         # JSON is half-written, not badly written. Serving it as ``raw`` would
         # put a torn-off sentence on the card and cache it there, so this is
         # the same failure as the empty answer and gets the same 502.
-        raise BriefingError(
+        exc = BriefingError(
             f"llm answer was truncated at max_tokens={cfg['max_tokens']} "
             f"(finish_reason='length', completion_tokens={answer.completion_tokens}, "
             f"{len(answer.text)} chars, not parseable) — raise the token "
             "budget in Settings ▸ Briefing model (llm.max_tokens)"
         )
+        if kept:
+            _record_failure(name, exc)
+        raise exc
     result = {
         "session": name,
         "generated_at": _now_iso(),
@@ -1380,9 +1746,11 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         "briefing": parsed,
         "raw": None if parsed is not None else answer.text,
     }
-    _cache[name] = (cache_key, result)
-    _persist_cache()
-    _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
+    if kept:
+        _failures.pop(name, None)
+        _cache[name] = (cache_key, result)
+        _persist(name)
+        _index_briefing(name, parsed or {"raw": answer.text}, result["generated_at"])
     return result
 
 
@@ -1395,10 +1763,17 @@ DIGEST_FIELD_CHARS = 240
 
 
 def cached_result(name: str) -> Optional[dict]:
-    """Read the last complete briefing without checking changing evidence."""
+    """Read the last complete briefing without checking changing evidence.
+
+    A retired one (:func:`retire_all`) is not served: opening a card after a
+    model change composes with the new model, as it did when the change
+    cleared the cache. The rail keeps showing the retired text meanwhile.
+    """
     _restore_cache()
     hit = _cache.get(name)
-    return {**hit[1], "cached": True} if hit is not None else None
+    if hit is None or (hit[0] and hit[0][-1] == _RETIRED):
+        return None
+    return {**hit[1], "cached": True}
 
 
 def digest(name: str) -> Optional[dict]:
@@ -1416,14 +1791,20 @@ def digest(name: str) -> Optional[dict]:
     ``goal``/``now``/``progress`` are present only when the summariser filled
     them, so a reader can tell an empty field from one the older response
     shape never had.
+
+    Two flags tell the row whose text it is (claunch-lluxq): ``stale`` when
+    the briefing was written by the backend before the last model change
+    (:func:`retire_all`), and ``failed`` (``{"at", "error"}``) when the last
+    composition since the last success failed. A failure with nothing
+    composed before it still yields a digest — empty fields and ``failed`` —
+    so the row says "failed" instead of "not yet".
     """
     _restore_cache()
+    failed = _failures.get(name)
     hit = _cache.get(name)
-    if hit is None:
-        return None
-    brief = (hit[1] or {}).get("briefing")
+    brief = (hit[1] or {}).get("briefing") if hit is not None else None
     if not isinstance(brief, dict):
-        return None
+        return {"one_line": "", "state": "", "failed": failed} if failed else None
     out = {
         "one_line": _clip(
             str(brief.get("one-line-job-description") or ""), DIGEST_FIELD_CHARS
@@ -1435,5 +1816,9 @@ def digest(name: str) -> Optional[dict]:
         if value:
             out[key] = value
     if not any(out.get(key) for key in ("one_line", "goal", "now", "progress")):
-        return None
+        return {"one_line": "", "state": "", "failed": failed} if failed else None
+    if hit[1].get("stale"):
+        out["stale"] = True
+    if failed:
+        out["failed"] = failed
     return out

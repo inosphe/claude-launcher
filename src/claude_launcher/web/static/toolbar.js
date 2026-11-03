@@ -12,11 +12,13 @@
  *      chips on every poll, and a class put there would be gone each time);
  *   3. overflow — only once every control is a glyph and the row still does
  *      not fit, controls leave for the `⋯` menu one at a time, in the same
- *      order.
+ *      order — all but the ROW_PINNED ones, which stay on the row as glyphs
+ *      at any width (claunch-xbhbg.1).
  *
- * The iconified and the overflowed controls are always a prefix of the order,
- * so a narrower column never makes any control wider: every width is one
- * position on one ordered list. */
+ * The iconified and the overflowed controls are always a prefix of the order
+ * (the overflowed ones of the order without ROW_PINNED), so a narrower column
+ * never makes any control wider: every width is one position on one ordered
+ * list. */
 (() => {
   const header = document.getElementById("term-header");
   if (!header) return;
@@ -28,11 +30,14 @@
     "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
     "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
     "term-zoom", "term-view", "term-life",
-    "term-chartbtn", "term-categorybtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
+    "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
     "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
     "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
     "term-tps", "term-note", "term-handle", "term-status",
   ];
+  // Controls that iconify but never leave the row: the goto button is how a
+  // session is reached at all, so a narrow column keeps it as `⇱`.
+  const ROW_PINNED = new Set(["term-goto"]);
   // Squeeze range: [full, tightest] in px.
   const GAP = [10, 4];
   const PAD = [9, 4];
@@ -52,7 +57,7 @@
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇", "term-categorybtn": "⌘", "term-qabtn": "?", "term-threadsbtn": "🗪",
-    "term-clibtn": "❯", "term-vmbtn": "🖥", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
+    "term-clibtn": "❯", "term-vmbtn": "🖥", "term-wrapupbtn": "✎", "term-planbtn": "☰", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
     "term-details": "ⓘ", "term-zoom-level": "A",
     // Already one character: described like the rest, but no glyph -- the
     // fixed glyph width would make them wider, not narrower.
@@ -265,7 +270,7 @@
       ...list.filter(el => rank(el) >= 0).sort((a, b) => rank(a) - rank(b))];
     const movable = items.filter(el => el.id !== "term-title");
     const glyphOrder = byRank(lane ? [...movable, lane] : movable);
-    const leaveOrder = byRank(movable);
+    const leaveOrder = byRank(movable.filter(el => !ROW_PINNED.has(el.id)));
     if (!fits()) {
       // 1. Squeeze. The tightest spacing either fits or it does not; when it
       // does, the least squeeze that fits is found by bisection (the slack

@@ -78,7 +78,9 @@ TOOLS = [
         "description": (
             "Send a message to mesh members. '*' broadcasts to every other "
             "connected member (and the result carries a BROADCAST advisory: "
-            "each recipient spends a turn on it); '@in_review' addresses the "
+            "each recipient spends a turn on it) — a worker's '*' is refused "
+            "with the reason, so a worker names the handles it is for; "
+            "'@in_review' addresses the "
             "members whose issue is in_review on your board. Delivery types "
             "the message into each recipient's "
             "terminal (remote members receive it over the relay). The sender "
@@ -310,7 +312,10 @@ TOOLS = [
             "sees a card and approves, rejects, extends it or makes the session "
             "by hand in a form, and the outcome (with the created session's "
             "name) is typed into your terminal as a [claunch spawn-request] "
-            "block. With no answer in 5 minutes the child is created as you "
+            "block. Made by hand, it may come back TOP-LEVEL instead of as "
+            "your child (or the reverse): the block says which, and a "
+            "top-level one is not in your 'children'. "
+            "With no answer in 5 minutes the child is created as you "
             "asked. Do not spawn again for the same work while it waits. A "
             "'reviewer' child is not gated: it is created at once. 'root' asks "
             "for a TOP-LEVEL session instead of a child (your profile and "
@@ -321,7 +326,21 @@ TOOLS = [
             "on a branch of its own. They are different answers and can be "
             "asked together — the checkout is cut inside the workspace, so "
             "moving a child to another repository AND giving it its own branch "
-            "is 'workspace' plus 'worktree', never one in place of the other."
+            "is 'workspace' plus 'worktree', never one in place of the other. "
+            "WHICH BOARD: the child's board is the one in the directory it "
+            "runs in, so 'issue' is looked up THERE — the id you wrote on "
+            "your own board is not on the board of the workspace you are "
+            "sending the child to, and the request is refused rather than "
+            "started without its issue. A child sent to another project's "
+            "directory is still FILED under your project unless you name its "
+            "'project' too: name both, or the roster says one project while "
+            "the checkout belongs to another. "
+            "WHAT YOU CANNOT CHOOSE: 'profile', 'borrow', 'cwd', 'args' and "
+            "'env' are honoured but not offered — the spawn block in "
+            "~/.claude-launcher/.claunch.yaml is closed on them by default "
+            "(spawn.allow_profile, allow_cwd, allow_args, allow_env), and a "
+            "request that names one is refused, not quietly ignored. With no "
+            "'profile' the child runs on YOURS, harness and model alike."
         ),
         "inputSchema": {
             "type": "object",
@@ -356,7 +375,13 @@ TOOLS = [
                         "is opened for the two of you if you are in none, so "
                         "you can always reach each other. Only name a mesh to "
                         "put the child somewhere other than your own; '-' "
-                        "skips a team mesh; the parent/child channel is still created"
+                        "skips a team mesh; the parent/child channel is still created. "
+                        "Two facts about the normal case: in several meshes "
+                        "the child joins the one you joined FIRST (your main "
+                        "mesh), and when no mesh exists to join, one is opened "
+                        "for the pair and the child lands in it as 'free-role' "
+                        "whatever role you named — there is no team there to "
+                        "hold a place in, and you are warned when it happens"
                     ),
                 },
                 "handle": {
@@ -371,7 +396,13 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "the child's mesh role, which sets its stance — see "
-                        "'claunch mesh roles MESH' for this mesh's vocabulary"
+                        "'claunch mesh roles MESH' for this mesh's vocabulary. "
+                        "Omitted, it is INFERRED from the child's handle's "
+                        "leading word ('worker_2' -> worker, 'qa-1' -> "
+                        "reviewer, 'moderator' -> leader), and only a handle "
+                        "that names no role falls back to 'free-role' — which "
+                        "is what a handle left at the session name ('s1234') "
+                        "does. Name it when you mean it"
                     ),
                 },
                 "subroles": {
@@ -404,7 +435,11 @@ TOOLS = [
                         "child_cflow), and on none when your workflow pairs "
                         "with nothing or you are driving no run. Name one to "
                         "override that pairing; '-' gives the child no run "
-                        "where the pair would have given it one. A cflow v2 workflow "
+                        "where the pair would have given it one — which is "
+                        "what a 'reviewer' child usually needs: a run's "
+                        "filter_roles admits only the roles it names "
+                        "(improv-worker-v2 takes [worker]), so a pairing that "
+                        "does not list the reviewer refuses to start on it. A cflow v2 workflow "
                         "is named the same way (or as v2:<name> when a v1 one "
                         "shares the name, or a .cflow2/generated/*.yaml path)"
                     ),
@@ -430,11 +465,33 @@ TOOLS = [
                         "has booted — what it is for, in its own words"
                     ),
                 },
+                "opening_contexts": {
+                    "type": "array",
+                    "description": (
+                        "separate context items for the child, kept apart "
+                        "from its task: an error log, a spec excerpt, notes. "
+                        "Each is stored as its own file in the child's state "
+                        "directory, and its opening lists them with how to "
+                        "read them (MCP context_read / context_list). At most "
+                        "20 items, 256 KiB each and 384 KiB together — attach "
+                        "anything larger by path in the task instead"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "a short name, e.g. 'pytest failure log'"},
+                            "text": {"type": "string", "description": "the item's content"},
+                        },
+                        "required": ["text"],
+                    },
+                },
                 "issue": {
                     "type": "string",
                     "description": (
                         "an EXISTING board issue for the child, instead of "
-                        "the fresh one its task would otherwise mint. What "
+                        "the fresh one its task would otherwise mint — read "
+                        "off the board of the directory the child runs in, "
+                        "which is YOURS unless 'workspace' moves it. What "
                         "that means is the daemon's call, not yours: an issue "
                         "nobody holds is assigned to the child, and one a "
                         "RUNNING session holds is only joined — the "
@@ -543,9 +600,13 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "file the child under a project other than yours "
-                        "('children' lists them). With no 'workspace' or "
-                        "'worktree' beside it, the child starts in that "
-                        "project's default workspace when it has one"
+                        "('children' lists them; default: yours). With no "
+                        "'workspace' or 'worktree' beside it, the child "
+                        "starts in that project's default workspace when it "
+                        "has one. The label does NOT follow the directory: "
+                        "sending a child to another project's 'workspace' "
+                        "files it under YOUR project unless you name that "
+                        "one here too, so name both"
                     ),
                 },
                 "workspace": {
@@ -557,7 +618,11 @@ TOOLS = [
                         "if nothing is registered there is nowhere to send it "
                         "and yours is inherited. This moves the child; it "
                         "does not give it a branch of its own — that is "
-                        "'worktree'"
+                        "'worktree'. It also moves the BOARD the child's "
+                        "'issue' is looked up on, so an issue of your own "
+                        "board is not found from a directory of another "
+                        "project: pair the move with that project's name in "
+                        "'project' and with an issue of that board"
                     ),
                 },
                 "worktree": {
@@ -1202,8 +1267,12 @@ TOOLS = [
         "name": "loop_close",
         "description": (
             "End one open loop by id, with an optional 'note' on how it "
-            "resolved. Close a loop when its wait ends; a loop nobody closes "
-            "turns STALE and keeps asking to be judged."
+            "resolved. The 'loops' tool prints every id this accepts, "
+            "including the reply: waits read off the mesh's response "
+            "watches -- closing one of those deletes the watch, which stops "
+            "the response nudge and drops the line from the re-briefing. "
+            "Close a loop when its wait ends; a loop nobody closes turns "
+            "STALE and keeps asking to be judged."
         ),
         "inputSchema": {
             "type": "object",
@@ -1543,7 +1612,7 @@ def _await_connect(mesh: str, me: str, peer: str) -> dict:
 #: in the same honoured-not-offered group: it rides the ``args`` gate.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
-    "task", "issue", "issue_text", "harness", "workspace", "worktree",
+    "task", "opening_contexts", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
     # model/effort ride the allow_args gate (spawn._GATED_FIELDS); a workflow
     # delegating to a cheaper model preset names one (claunch-yl0to)

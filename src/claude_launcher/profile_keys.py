@@ -10,7 +10,8 @@ launch time that writes the chosen key into the token file.
 
 So the invariant is:
 
-* the pool is the list, the strategy and the rotation cursor;
+* the pool is the list, the strategy, the rotation cursor and (for the
+  strategies that store one) the key the next launch takes;
 * ``.launcher-token`` is *this launch's* key, and is the only file the rest of
   the launcher reads;
 * a profile with no pool behaves exactly as before -- one token, no selection.
@@ -42,7 +43,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from . import atomic, credentials
 from .profile import Profile
@@ -54,15 +55,19 @@ KEYS_FILENAME = ".launcher-keys.json"
 #: Bumped only for a format the reader below cannot interpret.
 FORMAT_VERSION = 1
 #: Strategy names accepted on the command line and in the file.
-STRATEGIES = ("rotation", "usage-min", "usage-max", "random")
+STRATEGIES = ("rotation", "usage-min", "usage-max", "random", "manual")
 DEFAULT_STRATEGY = "rotation"
+#: The operator names the key; the pool stores it as ``pick`` (claunch-i985h).
+MANUAL_STRATEGY = "manual"
 #: Strategies that read every key's own usage to choose one (claunch-wllke.4).
 #: A caller that already holds each key's usage asks the account nothing more;
 #: one that only previews a pick must not spend a read per key for it.
 MEASURING_STRATEGIES = ("usage-min", "usage-max")
-#: Strategies whose pick is decided when they run, so a preview cannot name
-#: the key a launch would take (``random`` with more than one key).
-UNPREDICTABLE_STRATEGIES = ("random",)
+#: Strategies whose pick is stored in the pool (``Pool.pick``) rather than
+#: computed from its cursor: the operator's key for manual, the drawn key for
+#: random. Storing it is what lets the create form name the key a launch will
+#: take and lets a random draw be re-rolled before that launch (claunch-i985h).
+PINNED_STRATEGIES = (MANUAL_STRATEGY, "random")
 
 
 class KeysError(Exception):
@@ -91,6 +96,9 @@ class Pool:
     strategy: str = DEFAULT_STRATEGY
     #: id of the key the last rotation landed on (``None`` before the first).
     cursor: Optional[str] = None
+    #: id of the key the NEXT launch takes, for the strategies in
+    #: :data:`PINNED_STRATEGIES`; ``None`` on a pool that has never stored one.
+    pick: Optional[str] = None
     keys: List[Key] = field(default_factory=list)
 
 
@@ -102,8 +110,13 @@ class Selection:
     strategy: str
     index: int
     owner: Profile
-    #: Why a usage strategy fell back to rotation, when it did.
+    #: Why a strategy fell back to rotation, when it did.
     fallback: Optional[str] = None
+    #: Whether this key is what the NEXT launch takes, read from the pool's
+    #: stored state rather than decided, by this call (a random draw that has
+    #: not been stored yet is not: the launch re-draws). A preview that names
+    #: a key is only honest about a launch when this is true.
+    exact: bool = True
 
 
 def path(profile: Profile) -> Path:
@@ -195,15 +208,17 @@ def load(profile: Profile) -> Optional[Pool]:
             )
         )
     cursor = raw.get("cursor")
+    pick = raw.get("pick")
     return Pool(
         strategy=strategy,
         cursor=str(cursor) if cursor else None,
+        pick=str(pick) if pick else None,
         keys=keys,
     )
 
 
 def _dump(pool: Pool) -> dict:
-    return {
+    data = {
         "version": FORMAT_VERSION,
         "strategy": pool.strategy,
         "cursor": pool.cursor,
@@ -219,6 +234,11 @@ def _dump(pool: Pool) -> dict:
             for k in pool.keys
         ],
     }
+    # Only the strategies that read it write it, so a pool on rotation does not
+    # keep a stale id of a key that may have been removed.
+    if pool.pick and pool.strategy in PINNED_STRATEGIES:
+        data["pick"] = pool.pick
+    return data
 
 
 def save(profile: Profile, pool: Pool) -> None:
@@ -496,7 +516,9 @@ def replace(profile: Profile, token: str, ident: Optional[str] = None) -> Key:
         return key
 
 
-def set_strategy(profile: Profile, strategy: str) -> Pool:
+def set_strategy(
+    profile: Profile, strategy: str, key_id: Optional[str] = None
+) -> Pool:
     """Set the strategy of the pool this profile's launches select from.
 
     The pool is the one :func:`strategy_owner` names: the profile's own, or
@@ -513,6 +535,16 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
     pool that profile's launches actually select from. Callers that print the
     result should name ``strategy_owner(profile)`` when it is not the profile
     itself, because another profile's file is what changed.
+
+    The two strategies in :data:`PINNED_STRATEGIES` store ``pick`` here, which
+    is what makes their next launch nameable before it runs (claunch-i985h):
+
+    * ``manual`` takes ``key_id`` (a key id, or a 1-based position as the CLI
+      accepts). Without one it keeps the pool's current pick, else the key the
+      token file already holds, else the first key -- so choosing the strategy
+      never leaves the pool in a state a launch would refuse.
+    * ``random`` draws one now, so the form can show (and re-roll) the key the
+      next launch takes instead of saying "picked at launch".
     """
     strategy = str(strategy or "").strip().lower()
     if strategy not in STRATEGIES:
@@ -524,9 +556,66 @@ def set_strategy(profile: Profile, strategy: str) -> Pool:
         pool = adopt_single_token(source)
         if pool is None:
             raise KeysError(stored_key_advice(source))
+        if strategy == MANUAL_STRATEGY:
+            pool.pick = _manual_pick(pool, key_id, source)
+        elif strategy == "random":
+            pool.pick = _draw(pool)
         pool.strategy = strategy
         save(source, pool)
         return pool
+
+
+def _manual_pick(pool: Pool, key_id: Optional[str], source: Profile) -> Optional[str]:
+    """The key id a manual switch should store (see :func:`set_strategy`).
+
+    A named key wins, matched the way the rest of the CLI matches one (id, or
+    a 1-based position) and stored by id. Without one the pool keeps the pick
+    it already had, and a pool that has none falls back to the key the
+    profile's token file holds -- the key this profile's last launch used --
+    so switching to manual names a key immediately instead of leaving the
+    next launch to a fallback it would have to explain.
+    """
+    if not pool.keys:
+        return None
+    text = str(key_id or "").strip()
+    if text:
+        return pool.keys[_index_of(pool, text)].id
+    stored = _pick_index(pool)
+    if stored is not None:
+        return pool.keys[stored].id
+    current = credentials.stored_token(source)
+    for key in pool.keys:
+        if key.token == current:
+            return key.id
+    return pool.keys[0].id
+
+
+def roll(profile: Profile) -> Selection:
+    """Draw a new key for a ``random`` pool and store it as the next pick.
+
+    A random pool's draw is stored (:data:`PINNED_STRATEGIES`) so it can be
+    named before the launch and re-drawn as often as the operator likes; each
+    call replaces the stored draw, and the next launch takes whatever the
+    latest call left (claunch-i985h).
+    """
+    source = strategy_owner(profile) or profile
+    with pool_lock(source):
+        pool = adopt_single_token(source)
+        if pool is None:
+            raise KeysError(stored_key_advice(source))
+        if not pool.keys:
+            raise KeysError("the key pool is empty")
+        if pool.strategy != "random":
+            raise KeysError(
+                f"only the random strategy draws a key; this pool uses "
+                f"{pool.strategy!r}"
+            )
+        pool.pick = _draw(pool)
+        save(source, pool)
+        index = _pick_index(pool)
+        if index is None:  # an empty pool is refused above; belt and braces
+            index = 0
+        return Selection(pool.keys[index], pool.strategy, index, source)
 
 
 def strategy_owner(profile: Profile) -> Optional[Profile]:
@@ -722,25 +811,59 @@ def _utilization_reader(
     return measure, None
 
 
-def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
+def _pick_index(pool: Pool) -> Optional[int]:
+    """Where the pool's stored ``pick`` sits, or ``None`` when it names no key.
+
+    A pick that names a removed key is not an error: launches fall back (see
+    :func:`_pick`), so that a ``keys remove`` — or a pool edited by hand —
+    cannot wedge every launch of the profile.
+    """
+    if not pool.pick:
+        return None
+    for position, key in enumerate(pool.keys):
+        if key.id == pool.pick:
+            return position
+    return None
+
+
+def _draw(pool: Pool) -> Optional[str]:
+    """A uniformly drawn key id, or ``None`` for an empty pool."""
+    if not pool.keys:
+        return None
+    return pool.keys[random.randrange(len(pool.keys))].id
+
+
+def _usage_index(pool: Pool, readings: Dict[str, float], strategy: str) -> Optional[int]:
+    """The best key by the peaks already read, or ``None`` if none is usable."""
+    scored = []
+    for position, key in enumerate(pool.keys):
+        value = readings.get(key.id)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number != number:  # NaN: an unreadable reading, not a low one
+            continue
+        scored.append((number, position))
+    if not scored:
+        return None
+    return (min(scored) if strategy == "usage-min" else max(scored))[1]
+
+
+def _pick(
+    pool: Pool,
+    source: Profile,
+    owner_profile: Profile,
+    readings: Optional[Dict[str, float]] = None,
+) -> Selection:
     strategy = pool.strategy
     if not pool.keys:
         raise KeysError("the key pool is empty")
-    if strategy == "random" and len(pool.keys) > 1:
-        index = random.randrange(len(pool.keys))
-        return Selection(pool.keys[index], strategy, index, owner_profile)
-    if strategy in MEASURING_STRATEGIES:
-        measure, unmeasurable = _utilization_reader(source)
-        scored = []
-        for position, key in enumerate(pool.keys):
-            value = measure(key)
-            if value is not None:
-                scored.append((value, position))
-        if scored:
-            if strategy == "usage-min":
-                value, index = min(scored)
-            else:
-                value, index = max(scored)
+    if strategy == MANUAL_STRATEGY:
+        index = _pick_index(pool)
+        if index is not None:
             return Selection(pool.keys[index], strategy, index, owner_profile)
         index = _rotation_index(pool)
         return Selection(
@@ -748,23 +871,85 @@ def _pick(pool: Pool, source: Profile, owner_profile: Profile) -> Selection:
             DEFAULT_STRATEGY,
             index,
             owner_profile,
-            fallback=unmeasurable
-            or f"no key's usage could be read ({strategy} needs a "
-            "key-based usage reader)",
+            fallback=(
+                f"the manual key {pool.pick!r} is not in this pool"
+                if pool.pick
+                else "no key has been chosen for the manual strategy"
+            ),
         )
-    index = _rotation_index(pool) if strategy == "rotation" else _selected_index(pool)
+    if strategy == "random":
+        index = _pick_index(pool)
+        if index is not None:
+            return Selection(pool.keys[index], strategy, index, owner_profile)
+        if len(pool.keys) == 1:
+            return Selection(pool.keys[0], strategy, 0, owner_profile)
+        # A pool stored before claunch-i985h has a strategy and no draw: this
+        # names a key but cannot promise the launch will take it, which is
+        # what `exact` says (the draw is stored by set_strategy/roll and, from
+        # now on, by the launch itself).
+        index = random.randrange(len(pool.keys))
+        return Selection(pool.keys[index], strategy, index, owner_profile, exact=False)
+    if strategy in MEASURING_STRATEGIES:
+        if readings is not None:
+            index = _usage_index(pool, readings, strategy)
+            unmeasurable = None
+            if index is None:
+                unmeasurable = (
+                    f"no key's usage could be read ({strategy} needs a "
+                    "key-based usage reader)"
+                )
+        else:
+            measure, unmeasurable = _utilization_reader(source)
+            scored = []
+            for position, key in enumerate(pool.keys):
+                value = measure(key)
+                if value is not None:
+                    scored.append((value, position))
+            index = None
+            if scored:
+                index = (min(scored) if strategy == "usage-min" else max(scored))[1]
+            else:
+                unmeasurable = unmeasurable or (
+                    f"no key's usage could be read ({strategy} needs a "
+                    "key-based usage reader)"
+                )
+        if index is not None:
+            # The launch reads the accounts again; this key is what THIS read
+            # says it would take. `exact` is the promise that a preview names
+            # the relaunch's key, and a usage strategy cannot make it (the
+            # create form shows the hedge this sets, claunch-i985h).
+            return Selection(
+                pool.keys[index], strategy, index, owner_profile, exact=False
+            )
+        index = _rotation_index(pool)
+        return Selection(
+            pool.keys[index],
+            DEFAULT_STRATEGY,
+            index,
+            owner_profile,
+            fallback=unmeasurable,
+        )
+    index = _rotation_index(pool) if strategy == DEFAULT_STRATEGY else _selected_index(pool)
     return Selection(pool.keys[index], strategy, index, owner_profile)
 
 
-def peek(profile: Profile) -> Optional[Selection]:
-    """What the next launch of ``profile`` would pick, without consuming it."""
+def peek(
+    profile: Profile, readings: Optional[Dict[str, float]] = None
+) -> Optional[Selection]:
+    """What the next launch of ``profile`` would pick, without consuming it.
+
+    ``readings`` maps a key id to that key's peak usage for callers that have
+    already read every key (the create form does, claunch-i985h): a usage
+    strategy then compares those numbers instead of asking each account
+    again, which is the whole reason the form can name the pick at all.
+    """
     owner_profile = owner(profile)
     if owner_profile is None:
         return None
     pool = load(owner_profile)
     if pool is None or not pool.keys:
         return None
-    return _pick(pool, profile, owner_profile)
+    return _pick(pool, profile, owner_profile, readings=readings)
 
 
 def materialize(profile: Profile, key_id: str) -> Optional[Selection]:
@@ -849,9 +1034,45 @@ def select_for_launch(profile: Profile) -> Optional[Selection]:
             use_count=used.use_count + 1,
         )
         pool.cursor = used.id
+        if pool.strategy == "random":
+            # The draw that was just spent is replaced here, so the pool
+            # always holds the key the NEXT launch takes and the create form
+            # can keep naming it (claunch-i985h). A manual pick is not
+            # consumed: it stays until the operator chooses another key.
+            pool.pick = _draw(pool)
         save(owner_profile, pool)
         credentials.save_token(owner_profile, used.token)
         return selection
+
+
+def identify(profile: Profile, token: Optional[str]) -> Optional[str]:
+    """The id of the pool key whose token is exactly ``token``, or ``None``.
+
+    A launch knows the token it handed the child but not which key of the pool
+    it was: the pool file, the cursor and the token file are shared by every
+    launch of the profile, so a read of the token file afterwards may name a
+    key another session wrote there in between. Matching the token the child
+    was actually given answers the launch's own question, and the daemon keeps
+    that id on the session (``Session.launched_key``) so the rail's key modal
+    can name the key a session is on instead of the key the pool last wrote
+    (claunch-i985h).
+
+    Read-only and mask-free: the caller already holds the token, and nothing
+    here returns one.
+    """
+    text = str(token or "").strip()
+    if not text:
+        return None
+    source = owner(profile)
+    if source is None:
+        return None
+    pool = load(source)
+    if pool is None:
+        return None
+    for key in pool.keys:
+        if key.token == text:
+            return key.id
+    return None
 
 
 def view(profile: Profile) -> dict:
@@ -882,7 +1103,7 @@ def summary(profile: Profile) -> dict:
     if pool is None:
         return {"profile": profile.name, "pooled": False, "keys": []}
     current = credentials.stored_token(profile)
-    return {
+    data = {
         "profile": profile.name,
         "pooled": True,
         "strategy": pool.strategy,
@@ -900,3 +1121,9 @@ def summary(profile: Profile) -> dict:
             for key in pool.keys
         ],
     }
+    # The key the next launch takes, for the strategies that store one
+    # (claunch-i985h). Reported only where a launch would read it, so no
+    # caller mistakes a stale id for a decision on a rotation pool.
+    if pool.strategy in PINNED_STRATEGIES:
+        data["pick"] = pool.pick
+    return data

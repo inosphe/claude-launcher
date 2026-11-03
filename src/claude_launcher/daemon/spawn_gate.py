@@ -31,6 +31,9 @@ Two kinds of request:
   again). It ends only when the form's create reports its session back
   (:meth:`link`), the person rejects it, or the asker withdraws it —
   claunch-uzo40. ``+5 min`` on a held request restarts the countdown.
+  The form offers both tabs whatever the scope, so the person can make a
+  child request top-level (or the reverse); the link says which it made
+  (``created_as``) — claunch-oaxni.
 * **Rejected** -- nothing is created.
 * **Unanswered** -- after :data:`GATE_TIMEOUT` (plus every extension) a
   child request counts as approved (th-d9e343), and a root request creates
@@ -179,6 +182,19 @@ def clean_reason(text) -> str:
 #: read as if the workspace were the checkout.
 CARD_FIELDS = ("project", "profile", "workspace", "worktree", "role", "workflow")
 
+#: What an EMPTY row means, for the rows where empty is a real answer. The
+#: card renders these beside the dash; a person reading "role —" cannot tell
+#: "nobody chose one" from "the daemon lost it" (claunch-8fvr5). A role is
+#: not "free-role when empty": it is inferred from the handle's leading word
+#: and only an unnameable handle falls back (mesh_roles.RoleSet.infer). The
+#: note says where it comes from rather than resolving it — the vocabulary in
+#: force can be a mesh's own override, which this side cannot see, and a
+#: guessed role on an approval card is worse than none.
+_EMPTY_MEANS = {
+    "role": "from the handle, else free-role",
+    "workflow": "no run",
+}
+
 
 def _dir_label(path: str) -> str:
     """A directory as the person registered it: the workspace it lives in
@@ -303,6 +319,12 @@ def card_facts(spec: Optional[dict], asker: Optional[dict] = None, *,
         facts["workflow"] = row("" if flow == "-" else flow)
     else:
         facts["workflow"] = row(paired_workflow.strip(), True)
+    # An empty row is an answer, and the card has to say WHICH one: a dash
+    # read as "the daemon could not fill this in" (claunch-8fvr5). These are
+    # the two rows where empty is a real outcome rather than a missing value.
+    for key, note in _EMPTY_MEANS.items():
+        if not facts[key]["value"]:
+            facts[key]["note"] = note
     return facts
 
 
@@ -343,7 +365,19 @@ def outcome_message(record: dict) -> str:
                 f"{form}. The request stays open -- you are told when a session is "
                 "created for it, or when it is rejected or withdrawn.")
     elif status == APPROVED and record.get("setup") == SETUP_CUSTOM:
-        body = f"the person created session {created} by hand from your request ({by})."
+        # The form offers both tabs (claunch-oaxni), so where it was made is
+        # said outright: a child request can come back top-level, and then
+        # the session is not the asker's child to poll, message or kill.
+        if record.get("created_as") == ROOT and record.get("scope") == CHILD:
+            where = ("top-level, not as your child: it is not in your children, "
+                     "so follow it as any other session")
+        elif record.get("created_as") == CHILD and record.get("scope") == ROOT:
+            where = "as your child, not top-level"
+        elif record.get("created_as") == CHILD:
+            where = "as your child"
+        else:
+            where = "top-level"
+        body = f"the person created session {created} by hand from your request ({by}), {where}."
     elif status == APPROVED and record.get("setup") == SETUP_AGENT:
         if record.get("scope") == ROOT:
             body = (f"nobody answered: no top-level session was made; session {created} "
@@ -724,6 +758,11 @@ class SpawnGate:
             return dict(row)      # already taken over: no second note, same spec
         self._clear(rid)
         row["hold"] = HOLD_MANUAL
+        # Two facts, not one: the hold is the PAUSE, and this is that the form
+        # is out there. `+5 min` ends the pause and is not the form's answer,
+        # so the open form has to stay linkable afterwards
+        # (claunch-uzo40.1).
+        row["opened"] = _stamp()
         row["held_at"] = _stamp()
         row["held_by"] = decided_by
         row["setup"] = SETUP_CUSTOM
@@ -750,21 +789,40 @@ class SpawnGate:
             row["followup"] = follow["id"]
         return self._finish(row)
 
-    def link(self, rid: str, created: str) -> dict:
+    def link(self, rid: str, created: str, created_as: Optional[str] = None) -> dict:
         """The manual form created ``created`` for the request ``rid``.
 
         This is what ends a hold: the request settles ``approved`` with
         ``setup: custom`` and the asker learns the session's name. A request
-        the person never took over cannot be linked."""
+        the person never took over cannot be linked.
+
+        ``created_as`` is the form tab the person created it from -- ``root``
+        (New session) or ``child`` (Spawn child, under the asker). The form
+        offers both whatever the request's ``scope`` (claunch-oaxni), so it
+        overrides the scope's guess :meth:`manual` wrote; omitted, that guess
+        stands.
+
+        A form the person opened stays linkable after ``+5 min`` put the
+        clock back on (:meth:`extend`): that button restarts the countdown,
+        it does not answer the form. Without this the two paths raced — the
+        extend cleared the hold, the link was refused 409, and the deadline
+        went on to create a SECOND session beside the one the form made
+        (claunch-uzo40.1)."""
         self.reconcile()
         row = self._pending(rid, SPAWN)
-        if row.get("hold") != HOLD_MANUAL:
+        if row.get("hold") != HOLD_MANUAL and not row.get("opened"):
             raise GateRefused(409, "no manual spawn request with that id")
         if row.get("created"):
             raise GateRefused(409, f"request {rid} is already linked to {row['created']}")
         created = str(created or "").strip()
         if not created:
             raise GateRefused(400, "session (the created session) is required")
+        if created_as is not None and created_as not in SCOPES:
+            raise GateRefused(400, f"created_as must be one of {', '.join(SCOPES)}")
+        # An extended request has a live timer; the answer is here now.
+        self._clear(rid)
+        if created_as is not None:
+            row["created_as"] = created_as
         row["created"] = created
         row["created_at"] = _stamp()
         row["setup"] = SETUP_CUSTOM
@@ -776,7 +834,9 @@ class SpawnGate:
 
         On a request the person took over by hand this is also the way back
         to the clock: the hold is cleared and the countdown starts again,
-        five minutes out (claunch-uzo40)."""
+        five minutes out (claunch-uzo40). What it does NOT clear is the fact
+        that the form is open — the request stays linkable until it really
+        settles (claunch-uzo40.1)."""
         row = self._pending(rid)
         now = _now()
         row.pop("hold", None)

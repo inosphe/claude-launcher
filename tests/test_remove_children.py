@@ -83,15 +83,59 @@ def test_removing_a_middle_record_promotes_its_children(home):
     assert {e["def"]["name"]: e["def"]["parent"] for e in saved}["kid"] == "lead"
 
 
-def test_a_removed_root_leaves_its_children_as_roots(home):
-    """Nothing to promote them to, so they become what they would have become
-    anyway — but by decision rather than by a dangling name."""
+def test_a_removed_root_leaves_its_children_as_orphans(home):
+    """Nothing to promote them to, so they lose their parent — but they are
+    orphans of ``lead``, not roots a human started (claunch-ikiys)."""
     mgr = _tree(lead=True)
     mgr._sessions["mid"] = _Fake("mid", "lead")
     _, moved = mgr.remove("lead")
     assert moved == ["mid"]
     assert mgr.get("mid").sdef.parent is None
+    assert mgr.get("mid").sdef.orphan_of == "lead"
     assert mgr.depth("mid") == 0
+    # it survives a restart, and the listings read it from the record
+    saved = {e["def"]["name"]: e["def"] for e in db.open_default().load_all()}
+    assert saved["mid"]["orphan_of"] == "lead"
+    assert SessionDef.from_dict(saved["mid"]).orphan_of == "lead"
+
+
+def test_a_promoted_child_is_not_an_orphan(home):
+    mgr = _tree(mid=True)
+    mgr.remove("mid")
+    assert mgr.get("kid").sdef.orphan_of is None
+    assert "orphan_of" not in mgr.get("kid").sdef.to_dict()
+
+
+def test_a_session_created_later_under_the_lost_name_is_not_its_parent(home):
+    mgr = _tree(lead=True)
+    mgr._sessions["mid"] = _Fake("mid", "lead")
+    mgr.remove("lead")
+    mgr._sessions["lead"] = _Fake("lead", None)   # a new session, same name
+    assert mgr.children("lead") == []
+    assert mgr.get("mid").sdef.orphan_of == "lead"
+
+
+def test_reparent_clears_the_orphan_mark(home, monkeypatch):
+    mgr = _tree(lead=True)
+    mgr._sessions["mid"] = _Fake("mid", "lead")
+    mgr.remove("lead")
+    monkeypatch.setattr(mgr, "persist", lambda: None)
+    mgr.reparent("mid", "solo")
+    assert mgr.get("mid").sdef.parent == "solo"
+    assert mgr.get("mid").sdef.orphan_of is None
+
+
+def test_detach_turns_an_orphan_into_a_root(home):
+    """An orphan has no parent to detach from, but an operator's detach is
+    still how it says the session stands alone now."""
+    mgr = _tree(lead=True)
+    mgr._sessions["mid"] = _Fake("mid", "lead")
+    mgr.remove("lead")
+    mgr.events.record = lambda *a, **k: None
+    assert mgr.detach("mid")["previous"] == "lead"
+    assert mgr.get("mid").sdef.orphan_of is None
+    with pytest.raises(ManagerError):
+        mgr.detach("mid")
 
 
 def test_a_dangling_grandparent_is_not_written_back(home):
@@ -101,6 +145,7 @@ def test_a_dangling_grandparent_is_not_written_back(home):
     del mgr._sessions["lead"]
     mgr.remove("mid")
     assert mgr.get("kid").sdef.parent is None
+    assert mgr.get("kid").sdef.orphan_of == "mid"
 
 
 def test_cascade_drops_the_whole_subtree(home):
@@ -150,6 +195,16 @@ def test_clear_passes_live_grandchildren_up_past_a_chain(home):
     assert sorted(mgr.clear()) == ["kid", "mid"]
     assert mgr.get("grand").sdef.parent == "lead"
     assert mgr.get("kid2").sdef.parent == "lead"
+
+
+def test_clear_of_a_whole_chain_leaves_the_survivor_an_orphan(home):
+    """No session above survives the clear: the live grandchild keeps the
+    nearest parent it lost instead of becoming a root."""
+    mgr = _tree(lead=True, mid=True, kid=True)
+    mgr._sessions["grand"] = _Fake("grand", "kid")
+    mgr.clear()
+    assert mgr.get("grand").sdef.parent is None
+    assert mgr.get("grand").sdef.orphan_of == "kid"
 
 
 # --------------------------------------------------------------------------- #

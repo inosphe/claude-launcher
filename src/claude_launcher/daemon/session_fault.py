@@ -25,9 +25,15 @@ positive expires when its kind's window does.
 
 The lifetime is a kind's ``window`` unless the message names a reset time
 ("resets Oct 26, 9am (Asia/Seoul)"), which is parsed with :mod:`zoneinfo`
-and becomes the deadline. A fault is *active* until that deadline; it is
-never cleared early by later output, because a recovery is not visible in
-the text that follows (a re-login prints nothing that says so).
+and becomes the deadline. A fault is *active* until that deadline, with one
+early exit. The scan only runs on a changed screen, and a stopped session
+paints nothing that could push its fault line out of the live region -- so
+when the message is gone from the bottom rows while the screen kept moving,
+the stop is over as far as anyone watching can tell, and the run closes
+early (``cleared``) instead of sitting out the window. That was the gap the
+window could not cover (claunch-4ghrr, 2026-10-30: sessions s6081/s6082
+retried through their 429 within minutes and worked visibly below the error
+line, but the badge stayed for the rest of the fifteen minutes).
 """
 
 from __future__ import annotations
@@ -56,6 +62,13 @@ SCAN_ROWS = 16
 #: sample would spend time on a screen that cannot have changed. One second
 #: still catches a message that is up for two or three samples.
 SCAN_INTERVAL = 1.0
+
+#: The longest a repeating sender holds its notice for one fault run that
+#: keeps coming back (claunch-16j5v). A repeat doubles the hold from the
+#: kind's window (15 minutes for a rate limit: 30, 60, 120 ...), and this
+#: caps it, so a session whose stop truly ended without its screen changing
+#: is told again within the cap.
+NOTICE_HOLD_CAP = 6 * 3600.0
 
 #: A row is skipped when it is a diff line: ``+ text``, ``- text``, or the
 #: line-numbered form a tool result uses (``  12 + text``). Writing a
@@ -113,6 +126,46 @@ _UNIT_SECONDS = {"m": 60.0, "h": 3600.0, "d": 86400.0}
 #: and reading it as one loses the difference between "nothing here can
 #: move until a person looks" and "waiting will fix it" (claunch-pczoc.3).
 RESOLVED_BY = ("input", "account", "provider", "policy")
+
+
+def is_active(session) -> bool:
+    """Whether ``session`` is stopped by an active fault right now.
+
+    The one reading the daemon's repeating senders share (the cflow v2
+    re-nudge, the session reminder, the stall ping): a harness in a fault
+    answers every typed notice with the same fault line, so they hold their
+    notice until the fault's window ends (claunch-ijot0). Anything without a
+    ``fault()`` reading (a test double, a dead record) is not faulted, and a
+    reading that raises does not silence a sender.
+    """
+    record = _reading(session)
+    return bool(record and record.get("active"))
+
+
+def holds_notices(session) -> bool:
+    """Whether the daemon's repeating senders hold their notice for ``session``.
+
+    True while its fault is active (:func:`is_active`), and also past the
+    window while the run is ``held``: a fault that came straight back after
+    its last hold ended -- the notice typed at that moment met the same stop
+    -- is held twice as long each time, up to :data:`NOTICE_HOLD_CAP`
+    (claunch-16j5v: s6252 under a usage limit read as a 15-minute rate limit
+    was re-nudged into the same 429 every 15 minutes). A screen that moves on
+    past the fault line ends the hold early, as it ends the window.
+    """
+    record = _reading(session)
+    return bool(record and (record.get("active") or record.get("held")))
+
+
+def _reading(session) -> Optional[dict]:
+    """``session.fault()``, or None when there is none or it raises."""
+    reader = getattr(session, "fault", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:  # noqa: BLE001 -- a broken reading must not silence it
+        return None
 
 
 class CatalogError(Exception):
@@ -390,9 +443,10 @@ class Detector:
     :meth:`scan` is called from the session's sample loop. It reads only the
     bottom ``SCAN_ROWS`` rows, at most once per :data:`SCAN_INTERVAL`, and
     keeps the last match as this session's fault until the kind's window (or
-    the message's own reset time) runs out. Seeing the same kind again inside
-    that window does not extend it; seeing it after the window opens a new
-    run and counts a strike.
+    the message's own reset time) runs out -- or until a changed screen no
+    longer shows the message, which closes the run early. Seeing the same
+    kind again inside that window does not extend it; seeing it after the
+    run ended (window out or cleared) opens a new run and counts a strike.
     """
 
     def __init__(
@@ -430,6 +484,21 @@ class Detector:
         text = " ".join(rows)
         found = self._catalog.match(self.harness, text)
         if found is None:
+            # No fault in the live region. This scan only ran because the
+            # screen changed, so a record whose message is gone while rows
+            # kept painting underneath it names a stop that is visibly over:
+            # a still-stopped session has nothing that would push the fault
+            # line out of the tail. Close the run early rather than sitting
+            # out the window (claunch-4ghrr). An empty read never reaches
+            # here, so a momentarily blank redraw cannot clear a record.
+            # The same holds for a notice hold that outlasts the window.
+            previous = self._record
+            if (
+                previous is not None
+                and previous.get("cleared") is None
+                and now < max(previous["until"], previous.get("hold_until", 0.0))
+            ):
+                previous["cleared"] = now
             return True
         kind, _pattern, match = found
         message = _message_from(text, rows, match.start())
@@ -468,11 +537,16 @@ class Detector:
         # Reading it from the previous record alone held the window shut for
         # good: a session that once drew a stale reset stayed inactive when a
         # later screen named a future one (claunch-5ldt8 review).
+        #
+        # A run closed early (``cleared``) is closed exactly like one whose
+        # window ran out: a later match of the same kind is a new sighting,
+        # not a continuation.
         previous_expired = (
             previous is not None and previous["until"] <= previous["since"]
         )
         this_expired = deadline is not None and deadline <= now
-        running = same_kind and (
+        previous_cleared = previous is not None and previous.get("cleared") is not None
+        running = same_kind and not previous_cleared and (
             now < previous["until"] or (previous_expired and this_expired)
         )
         if running:
@@ -480,9 +554,16 @@ class Detector:
             until = previous["until"]
             reset = previous.get("reset", "")
             strikes = previous.get("strikes", 1)
+            stated = previous.get("until_stated", False)
+            repeats = previous.get("repeats", 1)
+            hold_until = previous.get("hold_until", until)
         else:
             since = now
             until = deadline if deadline is not None else now + kind.window
+            # Whether ``until`` is the harness's own reset time read off the
+            # screen, or this kind's window guessed from the first sighting
+            # (claunch-ijot0: only a stated reset is told to a person).
+            stated = deadline is not None
             reset = hint
             if not same_kind:
                 # A different kind opens its own first run.
@@ -492,8 +573,27 @@ class Detector:
                 # and this is not a second sighting of it.
                 strikes = previous.get("strikes", 1)
             else:
-                # Coming back after the window closed is a second sighting.
+                # Coming back after the run closed -- its window ran out, or
+                # the message scrolled out and the run was cleared -- is a
+                # second sighting.
                 strikes = previous.get("strikes", 0) + 1
+            # A repeat is a sighting that follows the previous run's hold
+            # within one window: the senders' first notice after the hold
+            # met the same stop. ``strikes`` counts every return, however far
+            # apart; ``repeats`` counts this chain only, so a limit hit again
+            # a day later starts from the kind's own window.
+            chained = (
+                same_kind and not previous_expired
+                and now <= max(previous["until"], previous.get("hold_until", 0.0))
+                + kind.window
+            )
+            repeats = previous.get("repeats", 1) + 1 if chained else 1
+            if stated:
+                # The harness said when it ends; that is the hold.
+                hold_until = until
+            else:
+                hold = min(kind.window * 2 ** (repeats - 1), NOTICE_HOLD_CAP)
+                hold_until = max(until, since + hold)
         self._record = {
             "harness": self.harness,
             "kind": kind.name,
@@ -506,7 +606,11 @@ class Detector:
             "since": since,
             "last_seen": now,
             "until": until,
+            "until_stated": stated,
             "strikes": strikes,
+            "repeats": repeats,
+            "hold_until": hold_until,
+            "cleared": None,
         }
         return True
 
@@ -528,8 +632,19 @@ class Detector:
             "since": _iso(record["since"]),
             "last_seen": _iso(record["last_seen"]),
             "until": _iso(record["until"]),
+            "until_stated": bool(record.get("until_stated", False)),
+            "cleared": _iso(record["cleared"]) if record.get("cleared") else "",
             "strikes": record.get("strikes", 1),
-            "active": now < record["until"],
+            "repeats": record.get("repeats", 1),
+            "hold_until": _iso(record.get("hold_until", record["until"])),
+            "active": now < record["until"] and record.get("cleared") is None,
+            # Past the window, the repeating senders still hold their notice
+            # (:func:`holds_notices`); the rail does not show it.
+            "held": (
+                now >= record["until"]
+                and now < record.get("hold_until", record["until"])
+                and record.get("cleared") is None
+            ),
             "source": "screen",
         }
 

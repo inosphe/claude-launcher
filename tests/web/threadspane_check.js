@@ -561,6 +561,29 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
   assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
 
+  // the form's first-message box takes the composer's keys too
+  // (claunch-3y0px): Enter starts the thread, Shift+Enter and Ctrl+J post
+  // nothing and break the line instead.
+  host.querySelector(".th-new").fire("click");
+  await settle();
+  const nbox = host.querySelector(".th-newform .th-text");
+  nbox.value = "line one";
+  nbox.fire("keydown", {key: "Enter", shiftKey: true});
+  nbox.fire("keydown", {key: "j", ctrlKey: true});
+  await settle();
+  assert.equal(calls.filter((c) => c[1] === "/api/threads").length, 1,
+               "Shift+Enter and Ctrl+J in the form post nothing");
+  assert.equal(nbox.value, "line one\n", "Ctrl+J breaks the line in the form");
+  calls.length = 0;
+  host.querySelector(".th-newform .th-title-input").value = "Keys";
+  const nbox2 = host.querySelector(".th-newform .th-text");
+  nbox2.value = "안녕";
+  nbox2.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.deepEqual(calls.filter((c) => c[1] === "/api/threads"),
+                   [["POST", "/api/threads", {to: "s1", title: "Keys", text: "안녕"}]],
+                   "Enter in the form starts the thread");
+
   // fork mode (claunch-uaxp8): the form asks whether a copy can be made, the
   // box is enabled only when it can, the post carries fork: true, and the pane
   // leaves for the copy that now owns the thread.
@@ -1074,6 +1097,69 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     // the all-threads page and a guest's view read the thread without
     // answer controls (only the owner's pane answers).
     assert.ok(src.includes("답변 대기 — 소유 세션의 창에서 답합니다"));
+  }
+
+  /* resend & revert (claunch-tpbqz): a user message carries hover actions
+     that re-type it into the sessions its mentions name -- for a message
+     the daemon accepted but a hung or restarted harness never got. A
+     revert is that resend with the message marked "reverted by the user";
+     the header's top-right 재전송 does it for the latest user message, and
+     the marks render on the entries. */
+  {
+    const rt = {id: "th-r", session: "s1", title: "Lost on the way", status: "open",
+                last_seq: 2, last: {author: "user", body: "살아있나?"}};
+    const rMsgs = [
+      {seq: 1, author: "user", body: "살아있나?", at: "2026-10-29T00:00:00+00:00",
+       data: {resent_at: ["2026-10-29T00:01:00+00:00"]}},
+      {seq: 2, author: "agent", body: "여기 있어요", at: "2026-10-29T00:00:01+00:00"},
+    ];
+    const rcalls = [];
+    const rapi = async (p, opts = {}) => {
+      rcalls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+      let doc = {};
+      if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads: [{...rt}], open: 1, agent_seq: 0};
+      else if (p.startsWith("/api/threads/th-r?after=")) doc = {thread: {...rt}, messages: rMsgs.slice()};
+      else if (p.endsWith("/messages/1/resend")) doc = {message: rMsgs[0], delivered: true, hold: null};
+      else if (p.endsWith("/messages/1/revert")) {
+        doc = {message: {...rMsgs[0], data: {resent_at: [...(rMsgs[0].data.resent_at || [])],
+                                             reverted_at: "2026-10-29T00:02:00+00:00"}},
+               delivered: true, hold: null};
+      }
+      return {ok: true, status: 200, json: async () => doc};
+    };
+    const rh = document.createElement("div");
+    P.mount(rh, "s1", {api: rapi, storageKey: "rk"});
+    await settle();
+    const rows = rh.querySelectorAll(".th-msg");
+    const acts = rows[0].querySelectorAll(".th-msg-actions .th-act");
+    assert.deepEqual(acts.map((a) => a.textContent), ["재전송", "revert"], "a user message carries both actions");
+    assert.ok(!rows[1].querySelector(".th-msg-actions"), "an agent message has none");
+    assert.ok(rows[0].querySelector(".th-msg-flag").textContent.includes("재전송"),
+              "the resend count shows on the entry");
+    acts[0].fire("click");
+    await settle();
+    assert.deepEqual(rcalls.find((c) => c[1].endsWith("/messages/1/resend")),
+                     ["POST", "/api/threads/th-r/messages/1/resend", {}]);
+    rh.querySelectorAll(".th-msg")[0].querySelectorAll(".th-act")[1].fire("click");
+    await settle();
+    assert.deepEqual(rcalls.find((c) => c[1].endsWith("/messages/1/revert")),
+                     ["POST", "/api/threads/th-r/messages/1/revert", {}]);
+    // the header's top-right button resends the latest user message
+    const headBtn = rh.querySelector(".th-convo-head .th-resend");
+    assert.ok(headBtn, "the header has the resend button");
+    headBtn.fire("click");
+    await settle();
+    assert.equal(rcalls.filter((c) => c[1].endsWith("/messages/1/resend")).length, 2,
+                 "the header resend hits the latest user message");
+    P.unmount();
+    // a reverted message cannot be reverted again and shows its mark
+    rMsgs[0].data = {resent_at: ["2026-10-29T00:01:00+00:00"], reverted_at: "2026-10-29T00:02:00+00:00"};
+    P.mount(rh, "s1", {api: rapi, storageKey: "rk"});
+    await settle();
+    const revertedRow = rh.querySelector(".th-msg");
+    assert.equal(revertedRow.querySelector(".th-msg-flag").textContent, "reverted");
+    assert.ok(revertedRow.querySelector(".th-act-revert").disabled, "a reverted message cannot be reverted again");
+    P.unmount();
   }
 
   /* wiring */

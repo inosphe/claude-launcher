@@ -8,6 +8,7 @@ the same surface from a terminal, over ``/api/sessions/<name>/shell/*``
 
   claunch shell [--session NAME] status          running/exited, cursor, pending
   claunch shell [--session NAME] read [--offset N]   output since a cursor
+                                                (no --offset: since your last read)
   claunch shell [--session NAME] suggest TEXT --why ..
   claunch shell [--session NAME] suggestions     the proposal queue
   claunch shell [--session NAME] accept ID       the user's control: type it
@@ -126,6 +127,7 @@ def _cmd_status(args) -> int:
     print(f"shell {data.get('id', session)}: {state}"
           + (f" (pid {data['pid']})" if data.get("pid") else ""))
     print(f"  size: {data.get('cols')}x{data.get('rows')}  cursor: {data.get('offset')}"
+          f"  read: {data.get('last_read')} (unread {data.get('unread_bytes')})"
           f"  pending suggestions: {data.get('pending', 0)}")
     return 0
 
@@ -256,9 +258,10 @@ def register(sub) -> None:
     st.add_argument("--json", action="store_true")
     st.set_defaults(func=_cmd_status)
 
-    rd = ssub.add_parser("read", help="print the shell's output (tail by default)")
+    rd = ssub.add_parser("read", help="print the shell's output (since your last read by default)")
     _session_option(rd, argparse.SUPPRESS)
-    rd.add_argument("--offset", type=int, help="byte offset a previous read returned")
+    rd.add_argument("--offset", type=int,
+                    help="byte offset a previous read returned (omit for your last read)")
     rd.add_argument("--limit", type=int, help="maximum bytes (default 65536)")
     rd.add_argument("--json", action="store_true")
     rd.set_defaults(func=_cmd_read)

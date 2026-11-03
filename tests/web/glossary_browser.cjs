@@ -126,12 +126,24 @@ const server = http.createServer((req,res) => {
     await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();
     await screenshot('composer-meanings');
     await page.locator('.gc-choice').filter({hasText:'추가 탐색'}).click();
-    assert.equal(await field.inputValue(),'😀 [[term:#research]] 설명해주세요');
-    await page.locator('.gc-resolved').waitFor();
+    assert.equal(await field.inputValue(),'😀 자세히 설명해주세요\n[[term:#research]]');
+    // The included term is marked, and its long definition stays folded.
+    const included = page.locator('details.gc-included').filter({hasText:'추가 탐색'});
+    await included.waitFor();
+    assert.equal(await included.evaluate(n => n.open), false);
+    assert((await included.locator('summary').innerText()).includes('포함됨'));
+    // Asking for the same meaning again appends nothing and says so.
+    await field.click();
+    await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();
+    const again = page.locator('.gc-choice').filter({hasText:'추가 탐색'});
+    await again.waitFor();
+    assert((await again.innerText()).includes('이미 포함됨'));
+    await again.click();
+    assert.equal(await field.inputValue(),'😀 자세히 설명해주세요\n[[term:#research]]');
     await field.press('Enter');
     await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
     assert(sent[0].paste.includes(entries[1].definition));
-    assert(sent[0].paste.startsWith('😀 [[term:#research]] 설명해주세요'));
+    assert(sent[0].paste.startsWith('😀 자세히 설명해주세요\n[[term:#research]]'));
     assert(!sent[0].paste.includes('수정된 정의'));
     // Unresolved explicit name stays in the input; no transmission.
     await field.fill('[[term:자세히]] 해줘');
@@ -189,6 +201,29 @@ const server = http.createServer((req,res) => {
     await page.evaluate(() => refreshTermInput());
     assert(await field.isDisabled()); assert.equal(await field.inputValue(),'same-state send');
     sendResolve(); await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
+    // Visibility is per session: closing stores 'closed', hands focus back to
+    // the field, and stops the panel from reopening while typing.
+    const modeKey = await page.evaluate(() => 'claunch.glossary.visibility.' + currentName);
+    await page.evaluate(k => localStorage.removeItem(k), modeKey);
+    await field.fill('자세히');
+    await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();
+    await page.locator('.gc-close').click();
+    assert(await page.locator('.glossary-composer').evaluate(n => n.hidden));
+    assert(await field.evaluate(n => n === document.activeElement));
+    assert.equal(await page.evaluate(k => localStorage.getItem(k), modeKey), 'closed');
+    await field.fill('자세히'); await page.waitForTimeout(250);
+    assert(await page.locator('.glossary-composer').evaluate(n => n.hidden));
+    // The glossary button is the way back in, and open mode keeps the panel.
+    await page.getByRole('button',{name:'용어집',exact:true}).click();
+    await page.waitForTimeout(250);
+    assert(!(await page.locator('.glossary-composer').evaluate(n => n.hidden)));
+    assert.equal(await page.evaluate(k => localStorage.getItem(k), modeKey), 'open');
+    await field.fill(''); await page.waitForTimeout(250);
+    assert(!(await page.locator('.glossary-composer').evaluate(n => n.hidden)));
+    await page.getByRole('button',{name:'자동',exact:true}).click();
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(k => localStorage.getItem(k), modeKey), 'auto');
+    assert(await page.locator('.glossary-composer').evaluate(n => n.hidden));
     await page.setViewportSize({width:390,height:844});
     await field.fill('자세히'); await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();
     await screenshot('composer-mobile');

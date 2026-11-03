@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 import claude_launcher
-from claude_launcher.cflow2 import check, layers
+from claude_launcher.cflow2 import check, frontend, layers
 from claude_launcher.cflow2.frontend import compile_text
 
 WF_DIR = Path(claude_launcher.__file__).parent / "workflows"
@@ -139,21 +139,15 @@ V2_INSTEAD_BATCH = """상한 10개에 닿으면) 배치의 이슈 전부를 in_r
 의존하는 것)은 영역이 달라도 한 배치에 싣고, 배치 안 일감에만 막힌
 의존은 blocked로 세지 않는다 — 연속 작업 하나는 PR(착지 요청) 하나다."""
 
-#: claunch-eyz0s.2 (v2 only): v2's landing check 4 tells a reviewer's verdict
-#: from the upper session's decline by the ``@ <tip>``, so the shared marker
-#: list has to show the tip-carrying form. A reviewer that copies v1's
-#: tip-less spelling leaves a marker check 4 reads as "no round named" and
-#: escalates -- the rework round then waits on a person forever, which is the
-#: defect this issue fixes. v1 keeps its own spelling: it has no such rule.
-V1_ONLY_MARKER = """`REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /"""
-V2_INSTEAD_MARKER = """`REVIEWED: pass @ <hash>` /
-      `CHANGES REQUESTED @ <hash>: <무엇을>` (상위가 착지를 거절하며 남기는
-      tip 없는 `CHANGES REQUESTED: <무엇을>`은 리뷰 판정이 아니라 상위의
-      제동이다 — 그 둘은 `@ <hash>`의 유무로 갈린다) /"""
+#: claunch-eyz0s.2 gave v2's landing check 4 the tip-carrying marker form, so
+#: the shared marker list had to show it -- and it diverged from v1's tip-less
+#: spelling. claunch-eyz0s.2.1 ported check 4 to v1, so the two blocks say the
+#: same thing again and that divergence is gone: the marker list is no longer
+#: in DIVERGENCES, and a re-introduced difference is a test failure, not a
+#: silently allowed one.
 
 #: Every declared v2 divergence from the v1 block, as (v1 text, v2 text).
-DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH),
-               (V1_ONLY_MARKER, V2_INSTEAD_MARKER)]
+DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH)]
 
 
 def _words(text: str) -> str:
@@ -274,7 +268,38 @@ def _coding_item(tmp_path, monkeypatch, approval):
         "require_coding_approval": approval,
     })
     kw = {"cwd": str(tmp_path), "scope": "coding", "now": 1.0}
-    return runtime.start(chart, caps={}, **kw), kw
+    st = runtime.start(chart, caps={}, **kw)
+    return (_start_work(st, kw) if approval is not True else st), kw
+
+
+def _plan_clear(st, kw):
+    """Let the plan stop pass: the probe answers 0, so the plan owes the user
+    nothing and the round goes on (claunch-rzepk).
+
+    A test has no probe runner of its own, so the wait would sit forever.
+    The helper asserts the run really is at a plan wait, so a route that
+    stopped stopping there is red here rather than silently passing the
+    assertion that follows."""
+    from claude_launcher.cflow2 import runtime
+
+    waits = [w for w in st.get("waits") or []
+             if "plan-wait" in str(w.get("node") or "")]
+    assert waits, f"no plan wait to clear (tasks {[t['label'] for t in st['tasks']]})"
+    return runtime.wait_tick(kw["now"], lambda cmd, cwd: (0, ""),
+                             cwd=kw["cwd"], scope=kw["scope"])
+
+
+def _start_work(st, kw):
+    """The gate-less round start: plan-seed, the plan stop, then work.
+
+    Every path that skipped ``coding-plan`` now writes the plan first and
+    waits on it (claunch-rzepk 규칙 1·3), so a test that used to find
+    ``work`` here crosses both nodes."""
+    from claude_launcher.cflow2 import runtime
+
+    if any(t["label"] == "plan-seed" for t in st["tasks"]):
+        st = runtime.report(_one(st, "plan-seed"), "ok", {"plan_waiting": 0}, **kw)
+    return _plan_clear(st, kw)
 
 
 @pytest.mark.parametrize("approval", [None, False])
@@ -292,6 +317,8 @@ def _approve_item(st, kw, visit, decision):
     assert plan["label"] == "coding-plan"
     brief = f"item {visit}: edit workflow and test true/false routing"
     st = runtime.report(plan["instance"], "ok", {"brief": brief}, **kw)
+    # the plan stop sits between the plan and the gate (claunch-rzepk)
+    st = _plan_clear(st, kw)
     assert not st["tasks"]
     [ask] = st["asks"]
     assert ask["label"] == "coding-approval"
@@ -345,11 +372,16 @@ def test_coding_approval_once_asks_again_on_the_next_item(tmp_path, monkeypatch)
 
 
 def test_coding_approval_always_skips_the_gate_for_later_items(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
     st, kw = _coding_item(tmp_path, monkeypatch, True)
     st = _approve_item(st, kw, 1, "approve-always")
     assert _approval_data(kw)["decision"] == "approve-always"
-    # the second item goes straight to work: no plan, no ask
+    # The second item skips the gate, and still stops on the plan: approve-
+    # always turns off the gate, not the plan wait (claunch-rzepk 규칙 4).
     assert not st.get("asks")
+    st = _plan_clear(runtime.report(_one(st, "plan-seed"), "ok",
+                                    {"plan_waiting": 0}, **kw), kw)
     st = _work_item(st, kw)
     assert st["status"] == "done"
 
@@ -361,11 +393,15 @@ def test_coding_approval_always_holds_after_a_reject(tmp_path, monkeypatch):
     st, kw = _coding_item(tmp_path, monkeypatch, True)
     [plan] = st["tasks"]
     st = runtime.report(plan["instance"], "ok", {"brief": "first"}, **kw)
+    st = _plan_clear(st, kw)
     runtime.approve(None, decision="reject", reason="too broad", **kw)
     st = runtime.status(**kw)
     assert _approval_data(kw)["decision"] == "reject"
     st = _approve_item(st, kw, 1, "approve-always")
     assert not st.get("asks")
+    # the next item writes its plan first and still stops on it (규칙 4)
+    st = _plan_clear(runtime.report(_one(st, "plan-seed"), "ok",
+                                    {"plan_waiting": 0}, **kw), kw)
     assert _work_item(st, kw)["status"] == "done"
 
 
@@ -378,6 +414,141 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     assert ask["otherwise"] == "human"
     assert "from" not in ask and "timeout" not in ask
     assert ask["urgent"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the plan's own decisions stop the round before the gate (claunch-rzepk)
+# --------------------------------------------------------------------------- #
+def test_the_plan_wait_is_declared_on_both_paths():
+    """One wait beside the gate, one on the path that skips ``coding-plan``.
+
+    Both probe ``claunch gate plan-waiting`` (0 clear, 1 still owed, 2 could
+    not tell), poll, and cap undecided reads -- but carry no ``seconds``:
+    the confirmed rule has no upper bound on "stop until the user decides",
+    and a failed read goes to a person instead of releasing the run
+    (docs/plan-coding-approval.md 규칙 1)."""
+    chart = _chart()
+    waits = [n for n in chart.nodes.values() if n.type == "wait"
+             and n.get("probe") == ["claunch", "gate", "plan-waiting"]]
+    assert len(waits) == 2, [n.id for n in waits]
+    for n in waits:
+        assert "plan-wait" in n.id
+        assert n.get("poll") == 30 and n.get("undecided_max") == 3
+        assert n.get("seconds") is None
+        assert "undecidable" in n.on
+
+
+def test_coding_plan_reports_the_count_the_wait_reads():
+    """The agent's report and the probe read the same number, so a reader of
+    the round can see why it stopped."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    plan = doc["nodes"]["coding-plan"]
+    assert plan["returns"]["ok"]["plan_waiting"] == "int?"
+    assert "plan_waiting" in _words(plan["done_when"])
+    assert "summary.waiting" in _words(plan["prompt"])
+
+
+def test_a_plan_decision_stops_the_round_before_the_gate(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, True)
+    [plan] = st["tasks"]
+    assert plan["label"] == "coding-plan"
+    st = runtime.report(plan["instance"], "ok",
+                        {"brief": "b", "plan_waiting": 3}, **kw)
+    # the gate does not stand while the plan still owes the user a decision
+    assert not st.get("asks")
+    [wait] = st["waits"]
+    assert "plan-wait" in wait["node"]
+    # once the plan is clear, the same item reaches the gate
+    st = _plan_clear(st, kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "coding-approval"
+
+
+def test_a_plan_decision_stops_the_gate_less_round_too(tmp_path, monkeypatch):
+    """approve-always and the routing-only path skip ``coding-plan``; the
+    plan is written first (``plan-seed``) and the round stops on it there
+    too (claunch-rzepk 규칙 1·3)."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {})
+    [seed] = st["tasks"]
+    assert seed["label"] == "plan-seed"
+    st = runtime.report(seed["instance"], "ok", {"plan_waiting": 0}, **kw)
+    [wait] = st["waits"]
+    assert "plan-wait" in wait["node"]
+    st = _plan_clear(st, kw)
+    assert [t["label"] for t in st["tasks"]] == ["work"]
+
+
+def test_pre_approval_summary_thread_opens_whenever_the_gate_stands():
+    """승인을 구하는 일감이면 항상 사용자 요약 스레드를 연다(사용자 지시,
+    th-275cfa) — 끌 수 있는 스위치가 없고, 거절 뒤 재승인을 구할 때도 매번
+    다시 연다. thread_open이 실패하면 done_when은 thread_id 대신 실패 사유를
+    요구한다(claunch-vz15z)."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert "coding_brief_thread" not in doc["inputs"]
+    plan = doc["nodes"]["coding-plan"]
+    assert "thread_id" in plan["returns"]["ok"]
+    prompt = plan["prompt"]
+    assert "문제제기" in prompt and "작업 목표" in prompt
+    assert "작업 범위" in prompt and "기대효과" in prompt and "리스크" in prompt
+    assert "thread_open" in prompt
+    assert "항상 연다" in prompt
+    assert "coding_brief_thread" not in prompt
+    done_when = plan["done_when"]
+    assert "thread_open이 실패한 경우에는 thread_id 대신" in done_when
+
+
+def test_merge_approval_is_a_false_by_default_boolean_and_human_only():
+    # claunch-boxug: the switch gates the landing request itself — same shape
+    # as coding approval (bool off by default, person-only, urgent card).
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    declaration = doc["inputs"]["require_merge_approval"]
+    assert declaration["type"] == "bool"  # shared form renders bool as checkbox
+    assert declaration["default"] is False
+    assert declaration["set_by"] == ["user"]
+    assert declaration["group"] == "착지 승인"
+    node = doc["nodes"]["merge-approval"]
+    ask = node["ask"]
+    assert ask["otherwise"] == "human"
+    assert "from" not in ask and "timeout" not in ask
+    assert ask["urgent"] is True
+    assert set(ask["options"]) == {"approve", "hold"}
+    assert ask["options"]["approve"]["outcome"] == "ok"
+    assert ask["options"]["hold"]["outcome"] == "hold"
+    assert set(node["returns"]) == {"ok", "hold"}
+
+
+def test_merge_approval_gate_stands_between_peer_review_and_publish():
+    # claunch-boxug: with the switch on, the ask sits in land's submit right
+    # before publish (the request); a hold ends the round held (freeze), and
+    # the off branch is a pass-through so default runs are unchanged.
+    # safe_load parses the YAML 1.1 ``on:`` handler key as boolean True —
+    # the frontend loader keeps it the string the engine reads.
+    from claude_launcher.cflow2 import frontend
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    land = doc["procedures"]["land"]
+    submit = next(s for s in land["body"]
+                  if isinstance(s, dict) and s.get("id") == "submit")
+    do = submit["loop"]["do"]
+    gate = next(s for s in do if isinstance(s, dict)
+                and s.get("id") == "merge-approval-gate")
+    publish = next(s for s in do if isinstance(s, dict)
+                   and s.get("id") == "publish")
+    assert do.index(publish) == do.index(gate) + 1
+    peer = next(s for s in do if isinstance(s, dict)
+                and s.get("id") == "peer-review-loop")
+    assert do.index(peer) < do.index(gate)
+    cond = gate["cond"][0]["if"]
+    assert "$data.inputs.require_merge_approval == true" in cond
+    assert gate["cond"][1] == {"else": []}
+    hold = gate["cond"][0]["then"][0]["on"]["hold"]
+    assert hold["return"] == "held"
+    assert hold["value"]["reason"] == \
+        "$result['merge-approval'].value.reason"
+    assert gate["cond"][0]["then"][0]["seq"] == ["merge-approval"]
 
 
 # -- session routing (claunch-yl0to) ----------------------------------------
@@ -440,7 +611,7 @@ def test_routing_without_a_gate_follows_the_plans_recommendation(tmp_path, monke
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
     plan = {"brief": "edit a.py", "difficulty": "easy", "recommend": "delegate", "why": "one file"}
-    st = runtime.report(_one(st, "coding-plan"), "ok", plan, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", plan, **kw), kw)
     assert not st.get("asks")  # no gate: nobody is asked
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     # the delegate does the work in place of `work`
@@ -452,11 +623,38 @@ def test_routing_hard_plan_keeps_the_work_here(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
     st = runtime.report(_one(st, "work"), "ok", {}, **kw)
     assert _finish_skip(st, kw)["status"] == "done"
+
+
+def test_routing_gate_keeps_approve_always_out_of_the_per_item_promise(
+        tmp_path, monkeypatch):
+    """The routing prompt offers four approvals and then says which of them
+    last one item. `approve-always` is the exception — the line describing it
+    says the run asks nobody again — so a count over all four ("위의 네 승인은
+    이번 일감만의 승인이다") states the opposite of the line right above it
+    (claunch-ns4kd). The paragraph has to name the exception."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch,
+                           {"session_routing": True, "require_coding_approval": True})
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
+    [ask] = st["asks"]
+    approvals = [o["name"] for o in ask["options"] if o["name"].startswith("approve-")]
+    assert len(approvals) == 4
+    blocks = [b for b in ask["prompt"].split("\n\n") if "이번 일감만의 승인" in b]
+    assert blocks, "the routing prompt still says which approvals last one item"
+    block = " ".join(blocks[0].split())
+    assert "approve-always" in block, (
+        "the paragraph about per-item approvals has to name approve-always: it "
+        "is the one answer the run keeps for the items after this one")
+    assert "네 승인" not in block, (
+        "counting all four approvals as per-item is the contradiction this "
+        "test exists for")
 
 
 @pytest.mark.parametrize("answer, route, worker", [
@@ -470,8 +668,8 @@ def test_routing_gate_offers_five_answers(tmp_path, monkeypatch, answer, route, 
 
     st, kw = _routing_item(tmp_path, monkeypatch,
                            {"session_routing": True, "require_coding_approval": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     [ask] = st["asks"]
     assert ask["label"] == "coding-approval-routing" and ask["urgent"] is True
     assert [o["name"] for o in ask["options"]][:5] == [
@@ -494,14 +692,14 @@ def test_routing_gate_always_follows_the_plan_without_asking_again(tmp_path, mon
 
     st, kw = _routing_item(tmp_path, monkeypatch,
                            {"session_routing": True, "require_coding_approval": True}, items=2)
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "hard", "recommend": "direct"}, **kw), kw)
     runtime.approve(None, decision="approve-always", reason="r", **kw)
     st = runtime.report(_one(runtime.status(**kw), "route-planned"), "ok", DIRECT, **kw)
     st = _finish_skip(runtime.report(_one(st, "work"), "ok", {}, **kw), kw)
     # the second item: the plan is still written (routing needs it), the gate is not
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b2", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b2", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     assert not st.get("asks")
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
@@ -516,6 +714,7 @@ def test_reject_rewrites_the_plan(tmp_path, monkeypatch, routing):
                            {"session_routing": routing, "require_coding_approval": True})
     for visit in (1, 2):
         st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": f"plan {visit}"}, **kw)
+        st = _plan_clear(st, kw)
         [ask] = st["asks"]
         assert f"plan {visit}" in ask["prompt"]
         if visit == 1:
@@ -533,8 +732,8 @@ def test_a_stopped_delegate_asks_the_person(tmp_path, monkeypatch, outcome):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok",
-                        {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok",
+                    {"brief": "b", "difficulty": "easy", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     stopped = ({"reason": "needs a design call", "commits": [], "remaining": "all"}
                if outcome == "escalated" else {"reason": "spawn refused"})
@@ -558,7 +757,7 @@ def test_a_stopped_delegate_rejected_goes_back_to_the_plan(tmp_path, monkeypatch
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "escalated",
                         {"reason": "r", "commits": [], "remaining": "x"}, **kw)
@@ -572,7 +771,7 @@ def test_a_failed_parent_test_on_delegated_work_asks_the_person(tmp_path, monkey
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
     st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
@@ -597,7 +796,7 @@ def _failed_parent_test(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
 
     st, kw = _routing_item(tmp_path, monkeypatch, {"session_routing": True})
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b", "recommend": "delegate"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DELEGATE, **kw)
     st = runtime.report(_one(st, "delegate-work"), "ok", DONE, **kw)
     st = runtime.select(st["choices"][0]["instance"], "run", reason="fixture", **kw)
@@ -669,14 +868,17 @@ def test_delegated_work_sent_back_by_review_asks_first(tmp_path, monkeypatch):
     runtime.approve(None, decision="reject", reason="new plan", **kw)
     st = runtime.report(_one(runtime.status(**kw), "route-direct"), "ok", DIRECT, **kw)
     # rejected: back to the plan, and the gate does not reopen
-    st = runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b2", "recommend": "direct"}, **kw)
+    st = _plan_clear(runtime.report(_one(st, "coding-plan"), "ok", {"brief": "b2", "recommend": "direct"}, **kw), kw)
     st = runtime.report(_one(st, "route-planned"), "ok", DIRECT, **kw)
     assert _one(st, "work")
 
 
 def test_routing_off_keeps_todays_path_even_with_a_delegate_route(tmp_path, monkeypatch):
-    st, _ = _routing_item(tmp_path, monkeypatch, {},
-                          data={"route": DELEGATE, "land_out": {"rework": True}})
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _routing_item(tmp_path, monkeypatch, {},
+                           data={"route": DELEGATE, "land_out": {"rework": True}})
+    st = _start_work(st, kw)
     assert [t["label"] for t in st["tasks"]] == ["work"]
     assert not st.get("asks")
 
@@ -760,7 +962,10 @@ def test_land_returns_landed_held_rework():
     # blocked is the fourth (claunch-improver-integration-request-blocked-o6paj):
     # "the landing request was not raised because it is blocked" had no
     # declared outcome, so it could only be reported as the engine's fail.
-    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
+    # pr-submitted is the fifth (claunch-ijkge): auto_merge=false stops at PR
+    # submission and the person merges, so that ending needs its own outcome
+    # rather than leaving the round as a merge the workflow did not do.
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked", "pr-submitted"}
     assert set(land["params"]) == {"mode", "allow"}
 
 
@@ -814,10 +1019,51 @@ def _asked(chart, wrapper):
     return wrapper.get("cases"), call.get("with_")
 
 
+#: The one ``chooser: user`` choose this definition keeps (claunch-dsr4o).
+#: A person's questions go through ask-user (63d53352, claunch-yq80p.8); that
+#: commit already left workspace-gate an approval because "holding is not an
+#: answer, so it is not a decision with two or more options". test-skip-gate
+#: is the same kind: a stop button open beside the running tests loop, not a
+#: decision with a brief -- ask-user would add an ask-frame task next to the
+#: tests and hold the run in waiting_approval for as long as they run. Named
+#: exactly; no pattern or prefix match.
+USER_CHOOSE_ALLOWED = frozenset({"test-skip-gate"})
+
+
+def _unlisted_user_chooses(chart):
+    return [n.label or n.id for n in chart.nodes.values()
+            if n.type == "choose" and n.get("chooser") == "user"
+            and (n.label or n.id) not in USER_CHOOSE_ALLOWED]
+
+
 def test_no_user_choose_is_left():
     chart = _chart()
-    assert [n.label or n.id for n in chart.nodes.values()
-            if n.type == "choose" and n.get("chooser") == "user"] == []
+    assert _unlisted_user_chooses(chart) == []
+    # the allowed one is really there (a rename must update the list)
+    assert [n.label for n in chart.nodes.values()
+            if n.type == "choose" and n.get("chooser") == "user"] == ["test-skip-gate"]
+
+
+def test_a_user_choose_outside_the_allowed_list_is_still_refused():
+    """The negative case: any other ``chooser: user`` choose -- including one
+    whose name only starts like the allowed one -- is reported."""
+    import json
+
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["nodes"]["work"] = {"prompt": "work"}
+    doc["body"] = [
+        {"call": "item"},
+        {"id": "test-skip-gate-2", "choose": {
+            "chooser": "user", "prompt": "p",
+            "options": {"a": {"description": "a", "then": []},
+                        "b": {"description": "b", "then": []}}}},
+    ]
+    doc.pop("spec", None)
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    assert _unlisted_user_chooses(chart) == ["test-skip-gate-2"]
 
 
 def test_user_questions_call_ask_user_with_fixed_choices_and_reasons():
@@ -1137,7 +1383,8 @@ _NONE = {"remote": None, "repo": None, "base": None, "pr_url": None, "pr_number"
 MEDIUM_SCENARIOS = {
     "landing-ok": (False, [("remote-setup", "ok", _SETUP), ("pr-open", "ok", _PR)],
                    ["remote-setup", "pr-open", "after"],
-                   {"landing": _LANDED, "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+                   {"landing": _LANDED,
+                    "published": {**_SETUP, "pr_url": "u", "pr_number": 7, "tip": "t"}}),
     "landing-retry-ok": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                                  ("answer", "retry", None), ("remote-setup", "ok", _SETUP),
                                  ("pr-open", "failed", {"reason": "F1"})],
@@ -1162,7 +1409,8 @@ MEDIUM_SCENARIOS = {
                               ("pr-open", "ok", _PR)],
                        ["remote-setup", "pr-open", "ask-frame", "pr-open", "after"],
                        {"landing": _LANDED,
-                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7}}),
+                        "published": {**_SETUP, "pr_url": "u", "pr_number": 7,
+                                      "tip": "t"}}),
     # a brief spelling 'Local' answers the definition's 'local' (Z2)
     "case-Local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                            ("answer", "Local", ("retry", "Local"))],
@@ -1289,6 +1537,30 @@ def test_landing_leaders_third_group_is_the_mesh_root():
     assert all(c["scope"] != "descendant" for c in ask["from"]), (
         "a run must not stand up a session to answer its own landing question"
     )
+
+
+def test_stacked_landing_review_reaches_the_leader_like_independent():
+    """claunch-0ka8c: a stacked round with nobody in its parent chain to merge
+    has its request demoted to the leader's queue, so the question about that
+    request must reach the same leaders ``landing-review-leader`` asks --
+    after the worker parent, which stays first for a real stack."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    stacked = doc["nodes"]["landing-review"]["ask"]["from"]
+    leader = doc["nodes"]["landing-review-leader"]["ask"]["from"]
+    assert stacked[0] == {"role": "worker", "scope": "ancestor"}
+    assert stacked[1:] == leader
+    assert doc["nodes"]["landing-review"]["ask"]["otherwise"] == "human"
+
+
+def test_the_sixth_check_reads_a_demotion_as_request():
+    """A stacked gate answer of 0 with ``demoted`` set is the leader route,
+    not an error: the landing prompt says so and the bundle carries it."""
+    text = V2.read_text(encoding="utf-8")
+    assert "`demoted`가 비어 있지 않으면" in text
+    assert "강등은 에러가 아니다" in text
+    assert "stacked였으나 <demoted의\n        사유>로 리더 큐로 라우팅" in text
 
 
 def test_landing_leader_ask_wires_an_unwired_root_leader(monkeypatch):
@@ -1463,6 +1735,19 @@ def test_peer_review_question_says_how_to_read_an_unrendered_item_list(tmp_path,
 # -- claunch-0adj8: the slot the ask reads belongs to this round ------------
 
 
+def _batch_step(doc, step_id):
+    """The step ``step_id`` of the batch try in ``worker-round``, by id.
+
+    Looked up by id rather than position: the try also opens with
+    ``feasibility`` (claunch-101wi), and a guard pinned to an index breaks
+    on every step added in front of the one it means.
+    """
+    steps = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"]
+    found = [s for s in steps if isinstance(s, dict) and s.get("id") == step_id]
+    assert len(found) == 1, [s.get("id") if isinstance(s, dict) else s for s in steps]
+    return found[0]
+
+
 def _items_pass_chart(doc):
     """The real ``items-pass`` node from the canon, with its surroundings
     stubbed, called twice: ``full`` (a batch of one) then ``stack-only``."""
@@ -1470,8 +1755,7 @@ def _items_pass_chart(doc):
 
     from claude_launcher.cflow2 import frontend, runtime
 
-    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
-    assert ip["id"] == "items-pass"
+    ip = _batch_step(doc, "items-pass")
 
     def task_of(name, src):
         keeps = ("title", "returns", "effects")
@@ -1546,8 +1830,7 @@ def test_items_pass_completes_in_a_stack_only_round_with_an_empty_list():
     from claude_launcher.cflow2 import frontend
 
     doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
-    ip = doc["procedures"]["worker-round"]["body"][1]["loop"]["do"]["try"][0]
-    assert ip["id"] == "items-pass"
+    ip = _batch_step(doc, "items-pass")
     arms = ip["cond"]
     assert "if" in arms[0] and "then" in arms[0]
     assert list(arms[1]) == ["else"]
@@ -1677,7 +1960,13 @@ def test_the_landing_request_is_gated_on_a_bound_issue():
     seq = sequence_with_gate(doc["procedures"])
     assert seq is not None
     labels = [n.get("id") if isinstance(n, dict) else n for n in seq]
-    assert labels.index("issue-gate") + 1 == labels.index("integration-request")
+    # claunch-101wi: the landing-channel check stands between the issue gate
+    # and the request; nothing else may raise a request there. claunch-ijkge
+    # adds pr-submitted-route after the gate: auto_merge=false ends the round
+    # at PR submission, so it must not reach the request either — and it runs
+    # after the gate so the marker task has the bound issue.
+    between = labels[labels.index("issue-gate") + 1:labels.index("integration-request")]
+    assert between == ["pr-submitted-route", "landing-channel"]
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
@@ -2625,22 +2914,43 @@ def test_a_long_landing_wait_alerts_the_user_by_thread_before_the_loop_limit():
     hours) with the request NOT queued: terminal text and issue comments raise
     no notification, and flow_nudge is refused while the run owes a person
     nothing. landing-nudge tells the worker to open or answer a thread at fixed
-    points; the shared pack carries the general rule."""
+    points; the shared pack carries the general rule.
+
+    The ceiling is 5 rounds now (about 50 minutes, claunch-gpgw1), so the
+    re-alert point moved from the sixth nudge to the fourth: a sixth nudge
+    cannot happen before the loop stops."""
     from claude_launcher.cflow2 import frontend
 
     doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
     node = doc["nodes"]["landing-nudge"]
     nudge = _flat(node["prompt"])
     for anchor in ("사용자 알림", "`thread_reply`", "`thread_open`",
-                   "3번째 재촉", "6번째 재촉마다", "`flow_nudge`", "loop_limit",
+                   "3번째 재촉", "4번째 재촉", "`flow_nudge`", "loop_limit",
                    "`owed`"):
         assert anchor in nudge, f"landing-nudge lost {anchor!r}"
+    assert "6번째 재촉" not in nudge, "a sixth nudge cannot happen inside a 5-round wait"
     assert "사용자 알림」의 스레드로" in nudge, "NOT queued must point at the thread notice"
     assert "알린 스레드 id" in _flat(node["done_when"])
     common = _flat((V2.parents[2] / "prompt_packs" / "common.md").read_text(encoding="utf-8"))
     for anchor in ("같은 대기 단계를 반복할 때", "`thread_reply`", "`thread_open`",
                    "`flow_nudge`", "대기 한도에 닿기 전에"):
         assert anchor in common, f"common.md lost {anchor!r}"
+
+
+def test_the_landing_wait_stops_at_five_rounds():
+    """The wait was 25 rounds of ten minutes (about four hours); a round whose
+    parent never answers sat there while nobody was told. User decision
+    2026-10-30 (claunch-gpgw1): 5 rounds, about 50 minutes, so a fault reaches
+    a person quickly. The gate that stands before the wait quotes the same
+    ceiling, and the two statements of it must not drift."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    loop, _chart_ = _await_flow()
+    assert loop["loop"]["max"] == 5
+    gate = _flat(doc["nodes"]["landing-channel-gate"]["ask"]["prompt"])
+    assert "상한(5회, 10분 간격)" in gate
+    assert "25회" not in gate
 
 
 # -- claunch-77cu6: the targeted-test self-gate and a skip that reaches the request
@@ -2723,6 +3033,144 @@ def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, mon
         st = runtime.report(task["instance"], "ok", {}, **kw)
     assert seen[:2] == ["test-skipped", "commit"]
     assert "review" not in seen and "targeted-test" not in seen
+
+
+# -- claunch-dsr4o: a person may skip the targeted tests while they run --------
+
+
+def _skip_gate(chart):
+    [gate] = [n for n in chart.nodes.values() if n.label == "test-skip-gate"]
+    return gate
+
+
+def test_the_skip_gate_races_the_tests_loop():
+    """Static shape: the gate is a person's choose in a race par beside the
+    tests loop; its one option raises user-skipped, which the enclosing try
+    sends to test-skipped."""
+    chart = _chart()
+    gate = _skip_gate(chart)
+    assert gate.type == "choose" and gate.get("chooser") == "user"
+    assert gate.get("require_reason") is True
+    race = chart.node(gate.parent)
+    assert race.type == "par" and race.get("settle") == "race"
+    branches = race.get("branches")
+    assert set(branches) == {"tests", "skip-gate"}
+    tests = chart.node(branches["tests"])
+    assert tests.type == "loop" and tests.label == "tests"
+    [skip] = gate.get("options")
+    assert skip["name"] == "skip"
+    raised = chart.node(skip["child"])
+    assert raised.type == "control" and raised.get("op") == "raise" \
+        and raised.get("outcome") == "user-skipped"
+    guard = chart.node(race.parent)
+    while guard.type != "try":
+        guard = chart.node(guard.parent)
+    handler = chart.node(guard.get("catch")["user-skipped"])
+    assert handler.label == "test-skipped"
+    assert "replan" in guard.get("catch")
+
+
+def _to_review(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, None)
+    st = runtime.report(_one(st, "work"), "ok", {}, **kw)
+    [choice] = st["choices"]
+    st = runtime.select(choice["instance"], "run", reason="code change", **kw)
+    return st, kw
+
+
+def _gates(st):
+    return [c for c in st["choices"] if c["label"] == "test-skip-gate"]
+
+
+_REVIEWED = {"modules": ["tests/test_mesh.py"], "surfaces": "관련 표면 없음", "tried": []}
+
+
+def test_the_skip_gate_is_open_while_the_tests_run(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    assert [t["label"] for t in st["tasks"]] == ["review"]
+    [gate] = _gates(st)
+    assert gate["chooser"] == "user"
+    # the run is not held: the agent keeps reporting the test tasks
+    assert st["status"] == "running"
+    st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["targeted-test"]
+    assert [g["instance"] for g in _gates(st)] == [gate["instance"]]
+    # a new failure sends the loop round again: the same gate stays open
+    st = runtime.report(_one(st, "targeted-test"), "ok",
+                        {**_MEASURED, "failed": 1, "new_failed": 1}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["review"]
+    assert [g["instance"] for g in _gates(st)] == [gate["instance"]]
+
+
+def test_the_skip_gate_goes_away_when_the_tests_finish(tmp_path, monkeypatch):
+    """Nobody presses it: the tests loop ends, the race drops the open
+    choice, and it does not come back later in the item."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    [gate] = _gates(st)
+    st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    st = runtime.report(_one(st, "targeted-test"), "ok", {**_MEASURED, "failed": 0}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["commit"]
+    assert _gates(st) == []
+    with pytest.raises(runtime.FlowError):
+        runtime.select(gate["instance"], "skip", reason="too late", caller="user", **kw)
+    seen = []
+    while st["tasks"]:
+        [task] = st["tasks"]
+        if task["label"] == "work":
+            break
+        seen.append(task["label"])
+        assert _gates(st) == [], task["label"]
+        st = runtime.report(task["instance"], "ok", {}, **kw)
+    assert "test-skipped" not in seen
+    journal = runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
+    left = [e for e in journal if e.get("event") == "left"
+            and e.get("instance") == gate["instance"]]
+    assert left and left[-1]["outcome"] == "cancelled"
+
+
+@pytest.mark.parametrize("at", ["review", "targeted-test"])
+def test_a_person_skip_stops_the_tests_loop(tmp_path, monkeypatch, at):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _to_review(tmp_path, monkeypatch)
+    if at == "targeted-test":
+        st = runtime.report(_one(st, "review"), "ok", _REVIEWED, **kw)
+    running = _one(st, at)
+    [gate] = _gates(st)
+    # the agent cannot press it
+    with pytest.raises(runtime.FlowError):
+        runtime.select(gate["instance"], "skip", reason="mine", **kw)
+    st = runtime.select(gate["instance"], "skip", reason="tests take 20 min; sweep covers it",
+                        caller="user", **kw)
+    assert [t["label"] for t in st["tasks"]] == ["test-skipped"]
+    assert _gates(st) == []
+    assert st["person_picks"][-1]["label"] == "test-skip-gate"
+    assert st["person_picks"][-1]["reason"] == "tests take 20 min; sweep covers it"
+    # the running test task is gone: its report is refused
+    with pytest.raises(runtime.FlowError):
+        runtime.report(running, "ok", _REVIEWED, **kw)
+    st = runtime.report(_one(st, "test-skipped"), "ok", {}, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["commit"]
+
+
+def test_test_skipped_says_how_a_person_skip_is_marked():
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    nodes = doc["nodes"]
+    skipped = _flat(nodes["test-skipped"]["prompt"])
+    assert "TESTS SKIPPED @ <HEAD 해시>: user — <사람의 reason>" in skipped
+    assert "person_picks" in skipped
+    landing = _flat(V2.read_text(encoding="utf-8"))
+    assert "마커의 사유가 `user — `로 시작하면" in landing
+    stack = _flat((V2.parent / "stack-v2.yaml").read_text(encoding="utf-8"))
+    assert "`user — `로 시작하면" in stack
 
 
 # -- claunch-wuaup: the tests loop ends on new failures, not on preexisting ones
@@ -3047,8 +3495,12 @@ def test_chart_prose_reaches_a_procedure_description():
     fails if the collection reads only the definition's own file.
     """
     chart = _chart()
+    # claunch-ijkge added the fifth outcome to this sentence; the anchor is
+    # the sentence as it stands, so the test keeps failing when the prose
+    # collection stops reading procedures.
     anchor = ("결과는 landed(머지 해시), held(동결로 마감), rework(작업으로 "
-              "되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다")
+              "되돌아감), blocked(차단으로 요청을 세우지 않음), pr-submitted(PR만 제출, "
+              "머지는 사용자가 함 — auto_merge=false) 다섯 중 하나다")
     included = "회차 도중 발견한 범위 밖 결함 하나를 이슈로 남긴다"
 
     # not reachable from nodes: this is the gap the collection had to close,
@@ -3301,7 +3753,8 @@ def _fork_item(tmp_path, monkeypatch, parallel):
                                   resolve_include=layers.resolver())
     chart = inputs.apply(chart, {} if parallel is None else {"parallel_fork": parallel})
     kw = {"cwd": str(tmp_path), "scope": "forking", "now": 1.0}
-    return runtime.start(chart, caps={}, **kw), kw
+    st = runtime.start(chart, caps={}, **kw)
+    return _start_work(st, kw), kw
 
 
 WORK_OK = {"files": ["a.py"], "summary": "s", "tried": []}
@@ -3399,19 +3852,213 @@ def test_land_declares_and_routes_blocked_out_of_the_batch():
     as ``fail``."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     land = doc["procedures"]["land"]
-    assert set(land["returns"]) == {"landed", "held", "rework", "blocked"}
-    assert land["returns"]["blocked"] == {"reason": "str"}
+    # pr-submitted (claunch-ijkge) is the auto_merge=false ending: the round
+    # stops at PR submission and the person merges, so it is a declared
+    # outcome too and has to leave the batch the same way.
+    assert set(land["returns"]) == {"landed", "held", "rework", "blocked", "pr-submitted"}
+    # reason is required; the route fields are what a person's answer is
+    # recorded with so the next round need not ask again (claunch-1aj1a.1),
+    # and they are optional because the ``reframe`` answer carries none. The
+    # place is ``repo`` + ``relation`` (the reuse condition), ``owner`` is
+    # the receiver the evidence measured, and ``issue`` says what was
+    # answered about.
+    assert land["returns"]["blocked"] == {
+        "reason": "str", "decision": "str?", "tip": "str?", "repo": "str?",
+        "owner": "str?", "issue": "str?", "relation": "str?"}
 
     batch = _find_id(doc["procedures"]["worker-round"]["body"], "batch")
     # ``do: {try: [...], catch: {...}}`` -- a bare-key mapping, not a list
     [try_node] = [batch["loop"]["do"]] if isinstance(batch["loop"]["do"], dict) \
         else [c for c in batch["loop"]["do"] if isinstance(c, dict) and "try" in c]
     catch = try_node["catch"]
-    assert set(catch) == {"rework", "landed", "held", "blocked"}
+    assert set(catch) == {"rework", "landed", "held", "blocked", "pr-submitted"}
     # a blocked round is over: continuing would re-run the work that was just
     # refused a request, so it leaves the batch loop like held does.
     assert catch["blocked"] == {"break": "batch"}
     assert catch["rework"] == {"continue": "batch"}
+    # a submitted round is over too: the PR is open and the merge is the
+    # person's, so the batch must not re-run the work under another request.
+    assert catch["pr-submitted"] == {"break": "batch"}
+
+
+# --------------------------------------------------------------------------- #
+# PR 제출에서 끝나는 회차: auto_merge (claunch-ijkge)
+# --------------------------------------------------------------------------- #
+def test_auto_merge_is_a_pr_input_defaulting_to_the_current_behaviour():
+    """The user's shape for the variable: the default keeps today's path
+    (landing request, parent's merge, landed), and the manual-merge path is
+    the opt-in. A default of ``false`` would have changed every existing run
+    into a run that stops at the PR."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    spec = doc["inputs"]["auto_merge"]
+    assert spec["type"] == "bool"
+    assert spec["default"] is True
+    assert spec["group"] == "PR"
+    assert spec["set_by"] == ["user"]
+    # the two switches it qualifies read the same inputs dict, so the help
+    # text has to say it applies to the PR path only
+    assert "로컬 착지에는 적용되지 않는다" in _words(spec["help"])
+
+
+def test_auto_merge_false_ends_the_round_at_pr_submission():
+    """``land``'s submit loop publishes the PR and, when auto_merge is off,
+    ends the landing right there with its own outcome -- not by continuing to
+    the landing request, which would put the parent back in the merge seat
+    the person just took."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    ids = [n.get("id") for n in submit["loop"]["do"] if isinstance(n, dict)]
+    assert ids.index("publish") < ids.index("pr-submitted-route")
+    route = _find_id(submit, "pr-submitted-route")
+    branch = route["cond"][0]           # the if-branch; the second is the else
+    assert "$data.landing.medium == 'pr'" in branch["if"]
+    assert "$data.inputs.auto_merge == false" in branch["if"]
+    # a stack-only round carries no work branch and no claim; the marker there
+    # would have no issue to write to
+    assert "$params.mode == 'full'" in branch["if"]
+    mark, stop = branch["then"]
+    assert mark == "pr-submitted-mark"
+    assert stop["return"] == "pr-submitted"
+    # the value is the PR the person merges, not a merge hash
+    assert set(stop["value"]) == {"url", "number", "tip"}
+    assert "pr_url" in stop["value"]["url"]
+    assert "pr_number" in stop["value"]["number"]
+
+
+def test_the_submitted_pr_marker_is_what_leaves_the_issue_in_review():
+    """The board is the record the workflow and the person both read, so the
+    marker has to be written by the round that submitted, and the round must
+    not close the issue itself -- the merge has not happened yet."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    task = doc["nodes"]["pr-submitted-mark"]
+    prose = _words(task["prompt"])
+    for anchor in ("PR SUBMITTED @ <tip> <url>", "--status in_review",
+                   "PR SUBMITTED @ <tip> (batch of", "하지 않는 것"):
+        assert anchor in prose, anchor
+    # the work the round does not do is named, so a session does not infer it
+    for anchor in ("gh pr merge", "이슈 close"):
+        assert anchor in prose, anchor
+    assert set(task["returns"]["ok"]) == {"url", "number", "tip"}
+
+
+def test_wrapup_does_not_close_a_submitted_pr_issue():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    wrap = _words(doc["nodes"]["wrapup"]["prompt"])
+    assert "PR만 제출하고 끝난 회차로 왔으면" in wrap
+    assert "닫지 않는다" in wrap
+    assert "PR SUBMITTED @ <tip> <url>" in wrap
+
+
+def test_settle_reads_a_submitted_pr_as_settled_for_this_session():
+    """A session whose PR waits on a person's merge must still be able to
+    end: the branch is pushed, the PR is the durable record, and the merge is
+    not this session's act. The exception is narrow -- in_review plus this
+    session's own marker -- so a stale in_review from another cause still
+    blocks."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    check = _find_id(doc["procedures"]["settle"]["body"], "settle-check")
+    prose = _words(check["choose"]["prompt"])
+    assert "PR만 제출하고 머지를 남긴 이슈" in prose
+    assert "PR SUBMITTED @" in prose
+    assert "author`가 이 세션" in prose
+    assert "in_review" in prose
+
+
+def test_a_local_fallback_warns_the_person_before_the_branch_can_be_lost():
+    """When PR submission is impossible (gh missing or logged out) the round
+    falls back to a local branch. That branch lives only in this machine's
+    checkout, so the person has to see the warning -- a board comment alone
+    does not reach them."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    warn = _find_id(submit, "local-warning")
+    branch = warn["cond"][0]
+    assert "$data.landing.medium == 'local'" in branch["if"]
+    assert "$params.mode == 'full'" in branch["if"]
+    # a person who chose local already knows; this warning is for the
+    # automatic fallback only
+    assert "force_pr != true" in branch["if"]
+    assert "force_no_pr != true" in branch["if"]
+    assert branch["then"] == ["pr-local-notice"]
+    prose = _words(doc["nodes"]["pr-local-notice"]["prompt"])
+    for anchor in ("thread_open", "thread_reply", "유실"):
+        assert anchor in prose, anchor
+    # remote-setup keeps the board marker and defers the visible warning
+    setup = _words(doc["nodes"]["remote-setup"]["prompt"])
+    assert "LANDING MEDIUM: local (PR 불가: <reason>)" in setup
+    assert "local-warning" in setup
+
+
+def _local_warning_flow(landing, tmp_path):
+    """`land`'s local-warning branch as a workflow of its own (claunch-ijkge.2).
+
+    The medium is decided by the round's `remote-setup` task -- an agent reads
+    the gh preflight -- so a test cannot make gh logged out. What it can do is
+    seed the decision that follows, which is where this warning lives. The
+    condition and the node come from the definition, so what is measured is
+    the engine's routing plus the reason reaching the warning text.
+    """
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    submit = _find_id(doc["procedures"]["land"]["body"], "submit")
+    warn = _find_id(submit, "local-warning")
+    flow = {
+        "cflow": 2,
+        "name": "local-warning-flow",
+        "params": {"mode": {"default": "full"}},
+        "inputs": {"force_pr": {"type": "bool", "default": False},
+                   "force_no_pr": {"type": "bool", "default": False}},
+        "nodes": {"pr-local-notice": doc["nodes"]["pr-local-notice"],
+                  "after": {"prompt": "after"}},
+        "data": {"landing": landing, "claim": {"issue": "claunch-x"}},
+        "body": [warn, "after"],
+    }
+    return compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                        resolve_include=layers.resolver(str(tmp_path)))
+
+
+def test_a_local_landing_without_a_pr_leaves_a_warning_the_person_can_see(
+        tmp_path, monkeypatch):
+    """claunch-ijkge.2: a round that cannot publish a PR lands on a branch that
+    exists only in this machine's checkout, so it has to say so -- reason
+    included -- in a task the round actually runs. The structure test above
+    pins the branch; this one pins that the branch fires and carries the
+    reason, which is the part a person depends on."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reason = "gh not logged in"
+    chart = _local_warning_flow({"medium": "local", "reason": reason}, tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0)
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["pr-local-notice"]
+    prompt = _words(st["tasks"][0]["prompt"])
+    assert reason in prompt            # the failure reaches the person
+    assert "유실" in prompt            # next to what the local branch can lose
+    assert "gh auth login" in prompt   # and how to make the copy durable
+    assert "thread_open" in prompt     # through the channel they watch
+
+
+def test_a_person_who_chose_local_is_not_warned_about_the_branch(
+        tmp_path, monkeypatch):
+    """`force_no_pr` is the person's own answer. Warning them about the risk
+    of the option they picked would be the round arguing with that answer, so
+    the branch is gated on the switch too (not only on `medium == 'local'`)."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _local_warning_flow({"medium": "local", "reason": "user chose local"},
+                                tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0,
+                       inputs={"force_no_pr": True})
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["after"]
+
+
+def test_a_pr_landing_raises_no_local_warning(tmp_path, monkeypatch):
+    """The warning belongs to the fallback, not to every round: a round whose
+    landing record already says `pr` must not tell the person to run
+    `gh auth login`."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _local_warning_flow({"medium": "pr", "reason": "gh ok"}, tmp_path)
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), scope="m", now=1.0)
+    assert [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]] == ["after"]
 
 
 def test_a_blocked_request_does_not_push_a_landing_row():
@@ -3624,3 +4271,114 @@ def test_a_blocked_request_reaches_queue_recheck(tmp_path, monkeypatch):
     round_left = [e for e in runtime.journal(cwd=kw["cwd"], scope=kw["scope"])
                   if e.get("event") == "left" and e.get("node") == "round"]
     assert round_left and round_left[-1]["outcome"] == "ok", round_left
+
+
+# -- claunch-d8scd: landing entry (start_at=landing) ------------------------
+
+
+def test_landing_entry_seeds_the_first_round_and_the_recheck_is_the_invalidation():
+    """``start_at=landing`` is a round kind for the FIRST round only.
+
+    The seed step sits in front of the rounds loop, so it runs once. Every
+    later round takes its kind from ``data.recheck.mode``, and queue-recheck
+    rewrites that with ``full`` on both of its continuing answers — that
+    rewrite is the invalidation, so the definition needs no reset node."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+
+    steps = doc["body"]["try"]
+    assert [s["id"] for s in steps] == ["entry-mode", "rounds"]
+
+    arms = steps[0]["cond"]
+    assert arms[0]["if"] == "$data.inputs.start_at == 'landing'"
+    assert arms[0]["then"] == {"call": "landing-entry", "bind": "recheck"}
+    assert list(arms[1]) == ["else"] and arms[1]["else"] == []
+
+    entry = doc["procedures"]["landing-entry"]
+    assert entry["body"] == [{"return": "ok",
+                              "value": {"next": "next-round", "mode": "land-only"}}]
+
+    # the switch is a start input with a default that keeps every existing run
+    # on the full path
+    assert doc["inputs"]["start_at"]["choices"] == ["full", "landing"]
+    assert doc["inputs"]["start_at"]["default"] == "full"
+
+    call = steps[1]["loop"]["do"][0]
+    assert call["id"] == "round" and call["call"] == "worker-round"
+    assert call["with"]["mode"] == "$data.recheck.mode"
+
+    opts = doc["procedures"]["queue-recheck"]["body"]["choose"]["options"]
+    assert opts["next-round"]["then"]["value"] == {"next": "next-round", "mode": "full"}
+    assert opts["done"]["then"]["value"] == {"next": "done", "mode": "full"}
+
+
+def _entry_mode_chart(doc, rounds):
+    """The canon's ``entry-mode`` step and ``landing-entry`` procedure inside a
+    skeleton whose rounds report back the ``mode`` they were called with.
+
+    The queue-recheck stand-in answers ``second`` rather than ``full`` so a
+    later round's kind is distinguishable from the seed's."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    entry = doc["body"]["try"][0]
+    assert entry["id"] == "entry-mode"
+    flow = {
+        "cflow": 2, "name": "landing-entry",
+        "inputs": {"start_at": {"type": "enum", "choices": ["full", "landing"],
+                                "default": "full"}},
+        "data": {"recheck": {"next": "next-round", "mode": "full"}},
+        # a task after the loop keeps the run open, so start() answers with the
+        # payload that carries `result` (a run that finishes inside start()
+        # comes back as a summary without it)
+        "nodes": {"after": {"title": "after", "prompt": "after",
+                            "returns": {"ok": {}}}},
+        "procedures": {
+            "landing-entry": doc["procedures"]["landing-entry"],
+            "worker-round": {"params": {"mode": {"type": "str", "default": ""}},
+                             "returns": {"ok": {"mode": "str"}},
+                             "body": [{"return": "ok",
+                                       "value": {"mode": "$params.mode"}}]},
+            "queue-recheck": {"returns": {"ok": {"next": "str", "mode": "str"}},
+                              "body": [{"return": "ok",
+                                        "value": {"next": "next-round",
+                                                  "mode": "second"}}]},
+        },
+        "body": [entry, {"id": "rounds", "loop": {
+            "while": f"$visits.round == null or $visits.round < {rounds}",
+            "max": rounds,
+            "do": [{"id": "round", "call": "worker-round", "bind": "round",
+                    "with": {"mode": "$data.recheck.mode"}},
+                   {"id": "recheck", "call": "queue-recheck", "bind": "recheck"}]}},
+                 "after"],
+    }
+    return frontend.compile_text(json.dumps(flow, ensure_ascii=False)), runtime
+
+
+def test_start_at_landing_calls_the_first_round_land_only(tmp_path):
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=1)
+    kw = {"cwd": str(tmp_path), "scope": "landing", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "land-only"}
+
+
+def test_a_full_start_calls_the_first_round_full(tmp_path):
+    """The default path is unchanged: a run that says nothing about its entry
+    still hands ``full`` to the first round."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=1)
+    kw = {"cwd": str(tmp_path), "scope": "full", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "full"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "full"}
+
+
+def test_the_second_round_takes_the_recheck_kind_not_the_seed(tmp_path):
+    """The seed runs once, in front of the loop. Round two takes whatever
+    queue-recheck wrote, which in the canon is ``full``."""
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    chart, runtime = _entry_mode_chart(doc, rounds=2)
+    kw = {"cwd": str(tmp_path), "scope": "landing-two", "now": 1.0}
+    st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
+    assert st["result"]["round"]["value"] == {"mode": "second"}
+

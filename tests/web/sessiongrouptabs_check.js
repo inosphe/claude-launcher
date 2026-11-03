@@ -119,19 +119,23 @@ function storage(seed) {
 }
 
 /* The state block and the tab helpers, sliced from app.js and bound to a
-   browser storage of the harness's choosing. */
-function load(seed) {
+   browser storage of the harness's choosing. `project` seeds the rail's
+   currentProject: "" is "All projects", a name is a picked project — the
+   ⊕ demands one (claunch-teipq). */
+function load(seed, project = "") {
   const localStorage = storage(seed);
   const ctx = { redraws: [], went: [] };
   new Function(
     "exports", "document", "$", "localStorage", "BASE", "refreshSessions", "go",
     constLine("SESSION_GROUP_KEY") + constLine("SESSION_GROUP_ORDER_KEY") +
     constLine("SESSION_GROUPS") + letBlock("sessionGroupOrder") + "\n" +
+    constLine("RAIL_SCROLL_TOP_ANIM_MS") + "\n" +
     constLine("SESSION_GROUP_TAB_KEY") + letBlock("sessionGroupTab") + "\n" +
     constLine("SESSION_ORIGIN_FILTERS") + constLine("SESSION_ORIGIN_KEY") +
     letBlock("sessionOriginFilter") + "\n" +
     "let sessionGroupTabScrollReset = false;\n" +
     "let sessionFilter = 'current', sessionSearch = {q: ''};\n" +
+    `let currentProject = ${JSON.stringify(project)};\n` +
     "function sessionMatchesSearch(s) { return !sessionSearch.q || s.name.includes(sessionSearch.q); }\n" +
     "function shadowMatchesSearch(s) { return !sessionSearch.q || s.session.includes(sessionSearch.q); }\n" +
     // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
@@ -156,6 +160,7 @@ Object.assign(exports, {
   top: scrollSessionListTop,
   origin: () => sessionOriginFilter,
   byOrigin: filterSessionOrigin,
+  setProject: (v) => { currentProject = v; },
 });`)(ctx, document, $, localStorage, "/t/local/",
       (opts) => ctx.redraws.push(opts), (hash) => ctx.went.push(hash));
   ctx.writes = localStorage.writes;
@@ -174,7 +179,7 @@ check("a saved tab pick is read back per grouping",
       { mesh: "m2" });
 
 /* ---- the split ---- */
-const ctx = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"m2"}' });
+const ctx = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"m2"}' }, "proj1");
 const session = (name) => ({ type: "session", session: { name }, depth: 0 });
 const shadow = (name) => ({ type: "shadow", shadow: { session: name, machine: "x" }, depth: 0 });
 const ROWS = [
@@ -234,6 +239,19 @@ let stopped = 0;
 add.handlers.click({ stopPropagation() { stopped++; } });
 check("the ⊕ opens the create form with that mesh picked, and nothing else",
       [ctx.went, stopped, ctx.redraws.length], [["#/new/m2"], 1, 0]);
+
+/* ---- the ⊕ demands a picked project (claunch-teipq) ---- */
+const allProjects = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"m2"}' });
+allProjects.render("mesh", split.tabs, "m2");
+check("on All projects an open mesh's header has no ⊕",
+      head.querySelectorAll(".session-group-new").length, 0);
+allProjects.setProject("proj1");
+allProjects.render("mesh", split.tabs, "m2");
+check("picking a project draws the ⊕ on the open mesh's header",
+      head.querySelectorAll(".session-group-new").length, 1);
+/* The DOM stubs are shared across contexts: hand the strip and header
+   back to the main context before its own checks continue. */
+ctx.render("mesh", split.tabs, split.active);
 
 /* ---- the press ---- */
 list.scrollTop = 300;
@@ -328,7 +346,7 @@ check("ungrouped local removes the empty remote daemon heading",
       ctx.byOrigin(UNGROUPED, "local").map(rowName), ["s1"]);
 check("ungrouped remote keeps the daemon heading with its remote row",
       ctx.byOrigin(UNGROUPED, "remote").map(rowName), ["other-daemon", "r1"]);
-const octx = load({});
+const octx = load({}, "proj1");
 octx.render("mesh", split.tabs, "m2");
 const opts = () => head.querySelectorAll(".session-origin-option");
 check("a mesh header carries the three picks, both on",

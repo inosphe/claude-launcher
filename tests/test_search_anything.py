@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
 from claude_launcher.daemon import observer, rag, search_anything, search_records, status_checks
-from test_rag import Endpoint, _start_endpoint, _cfg
+from test_rag import Endpoint, FakeBr, _start_endpoint, _cfg
 
 
 def _world(tmp_path, n_sessions=3):
@@ -171,6 +171,13 @@ def test_config_preserves_secret_and_removes_requested_dimensions():
     assert "api_key" not in doc["rag"] and "base_url" not in doc["rag"]
     assert "dimensions" not in doc["rag"]
     assert "secret" not in str(search_anything.public_settings())
+    # public_settings migrates a configured legacy block into a preset
+    # (claunch-rag-preset-always-hn5bc), and with a preset in force the bad
+    # connection rows below are not the ones validated -- so exercise the
+    # legacy validation path with a fresh no-preset block.
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "http://localhost:123/v1", "api_key": "secret", "embedding_model": "embed", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
     for bad in ({"dimensions": 123}, {"batch": 1.5}, {"timeout": float("nan")}, {"base_url": "http://user:pass@host/v1"}):
         with pytest.raises(ValueError):
             search_anything.proposed(bad)
@@ -292,6 +299,111 @@ def test_settings_routes_test_without_saving_and_persist_models(tmp_path):
             await service.shutdown()
             await client.close()
             await server.close()
+    asyncio.run(run())
+
+
+def test_backfill_pause_resume_routes_flip_the_flag_reported_by_status(tmp_path):
+    async def run():
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            # /api/rag/status itself is api.py's route; the flag this pair of
+            # endpoints flips is what service.status() reports.
+            assert service.status()["backfill_paused"] is False
+            response = await client.post("/api/rag/backfill/pause")
+            assert response.status == 200
+            assert (await response.json())["paused"] is True
+            assert service.backfill_paused() is True
+            # Pausing twice is the same state, not an error.
+            response = await client.post("/api/rag/backfill/pause")
+            assert (await response.json())["paused"] is True
+            response = await client.post("/api/rag/backfill/resume")
+            assert response.status == 200
+            assert (await response.json())["paused"] is False
+            assert service.backfill_paused() is False
+            assert service.status()["backfill_paused"] is False
+        finally:
+            await service.shutdown()
+            await client.close()
+    asyncio.run(run())
+
+
+def test_paused_consumer_holds_the_queue_and_resume_drains_it(tmp_path):
+    """Pause holds before the dequeue, not mid-pass: the queued key keeps its
+    place and a resume drains it without a re-enqueue."""
+    async def run():
+        service = rag.RagService(
+            config=lambda: {**store.RAG_DEFAULTS, "base_url": "http://127.0.0.1:9/v1",
+                            "api_key": "k", "embedding_model": "m"},
+            root_dir=tmp_path / "index",
+        )
+        consumed = []
+        async def spy_consume(kind, root):
+            consumed.append(kind)
+        service._consume = spy_consume
+        service.pause_backfill()
+        try:
+            assert service.enqueue("sessions") is True
+            await asyncio.sleep(0.05)
+            assert consumed == []
+            assert service._queue.qsize() == 1
+            assert "sessions" in service._pending
+            service.resume_backfill()
+            for _ in range(200):
+                if consumed:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions"]
+            assert service._queue.empty()
+            assert not service._pending
+        finally:
+            await service.shutdown()
+    asyncio.run(run())
+
+
+def test_pause_while_consumer_parked_in_get_holds_the_next_key(tmp_path):
+    """The idle consumer parks inside queue.get(); a pause that arrives in
+    that window must still hold a key enqueued afterwards — the peer review
+    of claunch-fhs7f measured the pass running while paused without this."""
+    async def run():
+        service = rag.RagService(
+            config=lambda: {**store.RAG_DEFAULTS, "base_url": "http://127.0.0.1:9/v1",
+                            "api_key": "k", "embedding_model": "m"},
+            root_dir=tmp_path / "index",
+        )
+        consumed = []
+        async def spy_consume(kind, root):
+            consumed.append(kind)
+        service._consume = spy_consume
+        try:
+            assert service.enqueue("sessions") is True
+            for _ in range(200):
+                if consumed:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions"]
+            # The consumer is now parked in get(). Pause, then enqueue: the
+            # key must wait, not run, until resume.
+            service.pause_backfill()
+            assert service.enqueue("beads", tmp_path / "board") is True
+            await asyncio.sleep(0.1)
+            assert consumed == ["sessions"]
+            assert service.backfill_paused() is True
+            service.resume_backfill()
+            for _ in range(200):
+                if len(consumed) > 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert consumed == ["sessions", "beads"]
+            assert service._queue.empty()
+            assert not service._pending
+        finally:
+            await service.shutdown()
     asyncio.run(run())
 
 
@@ -890,15 +1002,15 @@ def test_profile_source_uses_the_profile_backend_and_keeps_the_typed_pair():
     assert cfg["api_key"] == "fw-secret"
     store.save(doc)
     public = search_anything.public_settings()
-    assert public["source"] == "profile" and public["profile"] == "ds4"
-    assert public["base_url"] == "http://localhost:8000/v1"  # the form keeps the typed address
+    # The first card read migrates the legacy block into a preset named
+    # after the model (claunch-rag-preset-always-hn5bc); the card edits
+    # presets now, so the pointer and the preset row are what it is told.
+    assert public["preset"] == "embed"
+    assert public["presets"][0]["profile"] == "ds4"
     assert public["resolved"] == {"base_url": "https://api.fireworks.ai/inference/v1", "has_key": True}
-    assert public["configured"] and public["api_key_set"]
+    assert public["configured"]
     assert [row["name"] for row in public["profiles"]] == ["ds4"]
     assert "fw-secret" not in str(public) and "local-secret" not in str(public)
-    back = store.rag_config(search_anything.proposed({"source": "custom"}))
-    assert (back["base_url"], back["api_key"]) == ("http://localhost:8000/v1", "local-secret")
-    assert back["profile"] == "ds4"
 
 
 def test_the_environment_key_belongs_to_the_custom_endpoint(monkeypatch):
@@ -1075,13 +1187,20 @@ def test_the_settings_card_is_told_both_rows_and_no_secret():
         "profile": {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""},
     }, "source": "profile"}})
     public = search_anything.public_settings()
+    # The first read migrates the legacy rows into a preset (named after the
+    # in-force model), which becomes the pointer — the card edits presets.
+    assert public["preset"] == "fw-embed"
     assert set(public["sources"]) == {"custom", "profile"}
     assert public["sources"]["custom"]["embedding_model"] == "omlx-embed"
     assert public["sources"]["custom"]["rerank_model"] == "omlx-rerank"
     assert public["sources"]["profile"] == {"profile": "ds4", "embedding_model": "fw-embed", "rerank_model": ""}
     assert "api_key" not in public["sources"]["custom"]
     assert "local-secret" not in str(public) and "fw-secret" not in str(public)
-    assert public["api_key_set"]
+    # api_key_set describes the row the card edits (the active preset): a
+    # profile-source preset carries no typed key. The legacy custom row
+    # still holds local-secret on file — proven by the PUT below preserving
+    # it through an empty field.
+    assert not public["api_key_set"]
     # Every row sails through the save's own check, since the card posts it back.
     assert search_anything.proposed({"source": "profile", "sources": public["sources"]})["rag"]["source"] == "profile"
 
@@ -1129,4 +1248,942 @@ def test_settings_routes_call_the_profile_backend(tmp_path):
             await service.shutdown()
             await client.close()
             await server.close()
+    asyncio.run(run())
+
+
+def test_settings_routes_round_trip_presets_without_secrets(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            presets = [
+                {"id": "local", "source": "custom", "base_url": "http://h:1/v1",
+                 "api_key": "first-secret", "embedding_model": "emb-a",
+                 "rerank_model": "", "model_key": "shared-key"},
+                {"id": "cloud", "source": "custom", "base_url": "http://h:2/v1",
+                 "api_key": "second-secret", "embedding_model": "emb-b",
+                 "model_key": "shared-key"},
+            ]
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": presets, "preset": "cloud"})
+            assert response.status == 200
+            body = await response.json()
+            # secrets never cross the boundary; whether one is on file does
+            assert "first-secret" not in json.dumps(body)
+            assert "second-secret" not in json.dumps(body)
+            assert body["presets"][0]["api_key_set"] is True
+            assert body["preset"] == "cloud"
+            assert [p["id"] for p in body["presets"]] == ["local", "cloud"]
+            assert body["presets"][0]["model_key"] == "shared-key"
+
+            saved = store.rag_config()
+            assert saved["preset"] == "cloud"
+            assert saved["model_key"] == "shared-key"  # the active preset's key
+            assert saved["embedding_model"] == "emb-b"
+            # the secrets actually landed in the file
+            stored = store.rag_presets()
+            assert stored[0]["api_key"] == "first-secret"
+            assert stored[1]["api_key"] == "second-secret"
+
+            # an empty api_key preserves the saved secret under that id
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{**presets[0], "api_key": ""}, presets[1]]})
+            assert response.status == 200
+            assert store.rag_presets()[0]["api_key"] == "first-secret"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_settings_routes_refuse_bad_presets(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            good = {"id": "one", "source": "custom", "base_url": "http://h/v1",
+                    "api_key": "k", "embedding_model": "emb"}
+            for bad, needle in [
+                ({"presets": "nope"}, "presets must be a list"),
+                ({"presets": [{"id": "Bad Name", "embedding_model": "emb"}]},
+                 "lowercase letters, digits and hyphens"),
+                ({"presets": [good, dict(good)]}, "duplicate preset id"),
+                ({"presets": [good], "preset": "ghost"}, "not one of the saved presets"),
+                ({"presets": [good], "preset": 5}, "preset must be text"),
+                ({"presets": [{"id": f"p{i}"} for i in range(21)]}, "at most"),
+            ]:
+                response = await client.put("/api/rag/settings", json=bad)
+                assert response.status == 400, bad
+                if needle:
+                    assert needle in (await response.json())["error"]
+            # a failed save leaves the file as it was
+            assert store.rag_config()["embedding_model"] == "emb"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_legacy_direct_settings_migrate_into_a_named_preset():
+    """claunch-rag-preset-always-hn5bc: the card is preset-only, so a block
+    whose pointer resolves to nothing is migrated on the first settings
+    read — the pre-preset direct settings become a preset named after the
+    embedding model, exactly the backfill the user asked for."""
+    store.save({"rag": {"base_url": "http://host/v1", "api_key": "secret-key",
+                        "embedding_model": "qwen3-embedding-8b", "rerank_model": "r"}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "qwen3-embedding-8b"
+    row = public["presets"][0]
+    assert row["embedding_model"] == "qwen3-embedding-8b"
+    assert row["rerank_model"] == "r"
+    assert row["api_key_set"] is True
+    assert "secret-key" not in json.dumps(public)
+    assert store.load()["rag"]["preset"] == "qwen3-embedding-8b"
+    # idempotent — a second read adds nothing
+    again = search_anything.public_settings()
+    assert [p["id"] for p in again["presets"]] == ["qwen3-embedding-8b"]
+
+
+def test_migration_takes_a_suffix_when_the_model_name_is_taken():
+    store.save({"rag": {"base_url": "http://host/v1", "api_key": "k",
+                        "embedding_model": "qwen3-embedding-8b",
+                        "presets": [{"id": "qwen3-embedding-8b", "source": "custom",
+                                     "base_url": "http://other/v1", "api_key": "k2",
+                                     "embedding_model": "other-model"}]}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "qwen3-embedding-8b-2"
+    assert [p["id"] for p in public["presets"]] == ["qwen3-embedding-8b", "qwen3-embedding-8b-2"]
+    assert public["presets"][1]["base_url"] == "http://host/v1"
+
+
+def test_migration_wakes_a_dangling_pointer_to_the_first_preset():
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "", "api_key": "", "embedding_model": "", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}},
+                        "presets": [{"id": "only", "source": "custom", "base_url": "http://h/v1",
+                                     "api_key": "k", "embedding_model": "m"}]}})
+    public = search_anything.public_settings()
+    assert public["preset"] == "only"
+    assert [p["id"] for p in public["presets"]] == ["only"]
+
+
+def test_migration_leaves_an_unconfigured_block_alone():
+    store.save({"rag": {"source": "custom",
+                        "sources": {"custom": {"base_url": "", "api_key": "", "embedding_model": "", "rerank_model": ""},
+                                    "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+    public = search_anything.public_settings()
+    assert public["preset"] == ""
+    assert public["presets"] == []
+
+
+def test_base_url_without_a_version_root_is_normalized_for_calls():
+    """A bare host answers the protocol paths with 404 (measured live: oMLX
+    with no /v1, selftest failing on /embeddings). The stored spelling is
+    kept; the call target gains the /v1 root."""
+    for typed, called in [("https://omlx.inosphe.work", "https://omlx.inosphe.work/v1"),
+                          ("https://omlx.inosphe.work/", "https://omlx.inosphe.work/v1"),
+                          ("https://h/v1", "https://h/v1"),
+                          ("https://h/openai/v1", "https://h/openai/v1")]:
+        cfg = store.rag_config({"rag": {"source": "custom", "base_url": typed,
+                                        "api_key": "k", "embedding_model": "m"}})
+        assert cfg["base_url"] == called, typed
+    # a profile-sourced block borrows its root from the provider, untouched
+    assert store.rag_normalize_base_url("") == ""
+
+
+def test_root_serving_endpoint_opts_out_of_the_v1_correction():
+    """claunch-rag-preset-always-hn5bc.1: TEI serves /embeddings at the host
+    root, so <host>/v1/embeddings is 404 — the /v1 correction must be
+    escapable. The preset row's root_serving flag (or the legacy block's)
+    keeps the bare host as the call target; the stored spelling is untouched
+    either way."""
+    cfg = store.rag_config({"rag": {"source": "custom", "base_url": "https://tei.local",
+                                    "api_key": "k", "embedding_model": "m",
+                                    "root_serving": True}})
+    assert cfg["base_url"] == "https://tei.local"
+    assert cfg["root_serving"] is True
+    # without the flag the correction stands
+    cfg = store.rag_config({"rag": {"source": "custom", "base_url": "https://tei.local",
+                                    "api_key": "k", "embedding_model": "m"}})
+    assert cfg["base_url"] == "https://tei.local/v1"
+    assert cfg["root_serving"] is False
+    # a preset row carries its own flag and wins while it is active
+    doc = {"rag": {"source": "custom",
+                   "presets": [
+                       {"id": "tei", "source": "custom", "base_url": "https://tei.local",
+                        "api_key": "k", "embedding_model": "m", "root_serving": True},
+                       {"id": "plain", "source": "custom", "base_url": "https://h/v1",
+                        "api_key": "k", "embedding_model": "m"}],
+                   "preset": "tei"}}
+    assert store.rag_config(doc)["base_url"] == "https://tei.local"
+    doc["rag"]["preset"] = "plain"
+    assert store.rag_config(doc)["base_url"] == "https://h/v1"
+    # only the exact boolean counts: a truthy string does not become the flag
+    cleaned = store.clean_rag_preset({"id": "x", "source": "custom", "base_url": "https://h",
+                                      "embedding_model": "m", "root_serving": "yes"})
+    assert cleaned == {"id": "x", "base_url": "https://h", "embedding_model": "m"}
+    # a hand-set legacy flag travels onto the preset the migration mints —
+    # otherwise the preset branch would lose it and the /v1 correction
+    # would quietly break the endpoint again
+    store.save({"rag": {"source": "custom", "base_url": "https://tei.local",
+                        "api_key": "k", "embedding_model": "m", "root_serving": True}})
+    public = search_anything.public_settings()
+    assert public["presets"][0]["root_serving"] is True
+    assert store.rag_config()["base_url"] == "https://tei.local"
+
+
+def test_settings_routes_round_trip_the_root_serving_flag_and_expose_the_cap(tmp_path):
+    """The card checkbox rides the preset row through the settings PUT, the
+    active flag answers at the top level, and the saved-list ceiling the
+    daemon enforces is surfaced as preset_max so the card can show N/20."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "tei", "source": "custom", "base_url": "http://tei.local",
+                             "api_key": "k", "embedding_model": "emb", "root_serving": True}],
+                "preset": "tei"})
+            assert response.status == 200
+            body = await response.json()
+            assert body["presets"][0]["root_serving"] is True
+            assert body["root_serving"] is True
+            assert body["resolved"]["base_url"] == "http://tei.local"  # no /v1 appended
+            assert body["preset_max"] == store.RAG_MAX_PRESETS
+            # a non-boolean spelling is refused, not coerced
+            response = await client.put("/api/rag/settings", json={"root_serving": "yes"})
+            assert response.status == 400
+            assert "boolean" in (await response.json())["error"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_connection_test_honors_the_root_serving_escape(tmp_path):
+    """The probe must exercise the same call shape the save would use: with
+    root_serving set, a bare-host TEI endpoint is called at its root."""
+    async def run():
+        endpoint = Endpoint()
+        root_app = web.Application()
+        root_app.router.add_post("/embeddings", endpoint.embeddings)
+        root_app.router.add_post("/rerank", endpoint.rerank)
+        server = TestServer(root_app)
+        await server.start_server()
+        live = str(server.make_url("/"))
+        store.save({"rag": {"source": "custom", "watch_interval": 0,
+                            "sources": {"custom": {"base_url": live, "api_key": "k",
+                                                   "embedding_model": "m", "rerank_model": ""},
+                                        "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            body = {"timeout": 2, "root_serving": True,
+                    "sources": {"custom": {"base_url": live, "api_key": "k",
+                                           "embedding_model": "m", "rerank_model": ""},
+                                "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}
+            calls_before = len(endpoint.embed_calls)
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 200, await response.text()
+            assert len(endpoint.embed_calls) > calls_before  # reached the root-serving endpoint
+            # without the escape the same address is probed at /v1, which this
+            # server does not serve
+            body["root_serving"] = False
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_settings_delete_one_preset_drops_only_that_row_and_repoints_the_pointer(tmp_path):
+    """claunch-rag-preset-always-hn5bc.2: deletion is a settings PUT carrying
+    the list minus the row. The pointer moves to a remaining preset when the
+    active one went away, the kept rows' secrets survive, and the deleted
+    row's secret leaves the file."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        cfg["presets"] = [
+            {"id": "one", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "secret-1", "embedding_model": "emb-a"},
+            {"id": "two", "source": "custom", "base_url": "http://h:2/v1",
+             "api_key": "secret-2", "embedding_model": "emb-b"},
+        ]
+        cfg["preset"] = "two"
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            kept = dict(cfg["presets"][0])
+            kept.pop("api_key")
+            # the active preset is deleted: the pointer wakes at the first remaining row
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [kept], "preset": "one"})
+            assert response.status == 200
+            assert [p["id"] for p in store.rag_presets()] == ["one"]
+            assert store.rag_presets()[0]["api_key"] == "secret-1"  # empty key preserves it
+            assert store.rag_config()["preset"] == "one"
+            assert "secret-2" not in json.dumps(store.load())
+            # an empty list that ever reaches the server is NOT a deletion
+            # either — the read-side migration immediately re-wraps the
+            # still-alive legacy connection as a model-named preset, so the
+            # stored result is one fresh preset, not zero. The card knows
+            # this and refuses to delete the last preset up front; this
+            # block pins the read-side safety net the refusal text cites.
+            response = await client.put("/api/rag/settings", json={"presets": [], "preset": ""})
+            assert response.status == 200
+            rows = store.rag_presets()
+            assert [p["id"] for p in rows] == ["emb"]
+            assert store.rag_config()["preset"] == "emb"
+            assert rows[0]["base_url"] == cfg["base_url"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_connection_test_probes_the_screen_rows_not_the_saved_preset(tmp_path):
+    """POST /api/rag/test must evaluate what is on the card — the reader
+    tests edits before saving. A saved preset in the same body must not
+    redirect the probe at the preset's stored connection."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        live = str(server.make_url("/v1"))
+        store.save({"rag": {
+            "source": "custom",
+            "watch_interval": 0,
+            "presets": [{"id": "saved", "source": "custom", "base_url": live,
+                         "api_key": "rag-secret", "embedding_model": "saved-model"}],
+            "preset": "saved",
+            "sources": {"custom": {"base_url": live, "api_key": "rag-secret",
+                                   "embedding_model": "screen-model", "rerank_model": ""},
+                        "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            calls_before = len(endpoint.embed_calls)
+            # screen rows point at the live server while the saved preset is
+            # unreachable: the probe succeeds, proving it used the screen
+            body = {"preset": "saved", "timeout": 2,
+                    "sources": {"custom": {"base_url": live, "api_key": "rag-secret",
+                                           "embedding_model": "screen-model", "rerank_model": ""},
+                                "profile": {"profile": "", "embedding_model": "", "rerank_model": ""}}}
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 200, await response.text()
+            assert len(endpoint.embed_calls) > calls_before
+            # and the inverse: screen rows unreachable, saved preset live —
+            # the probe fails, so it cannot have used the preset
+            body["sources"]["custom"]["base_url"] = "http://localhost:9/v1"
+            response = await client.post("/api/rag/test", json=body)
+            assert response.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+    asyncio.run(run())
+
+
+def test_settings_save_with_a_preset_validates_the_preset_connection(tmp_path):
+    """Only the connection in force is validated: a preset save needs the
+    preset's endpoint, and an unresolvable active profile is refused."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "local", "source": "custom", "api_key": "k",
+                             "embedding_model": "emb"}],
+                "preset": "local"})
+            assert response.status == 400
+            assert "base_url" in (await response.json())["error"]
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "prof", "source": "profile", "profile": "ghost",
+                             "embedding_model": "emb"}],
+                "preset": "prof"})
+            assert response.status == 400
+            # the legacy rows out of force are not validated: a custom save
+            # with a preset active ignores the legacy custom row's address
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "prof", "source": "profile", "profile": "ghost",
+                             "embedding_model": "emb"}],
+                "preset": ""})
+            assert response.status == 200
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_selftest_route_reports_the_sample_against_the_threshold(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        root = tmp_path / "repo"
+        (root / ".beads").mkdir(parents=True)
+        (root / ".beads" / "beads.db").write_bytes(b"")
+
+        issue = {"id": "x-1", "title": "kanban lanes", "status": "open",
+                 "description": "kanban lanes\n\nadd the column"}
+        from claude_launcher.daemon import beads as beads_mod
+        br = FakeBr([issue])
+        board = beads_mod.Board(br, root_for=lambda cwd: root if cwd and str(cwd).startswith(str(root)) else None)
+        service = rag.RagService(board=board, root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            prog = service.ensure_sync("beads", root)
+            await service.wait_sync(prog, 5)
+            assert prog.error is None
+            response = await client.post("/api/rag/selftest",
+                                         json={"kind": "beads", "cwd": str(root),
+                                               "sample": 1, "threshold": 0.5, "top_k": 2})
+            assert response.status == 200
+            body = await response.json()
+            assert body["sampled"] == 1 and body["passed"] == 1 and body["failed"] == 0
+            assert body["similarity"]["max"] == pytest.approx(1.0)
+            assert "rag-secret" not in json.dumps(body)
+            # a beads self test needs a cwd that resolves to a board
+            response = await client.post("/api/rag/selftest",
+                                         json={"kind": "beads", "cwd": "/nowhere"})
+            assert response.status == 400
+            response = await client.post("/api/rag/selftest", json={"kind": "nope"})
+            assert response.status == 400
+            # no body at all: the sessions corpus is the default
+            response = await client.post("/api/rag/selftest")
+            assert response.status in (200, 400)  # empty registry: 400, nothing to sample
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+
+
+# -- claunch-fhs7f.1: renaming a preset, and a preset that names its store ----
+
+
+def _write_store(base, name, *, dims, model, model_key=""):
+    """A collection directory plus the sidecar a preset has to match."""
+    path = base / f"{name}.zvec"
+    path.mkdir(parents=True, exist_ok=True)
+    meta = {"format": rag.FORMAT, "model": model, "model_key": model_key,
+            "dims": dims, "signature": "", "updated_at": "2026-11-02T00:00:00Z"}
+    path.with_suffix(".meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_renaming_a_preset_carries_the_saved_secret_and_stores_no_hint(tmp_path):
+    """The id names the row AND files the secret — a rename must move it.
+
+    Without ``renamed_from`` the save looks up the secret under an id nobody
+    has written yet and the API key is silently dropped (claunch-fhs7f.1).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            preset = {"id": "old-name", "source": "custom", "base_url": "http://h:1/v1",
+                      "api_key": "kept-secret", "embedding_model": "emb-a"}
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [preset], "preset": "old-name"})
+            assert response.status == 200
+            assert store.rag_presets()[0]["api_key"] == "kept-secret"
+
+            renamed = {**preset, "id": "new-name", "api_key": "",
+                       "renamed_from": "old-name"}
+            response = await client.put("/api/rag/settings",
+                                        json={"presets": [renamed], "preset": "new-name"})
+            assert response.status == 200
+            body = await response.json()
+            assert [p["id"] for p in body["presets"]] == ["new-name"]
+            assert body["preset"] == "new-name"
+            stored = store.rag_presets()
+            assert stored[0]["id"] == "new-name"
+            assert stored[0]["api_key"] == "kept-secret"
+            # the hint is a save-time input, not a field that lands on disk
+            assert "renamed_from" not in stored[0]
+            assert "renamed_from" not in json.dumps(store.load())
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_preset_named_db_decides_the_collection_path(tmp_path):
+    """``db`` wins over ``model_key``, and an absent one keeps the old rule."""
+    service = rag.RagService(root_dir=tmp_path)
+    base = tmp_path
+    assert service._index_path(base, "sessions", {"db": "kept", "model_key": "m1"}) == base / "sessions.kept.zvec"
+    assert service._index_path(base, "sessions", {"model_key": "m1"}) == base / "sessions.m1.zvec"
+    assert service._index_path(base, "sessions", {}) == base / "sessions.zvec"
+
+    block = {"preset": "p", "presets": [{"id": "p", "source": "custom",
+                                         "base_url": "http://h:1/v1", "api_key": "k",
+                                         "embedding_model": "emb-a", "db": "Shared DB"}]}
+    cfg = store.rag_config({"rag": block})
+    assert cfg["db"] == "shared-db"          # stored as a directory-safe slug
+    assert cfg["model_key"] == "emb-a"       # the model identity is unchanged
+
+    block["presets"][0].pop("db")
+    cfg = store.rag_config({"rag": block})
+    assert cfg["db"] == "emb-a"              # no db: the model identity stands in
+
+
+def test_a_named_db_that_cannot_hold_the_models_width_is_refused(tmp_path):
+    """The save is where a 4096-vs-768 mismatch is caught, not the query."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        # the model this preset uses has built a 768-dimension collection
+        _write_store(base, "sessions.emb-a", dims=768, model="emb-a")
+        # and the DB it now names holds 4096-dimension vectors
+        _write_store(base, "sessions.wide", dims=4096, model="old-model", model_key="wide")
+        block = dict(_cfg(server, watch_interval=0))
+        block.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "wide"}],
+        })
+        store.save({"rag": block})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                             "api_key": "rag-secret", "embedding_model": "emb-a", "db": "wide"}],
+                "preset": "p",
+            })
+            assert response.status == 400
+            error = (await response.json())["error"]
+            assert "4096" in error and "768" in error and "wide" in error
+
+            # the same model against a DB of its own width saves
+            response = await client.put("/api/rag/settings", json={
+                "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                             "api_key": "rag-secret", "embedding_model": "emb-a",
+                             "db": "emb-a"}],
+                "preset": "p",
+            })
+            assert response.status == 200
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_the_dbs_route_lists_collections_and_the_presets_that_read_them(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.emb-a", dims=768, model="emb-a")
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "kept"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/api/rag/dbs")
+            assert response.status == 200
+            body = await response.json()
+            rows = {row["name"]: row for row in body["dbs"]}
+            assert set(rows) == {"sessions.emb-a", "sessions.kept"}
+            assert rows["sessions.kept"]["dims"] == 768
+            assert rows["sessions.kept"]["presets"] == ["p"]
+            assert rows["sessions.kept"]["in_use"] is True
+            assert rows["sessions.emb-a"]["presets"] == []
+            assert rows["sessions.emb-a"]["in_use"] is False
+            assert body["active"] == "kept"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_collection_refuses_readers_and_removes_the_rest(tmp_path):
+    """A store a preset reads stays; one nobody reads goes, sidecar included.
+
+    Deleting a collection whose vectors a preset answers from would make
+    that preset rebuild them from the provider, so the readers are named and
+    the delete is refused until the preset points elsewhere
+    (claunch-fhs7f.1).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        _write_store(base, "sessions.orphan", dims=768, model="emb-a", model_key="orphan")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a", "db": "kept"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions.kept"})
+            assert refused.status == 400
+            error = (await refused.json())["error"]
+            assert "kept" in error and "p" in error
+            assert (base / "sessions.kept.zvec").is_dir()
+
+            removed = await client.post("/api/rag/dbs/delete", json={"name": "sessions.orphan"})
+            assert removed.status == 200
+            body = await removed.json()
+            assert body["deleted"] == "sessions.orphan"
+            assert [row["name"] for row in body["dbs"]] == ["sessions.kept"]
+            assert not (base / "sessions.orphan.zvec").exists()
+            assert not (base / "sessions.orphan.meta.json").exists()
+
+            missing = await client.post("/api/rag/dbs/delete", json={"name": "no-such-db"})
+            assert missing.status == 400
+            assert "no-such-db" in (await missing.json())["error"]
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def _db_app(tmp_path, server, presets, active):
+    cfg = _cfg(server, watch_interval=0)
+    cfg.update({"preset": active, "presets": presets})
+    store.save({"rag": cfg})
+    service = rag.RagService(root_dir=tmp_path / "index")
+    app = web.Application()
+    app["rag"] = service
+    app["observer"] = SimpleNamespace()
+    search_anything.install(app)
+    return service, TestClient(TestServer(app))
+
+
+def test_renaming_a_db_moves_every_collection_and_repoints_its_readers(tmp_path):
+    """A DB rename moves each corpus's directory and sidecar to the new name.
+
+    Every preset that read the old name follows it -- the one that named
+    ``db`` and the one that read it through its model key alone -- so none
+    of them goes looking for the old directory and embeds the corpus again.
+    A preset reading another DB is left alone, and so is its secret
+    (claunch-r4796).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.old", dims=768, model="emb-a", model_key="old")
+        _write_store(base, "beads-abc.old", dims=768, model="emb-a", model_key="old")
+        (base / "all.old.meta.json").write_text("{}", encoding="utf-8")
+        _write_store(base, "sessions.other", dims=768, model="emb-b", model_key="other")
+        presets = [
+            {"id": "named", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "named-secret", "embedding_model": "emb-a", "db": "old"},
+            {"id": "by-model", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "model-secret", "embedding_model": "old"},
+            {"id": "elsewhere", "source": "custom", "base_url": "http://h:1/v1",
+             "api_key": "other-secret", "embedding_model": "emb-b", "db": "other"},
+        ]
+        service, client = _db_app(tmp_path, server, presets, "named")
+        await client.start_server()
+        try:
+            response = await client.post("/api/rag/dbs/rename",
+                                         json={"from": "old", "to": "Kept Vectors"})
+            assert response.status == 200, await response.text()
+            body = await response.json()
+            assert body["db"] == "kept-vectors"
+            assert body["presets"] == ["named", "by-model"]
+            assert (base / "sessions.kept-vectors.zvec").is_dir()
+            assert (base / "beads-abc.kept-vectors.zvec").is_dir()
+            assert (base / "sessions.kept-vectors.meta.json").is_file()
+            assert (base / "all.kept-vectors.meta.json").is_file()
+            assert not list(base.glob("*.old.*"))
+            assert (base / "sessions.other.zvec").is_dir()
+            stored = {p["id"]: p for p in store.rag_presets()}
+            assert stored["named"]["db"] == "kept-vectors"
+            assert stored["by-model"]["db"] == "kept-vectors"
+            assert stored["elsewhere"]["db"] == "other"
+            assert stored["named"]["api_key"] == "named-secret"
+            assert store.rag_config()["db"] == "kept-vectors"
+            names = {row["identity"] for row in body["dbs"]}
+            assert names == {"kept-vectors", "other"}
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_db_rename_refuses_a_taken_unknown_or_empty_name(tmp_path):
+    """Nothing moves when the target exists on disk or is already named by
+    another preset, the source does not exist, or the new name slugs to
+    nothing (claunch-r4796)."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.a", dims=768, model="emb-a", model_key="a")
+        _write_store(base, "sessions.b", dims=768, model="emb-a", model_key="b")
+        presets = [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-a", "db": "a"},
+                   {"id": "q", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-q", "db": "planned"}]
+        service, client = _db_app(tmp_path, server, presets, "p")
+        await client.start_server()
+        try:
+            # q names "planned" before anything was embedded there: moving a's
+            # vectors under that name would hand q another model's vectors.
+            claimed = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "planned"})
+            assert claimed.status == 400
+            assert "q" in (await claimed.json())["error"]
+            assert not (base / "sessions.planned.zvec").exists()
+            taken = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "b"})
+            assert taken.status == 400
+            assert "b" in (await taken.json())["error"]
+            missing = await client.post("/api/rag/dbs/rename", json={"from": "zz", "to": "c"})
+            assert missing.status == 400
+            assert "zz" in (await missing.json())["error"]
+            empty = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "!!!"})
+            assert empty.status == 400
+            same = await client.post("/api/rag/dbs/rename", json={"from": "a", "to": "A"})
+            assert same.status == 400
+            assert (base / "sessions.a.zvec").is_dir() and (base / "sessions.b.zvec").is_dir()
+            assert store.rag_presets()[0]["db"] == "a"
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_db_by_name_takes_all_its_collections_unless_read(tmp_path):
+    """``db`` deletes one DB as the panel lists it: every corpus's
+    collection and sidecar, refused while a preset reads it
+    (claunch-r4796)."""
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        _write_store(base, "sessions.orphan", dims=768, model="emb-a", model_key="orphan")
+        _write_store(base, "beads-abc.orphan", dims=768, model="emb-a", model_key="orphan")
+        (base / "all.orphan.meta.json").write_text("{}", encoding="utf-8")
+        presets = [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                    "api_key": "s", "embedding_model": "emb-a", "db": "kept"}]
+        service, client = _db_app(tmp_path, server, presets, "p")
+        await client.start_server()
+        try:
+            refused = await client.post("/api/rag/dbs/delete", json={"db": "kept"})
+            assert refused.status == 400
+            assert "p" in (await refused.json())["error"]
+            assert (base / "sessions.kept.zvec").is_dir()
+            removed = await client.post("/api/rag/dbs/delete", json={"db": "orphan"})
+            assert removed.status == 200
+            assert not list(base.glob("*.orphan.*"))
+            assert [row["name"] for row in (await removed.json())["dbs"]] == ["sessions.kept"]
+            missing = await client.post("/api/rag/dbs/delete", json={"db": "orphan"})
+            assert missing.status == 400
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_a_preset_adopts_is_refused(tmp_path):
+    """The pre-preset ``<corpus>.zvec`` is adopted, not named.
+
+    Its sidecar carries no ``model_key`` and the directory carries no
+    identity suffix, so a name-based pairing found no reader beside it and
+    the delete removed a collection the preset was answering from
+    (claunch-fhs7f.1 review). The reader is the path ``_index_path`` would
+    open, which is where the adoption rule lives.
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb-a")
+        cfg = _cfg(server, watch_interval=0)
+        cfg.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a"}],
+        })
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == ["p"]
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "p" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_deleting_a_legacy_collection_the_direct_config_reads_is_refused(tmp_path):
+    """A config with no preset reads the legacy store when its model matches.
+
+    ``db`` is empty on the legacy branch, so the guard cannot ask
+    ``cfg.db`` alone — the resolved path says the running service is on that
+    collection (claunch-fhs7f.1 review).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions", dims=768, model="emb")
+        store.save({"rag": _cfg(server, watch_interval=0)})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            listed = await client.get("/api/rag/dbs")
+            rows = {row["name"]: row for row in (await listed.json())["dbs"]}
+            assert rows["sessions"]["presets"] == []
+            assert rows["sessions"]["in_use"] is True
+
+            refused = await client.post("/api/rag/dbs/delete", json={"name": "sessions"})
+            assert refused.status == 400
+            assert "sessions" in (await refused.json())["error"]
+            assert (base / "sessions.zvec").is_dir()
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
     asyncio.run(run())

@@ -21,15 +21,25 @@ embeddings call; the reranker costs about a quarter second per document on
 the measured endpoint, which is why it scores a dozen and not the board.
 
 Indexes are machine-local derived data under ``<daemon dir>/rag/`` — the same
-rule ``briefings.json`` follows: ``~/.claude-launcher/.claunch.yaml`` carries configuration and
+rule the briefing cache (``sessions/<name>/briefing.json``) follows: ``~/.claude-launcher/.claunch.yaml`` carries configuration and
 is synced, this directory carries what a reindex can rebuild and is not. Each
-corpus is a zvec collection (``<key>.zvec/``) beside a small sidecar
+corpus is a zvec collection (``<key>.zvec/``, or ``<key>.<model-key>.zvec/``
+while a preset is active) beside a small sidecar
 (``<key>.meta.json``) holding the model, width and signature it was built
-under. Each entry remembers a content hash, so a sync embeds only what changed
+under. The ``model-key`` half is the store's identity: two presets that reach
+the same real model through different providers or name aliases share one
+collection by sharing one ``model_key``, so switching between them reuses the
+vectors instead of embedding the corpus again (claunch-7m5v8). Which model
+answers is recorded in ``active.json`` under the same directory, rewritten
+whenever the resolved selection changes. Each entry remembers a content hash,
+so a sync embeds only what changed
 since the last one; a full first index of a 778-issue board was measured at
 10-12 minutes and an incremental one at a second or two per changed issue,
 which is why syncing is a background task and a search reports how much of the
-corpus it covered rather than waiting for all of it.
+corpus it covered rather than waiting for all of it. Backfill requests are
+paced by ``rate_limit`` — a sliding window of five minutes the configured
+number of embedding requests may carry — so a corpus catch-up does not land
+on the endpoint as one burst (query embeddings are never delayed by it).
 
 A collection holds an exclusive lock on its directory — it refuses a second
 open even for reading — so one process at a time owns an index. That is the
@@ -50,7 +60,11 @@ times over embeds each changed document once.
 
 Configuration is the ``rag:`` block (``store.rag_config``); its ``source``
 says whether the endpoint and key are typed into the block (``custom``) or
-come from a claunch profile's backend (``profile``). An empty api key
+come from a claunch profile's backend (``profile``). A block may instead point
+``preset:`` at one of its ``presets:`` — saved connections under an id —
+and the named preset's fields are then the connection in force; its
+``model_key``, explicit or derived from its ``embedding_model``, decides
+which store a corpus opens. An empty api key
 means the feature is off: every producer is a no-op and the queue stays empty
 until the block is filled in, at which point the watcher's next tick catches
 up. The key leaves this module only as the ``Authorization`` header of the
@@ -86,7 +100,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTupl
 import aiohttp
 
 from .. import atomic, beads_db, cli_beads, routing, store
-from . import paths, pools, search_keywords
+from . import llm_usage, paths, pools, search_keywords
 
 try:
     import ssl as _ssl
@@ -279,18 +293,53 @@ class RagClient:
             timeout=aiohttp.ClientTimeout(total=self.timeout),
         )
 
-    async def _post(self, http: aiohttp.ClientSession, path: str, body: dict) -> Any:
+    async def _post(self, http: aiohttp.ClientSession, path: str, body: dict,
+                    meter: Optional[Callable[..., None]] = None) -> Any:
+        started = time.monotonic()
+
+        def done(data=None, error: str = "") -> None:
+            if meter is not None:
+                meter(usage=(data.get("usage") if isinstance(data, dict) else None),
+                      ok=not error, error=error, seconds=time.monotonic() - started)
+
         try:
             async with http.post(self.base + path, json=body) as resp:
                 if resp.status != 200:
                     snippet = (await resp.text())[:300]
+                    done(error=f"HTTP {resp.status}")
                     raise RagError(f"rag endpoint answered {resp.status} on {path}: {snippet}")
-                return await resp.json(content_type=None)
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError as exc:
+                    done(error="response is not JSON")
+                    raise RagError(f"rag response on {path} is not JSON: {exc}") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            done(error=type(exc).__name__)
             raise RagError(f"rag call failed on {path}: {exc}") from exc
+        done(data)
+        return data
 
-    async def embed(self, texts: List[str]) -> List[array]:
-        """One unit vector per text, in order; batched by ``batch``."""
+    def _meter(self, feature: str, model: str, purpose: str,
+               owners: Optional[List[str]] = None,
+               weights: Optional[List[int]] = None) -> Callable[..., None]:
+        """The ledger write for one request (claunch-60y0d): a request whose
+        inputs belong to several sessions is shared out over them by length."""
+        common = {"provider": str(self.cfg.get("provider") or ""), "endpoint": self.base,
+                  "model": model, "purpose": purpose}
+
+        def meter(usage=None, **kw) -> None:
+            if owners and weights:
+                llm_usage.record_shared(feature, owners, weights, usage, **common, **kw)
+            else:
+                llm_usage.record(feature, usage=usage, **common, **kw)
+        return meter
+
+    async def embed(self, texts: List[str], *, owners: Optional[List[str]] = None,
+                    purpose: str = "index") -> List[array]:
+        """One unit vector per text, in order; batched by ``batch``.
+
+        ``owners`` names, per text, the session it belongs to (``""`` for
+        none); the call's tokens are metered against them."""
         if not texts:
             return []
         out: List[array] = []
@@ -301,7 +350,11 @@ class RagClient:
                 dims = int(self.cfg.get("dimensions") or 0)
                 if dims > 0:
                     body["dimensions"] = dims
-                data = await self._post(http, "/embeddings", body)
+                meter = self._meter(
+                    "embedding", str(self.cfg["embedding_model"]), purpose,
+                    owners[start:start + self.batch] if owners else None,
+                    [len(t) for t in chunk])
+                data = await self._post(http, "/embeddings", body, meter)
                 try:
                     rows = sorted(data["data"], key=lambda r: int(r.get("index", 0)))
                     vecs = [unit(r["embedding"]) for r in rows]
@@ -324,8 +377,9 @@ class RagClient:
             "documents": documents,
             "top_n": max(1, min(top_n, len(documents))),
         }
+        meter = self._meter("rerank", str(self.cfg["rerank_model"]), "query")
         async with self._session() as http:
-            data = await self._post(http, "/rerank", body)
+            data = await self._post(http, "/rerank", body, meter)
         # Cohere and Jina answer in ``results``; Fireworks answers the same rows
         # in ``data`` (measured 2026-10-22, claunch-gm0b9).
         try:
@@ -345,6 +399,24 @@ class Doc(NamedTuple):
     hash: str
     chunks: List[str]
     meta: dict
+
+
+def doc_session(doc: Doc) -> str:
+    """The session a document is about, for metering its embedding.
+
+    A session document names it (``name``); a record or an issue lists the
+    sessions it belongs to (``sessions``) and the first is taken; an issue no
+    session matched falls back to its assignee. ``""`` when none applies.
+    """
+    meta = doc.meta if isinstance(doc.meta, dict) else {}
+    owners = meta.get("sessions")
+    if isinstance(owners, list):
+        for owner in owners:
+            if isinstance(owner, dict) and owner.get("name"):
+                return str(owner["name"])
+    if meta.get("kind") in (None, "session") and meta.get("name"):
+        return str(meta["name"])
+    return str(meta.get("assignee") or "")
 
 
 def content_hash(*parts: Optional[str]) -> str:
@@ -512,14 +584,36 @@ def _writing(fn):
     return run
 
 
+def _collection_dims(col) -> int:
+    """The vector width the collection itself was created with, or 0.
+
+    The sidecar beside a collection records a width, but it is a file a later
+    run can rewrite; the collection's schema is fixed when its vectors are
+    written. Asking the engine is what keeps a rewritten sidecar from making a
+    query of another width look compatible (claunch-rzepk.1).
+    """
+    try:
+        vectors = col.schema.vectors
+    except Exception:  # pragma: no cover - a collection we cannot describe
+        return 0
+    for vector in vectors or []:
+        try:
+            width = int(getattr(vector, "dimension", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - unexpected schema
+            continue
+        if width:
+            return width
+    return 0
+
+
 class VectorIndex:
     """One corpus's vectors, held in a zvec collection.
 
     Keyed by document id; each entry keeps the content hash it was embedded
     from, how many chunks it has, and the display metadata a result needs, so
-    a search answers from the index alone. ``model``/``dims`` are recorded in
-    a sidecar and a collection made under another model is discarded rather
-    than mixed.
+    a search answers from the index alone. ``model``/``model_key``/``dims``
+    are recorded in a sidecar and a collection made under another identity is
+    discarded rather than mixed.
 
     The vectors themselves stay in the collection. Ranking is a matrix
     operation inside zvec rather than a Python loop over every stored vector:
@@ -529,11 +623,27 @@ class VectorIndex:
     :meth:`neighbors` fetches the one vector it needs (0.3 ms).
     """
 
-    def __init__(self, path: Path, *, model: str, dims: int, signature: str = "") -> None:
+    def __init__(self, path: Path, *, model: str, dims: int, signature: str = "",
+                 model_key: str = "") -> None:
         self.signature = signature
         self.path = path
         self.model = model
+        #: The store identity (``rag.model_key``): which collection a model
+        #: opens is decided by this, so two aliases of one real model -- same
+        #: key through different providers or names -- keep using the vectors
+        #: they already have instead of re-embedding the corpus.
+        self.model_key = model_key
         self.dims = dims
+        #: The width the collection on disk actually holds, learned when it is
+        #: opened (:meth:`load`). ``dims`` is the configured width (0 means the
+        #: model's own); this is what the stored vectors were written with, and
+        #: the value a query or a write is checked against.
+        self.index_dims = 0
+        #: Why this collection cannot serve the configured model, when the
+        #: vectors on disk were written at another width. Empty while the index
+        #: is usable; a query or a write raises it instead of letting the
+        #: storage engine answer with its own error (claunch-rzepk.1).
+        self.stale_reason = ""
         self.entries: Dict[str, Entry] = {}
         self.keywords = search_keywords.KeywordIndex()
         self.updated_at: Optional[str] = None
@@ -631,6 +741,29 @@ class VectorIndex:
         self._col = zvec.create_and_open(path=str(self.path), schema=schema)
         return self._col
 
+    def _learn_index_dims(self, col) -> int:
+        """The width the open collection actually holds.
+
+        Read from the engine's schema, not from the sidecar: the sidecar is a
+        file a later model's ``save`` can rewrite beside vectors it did not
+        write, and the collection's width is fixed when those vectors were
+        written.
+        """
+        with self._mutex:
+            if not self.index_dims and col is not None:
+                self.index_dims = _collection_dims(col)
+            return self.index_dims
+
+    def _width_conflict(self, produced: int) -> RagError:
+        """The collection's width against the width this model produces."""
+        built = self.index_dims or self.dims
+        return RagError(
+            f"rag: index {self.path.name} holds {built}-dimension vectors but this "
+            f"model embeds at {produced} dimensions — the embedding model changed "
+            f"under the collection; rebuild the index (`claunch rag reindex`) or "
+            f"point the preset at a DB this model built"
+        )
+
     def load(self) -> None:
         with self._mutex:
             if self._loaded or self._closed:
@@ -647,11 +780,38 @@ class VectorIndex:
         file_dims = int(data.get("dims") or 0)
         # dims 0 means "the model's own width": adopt whatever the file was
         # made with. A configured width that differs is another index.
-        if data.get("model") != self.model or (self.dims and file_dims != self.dims) or (self.signature and data.get("signature") != self.signature):
+        # Files written before model keys existed carry none; their identity
+        # is the model name's slug, which is exactly what a preset without an
+        # explicit key derives -- so a pre-preset collection reads as the
+        # same identity the first preset names.
+        file_key = str(data.get("model_key") or "") or store.rag_model_key_slug(
+            str(data.get("model") or ""))
+        # Identity first, from the sidecar alone: a collection of another
+        # model is another index, and opening it here would take its exclusive
+        # lock (a switch to a new model re-embeds into it instead).
+        if self.model_key:
+            if file_key != self.model_key:
+                return
+        elif (data.get("model") != self.model
+              or (self.signature and data.get("signature") != self.signature)):
+            return
+        if self.dims and file_dims != self.dims:
+            return
+        # The collection's own width, asked of the engine rather than taken
+        # from the sidecar: a width is fixed when the vectors are written, and
+        # a later model's save can rewrite the sidecar beside vectors it did
+        # not make. That disagreement is what let a 768-dimension query reach
+        # a 4096-dimension collection and come back as the engine's raw
+        # "dimension mismatch" (claunch-rzepk.1). Both facts are in hand
+        # before anything is answered, so the search names the disagreement
+        # instead of returning an empty list for it.
+        col = self._open(create=False)
+        built_dims = self._learn_index_dims(col)
+        if built_dims and self.dims and built_dims != self.dims:
+            self.stale_reason = str(self._width_conflict(self.dims))
             return
         if not self.dims:
-            self.dims = file_dims
-        col = self._open(create=False)
+            self.dims = built_dims or file_dims
         if col is None:
             return
         # One pass over the collection's fields rebuilds what a search needs
@@ -694,7 +854,14 @@ class VectorIndex:
         data = {
             "format": FORMAT,
             "model": self.model,
-            "dims": self.dims,
+            "model_key": self.model_key,
+            # The collection's width, when it has been opened: the sidecar
+            # describes the vectors beside it, and those were written at the
+            # width the collection was created with. Writing the configured
+            # width instead let a later model claim a collection it could not
+            # query, and the engine answered the mismatch itself
+            # (claunch-rzepk.1).
+            "dims": self.index_dims or self.dims,
             "signature": self.signature,
             "updated_at": self.updated_at,
         }
@@ -762,6 +929,11 @@ class VectorIndex:
             self.entries.clear()
             self.keywords = search_keywords.KeywordIndex()
             self._loaded = True
+            # The collection is gone, so its width and the refusal it raised
+            # are gone with it: a reindex creates it again at whatever width
+            # the current model produces.
+            self.index_dims = 0
+            self.stale_reason = ""
             self.updated_at = _now_iso()
 
     @_writing
@@ -777,6 +949,14 @@ class VectorIndex:
         col = self._open(create=True)
         if col is None:
             raise RagError("rag: index unavailable")
+        # An upsert into a collection of another width fails inside zvec and
+        # leaves the sync reporting the engine's sentence. Refused here, with
+        # what to do about it (claunch-rzepk.1).
+        built = self._learn_index_dims(col)
+        if self.stale_reason:
+            raise RagError(self.stale_reason)
+        if built and len(vecs[0]) != built:
+            raise self._width_conflict(len(vecs[0]))
         zvec = _zvec()
         meta = dict(doc.meta)
         text = json.dumps(meta, ensure_ascii=False)
@@ -838,9 +1018,17 @@ class VectorIndex:
     def rank(self, qvec: array, k: int, *, exclude: Iterable[str] = (),
              include: Optional[Iterable[str]] = None) -> List[Tuple[str, float]]:
         """The ``k`` best documents by their best chunk, best first."""
+        col = self._open(create=False)
+        built = self._learn_index_dims(col)
+        # A collection this model cannot use is named before the search runs:
+        # an empty list would read as "nothing matched" and the cause would
+        # stay hidden (claunch-rzepk.1).
+        if self.stale_reason:
+            raise RagError(self.stale_reason)
+        if built and len(qvec) != built:
+            raise self._width_conflict(len(qvec))
         if self.dims and len(qvec) != self.dims:
             raise RagError("embedding dimensions changed; rebuild the index")
-        col = self._open(create=False)
         if col is None or not self.entries:
             return []
         skip = set(exclude)
@@ -913,11 +1101,117 @@ class VectorIndex:
         return hits
 
 
-def _index_fits(index: Optional[VectorIndex], model: str, dims: int, signature: str) -> bool:
-    """Whether an open index was made under the settings now configured."""
+def _index_fits(index: Optional[VectorIndex], model: str, dims: int, signature: str,
+                model_key: str = "") -> bool:
+    """Whether an open index was made under the settings now configured.
+
+    With a ``model_key`` the identity decides: aliases of one real model
+    share a key and one collection, so the raw model name and endpoint are
+    allowed to differ. Without one, the pre-preset comparison stands.
+    """
     if index is None:
         return False
+    if model_key:
+        return index.model_key == model_key and not (dims and index.dims != dims)
     return index.model == model and index.signature == signature and not (dims and index.dims != dims)
+
+
+def _stored_meta(path: Path) -> Optional[dict]:
+    """The sidecar of a collection directory, when it is one of ours."""
+    try:
+        data = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("format") == FORMAT else None
+
+
+def rag_stores(base: Path) -> List[dict]:
+    """Every collection directory under ``base``, as the DB panel reads them.
+
+    A store is ``<corpus>.<name>.zvec``, or ``<corpus>.zvec`` for one built
+    before presets existed. Its sidecar carries the width and the model the
+    vectors were made with — the two facts a preset has to match before it
+    can use the collection (claunch-fhs7f.1). ``identity`` is the part a
+    preset's ``db`` names; it is empty for a pre-preset collection, which is
+    adopted by a preset whose key matches its model.
+    """
+    rows: List[dict] = []
+    try:
+        dirs = sorted(p for p in base.glob("*.zvec") if p.is_dir())
+    except OSError:
+        return rows
+    for path in dirs:
+        meta = _stored_meta(path) or {}
+        name = path.name[: -len(".zvec")]
+        corpus, _, identity = name.partition(".")
+        total = 0
+        try:
+            for child in path.rglob("*"):
+                if child.is_file():
+                    total += child.stat().st_size
+        except OSError:
+            total = 0
+        rows.append({
+            "name": name,
+            "corpus": corpus,
+            "identity": identity,
+            "path": str(path),
+            "dims": int(meta.get("dims") or 0),
+            "model": str(meta.get("model") or ""),
+            "model_key": str(meta.get("model_key") or ""),
+            "updated_at": meta.get("updated_at"),
+            "bytes": total,
+        })
+    return rows
+
+
+class _RateLimiter:
+    """A sliding window on embedding requests (see ``rag.rate_limit``).
+
+    One consumer task drains the sync queue, so a single uncorrelated
+    limiter inside the service is enough: each ``acquire`` waits until the
+    window has room for the caller's requests, then records them. A limit
+    of 0 disables the cap. The window is fixed at five minutes -- the unit
+    the configuration speaks in.
+    """
+
+    WINDOW = 300.0
+
+    def __init__(self) -> None:
+        self._times: List[float] = []
+
+    async def acquire(self, n: int, limit: int) -> None:
+        if limit <= 0 or n <= 0:
+            return
+        # A group larger than the cap can never fit the window as one
+        # admission (``len + n <= limit`` stays false even on an empty
+        # window), and the wait-index math below assumes ``n <= limit`` --
+        # slice oversized groups so each slice is admissible.
+        remaining = n
+        while remaining > 0:
+            step = min(remaining, limit)
+            await self._acquire(step, limit)
+            remaining -= step
+
+    async def _acquire(self, n: int, limit: int) -> None:
+        while True:
+            now = time.monotonic()
+            cutoff = now - self.WINDOW
+            self._times = [t for t in self._times if t > cutoff]
+            if len(self._times) + n <= limit:
+                self._times.extend([now] * n)
+                return
+            # Admitting n needs len + n - limit of the oldest stamps to age
+            # out; wait for the newest of those. n <= limit keeps the index
+            # inside the list.
+            k = len(self._times) + n - limit - 1
+            wait = self._times[k] + self.WINDOW - now
+            await asyncio.sleep(max(wait, 0.05))
+
+    def view(self) -> dict:
+        now = time.monotonic()
+        cutoff = now - self.WINDOW
+        return {"window_s": int(self.WINDOW), "recent": sum(1 for t in self._times if t > cutoff)}
 
 
 def _now_iso() -> str:
@@ -1033,6 +1327,13 @@ class RagService:
         self._in_flight: Optional[str] = None
         self._pending: Dict[str, Tuple[str, Optional[Path]]] = {}
         self._consumer: Optional[asyncio.Task] = None
+        # Backfill pause (claunch-fhs7f): while cleared, the consumer holds
+        # before dequeuing — queued keys and in-progress bookkeeping stay
+        # untouched, and a resume drains from where it stopped. Runtime
+        # state only: a daemon restart comes back unpaused.
+        self._backfill_paused: bool = False
+        self._resume: "asyncio.Event" = asyncio.Event()
+        self._resume.set()
         self._watcher: Optional[asyncio.Task] = None
         #: Board roots the watcher stats: every root a producer or a search
         #: ever named, plus the ones the board resolved for a session.
@@ -1041,6 +1342,11 @@ class RagService:
         #: Whether the last watcher tick saw the feature configured — the edge
         #: a later-filled ``rag:`` block is caught on.
         self._armed = False
+        #: Paces document backfills against ``rag.rate_limit`` (see the class).
+        self._limiter = _RateLimiter()
+        #: The last selection written to ``active.json`` -- compared to skip
+        #: rewriting a file whose content already matches.
+        self._active_recorded: Optional[dict] = None
         #: Set by :meth:`shutdown`; a hook that fires after it (a late board
         #: write) must not start a consumer on a loop that is closing.
         self._closed = False
@@ -1085,17 +1391,24 @@ class RagService:
         """
         key = self._key(kind, root)
         model = str(cfg.get("embedding_model") or "")
+        model_key = str(cfg.get("model_key") or "")
+        # The collection's identity: the preset's ``db`` when it names one,
+        # else the model key (claunch-fhs7f.1).
+        store_key = str(cfg.get("db") or "") or model_key
         dims = int(cfg.get("dimensions") or 0)
         signature = content_hash(str(cfg.get("base_url") or ""), model, str(dims))
         self._roots[key] = root
+        self._record_active(cfg)
         while True:
             index = self._indexes.get(key)
-            if _index_fits(index, model, dims, signature):
+            if _index_fits(index, model, dims, signature, store_key):
                 return index
             task = self._loading.get(key)
             if task is None:
                 base = self._root_dir if self._root_dir is not None else paths.rag_dir()
-                fresh = VectorIndex(base / f"{key}.zvec", model=model, dims=dims, signature=signature)
+                fresh = VectorIndex(
+                    self._index_path(base, key, cfg),
+                    model=model, dims=dims, signature=signature, model_key=store_key)
                 # Out of the table before the thread starts: the old
                 # collection is closed there, and nothing should pick it up
                 # meanwhile.
@@ -1106,6 +1419,96 @@ class RagService:
             # An open started under other settings is waited for and then
             # checked again, like the table above.
             await asyncio.shield(task)
+
+    def _index_path(self, base: Path, key: str, cfg: dict) -> Path:
+        """The collection directory for this corpus under the resolved model.
+
+        Without a preset the path is what it always was (``<key>.zvec``) —
+        existing collections keep serving. With one, the store's identity is
+        the preset's ``db`` when it names one and its ``model_key`` otherwise:
+        same key, same directory, so presets that reach the same real model
+        through different providers or name aliases reuse one collection
+        instead of embedding the corpus again, and a preset whose ``db``
+        outlives a model swap keeps reading the vectors it already has
+        (claunch-fhs7f.1). A preset whose key matches the collection built
+        before presets existed adopts that directory rather than starting a
+        second copy of the same model's vectors.
+        """
+        legacy = base / f"{key}.zvec"
+        slug = str(cfg.get("db") or cfg.get("model_key") or "").strip()
+        if not slug:
+            return legacy
+        slugged = base / f"{key}.{slug}.zvec"
+        if slugged.is_dir():
+            return slugged
+        dims = int(cfg.get("dimensions") or 0)
+        meta = _stored_meta(legacy)
+        meta_key = ""
+        if meta is not None:
+            meta_key = str(meta.get("model_key") or "") or store.rag_model_key_slug(
+                str(meta.get("model") or ""))
+        if meta_key == slug and (not dims or int(meta.get("dims") or 0) == dims):
+            return legacy
+        return slugged
+
+    def _record_active(self, cfg: dict) -> None:
+        """Remember which model answers, in ``<rag dir>/active.json``.
+
+        Written whenever the resolved selection changes (and once per boot):
+        which preset is in force, which embedding model and store identity it
+        resolved to, and through which connection. The record is how a switch
+        is read back later — the index files show a model name, this file
+        shows the selection that put it there.
+        """
+        if not store.rag_configured(cfg):
+            return
+        record = {
+            "model_key": str(cfg.get("model_key") or ""),
+            "db": str(cfg.get("db") or ""),
+            "preset": str(cfg.get("preset") or ""),
+            "embedding_model": str(cfg.get("embedding_model") or ""),
+            "source": str(cfg.get("source") or "custom"),
+            "connection": str(cfg.get("profile") or cfg.get("base_url") or ""),
+            "recorded_at": _now_iso(),
+        }
+        if record == self._active_recorded:
+            return
+        base = self._root_dir if self._root_dir is not None else paths.rag_dir()
+        path = base / "active.json"
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        stale = {
+            "model_key": str(existing.get("model_key") or ""),
+            "db": str(existing.get("db") or ""),
+            "preset": str(existing.get("preset") or ""),
+            "embedding_model": str(existing.get("embedding_model") or ""),
+            "source": str(existing.get("source") or "custom"),
+            "connection": str(existing.get("connection") or ""),
+            "recorded_at": str(existing.get("recorded_at") or ""),
+        } if isinstance(existing, dict) else None
+        if stale is not None and all(stale[k] == record[k] for k in (
+            "model_key", "db", "preset", "embedding_model", "source", "connection"
+        )):
+            record["recorded_at"] = stale["recorded_at"]
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            with atomic.scratch(path) as tmp:
+                tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+                atomic.replace(tmp, path)
+            self._active_recorded = record
+        except OSError:
+            pass
+
+    def active_record(self) -> dict:
+        """The last selection this daemon wrote, or ``{}`` before the first."""
+        base = self._root_dir if self._root_dir is not None else paths.rag_dir()
+        try:
+            data = json.loads((base / "active.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     async def _swap_index(self, key: str, old: Optional[VectorIndex], fresh: VectorIndex) -> VectorIndex:
         def work() -> None:
@@ -1209,14 +1612,15 @@ class RagService:
             # the error paths below write it.
             group: List[Doc] = []
             chunks = 0
+            limit = int(cfg.get("rate_limit") or 0)
             for doc in stale:
                 if group and chunks + len(doc.chunks) > batch:
-                    await self._embed_group(client, index, group, prog)
+                    await self._embed_group(client, index, group, prog, limit)
                     group, chunks = [], 0
                 group.append(doc)
                 chunks += len(doc.chunks)
             if group:
-                await self._embed_group(client, index, group, prog)
+                await self._embed_group(client, index, group, prog, limit)
             await index.save_soon()
         except RagError as exc:
             prog.error = str(exc)
@@ -1268,9 +1672,13 @@ class RagService:
             index.put(doc, vecs[pos:pos + n])
             pos += n
 
-    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress) -> None:
+    async def _embed_group(self, client: RagClient, index: VectorIndex, group: List[Doc], prog: Progress, limit: int = 0) -> None:
         texts = [c for d in group for c in d.chunks]
-        vecs = await client.embed(texts)
+        # One client.embed is one HTTP request per batch slice; the limiter
+        # counts requests, not texts, so a group pays for the calls it makes.
+        await self._limiter.acquire(math.ceil(len(texts) / max(1, int(client.batch or 1))), limit)
+        owners = [doc_session(d) for d in group for _ in d.chunks]
+        vecs = await client.embed(texts, owners=owners)
         await pools.background(self._put_group, index, group, vecs)
         prog.indexed += len(group)
         prog.pending = max(0, prog.pending - len(group))
@@ -1434,9 +1842,41 @@ class RagService:
         if self._consumer is None or self._consumer.done():
             self._consumer = asyncio.get_running_loop().create_task(self._consume_loop())
 
+    def pause_backfill(self) -> bool:
+        """Hold the consumer before it dequeues the next key.
+
+        Keys already queued keep their order and wait; the key a pass is
+        mid-flight on finishes its pass. Returns the resulting paused state
+        (always ``True``).
+        """
+        self._backfill_paused = True
+        self._resume.clear()
+        return True
+
+    def resume_backfill(self) -> bool:
+        """Let the consumer drain the queue again; returns the resulting
+        paused state (always ``False``)."""
+        self._backfill_paused = False
+        self._resume.set()
+        return False
+
+    def backfill_paused(self) -> bool:
+        return self._backfill_paused
+
     async def _consume_loop(self) -> None:
         while True:
+            # Held here, not mid-pass: a pause never cancels embedding work
+            # in flight, it only stops the next key from starting.
+            await self._resume.wait()
             key = await self._queue.get()
+            # Re-check after dequeue: an idle consumer parks inside get(),
+            # so a pause that arrives in that window has already let this
+            # key through the gate above. Without this second wait the pass
+            # would start while paused — measured live by the claunch-fhs7f
+            # peer review (enqueue on a paused, parked consumer ran
+            # immediately). The key stays held here, keeping its order,
+            # until a resume lets the loop proceed.
+            await self._resume.wait()
             # Out of pending BEFORE the pass runs: an enqueue that lands while
             # this pass reads the corpus queues the key again, behind it.
             kind, root = self._pending.pop(key, (None, None))
@@ -1570,7 +2010,7 @@ class RagService:
         if hit is not None:
             self._qvecs.move_to_end(key)
             return hit, True
-        vec = (await client.embed([query]))[0]
+        vec = (await client.embed([query], purpose="query"))[0]
         self._qvecs[key] = vec
         while len(self._qvecs) > QUERY_CACHE:
             self._qvecs.popitem(last=False)
@@ -1905,7 +2345,8 @@ class RagService:
             if match is None:
                 return {"id": issue_id, "results": [], "index": prog.view(), "indexed": False}
             doc = issue_doc(match)
-            vecs = await self._client(cfg).embed(doc.chunks)
+            vecs = await self._client(cfg).embed(
+                doc.chunks, owners=[doc_session(doc)] * len(doc.chunks))
             index.put(doc, vecs)
             await index.save_soon()
         pairs = await asyncio.to_thread(index.neighbors, issue_id, limit)
@@ -1918,6 +2359,89 @@ class RagService:
             row.update(entry.meta)
             results.append(row)
         return {"id": issue_id, "results": results, "index": prog.view(), "indexed": True}
+
+    # -- self test -------------------------------------------------------- #
+    async def self_test(self, kind: str, root: Optional[Path] = None, *,
+                        sample: int = 20, threshold: float = 0.5,
+                        top_k: int = 5) -> dict:
+        """Sample the corpus and check each picked entry retrieves itself
+        within ``top_k`` at a similarity of at least ``threshold``.
+
+        The question this answers: does the store the active model opened
+        actually retrieve its own entries with confident similarity — the
+        check to run after switching presets, when the vectors came from a
+        backfill under a model whose quality is being compared. Each sampled
+        document's first chunk is embedded as a query (the query path, which
+        the rate limiter never delays) and ranked; the pass criterion is the
+        document itself appearing in the top ``top_k`` at ``threshold`` or
+        above. Identical text embeds to (near) the unit vector, so a healthy
+        index scores self-hits close to 1.0 — a collapse toward the threshold
+        says the store and the model disagree.
+
+        Raises :class:`RagError` when the feature is unconfigured or the
+        corpus has nothing to sample.
+        """
+        cfg = self.config()
+        if not store.rag_configured(cfg):
+            raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
+        if kind not in KINDS:
+            raise ValueError(f"unknown corpus {kind!r}")
+        try:
+            sample = max(1, min(int(sample), 200))
+        except (TypeError, ValueError):
+            sample = 20
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = 0.5
+        if not -1.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between -1 and 1")
+        try:
+            top_k = max(1, min(int(top_k), 50))
+        except (TypeError, ValueError):
+            top_k = 5
+        index = await self._index(kind, root, cfg)
+        docs = [d for d in await self._docs(kind, root) if d.chunks and d.chunks[0].strip()]
+        if not docs:
+            raise RagError(f"rag: corpus {self._key(kind, root)} has no documents to sample")
+        # A deterministic spread over the corpus rather than a random pick:
+        # re-running the test over the same index measures the same entries.
+        step = len(docs) / sample
+        picked = [docs[int(i * step)] for i in range(min(sample, len(docs)))]
+        client = self._client(cfg)
+        scores: List[float] = []
+        failures = []
+        for doc in picked:
+            qvec = (await client.embed([doc.chunks[0]], purpose="self-test"))[0]
+            hits = index.rank(qvec, top_k)
+            hit_scores = dict(hits)
+            score = hit_scores.get(doc.id)
+            scores.append(score if score is not None else 0.0)
+            if score is None or score < threshold:
+                failures.append({
+                    "id": doc.id,
+                    "score": None if score is None else round(score, 4),
+                    "top": [{"id": d, "score": round(s, 4)} for d, s in hits[:3]],
+                })
+        ordered = sorted(scores)
+        return {
+            "key": self._key(kind, root),
+            "model_key": str(cfg.get("model_key") or ""),
+            "preset": str(cfg.get("preset") or ""),
+            "embedding_model": str(cfg.get("embedding_model") or ""),
+            "sampled": len(picked),
+            "passed": len(picked) - len(failures),
+            "failed": len(failures),
+            "threshold": threshold,
+            "top_k": top_k,
+            "similarity": {
+                "min": round(ordered[0], 4),
+                "median": round(ordered[len(ordered) // 2], 4),
+                "max": round(ordered[-1], 4),
+            },
+            "failures": failures,
+            "tested_at": _now_iso(),
+        }
 
     # -- status --------------------------------------------------------- #
     def status(self) -> dict:
@@ -1950,8 +2474,15 @@ class RagService:
             "rerank_model": cfg.get("rerank_model") or "",
             "verify_tls": bool(cfg.get("verify_tls", True)),
             "dimensions": int(cfg.get("dimensions") or 0),
+            "rate_limit": int(cfg.get("rate_limit") or 0),
+            "preset": cfg.get("preset") or "",
+            "model_key": cfg.get("model_key") or "",
+            "db": cfg.get("db") or "",
+            "active": self.active_record(),
+            "rate": self._limiter.view(),
             "indexes": indexes,
             "queue": self.queue_view(),
+            "backfill_paused": self._backfill_paused,
         }
 
 

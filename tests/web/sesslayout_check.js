@@ -124,7 +124,7 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-vmbtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-vmbtn", "term-wrapupbtn", "term-planbtn"]) nodes[id] = node(id);
   const body = node("body");
   const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [], cleared: [] };
   const ctx = {};
@@ -417,6 +417,13 @@ check("the key carries the base path",
         && w.nodes["term-rebrief"].attrs["aria-pressed"] === "true"
         && w.nodes["term-categorybtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
   check("...and the packs choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "packs");
+  // The wrap-up drafts pane (✎ wrap-up, claunch-ar8jn) is another.
+  w.ctx.setSessLayout("s15", { pane: "wrapup" });
+  check("the wrap-up pane opens with the wrap-up view and lights ✎ only",
+        w.calls.kinds[w.calls.kinds.length - 1] === "wrapup"
+        && w.nodes["term-wrapupbtn"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-rebrief"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  check("...and the wrap-up choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "wrapup");
   w.ctx.setSessLayout("s15", { pane: "sims" });
   // A pi-durable session's chart (◇) is a third content of the same pane.
   w.ctx.setSessLayout("s15", { pane: "chart" });

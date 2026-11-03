@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .. import digests, prompt_packs, store, workspaces
 from ..cflow import engine as cflow_engine, state as cflow_state
-from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, session_packs, wallclock
+from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal, session_fault, session_packs, wallclock
 from .session import STATUS_BUSY, delivery_wake
 
 log = logging.getLogger("claunch.daemon.session-reminder")
@@ -582,6 +582,19 @@ class SessionReminderService:
             return bool(reader())
         return bool(getattr(getattr(session, "sdef", None), "reminder_paused", False))
 
+    def session_faulted(self, name: str) -> bool:
+        """Whether ``name`` is stopped by an active session fault
+        (:mod:`session_fault`: a usage limit, a rejected login ...). Such a
+        harness answers every typed reminder with the same fault line, so no
+        repeating source is delivered to it until the fault's window ends
+        (claunch-ijot0), or its longer hold when the fault keeps coming back
+        (claunch-16j5v)."""
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - an unknown session has no fault
+            return False
+        return session_fault.holds_notices(session)
+
     def _rearm_session(self, name: str, now: Optional[float] = None) -> List[str]:
         """Re-arm every repeating source currently held for one session."""
         stamp = time.monotonic() if now is None else now
@@ -1051,13 +1064,13 @@ class SessionReminderService:
         for cwd, scope, block, kind in cflow_due:
             if kind == "signal":
                 await self._deliver(cwd, scope, block, kind)
-            elif not self.session_paused(scope):
+            elif not self.session_paused(scope) and not self.session_faulted(scope):
                 reminders[scope] = (cwd, block)
 
         for name in sorted(
             set(reminders) | set(roles_due) | set(packs_due) | goals_due
         ):
-            if self.session_paused(name):
+            if self.session_paused(name) or self.session_faulted(name):
                 continue
             cflow_item = reminders.get(name)
             if cflow_item is not None:

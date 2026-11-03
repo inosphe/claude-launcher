@@ -355,6 +355,9 @@ body:
   seq:
     - id: rounds
       loop:
+        # 이 루프의 반복이 곧 회차다(claunch-oxmso.1). 표시용 round_now가 이
+        # 선언을 읽는다 — 회차가 아닌 감시·대기 루프에는 붙이지 않는다.
+        rounds: true
         while: "true"
         max: 50
         do:

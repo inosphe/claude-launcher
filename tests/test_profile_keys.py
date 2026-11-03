@@ -202,16 +202,144 @@ def test_rotation_starts_at_the_first_key_when_the_cursor_is_gone(home):
 # --- random -----------------------------------------------------------------
 
 
-def test_random_picks_inside_the_pool(home, monkeypatch):
-    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
-    profile_keys.set_strategy(p, "random")
+def test_random_takes_the_stored_draw_and_stores_the_next(home, monkeypatch):
+    """The draw the form shows is the key the launch takes (claunch-i985h).
 
-    picks = iter([0, 2, 2])
+    A random pool stores its draw, so `set_strategy` draws one, `peek` names
+    it, the launch spends exactly it, and the launch stores the next draw for
+    the following launch.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
+    picks = iter([1, 2])  # set_strategy draws 1; the launch then draws 2
     monkeypatch.setattr(profile_keys.random, "randrange", lambda n: next(picks))
 
-    assert profile_keys.select_for_launch(p).key.token == "sk-AAAA1111BBBB"
-    assert profile_keys.select_for_launch(p).key.token == "sk-EEEE3333FFFF"
-    assert profile_keys.select_for_launch(p).key.token == "sk-EEEE3333FFFF"
+    profile_keys.set_strategy(p, "random")
+    preview = profile_keys.peek(p)
+    assert preview.key.token == "sk-CCCC2222DDDD"
+    assert preview.exact is True
+
+    assert profile_keys.select_for_launch(p).key.token == "sk-CCCC2222DDDD"
+    # The draw just spent was replaced, so the next launch is nameable again.
+    assert profile_keys.peek(p).key.token == "sk-EEEE3333FFFF"
+
+
+def test_random_does_not_redraw_on_a_preview(home, monkeypatch):
+    """Opening the form must not consume or change the draw."""
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    calls = []
+    monkeypatch.setattr(
+        profile_keys.random, "randrange", lambda n: calls.append(n) or 1
+    )
+    profile_keys.set_strategy(p, "random")
+    before = profile_keys.load(p).pick
+
+    for _ in range(3):
+        assert profile_keys.peek(p).key.id == before
+
+    assert len(calls) == 1  # only the set_strategy draw
+    assert profile_keys.load(p).pick == before
+
+
+def test_roll_redraws_a_random_pool_as_often_as_asked(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
+    profile_keys.set_strategy(p, "random")
+    draws = iter([0, 2, 0])
+    monkeypatch.setattr(profile_keys.random, "randrange", lambda n: next(draws))
+
+    first = profile_keys.roll(p)
+    assert first.key.token == "sk-AAAA1111BBBB"
+    assert profile_keys.load(p).pick == first.key.id
+
+    second = profile_keys.roll(p)
+    assert second.key.token == "sk-EEEE3333FFFF"
+    # What the roll left is what the next launch takes.
+    assert profile_keys.peek(p).key.id == second.key.id
+    assert profile_keys.select_for_launch(p).key.id == second.key.id
+
+
+def test_roll_refuses_a_pool_that_is_not_random(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    profile_keys.set_strategy(p, "rotation")
+
+    with pytest.raises(profile_keys.KeysError, match="random strategy"):
+        profile_keys.roll(p)
+
+
+# --- manual -----------------------------------------------------------------
+
+
+def test_manual_takes_the_named_key_every_launch(home):
+    """manual is the pool strategy form of the session pin: one key, every launch."""
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
+    target = profile_keys.load(p).keys[1]
+
+    pool = profile_keys.set_strategy(p, "manual", target.id)
+    assert pool.pick == target.id
+
+    preview = profile_keys.peek(p)
+    assert preview.key.id == target.id
+    assert preview.strategy == "manual"
+    assert preview.exact is True
+
+    # Unlike rotation, a manual pick is not consumed: the second launch takes
+    # the same key, which is what the form's NEXT marker promises.
+    assert profile_keys.select_for_launch(p).key.id == target.id
+    assert profile_keys.select_for_launch(p).key.id == target.id
+    assert profile_keys.load(p).pick == target.id
+
+
+def test_manual_accepts_a_one_based_position_like_the_cli(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    profile_keys.set_strategy(p, "manual", "2")
+    assert profile_keys.peek(p).key.token == "sk-CCCC2222DDDD"
+
+
+def test_manual_without_a_key_names_the_key_the_token_file_holds(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    # `add` leaves the last key effective, so switching to manual names it.
+    pool = profile_keys.set_strategy(p, "manual")
+    assert pool.pick == profile_keys.load(p).keys[1].id
+
+
+def test_manual_keeps_its_pick_across_another_manual_set(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    first = profile_keys.load(p).keys[0]
+    profile_keys.set_strategy(p, "manual", first.id)
+
+    pool = profile_keys.set_strategy(p, "manual")  # no key: keep the pick
+
+    assert pool.pick == first.id
+
+
+def test_manual_key_removed_falls_back_to_rotation_and_says_so(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    target = profile_keys.load(p).keys[1]
+    profile_keys.set_strategy(p, "manual", target.id)
+
+    profile_keys.remove(p, target.id)
+
+    selection = profile_keys.select_for_launch(p)
+    assert selection.strategy == "rotation"
+    assert target.id in selection.fallback
+
+
+def test_manual_refuses_a_key_the_pool_does_not_hold(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+
+    with pytest.raises(profile_keys.KeysError, match="no key"):
+        profile_keys.set_strategy(p, "manual", "k-nope")
+
+
+def test_the_pick_is_written_only_for_the_strategies_that_read_it(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    profile_keys.set_strategy(p, "manual", profile_keys.load(p).keys[0].id)
+    assert "pick" in json.loads(profile_keys.path(p).read_text(encoding="utf-8"))
+
+    profile_keys.set_strategy(p, "rotation")
+
+    stored = json.loads(profile_keys.path(p).read_text(encoding="utf-8"))
+    assert "pick" not in stored
+    assert "pick" not in profile_keys.summary(p)
 
 
 # --- usage ------------------------------------------------------------------
@@ -258,6 +386,46 @@ def test_usage_strategy_falls_back_to_rotation_when_nothing_is_measurable(
     selection = profile_keys.select_for_launch(p)
 
     assert selection.key.token == "sk-AAAA1111BBBB"
+    assert selection.strategy == "rotation"
+    assert "could be read" in selection.fallback
+
+
+def test_peek_compares_the_readings_it_is_given_instead_of_the_account(
+    home, monkeypatch
+):
+    """The create form already holds every key's usage: name the pick for free.
+
+    ``peek(readings=…)`` must not fall back to the per-key account reader
+    (claunch-i985h): that is the read the form's answer already paid for, and
+    a second one per key is what kept the form from naming a usage pick.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
+    ids = [key.id for key in profile_keys.load(p).keys]
+    profile_keys.set_strategy(p, "usage-min")
+
+    def no_measure(_profile, _token):
+        raise AssertionError("peek must not read the accounts it was given")
+
+    monkeypatch.setattr(usage, "utilization_for_token", no_measure)
+
+    selection = profile_keys.peek(
+        p, readings={ids[0]: 80.0, ids[1]: 5.0, ids[2]: None}
+    )
+
+    assert selection.key.id == ids[1]
+    assert selection.strategy == "usage-min"
+    # No second account read happened, so this is not a promise about launch:
+    # the launch reads the accounts again and may land on another key. The
+    # create form turns this into its "as of this read" hedge.
+    assert selection.exact is False
+
+
+def test_peek_with_unreadable_readings_falls_back_to_rotation(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    profile_keys.set_strategy(p, "usage-max")
+
+    selection = profile_keys.peek(p, readings={})
+
     assert selection.strategy == "rotation"
     assert "could be read" in selection.fallback
 
@@ -649,6 +817,35 @@ def test_cli_add_list_and_strategy(home, capsys):
 
     assert cli.main(["keys", "strategy", "work", "usage-min"]) == 0
     assert "strategy usage-min" in capsys.readouterr().out
+
+
+def test_cli_strategy_manual_names_the_key_and_refuses_one_for_other_strategies(
+    home, capsys
+):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    second = profile_keys.load(p).keys[1]
+
+    assert cli.main(["keys", "strategy", "work", "manual", second.id]) == 0
+    out = capsys.readouterr().out
+    assert "strategy manual" in out
+    assert f"next {second.id}" in out
+    assert profile_keys.load(p).strategy == "manual"
+
+    with pytest.raises(SystemExit) as refused:
+        cli.main(["keys", "strategy", "work", "rotation", second.id])
+    assert "manual" in str(refused.value)
+
+
+def test_cli_roll_draws_the_key_the_next_launch_takes(home, capsys, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    profile_keys.set_strategy(p, "random")
+    monkeypatch.setattr(profile_keys.random, "randrange", lambda n: 0)
+
+    assert cli.main(["keys", "roll", "work"]) == 0
+    out = capsys.readouterr().out
+    drawn = profile_keys.load(p).keys[0]
+    assert drawn.id in out
+    assert profile_keys.peek(p).key.id == drawn.id
 
 
 def test_cli_select_is_a_dry_run_without_apply(home, capsys):
@@ -1375,3 +1572,49 @@ def test_login_and_display_paths_do_not_advance_the_pool(home):
     profile_keys.summary(p)
 
     assert profile_keys.load(p).keys[0].use_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# identifying the key a launch used (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_identify_names_the_key_holding_that_token(home):
+    """The token a launch handed the child names its key exactly.
+
+    The token file cannot answer this later — every launch of the pool writes
+    it — which is why the daemon records the answer at launch instead.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    pool = profile_keys.load(p)
+
+    assert profile_keys.identify(p, "sk-AAAA1111BBBB") == pool.keys[0].id
+    assert profile_keys.identify(p, "sk-CCCC2222DDDD") == pool.keys[1].id
+
+
+def test_identify_answers_none_for_a_token_the_pool_does_not_hold(home):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+
+    assert profile_keys.identify(p, "sk-nobody") is None
+    assert profile_keys.identify(p, "") is None
+    assert profile_keys.identify(p, None) is None
+
+
+def test_identify_of_a_child_names_its_ancestors_key(home):
+    """A child holding no token of its own launches on the ancestor's pool."""
+    parent = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", name="work")
+    child = profile.create("child")
+    lineage.set_parent(child, parent.name)
+    pool = profile_keys.load(parent)
+
+    assert profile_keys.identify(child, "sk-CCCC2222DDDD") == pool.keys[1].id
+
+
+def test_identify_writes_nothing(home):
+    """Reading which key a launch used must not spend a use or move a cursor."""
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    before = profile_keys.load(p)
+
+    profile_keys.identify(p, "sk-CCCC2222DDDD")
+
+    after = profile_keys.load(p)
+    assert after.cursor == before.cursor
+    assert [k.use_count for k in after.keys] == [k.use_count for k in before.keys]

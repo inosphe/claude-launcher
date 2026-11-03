@@ -2,6 +2,7 @@
 import asyncio
 import sys
 import time
+from datetime import datetime, timezone
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -90,6 +91,9 @@ def test_a_browser_copy_joins_the_history_without_touching_the_host(home):
             assert (await response.json())["item"]["text"] == "한글 <copy>\nline two"
             items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]
             assert [item["text"] for item in items] == ["한글 <copy>\nline two", "on the host"]
+            # The page relays host entries only (claunch-tn5ba): one it posted
+            # is on the browser's clipboard already.
+            assert [item["source"] for item in items] == ["browser", "host"]
             # The same text again moves to the front instead of repeating.
             await client.post("/api/clipboard", json={"text": "on the host"}, headers=headers)
             items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]
@@ -101,6 +105,40 @@ def test_a_browser_copy_joins_the_history_without_touching_the_host(home):
             assert (await client.post("/api/clipboard", json=too_long, headers=headers)).status == 413
             assert len((await (await client.get("/api/clipboard", headers=headers)).json())["items"]) == 2
         await mgr.shutdown_all()
+    asyncio.run(run())
+
+
+def test_the_history_carries_the_daemon_clock(home):
+    # A host-copy watch (claunch-tn5ba) ages ``copied_at`` against ``now``,
+    # the daemon's clock in the same response, so the browser's clock and its
+    # skew play no part.
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "secret", started_at=time.monotonic())
+        app["clipboard"].reader = lambda: "copied"
+        before = datetime.now(timezone.utc)  # the app's own sampler starts with the server
+        async with TestClient(TestServer(app)) as client:
+            headers = {"Authorization": "Bearer secret"}
+            doc = await (await client.get("/api/clipboard", headers=headers)).json()
+            now = datetime.fromisoformat(doc["now"])
+            copied_at = datetime.fromisoformat(doc["items"][0]["copied_at"])
+            assert before <= copied_at <= now <= datetime.now(timezone.utc)
+            assert doc["epoch"] == app["clipboard"].epoch
+        await mgr.shutdown_all()
+    asyncio.run(run())
+
+
+def test_a_new_history_counts_ids_in_a_new_epoch():
+    # A restarted daemon's History numbers its entries from one again; the
+    # epoch is what tells a watch that its held id is from the old run
+    # (claunch-tn5ba).
+    async def run():
+        first = clipboard.History(lambda: "copied")
+        second = clipboard.History(lambda: "copied")
+        await first.sample()
+        await second.sample()
+        assert first.items[0]["id"] == second.items[0]["id"] == "1"
+        assert first.epoch != second.epoch
     asyncio.run(run())
 
 

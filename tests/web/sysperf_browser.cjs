@@ -7,7 +7,8 @@
         numbers, is graded by its busiest number and links to #/sysperf;
      2. the badge polls the latest sample only (no ?history);
      3. clicking it opens the page, which reads the history once and draws
-        three line charts (CPU, Memory, Disk I/O with a read/write legend),
+        four line charts (CPU, Memory, Disk I/O with a read/write legend,
+        Sessions with running / hold / ended lines, claunch-cd6s9),
         the detail table, the per-drive capacity table and the log location;
      4. hovering a chart shows one tooltip listing every series;
      5. leaving the page drops it: the view is hidden again.
@@ -39,6 +40,7 @@ const history = Array.from({ length: 60 }, (_, i) => ({
   disk_read_bps: 1024 * 1024 * (1 + Math.cos(i / 5)), disk_write_bps: 300 * 1024,
   disk_busy_pct: 12, disks: { sda: { read_bps: 1048576, write_bps: 307200, busy_pct: 12 } },
   usage,
+  sessions: { running: 10 + (i % 7), hold: 3, ended: 20 + Math.floor(i / 10) },
 }));
 const latest = { ...history[history.length - 1], cpu_pct: 93.4 };
 const requests = [];
@@ -119,6 +121,12 @@ const server = http.createServer((req, res) => {
     await page.mouse.move(900, 700);
     await page.waitForFunction(() => document.getElementById("status-overlay").classList.contains("hidden"));
     assert.ok(requests.includes("?history=1"), "the page reads the history");
+    // The charts redraw on every badge poll (every POLL_MS), and a redraw
+    // wipes the hover tip — the sessions-tooltip read raced that and failed
+    // 40~50% of runs (claunch-l12u0 review). The badge assertions above are
+    // complete, so stop the poll for the hover steps: no further renders,
+    // the page keeps the samples it has.
+    await page.evaluate(() => globalThis.SysPerfPage.stopBadge());
     const view = await page.evaluate(() => {
       const v = document.getElementById("sysperf-view");
       return {
@@ -135,11 +143,12 @@ const server = http.createServer((req, res) => {
       };
     });
     assert.equal(view.hidden, false);
-    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Now", "Disk capacity", "Log"]);
-    assert.equal(view.charts, 3);
-    assert.equal(view.lines.length, 4, "CPU, memory, disk read and disk write");
-    assert.deepEqual(view.legend, ["Read", "Write"]);
+    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Sessions", "Now", "Disk capacity", "Log"]);
+    assert.equal(view.charts, 4);
+    assert.equal(view.lines.length, 7, "CPU, memory, disk read and write, three session lines");
+    assert.deepEqual(view.legend, ["Read", "Write", "Running", "Hold", "Ended (paused / killed)"]);
     assert.match(view.table, /of 8 logical CPUs/);
+    assert.match(view.table, /13 running, 3 hold, 25 ended/);
     assert.match(view.capacity, /\/mnt\/d/);
     assert.match(view.capacity, /95%/);
     assert.match(view.capacity, /45%/);
@@ -156,6 +165,41 @@ const server = http.createServer((req, res) => {
     await tip.waitFor({ state: "visible" });
     const rows = await tip.locator(".sysperf-tip-row span").allTextContents();
     assert.deepEqual(rows, ["Read", "Write"]);
+    // The hairline sits under the cursor at both ends of the plot, also when
+    // max-height caps the svg and centres the drawing (claunch-cd6s9.1).
+    const hair = page.locator("#sysperf-view .sysperf-card").nth(2).locator("line.sysperf-hair");
+    for (const px of [box.x + 1, box.x + box.width - 2]) {
+      await page.mouse.move(px, box.y + box.height / 2);
+      const line = await hair.boundingBox();
+      assert.ok(Math.abs(line.x + line.width / 2 - px) < 3,
+        `hairline at ${line.x + line.width / 2}, cursor at ${px}`);
+    }
+    // Read the sessions tip atomically: dispatch the hit rect's pointermove
+    // and read the tip it populates in the same task. A real-mouse hover
+    // raced the chart redraw, which wiped the tip between hover and read
+    // (claunch-l12u0 review: 40~50% failure); one synchronous task cannot be
+    // interleaved by a render.
+    const tipState = await page.evaluate(() => {
+      const card = document.querySelectorAll("#sysperf-view .sysperf-card")[3];
+      const hit = card.querySelector("rect.sysperf-hit");
+      const box = hit.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, clientX: box.x + box.width - 2,
+        clientY: box.y + box.height / 2, pointerId: 1, pointerType: "mouse", isPrimary: true };
+      hit.dispatchEvent(new PointerEvent("pointerover", opts));
+      hit.dispatchEvent(new PointerEvent("pointerenter", opts));
+      hit.dispatchEvent(new PointerEvent("pointermove", opts));
+      const tip = card.querySelector(".sysperf-tip");
+      return {
+        hidden: tip.classList.contains("hidden"),
+        rows: [...tip.querySelectorAll(".sysperf-tip-row span")].map((s) => s.textContent),
+        counts: [...tip.querySelectorAll(".sysperf-tip-row strong")].map((s) => s.textContent),
+      };
+    });
+    assert.equal(tipState.hidden, false, "the hover shows the sessions tip");
+    assert.deepEqual(tipState.rows, ["Running", "Hold", "Ended (paused / killed)"]);
+    assert.ok(tipState.counts.every((c) => /^\d+$/.test(c)),
+      `counts print as integers: ${tipState.counts}`);
+    assert.equal(tipState.counts[1], "3");
     if (process.env.SYSPERF_SHOT) await page.screenshot({ path: process.env.SYSPERF_SHOT, fullPage: true });
 
     // 5. leave

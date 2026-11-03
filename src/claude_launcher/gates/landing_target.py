@@ -144,8 +144,10 @@ def _render(doc: Optional[Dict[str, Any]], code: int, why: str = "") -> str:
         h = doc.get("holder") or {}
         where = f"{h.get('cwd')} {h.get('run') or 'main'} ({h.get('version')})"
         note = ""
+        if doc.get("demoted"):
+            note = f" -- {doc['demoted']}"
         if doc.get("passed"):
-            note = f" -- passed over: {'; '.join(doc['passed'])}"
+            note += f" -- passed over: {'; '.join(doc['passed'])}"
         return f"target: {doc.get('owner')!r} at {where}{note}"
     if code == CANNOT_TELL:
         return f"cannot tell: {doc.get('why') or 'the walk could not be read'}"
@@ -177,7 +179,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--json", action="store_true",
         help="print the daemon's whole answer (owner, holder, why, passed, "
-             "refused, undecidable) instead of the one-line verdict",
+             "refused, undecidable, demoted) instead of the one-line verdict",
     )
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"how long the daemon call may take (default {TIMEOUT:g}s)")

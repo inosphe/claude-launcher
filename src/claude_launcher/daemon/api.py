@@ -15,7 +15,6 @@ import functools
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -27,7 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
@@ -58,12 +57,13 @@ from .. import commit_detail, session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
 from .. import workspace_usage
+from .. import model_prices as model_prices_mod
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from .. import wsl_reg_stub
 from . import actors, beads as beads_mod, channel, clipboard, connections
 from . import p2p
-from . import opening_images
+from . import opening_contexts, opening_images
 from . import uploads
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
@@ -71,6 +71,7 @@ from . import pools
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
+from . import llm_usage
 from . import shared_reads, spawn_events, wallclock
 from . import worktree_inventory
 from . import work_checkout
@@ -118,6 +119,7 @@ from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import session as session_mod
+from . import gate_registry
 from . import ws as ws_mod
 from . import shadow as shadow_mod
 from . import session_opening
@@ -274,6 +276,13 @@ async def revalidate_middleware(request: web.Request, handler):
     Last-Modified the static handler already sends turn each load into a
     conditional GET that answers 304 in a couple of hundred bytes.
 
+    *Compression.* ``app.js`` is a 2.9 MB single bundle served over relays
+    as well as localhost, and the relay path pays the full weight on every
+    cold load. Files under ``/static/`` that are text (script, stylesheet,
+    svg, json) are gzip-encoded when the client says it accepts gzip; a
+    revalidating load still answers 304 untouched, so the CPU is paid once
+    per cold load, not per poll.
+
     *Release.* A browser keeps a connection in its pool after the answer
     arrives -- Firefox for 115 seconds by default -- and counts it against
     a per-server ceiling of six. This page asks for twelve assets on a
@@ -295,8 +304,45 @@ async def revalidate_middleware(request: web.Request, handler):
     path = request.path
     if path == "/" or path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "no-cache")
+        if _wants_gzip(request, response):
+            response.enable_compression(web.ContentCoding.gzip)
         response.force_close()
     return response
+
+
+#: Extensions worth gzip-encoding under ``/static/`` — text-shaped assets
+#: only. Fonts and raster images are already compressed; running them
+#: through gzip again spends CPU on bytes that only get bigger. The check
+#: is by path, not response Content-Type: at middleware time the static
+#: handler's FileResponse has not been prepared, so its Content-Type is
+#: still the octet-stream placeholder.
+_GZIP_SUFFIXES = frozenset(
+    {".js", ".mjs", ".css", ".html", ".htm", ".svg", ".json", ".map",
+     ".xml", ".txt", ".webmanifest"}
+)
+
+
+def _wants_gzip(request: web.Request, response: web.StreamResponse) -> bool:
+    """Whether this static answer should be gzip-encoded.
+
+    A conditional GET that will answer 304 carries no body, but aiohttp
+    stamps the enabled coding on the 304's headers all the same — and a 304
+    that promises a gzip body its empty payload cannot deliver makes the
+    next unconditional GET mis-decode. So a request revalidating a cached
+    copy skips compression: the 304 needs nothing, and a changed file's 200
+    is the rare, self-healing case (the next load holds the fresh copy and
+    revalidates normally).
+    """
+    if request.method not in ("GET", "HEAD"):
+        return False
+    if response.status != 200:
+        return False
+    if request.headers.get("If-None-Match") or request.headers.get("If-Modified-Since"):
+        return False
+    if request.path != "/" and Path(request.path).suffix.lower() not in _GZIP_SUFFIXES:
+        return False
+    accepted = request.headers.get("Accept-Encoding", "").lower()
+    return any(e.strip().split(";")[0].strip() == "gzip" for e in accepted.split(","))
 
 
 #: A refused cflow v2 operation or an unreadable v2 definition/run: a 400
@@ -649,11 +695,26 @@ def build_app(
         _mesh_audience, manager, board
     )
     manager.exit_hooks.append(board.session_exited)
-    # A failed session's sweep waits for the person settling it
-    # (claunch-0j6gb.1); test registries may not have the list.
+    # The cflow v2 gates that wait on a person, recorded on disk as they open
+    # and close (claunch-6vq2m.1). The rail reads compare against it; an
+    # archived or removed session's gates close with the record.
+    gates = gate_registry.GateRegistry(gate_registry.default_path())
+    app["gates"] = gates
+    gate_registry.install(gates)
+    filed_hooks = getattr(manager, "filed_hooks", None)
+    if filed_hooks is not None:
+        filed_hooks.append(gate_registry.lifecycle_closer(gates))
+
+    async def _uninstall_gates(_app: web.Application) -> None:
+        if gate_registry.active() is gates:
+            gate_registry.install(None)
+
+    app.on_cleanup.append(_uninstall_gates)
+    # A failed or paused session's sweep waits for the person settling it
+    # (claunch-0j6gb.1, claunch-ijot0); test registries may not have the list.
     settle_hooks = getattr(manager, "settle_hooks", None)
     if settle_hooks is not None:
-        settle_hooks.append(board.session_exited)
+        settle_hooks.append(board.session_settled)
     # A finished sweep stamps ``swept_at`` on the session; persisting right
     # after is what keeps the next restart from sweeping that ending again.
     # Tests hand in registries without persist.
@@ -713,6 +774,8 @@ def build_app(
     # Workspace knowledge records: decisions, vision, needs (claunch-269q1).
     from . import knowledge_api
     knowledge_api.install(app)
+    from . import retrospection_api
+    retrospection_api.install(app)
     # Fleet read of session faults (daemon/session_fault_api.py,
     # claunch-pczoc): which sessions the harness itself has stopped, read
     # off each session's screen by daemon/session_fault.py.
@@ -721,8 +784,11 @@ def build_app(
     # Leader faults (daemon/leader_fault.py, claunch-9djny): a fault on a
     # session that holds a mesh's leader role, while its state still owes the
     # project work. The dashboard raises a fatal notification from this.
-    from . import leader_fault
+    from . import fault_pause, leader_fault
     leader_fault.install(app)
+    # Usage-limit pauses whose stated reset has passed (daemon/fault_pause.py,
+    # claunch-ijot0): the dashboard tells the person a resume is theirs to make.
+    fault_pause.install(app)
     from . import spec_api
     spec_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
@@ -733,6 +799,16 @@ def build_app(
     # to the user, answered in its QA pane and typed back into it.
     from . import qa_api
     qa_api.install(app)
+    # Session plans (daemon/plan_api.py, claunch-7jzp8): the steps, branch
+    # decisions and closure items a session shows in its plan pane; the
+    # user's decisions there are typed back into it.
+    from . import plan_api
+    plan_api.install(app, create=_create_session)
+    # Session wrap-up drafts (daemon/wrapup_api.py, claunch-ar8jn): glossary,
+    # category and knowledge entries a session files, written into their
+    # stores only when the user confirms them in the wrap-up pane.
+    from . import wrapup_api
+    wrapup_api.install(app)
     # Turn-end QA nudges (daemon/qa_nudge.py, claunch-165w6): a session that
     # ended its turn asking the user in plain text is told to use qa_ask.
     # After qa_api: the clock reads app["qa"] for the agent's own writes.
@@ -849,6 +925,10 @@ def build_app(
     # transcript, read through the same call the detail panel makes and kept
     # for a short while so a poll pays only for the append since the last one.
     app["stats_transcripts"] = statsboard.Transcripts()
+    # The Chart page's series asks the same of those sessions at the ledger's
+    # five-minute grid: bins folded from the requests each transcript gained
+    # since the last poll (claunch-gbj4h).
+    app["stats_transcript_bins"] = statsboard.TranscriptBins()
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
@@ -910,8 +990,12 @@ def build_app(
     # The key pool a session's launch reads (claunch-wllke.1): the modal's
     # list. Masks only — see h_profile_keys.
     r.add_get("/api/profiles/{profile}/keys", h_profile_keys)
-    # The pool's strategy, written from the create form (claunch-yx2bd).
+    # The pool's strategy, written from the create form (claunch-yx2bd), and
+    # its manual key (claunch-i985h).
     r.add_post("/api/profiles/{profile}/keys/strategy", h_profile_key_strategy)
+    # A fresh draw for a random pool, from the create form's roll button: the
+    # draw is what its next launch takes (claunch-i985h).
+    r.add_post("/api/profiles/{profile}/keys/roll", h_profile_key_roll)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
@@ -1048,6 +1132,7 @@ def build_app(
     r.add_get("/api/cflow2/node", h_cflow2_node)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
     r.add_get("/api/cflow2/rail", h_cflow2_rail)
+    r.add_get("/api/gates", h_gates)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
@@ -1167,6 +1252,7 @@ def build_app(
     # UI's notification card; settles itself when the run stops waiting.
     r.add_post("/api/flow-nudges", h_flow_nudge_file)
     r.add_get("/api/flow-nudges", h_flow_nudges_list)
+    r.add_post("/api/flow-nudges/{id}/resolve", h_flow_nudge_resolve)
     # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
     # the operator v2 agent routes, read and answered from the web UI's
     # notification card -- approve, reject, +5 min, manual (spawn) or a new
@@ -1250,6 +1336,9 @@ def build_app(
     r.add_post("/api/shadows/{machine}/{session}/line", h_shadow_line)
     r.add_get("/api/shadows/{machine}/{session}/transcript", h_shadow_transcript)
     r.add_get("/api/sessions", h_sessions_list)
+    # Recorded PRs across every session, for the PR page (#/pr). Read-only and
+    # local: no gh call, so it answers without gh installed or logged in.
+    r.add_get("/api/prs", h_prs)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -1270,6 +1359,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/token-series", h_session_token_series)
     r.add_get("/api/stats/compare", h_stats_compare)
     r.add_get("/api/stats/overview", h_stats_overview)
+    r.add_get("/api/stats/llm-usage", h_stats_llm_usage)
     r.add_get("/api/stats/series", h_stats_series)
     r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_delete("/api/sessions/{name}/input-journal/{request_id}",
@@ -1288,6 +1378,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)
     r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
+    r.add_delete("/api/sessions/{name}/queued/{id}", h_session_queued_discard)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_post("/api/sessions/{name}/mcp-ready", h_session_mcp_ready)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
@@ -1318,6 +1409,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
+    r.add_post("/api/sessions/{name}/provider-warning", h_session_provider_warning)
     r.add_post("/api/sessions/{name}/note", h_session_note)
     r.add_post("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
     r.add_delete("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
@@ -1373,6 +1465,12 @@ def build_app(
     r.add_delete("/api/sessions/{name}/packs", h_session_packs)
     r.add_get("/api/sessions/{name}/opening", h_session_opening)
     r.add_post("/api/sessions/{name}/opening", h_session_opening)
+    r.add_get("/api/sessions/{name}/contexts", h_session_contexts)
+    r.add_get("/api/sessions/{name}/contexts/{n}", h_session_context)
+    # The images and files the opening carried, for the Opening task section.
+    r.add_get("/api/sessions/{name}/opening/attachments", h_session_opening_attachments)
+    r.add_get("/api/sessions/{name}/opening/images/{image}", h_session_opening_image)
+    r.add_get("/api/sessions/{name}/opening/files/{fid}/{fname}", h_session_opening_file)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
     # (see SessionManager.repin_conversation).
@@ -1417,6 +1515,9 @@ def build_app(
     # pattern would be read as an issue called "queues".
     r.add_get("/api/beads/queues", h_beads_queues)
     r.add_get("/api/beads/stream", h_beads_stream)
+    # Before "/api/beads/{id}": the substring fallback behind the board
+    # page's search box when the rag is not configured.
+    r.add_get("/api/beads/text-search", h_beads_text_search)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_post("/api/beads/{id}/assign", h_beads_assign)
     r.add_post("/api/beads/{id}/workspace", h_beads_workspace)
@@ -3157,6 +3258,20 @@ async def h_profiles(request: web.Request) -> web.Response:
             # A profile whose provider cannot be read is reported as such by
             # its own rows below; this map simply has nothing to say.
             model_ids = {}
+        # Which backend this profile's launches talk to, and what service
+        # that backend is (``providers.service``). The create form's Runs-as
+        # block needs both: a Claude-harness session still has its permission
+        # classifier billed to Claude when the provider is not Claude's own,
+        # so the form recommends skip permissions there, and the name is what
+        # it puts in that sentence. A form never reads the config file that
+        # decides either, so they are published here.
+        try:
+            provider_name = providers.resolve_name(p, doc)
+            provider_service = providers.service(provider_name, doc)
+        except (providers.ProviderError, lineage.LineageError):
+            # The error row below already reports why the profile is unusable;
+            # an empty pair says "nothing to compare", not "Claude's own".
+            provider_name, provider_service = "", ""
         # The reasoning effort a launch of this profile applies, resolved the
         # way the launch resolves it. The session form shows it as the
         # "profile default" effort: for a harness that declares no
@@ -3188,6 +3303,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": name,
                     "harness_available": available.get(name, False),
+                    "provider": provider_name,
+                    "provider_service": provider_service,
                     "borrow_allowed": borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
                     "harness_allowed": True,
@@ -3295,6 +3412,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": harness_name,
                     "harness_available": available.get(harness_name, False),
+                    "provider": provider_name,
+                    "provider_service": provider_service,
                     "borrow_allowed": allowed and borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
                     "harness_allowed": allowed,
@@ -3734,14 +3853,20 @@ async def h_usage_keys(request: web.Request) -> web.Response:
 def _credential_preview(prof, selector: str, manual: bool) -> dict:
     """The create form's Runs-as facts about ``prof`` (blocking; worker thread).
 
-    Reads at most one account per key that is not already cached. Three
-    decisions worth naming:
+    Reads at most one account per key that is not already cached, and this
+    read writes nothing: opening the form must not consume a rotation or a
+    random draw (claunch-i985h).
+
+    Three decisions worth naming:
 
     - the profile's own reading answers for the key currently in its token
       file, so that key is skipped in the per-key pass rather than read twice;
-    - a usage strategy's pick is not previewed (``peek`` would spend one
-      account read per key to name a key the launch re-decides anyway), and a
-      random pick is not a fact to display at all;
+    - every strategy now names a key. A usage strategy is compared on the
+      numbers this read already collected (``peek(readings=…)``), so naming
+      its pick costs no account read -- but the launch reads the accounts
+      again, which is why that answer is marked ``exact: False``. A random
+      pool names the draw it stored; a random pool with no stored draw is the
+      one case that cannot promise anything, and says so;
     - a failed key read is a row with an error, never a failed request: a
       form that cannot read one key still shows the others.
     """
@@ -3749,25 +3874,6 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     keys = list(view.get("keys") or [])
     strategy = view.get("strategy")
     current = next((key for key in keys if key.get("current")), None)
-
-    next_key = None
-    next_unknown = None
-    if view.get("pooled"):
-        if strategy in profile_keys.MEASURING_STRATEGIES:
-            next_unknown = (
-                f"{strategy} reads every key's usage at launch and takes the "
-                f"{'lowest' if strategy == 'usage-min' else 'highest'}"
-            )
-        elif strategy in profile_keys.UNPREDICTABLE_STRATEGIES and len(keys) > 1:
-            next_unknown = f"{strategy} picks at launch"
-        else:
-            selection = profile_keys.peek(prof)
-            if selection is not None:
-                next_key = {
-                    "key_id": selection.key.id,
-                    "strategy": selection.strategy,
-                    "fallback": selection.fallback,
-                }
 
     body = None
     usage_error = None
@@ -3792,6 +3898,51 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     except (usage.UsageError, credentials.CredentialsError) as exc:
         readings = {"keys": {}, "unmeasurable": str(exc)}
 
+    # Peak utilization per key, from the readings this answer already carries:
+    # the same number ``usage.utilization_for_token`` returns at launch
+    # (max over the reading's windows). ``None`` means "this key cannot be
+    # compared", which the usage strategies skip rather than score as zero.
+    peaks: Dict[str, Optional[float]] = {}
+    for key in keys:
+        reading = readings.get("keys", {}).get(key["id"])
+        if reading is None and key.get("current") and body is not None:
+            reading = {"windows": body["windows"]}
+        windows = (reading or {}).get("windows") or []
+        values = [
+            window.get("utilization")
+            for window in windows
+            if isinstance(window.get("utilization"), (int, float))
+            and not isinstance(window.get("utilization"), bool)
+        ]
+        peaks[key["id"]] = float(max(values)) if values else None
+
+    next_key = None
+    next_unknown = None
+    if view.get("pooled"):
+        try:
+            selection = profile_keys.peek(prof, readings=peaks)
+        except (profile_keys.KeysError, credentials.CredentialsError):
+            selection = None
+        if selection is None:
+            next_unknown = "the daemon could not read this pool's selection"
+        elif selection.exact or strategy in profile_keys.MEASURING_STRATEGIES:
+            next_key = {
+                "key_id": selection.key.id,
+                "strategy": selection.strategy,
+                "fallback": selection.fallback,
+                # A usage strategy re-reads every account at launch, so the
+                # key named here is this read's answer and may move before the
+                # launch picks. Every other strategy stores its pick.
+                "exact": selection.exact,
+            }
+        elif strategy == "random":
+            next_unknown = (
+                "random has not drawn a key for this pool yet — roll to draw "
+                "the key the next launch takes"
+            )
+        else:
+            next_unknown = f"{strategy} picks at launch"
+
     rows = []
     for key in keys:
         row = dict(key)
@@ -3814,6 +3965,7 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
         "pooled": bool(view.get("pooled")),
         "strategy": strategy,
         "strategies": list(profile_keys.STRATEGIES),
+        "pick": view.get("pick"),
         "next": next_key,
         "next_unknown": next_unknown,
         "unmeasurable": readings.get("unmeasurable"),
@@ -4511,7 +4663,8 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
 #: out on purpose: it is a free map of extra chat/completions fields, which a
 #: text box cannot validate and which nothing in the UI reads back.
 LLM_EDITABLE = frozenset(
-    {"profile", "model", "endpoint", "api_key", "max_tokens", "presets", "preset"}
+    {"profile", "model", "endpoint", "api_key", "key_id", "max_tokens",
+     "presets", "preset"}
 )
 #: Upper bound for the completion budget a form may save. The endpoint's own
 #: limit is the real one; this only keeps a typo (a pasted model id, a stray
@@ -4535,14 +4688,32 @@ def _llm_profile_rows(doc: dict) -> List[dict]:
             backend = briefing.profile_backend(prof.name, doc)
         except briefing.BriefingError:
             continue
-        rows.append(
-            {
-                "name": prof.name,
-                "endpoint": backend.endpoint,
-                "models": list(backend.models),
-                "has_key": bool(backend.api_key),
-            }
-        )
+        row = {
+            "name": prof.name,
+            "endpoint": backend.endpoint,
+            "models": list(backend.models),
+            "has_key": bool(backend.api_key),
+        }
+        # The profile's key pool, for the card's key picker: ids, labels and
+        # masks only — a token never crosses to the browser. A pool that
+        # cannot be read is a row error, not a failed settings payload.
+        try:
+            pool = profile_keys.view(prof)
+        except profile_keys.KeysError as exc:
+            row["keys"] = []
+            row["keys_error"] = str(exc)
+        else:
+            if pool.get("pooled"):
+                row["keys"] = [
+                    {
+                        "id": k["id"],
+                        "label": k["label"],
+                        "masked": k["masked"],
+                        "current": k["current"],
+                    }
+                    for k in pool.get("keys") or []
+                ]
+        rows.append(row)
     return rows
 
 
@@ -4566,8 +4737,22 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
     cfg = briefing.llm_config(doc)
     error = ""
     if cfg["profile"]:
+        # The pin the active source wrote, so a stale one (the key was
+        # removed from the pool) is reported here instead of leaving the
+        # feature silently off: llm_config blanks the backend on the same
+        # error, and resolving without the pin would succeed and say nothing.
+        written_pin = str(block.get("key_id") or "").strip()
+        if cfg["preset"]:
+            written_pin = next(
+                (
+                    p.get("key_id", "")
+                    for p in briefing.presets(doc)
+                    if p["id"] == cfg["preset"]
+                ),
+                "",
+            )
         try:
-            briefing.profile_backend(cfg["profile"], doc)
+            briefing.profile_backend(cfg["profile"], doc, key_id=written_pin)
         except briefing.BriefingError as exc:
             error = str(exc)
     presets = briefing.presets_for_display(doc)
@@ -4592,6 +4777,9 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
         "profile": str(block.get("profile") or "").strip(),
         "model": str(block.get("model") or "").strip(),
         "endpoint": str(block.get("endpoint") or "").strip(),
+        # The block's own key pin (a preset's pin rides its row): the card
+        # preselects the key picker from it. An id, never a secret.
+        "key_id": str(block.get("key_id") or "").strip(),
         "max_tokens": cfg["max_tokens"],
         "api_key_set": bool(str(block.get("api_key") or "").strip()),
         "configured": briefing.llm_configured(cfg),
@@ -4599,6 +4787,9 @@ def _llm_settings_payload(doc: Optional[dict] = None) -> dict:
             "endpoint": cfg["endpoint"],
             "model": cfg["model"],
             "has_key": bool(cfg["api_key"]),
+            # The pool key the call authenticates with, when the profile
+            # holds a pool and the key could be named ("" otherwise).
+            "key_id": cfg.get("key_id", ""),
             # The provider the endpoint belongs to, when a profile supplies
             # it: its declared request-header rules go out on the call
             # (briefing.briefing_request_headers), and a card that cannot say
@@ -4730,12 +4921,51 @@ def _llm_block_update(body: dict, doc: dict) -> dict:
             block[key] = value
         else:
             block.pop(key, None)
+    # ``key_id`` pins one key of the named profile's pool. Without a profile
+    # it addresses nothing and is dropped — the same pairing rule that drops
+    # a typed endpoint once a profile supplies one. With a profile, a pin
+    # that names no key of its pool is refused: storing it would turn every
+    # briefing call into a BriefingError at compose time instead.
+    key_id = str(block.get("key_id") or "").strip()
+    if key_id:
+        pinned_profile = str(block.get("profile") or "").strip()
+        if not pinned_profile:
+            block.pop("key_id", None)
+        else:
+            _check_llm_key_id(pinned_profile, key_id)
     # An empty block is no block: dropping ``llm:`` entirely is what makes
     # the feature read as off rather than as configured with blanks.
     for field in ("presets",):
         if not block.get(field):
             block.pop(field, None)
     return block
+
+
+def _check_llm_key_id(profile_name: str, key_id: str) -> None:
+    """Refuse (ValueError) a pin that names no key of the profile's pool.
+
+    Save-time check for the block's own ``key_id``. Preset rows are not
+    checked here: the list is refused as a whole on any bad row, and a key
+    removed from a pool by ``claunch keys remove`` would otherwise make an
+    old preset block every later save of an unrelated field. A stale preset
+    pin surfaces instead as the payload's ``error`` and a briefing that is
+    off until the card picks another key.
+    """
+    try:
+        prof = profile_mod.require_selector(profile_name)
+    except ProfileError as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        source = profile_keys.owner(prof)
+        pool = profile_keys.load(source) if source is not None else None
+    except profile_keys.KeysError as exc:
+        raise ValueError(str(exc)) from exc
+    known = {key.id for key in pool.keys} if pool is not None else set()
+    if key_id not in known:
+        raise ValueError(
+            f"profile {profile_name!r} holds no key {key_id!r} — pick one of "
+            "its pool's keys, or save without a pin"
+        )
 
 
 async def h_briefing_llm(request: web.Request) -> web.Response:
@@ -4748,7 +4978,9 @@ async def h_briefing_llm(request: web.Request) -> web.Response:
 #: ``presets`` and ``max_tokens`` are refused rather than ignored — a probe
 #: tests a *backend*, and silently dropping a field the caller sent would
 #: report on something other than what was asked about.
-LLM_TESTABLE = frozenset({"profile", "model", "endpoint", "api_key", "preset"})
+LLM_TESTABLE = frozenset(
+    {"profile", "model", "endpoint", "api_key", "key_id", "preset"}
+)
 
 
 def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
@@ -4791,7 +5023,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
             (p for p in briefing.presets(doc) if p["id"] == wanted), block
         )
     fields = dict(base)
-    for field in ("profile", "model", "endpoint", "api_key"):
+    for field in ("profile", "model", "endpoint", "api_key", "key_id"):
         if field not in body:
             continue
         value = body[field]
@@ -4809,9 +5041,11 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
             continue
         if value is not None and not isinstance(value, str):
             raise ValueError(f"{field} must be text")
-        # For the other three a blank value is the card saying the box is
+        # For the other four a blank value is the card saying the box is
         # empty, and an empty box on save clears the field — so clearing it
-        # here too is what keeps the button honest about what a save would do.
+        # here too is what keeps the button honest about what a save would
+        # do. ``key_id`` is no secret, so blank genuinely means "no pin",
+        # never "keep the base's pin".
         fields[field] = str(value or "").strip()
     fields = {
         field: str(fields.get(field) or "").strip()
@@ -4822,9 +5056,12 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
     api_key = fields["api_key"]
     model = fields["model"]
     provider = ""
+    key_id = ""
     if profile_name:
         try:
-            backend = briefing.profile_backend(profile_name, doc)
+            backend = briefing.profile_backend(
+                profile_name, doc, key_id=fields["key_id"]
+            )
         except briefing.BriefingError as exc:
             # Handed back as a reason rather than raised: a profile that
             # cannot serve is a fact about the backend, which is the thing
@@ -4837,6 +5074,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
         endpoint, api_key = backend.endpoint, backend.api_key
         model = model or backend.model
         provider = backend.provider
+        key_id = backend.key_id
     cfg = {
         "preset": "",
         "profile": profile_name,
@@ -4844,6 +5082,7 @@ def _llm_probe_config(body: dict, doc: dict) -> Tuple[dict, str]:
         "endpoint": endpoint,
         "model": model,
         "api_key": api_key,
+        "key_id": key_id,
         "max_tokens": saved.get("max_tokens") or briefing.DEFAULT_MAX_TOKENS,
         "params": dict(saved.get("params") or {}),
     }
@@ -4874,6 +5113,7 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
                 "model": cfg.get("model", ""),
                 "endpoint": "",
                 "provider": "",
+                "key_id": "",
                 "seconds": 0.0,
             }
         )
@@ -4886,6 +5126,7 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
             "model": probe.model,
             "endpoint": probe.endpoint,
             "provider": probe.provider,
+            "key_id": cfg.get("key_id", ""),
             "seconds": probe.seconds,
         }
     )
@@ -4894,9 +5135,10 @@ async def h_briefing_llm_test(request: web.Request) -> web.Response:
 async def h_briefing_llm_save(request: web.Request) -> web.Response:
     """Write the ``llm`` block from the Settings card.
 
-    Cached briefings are dropped when the resolved backend changed, so the
+    Cached briefings are retired when the resolved backend changed, so the
     next card is composed by the model that was just chosen instead of
     showing the previous one's answer until the session's transcript moves.
+    Their text stays on the rail, marked stale, until then (claunch-lluxq).
     """
     body = await _json_body(request)
     doc = store.load()
@@ -4917,7 +5159,7 @@ async def h_briefing_llm_save(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
     after = briefing.llm_config(saved)
     if (after["endpoint"], after["model"]) != (before["endpoint"], before["model"]):
-        briefing.forget_all()
+        await briefing.retire_all_async()
     return json_response(_llm_settings_payload(saved))
 
 
@@ -5303,11 +5545,22 @@ def _model_tiers_state() -> dict:
     models_by_profile = {
         name: (catalog.models(name) or []) for name in profiles
     }
+    # The editor's Model select must offer what ``validate`` accepts, and
+    # ``validate`` reads the entry's harness, not the profile default. So the
+    # list is per (profile, harness): "" is the effective harness, every
+    # allowed harness name its own list (claunch-61vj3 review).
+    models_by_harness = {}
+    for name in profiles:
+        per = {"": models_by_profile[name]}
+        for harness in harnesses_by_profile.get(name) or []:
+            per[harness] = catalog.models_for(name, harness) or []
+        models_by_harness[name] = per
     return {
         "block": model_tiers.load(),
         "profiles": profiles,
         "harnesses": harnesses_by_profile,
         "models": models_by_profile,
+        "models_by_harness": models_by_harness,
         "presets": list(provider_spec.MODEL_ROLES),
         "max_tiers": model_tiers.MAX_TIERS,
     }
@@ -7147,8 +7400,8 @@ def _operator_rail_fields(app, rows):
 
 async def h_cflow2_rail(request: web.Request) -> web.Response:
     """The session rail's v2 lines: ``{"rows": {session: entry}}`` for each
-    registered session whose own directory holds a v2 run under the session's own
-    name (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
+    session whose own directory holds a v2 run under the session's own name
+    (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
     ``/api/cflow`` or ``/api/cflow2/runs``: the rail asks one question per
     session, keyed by the session, not by the run slots on disk.
 
@@ -7156,16 +7409,89 @@ async def h_cflow2_rail(request: web.Request) -> web.Response:
     (claunch-l9znm.1): a gate's ``opened_at`` is the daemon's stamp, and a
     page whose clock differs from it would otherwise show a wrong age. The
     page subtracts the difference before it counts. It sits here rather than
-    in a row because the rows are cached per run file and this must not be."""
+    in a row because the rows are cached per run file and this must not be.
+
+    Which sessions are read (claunch-6vq2m.1): the running ones, and the
+    ended ones the gate registry (``gate_registry``, ``app["gates"]``) still
+    holds an open gate for -- a killed or paused session's waiting run keeps
+    its card. Each read compares the run with the registry when its files
+    changed, and every answer carries its registry row as ``gate_id`` (and
+    the registry's ``opened_at`` where the run stamped none). An ended
+    session with nothing open is read once and then served from the cache
+    with no ``answers`` (``rail_entries``' ``settled``): its line still shows,
+    its files are not stat'ed on every poll. An archived session is served the
+    same way but never compared with the registry (``filed``): its gates were
+    closed when it was filed away, and its line still carries the run's
+    workflow and inputs ("Spawn same setup" seeds from it).
+
+    Each row also carries its session's lifecycle (claunch-6vq2m):
+    ``session_category`` is ``session.session_category`` (running, hold,
+    delayed, failed, killed, paused, archived) and ``session_status`` the
+    live status word (busy, idle, starting) or ``exited``; the corner cards
+    show the word beside the session's name. Stamped per answer, not cached
+    with the row: the session moves without its run file changing."""
     manager: SessionManager = request.app["manager"]
+    gates: Optional[gate_registry.GateRegistry] = request.app.get("gates")
+    held = (await asyncio.to_thread(gates.open_sessions)) if gates is not None else None
     pairs = []
+    settled = []
+    filed = []
+    lifecycle = {}
     for session in manager.list():
+        name = session.sdef.name
+        category = session_mod.session_category(session)
         cwd = _session_cwd(session)
         if cwd:
-            pairs.append((session.sdef.name, cwd))
-    rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
+            if held is not None and category == session_mod.CATEGORY_ARCHIVED:
+                filed.append((name, cwd))
+            elif held is not None and session.exited and name not in held:
+                settled.append((name, cwd))
+            else:
+                pairs.append((name, cwd))
+            lifecycle[name] = {
+                "session_category": category,
+                "session_status": "exited" if session.exited else session.status(),
+            }
+
+    def read() -> dict:
+        rows = cflow2_web.rail_entries(pairs, registry=gates, settled=settled,
+                                       filed=filed)
+        if gates is not None:
+            gate_registry.annotate(rows, gates)
+        return rows
+
+    rows = await asyncio.to_thread(read)
+    for name, row in rows.items():
+        row.update(lifecycle.get(name) or {})
     return json_response({"rows": _operator_rail_fields(request.app, rows),
                           "now": time.time()})
+
+
+async def h_gates(request: web.Request) -> web.Response:
+    """``GET /api/gates``: the gate registry's rows, newest first
+    (claunch-6vq2m.1). ``?state=open`` (default), ``closed`` or ``all``;
+    ``?session=`` narrows to one session; ``?limit=`` (default 500). Each
+    row: ``seq``, ``session``, ``cwd``, ``scope``, ``run_id``, ``workflow``,
+    ``kind``, ``item``, ``label``, ``card`` (the rail answer it was opened
+    from), ``opened_at``, ``recorded_at``, ``closed_at``, ``close_reason``.
+    ``backfill`` is the one-time backfill's record, null before it ran."""
+    gates: Optional[gate_registry.GateRegistry] = request.app.get("gates")
+    if gates is None:
+        return json_error(503, "the gate registry is not running in this daemon")
+    state = str(request.query.get("state") or "open")
+    if state not in ("open", "closed", "all"):
+        return json_error(400, "'state' must be open, closed or all")
+    try:
+        limit = int(request.query.get("limit") or 500)
+    except ValueError:
+        return json_error(400, "'limit' must be an integer")
+    session = str(request.query.get("session") or "").strip() or None
+
+    def read() -> dict:
+        return {"gates": gates.rows(state=state, session=session, limit=max(1, limit)),
+                "backfill": gates.meta(gate_registry.META_BACKFILLED)}
+
+    return json_response(await asyncio.to_thread(read))
 
 
 async def h_cflow2_definition(request: web.Request) -> web.Response:
@@ -7489,12 +7815,14 @@ async def h_cflow2_landing_target(request: web.Request) -> web.Response:
     branch on -- not an argument. A caller outside a run may pass
     ``relation`` to ask the question for a run it has no scope for.
 
-    Answers ``{owner, holder, why, passed, refused, undecidable}``:
+    Answers ``{owner, holder, why, passed, refused, undecidable, demoted}``:
     ``holder`` null with ``undecidable`` false is the definite "nobody",
     and with it true is "this could not be read". The probe
     (``claunch gate landing-target``) turns those into exit 1 and 2.
     ``refused`` is ``why`` split on ``"; "`` for a reader that wants the
     sentences one at a time; the sentences are the Router's own.
+    ``demoted`` is non-empty when a stacked run's request goes to the mesh
+    leader's queue as an independent one would (``Target.demoted``).
 
     The answer is a prediction, not a reservation: the set of directories
     and the rosters can change between this call and the push. That race is
@@ -7555,6 +7883,7 @@ def _landing_target(manager: Any, mesh: Any, cwds: Sequence[str], cwd: str,
         "passed": list(found.passed),
         "refused": [s for s in found.why.split("; ") if s],
         "undecidable": found.undecidable,
+        "demoted": found.demoted,
         "relation": relation,
     }
 
@@ -7927,17 +8256,23 @@ async def h_cflow_ping_defaults_set(request: web.Request) -> web.Response:
 
 
 def _model_prices() -> dict:
-    """The per-model price table, read live from the config file — the same
-    read the dashboard's cost estimate makes when it draws a rail row or the
-    detail panel, so what this reports is what the next poll will price
-    against. Keyed by the model id as the harness records it on the
-    transcript (``context.model``); each row holds per-1M-token rates."""
+    """The price table, read live from the config file — the same read the
+    dashboard's cost estimate makes when it draws a rail row or the detail
+    panel, so what this reports is what the next poll will price against.
+    Keyed by provider and then by the model id as the harness records it on
+    the transcript (``context.model``); each row holds per-1M-token rates
+    (:mod:`claude_launcher.model_prices`). ``profiles`` maps each profile to
+    the provider it resolves to: the dashboard knows a session's profile, and
+    this is how it finds the provider tier to price that session under."""
     cfg = store.daemon_config()
-    prices = cfg.get("model_prices")
-    if not isinstance(prices, dict):
-        prices = {}
+    prices = model_prices_mod.normalize(cfg.get("model_prices"))
     currency = str(cfg.get("model_price_currency") or "$")
-    return {"prices": prices, "currency": currency}
+    try:
+        profiles = model_prices_mod.profile_providers()
+    except store.StoreError:
+        profiles = {}
+    return {"prices": prices, "currency": currency, "profiles": profiles,
+            "any": model_prices_mod.ANY}
 
 
 async def h_model_prices(request: web.Request) -> web.Response:
@@ -7948,7 +8283,7 @@ async def h_model_prices(request: web.Request) -> web.Response:
 
 
 async def h_model_prices_set(request: web.Request) -> web.Response:
-    """Set the per-model price table the dashboard's cost estimates use.
+    """Set the price table the dashboard's cost estimates use.
 
     Written to the config file (``daemon.model_prices``) and read live, so
     a PUT is what the next dashboard poll prices against; the currency
@@ -7956,37 +8291,18 @@ async def h_model_prices_set(request: web.Request) -> web.Response:
     daemon config model_price_currency``. The table itself is replaced
     whole — the UI reads it back after the write; an empty table clears
     it, which turns the estimated-price display back off. Partial on
-    purpose: only the keys sent change.
+    purpose: only the keys sent change. Validation is
+    :func:`model_prices.clean` (provider → model → rates; a legacy row keyed
+    by model id alone is stored under ``"*"``).
     """
     body = await _json_body(request)
     prices_out = None
     currency_out = None
     if "prices" in body:
-        prices = body["prices"]
-        if prices is None:
-            prices = {}
-        if not isinstance(prices, dict):
-            return json_error(400, "'prices' must be an object keyed by model id")
-        clean: dict = {}
-        for model, rates in prices.items():
-            if not isinstance(model, str) or not model.strip():
-                return json_error(400, "price rows are keyed by a non-empty model id")
-            if not isinstance(rates, dict):
-                return json_error(400, f"prices for {model!r} must be an object")
-            row: dict = {}
-            for key in ("input", "cache_read", "cache_write", "output"):
-                v = rates.get(key)
-                if v is None:
-                    continue
-                try:
-                    v = float(v)
-                except (TypeError, ValueError):
-                    return json_error(400, f"price {key!r} for {model!r} must be a number")
-                if not math.isfinite(v) or v < 0:
-                    return json_error(400, f"price {key!r} for {model!r} must be a " "non-negative finite number")
-                row[key] = v
-            clean[model.strip()] = row
-        prices_out = clean or None
+        try:
+            prices_out = model_prices_mod.clean(body["prices"]) or None
+        except ValueError as exc:
+            return json_error(400, str(exc))
     if "currency" in body:
         currency = body["currency"]
         if currency is not None:
@@ -8948,6 +9264,10 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
         return err
     name = request.match_info["name"]
     do_fetch = request.query.get("fetch", "1") not in ("0", "false", "no")
+    # The remotes the Sync panel has checked (claunch-y3tuk). Without them one
+    # remote is chosen as before, so the CLI and the MCP tool are unaffected.
+    selected = [r for r in (request.query.get("remotes") or "").replace(" ", "").split(",") if r]
+    basis = request.query.get("basis") or None
     if request.query.get("peers", "1") in ("0", "false", "no"):
         peers, problems, unreadable = {}, [], []
     else:
@@ -8956,13 +9276,16 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
         reposync_flow.workspace_status, path, name, peers, problems,
         do_fetch=do_fetch, remote=request.query.get("remote") or None,
         branch=request.query.get("branch") or None, machine=_machine_name(request),
+        remotes=selected or None, basis=basis,
     )
     if doc.get("repo"):
         doc["remote_comparisons"] = await asyncio.to_thread(
             reposync_flow.remote_comparisons, doc["repo"],
             branch=request.query.get("branch") or (doc.get("plan") or {}).get("branch"),
-            do_fetch=do_fetch,
+            # a checked set was already fetched by its plans; do not fetch twice
+            do_fetch=do_fetch and not selected,
             already_fetched=(doc.get("plan") or {}).get("remote") if do_fetch else None,
+            only=selected or None,
         )
     doc["machine"] = _machine_name(request)
     # the peers table shows these as unreadable rows (claunch-gjjdp)
@@ -9030,11 +9353,139 @@ def _ws_plan(path: str, name: str, body: dict, *, do_fetch: bool = True):
     return p, reposync_flow.plan_card(p, workspace=name, key=key)
 
 
-def _ws_execute(p: "reposync.Plan", card: dict) -> dict:
+def _ws_multi_sync_card(path: str, name: str, body: dict):
+    """The card for a sync delegated with several remotes checked
+    (claunch-y3tuk). The top-level fields are the basis plan, so the existing
+    assignment builder keeps working; ``remotes`` carries every selected
+    remote in execution order with its own tips, and ``basis`` names the one
+    the fast-forward/rebase lands on."""
+    repo = reposync.toplevel(path)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if not remotes:
+        raise reposync.SyncError("no remotes given")
+    out, _made = reposync_flow.selected_plans(
+        repo, remotes, do_fetch=False, branch=str(body.get("branch") or "") or None,
+        basis=str(body.get("basis") or "") or None, workspace=name)
+    if out.get("error"):
+        raise reposync.SyncError(out["error"])
+    if out.get("incompatible"):
+        pairs = ", ".join(f"{a} / {b}" for a, b in out["incompatible"])
+        raise reposync.SyncError(
+            "these remotes cannot share one local branch (their tips are not on "
+            f"one line): {pairs}")
+    if out.get("basis_error"):
+        raise reposync.SyncError(out["basis_error"])
+    rows = [r for r in out["plans"] if r.get("plan")]
+    if not rows:
+        raise reposync.SyncError("no plan for the selected remotes")
+    basis = out.get("basis") or rows[0]["remote"]
+    first = next((r["plan"] for r in rows if r["remote"] == basis), rows[0]["plan"])
+    ordered = [out["sync_order"].index(r["remote"]) if r["remote"] in out["sync_order"] else 99
+               for r in rows]
+    rows = [r for _i, r in sorted(zip(ordered, rows), key=lambda pair: pair[0])]
+    card = {
+        "repo": repo, "workspace": name, "basis": basis,
+        "remote": first["remote"], "remote_key": first.get("remote_key"),
+        "branch": first["branch"], "action": first["action"],
+        "local": first["local"], "upstream": first["upstream"],
+        "ahead": first.get("ahead"), "behind": first.get("behind"),
+        "source": first.get("source"),
+        "summary": f"sync {first['branch']} through {basis}, then push to "
+                   + ", ".join(r["remote"] for r in rows if r["remote"] != basis),
+        "remotes": [
+            {**{k: r["plan"].get(k) for k in
+                ("remote", "remote_key", "branch", "action", "local",
+                 "upstream", "ahead", "behind", "summary")},
+             "basis": r["remote"] == basis}
+            for r in rows
+        ],
+    }
+    return card
+
+
+def _ws_multi_publish_card(path: str, name: str, body: dict, machine: str) -> dict:
+    """The approval card for publishing one work branch to several remotes
+    (claunch-y3tuk). Every remote gets its own row and the same local tip."""
+    repo = reposync.toplevel(path)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if not remotes:
+        raise reposync.SyncError("no remotes given")
+    branch = str(body.get("branch") or "")
+    if not branch:
+        raise reposync.SyncError("branch is required")
+    names = reposync.remotes(repo)
+    unknown = [r for r in remotes if r not in names]
+    if unknown:
+        raise reposync.SyncError(f"no remote named {', '.join(unknown)}")
+    sha = reposync.git(repo, "rev-parse", "--verify", "-q",
+                       f"refs/heads/{branch}", check=False)
+    if not sha:
+        raise reposync.SyncError(f"no local branch {branch!r}")
+    target = reposync.shared_ref(machine, branch)
+    force = bool(body.get("force_with_lease"))
+    action = "publish-force" if force else "publish"
+    rows = [{
+        "remote": remote, "remote_key": reposync.url_key(names.get(remote, "")),
+        "branch": target, "action": action, "local": sha, "upstream": "",
+        "source": branch,
+        "summary": f"push {branch} {sha[:8]} to {remote}/{target}"
+                   + (" (force-with-lease)" if force else ""),
+    } for remote in remotes]
+    basis = str(body.get("basis") or "") or remotes[0]
+    return {
+        "repo": repo, "workspace": name, "basis": basis,
+        "remote": rows[0]["remote"], "remote_key": rows[0]["remote_key"],
+        "branch": target, "action": action, "local": sha, "upstream": "",
+        "source": branch,
+        "summary": f"push {branch} {sha[:8]} to {target} on "
+                   + ", ".join(r["remote"] for r in rows),
+        "remotes": rows,
+    }
+
+
+def _ws_plans_moved(card: dict, body: dict) -> bool:
+    """Whether a remote moved since the panel showed its tips. The panel
+    sends the ``plans`` it drew; an absent list is a first request.
+
+    Only the remotes the body names are compared (claunch-y3tuk): a remote
+    the panel left out is not evidence that it moved -- an up-to-date remote
+    carries no pending row -- while a named remote the card no longer has
+    was checked after the panel read the plans and is stale."""
+    shown = {str(p.get("remote")): (p.get("local"), p.get("upstream"))
+             for p in (body.get("plans") or []) if isinstance(p, dict)}
+    if not shown:
+        return False
+    now = {str(r.get("remote")): (r.get("local"), r.get("upstream"))
+           for r in card.get("remotes") or []}
+    if set(shown) - set(now):
+        return True
+    return any(tips != now[remote] for remote, tips in shown.items())
+
+
+def _ws_plan_rows(card: dict) -> list:
+    """A multi card's remotes in the shape the status answer uses for
+    ``plans`` (``{remote, key, plan}``), so a 409's fresh plans can be drawn
+    by the same code that draws the panel (claunch-y3tuk).
+
+    Each ``plan`` carries the card's ``repo``, as every status plan does
+    (``reposync_flow.plan_card``): the panel draws a tip as a commit link only
+    when the plan says which checkout it is in, so rows built without it drew
+    bare hashes in the recovery screen (claunch-y3tuk.1)."""
+    rows = []
+    for r in card.get("remotes") or []:
+        plan = {k: v for k, v in r.items() if k != "basis"}
+        if card.get("repo"):
+            plan["repo"] = card["repo"]
+        rows.append({"remote": r.get("remote"), "key": r.get("remote_key"),
+                     "plan": plan})
+    return rows
+
+
+def _ws_execute(p: "reposync.Plan", card: dict, remember: str = "") -> dict:
     # the daemon has no session scratch of its own; its rebase worktrees live
     # under the daemon directory, never in the workspace
     result = reposync.execute(p, scratch=str(paths.daemon_dir() / "reposync-scratch"))
-    reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, p.remote, check=False)
+    reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, remember or p.remote, check=False)
     board = []
     if result.rewritten:
         board = reposync_flow.annotate_board(p.repo, result.rewritten, remote=p.remote, branch=p.branch)
@@ -9048,14 +9499,24 @@ async def h_reposync_ws_agent_preview(request: web.Request) -> web.Response:
         return err
     body = await _json_body(request)
     name = request.match_info["name"]
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
     try:
         if body.get("kind") == "sync":
-            p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
-            if p.local != body.get("local") or p.upstream != body.get("upstream"):
-                return json_response({"error": "The plan changed; refresh Sync before previewing.",
-                                      "stale": True, "plan": card}, status=409)
+            if remotes:
+                card = await asyncio.to_thread(_ws_multi_sync_card, path, name, body)
+                if _ws_plans_moved(card, body):
+                    return json_response(
+                        {"error": "The plans changed; refresh Sync before previewing.",
+                         "stale": True, "plans": _ws_plan_rows(card)}, status=409)
+            else:
+                p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
+                if p.local != body.get("local") or p.upstream != body.get("upstream"):
+                    return json_response({"error": "The plan changed; refresh Sync before previewing.",
+                                          "stale": True, "plan": card}, status=409)
         elif body.get("kind") == "push":
-            card = await asyncio.to_thread(_ws_publish_card, path, name, body, _machine_name(request))
+            card = await asyncio.to_thread(
+                _ws_multi_publish_card if remotes else _ws_publish_card,
+                path, name, body, _machine_name(request))
         else:
             return json_error(400, "kind must be sync or push")
     except reposync.SyncError as exc:
@@ -9195,6 +9656,26 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
         mode = await _ws_agent_options(request, body, path)
     except (ValueError, ManagerError) as exc:
         return json_error(400, str(exc))
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if remotes:
+        # A checked set runs one remote per request in commands mode: each
+        # push keeps its own approval card and its own tips (claunch-y3tuk).
+        if mode != "agent":
+            return json_error(
+                400, "commands mode runs one remote per request -- send one "
+                     "request per remote, basis first")
+        try:
+            card = await asyncio.to_thread(
+                _ws_multi_sync_card, path, request.match_info["name"], body)
+        except reposync.SyncError as exc:
+            return json_error(409, str(exc))
+        active = _ws_active_agent(request, card, mode)
+        if active is not None:
+            return active
+        if _ws_plans_moved(card, body):
+            return json_response({"error": "a remote moved since its plan was shown",
+                                  "stale": True, "plans": _ws_plan_rows(card)}, status=409)
+        return await _ws_start_agent(request, card, body)
     try:
         p, card = await asyncio.to_thread(_ws_plan, path, request.match_info["name"], body)
     except reposync.SyncError as exc:
@@ -9216,12 +9697,15 @@ async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
             return answer
         approval = _ws_approval(request, str(body.get("request") or ""))
 
+    # the basis is what the next CLI/MCP call should find, not the last mirror
+    remember = str(body.get("basis") or "")
+
     def run() -> dict:
         # history_entry runs git (repo_identity), so it stays off the event loop
         entry = reposync_flow.history_entry(
             p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
             branch=p.branch, by="web", approval=approval)
-        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card),
+        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card, remember),
                                       reposync_flow.master_done(p))
 
     try:
@@ -9280,8 +9764,15 @@ async def _h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     if not str(body.get("branch") or ""):
         return json_error(400, "branch is required")
     machine = _machine_name(request)
+    remotes = [str(r) for r in (body.get("remotes") or []) if str(r)]
+    if remotes and mode != "agent":
+        return json_error(
+            400, "commands mode publishes to one remote per request -- send "
+                 "one request per remote")
     try:
-        card = await asyncio.to_thread(_ws_publish_card, path, request.match_info["name"], body, machine)
+        card = await asyncio.to_thread(
+            _ws_multi_publish_card if remotes else _ws_publish_card,
+            path, request.match_info["name"], body, machine)
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
     active = _ws_active_agent(request, card, mode)
@@ -9562,12 +10053,35 @@ async def h_flow_nudge_file(request: web.Request) -> web.Response:
     if scope.split("@")[0].split("+")[0] != name:
         return json_error(403, f"scope {scope!r} is not {name}'s own run")
     try:
-        result = await asyncio.to_thread(
-            request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
-            message=str(body.get("message") or ""))
+        if body.get("emergency") in (True, "1", "true", 1):
+            result = await asyncio.to_thread(
+                request.app["flow_nudge"].emergency, session=name, cwd=cwd, scope=scope,
+                message=str(body.get("message") or ""),
+                cancel=body.get("cancel") in (True, "1", "true", 1))
+        else:
+            result = await asyncio.to_thread(
+                request.app["flow_nudge"].submit, session=name, cwd=cwd, scope=scope,
+                message=str(body.get("message") or ""))
     except flow_nudge.NudgeRefused as exc:
         return json_error(exc.status, str(exc))
     return json_response(result)
+
+
+async def h_flow_nudge_resolve(request: web.Request) -> web.Response:
+    """``POST /api/flow-nudges/{id}/resolve``: a person's answer to a nudge --
+    the card is closed as settled (claunch-8myyt). An agent cannot: the point
+    of the card is that a person releases it, and an agent that could close its
+    own would end the wait it raised. It withdraws an emergency nudge with
+    ``cancel`` on the filing route instead."""
+    if actors.from_request(request).get("kind") == actors.AGENT:
+        return json_error(403, "a nudge is resolved by a person; to withdraw your own "
+                               "emergency nudge call emergency_nudge with cancel")
+    try:
+        rec = await asyncio.to_thread(
+            request.app["flow_nudge"].resolve, request.match_info["id"])
+    except flow_nudge.NudgeRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response({"request": rec})
 
 
 async def h_flow_nudges_list(request: web.Request) -> web.Response:
@@ -9771,7 +10285,9 @@ async def h_spawn_request_settle(request: web.Request) -> web.Response:
         elif verb == "spawn":
             record = gate.spawn_instead(rid, decided_by="web")
         elif verb == "created":
-            record = gate.link(rid, str(body.get("session") or ""))
+            created_as = body.get("created_as")
+            record = gate.link(rid, str(body.get("session") or ""),
+                               str(created_as) if created_as else None)
         else:
             record = gate.withdraw(rid, session=str(body.get("session") or ""))
     except spawn_gate.GateRefused as exc:
@@ -10559,6 +11075,56 @@ async def h_peer_ops_lease(request: web.Request) -> web.Response:
     return json_response(result)
 
 
+#: How long the aggregated PR answer is reused. A recorded row changes when a
+#: session opens a PR, which is not a frequent event; without the cache every
+#: page poll would walk every session's run state.
+PRS_CACHE_SECONDS = 30.0
+_prs_cache: Dict[str, Any] = {"at": 0.0, "rows": None, "projects": None}
+
+
+def _recorded_prs(manager) -> Tuple[List[dict], List[str]]:
+    """Every PR recorded by a session on this daemon, newest first.
+
+    Recorded sources only — the wizard's ``prs.json`` and each v2 run's
+    ``prs`` collection — so this reads local files and never starts a ``gh``
+    call. ``status`` and ``title`` are the values recorded when the PR was
+    opened; the PR page says so beside the list.
+    """
+    now = time.monotonic()
+    if _prs_cache["rows"] is not None and now - _prs_cache["at"] < PRS_CACHE_SECONDS:
+        return _prs_cache["rows"], _prs_cache["projects"]
+    merged: Dict[str, dict] = {}
+    seen_projects: Set[str] = set()
+    for s in manager.list():
+        name = s.sdef.name
+        project = str(s.sdef.project or "").strip() or projects.DEFAULT
+        for row in session_prs.for_session(_session_cwd(s), name):
+            url = row.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            seen_projects.add(project)
+            merged.setdefault(url, {**row, "session": name, "project": project})
+    rows = list(merged.values())
+    rows.sort(key=lambda r: (r.get("at") or "", r.get("number") or 0), reverse=True)
+    _prs_cache.update({"at": now, "rows": rows, "projects": sorted(seen_projects)})
+    return rows, _prs_cache["projects"]
+
+
+async def h_prs(request: web.Request) -> web.Response:
+    """Recorded pull requests across every session, for the PR page (#/pr).
+
+    ``?project=`` narrows the list to one project's rows. No network call:
+    the answer comes from what the sessions themselves recorded, so it works
+    without ``gh`` being installed or logged in.
+    """
+    manager: SessionManager = request.app["manager"]
+    project = str(request.query.get("project") or "").strip()
+    rows, projects = await asyncio.to_thread(_recorded_prs, manager)
+    if project:
+        rows = [r for r in rows if r.get("project") == project]
+    return json_response({"prs": rows, "projects": projects, "count": len(rows)})
+
+
 async def h_sessions_list(request: web.Request) -> web.Response:
     """The session list; for a rail read that sends its row digests, only
     the rows that changed (claunch-4thlk.3, :func:`_rail_rows_delta`).
@@ -10634,6 +11200,9 @@ def _watch_rows(session: str) -> List[dict]:
 RAIL_FIELDS = {
     "name", "harness", "profile", "cwd", "args", "model", "effort",
     "tools", "restore", "conversation_id", "role", "parent", "borrow",
+    # The parent a top-level row lost when its record was removed: the rail
+    # draws such a row as an orphan, not a root (railOrphanOf, claunch-ikiys).
+    "orphan_of",
     "null_token", "issue", "keep_alive", "reminder_paused", "note",
     # The pool key this session is pinned to, or absent. The rail draws the
     # key chip from it and the modal preselects it (claunch-wllke.1).
@@ -10676,6 +11245,14 @@ RAIL_FIELDS = {
     # this poll -- the walk itself never runs on the poll path, and the
     # breakdown behind the badge comes from /api/sessions/{name}/storage.
     "storage",
+    # Which provider the launch actually uses, what service that is, and
+    # whether its person dismissed the provider warning: the strip at the
+    # top of a session (``termProviderWarnView`` in app.js) decides from
+    # these three and nothing else. The rail is the dashboard's only
+    # session poll, so leaving them out is not a saving -- the strip was
+    # never drawn on a live page, and only the stub rows of its own check
+    # ever reached it (claunch-1ztit.1).
+    "provider", "provider_service", "provider_warning_ignored",
 }
 
 
@@ -10902,12 +11479,56 @@ async def _sessions_list(request: web.Request) -> web.Response:
     attached, check_digests = await asyncio.to_thread(collect)
     if need_storage:
         storage_mod.STORAGE.prefetch(need_storage)
+    # Which backend each profile's launches talk to, and what service that
+    # backend is (``providers.service``) — the pair ``h_profiles`` publishes,
+    # keyed by profile so a row can name its own. Read once for the whole
+    # list: a browser cannot open the config that answers it, and a row asked
+    # by the screen is "does this session's claude harness run on a provider
+    # that is not Anthropic's" (the provider warning). One unreadable config
+    # leaves the map empty, which says "nothing to compare" — not "Claude's
+    # own" — and costs only the warning, never the list.
+    provider_of: Dict[str, str] = {}
+    provider_service_of: Dict[str, str] = {}
+    try:
+        facts = request.app["profile_facts"].facts()
+    except (KeyError, AttributeError):
+        facts = None
+    if facts is not None:
+        # Per profile rather than one all-or-nothing try: a single profile
+        # whose provider cannot be read answers "nothing to compare" for its
+        # own rows, and must not silence the warning for every other session.
+        for p in facts.profiles:
+            try:
+                provider_of[p.name] = providers.resolve_name(p, facts.doc)
+            except (providers.ProviderError, lineage.LineageError):
+                continue
+        for name in set(provider_of.values()):
+            try:
+                provider_service_of[name] = providers.service(name, facts.doc)
+            except providers.ProviderError:
+                continue
+        # The sessions that name no profile run on the global selection.
+        try:
+            provider_of[""] = providers.active(facts.doc) or providers.DEFAULT_PROVIDER
+            provider_service_of.setdefault(
+                provider_of[""], providers.service(provider_of[""], facts.doc)
+            )
+        except providers.ProviderError:
+            pass
     for s, info in zip(sessions, attached):
         # Which git branch the session's checkout is on — one fact that tells
         # two sessions in the same worktree apart without opening either. On
         # the loop, because a miss schedules its git read on the loop (see
         # _read_branch_later); the hit itself is one stat and a dict lookup.
         info["branch"] = _branch_of(info.get(work_checkout.FIELD) or _session_cwd(s))
+        # The provider this session's process is launched against: a borrowed
+        # profile's provider wins (that is the auth the launch uses), then the
+        # session's own profile, then the global default. Base names only —
+        # the definition carries ``profile:harness`` selectors.
+        lender = str(getattr(s.sdef, "borrow", None) or s.sdef.profile or "")
+        provider = provider_of.get(lender.split(":")[0], "")
+        info["provider"] = provider
+        info["provider_service"] = provider_service_of.get(provider, "")
         # The rail's observe-pin box and the observer card's read the same
         # definition field. Answering it here rather than in the observer's
         # snapshot is what lets the rail draw it off the poll it already
@@ -11134,6 +11755,17 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         }
     if not str(body.get("profile") or "").strip():
         return 400, {"error": "a session needs profile; its harness comes from it"}
+    # A session created already pinned to a pool key — the create form's
+    # "use this key" (claunch-i985h). The pin is applied on every launch
+    # (``daemon/harness.build_command``), so a key id the pool does not hold
+    # would be a pin that silently falls back to the strategy at the first
+    # launch and again at every restore. Refuse it here, while the operator is
+    # still looking at the form.
+    pin_error = await _checked_key_pin(body)
+    if pin_error:
+        return 400, {"error": pin_error}
+    if body.get("key_id"):
+        body["key_id"] = str(body["key_id"]).strip()
     # What the session is for (SessionDef.kind), checked here because the
     # definition's own reader only trims: a value it would store verbatim
     # must already be one the list column and the ``?kind=`` filter can take.
@@ -11162,6 +11794,9 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # session-definition copy (or a future SessionDef field could retain the
     # specification in the daemon's restart record).
     definition.pop("issue_text", None)
+    # The context items go to their own files (daemon/opening_contexts.py);
+    # the definition is the restart record and does not carry their text.
+    definition.pop("opening_contexts", None)
     definition.pop("prompt_packs", None)
     # v2 start inputs belong to the run (chart.json), not to the session.
     definition.pop("cflow_inputs", None)
@@ -11182,6 +11817,49 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     except onboard.OnboardError as exc:
         return 400, onboard.error_body(exc)
     return 201, {**session.info(), **result}
+
+
+async def _checked_key_pin(body: dict) -> Optional[str]:
+    """Why the ``key_id`` a create carries is unusable, or ``None``.
+
+    A pin the profile's pool does not hold is refused before a session exists
+    (claunch-i985h): the launch would otherwise apply it, find nothing, warn
+    to a log nobody reads, and run on the pool's strategy — a session the
+    operator believes is on one key, on another.
+
+    This is the New session form's pin. A spawn request cannot carry one: the
+    child's definition is built field by field under the spawn policy, which
+    has no key field, so a Spawn child picks its key through the profile's
+    strategy (manual included) rather than per child.
+
+    A create that borrows pins a key of the lender's pool: the lender's token
+    is what the launch authenticates with (claunch-e48es,
+    ``harness.key_pool_profile``).
+    """
+    pinned = str(body.get("key_id") or "").strip()
+    if not pinned:
+        return None
+    if not str(body.get("profile") or "").strip():
+        return None
+    selector = (
+        str(body.get("borrow") or "").strip()
+        or str(body.get("profile") or "").strip()
+    )
+    try:
+        prof = profile_mod.require_selector(selector)
+        view = await asyncio.to_thread(profile_keys.view, prof)
+    except (
+        profile_mod.ProfileError,
+        profile_keys.KeysError,
+        credentials.CredentialsError,
+    ) as exc:
+        return str(exc)
+    held = {str(k.get("id")) for k in view.get("keys") or []}
+    if pinned not in held:
+        return (
+            f"key {pinned!r} is not in the key pool of profile {prof.name!r}"
+        )
+    return None
 
 
 def _asked_prompt_packs(body: dict) -> List[str]:
@@ -11302,6 +11980,7 @@ async def _onboard_and_launch(
             raise onboard.OnboardError(str(exc)) from None
         image_ids = _opening_image_ids(body, session.sdef.harness)
         file_ids = _opening_file_ids(body)
+        context_items = _opening_contexts(body)
         # The operator's explicit "no workflow" on a session they create
         # (claunch-val3l.1): the CLI's --no-workflow, the form's cleared
         # role default. Taken out before preflight, which reads '-' as a
@@ -11563,6 +12242,12 @@ async def _onboard_and_launch(
         opening = score_goal.prompt(session.sdef) + (
             "\n\n" + opening if opening else ""
         )
+    contexts = opening_contexts.store(name, context_items)
+    if contexts:
+        # After the task they belong to and ahead of uploaded files: each item
+        # is its own file, and the opening says where and how to read it.
+        opening = (opening + "\n\n" if opening else "") + opening_contexts.block(contexts)
+        report["opening_contexts"] = [c["path"] for c in contexts]
     files = uploads.claim(file_ids, name)
     if files:
         # The paths ride at the end of the opening, after the task they
@@ -11576,7 +12261,9 @@ async def _onboard_and_launch(
     # A record that cannot be written is not a reason to refuse the session —
     # it costs the panel its re-inject, not the agent its job.
     try:
-        session_opening.record(name, opening, images=len(images))
+        session_opening.record(name, opening, images=len(images),
+                               image_names=[img.path.name for img in images],
+                               files=[f.record() for f in files])
     except OSError:
         log.warning("could not record the opening of %r", name, exc_info=True)
     try:
@@ -11762,7 +12449,7 @@ def spawn_gate_exempt(body: dict) -> bool:
 ROOT_SPEC_KEYS = (
     "name", "task", "workflow", "workflow_version", "workflow_params", "cflow_inputs",
     "context", "issue", "issue_text", "beads", "prompt_packs", "daemon_prompt",
-    "workspace_prompt",
+    "workspace_prompt", "opening_contexts",
 )
 
 
@@ -12452,7 +13139,10 @@ async def h_session_token_series(request: web.Request) -> web.Response:
     the overlay's hover view asks for ``full``; ``?points=`` bounds the number
     of points, past which consecutive requests are grouped) and the times the
     session swapped its profile's token for a borrowed one or back
-    (``swaps``). See :func:`sessionstats.series`."""
+    (``swaps``). Each point also carries its request's ``output`` tokens (not
+    drawn; the overlay prices the request with them) and ``totals`` sums the
+    four components over the window's requests. See
+    :func:`sessionstats.series`."""
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     window = request.query.get("window", "cap")
@@ -12487,7 +13177,8 @@ async def h_session_token_series(request: web.Request) -> web.Response:
 
 def _stats_overview(manager: "SessionManager", window: str,
                     include_ended: bool, ledger, transcripts=None,
-                    include_killed=None, include_archived=None) -> dict:
+                    include_killed=None, include_archived=None,
+                    prices=None, currency: str = "$") -> dict:
     """The overview payload, built off the event loop.
 
     ``Session.info()`` would carry a definition, a briefing and an environment
@@ -12497,6 +13188,9 @@ def _stats_overview(manager: "SessionManager", window: str,
     parse on the loop is the cost claunch-3r94d took the transcript reading off
     the loop for. The transcript reading for OAuth sessions runs in this same
     thread for that reason.
+
+    ``prices`` is the Settings price table for the model rows' estimates
+    (``daemon.model_prices``; see :mod:`statsboard.estimate_cost`).
     """
     events = getattr(manager, "events", None)
     metas = [statsboard.session_meta(s, events) for s in manager.list()]
@@ -12507,7 +13201,8 @@ def _stats_overview(manager: "SessionManager", window: str,
         extra["include_archived"] = include_archived
     return statsboard.overview(window=window, include_ended=include_ended,
                                sessions=metas, ledger=ledger,
-                               transcripts=transcripts, **extra)
+                               transcripts=transcripts,
+                               prices=prices, currency=currency, **extra)
 
 
 async def h_stats_overview(request: web.Request) -> web.Response:
@@ -12522,7 +13217,11 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     read from its own transcript (the call the detail panel makes) and marked
     ``source: "transcript"``, or reported as ``source: "none"`` with no figure
     rather than a zero when there is no transcript to read. See
-    :mod:`statsboard` for what each field means."""
+    :mod:`statsboard` for what each field means.
+
+    ``models``/``estimate`` split the window's tokens one provider's model at
+    a time and price each row from Settings → Model prices (read live; the
+    same table ``/api/model-prices`` serves)."""
     manager: SessionManager = request.app["manager"]
     window = request.query.get("window", "today")
     if window not in statsboard.WINDOWS:
@@ -12544,13 +13243,46 @@ async def h_stats_overview(request: web.Request) -> web.Response:
     transcripts = request.app.get("stats_transcripts")
     if transcripts is None:
         transcripts = statsboard.Transcripts()
+    # The price table is read live from the config file, as the dashboard's
+    # own cost estimate does (Settings → Model prices). A read failure leaves
+    # every model row unpriced instead of taking the page down with it.
+    try:
+        table = _model_prices()
+        prices, currency = table["prices"], table["currency"]
+    except Exception:  # noqa: BLE001 - the overview must outlive a bad table
+        log.warning("stats overview: reading the price table failed", exc_info=True)
+        prices, currency = {}, "$"
     try:
         payload = await asyncio.to_thread(
             _stats_overview, manager, window, include_ended, ledger, transcripts,
-            include_killed, include_archived)
+            include_killed, include_archived, prices, currency)
     except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
         log.warning("stats overview: %s", exc, exc_info=True)
         return json_error(500, f"reading the usage ledger failed: {exc}")
+    return json_response(payload)
+
+
+async def h_stats_llm_usage(request: web.Request) -> web.Response:
+    """The daemon's own LLM calls over one window -- briefing, observer,
+    search embedding/rerank, Jev -- for the Stats page's section beside the
+    session overview (``?window=today|week|month``, ``?provider=`` and
+    ``?session=`` to narrow it). These calls never reach the routing shim, so
+    the metering ledger the overview reads does not hold them; they are kept
+    in :mod:`llm_usage`'s own ledger (claunch-60y0d)."""
+    window = request.query.get("window", "today")
+    if window not in llm_usage.WINDOWS:
+        return json_error(
+            400, f"window must be one of: {', '.join(llm_usage.WINDOWS)}")
+    try:
+        table = _model_prices()
+        payload = await asyncio.to_thread(
+            llm_usage.overview, window,
+            provider=request.query.get("provider", ""),
+            session=request.query.get("session", ""),
+            prices=table["prices"], currency=table["currency"])
+    except Exception as exc:  # noqa: BLE001 - one ledger read must not 500 the page
+        log.warning("stats llm usage: %s", exc, exc_info=True)
+        return json_error(500, f"reading the daemon LLM ledger failed: {exc}")
     return json_response(payload)
 
 
@@ -12563,7 +13295,10 @@ async def h_stats_series(request: web.Request) -> web.Response:
     ``total / bucket_s`` as a rate and integrating over the axis gives the
     window's total -- the same reading the terminal overlay's throughput
     line gives for a single call. :meth:`statsboard.Ledger.series` chooses
-    the bucket width from the window so one answer is one screen."""
+    the bucket width from the window so one answer is one screen. A session
+    the ledger never saw (an OAuth route) is filled from its own transcript
+    through the daemon's :class:`statsboard.TranscriptBins`, which keeps the
+    bins and folds only what each transcript gained since the last poll."""
     manager: SessionManager = request.app["manager"]
     window = request.query.get("window", "7d")
     if window not in statsboard.SERIES_WINDOWS:
@@ -12577,6 +13312,9 @@ async def h_stats_series(request: web.Request) -> web.Response:
     ledger = request.app.get("stats_ledger")
     if ledger is None:
         ledger = statsboard.Ledger()
+    transcripts = request.app.get("stats_transcript_bins")
+    if transcripts is None:
+        transcripts = statsboard.TranscriptBins()
     events = getattr(manager, "events", None)
     project = str(request.query.get("project") or "").strip()
 
@@ -12586,7 +13324,8 @@ async def h_stats_series(request: web.Request) -> web.Response:
         ledger.refresh()
         return ledger.series(window, sessions=metas, project=project,
                              include_killed=bool(_flag("killed")),
-                             include_archived=bool(_flag("archived")))
+                             include_archived=bool(_flag("archived")),
+                             transcripts=transcripts)
 
     try:
         payload = await asyncio.to_thread(build)
@@ -13004,6 +13743,31 @@ async def h_session_queued_flush(request: web.Request) -> web.Response:
     )
 
 
+async def h_session_queued_discard(request: web.Request) -> web.Response:
+    """Delete one held message from this session's backlog, because a human
+    said so: the per-row delete in the queued strip, the opposite answer to
+    :func:`h_session_queued_flush`. The message is never typed into this
+    terminal (see :meth:`MeshManager.discard_queued`); the mesh log and every
+    other recipient are left alone.
+
+    ``?mesh=`` and ``?handle=`` narrow the match to the row the button was
+    on. An id that is not queued for this session right now -- already
+    delivered, or never addressed here -- is a 400, not a silent success.
+    Answers with the deletion *and* the re-read backlog, like the flush, so
+    the strip redraws from one round trip.
+    """
+    session = _session(request)
+    result = _mesh_mgr(request).discard_queued(
+        session.sdef.name,
+        request.match_info["id"],
+        mesh_name=request.query.get("mesh") or None,
+        handle=request.query.get("handle") or None,
+    )
+    return json_response(
+        {**result, "queued": _session_queued(request, session)}
+    )
+
+
 async def h_session_hold(request: web.Request) -> web.Response:
     """Pin this session shut, or let it go again, because a person said so.
 
@@ -13179,8 +13943,11 @@ async def h_session_pause(request: web.Request) -> web.Response:
     and the bulk resume brings back as a set. No wind-down because the
     reason to pause is a session misbehaving — looping, racing another on
     the same checkout — and typing a settle-your-issues request into it is
-    the thing being stopped. Its board issues get the same ``SESSION ENDED``
-    sweep a kill's do; that is the daemon's exit path, unchanged.
+    the thing being stopped. Its board issues are left in_progress, as a
+    hold's are (claunch-ijot0): the pause is meant to be resumed. The
+    ``SESSION ENDED`` sweep runs when the pause becomes an ending -- the kill
+    route on the paused record, an archive or a removal
+    (``SessionManager.settle_pause``).
 
     On an exited session the reply says ``already_exited``, as the kill
     route does; the record keeps whichever marker it has.
@@ -13350,6 +14117,27 @@ async def h_session_keep_alive(request: web.Request) -> web.Response:
     on = request.query.get("off") not in ("1", "true")
     session = manager.set_keep_alive(name, on)
     return json_response({**session.info(), "keep_alive": bool(on)})
+
+
+async def h_session_provider_warning(request: web.Request) -> web.Response:
+    """Record (or, with ``"ignore": false``, clear) a session's dismissal of
+    the provider warning.
+
+    Body: ``{"ignore": true|false}``. The warning sits at the top of a session
+    whose claude harness runs on a provider that is not Anthropic's own, and
+    offers two answers: restart it on yolo mode (the existing
+    ``/skip-permissions`` route) or stop showing this. The second is recorded
+    on the definition, so it is per session and survives a reload, a daemon
+    restart and a respawn; a session that never dismissed it keeps showing
+    the warning, which is what makes the rule retroactive across the fleet.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    ignore = body.get("ignore")
+    if not isinstance(ignore, bool):
+        return json_error(400, "pass 'ignore': true to hide it, false to show it again")
+    session = manager.set_provider_warning_ignored(request.match_info["name"], ignore)
+    return json_response({**session.info(), "provider_warning_ignored": bool(ignore)})
 
 
 async def h_session_note(request: web.Request) -> web.Response:
@@ -13886,6 +14674,21 @@ async def h_session_handoff(request: web.Request) -> web.Response:
     try:
         if text is not None and str(text).strip():
             result = await handoffs.complete(manager, name, text=str(text), to=to, kind=kind)
+            # A merge moved the copy's live children under the target
+            # (claunch-dsqhp). They need the mesh edge to their new parent
+            # for the same reason an escalated or re-parented child does: a
+            # child that cannot reach its parent cannot report. No edge is
+            # opened when the pair share no mesh, and an open one is not
+            # reported again.
+            adopted = result.get("adopted") or []
+            above = result.get("target") or ""
+            mm = request.app.get("mesh")
+            if adopted and above and mm is not None:
+                opened: List[dict] = []
+                for child in adopted:
+                    opened.extend(await mm.link_lineage(child, above))
+                if opened:
+                    result["connected"] = opened
             # A merge with no live session above the copy is answered, not
             # refused: the wrap-up was saved and the copy kept (``note`` says
             # where), and ``completed`` is false because nothing landed.
@@ -14020,10 +14823,14 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     like every path in this API). ``children: true`` also migrates every
     descendant standing in the *same* directory the session is leaving —
     those elsewhere (their own worktrees included) are exactly where someone
-    put them, and stay.
+    put them, and stay. Optional ``project`` re-files the named session under
+    that project (validated against the registry); followers keep their own
+    project — it is a filing of the session, not of the directory.
 
     The move itself is :meth:`SessionManager.migrate`: stop, carry the claude
-    transcript to the new directory's slug, relaunch there. The named session
+    transcript to the new directory's slug, move the session's cflow v2 run
+    slots to the same scope under the new directory (runs are keyed
+    ``(cwd, scope)``), relaunch there. The named session
     is all-or-nothing (a refusal leaves it untouched); the children are each
     their own attempt, reported per name, because "the parent moved but w3
     would not" is a state the operator can finish by hand, while unwinding a
@@ -14039,6 +14846,7 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     session = manager.get(name)  # ManagerError -> 400
     old_cwd = session.sdef.cwd
     wt_name, to = body.get("worktree"), body.get("cwd")
+    project = body.get("project")
     if (wt_name is None) == (to is None):
         return json_error(400, "pass exactly one of 'worktree' or 'cwd'")
     wt = None
@@ -14074,10 +14882,12 @@ async def h_session_migrate(request: web.Request) -> web.Response:
                 os.path.abspath(manager.get(child).sdef.cwd or "")
             ) == old_key
         ]
-    migrated, carried = await manager.migrate(name, new_cwd)
+    migrated, carried = await manager.migrate(name, new_cwd, project=project)
     children = []
     for child in followers:
         try:
+            # a follower's project is its own filing, not the parent's —
+            # only the directory follows
             _, child_carried = await manager.migrate(child, new_cwd)
             children.append(
                 {"name": child, "ok": True, "transcript_moved": child_carried}
@@ -14132,7 +14942,12 @@ async def h_profile_keys(request: web.Request) -> web.Response:
 async def h_profile_key_strategy(request: web.Request) -> web.Response:
     """Set the strategy of the pool a launch of this profile reads.
 
-    Body: ``{"strategy": "usage-min"}`` — one of ``profile_keys.STRATEGIES``.
+    Body: ``{"strategy": "usage-min"}`` — one of ``profile_keys.STRATEGIES``
+    — and, for ``manual``, ``"key_id": "k-ab12cd"`` naming the key the next
+    launch takes (a 1-based position is accepted too, as the CLI does). A
+    ``manual`` switch without a key keeps the pool's current pick, or the key
+    the token file already holds, so it never leaves the pool in a state a
+    launch would fall back from (claunch-i985h).
     The write lands on the pool's own profile, not necessarily the one named:
     a profile holding no token of its own matches its ancestor's pool, and a
     strategy written to the child's (nonexistent) pool would silently do
@@ -14148,6 +14963,9 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     body = await _json_body(request)
     strategy = str(body.get("strategy") or "").strip().lower()
+    key_id = body.get("key_id")
+    if key_id is not None and not isinstance(key_id, str):
+        return json_error(400, "'key_id' must be a key id string or null")
     try:
         source = profile_keys.owner(prof)
     except (profile_keys.KeysError, credentials.CredentialsError) as exc:
@@ -14159,7 +14977,9 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
             f"it holds keys ('claunch keys add {prof.name}')",
         )
     try:
-        pool = await asyncio.to_thread(profile_keys.set_strategy, source, strategy)
+        pool = await asyncio.to_thread(
+            profile_keys.set_strategy, source, strategy, (key_id or "").strip() or None
+        )
     except profile_keys.KeysError as exc:
         return json_error(400, str(exc))
     return json_response(
@@ -14167,7 +14987,41 @@ async def h_profile_key_strategy(request: web.Request) -> web.Response:
             "profile": prof.name,
             "owner": source.name,
             "strategy": pool.strategy,
+            "pick": pool.pick,
             "keys": len(pool.keys),
+        }
+    )
+
+
+async def h_profile_key_roll(request: web.Request) -> web.Response:
+    """Draw a new key for a ``random`` pool: the create form's roll button.
+
+    The draw a ``random`` pool stores is what its next launch takes
+    (``profile_keys.PINNED_STRATEGIES``), so re-drawing here re-decides that
+    launch — as often as the operator presses it, which is what makes the
+    strategy's effect visible before the session exists (claunch-i985h).
+    Any other strategy is refused: rotation, the two usage strategies and
+    manual each answer "which key" from something other than a draw.
+    """
+    try:
+        prof = profile_mod.require_selector(request.match_info["profile"])
+    except profile_mod.ProfileError as exc:
+        return json_error(400, str(exc))
+    try:
+        selection = await asyncio.to_thread(profile_keys.roll, prof)
+    except profile_keys.KeysError as exc:
+        return json_error(409, str(exc))
+    return json_response(
+        {
+            "profile": prof.name,
+            "owner": selection.owner.name,
+            "strategy": selection.strategy,
+            "pick": selection.key.id,
+            "key": {
+                "id": selection.key.id,
+                "label": selection.key.label,
+                "masked": selection.key.masked(),
+            },
         }
     )
 
@@ -14580,6 +15434,14 @@ async def h_session_upload(request: web.Request) -> web.Response:
         "path": str(stored.path),
         "line": uploads.line(stored.name, stored.bytes, stored.path),
     }, status=201)
+
+
+def _opening_contexts(body: dict) -> List["opening_contexts.Item"]:
+    """``body["opening_contexts"]`` checked, as items to store (gds6-bfu7)."""
+    try:
+        return opening_contexts.check(body.get("opening_contexts"))
+    except opening_contexts.ContextError as exc:
+        raise onboard.OnboardError(str(exc)) from None
 
 
 def _opening_file_ids(body: dict) -> List[str]:
@@ -15481,6 +16343,14 @@ async def h_session_retrospective(request: web.Request) -> web.Response:
     ``claunch retro --print``. POST types it into the session's terminal, the
     person's door for a session whose run did not end normally. ``?pack=``
     names another on-demand pack; an opening pack is refused (400).
+
+    A POST of the retrospective pack heads the block with
+    ``retrospection: trigger=manual, auto record=<bool>`` (claunch-lmnlv): the
+    pack records the result on the Retrospection page and takes ``auto`` from
+    that line. ``?auto=0`` (``claunch retro --review``) leaves it a wrap-up
+    draft for the person; the default records it at once, since the person
+    sending it is the one who asked. A GET carries no such line: the run's
+    node gives its own input instead.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -15497,10 +16367,16 @@ async def h_session_retrospective(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     if request.method == "GET":
         return json_response({"session": name, "pack": pack_id, "block": block})
+    auto = None
+    if pack_id == prompt_packs.RETROSPECTIVE:
+        auto = request.query.get("auto", "1").strip().lower() not in ("0", "false", "no")
+        block = prompt_packs.with_header_line(
+            block, f"retrospection: trigger=manual, auto record={'true' if auto else 'false'}")
     delivered = await session.deliver(block)
-    return json_response(
-        {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
-    )
+    doc = {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
+    if auto is not None:
+        doc["auto_record"] = auto
+    return json_response(doc)
 
 
 async def h_session_packs(request: web.Request) -> web.Response:
@@ -15559,6 +16435,37 @@ async def h_session_packs(request: web.Request) -> web.Response:
 #: grace (``FORCE_TYPING_GRACE``) and the paste; the bound exists so a harness
 #: that never reads answers the panel instead of holding the request open.
 OPENING_DELIVER_TIMEOUT = 90.0
+
+
+async def h_session_contexts(request: web.Request) -> web.Response:
+    """The context items this session was created with (gds6-bfu7): each
+    one's number, title, size and path, without the text. Read by the detail
+    panel's Opening task section and by the MCP ``context_list`` tool."""
+    session = _session(request)
+    name = session.sdef.name
+    items = await asyncio.to_thread(opening_contexts.listing, name)
+    return json_response({"session": name, "items": items})
+
+
+async def h_session_context(request: web.Request) -> web.Response:
+    """One context item's text, a window of it at a time: ``offset`` (in
+    characters) and ``max_chars`` page through an item larger than one
+    answer; ``next_offset`` says where the next window starts."""
+    session = _session(request)
+    name = session.sdef.name
+    try:
+        n = int(request.match_info["n"])
+        offset = int(request.query.get("offset") or 0)
+        raw_max = request.query.get("max_chars")
+        max_chars = int(raw_max) if raw_max not in (None, "") else None
+    except ValueError:
+        return json_error(400, "n, offset and max_chars must be whole numbers")
+    try:
+        item = await asyncio.to_thread(
+            opening_contexts.read, name, n, offset=offset, max_chars=max_chars)
+    except opening_contexts.ContextError as exc:
+        return json_error(404, str(exc))
+    return json_response({"session": name, **item})
 
 
 async def h_session_opening(request: web.Request) -> web.Response:
@@ -15626,6 +16533,56 @@ async def h_session_opening(request: web.Request) -> web.Response:
     return json_response({
         **body, "ok": True, "delivered": bool(delivered),
         "reason": "" if delivered else "the session did not take it: it is not reading input",
+    })
+
+
+async def h_session_opening_attachments(request: web.Request) -> web.Response:
+    """The images and uploaded files this session's opening carried
+    (``session_opening.attachments``), so the detail panel can show them
+    under the opening task. Each entry is named, not served: the two routes
+    below serve the bytes."""
+    session = _session(request)
+    name = session.sdef.name
+    found = await asyncio.to_thread(session_opening.attachments, name)
+    return json_response({"session": name, **found})
+
+
+async def h_session_opening_image(request: web.Request) -> web.Response:
+    """One image the opening carried, as an image the browser can draw."""
+    session = _session(request)
+    name = session.sdef.name
+    image = request.match_info["image"]
+    # Only images this opening names: the folder may hold an earlier
+    # same-name session's (session_opening.image_names).
+    named = image in await asyncio.to_thread(session_opening.image_names, name)
+    path = (await asyncio.to_thread(opening_images.claimed_path, name, image)) if named else None
+    if path is None:
+        return json_response(
+            {"error": f"{session.sdef.name}'s opening has no image {image}"}, status=404)
+    return web.FileResponse(path, headers={
+        "Content-Type": opening_images.media_type(image),
+        # The name carries a random id and never names other bytes.
+        "Cache-Control": "private, max-age=31536000, immutable",
+    })
+
+
+async def h_session_opening_file(request: web.Request) -> web.Response:
+    """One uploaded file the opening carried, as a download. Only files the
+    recorded opening names: the session's uploads folder also holds files
+    sent later from the session line, and this route is the opening's."""
+    session = _session(request)
+    name = session.sdef.name
+    fid, fname = request.match_info["fid"], request.match_info["fname"]
+    found = await asyncio.to_thread(session_opening.read, name)
+    named = any(f.get("id") == fid and f.get("name") == fname
+                for f in (found or {}).get("files") or [])
+    path = (await asyncio.to_thread(uploads.session_file, name, fid, fname)) if named else None
+    if path is None:
+        return json_response(
+            {"error": f"{name}'s opening has no file {fid}/{fname}"}, status=404)
+    return web.FileResponse(path, headers={
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(fname),
     })
 
 
@@ -15711,11 +16668,16 @@ async def h_session_loop_close(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     manager.get(name)
     body = await _json_body(request)
-    entry = loops.close(
-        name, request.match_info["loop"], note=str(body.get("note") or "")
-    )
+    loop_id = request.match_info["loop"]
+    note = str(body.get("note") or "")
+    entry = loops.close(name, loop_id, note=note)
     if entry is None:
-        return json_error(404, f"no open loop {request.match_info['loop']!r}")
+        # ``reply:`` waits are derived from the mesh's response watches, so
+        # they have no stored row for ``close`` to find -- the wait ends by
+        # deleting the watch the id was read from.
+        entry = loops.close_reply_wait(name, loop_id, _mesh_mgr(request), note=note)
+    if entry is None:
+        return json_error(404, f"no open loop {loop_id!r}")
     return json_response({"session": name, "loop": entry})
 
 
@@ -16110,6 +17072,34 @@ async def h_beads_stream(request: web.Request) -> web.Response:
         board_root=request.query.get("board"),
     )
     return json_response(view)
+
+
+async def h_beads_text_search(request: web.Request) -> web.Response:
+    """Substring search of one board — the search box's no-rag path.
+
+    ``q`` is required; ``cwd`` names the board (any directory inside the
+    repository, default the daemon's own). This is the fallback the board
+    page reaches for when the rag block is absent or its embeddings are
+    unreachable, so it must work with nothing configured beyond ``br``.
+    """
+    q = request.query.get("q", "").strip()
+    if not q:
+        return json_error(400, "q is required")
+    if len(q) > 200:
+        return json_error(400, "q must be at most 200 characters")
+    try:
+        limit = int(request.query.get("limit", "30"))
+    except ValueError:
+        return json_error(400, "limit must be an integer")
+    if not 1 <= limit <= 100:
+        return json_error(400, "limit must be 1..100")
+    board = request.app["beads"]
+    cwd = request.query.get("cwd") or os.getcwd()
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    rows = await board.text_search(root, q, limit=limit)
+    return json_response({"issues": rows[:limit], "root": str(root)})
 
 
 async def h_beads_boards(request: web.Request) -> web.Response:

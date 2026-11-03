@@ -774,3 +774,330 @@ def test_the_v1_peer_review_question_takes_the_issue_from_the_nudge(layer):
     assert "--status in_progress --status in_review --json" in prompt
     assert "후보가 둘 이상이면 추측하지 말고 abstain한다" in prompt
     assert "그대로 in_progress(재요청 회차면 in_review)" in prompt
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_landing_gate_separates_a_rereview_from_an_unresolved_marker(layer):
+    """claunch-eyz0s.2.1 — the port of the v2 ordering fix.
+
+    v1's ``landing`` check 4 asked only "is an unresolved CHANGES REQUESTED /
+    HOLD / BLOCKED on this issue". The one session that can clear a reviewer's
+    marker (``peer-review``) runs *after* ``landing``, so a rework round could
+    never pass the gate: it escalated to a person every time. v2 fixed this
+    (claunch-eyz0s.2, three days lost waiting on a person); this pins the port.
+
+    Three sentences carry the fix, and each is load-bearing:
+    · the marker types are separated, with where each one is cleared;
+    · a rework round's 「재심 대기」 is judged by three git/board outputs;
+    · the order that makes that safe is named, with its honest scope limit.
+    """
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+
+    # 1. the three markers and where each is cleared
+    assert "마커는 셋이고, 푸는 자리도 셋이다" in text
+    assert "`HOLD:` — 상위 세션 또는 사람의 제동이다" in text
+    assert "이 세션은 풀 수 없다" in text
+    # 2. 「미해소」와 「재심 대기」를 가르는 판정 — 명령의 출력 셋
+    assert "**재심 대기**" in text
+    assert "git merge-base --is-ancestor <tip> HEAD" in text
+    assert "git rev-list --count <tip>..HEAD" in text
+    assert "셋 중 하나라도 안 서면 escalate다" in text
+    # 3. 그 판정이 안전한 이유는 순서이고, 순서의 보장 범위도 적혀 있어야 한다
+    assert "`integration-request` **앞에서** 돈다" in text
+    assert "**다만 그 순서는 리뷰어가 답했을 때의 보장이다**" in text
+    # 순서를 재심 뒤로 옮기면 이 문장이 항변한다
+    assert "`peer-review`가 `integration-request` **앞에서**" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_the_narrowed_tip_reading(layer):
+    """The port carried the narrowed tip reading into v1, but nothing pinned it
+    there: replacing the paragraph with the old 「줄 어디에서 찾든 tip」 survived
+    every test (s511-rev·s1262-rev·s490-rev, each with its own mutation). The
+    rule is what keeps an upper session's quoted hash from being read as a
+    reviewer's tip, so v1 needs the same three assertions v2 has — body
+    exclusion, its escalate consequence, and the two-slot disagreement."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 좁힌 판독 — 두 자리만 tip이다
+    assert "**tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.**" in text
+    assert "그 줄의 마지막 토큰" in text
+    # 본문 안의 해시는 tip이 아니다 → tip 없는 마커 → escalate
+    assert "**줄 본문 안의 다른 `@ <hex>`는 tip이 아니다**" in text
+    assert "그 줄은 tip 없는 마커이므로 escalate다" in text
+    # 두 자리가 다른 해시를 가리키면 판독 불가
+    assert "서로 다른 해시를 가리키면 판독 불가라 escalate다" in text
+    # 옛 판독으로 되돌리면 이 문장이 항변한다
+    assert "줄 어디에서 찾든" not in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_separates_the_upper_by_comment_author_not_by_prefix(layer):
+    """The gate used to separate the upper's brake from a reviewer's verdict by
+    the line's *prefix* (``PR-REVIEW #<번호>``). Three measured lines written by
+    the same upper (s29) carry no prefix and were therefore read as reviewer
+    verdicts: ``CHANGES REQUESTED @ 568b0d19…`` (claunch-o8pb7),
+    ``CHANGES REQUESTED @ acc16d7b (s29):`` (claunch-u9m6z) and a trailing
+    ``@ b606bc15`` (claunch-75kfl). The ground is *who wrote the line*
+    (claunch-eyz0s.2.1.1).
+
+    The first implementation narrowed "upper" to the first
+    ``landing-review`` responder group and compared ``[sNNN]`` against the
+    roster's handle column. Both are wrong: ``resolves`` is a top-level
+    ``any(asks)``, the first group is the worker in a parent-worker
+    configuration (the leader is in none), and ``[sNNN]`` is a session name.
+    The default is therefore flipped — only the three review-verdict branches
+    are reviews; everything else is a brake; the prefix is the last fallback.
+    """
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # the flipped default
+    assert "기본값은 「제동」이고, 리뷰어만 뺀다" in text
+    # where the subject is read from, and that it is a session name
+    assert "`[sNNN] at <시각>` 꼴의 머리" in text
+    assert "그 `[sNNN]`은 **세션 이름**이다" in text
+    # the roster comparison is the third column
+    assert "첫 열(핸들)이 아니라 셋째 열의 세션 이름" in text
+    for pair in ("`s404-rev`의 세션은 `s573`", "`s511-rev`는 `s523`",
+                 "`s5874-indep-leader`는 `s5878`"):
+        assert pair in text, pair
+    # the three review-verdict branches, tested before the brake default
+    assert "리뷰 판정 셋 중 하나에" in text and "먼저 걸리면" in text
+    assert "(a) 그 세션의 role이 `reviewer`다" in text
+    assert "`peer-review` 질문에 **실제로 답한**" in text
+    assert "`groups[].asks`로는 갈리지 않는다" in text
+    assert "`leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가 들어" in text
+    assert "ask_answered {\"ask\": \"<ask id>\", \"by\": \"<...>\"}" in text
+    # the journal's `by` is a handle, so it takes the third-column mapping
+    assert "다만 그 `by`는 **핸들**이다" in text
+    assert "저널을 읽을 수 없으면 (b)는 서지 않는다" in text
+    # the roster query must include closed sessions
+    assert "**`--state all`로 읽는다**" in text
+    assert "`--state all`로도 그 세션이 안 나오면" in text
+    # (c) is a fallback only; a line form alone must not promote a brake
+    assert "는 **role을 읽지 못했을 때의 대체**이고" in text
+    assert "꼴만으로는 리뷰 판정이라 하지 않는다" in text
+    # a session absent from the roster is a brake, one way only
+    assert "**명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**" in text
+    assert "머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다" in text
+    # the prefix fallback must not flip the brake default either
+    assert "아니면 **여전히" in text and "제동이다**" in text
+    assert "머리가 없으면 셋 다 서지 않는다" in text
+    # own comments are neither: ordering keeps them out of both lists
+    assert "**자기 코멘트는 이 갈래에 들지 않는다.**" in text
+    # everything else is a brake, including a session absent from the roster
+    assert "**그 밖의 전부 — 상위의 제동이다.**" in text
+    # "absent" means absent under `--state all`, the flag (a) names; that flag
+    # keeps closed sessions, so a finished reviewer is not absent
+    assert "**명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로" in text
+    assert "그 세션이 명부(`claunch mesh members <mesh> --state all`)에서" in text
+    # (b) is per line and per run, and compares against the line's author
+    assert "**줄 단위**다" in text
+    assert "그 답이 **이 줄**을 낳았다" in text
+    assert "**그 줄을 쓴 세션**의 이름과 같으면 (b)의 후보다" in text
+    assert "저널은 **런 전체**를 읽는다" in text
+    # the pairing value is the ask_opened..ask_answered window — ask_answered
+    # carries no tip (s404-rev, s490-rev, s511-rev, s1236-rev2, s648-rev).
+    # The v1 names must be the ones the v1 engine emits: `ask_opened`, not
+    # `ask_routed`; `step`/`visit`, not `instance`; `by_session` is on the
+    # responder branch (s648-rev, confirmed in cflow/engine.py by s1389-rev).
+    assert "`ask_answered`에는" in text
+    assert "`ask_opened`와 `ask_answered`의 시각" in text
+    assert "`step`이 `peer-review`인" in text
+    assert "`by_session`에 그대로 있다" in text
+    # the pairing must FILTER on something. The clause "ask_answered's `at`
+    # lies between ask_opened's `at` and ask_answered's `at`" is the interval's
+    # own endpoint, so it is true by definition and rejects nothing
+    # (s1262-rev). The predicate is the line head's time plus `step`
+    # (claunch-nj5yq defect 1).
+    assert "거르는 값은 **머리 시각**과" in text
+    assert "정의상 늘 참이고 아무것도 거르지 않는다(s1262-rev 지적)" in text
+    assert "그 절은 조건이 아니라 판독 절차의 서술이므로 술어로 쓰지 않는다" in text
+    # the minute/second boundary rule — the board head is minute-granular,
+    # the journal `at` is second-granular, so the head is widened to its whole
+    # minute and the test is overlap (s490-rev, s597-rev; claunch-nj5yq
+    # defect 2).
+    assert "**분과 초의 경계는 머리 쪽을 그 분 전체로 펼쳐 정한다**" in text
+    assert "`[HH:MM:00, HH:MM:59]` 구간으로 펼치고" in text
+    assert "겹치면** 든다(양 끝 포함, 겹침 판정)" in text
+    assert "내림도 올림도 쓰지 않는다" in text
+    # The JUSTIFICATION must be true. This sentence has now been wrong twice:
+    # first "overlap sits between floor and ceil" (it is the widest), then
+    # "overlap is their union" — which s597-rev disproved: with an ask that
+    # opens and closes inside one minute (10:05:10–10:05:40, head 10:05)
+    # floor and ceil are BOTH false and only overlap is true. Overlap is a
+    # strict superset of the union.
+    assert "**겹침이 셋 가운데 가장 넓다**" in text
+    assert "내림은 여는 분의 줄을" in text
+    assert "빠뜨리고(구간 10:05:30–10:29:08에서 머리 10:05는 내림 False·" in text
+    assert "올림은 답한 분의 줄을 빠뜨린다(머리 10:29가" in text
+    assert "**포함하고 그보다 넓다**" in text
+    assert "10:05:10–10:05:40, 머리 10:05) 내림·올림이 둘 다 False인데" in text
+    assert "겹침만 True다(s597-rev 재심)" in text
+    assert "「둘의 합집합」이라고" in text
+    assert "적지 않는다" in text
+    # the sentence it replaces names the three it covers -- a bare pronoun
+    # ("앞의 셋") does not say which values it means (s511-rev)
+    assert "**내림과 올림 둘 다를 덮고 그 둘을 합친 것보다도 넓다**" in text
+    assert "앞의 셋을 전부 덮는다" not in text
+    # the predicate itself is pinned whole, both bounds and both directions:
+    # flipping either operator (`<=` -> `<`, `>=` -> `>`) changes nothing the
+    # other assertions see, so the sentence is asserted verbatim (s404-rev,
+    # s490-rev, s1236-rev2 -- each measured the flip green)
+    assert (
+        "겹침의 술어는 `HH:MM:00 <= 답의 at` 이고 `HH:MM:59 >= ask_opened의 at` "
+        "둘 다인 것이고" in text
+    )
+    assert "**값을 치르는 자리도 적는다**" in text
+    assert "ask가 열리기 **전** 같은" in text
+    assert "경우 (b)가 **서는** 방향이다" in text
+    # the false forms must not survive
+    assert "내림하면 답 직전 1분의 앞 줄까지" not in text
+    assert "겹침은 그 둘의 합집합이고" not in text
+    assert "겹침 판정이" not in text
+    # board-write-first is a RULE the pairing stands on, not an observation,
+    # and its enforcement point is named (claunch-nj5yq defect 3)
+    assert "**이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙" in text
+    assert "관측된 습관이 아니라 규칙이다" in text
+    assert "그 지시문이 이 규칙의 강제" in text
+    # "v1 always emits by_session" was responder-only: the person-answer path
+    # (cflow select/approve override) writes by_session None and no visit
+    # (engine.py:1099-1106) — s1262-rev, s511-rev, s404-rev; claunch-nj5yq
+    # defect 4. Pinning the code sites keeps the claim from widening again.
+    assert "**응답자 갈래에서만** 그 필드가 있다" in text
+    assert "`cflow/engine.py:5398`" in text
+    assert "`by_session`이 `None`이고 `visit`도 없다(`engine.py:1099-1106`)" in text
+    # "늘 싣지 않는다" read as "never emits at all", contradicting the
+    # sentence right before it (s511-rev). The scope must be "not always".
+    assert "v1은 그 필드를 **늘 싣는 것은 아니다**" in text
+    assert "「이 답은 응답자 갈래가 아니다」로 읽는다" in text
+    # the v2 runtime citation must be accurate: the changes/pass emit has
+    # `by` only, the abstain emit also carries `by_session` (s597-rev
+    # measured runtime.py:6622 @ bfece51f)
+    assert "**`changes`·`pass` 답 emit" in text
+    assert "`abstain` emit(`:6622`" in text
+    assert "`by_session`을 함께 싣는다**" in text
+    # no dangling reference: four reviewers caught this paragraph promising a
+    # fallback below that the canon does not carry (s648-rev, s490-rev,
+    # s1389-rev, s1236-rev2). The handle-to-session mapping lives in (a); the
+    # paragraph must point there and must not quote the dead phrase either,
+    # or the "phrase absent" check would pass on its own explanation.
+    assert "이 문단이 앞선 회차에 약속한 폴백은 v1 정본 어디에도" in text
+    assert "위 (a)이고 거기에 그 변환이 있다" in text
+    assert "아래 폴백" not in text
+    # the names the v1 engine does not emit appear only to be ruled out —
+    # the prose names them precisely so the next reader does not copy them
+    # back in (s648-rev: v1 emits ask_opened and has no ask_routed at all)
+    assert "v1에는 `ask_routed` 이벤트가 없고" in text
+    assert "`instance`도 `channel`도 없다" in text
+    assert "「답 이후 첫 줄」은 방향이 반대다" in text
+    assert "줄의 `@ <tip>`은 이 판정에 쓰지 않는다" in text
+    # the line count is never pinned in the prose — the journal grows
+    assert "줄 수를 문면에 박지 않는다" in text
+    # the `resolves` fact the first implementation got wrong
+    assert "`resolves`는 최상위에" in text
+    assert "그룹마다의 `resolves` 필드는 없다" in text
+    # the parent-worker anchor
+    assert "부모 워커가 답하는 편성에서 첫 그룹은 worker(ancestor)이고" in text
+    # the prefix survives only as the fallback, both directions stated
+    assert "**줄 머리 접두가 마지막 대체다**" in text
+    assert "`PR-REVIEW #<번호>`로 시작하면 제동이고" in text
+    assert "주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고" in text
+    assert "주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다" in text
+    # the three measured lines and their measured author
+    assert "claunch-o8pb7" in text and "claunch-u9m6z" in text and "claunch-75kfl" in text
+    assert "셋 다 상위(s29)가 쓴 줄이다" in text
+    # the prefix case that *was* caught still sits there as the fallback example
+    assert "`PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`" in text
+    # the ordering claim survives the rewrite
+    assert "이 규칙이 자리 규칙보다" in text and "앞선다" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_gate_pins_its_three_load_bearing_sentences(layer):
+    """Three sentences of the v1 check 4 survived every mutation (s490-rev,
+    claunch-eyz0s.2.1 rework). Mutating the canon *and* the project layer to
+    the same bytes left all four modules at 250 passed, so none of them was
+    pinned:
+
+    1. a tip-less ``CHANGES REQUESTED`` "cannot be told apart on the board --
+       then it is escalate". Flip it to 「read as 재심 대기」 and the upper
+       session's decline becomes a waiting review.
+    2. ``BLOCKED`` is cleared only by a ``CLEARED`` naming the *same* tip.
+       Drop the same-tip condition and a stale lift from an earlier tip
+       clears a brake it never addressed.
+    3. the evidence bundle must carry ``미해소 마커: …`` or ``미해소 마커 없음``.
+       Delete that line and the upper session reads a round as reviewed when
+       the marker is still open.
+
+    Each assertion below names the sentence itself, so the mutation that
+    removes or inverts it fails here rather than passing silently."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    text = " ".join(model.load(path).steps["landing"].select.prompt.split())
+    # 1. tip 없는 마커는 어느 회차의 판정인지 갈리지 않는다 → escalate
+    assert "판정인지 보드에서 갈리지 않는다 — 그때는 escalate다" in text
+    # 2. CLEARED는 같은 tip만 푼다
+    assert "같은 tip의 `CLEARED: ... @ <tip>`가 풀고" in text
+    assert "다른 tip의 CLEARED는 풀지 않는다" in text
+    # 3. 증거 묶음의 미해소 마커 줄
+    assert "`미해소 마커: CHANGES REQUESTED @ <tip> — 재심은 <무응답 통과>`" in text
+    assert "`미해소 마커 없음`" in text
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_reviewer_writes_the_tip_it_judged(layer):
+    """The gate reads ``@ <tip>`` to tell a reviewer's verdict from the upper
+    session's decline, so the reviewer has to write it -- in both places that
+    instruct a reviewer (the spawned reviewer's task and the peer-review
+    question). One side only leaves the other path emitting tip-less markers,
+    which check 4 escalates (claunch-eyz0s.2.1, porting claunch-eyz0s.2)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    reviewer = " ".join(str(wf.steps["reviewer-ensure"].instructions or "").split())
+    question = " ".join(str(wf.steps["peer-review"].select.prompt or "").split())
+    for where, text in (("reviewer-ensure", reviewer), ("peer-review", question)):
+        assert "CHANGES REQUESTED @ <tip>: <무엇을>" in text, (where, text[:300])
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_peer_review_question_orders_the_board_line_before_the_answer(layer):
+    """Check 4 pairing (b) stands on "the responder writes the board line
+    BEFORE answering": the comment head's minute must not fall past the
+    journal's `at`. The gate prose calls this the rule's enforcement point,
+    so the enforcement point itself has to carry the rule -- in both layers,
+    or the prose names a place where nothing is enforced (s597-rev measured
+    this on the v1 side: rewriting the sentence to "이 코멘트는 답 뒤에
+    남겨도 된다" left the 3-module selection fully green)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    question = " ".join(str(wf.steps["peer-review"].select.prompt or "").split())
+    assert "**이 코멘트를 이 답보다 먼저 남긴다.**" in question
+    assert "코멘트 머리 시각이" in question
+    assert "답의 저널 `at`보다 앞서야" in question
+    assert "구간 밖으로 나가고 (b)는 그 줄을 놓쳐 제동으로" in question
+    # and the failure direction is stated, so the rule is not mistaken for a
+    # correctness gate
+    assert "escalate 방향이라 잘못된 통과는 아니다" in question
+    # a failed board write must not silently become "answer first"
+    assert "보드 쓰기가 실패하면 답하기 전에 그 사실을 밝히고" in question
+    # the opposite order must not survive
+    assert "답 뒤에 남겨도 된다" not in question

@@ -186,6 +186,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-ytick { fill: var(--term
 html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-strong); stroke: var(--term-halo); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
+html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term-strong); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
@@ -669,10 +670,16 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
              The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` belongs to expanded cards. The API-key picker and
-   briefing/check refresh controls are available after opening the card.
-   Keeping asynchronous
-   refresh labels off the identity line also keeps the profile position stable.
+   `.rail-actions` belongs to expanded cards, with one named pair of
+   exceptions: the spawn `+` and the 📌 pin (claunch-g6ecv, operator
+   request — the child-add button the operator asked back onto the default
+   card, in its remembered place directly left of the pin, on the card's
+   own buttons line). Everything else
+   in the
+   box — the API-key picker, briefing/check refresh controls, observe, note
+   and ⓘ — is available after opening the card. Keeping asynchronous
+   refresh labels off the identity line also keeps the profile position
+   stable.
 
    `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
    case: they SAY something the name and the dot cannot, so both survive the
@@ -744,8 +751,28 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
 #session-list li[data-rail-mode="compact"] .sess-brief {
   display: none;
 }
-/* All controls, including the key picker, belong to expanded cards. */
-#session-list li[data-rail-mode="compact"] .rail-actions {
+/* The buttons line is the expanded card's, EXCEPT the spawn+pin pair the
+   operator asked back onto the collapsed card (claunch-g6ecv): the `+`
+   spawns a child of the session and sits directly left of the 📌, the
+   arrangement the card wore before the density split. The pair takes the
+   buttons line of its own — riding the name line was tried first and
+   fails on the real rail: a name line's flex bases already fill the 260px
+   rail (dot + name group + a borrow-naming meta), so a fourth base always
+   wraps (measured live: every compact card took a second line). Exited
+   sessions have no `+` (nothing to spawn from) and wear the pin alone.
+   Placing the visible part by exclusion, not by hiding the box, is what
+   keeps the pair reachable: an ancestor `display: none` would take them
+   with the other buttons. The exceptions are listed by name rather than
+   left implicit, so a further control kept on the compact card has to be
+   decided about rather than inherited. */
+#session-list li[data-rail-mode="compact"] .rail-actions
+  > :not(.sess-plus, .sess-pin) {
+  display: none;
+}
+/* ...and a box that holds nothing visible must not cost height. A box
+   whose every child is hidden measures as holding nothing. */
+#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(
+    .sess-plus, .sess-pin)) {
   display: none;
 }
 /* Workflow state remains visible at every card density. */
@@ -1478,6 +1505,12 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   font-size: 11px; color: #8b949e; line-height: 1.45;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* A summary request that failed is told apart from one never made
+   (decorateBriefingRow, claunch-lluxq), in the colour the card uses for the
+   same failure (.sess-brief-note.error); a one-liner written by the previous
+   briefing model stays, set in italics until it is re-summarised. */
+#session-list .rail-brief.failed { color: #f85149; }
+#session-list .rail-brief.stale { font-style: italic; }
 /* The reader's own note for a session, on its rail row. Same line geometry as
    the briefing one-liner below it and the same reasons for `pre-wrap` and
    `anywhere`: it is prose the person typed, with the breaks they chose, and
@@ -2104,8 +2137,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { backg
   #rail-nav-dock {
     /* Must be at least the number of links in #rail-nav, or the rows past it
        are unreachable while the dock is hovered (the pin shows them all).
-       21 links as of claunch-v5nhp.1; keep this ahead of that count. */
-    --rail-nav-rows: 24;
+       26 links as of claunch-ijkge (the PR page added the last one); keep
+       this ahead of that count. */
+    --rail-nav-rows: 27;
     --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
     padding-right: var(--rail-nav-pin); background: #1b1e24;
@@ -2563,6 +2597,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #profile-hint {
   margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
 }
+/* The Runs-as block's own recommendation (renderProviderHint): the Claude
+   harness on a provider that is not Claude's own still bills its permission
+   classifier to Claude, so the form points at skip permissions. Amber for
+   the same register as #profile-hint — not an error, but something that
+   would have gone wrong unnoticed — and a paragraph of its own because the
+   two can be true at once. */
+#new-provider-hint {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
+}
 
 /* What the selected credential reports, and what is left of it
    (claunch-yx2bd). A compact readout under the Profile row: the account's
@@ -2616,7 +2659,23 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
 .new-usage-key-used { flex: none; color: #6e7681; font-size: 11px; }
 .new-usage-key-use.bad { color: #d29922; }
-.new-usage-key-now { flex: none; color: #58a6ff; font-size: 10px; }
+/* The manual choice per row (claunch-i985h): small, quiet, and never the
+   loudest thing on a row — the usage numbers are what the block exists for. */
+.new-usage-key-take {
+  flex: none; padding: 0 6px; font-size: 10px; line-height: 16px;
+  border: 1px solid #30363d; border-radius: 4px; background: none;
+  color: #8b949e; cursor: pointer;
+}
+.new-usage-key-take:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.new-usage-key-take:disabled { opacity: .5; cursor: default; }
+.new-usage-key.next .new-usage-key-take:disabled { color: #3fb950; border-color: #2ea04366; }
+.new-usage-roll {
+  flex: none; margin-left: 6px; padding: 1px 8px; font-size: 11px;
+  border: 1px solid #30363d; border-radius: 4px; background: none;
+  color: #8b949e; cursor: pointer;
+}
+.new-usage-roll:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.new-usage-roll:disabled { opacity: .5; cursor: default; }
 .new-usage-strategy { align-items: center; gap: 6px; }
 #new-usage .new-usage-strategy { display: flex; margin: 6px 0 0; }
 .new-usage-strategy select { flex: 1 1 auto; min-width: 0; }
@@ -2944,10 +3003,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .term-actions { display: contents; }
 .term-btn { white-space: nowrap; }
 /* Reserve the session name before fitting controls. Only a name longer than
-   the column itself is clipped, leaving room for the overflow button. */
+   the column itself is clipped, leaving room for the overflow button and the
+   goto glyph, which never leaves the row (28px plus a 4px gap,
+   claunch-xbhbg.1). */
 #term-title {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  min-width: 0; flex-shrink: 0; max-width: calc(100% - 40px);
+  min-width: 0; flex-shrink: 0; max-width: calc(100% - 72px);
   cursor: copy; border-radius: 4px;
 }
 /* A click copies the name (app.js copyTermTitle). */
@@ -3230,6 +3291,19 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   border: 1px solid #2a2e36; border-radius: 6px;
 }
 .tq-msg-meta { color: #7d8590; font-size: 11px; margin-bottom: 3px; }
+.tq-msg-head { display: flex; align-items: baseline; gap: 8px; }
+.tq-msg-head .tq-msg-meta { flex: 1; min-width: 0; }
+/* Per-row delete: quiet until hovered, red then — it drops a message for
+   good, so it must not read as the row's main action. */
+.tq-msg-del {
+  flex: none; padding: 1px 8px; background: none;
+  border: 1px solid #3d444d; border-radius: 6px; color: #7d8590;
+  font: inherit; font-size: 11px; cursor: pointer;
+}
+.tq-msg-del:hover:not(:disabled) {
+  border-color: #da3633; color: #ff7b72;
+}
+.tq-msg-del:disabled { opacity: 0.6; cursor: default; }
 .tq-msg-body {
   color: #c6cdd5; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 9em; overflow-y: auto; font-size: 12px;
@@ -3335,6 +3409,34 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-cflow .tcf-btn.approve { background: #238636; border-color: #2ea043; }
 #term-cflow .tcf-btn.approve:hover { background: #2ea043; }
 #term-cflow .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
+/* The provider warning strip (claunch-1ztit.1): a session running the claude
+   harness on a provider that is not Claude's own. The same amber as the
+   answer strip above it -- both are "read this before you carry on" -- one
+   row high at desktop width, wrapping to a second line on a narrow window.
+   `flex: none` so its height comes out of the terminal, refitted whenever
+   renderTermProviderWarn changes it. The "ignore" press is deliberately the
+   quieter of the two: it is the one that stops the advice, not the one that
+   acts on it. */
+#term-provider-warn {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  flex: none; padding: 5px 14px; font-size: 12px;
+  background: #2a2108; border-bottom: 1px solid #6e5000; color: #e3b341;
+}
+#term-provider-warn.hidden { display: none; }
+#term-provider-warn .tpw-mark { flex: none; font-size: 13px; }
+#term-provider-warn .tpw-text {
+  flex: 1 1 18em; min-width: 0; color: #c9b27a;
+}
+#term-provider-warn .tpw-buttons { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+#term-provider-warn .tpw-btn {
+  padding: 3px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+  background: #21262d; border: 1px solid #6e5000; color: #e6edf3;
+  cursor: pointer; white-space: nowrap;
+}
+#term-provider-warn .tpw-btn:hover { background: #4d3800; }
+#term-provider-warn .tpw-btn:disabled { opacity: .6; cursor: default; }
+#term-provider-warn .tpw-btn:disabled:hover { background: #21262d; }
+#term-provider-warn .tpw-yolo { border-color: #e3b341; font-weight: 600; }
 /* overflow hidden is the backstop for fitView (app.js): the grid is kept
    inside the box by shrinking glyphs, and whatever a mid-adjustment frame
    still hangs over the edge must clip, not become a scrollbar.
@@ -3902,6 +4004,18 @@ body.term-split[data-page="log"] #log-view { flex: var(--split-term, 0.6) 1 0; m
   padding: 4px 0 6px; font-size: 12px; color: #8b949e; }
 .cli-pane-status { flex: none; }
 .cli-pane-act { margin-left: auto; }
+/* The nudge sits next to the title, before the status: it is the one control
+   the user reaches for while reading the shell, so it stays left where the
+   eye already is, and the restart control keeps the right edge. */
+.cli-pane-nudge { display: flex; align-items: center; gap: 4px; flex: 1 1 auto;
+  min-width: 0; }
+.cli-pane-nudge-input {
+  flex: 1 1 auto; min-width: 0; padding: 1px 6px; font-size: 11px;
+  color: #c6cdd5; background: #161a20; border: 1px solid #2a2e36;
+  border-radius: 4px;
+}
+.cli-pane-nudge-input::placeholder { color: #6e7681; }
+.cli-pane-nudge-btn { flex: none; }
 .cli-pane-suggest {
   flex: none; max-height: 34vh; overflow-y: auto; margin-bottom: 6px;
   border: 1px solid #2a2e36; border-radius: 6px; background: #161a20;
@@ -4383,11 +4497,31 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   mask-image: linear-gradient(#000 8.5em, transparent);
 }
 .sess-task-more { margin: 8px 0 0; }
+/* What the opening carried besides its text: image thumbnails in a wrapping
+   row (each opens full size), then the uploaded files as download links. */
+.sess-task-attach { margin-top: 8px; }
+.sess-task-images { display: flex; flex-wrap: wrap; gap: 6px; }
+.sess-task-image img {
+  display: block; max-width: 160px; max-height: 120px; border-radius: 4px;
+  border: 1px solid #30363d; object-fit: cover;
+}
+.sess-task-files { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
+.sess-task-file { overflow-wrap: anywhere; }
 /* Re-inject / Copy, under the task they hand over: one row of buttons and the
    outcome line beneath them. The line is the whole receipt — which text went
    out (the record or a reconstruction), how much of it, and what went wrong
    when it did not — so it sits under the buttons rather than in a tooltip. */
 .sess-opening-actions { margin-top: 10px; }
+/* The opening's context items (gds6-bfu7): a numbered list of titles; a
+   press opens one item's text under its title. */
+.sess-opening-contexts h4 { margin: 10px 0 4px; font-size: 12px; color: #8b949e; }
+.sess-opening-context-list { margin: 0; padding-left: 18px; font-size: 12px; }
+.sess-opening-context { margin: 2px 0; }
+.sess-opening-context .file-size { margin-left: 6px; color: #8b949e; }
+.sess-opening-context-text {
+  max-height: 24em; overflow: auto; margin-top: 4px; padding: 6px;
+  border: 1px solid #30363d; border-radius: 4px; font-family: monospace; font-size: 12px;
+}
 .sess-opening-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .sess-opening-buttons .wf-btn { margin-right: 0; }
 .sess-opening-status { margin: 8px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
@@ -4579,6 +4713,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   display: flex; flex-direction: column; gap: 2px; padding: 6px 8px;
   border: 1px solid #2a2e36; border-radius: 6px; background: #1b1e24;
 }
+/* The keyboard-walked result: same amber the score chip uses for lexical
+   hits, so the two kinds of "this row is what you asked for" agree. */
+.rag-hit.on { border-color: #d29922; background: #211d12; }
+mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; padding: 0 1px; }
 .rag-hit-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .rag-hit-line .beads-row { flex: 1; min-width: 0; }
 .rag-excerpt { padding-left: 2px; }
@@ -5062,6 +5200,10 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .wf-context { margin-top: 8px; color: #9da5b0; font-size: 13px; }
 .wf-warning { margin-top: 8px; color: #d29922; font-size: 12px; }
 .wf-note { color: #7d8590; font-size: 13px; }
+/* an ask card's "why it is open" and "who was asked" (cf2AskWhy, claunch-0rjnn) */
+.cf2-ask-why, .cf2-ask-route { border-left: 3px solid #d29922; padding: 2px 0 2px 10px; margin: 6px 0 10px; }
+.cf2-ask-why-head { font-weight: 600; margin: 0 0 4px; font-size: 13px; }
+.cf2-ask-route-list { margin: 0; padding-left: 20px; font-size: 12px; color: #7d8590; overflow-wrap: anywhere; }
 
 /* Which YAML a run came from / a pick would run. Quiet by default; the
    override half is not, because that is the line somebody needs to read. */
@@ -5314,6 +5456,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-head.anc { opacity: 0.5; }
 .dfl-edge.anc { stroke-dasharray: 3 3; opacity: 0.4; }
 .dfl-edge.anc-link { stroke: #58a6ff; stroke-dasharray: 5 3; opacity: 0.6; }
+/* A log that carries several runs (gds6 scenarios v2: stage A, then B hours
+   later) draws each in a band of its own, named, with a gap between
+   (claunch-papez). Translucent, so it reads on either theme. */
+.dfl-band rect { fill: rgba(88, 166, 255, 0.05); stroke: rgba(88, 166, 255, 0.4); stroke-width: 1; stroke-dasharray: 6 4; }
+.dfl-band-label { fill: #58a6ff; font-size: 11px; font-weight: 600; }
 @keyframes dfl-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dfl-march { to { stroke-dashoffset: -20; } }
 @media (prefers-reduced-motion: reduce) {
@@ -5361,6 +5508,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .dfl-seq-rule { stroke: #21262d; stroke-width: 1; }
 .dfl-seq-tick { stroke: #30363d; stroke-width: 1; }
 .dfl-seq-axis { fill: #7d8590; font-size: 10px; }
+.dfl-seq-band { fill: rgba(88, 166, 255, 0.05); stroke: rgba(88, 166, 255, 0.3); stroke-width: 1; }
+.dfl-seq-seg { fill: #58a6ff; font-size: 11px; font-weight: 600; }
+.dfl-seq-break { fill: none; stroke: #7d8590; stroke-width: 1.4; }
 .dfl-seq-bar { fill: #1b1e24; stroke: #30363d; }
 .dfl-seq-bar.st-run { fill: #12304f; stroke: #58a6ff; }
 .dfl-seq-bar.st-ok { fill: #12301f; stroke: #2f6f43; }
@@ -5530,6 +5680,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .md-strike { color: #6e7681; }
 .md-link { color: #58a6ff; text-decoration: none; }
 .md-link:hover { text-decoration: underline; }
+/* A beads issue id mentioned in prose (claunch-dvg6c) links to its board
+   page; slightly heavier than a plain link so the affordance reads as
+   "board record", not "web page". */
+.md-beads-link { font-weight: 600; }
 /* A link the page will not follow (javascript:, data:) still shows its text
    — dropping it silently would hide that the report said something. */
 .md-link-inert { color: #9da5b0; text-decoration: underline dotted; }
@@ -5872,6 +6026,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-role {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;
   background: #172947; color: #58a6ff;
+}
+/* A top-level rail row whose parent is gone (claunch-ikiys, railOrphanOf). */
+.rail-orphan {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #2d2308; color: #d29922;
 }
 .mesh-mirror-badge {
   font-size: 11px; padding: 2px 9px; border-radius: 9px; margin-left: 10px;
@@ -6294,6 +6453,24 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* The hint under the label, on its own line: run together, "second" and
    "pinned to this session" read as one sentence about nothing. */
 .modal-choice small { display: block; color: #6b7280; margin-top: 2px; }
+/* The key picker's usage line (claunch-z881u), coloured by the key's peak
+   window the way the create form's pool rows are. */
+.modal-choice small.modal-choice-detail.mid { color: #d29922; }
+.modal-choice small.modal-choice-detail.high { color: #f85149; }
+/* The key picker's own row: the pool's strategy, the key its next launch
+   takes, and the roll (claunch-i985h). Sits between the modal's question and
+   the key list, so the list is read against the key that row names. */
+.key-picker-controls { margin: 10px 0 2px; }
+.key-picker-row { display: flex; align-items: center; gap: 8px; }
+.key-picker-strategy { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; color: #8b949e; font-size: 12px; }
+.key-picker-strategy select { flex: 1 1 auto; min-width: 0; }
+.key-picker-roll {
+  flex: none; padding: 1px 8px; font-size: 11px; border-radius: 4px;
+  border: 1px solid #30363d; background: none; color: #8b949e; cursor: pointer;
+}
+.key-picker-roll:hover { color: #e6edf3; border-color: #8b949e; }
+.key-picker-next { margin: 6px 0 0; font-size: 12px; color: #e6edf3; }
+.key-picker-note { margin: 4px 0 0; font-size: 11px; line-height: 1.45; }
 #modal-actions { flex: none; display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 #modal-actions button {
   padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;
@@ -6481,6 +6658,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-form { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .ws-sync-form select, .ws-sync-form input:not([type="checkbox"]) { flex: 1 1 140px; min-width: 0; }
 .ws-sync-form .wf-btn { flex: none; }
+/* target remotes, basis and execution order (claunch-y3tuk) */
+.ws-sync-remotes { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.ws-sync-remote { display: flex; align-items: center; gap: 6px; }
+.ws-sync-remote .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ws-sync-targets .ws-sync-form { margin: 4px 0 0; }
+.ws-sync-order { margin: 6px 0 0; }
+.ws-sync-order h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
+.ws-sync-order-row { font-size: 12px; padding: 1px 0; }
+.ws-sync-plan-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; }
+.ws-sync-plan-row .mono { flex: none; }
 /* Refresh all over the workspace list (claunch-87eqx) */
 .ws-refresh-all { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
 .ws-refresh-progress { flex: none; }
@@ -7280,6 +7467,27 @@ body.embed #main { width: 100%; }
   padding: 0 6px; border: 0; border-radius: 4px; background: #21262d;
   color: #c9d1d9; cursor: pointer;
 }
+/* Opening context items (gds6-bfu7): one block per item, a title row with
+   its size and remove button over the item's own text box. */
+.new-task-contexts { margin-top: 6px; }
+.new-task-contexts-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 9px; border: 1px dashed #3d444d; border-radius: 6px;
+}
+.new-task-contexts-list { margin: 6px 0 0; padding: 0; list-style: none; }
+.new-task-contexts-list:empty { display: none; }
+.new-task-context {
+  margin: 0 0 6px; padding: 6px; border: 1px solid #30363d; border-radius: 6px;
+  background: #0d1117;
+}
+.new-task-context-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.new-task-context-title { flex: 1; min-width: 0; }
+.new-task-context-head .file-size { color: #8b949e; font-size: 11.5px; }
+.new-task-context-head button {
+  padding: 0 6px; border: 0; border-radius: 4px; background: #21262d;
+  color: #c9d1d9; cursor: pointer;
+}
+.new-task-context-text { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px; }
 /* A harness panel is one runtime decision with several controls, not more
    unrelated rows in the generic spawn grid.  Codex gets its own heading and
    accent; panels for other harnesses can define their own class alongside it. */
@@ -7443,11 +7651,11 @@ body.embed #main { width: 100%; }
 .notice.warn { border-left-color: #d29922; }
 .notice.bad { border-left-color: #ff7b72; }
 /* A leader the harness stopped (claunch-9djny): the grade above warn/bad.
-   It has no × and no timeout -- the whole point is that the project is
-   stopped until a person acts -- so it reads as a different thing from the
-   toasts beside it: a thick rule on a red ground, and a title that carries
-   the weight. The card goes away when the daemon stops reporting the fault,
-   never because it was swiped at. */
+   It carries the same × as every other card and no timeout, so it is still
+   there for a reader who was away and can still be put away by hand
+   (claunch-8vl1s); the poll takes it down when the daemon stops reporting
+   the fault. It reads as a different thing from the toasts beside it: a
+   thick rule on a red ground, and a title that carries the weight. */
 .notice.fatal {
   border-left: 5px solid #f85149; border-color: #6b2b28; background: #2a1615;
 }
@@ -7467,14 +7675,75 @@ body.embed #main { width: 100%; }
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
 .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
+/* A gate body drawn as markdown (claunch-ns4kd): the ask writes headings,
+   lists and the plan's own breaks, and the card renders them as elements —
+   so pre-wrap would turn the newlines between those elements into blank
+   space, and the report-sized spacing of `.md` would push a three-line
+   question to the height of a page. Sizes stay at the card's own. */
+.gate-reason.md { white-space: normal; }
+.gate-reason.md .md-p { margin: 0 0 5px; white-space: pre-wrap; }
+.gate-reason.md > :last-child { margin-bottom: 0; }
+.gate-reason.md .md-h1, .gate-reason.md .md-h2,
+.gate-reason.md .md-h3, .gate-reason.md .md-h4,
+.gate-reason.md .md-h5, .gate-reason.md .md-h6 {
+  font-size: 11.5px; margin: 6px 0 3px; color: #c9d1d9;
+}
+.gate-reason.md .md-list { margin: 0 0 5px; padding-left: 16px; }
+.gate-reason.md .md-item { margin: 1px 0; line-height: 1.45; }
+.gate-reason.md .md-pre { margin: 0 0 5px; padding: 4px 6px; font-size: 10.5px; }
+.gate-reason.md .md-quote { margin: 0 0 5px; }
+.gate-reason.md .md-hr { margin: 6px 0; }
+.gate-reason.md .md-table { margin: 0 0 5px; font-size: 10.5px; }
 /* A spawn card's project / profile / workspace / role / workflow rows
    (claunch-mgope): label column, value column. */
 .gate-facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; margin-top: 4px; }
 .gate-fact-key { color: #6e7681; }
 .gate-fact-val { color: #c9d1d9; overflow-wrap: anywhere; }
 .gate-fact-from { color: #6e7681; }
-.gate-actions { display: flex; gap: 8px; margin-top: 8px; }
-.gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
+/* A request's presses wrap onto the next line rather than run past the card
+   or squeeze a label over two lines (claunch-gnlui.2): a run's question has
+   up to five answers, and the card or panel row adds its own presses. */
+.gate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
+/* The two presses a gate card offers besides its answer (claunch-6scxn):
+   Hide and Remind. The box leaves the layout to the actions row so Hide
+   wraps with the answers and Remind can take its own line. */
+.gate-aside { display: contents; }
+/* Remind's waits are three exclusive presses, one per wait (claunch-gnlui),
+   drawn as one segmented group after a "Remind" caption so they read as a
+   choice of when rather than as three unrelated actions. The group is a line
+   of its own under every other press (claunch-gnlui.2), in the card and in
+   the panel row alike. */
+.gate-remind { display: inline-flex; align-items: center; gap: 0; }
+.gate-actions .gate-remind { order: 1; flex-basis: 100%; }
+.gate-remind-label { color: #9da5b0; font-size: 11px; margin-right: 6px; }
+.gate-actions .gate-remind .wf-btn { padding: 3px 7px; border-radius: 0; }
+.gate-actions .gate-remind .wf-btn + .wf-btn { border-left-width: 0; }
+.gate-actions .gate-remind .wf-btn:first-of-type { border-radius: 4px 0 0 4px; }
+.gate-actions .gate-remind .wf-btn:last-of-type { border-radius: 0 4px 4px 0; }
+/* A card or history row above NOTICE_FOLD_MAX_PX tall folds by default
+   (claunch-qf41a, claunch-qf41a.1): the title/head and the answer buttons
+   stay up, the body moves into this box and the `folded` class clamps it
+   to a five-line preview — enough to read what the notice is about — until
+   the toggle is pressed. The clamp is five lines of the markdown body the
+   box mostly carries (16px × 1.55); smaller text shows more lines, larger
+   fewer, and the fade says the box continues. */
+.notice-fold { display: block; }
+.notice.folded .notice-fold,
+.notice-row.folded .notice-fold {
+  max-height: calc(5 * 1.55 * 1em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
+/* The fold toggle rides the actions row like the other presses (it is
+   inserted before Hide), so inside .gate-actions it picks up the row's
+   own wf-btn sizing; the declaration keeps a lone toggle (a card with no
+   actions row) at the same compact size. The box is display:contents, the
+   way .gate-aside rides the same row: the row's `> button` children stay
+   the answer presses. */
+.notice-fold-toggle { padding: 3px 7px; font-size: 11px; white-space: nowrap; }
+.notice-fold-toggle-box { display: contents; }
 /* A session named on a gate card opens that session. Marked as a press the
    way the run list marks its own session line, so it reads as one before it
    is hovered: the card is read once and answered, and a link nobody can see
@@ -7485,6 +7754,17 @@ body.embed #main { width: 100%; }
 }
 .notice .gate-session:hover { color: #58a6ff; border-bottom-color: #58a6ff; }
 .notice-title .gate-session { color: #e6edf3; }
+/* The session's state beside its name (claunch-6vq2m): quieter than the
+   name, and an ended session's word in the colour the rail gives an ended
+   row, so a card about a session nobody is driving reads as such. */
+.gate-session .gate-session-state {
+  color: #8b949e; font-weight: normal; font-size: 0.9em;
+}
+.gate-session .gate-session-state[data-state="busy"] { color: #d29922; }
+.gate-session .gate-session-state[data-state="idle"] { color: #3fb950; }
+.gate-session .gate-session-state[data-state="killed"],
+.gate-session .gate-session-state[data-state="failed"],
+.gate-session .gate-session-state[data-state="archived"] { color: #f85149; }
 /* The countdown is its own line so the poll can rewrite it without touching
    the links beside it. */
 .notice .gate-clock { color: #8b949e; }
@@ -7576,6 +7856,17 @@ body.embed #main { width: 100%; }
 .notice-panel-section-row { display: flex; align-items: baseline; gap: 8px; }
 .notice-panel-section-row .notice-panel-section { flex: 1; }
 .notice-panel-section-row .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
+/* Folding "Waiting on you" (thread th-3b3470): the line left behind says how
+   many the fold keeps back, so a folded list never hides a request silently. */
+.notice-folded-note { margin: 2px 0 8px; }
+.notice-panel-section-row .wf-btn.fold-open { color: #58a6ff; }
+/* The Waiting head carries the fold press beside its heading (thread
+   th-3b3470). Its own class, not notice-panel-section-row: that one names
+   the History head, which is where the filter presses live. */
+.notice-waiting-head { display: flex; align-items: baseline; gap: 8px; }
+.notice-waiting-head .notice-panel-section { flex: 1; }
+.notice-waiting-head .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
+.notice-waiting-head .wf-btn.fold-open { color: #58a6ff; }
 .notice-row {
   background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
   border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
@@ -7589,8 +7880,16 @@ body.embed #main { width: 100%; }
 .notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
 .notice-row.bad { border-left-color: #ff7b72; }
 /* The history keeps a raised leader fault (claunch-9djny) after the card is
-   gone, with the same grade the card carried. */
-.notice-row.fatal { border-left-color: #f85149; }
+   gone, with the same grade the card carried. The grade is the card's, not a
+   thinner one (thread th-3b3470): the panel is where the reader goes to find
+   the card again, and a row that dropped the red ground read as an ordinary
+   request. warn and bad already match their cards above. */
+.notice-row.fatal {
+  border-left: 5px solid #f85149; border-color: #6b2b28; background: #2a1615;
+}
+.notice-row.fatal .notice-title { color: #ffb3ad; font-weight: 600; }
+.notice-row.fatal .notice-sub,
+.notice-row.fatal .notice-when { color: #e6b3ae; }
 .notice-row.openable { cursor: pointer; }
 .notice-row.openable:hover { background: #20242b; }
 /* Read marks (claunch-x76l8): an unread row has a dot and full colour, a
@@ -7622,6 +7921,10 @@ body.embed #main { width: 100%; }
 .notice-row .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-row .gate-clock, .notice-row .notice-when { color: #8b949e; }
 .notice-row .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The history row draws the same markdown body as the card above, and this
+   rule sits after the `.gate-reason.md` one — same specificity, so it would
+   put the pre-wrap back (claunch-ns4kd). */
+.notice-row .gate-reason.md { white-space: normal; }
 .notice-row .gate-session {
   cursor: pointer; color: #c9d1d9; border-bottom: 1px dotted #6e7681;
 }
@@ -7631,6 +7934,10 @@ body.embed #main { width: 100%; }
   border: 1px solid #3c444d; color: #9da5b0;
 }
 .notice-chip.live { border-color: #d29922; color: #d29922; }
+/* A request put aside by Remind says which step brings it back
+   (claunch-6scxn). The same amber as `live`: the card is not answered and
+   not gone, and the reader asked for this one to return. */
+.notice-chip.remind { border-color: #d29922; color: #d29922; }
 /* A phone has no corner to spare: the strip spans the width under the
    mobile bar instead of floating over the session it is reporting on —
    and "under" is measured (--notices-top, claunch-lolft), because the
@@ -7876,13 +8183,13 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .stats-switch.profile .stats-switch-kind { color: #58a6ff; border-color: #1f3a5f; }
 .stats-switch-model { color: #8b949e; }
 .stats-providers { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
-.stats-provider {
+.stats-provider, .stats-llm-provider {
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
   padding: 6px 10px; color: #c6cdd5; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; cursor: pointer;
   text-align: left;
 }
-.stats-provider.active { color: #e6edf3; background: #2d333b; border-color: #444c56; }
+.stats-provider.active, .stats-llm-provider.active { color: #e6edf3; background: #2d333b; border-color: #444c56; }
 .stats-provider-name { font-size: 12px; }
 .stats-provider-total { font-size: 13px; font-variant-numeric: tabular-nums; }
 .stats-provider-sessions { color: #6e7681; font-size: 10px; }
@@ -7917,14 +8224,50 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   display: inline-block; width: 120px; height: 8px; background: #22262d;
   border-radius: 3px; overflow: hidden; vertical-align: middle;
 }
-.stats-rowbar-fill { display: block; height: 100%; background: #58a6ff; }
+.stats-rowbar-fill, .stats-llm-rowbar-fill { display: block; height: 100%; background: #58a6ff; }
 .stats-rowvalue { margin-left: 8px; font-variant-numeric: tabular-nums; }
-.stats-unmetered { color: #6e7681; }
+.stats-unmetered, .stats-llm-unreported { color: #6e7681; }
 .stats-model-cell {
   max-width: 200px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; color: #8b949e; font-size: 11px;
 }
 .stats-last-cell { color: #6e7681; font-size: 11px; white-space: nowrap; }
+/* The daemon's own LLM calls (claunch-60y0d): one day column per local date,
+   stacked by feature, beside the per-feature/provider/session tables. */
+.stats-llm-sub { margin: 14px 0 6px; font-size: 12px; color: #8b949e; font-weight: 600; }
+.stats-llm-part { color: #8b949e; }
+.stats-llm-cost { white-space: nowrap; }
+.stats-llm-cost-partial::after { content: "*"; margin-left: 2px; color: #d29922; }
+/* The session overview's provider + model table (claunch-qs2ev): the same
+   split and estimate the daemon-LLM section draws, for the shim's ledger. */
+.stats-model-cost { white-space: nowrap; }
+.stats-model-cost-partial::after { content: "*"; margin-left: 2px; color: #d29922; }
+.stats-model-unpriced { color: #6e7681; }
+.stats-llm-errors { margin-left: 6px; color: #ff7b72; border-color: #4a2a2a; }
+.stats-llm-days {
+  display: flex; align-items: flex-end; gap: 3px; height: 96px;
+  margin: 10px 0 4px; overflow-x: auto;
+}
+.stats-llm-day {
+  flex: 1 0 14px; max-width: 40px; height: 100%;
+  display: flex; flex-direction: column; align-items: stretch;
+}
+.stats-llm-daybar {
+  flex: 1 1 auto; display: flex; flex-direction: column-reverse;
+  background: #1b1e24; border-radius: 2px; overflow: hidden;
+}
+.stats-llm-seg { display: block; width: 100%; }
+.stats-llm-daylabel {
+  font-size: 9px; color: #6e7681; text-align: center; white-space: nowrap;
+}
+.stats-llm-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: #8b949e; }
+.stats-llm-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.stats-llm-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.llm-briefing { background: #58a6ff; }
+.llm-observer { background: #3fb950; }
+.llm-embedding { background: #d2a8ff; }
+.llm-rerank { background: #e3b341; }
+.llm-jev { background: #f78166; }
 @media (max-width: 1100px) {
   /* Stacked, the main column takes the view's width: left at flex-start it
      sized itself to its widest table and the section's overflow cut it. */
@@ -8059,7 +8402,8 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .llm-settings-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .llm-settings-form input, .llm-settings-form select { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .llm-settings-form input:disabled, .llm-settings-form select:disabled { color: #7d8590; background: #161b22; }
-/* Model prices: a model id wide, four narrow rate columns, a drop button.
+/* Model prices: a provider and a model id, four narrow rate columns, a drop
+   button.
    The table is a grid so the rate inputs line up across rows — these
    figures are typed against each other, and a column that ragged-reads
    invites a rate into the wrong bucket. */
@@ -8067,12 +8411,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .mp-currency { display: inline-flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
 .mp-currency input { width: 8ch; box-sizing: border-box; padding: 8px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .mp-table { display: grid; gap: 6px 8px; }
-.mp-row { display: grid; grid-template-columns: minmax(140px, 1fr) repeat(4, minmax(64px, 80px)) auto; gap: 6px 8px; align-items: center; }
+.mp-row { display: grid; grid-template-columns: minmax(90px, 140px) minmax(140px, 1fr) repeat(4, minmax(64px, 80px)) auto; gap: 6px 8px; align-items: center; }
 .mp-head { color: #8b949e; font-size: 11px; }
-.mp-model { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-model, .mp-provider { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-rate { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
-.mp-add { margin-top: 10px; grid-template-columns: minmax(140px, 1fr) auto auto; }
-.mp-add input { padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
+.mp-add { margin-top: 10px; grid-template-columns: minmax(90px, 140px) minmax(140px, 1fr) auto; }
+.mp-add input, .mp-add select { padding: 6px; border: 1px solid #30363d; border-radius: 4px; background: #0d1117; color: #c9d1d9; }
 .model-prices-form .wf-btn { margin-top: 10px; }
 /* Read-only holds a value worth reading (the profile's endpoint), so it stays
    legible where :disabled greys out a field that is empty anyway. */
@@ -8187,14 +8531,62 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
 }
 .search-anything-filter-count { font-variant-numeric: tabular-nums; opacity: .75; }
-.search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+/* Search settings card (claunch-r4796): numbered sections, a summary of what
+   is in force at the top, a hint line under every field that says its rule,
+   and the DB panel as a table whose names fill the DB field when clicked. */
+.search-settings .rag-summary { display: flex; flex-direction: column; gap: 6px; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+.search-settings .rag-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; }
+.search-settings .rag-summary-key { flex: none; width: 88px; color: #9da5b0; font-size: 12px; }
+.search-settings .rag-summary-value { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.search-settings .rag-status { min-height: 1em; margin: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+.search-settings .rag-status:empty { display: none; }
+.search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 2px; }
+.search-settings .rag-field-title { font-size: 13px; font-weight: 600; }
 .search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
-.search-settings input[type=checkbox] { align-self: flex-start; }
-.search-settings fieldset { border: 1px solid var(--border, #ccc); border-radius: 6px; margin: 10px 0; padding: 4px 12px; min-width: 0; }
-.search-settings fieldset[hidden] { display: none; }
-.search-settings label:has(> input[type=radio]) { flex-direction: row; align-items: center; gap: 6px; }
-.search-settings select { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
-.search-settings button { margin-right: 8px; }
+.search-settings select { max-width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; font-size: 16px; }
+.search-settings fieldset.rag-section, .search-settings details.rag-section { border: 1px solid var(--border, #30363d); border-radius: 6px; margin: 12px 0; padding: 4px 12px 10px; min-width: 0; }
+.search-settings legend, .search-settings details.rag-section > summary { font-weight: 600; font-size: 14px; padding: 0 4px; }
+.search-settings details.rag-section > summary { cursor: pointer; padding: 6px 0; }
+.search-settings [hidden] { display: none !important; }
+.search-settings .rag-hint { color: var(--muted, #9da5b0); font-size: 12px; margin: 2px 0 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.search-settings .rag-hint-inline { color: var(--muted, #9da5b0); font-size: 12px; }
+.search-settings .rag-problem { color: #f0883e; font-size: 12px; margin: 2px 0; }
+.search-settings .rag-problem:empty { display: none; }
+.search-settings .rag-check { flex-direction: row; align-items: center; gap: 8px; }
+.search-settings .rag-check input { flex: none; margin: 0; }
+.search-settings .rag-radio { flex-direction: row; align-items: flex-start; gap: 8px; margin: 8px 0; }
+.search-settings .rag-radio input { flex: none; margin-top: 3px; }
+.search-settings .rag-source-box { border-left: 2px solid #30363d; padding-left: 12px; margin: 4px 0 4px 4px; }
+.search-settings .rag-preset-row { flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
+.search-settings .rag-preset-row select { flex: 1 1 220px; }
+.search-settings .rag-preset-count { color: var(--muted, #9da5b0); font-size: 12px; }
+.search-settings .rag-badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid #30363d; color: #9da5b0; }
+.search-settings .rag-badge:empty { display: none; }
+.search-settings .rag-badge-on { border-color: #238636; color: #3fb950; }
+.search-settings .rag-badge-warn { display: block; width: max-content; border-color: #9e6214; color: #f0883e; margin-top: 2px; }
+.search-settings .rag-actions-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.search-settings .rag-actions-row .wf-btn { margin: 0; }
+.search-settings .rag-actions-row input { flex: 1 1 160px; min-width: 0; }
+.search-settings .rag-subform { border: 1px dashed #30363d; border-radius: 6px; padding: 4px 10px 6px; margin: 6px 0; }
+.search-settings .rag-footer { margin-top: 12px; }
+.search-settings .wf-btn:disabled { opacity: .5; cursor: default; }
+.search-settings .rag-preset-state { flex: 1 1 200px; min-width: 0; color: inherit; font-size: 13px; }
+.search-settings .rag-selftest-result { color: var(--muted, #9da5b0); font-size: 12px; margin: 4px 0 8px; }
+.search-settings .rag-preset-db input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.search-settings .rag-db-list { margin: 6px 0 0; }
+.search-settings .rag-db-scroll { overflow-x: auto; }
+.search-settings .rag-db-table { width: 100%; min-width: 600px; border-collapse: collapse; font-size: 12px; }
+.search-settings .rag-db-table th { text-align: left; font-weight: 600; color: #9da5b0; padding: 4px 6px; border-bottom: 1px solid #30363d; white-space: nowrap; }
+.search-settings .rag-db-table td { padding: 4px 6px; border-bottom: 1px solid #21262d; vertical-align: middle; overflow-wrap: anywhere; }
+.search-settings .rag-db-entry td:nth-child(2), .search-settings .rag-db-entry td:nth-child(5) { white-space: nowrap; }
+.search-settings .rag-db-use { white-space: nowrap; background: none; border: none; padding: 0; margin: 0; color: #58a6ff; cursor: pointer; font: inherit; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.search-settings .rag-db-use:hover:not(:disabled) { text-decoration: underline; }
+.search-settings .rag-db-use:disabled { color: inherit; cursor: default; }
+.search-settings .rag-db-use[aria-pressed="true"] { font-weight: 700; }
+.search-settings .rag-db-use[aria-pressed="true"] { box-shadow: inset 0 -2px 0 #3fb950; }
+.search-settings .rag-db-actions { white-space: nowrap; text-align: right; }
+.search-settings .rag-db-actions .wf-btn { margin: 0 0 0 4px; }
+.search-settings .rag-db-rename-row td { background: rgba(110, 118, 129, .08); }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
 @media (max-width: 820px) {
   .search-anything input { font-size: 16px; height: 36px; }
@@ -8340,7 +8732,10 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 /* Chart (#/chart, chart-page.js): every session as a bar on one time axis.
    Columns: name, track, lifetime, cflow. The track is positioned inline by
    the page; every colour is here so the light theme derives it. */
-#chart-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 18px 26px 0; min-height: 0; }
+/* overflow-x: the timeline column keeps a minimum width (--chart-main-min,
+   below), so a narrow window scrolls the view sideways instead of squeezing
+   the bars under the sticky columns (claunch-p8f73.1). */
+#chart-view { --chart-main-min: 840px; flex: 1; display: flex; flex-direction: column; overflow-x: auto; overflow-y: hidden; padding: 18px 26px 0; min-height: 0; }
 #chart-view > .wf-head, #chart-view > .chart-toolbar, #chart-view > .chart-summary, #chart-view > .chart-error { flex: none; }
 #chart-view .wf-head { display: flex; align-items: baseline; gap: 12px; }
 .chart-muted { color: #8b949e; font-size: 12px; }
@@ -8371,8 +8766,13 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
    header, the name column and the cflow column stay in view while the bars
    scroll under them. */
 .chart-hint { margin: -4px 0 8px; }
-.chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 640px; }
-.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(200px, 1fr) 64px 78px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
+/* The bar column keeps at least 300px: min-width is the five columns'
+   minimums plus the four gaps. The name column and the three right columns
+   are sticky, so this alone does not keep the bars in view -- a column
+   narrower than the grid scrolls them under the sticky ones. The column
+   itself keeps --chart-main-min (.chart-split) for that. */
+.chart-grid { display: flex; flex-direction: column; font-size: 12px; min-width: 822px; }
+.chart-row { display: grid; grid-template-columns: minmax(120px, 220px) minmax(300px, 1fr) 64px 78px 220px; gap: 10px; align-items: center; min-height: 22px; border-bottom: 1px solid #21262d; }
 .chart-row:not(.chart-axis) { cursor: pointer; }
 .chart-row:not(.chart-axis):hover { background: #161b22; }
 /* The token series row is a chart, not a pick: no pointer, no hover. */
@@ -8471,7 +8871,9 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-series-area.out { fill: #3fb950; }
 /* Two columns: the timeline (.chart-main) and the picked row's detail
    (.chart-detail), with a draggable divider whose place is --chart-left. */
-.chart-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, var(--chart-left, 64%)) 6px minmax(0, 1fr); }
+.chart-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(var(--chart-main-min), var(--chart-left, 64%)) 6px minmax(200px, 1fr); }
+/* No picked row: no detail column and no divider, the timeline takes the width. */
+.chart-split.solo { grid-template-columns: minmax(var(--chart-main-min), 1fr); }
 .chart-main { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 18px; }
 .chart-divider { cursor: col-resize; background: transparent; border-left: 1px solid #30363d; margin-left: 2px; touch-action: none; }
 .chart-divider:hover, .chart-divider.dragging, .chart-divider:focus-visible { border-left: 3px solid #388bfd; margin-left: 1px; outline: none; }
@@ -8496,7 +8898,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 @media (max-width: 760px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
   .chart-split { display: flex; flex-direction: column; flex: none; }
-  .chart-main { overflow-x: auto; overflow-y: visible; }
+  .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
   .chart-divider { display: none; }
   .chart-detail { padding: 12px 0 18px; border-top: 1px solid #30363d; overflow: visible; }
 }
@@ -8613,7 +9015,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 /* Composer suggestions remain outside the textarea and preserve its caret. */
 .glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
 .glossary-composer[hidden] { display: none; }
-.gc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .gc-hint { color: #afbed2; margin: 8px 0 12px; line-height: 1.6; }
 .gc-button { font: inherit; text-align: left; border: 1px solid #455771; background: #253750; color: #c8dfff; border-radius: 7px; padding: 8px 12px; cursor: pointer; }
 .gc-button:hover { background: #334e70; }
@@ -8622,9 +9024,18 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .gc-mentions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gc-choices { display: grid; gap: 8px; }
 .gc-choice { display: grid; gap: 6px; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.gc-choice span, .gc-resolved span { color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
+.gc-choice span { color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
 .gc-choice small { color: #97c0ff; }
-.gc-resolved { display: grid; gap: 5px; margin-top: 10px; border-left: 2px solid #73a0d9; padding-left: 12px; overflow-wrap: anywhere; }
+.gc-choice.included small { color: #9cc4ff; }
+.gc-modes { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.gc-mode { padding: 4px 10px; }
+.gc-mode[aria-pressed="true"] { border-color: #73a0d9; background: #334e70; color: #ffffff; }
+.gc-included-list { display: grid; gap: 6px; margin-top: 10px; }
+.gc-included-title { margin: 0; font-size: 12px; font-weight: 600; color: #afbed2; }
+.gc-included { border-left: 2px solid #73a0d9; padding-left: 12px; overflow-wrap: anywhere; }
+.gc-included summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; }
+.gc-included .gc-definition { margin: 6px 0 0; color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
+.gc-badge { border-radius: 999px; padding: 1px 7px; background: #2c3a4d; color: #9cc4ff; font-size: 11px; }
 
 @media (max-width: 820px) { #worktrees-view { padding: 14px 12px; } }
 .wt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
@@ -9824,7 +10235,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    user's on the right in the accent colour; both bodies are markdown.
    No fixed width cap (claunch-1n081): a bubble may use the column's width,
    less a margin that keeps the two sides apart. */
-.th-msg { max-width: 94%; padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
+.th-msg { position: relative; max-width: 94%; padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
   line-height: 1.5; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
 .th-msg.th-user { align-self: flex-end; background: #12274a; border: 1px solid #1f4f99;
   border-bottom-right-radius: 3px; }
@@ -9839,6 +10250,20 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg-at { color: #7d8590; font-family: ui-monospace, monospace; }
 .th-msg-state { color: #d29922; }
 .th-msg.th-failed .th-msg-state { color: #f85149; }
+/* A user message's resend/revert (claunch-tpbqz): the mark sits in the meta
+   line, and the hover actions stay out of the way until the bubble is
+   hovered. The actions float on the pane background above the bubble's
+   top-right corner (claunch-tpbqz.2) — hidden with visibility they still
+   reserved their flex space and left an empty gap beside every message. */
+.th-msg-flag { color: #d29922; font-weight: 600; }
+.th-msg-actions { position: absolute; top: -9px; right: 8px; display: inline-flex; gap: 4px;
+  padding: 1px 3px; background: #14161a; border-radius: 8px; z-index: 2; }
+.th-msg-actions .th-act { padding: 0 6px; border: 1px solid #30363d; border-radius: 8px;
+  background: transparent; color: #9da5b0; font-size: 10px; cursor: pointer; }
+.th-msg-actions .th-act:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.th-msg-actions .th-act:disabled { opacity: 0.5; cursor: default; }
+.th-msg .th-msg-actions { visibility: hidden; }
+.th-msg:hover .th-msg-actions, .th-msg:focus-within .th-msg-actions { visibility: visible; }
 .th-msg-body { overflow-wrap: anywhere; }
 .th-msg-body.plain { white-space: pre-wrap; }
 .th-msg-body > :first-child { margin-top: 0; }
@@ -10005,7 +10430,8 @@ body.split-max #term-wf { flex: 1 1 0; }
 
 /* System performance page (sysperf-page.js, claunch-zuk0b). One axis per
    chart; series colours validated against the dark surface (read #388bfd,
-   write #d4691f); grid and axis text stay recessive. */
+   write #d4691f); the sessions chart's third line, ended sessions, takes the
+   neutral grey #8b949e (claunch-cd6s9); grid and axis text stay recessive. */
 .sysperf-card { margin-top: 12px; padding: 10px 12px; }
 .sysperf-card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .sysperf-card-head h3 { margin: 0; }
@@ -10014,6 +10440,7 @@ body.split-max #term-wf { flex: 1 1 0; }
 .sysperf-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 .sysperf-key.s-a, .sysperf-tip-key.s-a { background: #388bfd; }
 .sysperf-key.s-b, .sysperf-tip-key.s-b { background: #d4691f; }
+.sysperf-key.s-c, .sysperf-tip-key.s-c { background: #8b949e; }
 .sysperf-chart-wrap { position: relative; margin-top: 6px; }
 .sysperf-chart { display: block; width: 100%; height: auto; max-height: 220px; }
 .sysperf-grid { stroke: #30363d; stroke-width: 1; }
@@ -10021,10 +10448,12 @@ body.split-max #term-wf { flex: 1 1 0; }
 .sysperf-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .sysperf-line.s-a { stroke: #388bfd; }
 .sysperf-line.s-b { stroke: #d4691f; }
+.sysperf-line.s-c { stroke: #8b949e; }
 .sysperf-hair { stroke: #7d8590; stroke-width: 1; }
 .sysperf-dot { stroke: #14161a; stroke-width: 2; }
 .sysperf-dot.s-a { fill: #388bfd; }
 .sysperf-dot.s-b { fill: #d4691f; }
+.sysperf-dot.s-c { fill: #8b949e; }
 .sysperf-hit { fill: transparent; cursor: crosshair; }
 .sysperf-tip {
   position: absolute; top: 4px; pointer-events: none; z-index: 2;
@@ -10145,6 +10574,159 @@ a.category-ref:hover { text-decoration: underline; }
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
+
+/* ---- Wrap-up drafts pane (wrapup-pane.js, ✎ wrap-up, claunch-ar8jn) ---- */
+.wrapup-host {
+  --wrapup-border: #303843; --wrapup-muted: #a4afbd; --wrapup-panel: #1b2028;
+  height: 100%; overflow: auto; padding: 12px 16px; box-sizing: border-box;
+}
+.wrapup-pane { font-size: 13px; line-height: 1.5; }
+.wrapup-pane-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 8px; }
+.wrapup-muted { color: var(--wrapup-muted); font-size: 12px; }
+.wrapup-error { color: #ff7b72; margin: 4px 0; }
+.wrapup-warn { color: #e3b341; margin: 4px 0 8px; }
+.wrapup-note { color: #7ee787; margin: 4px 0 0; font-size: 12px; }
+.wrapup-empty { color: var(--wrapup-muted); }
+.wrapup-tabs { display: flex; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--wrapup-border); flex-wrap: wrap; }
+.wrapup-tab { background: none; border: none; color: var(--wrapup-muted); padding: 4px 10px; cursor: pointer; border-bottom: 2px solid transparent; }
+.wrapup-tab[aria-selected="true"] { color: inherit; border-bottom-color: #427fdf; }
+.wrapup-card { background: var(--wrapup-panel); border: 1px solid var(--wrapup-border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.wrapup-failed { border-color: #da3633; }
+.wrapup-card-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.wrapup-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--wrapup-border); border-radius: 10px; color: var(--wrapup-muted); }
+.wrapup-editor { display: grid; gap: 6px; margin-top: 8px; }
+.wrapup-field { display: grid; gap: 2px; }
+.wrapup-field-label { font-size: 11px; color: var(--wrapup-muted); }
+.wrapup-field input, .wrapup-field textarea, .wrapup-field select {
+  width: 100%; box-sizing: border-box; background: #0f1318; color: inherit;
+  border: 1px solid var(--wrapup-border); border-radius: 5px; padding: 4px 6px; font: inherit;
+}
+.wrapup-field textarea { min-height: 70px; resize: vertical; }
+.wrapup-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.wrapup-primary { background: #2a4a7a; border-color: #427fdf; }
+.wrapup-settled { margin-top: 12px; }
+.wrapup-settled summary { cursor: pointer; color: var(--wrapup-muted); }
+.wrapup-settled ul { list-style: none; padding: 0; margin: 4px 0 0; }
+.wrapup-settled-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 2px 0; }
+
+/* ---- Session plan pane (plan-pane.js, ☰ plan, claunch-7jzp8) ---- */
+.plan-host {
+  --plan-border: #303843; --plan-muted: #a4afbd; --plan-panel: #1b2028;
+  height: 100%; overflow: auto; padding: 12px 16px; box-sizing: border-box;
+}
+.plan-pane { font-size: 13px; line-height: 1.5; }
+.plan-pane-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.plan-muted { color: var(--plan-muted); font-size: 12px; }
+.plan-goal { margin: 4px 0; white-space: pre-wrap; }
+.plan-progress { margin: 4px 0 0; color: var(--plan-muted); }
+.plan-closable { color: #7ee787; margin: 2px 0 8px; font-weight: 600; }
+.plan-open { color: #e3b341; margin: 2px 0 8px; }
+.plan-error { color: #ff7b72; margin: 4px 0; }
+.plan-empty { color: var(--plan-muted); }
+.plan-section { margin: 14px 0 4px; font-size: 13px; border-bottom: 1px solid var(--plan-border); }
+.plan-item { padding: 4px 0; }
+.plan-item-head { display: flex; gap: 8px; align-items: baseline; }
+.plan-title { overflow-wrap: anywhere; }
+.plan-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--plan-border); border-radius: 10px; color: var(--plan-muted); white-space: nowrap; }
+.plan-detail { margin: 2px 0 0 4px; color: var(--plan-muted); white-space: pre-wrap; font-size: 12px; }
+.plan-option-head { display: flex; gap: 6px; align-items: baseline; }
+.plan-effect { color: #9fd8a8; }
+.plan-risk { color: #f0b37e; }
+.plan-note { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 3px 6px; font: inherit; font-size: 12px; resize: vertical; margin-top: 4px; }
+.plan-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.plan-result { color: #7ee787; margin: 4px 0 0; font-size: 12px; }
+.plan-stale { color: #e3b341; margin: 4px 0 0; font-size: 12px; }
+.plan-told { color: var(--plan-muted); margin: 2px 0 0; font-size: 12px; }
+.plan-blockers { margin-top: 12px; }
+.plan-blockers summary { cursor: pointer; color: var(--plan-muted); }
+.plan-blockers ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.plan-feedback { margin-top: 14px; display: grid; gap: 6px; }
+.plan-feedback textarea { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 4px 6px; font: inherit; resize: vertical; }
+.plan-feedback .wf-btn { justify-self: start; }
+.plan-joint-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.plan-joint { list-style: none; margin: 0; padding: 0; }
+.plan-joint-member { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
+.plan-joint-member p { margin: 2px 0; }
+.plan-joint-self { border-left-color: #427fdf; }
+.plan-joint-pane { margin: 6px 0 0; padding: 8px 10px; background: var(--plan-panel); border-radius: 6px; }
+#plan-view { flex: 1; min-height: 0; }
+.plan-page h3 { margin: 0 0 8px; font-size: 15px; }
+.plan-page select { background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 2px 6px; font: inherit; }
+.plan-page-on { border-color: #427fdf; color: #79b8ff; }
+.plan-page-list { list-style: none; margin: 0; padding: 0; }
+.plan-page-row { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
+.plan-page-row p { margin: 2px 0; }
+.plan-page-session { font-weight: 600; color: #79b8ff; }
+.plan-page-agg { border: 1px solid var(--plan-border); border-radius: 6px; padding: 6px 10px; margin: 8px 0; }
+.plan-page-agg-session { font-weight: 600; color: #79b8ff; }
+.plan-stage-user { border-left-color: #e3b341; }
+.plan-stage-blocked { border-left-color: #da3633; }
+.plan-stage-closable { border-left-color: #2ea043; }
+/* The plan page's tree (claunch-7jzp8.5): every li draws its own elbow --
+   a vertical from the parent's line down to its label and a short
+   horizontal into it; the last child stops the vertical at its label. */
+.ptree { list-style: none; margin: 0; padding: 0 0 0 22px; }
+.ptree > .ptree-node { position: relative; padding: 6px 0 0 16px; }
+.ptree > .ptree-node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; border-left: 1px solid #4d5566; }
+.ptree > .ptree-node:last-child::before { bottom: auto; height: 20px; }
+.ptree > .ptree-node::after { content: ""; position: absolute; left: 0; top: 20px; width: 14px; border-top: 1px solid #4d5566; }
+.ptree-root { padding-left: 0; }
+.ptree-root > .ptree-node { padding-left: 0; }
+.ptree-root > .ptree-node::before, .ptree-root > .ptree-node::after { display: none; }
+.ptree-flat { display: flex; flex-wrap: wrap; gap: 8px; }
+.ptree-steps > .ptree-node::before, .ptree-steps .ptree > .ptree-node::before { border-left-style: dashed; }
+.ptree-steps > .ptree-node::after, .ptree-steps .ptree > .ptree-node::after { border-top-style: dashed; }
+.ptree-card {
+  display: inline-block; min-width: 260px; max-width: 560px; box-sizing: border-box;
+  background: var(--plan-panel); border: 1px solid var(--plan-border); border-left-width: 4px;
+  border-radius: 6px; padding: 4px 10px 6px;
+}
+.ptree-card p { margin: 2px 0; }
+.ptree-card .wf-btn { margin-left: auto; font-size: 11px; padding: 0 6px; }
+.ptree-card .plan-item-head { flex-wrap: wrap; }
+.ptree-dim { opacity: 0.45; }
+.ptree-label {
+  display: inline-flex; gap: 6px; align-items: baseline; max-width: 560px;
+  padding: 1px 8px; border: 1px solid transparent; border-radius: 4px;
+}
+.ptree-mark { color: var(--plan-muted); }
+.ptree-st-doing > .ptree-label .ptree-mark { color: #79b8ff; }
+.ptree-st-done > .ptree-label .ptree-mark { color: #7ee787; }
+.ptree-st-done > .ptree-label .plan-title, .ptree-st-skipped > .ptree-label .plan-title { color: var(--plan-muted); }
+.ptree-st-blocked > .ptree-label { border-color: #da3633; }
+.ptree-st-blocked > .ptree-label .ptree-mark { color: #ff7b72; }
+.ptree-decision > .ptree-label { border-color: #e3b341; background: #2a2412; }
+.ptree-decision > .ptree-label .ptree-mark, .ptree-decision > .ptree-label .plan-chip { color: #e3b341; border-color: #e3b341; }
+.ptree-decided > .ptree-label { border-color: #2ea043; background: #15261b; }
+.ptree-decided > .ptree-label .ptree-mark, .ptree-decided > .ptree-label .plan-chip { color: #7ee787; border-color: #2ea043; }
+.ptree-opt {
+  display: inline-block; max-width: 440px; box-sizing: border-box;
+  background: var(--plan-panel); border: 1px solid var(--plan-border); border-radius: 6px; padding: 3px 9px;
+}
+.ptree-opt p { margin: 1px 0; font-size: 12px; }
+.ptree-recommended > .ptree-opt { border-color: #427fdf; }
+.ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
+.ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
+.ptree-unchosen > .ptree-opt { opacity: 0.5; }
+/* Each project is the root of its tree (claunch-7jzp8.5.2). */
+.ptree-root + .ptree-root { margin-top: 14px; }
+.ptree-project > .ptree-label { background: var(--plan-panel); border-color: var(--plan-border); font-size: 14px; padding: 3px 10px; }
+.ptree-noplan > .ptree-flat { padding: 6px 0 0 16px; }
+/* The session ☰ plan pane draws the same tree (claunch-7jzp8.5.2): the
+   plan's steps hang from its title, the closure items from their heading,
+   and each branch keeps the pane's controls under its label. The page's own
+   shell is a .plan-pane too, so these rules leave .plan-page out. */
+.plan-pane:not(.plan-page) > .ptree-steps, .plan-pane:not(.plan-page) > .ptree-closures { padding-left: 6px; }
+.plan-pane:not(.plan-page) .ptree-node.plan-item { padding-bottom: 0; }
+.plan-pane:not(.plan-page) .ptree-label { max-width: 100%; box-sizing: border-box; flex-wrap: wrap; }
+.plan-pane:not(.plan-page) .ptree-st-doing > .ptree-label .plan-chip { border-color: #427fdf; color: #79b8ff; }
+.plan-pane:not(.plan-page) .ptree-st-blocked > .ptree-label .plan-chip { border-color: #da3633; color: #ff7b72; }
+.plan-pane:not(.plan-page) .ptree-opt { display: block; max-width: 100%; }
+.plan-pane:not(.plan-page) .ptree-opt .wf-btn { margin-top: 4px; }
+.plan-pane:not(.plan-page) .ptree-unchosen > .ptree-opt:hover { opacity: 1; }
+.plan-decision-box, .plan-pane:not(.plan-page) .ptree-closure > .plan-note, .plan-pane:not(.plan-page) .ptree-closure > .plan-actions,
+.plan-pane:not(.plan-page) .ptree-closure > .plan-result, .plan-pane:not(.plan-page) .ptree-closure > .plan-told { margin-left: 8px; }
+.plan-decision-box .plan-note { max-width: 440px; }
 
 /* ---- Briefing and prompt packs pane (packs-pane.js, ↻ rebrief, claunch-6esft.1) ---- */
 .packs-host {
@@ -10405,6 +10987,15 @@ a.category-ref:hover { text-decoration: underline; }
 #term-tps-overlay .term-series-key.swap::before {
   background: #39c5cf; width: 6px; height: 6px; margin-right: 5px; border-radius: 0;
   transform: rotate(45deg);
+}
+/* What the charted requests are estimated to have cost at Settings → Model
+   prices (claunch-i6xl2). A caption under the small chart, and under the
+   zoomed chart's legend; the number is right-aligned so its last digit sits
+   over the plot's right edge. Nothing is drawn where the table has no rates
+   for the session's model -- the chart's tooltip says so instead. */
+#term-tps-overlay .term-series-cost {
+  font-size: 10px; line-height: 12px; color: #c9d1d9; text-align: right;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 /* The zoomed chart is exactly as wide as its plot, and two fixed rows under
    the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
@@ -10722,3 +11313,67 @@ a.category-ref:hover { text-decoration: underline; }
 /* The session VM pane's frame fills the split frame's body by position. */
 .vm-session-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; display: block; }
 .split-frame-body.vm-session-host { position: relative; overflow: hidden; padding: 0; }
+
+/* PR page (#/pr, pr-page.js): recorded pull requests per project, laid out
+   on a date timeline. Read-only and local (daemon/api.py's /api/prs), so the
+   list is as dense as a board rather than a card grid. */
+#pr-view {
+  flex: 1; display: flex; flex-direction: column; overflow: auto;
+  padding: 18px 22px 18px; min-height: 0;
+}
+#pr-view .pr-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; flex: none; }
+#pr-view .pr-head h2 { font-size: 17px; color: #e6edf3; }
+#pr-view .pr-head .wf-note { flex-basis: 100%; margin: 0; }
+.pr-count { color: #8b949e; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pr-controls { flex: none; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 10px 0 8px; font-size: 12px; }
+.pr-filter { display: inline-flex; align-items: center; gap: 5px; color: #c9d1d9; }
+.pr-project-select, .pr-status-select {
+  background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 6px; padding: 3px 7px; font-size: 12px;
+}
+.pr-list { display: flex; flex-direction: column; gap: 14px; }
+.pr-project {
+  border: 1px solid #262c36; border-radius: 8px; background: #0f141b;
+  padding: 10px 12px 12px;
+}
+.pr-project-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.pr-project-name { font-size: 14px; color: #e6edf3; }
+.pr-project-count { color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
+.pr-day { margin-top: 8px; }
+.pr-day-head {
+  color: #58a6ff; font-size: 11px; letter-spacing: 0.3px;
+  border-bottom: 1px solid #262c36; padding-bottom: 3px; margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.pr-rows { display: flex; flex-direction: column; }
+.pr-row { display: flex; gap: 10px; padding: 5px 2px; border-bottom: 1px solid #161b22; }
+.pr-row:last-child { border-bottom: none; }
+.pr-row:hover { background: #131922; }
+.pr-num {
+  flex: none; min-width: 52px; color: #58a6ff; font-variant-numeric: tabular-nums;
+  text-decoration: none; font-size: 12px; padding-top: 1px;
+}
+.pr-num:hover { text-decoration: underline; }
+.pr-main { min-width: 0; flex: 1; }
+.pr-title { color: #e6edf3; text-decoration: none; font-size: 12.5px; overflow-wrap: anywhere; }
+.pr-title:hover { text-decoration: underline; }
+.pr-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: #8b949e; font-size: 11px; margin-top: 2px; }
+.pr-repo, .pr-branch, .pr-issue, .pr-source { overflow-wrap: anywhere; }
+.pr-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pr-issue { color: #d2a8ff; }
+.pr-session { color: #58a6ff; text-decoration: none; }
+.pr-session:hover { text-decoration: underline; }
+.pr-state {
+  border: 1px solid #30363d; border-radius: 999px; padding: 0 7px;
+  font-size: 10px; line-height: 16px; letter-spacing: 0.4px;
+}
+.pr-state-open { color: #3fb950; border-color: #2ea04366; }
+.pr-state-merged { color: #bc8cff; border-color: #8957e566; }
+.pr-state-closed { color: #ff7b72; border-color: #f8514966; }
+.pr-state-draft { color: #8b949e; }
+.pr-state-recorded { color: #d29922; border-color: #9e6a0366; }
+.pr-empty { padding: 30px 4px; color: #8b949e; font-size: 12px; }
+.pr-error {
+  margin-top: 8px; padding: 8px 10px; border: 1px solid #f8514966;
+  border-radius: 6px; background: #2d1517; color: #ffa198; font-size: 12px;
+}

@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 
@@ -205,6 +207,120 @@ def test_the_cli_shell_does_not_inherit_the_daemons_interpreter_settings(
     assert "PYTHON_GIL" not in seen
 
 
+def _spawn_env_capture(monkeypatch):
+    """``pty_backend.spawn_local`` replaced by a capture: returns the env
+    dict the shell's child was handed."""
+    from claude_launcher.daemon import pty_backend
+
+    seen = {}
+
+    class _Fake:
+        pid = 1
+
+        def read(self):
+            return b""
+
+        def terminate(self, force=False):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_spawn(argv, *, env, cwd, cols, rows):
+        seen.update(env)
+        return _Fake()
+
+    monkeypatch.setattr(pty_backend, "spawn_local", fake_spawn)
+    return seen
+
+
+def test_session_shell_applies_the_templates_common_env(home, monkeypatch, tmp_path):
+    """The pane is where the user runs git by hand, so its shell must see the
+    same ``template.env`` the session's harness child gets from
+    ``runner.child_env`` — GIT_CONFIG_GLOBAL above all (claunch-ol3w0)."""
+    from claude_launcher import store
+    from claude_launcher.daemon import clipty
+
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    store.set_template_env({"GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig-main")})
+    seen = _spawn_env_capture(monkeypatch)
+
+    async def run():
+        shell = clipty.SessionShell(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    assert seen["GIT_CONFIG_GLOBAL"] == str(tmp_path / "gitconfig-main")
+
+
+def test_the_cli_tab_shell_layers_nothing_over_the_daemons_env(
+    home, monkeypatch, tmp_path
+):
+    """The template env is for sessions; the CLI tab's shell keeps the
+    daemon's own environment and nothing more (scope pin)."""
+    from claude_launcher import store
+    from claude_launcher.daemon import clipty
+
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    store.set_template_env({"GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig-main")})
+    seen = _spawn_env_capture(monkeypatch)
+
+    async def run():
+        shell = clipty.ShellPty(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    assert "GIT_CONFIG_GLOBAL" not in seen
+
+
+def test_session_shell_env_lets_git_commit(home, monkeypatch, tmp_path):
+    """The acceptance, end to end: git run with exactly the env a
+    SessionShell hands its child commits with no identity configured
+    anywhere else."""
+    from claude_launcher import store
+    from claude_launcher.daemon import clipty
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not on PATH")
+    gitconfig = tmp_path / "gitconfig-main"
+    gitconfig.write_text(
+        "[user]\n\tname = Session Shell\n\temail = shell@claunch.invalid\n"
+    )
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    store.set_template_env({"GIT_CONFIG_GLOBAL": str(gitconfig)})
+    seen = _spawn_env_capture(monkeypatch)
+
+    async def run():
+        shell = clipty.SessionShell(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    home_dir = tmp_path / "home-without-gitconfig"
+    home_dir.mkdir()
+    git_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(home_dir),
+        "GIT_CONFIG_GLOBAL": seen["GIT_CONFIG_GLOBAL"],
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], env=git_env, cwd=repo, capture_output=True, text=True
+        )
+
+    (repo / "file.txt").write_text("x")
+    assert git("init", "-q").returncode == 0
+    assert git("add", "file.txt").returncode == 0
+    commit = git("commit", "-q", "-m", "identity from the template env")
+    assert commit.returncode == 0, commit.stderr
+
+
 #: A session leader that starts one child in its own process group and one in
 #: a session of its own, then waits to be killed. The two children write a
 #: marker after a delay, so what survives is visible after the leader is gone.
@@ -361,6 +477,40 @@ def test_cli_resize_reaches_every_viewer(home, tmp_path):
             assert (shell.cols, shell.rows) == (90, 25)
             await ws1.close()
             await ws2.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_restart_frame_is_refused_while_the_child_is_live(home, tmp_path):
+    """The pane's restart control is for an exited shell. A frame that
+    arrives while one is running is answered and dropped, so a client that is
+    not the panel cannot kill a shell somebody is using (claunch-742jf.1)."""
+
+    async def run():
+        shell = ShellPty(argv=REPL, cwd=str(tmp_path))
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), shell=shell)
+        client = test_utils.TestClient(test_utils.TestServer(app))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect("/api/cli/ws", headers=BEARER)
+            init = await _next_json(ws)
+            await _stream_until(ws, b">>>")
+
+            await ws.send_str(json.dumps({"type": "restart"}))
+            refused = await _next_json(ws)
+            assert refused["type"] == "restart" and refused["ok"] is False
+            assert refused["reason"] == "live"
+            assert refused["pid"] == init["pid"] == shell.pid
+            assert shell.exited is False
+
+            # The child was left alone: keystrokes still reach it.
+            await ws.send_bytes(b"print(7 * 6)\r")
+            await _stream_until(ws, b"42\r\n")
+            assert shell.pid == init["pid"]
+            await ws.close()
         finally:
             await client.close()
 

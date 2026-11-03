@@ -42,6 +42,54 @@ collections:
   # 버리고 나머지를 다음 회차로 넘긴다(deferred -> requested).
   landing: {type: landing-queue, env: {TARGET: master}}
 
+rules:
+  human-wait-nudge:
+    text: |
+      ── 사람만 풀 수 있는 결정을 기다릴 때는 사용자에게 알림을 올린다 (claunch-8myyt) ──
+      런이 사람의 결정을 기다리며 움직이지 않으면 터미널 설명만 남기지 않고
+      사용자에게 알림을 올린다. 스레드와 터미널 출력은 그 자체로는 사용자에게
+      알림이 가지 않는다. 어느 도구를 쓰는지는 런이 사람을 기다리는 상태인지로 갈린다:
+      · 런이 사람을 기다린다(chooser가 user인 선택, 사람에게 간 ask,
+        flow_request_move, loop/visit 한도, halt): `flow_nudge`. message는 한두 줄 —
+        결정할 내용과 리더의 권고. 같은 결정이 이어지면 새 카드를 만들지 않고 같은
+        호출로 같은 카드의 message를 갱신한다.
+      · flow_nudge가 "the run waits on no person right now"로 거절되면(자동 모드
+        분류기 거절처럼 리더의 integrate 같은 단계에서 막혔지만 엔진 상태는 사람
+        대기가 아니다): `emergency_nudge`(MCP, 셸은 `claunch nudge emergency`)를 부른다.
+        런 상태와 무관하게 서고, message는 결정할 내용과 리더의 권고 한두 줄이다.
+        근거: r484(integrate@18)와 r485에서 분류기 거절로 멈췄을 때 flow_nudge가
+        거절됐고 스레드 질문은 사용자에게 알림이 가지 않았다.
+      · 사용자가 응답할 때까지 20분 간격으로, 반복 상한 없이 같은 호출을 다시 불러
+        같은 카드의 message를 갱신한다(새 알림 행을 쌓지 않는다. emergency_nudge는
+        세션당 1분에 한 번까지). 사용자 지시 th-b02245이고, 간격은
+        cflow_clock.HUMAN_WAIT_NUDGE_INTERVAL 하나다. 카드는 런이 움직이거나
+        사용자가 해소하면 닫힌다. 더 필요 없으면 `emergency_nudge`에 cancel을 준다.
+      · 결정이 풀리면 멈추고 일을 계속한다.
+      cflow2 reminder는 yaml의 이 문구를 싣지 않고, daemon/cflow_clock.py의
+      v2_reminder_block이 같은 지침을 protocol 줄에 싣는다(첫 알림과 짧은 형태 모두).
+    why: >-
+      라운드 484의 integrate@18이 PR #703 머지의 사용자 결정을 약 94분 기다렸다.
+      리더는 스레드 질문만 올렸고 flow_nudge는 쓰지 않았다(claunch-8myyt).
+    deliver: all
+  worker-plans:
+    text: |
+      ── 워커의 plan 패널 (claunch-7jzp8) ──
+      improv-worker-v2 워커는 plan 패널에 계획·갈래·종료 조건을 쓴다(plan_set).
+      워커의 진행 상태를 메시로 묻기 전에 `plan_get session=<워커>`로 읽는다:
+      summary.current(지금 단계), waiting(사용자 결정 대기 수), closable과
+      blockers(닫을 수 없는 이유). 여러 워커를 한 번에 볼 때는 `plan_get joint=true`
+      (session을 비우면 나)가 스폰 자식·같은 이슈·하위 이슈 세션의 요약을 한
+      트리로 준다(claunch-7jzp8.1). 프로젝트 전체의 진행 단계(user·blocked·
+      closable·working·idle, v2 런의 현재 노드와 owed)는 `plan_overview
+      project=<프로젝트>` 한 번으로 읽는다(claunch-7jzp8.2). 착지 후보를 심사할 때 그 워커의 closure에
+      failed verify가 있으면 판정 근거에 그 항목 id와 메모를 적는다. 갈래 선택과
+      확인 판정은 사용자의 것이다 — 리더가 대신 결정하지 않는다. plan이 없거나
+      도구가 없으면 지금처럼 보드와 메시로 확인한다.
+    why: >-
+      claunch-7jzp8: 리더가 워커 상태를 메시 질의로 모으면 그 질문과 답이 양쪽
+      컨텍스트에 쌓인다. 워커가 쓰는 plan 하나를 읽으면 같은 사실을 한 번에 얻는다.
+    deliver: [intake, integrate-preflight]
+
 fragments:
   remote-mesh: |
     먼저 대상 저장소의 PR-only 정책을 조회한다. 관리 대상이면 아래 ahead base
@@ -99,7 +147,12 @@ fragments:
        "REQUEST CHANGES: <사유>")로 남긴다. 어느 쪽이든 판정의 정본은 보드다 —
        그 이슈에 `claunch beads comments add <이슈> "PR-REVIEW #<번호> <판정>: <근거>"`
        를 남기고 보고에 매체(review 또는 comment)를 적는다. 판정 자체(머지 여부)는
-       매체와 무관하다.
+       매체와 무관하다. **이 코멘트에도 판정 낱말 뒤에 `@ <hash>`를 붙이지 않는다** —
+       해시를 인용해야 하면 다음 줄에 `tip: <hash>`로 적는다. 이유: 워커의 착지
+       확인 4는 `@ <hex>`의 자리로 리뷰 판정과 상위 제동을 가르는데, 이 줄에 해시를
+       붙이면 상위의 제동이 「재심 대기」로 분류된다(실측: `PR-REVIEW #530 CHANGES
+       REQUESTED @ e6daa14b:` — claunch-75kfl.1, claunch-eyz0s.2.2 재심). 큐 거절
+       자리(아래 절차)의 같은 지시와 이 자리의 지시가 둘 다 있어야 한다.
     4. 먼저 `tools/delayed_sweep.py admit --repo <대상 저장소> --issue <이슈>`가
        통과하는지 다시 확인한다. 거절되면 deferred로 두고 머지하지 않는다.
        `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
@@ -221,6 +274,22 @@ nodes:
          표적 실행 하나만 허용하므로 미리보기는 차례로 돈다.
       3. 통과한 후보는 flow_collection set으로 status waiting, 이번에 넣지 않는
          후보는 deferred(사유 note), 거절은 rejected(사유를 워커와 보드에).
+         ── 거절은 보드에도 남는다 — 꼴이 정해져 있다 ──
+         큐 status만 rejected로 두면 워커는 그 이슈의 착지 확인 4에서 무엇이
+         자기 제동인지 읽지 못한다. 그래서 거절한 후보의 이슈에는 코멘트를
+         하나 남긴다: `CHANGES REQUESTED: <무엇을>`.
+         **그 코멘트에는 `@ <hash>`를 붙이지 않는다.** 워커의 착지 확인 4는
+         tip이 붙은 `CHANGES REQUESTED`를 리뷰 판정으로, tip 없는 것을 상위의
+         제동으로 가른다(improv-worker-v2의 확인 4 — 그 구별이 서야 워커가
+         리뷰어의 판정과 리더의 거절을 섞지 않는다). 여기에 tip을 붙이면
+         같은 거절이 「재심 대기」로 읽혀 리뷰어 없이 통과한다.
+         **거절 사유에 해시를 인용해야 하면 그 줄에 `@ <hex>` 꼴로 쓰지
+         않는다** — 워커의 판독은 마커 낱말 바로 뒤와 그 줄의 마지막 토큰만
+         tip으로 인정하고 본문 안의 `@ <hex>`는 tip이 아니지만(그 규칙이
+         이것을 위한 것이다), 형태를 흐리는 것보다 피하는 편이 낫다.
+         해시는 둘째 줄 이하에 `tip: <hash>`로 적는다.
+         deferred는 거절이 아니다 — 사유를 note에 적고 다음 창에서 다시 본다.
+         이 코멘트를 남기지 않는 deferred가 워커를 세우지 않는 이유가 그것이다.
       4. PR 후보(pr_url이 있음)는 아래 PR 절차의 1–2(상태·mergeable·head 일치)까지
          여기서 확인한다. base가 master가 아닌 항목은 deferred.
       ${frag:pr-merge}

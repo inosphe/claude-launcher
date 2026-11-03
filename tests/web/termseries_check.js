@@ -101,9 +101,13 @@ const renderTermTps = () => { renders++; };
 const ctx = {};
 new Function(
   "exports", "el", "document", "api", "renderTermTps", "fmtAge", "usageShort",
+  "modelPrices",
   '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesIndexAt", "termSeriesScale",
-    "termSeriesTicks", "termSeriesTick", "termSeriesTickLabelY", "termSeriesChart",
-    "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker"].map(slice).join("\n") + `
+    "termSeriesTicks", "termSeriesTick", "termSeriesTickLabelY", "termSeriesPrice",
+    "termSeriesCostText", "termSeriesChart",
+    "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker",
+    "priceCurrency", "priceAnyProvider", "priceRateFor", "sessionPriceProvider",
+    "cacheWriteRate", "readingCost", "usageCost"].map(slice).join("\n") + `
 exports.read = termSeriesRead;
 exports.data = termSeriesData;
 exports.chart = termSeriesChart;
@@ -112,13 +116,15 @@ exports.tickLabelY = termSeriesTickLabelY;
 exports.indexAt = termSeriesIndexAt;
 exports.maker = termSeriesMaker;
 exports.reads = termSeriesReads;
+exports.price = termSeriesPrice;
+exports.setPrices = (v) => { modelPrices = v; };
 exports.consts = { TERM_SERIES_LOG_BASE, TERM_SERIES_TICK_COUNT, TERM_SERIES_ZOOM_HEIGHT,
   TERM_SERIES_PLOT_INSET, TERM_SERIES_TICK_LABEL_HEIGHT,
   TERM_SERIES_TICK_LABEL_LIFT, TERM_SERIES_TICK_LABEL_MIN };
 exports.hover = (v) => { termSeriesHover = v; };
 exports.hovered = () => termSeriesHover;
 `)(ctx, node, document, api, renderTermTps,
-  (s) => `${Math.floor(s / 60)}m`, (n) => String(n));
+  (s) => `${Math.floor(s / 60)}m`, (n) => String(n), null);
 
 let failures = 0;
 function check(label, actual, expected) {
@@ -133,7 +139,8 @@ const CONTEXTS = [[1, 10, 2], [1, 30, 2], [1, 5, 4], [2, 40, 2]];
 const series = (win, start = 1000) => ({
   available: true, window: win, start, until: start + 400, requests: 4, count: 4,
   points: CONTEXTS.map(([input, cache_read, cache_write], i) =>
-    ({ t: start + i * 100, n: i + 1, count: 1, input, cache_read, cache_write })),
+    ({ t: start + i * 100, n: i + 1, count: 1, input, cache_read, cache_write, output: 0 })),
+  totals: { input: 5, cache_read: 85, cache_write: 10, output: 0 },
   compactions: [start + 150],
   swaps: [{ at: start + 250, from: "opencode", to: "opencode2" }],
 });
@@ -365,6 +372,55 @@ const series = (win, start = 1000) => ({
   const bare = ctx.chart({ ...series("cap"), swaps: undefined, compactions: [] }, false);
   check("a series without swap records draws no swap mark",
         bare.kids[0].kids.some((k) => k.attrs.class === "term-series-swap"), false);
+
+  /* ---- the estimated cost (claunch-i6xl2) ---- */
+  /* The real price helpers run here, over a table handed in as `modelPrices`
+     (the same shape /api/model-prices answers). The chart prices the window's
+     totals at the session's model under its profile's provider. */
+  const RATES = { input: 1, cache_read: 0.5, cache_write: 2, output: 3 };
+  ctx.setPrices({ currency: "$", any: "*", profiles: { work: "deepseek" },
+                  prices: { deepseek: { "deepseek-v4.1-flash": RATES } } });
+  const price = ctx.price({ context: { model: "deepseek-v4.1-flash" }, profile: "work" });
+  check("the overlay prices the session's model under its profile's provider",
+        [price.model, price.provider, price.rates === RATES],
+        ["deepseek-v4.1-flash", "deepseek", true]);
+  const unknown = ctx.price({ context: { model: "unpriced-model" }, profile: "work" });
+  check("a model the table does not price resolves to no rates",
+        [unknown.model, unknown.rates], ["unpriced-model", null]);
+  const costPoints = [
+    { t: 1000, n: 1, count: 1, input: 1000, cache_read: 9000, cache_write: 500, output: 200 },
+    { t: 1100, n: 2, count: 1, input: 1000, cache_read: 9000, cache_write: 500, output: 200 },
+  ];
+  const costData = { ...series("cap"), points: costPoints, requests: 2, count: 2,
+    totals: { input: 100000, cache_read: 1000000, cache_write: 50000, output: 20000 },
+    compactions: [], swaps: [] };
+  const priced = ctx.chart(costData, false, price);
+  check("the small chart captions what its requests are estimated to cost",
+        [priced.kids.length, priced.kids[1].className, priced.kids[1].textContent],
+        [2, "term-series-cost", "≈ $0.7600"]);
+  check("the tooltip names the estimate, the request count and where the rates came from",
+        [priced.title.includes("≈ $0.7600 estimated for 2 requests at Settings → Model prices"),
+         priced.title.includes("for deepseek-v4.1-flash on deepseek")],
+        [true, true]);
+  const pricedZoom = ctx.chart(costData, true, price);
+  check("the zoomed chart carries the window's estimate under its legend",
+        pricedZoom.kids.map((k) => k.attrs.class || k.className),
+        ["term-series-chart", "term-series-axis", "term-series-legend",
+         "term-series-cost", "term-series-readout"]);
+  check("...with the same number as the small one",
+        pricedZoom.kids[3].textContent, "≈ $0.7600");
+  pricedZoom.kids[0].handlers.mousemove({ clientX: 100 });
+  check("and the request under the pointer carries its own estimate",
+        [pricedZoom.kids[4].kids[0].textContent, pricedZoom.kids[4].kids[1].textContent],
+        ["#2 · 5m ago · ≈ $0.0071", "10500 = in 1000 · cached 9000 · write 500"]);
+  const unpriced = ctx.chart(costData, false, unknown);
+  check("an unpriced model draws no caption, and the tooltip says where to set rates",
+        [unpriced.kids.length, unpriced.title.includes(
+          "not priced — set rates for unpriced-model in Settings → Model prices")],
+        [1, true]);
+  ctx.setPrices(null);
+  check("no price table at all draws no caption either",
+        ctx.chart(costData, false, ctx.price({ context: { model: "deepseek-v4.1-flash" } })).kids.length, 1);
 
   // Reading.
   reply = answer(series("cap"));

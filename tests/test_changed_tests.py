@@ -58,6 +58,24 @@ def _load():
 
 changed_tests = _load()
 
+#: What the stand-in environment probe answers. The real probe spawns
+#: ``uv run`` in the repository under test, which these fixtures do not have
+#: a venv for; it is exercised on its own further down.
+FAKE_ENVIRONMENT = {
+    "python": "3.14.0", "implementation": "cpython", "platform": "linux",
+    "packages": "aaaaaaaaaaaa", "package_count": 23,
+}
+
+
+_REAL_ENVIRONMENT_IDENTITY = changed_tests.environment_identity
+
+
+@pytest.fixture(autouse=True)
+def _fixed_environment(monkeypatch):
+    monkeypatch.setattr(
+        changed_tests, "environment_identity", lambda repo: dict(FAKE_ENVIRONMENT)
+    )
+
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
@@ -957,6 +975,205 @@ def test_a_narrower_selection_does_not_answer_for_a_wider_one(repo, gate):
     assert changed_tests.find_receipt(repo, tree, files, gate.receipts) is not None
     wider = sorted(files + ["tests/test_unrelated.py"])
     assert changed_tests.find_receipt(repo, tree, wider, gate.receipts) is None
+
+
+# --------------------------------------------------------------------------- #
+# the reuse key: tree, base, selection and environment, each on its own
+# --------------------------------------------------------------------------- #
+def _receipt_of(repo, gate):
+    tree = changed_tests.worktree_tree(repo)
+    files = _select(repo)
+    path = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    return json.loads(path.read_text(encoding="utf-8")), path
+
+
+def test_a_receipt_records_what_the_file_name_does_not_say(repo, gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+
+    receipt, _ = _receipt_of(repo, gate)
+    reuse = receipt["reuse"]
+    assert reuse["tree"] == changed_tests.worktree_tree(repo)
+    assert reuse["base_commit"] == _git(repo, "merge-base", "master", "HEAD").strip()
+    assert reuse["selection"] == changed_tests.selection_key(_select(repo))
+    assert reuse["environment"] == FAKE_ENVIRONMENT
+    assert len(reuse["key"]) == 12
+
+
+@pytest.mark.parametrize("element", ["base_commit", "environment"])
+def test_a_green_receipt_is_not_reused_once_one_key_element_moves(
+    repo, gate, monkeypatch, capsys, element
+):
+    """The element changes, the tree and the selection do not: the run happens.
+
+    These two are the ones the file name cannot show. Reusing across them
+    hands a verdict measured against another base, or under another
+    interpreter and package set, to a run that never saw either.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate() == 0
+    assert gate.runs() == 1, "control: with nothing moved the receipt answers"
+
+    if element == "base_commit":
+        monkeypatch.setattr(changed_tests, "merge_base", lambda repo, base: "f" * 40)
+    else:
+        monkeypatch.setattr(
+            changed_tests, "environment_identity",
+            lambda repo: {**FAKE_ENVIRONMENT, "packages": "bbbbbbbbbbbb"},
+        )
+    capsys.readouterr()
+    assert gate() == 0
+    assert gate.runs() == 2, f"a receipt measured under another {element} was reused"
+    out = capsys.readouterr().out
+    assert "not reusing" in out and f"{element} differs" in out
+
+    receipt, _ = _receipt_of(repo, gate)
+    assert receipt["reuse"][element] is not None, "the new run files its own key"
+
+
+def test_an_unmeasurable_environment_is_never_equal(repo, gate, monkeypatch):
+    """"Unknown" is not "the same": no probe answer means a run, every time."""
+    monkeypatch.setattr(changed_tests, "environment_identity", lambda repo: None)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate() == 0
+    assert gate.runs() == 2
+
+
+def test_the_tree_and_the_selection_still_key_a_run(repo, gate):
+    """The two elements the file name carries, through the same door."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate("--deselect", "tests/test_mesh.py::test_one") == 0
+    assert gate.runs() == 2, "a deselection is another verdict"
+    _write(repo, "tests/test_extra.py", "def test_x():\n    pass\n")
+    assert gate() == 0
+    assert gate.runs() == 3, "an edit is another tree"
+
+
+@pytest.mark.parametrize(
+    "moved",
+    ["tree", "base_commit", "selection", "environment"],
+)
+def test_reuse_mismatch_names_each_element_on_its_own(moved):
+    """Four elements, one flipped at a time, and the refusal names that one."""
+    base = changed_tests.reuse_key(
+        "a" * 40, "b" * 40, ["tests/test_a.py"], (), FAKE_ENVIRONMENT
+    )
+    receipt = {"reuse": base}
+    assert changed_tests.reuse_mismatch(receipt, dict(base)) is None
+
+    now = dict(base)
+    now[moved] = (
+        {**FAKE_ENVIRONMENT, "python": "3.13.1"} if moved == "environment"
+        else "c" * 40 if moved != "selection"
+        else changed_tests.selection_key(["tests/test_a.py", "tests/test_b.py"])
+    )
+    why = changed_tests.reuse_mismatch(receipt, now)
+    assert why is not None and why.startswith(f"{moved} differs")
+
+
+def test_a_missing_element_on_either_side_is_a_mismatch():
+    key = changed_tests.reuse_key("a" * 40, "b" * 40, ["t.py"], (), FAKE_ENVIRONMENT)
+    gone = {**key, "base_commit": None}
+    assert "not known" in changed_tests.reuse_mismatch({"reuse": key}, gone)
+    assert "not known" in changed_tests.reuse_mismatch({"reuse": gone}, key)
+
+
+def test_a_receipt_from_before_the_key_is_run_again_but_still_readable(
+    repo, gate, capsys
+):
+    """Receipts already filed carry no key. Skipping a run on one would be the
+    stale reuse this exists to stop; refusing to read one would break the
+    reviewer's ``--check`` for every round in flight. So: the run happens, the
+    read-only door still answers and says what it answered on.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    receipt, path = _receipt_of(repo, gate)
+    del receipt["reuse"]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    capsys.readouterr()
+    assert gate("--check") == 0
+    out = capsys.readouterr().out
+    assert "green receipt" in out and "before the reuse key existed" in out
+    assert gate.runs() == 1
+
+    assert gate() == 0
+    assert gate.runs() == 2, "a keyless receipt must not stop the run"
+    assert "reuse" in _receipt_of(repo, gate)[0], "the new receipt carries the key"
+
+
+def test_check_abstains_when_a_green_receipt_is_for_another_environment(
+    repo, gate, monkeypatch, capsys
+):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    monkeypatch.setattr(
+        changed_tests, "environment_identity",
+        lambda repo: {**FAKE_ENVIRONMENT, "python": "3.12.0"},
+    )
+    capsys.readouterr()
+    assert gate("--check") == changed_tests.CANNOT_TELL
+    out = capsys.readouterr().out
+    assert "does not answer for this run" in out and "environment differs" in out
+    assert gate.runs() == 1, "--check never runs"
+
+
+def test_the_environment_probe_names_interpreter_and_packages():
+    """The probe text itself, under this interpreter (no ``uv`` needed)."""
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", changed_tests._ENVIRONMENT_PROBE],
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    identity = json.loads(done.stdout.strip().splitlines()[-1])
+    assert identity["python"] == sys.version.split()[0]
+    assert identity["platform"] == sys.platform
+    assert identity["package_count"] > 0 and len(identity["packages"]) == 12
+
+
+def test_the_probe_asks_the_interpreter_pytest_will_use(repo, monkeypatch):
+    """Not ``sys.executable``: ``python tools/...`` from another venv would key
+    the run by an environment pytest never sees (build_command runs
+    ``uv run --no-sync``)."""
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen["argv"], seen["cwd"] = argv, kwargs.get("cwd")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"python": "3.14.0"}\n', stderr="")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) == {"python": "3.14.0"}
+    assert seen["argv"][:5] == ["uv", "run", "--no-sync", "python", "-I"]
+    assert seen["cwd"] == str(repo)
+
+
+@pytest.mark.parametrize("stdout", ["", "not json\n", "[1, 2]\n"])
+def test_a_probe_that_fails_or_answers_badly_is_no_identity(repo, monkeypatch, stdout):
+    """A non-zero exit, or output that is not a JSON object, must not be read
+    as an environment: the run then happens instead of reusing."""
+    def fake(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout='{"python": "3.14.0"}\n', stderr="boom")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) is None, "exit 1 with a valid-looking body"
+
+    def fake_ok(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", fake_ok)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) is None
+
+
+def test_environment_identity_is_none_when_the_probe_cannot_run(repo, monkeypatch):
+    def refuse(*a, **k):
+        raise OSError("no uv")
+
+    monkeypatch.setattr(changed_tests.subprocess, "run", refuse)
+    assert _REAL_ENVIRONMENT_IDENTITY(repo) is None
 
 
 def test_a_targeted_receipt_is_invisible_to_the_sweep_gate(repo, gate):
@@ -1934,6 +2151,50 @@ def test_the_indirect_list_is_whole_rather_than_capped(repo, capsys):
     named = _named_as_missed(out)
     assert len(named) == 13                            # 12 readers + the original
     assert f"NOTE: {len(named)} test module(s)" in out
+
+
+def test_a_hop_from_a_changed_test_module_is_named(repo, capsys):
+    """The blind spot ``claunch-d8scd.1``: a test another test imports.
+
+    ``test_reposync_workflows`` writes ``from test_cflow2_improv_worker import
+    _medium_flow`` and is not selected when that module changes -- correctly,
+    rule 2b is direct imports of *source* modules only. What was wrong is what
+    the tool said: ``module_name`` answers ``None`` outside ``src``, so the
+    changed test module was skipped whole, and the note reported that nothing
+    sat one hop outside a selection that was missing exactly this module.
+    """
+    _seed_on_base(repo, {
+        "tests/test_helper.py": "def shared():\n    return 1\n",
+        "tests/test_uses_helper.py": "from test_helper import shared\n",
+    })
+    _write(repo, "tests/test_helper.py", "def shared():\n    return 2\n")
+    _git(repo, "commit", "-qam", "change a test module another one imports")
+
+    picked = _select(repo)
+    assert "tests/test_helper.py" in picked
+    assert "tests/test_uses_helper.py" not in picked     # named, not selected
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert _named_as_missed(out) == [
+        "  tests/test_uses_helper.py  <- tests/test_helper.py via test_helper"
+    ]
+    assert "no test module sits one import hop outside" not in out
+
+
+def test_a_changed_test_module_nothing_imports_still_says_so(repo, capsys):
+    """The other half of the same statement: no hop, and the line says so.
+
+    Leaving the sentence out whenever the change is a test module would make
+    an empty note indistinguishable from a note the tool never computed.
+    """
+    _write(repo, "tests/test_mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a test module nothing else imports")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert _named_as_missed(out) == []
+    assert "no test module sits one import hop outside this selection." in out
 
 
 def test_both_caveats_are_stated_even_when_they_are_empty(repo, capsys):
@@ -3069,7 +3330,7 @@ def test_the_receipt_names_each_skipped_node_and_its_reason(repo, tmp_path):
         {"nodeid": "tests/test_skip.py::test_harness[a.cjs]", "reason": reason},
         {"nodeid": "tests/test_skip.py::test_harness[b.cjs]", "reason": reason},
     ]
-    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse"}
     assert receipt["command"] == cmd, "the junit request rides in the environment"
     assert receipt["counts"] == {"passed": 1, "skipped": 2}
     assert str(basetemp) not in json.dumps(receipt["skips"])
@@ -3083,7 +3344,7 @@ def test_a_run_without_a_basetemp_files_skips_as_unknown(repo, tmp_path):
     receipt = json.loads(changed_tests.receipt_path(
         repo, "u" * 40, files, receipts).read_text(encoding="utf-8"))
     assert receipt["skips"] is None
-    assert set(receipt) - _RECEIPT_KEYS == {"skips"}
+    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse"}
 
 
 def test_deselect_flag_reaches_the_real_pytest_command():

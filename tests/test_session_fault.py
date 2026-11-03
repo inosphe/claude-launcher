@@ -5,7 +5,8 @@ matched here against its declared kind, so a pattern that drifts away from
 the message it was collected from fails the suite instead of silently
 missing live faults. The detector is read from the bottom of the rendered
 screen, skips diff and tool-call rows, and keeps a fault until its window
-(or the reset time the message names) runs out.
+(or the reset time the message names) runs out -- or until a changed screen
+no longer shows the message, which closes the run early (claunch-4ghrr).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher.daemon import api, session_fault
+from claude_launcher.daemon import actors, api, fault_pause, session_fault
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -780,6 +781,127 @@ def test_a_kind_that_comes_back_after_its_window_is_a_second_sighting():
     assert later["active"] is True
 
 
+# ------------------------------------------------------- repeat notice hold
+
+def _rate_catalog(window=60):
+    return session_fault.load(
+        "version: 1\n"
+        "kinds:\n"
+        "  rate_limit: {label: rate limit, action: wait, window: %d, resolved_by: provider}\n"
+        "common: []\n"
+        "harnesses:\n"
+        "  claude:\n"
+        "    - kind: rate_limit\n"
+        "      pattern: 'Request rejected \\(429\\)'\n" % window
+    )
+
+
+LINE_429 = "API Error: Request rejected (429)"
+
+
+def test_the_s6252_quota_line_is_a_usage_limit_over_the_generic_429():
+    """claunch-16j5v: the provider's quota sentence behind an opencode route
+    read as a 15-minute rate limit and was re-nudged every 15 minutes."""
+    found = session_fault.default().match(
+        "claude", "API Error: Request rejected (429) · Go usage limit exceeded"
+    )
+    assert found and found[0].name == "usage_limit"
+
+
+def test_a_first_sighting_holds_notices_for_its_window_only():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    view = det.view(now=1000.0)
+    assert view["repeats"] == 1
+    assert view["hold_until"] == view["until"]
+    assert det.view(now=1061.0)["held"] is False
+
+
+def test_a_fault_that_comes_straight_back_doubles_the_hold():
+    """The notice typed when the hold ends meets the same stop: each such
+    return holds twice as long as the one before."""
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)  # until 1060, hold 1060
+    det.scan(_Screen("re-nudge", LINE_429), now=1070.0)
+    view = det.view(now=1070.0)
+    assert view["repeats"] == 2
+    assert view["until"] == session_fault._iso(1130.0)
+    assert view["hold_until"] == session_fault._iso(1190.0)
+    held = det.view(now=1150.0)
+    assert held["active"] is False and held["held"] is True
+    assert det.view(now=1190.0)["held"] is False
+    det.scan(_Screen(LINE_429, "re-nudge"), now=1200.0)
+    view = det.view(now=1200.0)
+    assert view["repeats"] == 3
+    assert view["hold_until"] == session_fault._iso(1200.0 + 240.0)
+
+
+def test_the_repeat_hold_is_capped():
+    window = 3 * 3600
+    det, _ = _detector(catalog=_rate_catalog(window))
+    now = 1000.0
+    det.scan(_Screen(LINE_429), now=now)
+    for step in range(4):
+        hold_end = det._record["hold_until"]
+        now = hold_end + 1.0
+        det.scan(_Screen("try %d" % step, LINE_429), now=now)
+    record = det._record
+    assert record["repeats"] == 5
+    assert record["hold_until"] - record["since"] == session_fault.NOTICE_HOLD_CAP
+
+
+def test_a_return_far_after_the_hold_starts_the_chain_over():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    det.scan(_Screen("a", LINE_429), now=1070.0)  # repeats 2, hold to 1190
+    det.scan(_Screen("b", LINE_429), now=1251.0)  # past 1190 + 60
+    view = det.view(now=1251.0)
+    assert view["repeats"] == 1
+    assert view["strikes"] == 3
+    assert view["hold_until"] == view["until"]
+
+
+def test_a_stated_reset_is_its_own_hold():
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    view = det.view(now=1000.0)
+    assert view["until_stated"] is True
+    assert view["hold_until"] == view["until"]
+
+
+def test_a_screen_that_moves_on_ends_the_hold():
+    det, _ = _detector(catalog=_rate_catalog())
+    det.scan(_Screen(LINE_429), now=1000.0)
+    det.scan(_Screen("a", LINE_429), now=1070.0)
+    assert det.view(now=1150.0)["held"] is True
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1150.0)
+    view = det.view(now=1151.0)
+    assert view["held"] is False and view["active"] is False
+    assert view["cleared"]
+
+
+class _FaultReading:
+    def __init__(self, record=None, broken=False):
+        self.record, self.broken = record, broken
+
+    def fault(self):
+        if self.broken:
+            raise RuntimeError("dead record")
+        return self.record
+
+
+@pytest.mark.parametrize("session, held", [
+    (_FaultReading({"active": True}), True),
+    (_FaultReading({"active": False, "held": True}), True),
+    (_FaultReading({"active": False, "held": False}), False),
+    (_FaultReading(None), False),
+    (_FaultReading(broken=True), False),
+    (object(), False),
+])
+def test_holds_notices_reads_active_or_held(session, held):
+    assert session_fault.holds_notices(session) is held
+
+
 def test_a_different_kind_starts_the_count_over():
     det, now = _detector()
     det.scan(_Screen(WEEKLY), now=1000.0)
@@ -797,6 +919,89 @@ def test_a_line_that_keeps_scrolling_holds_the_badge_one_window_at_a_time():
     view = det.view(now=1000.0 + 1800)
     assert view["strikes"] == 2
     assert view["active"] is False
+
+
+# A screen that moved past the fault: the error line left the live region
+# under freshly painted work rows (s6081/s6082, 2026-10-30 -- the sessions
+# retried through their 429 and worked below it while the badge sat out its
+# fifteen minutes).
+RECOVERED_SCREEN = (
+    "⏺ Search(pattern: session_fault)",
+    "  found 12 files",
+    "the label now clears when the message leaves the live region",
+)
+
+
+def test_a_message_that_scrolls_out_closes_the_run_early():
+    """The scan runs only on a changed screen, and a stopped session has
+    nothing that would push its fault line out of the tail -- so the message
+    being gone from the live region means the stop is visibly over, and the
+    badge comes down then instead of at the window's end (claunch-4ghrr)."""
+    det, now = _detector()
+    det.scan(_Screen("API Error: Request rejected (429) · rate limit"), now=1000.0)
+    assert det.view(now=1000.0)["active"] is True
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    view = det.view(now=1005.0)
+    assert view["active"] is False
+    assert view["cleared"] == "1970-01-01T00:16:45+00:00"
+    # The window the run was opened with stays on the record.
+    assert view["until"] == "1970-01-01T00:31:40+00:00"
+
+
+def test_a_blank_read_does_not_clear_the_record():
+    """A tail of nothing (a momentarily blank redraw) is not evidence: the
+    early close needs rows that could only have painted after the stop."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    det.scan(_Screen(), now=1005.0)
+    view = det.view(now=1005.0)
+    assert view["active"] is True
+    assert view["cleared"] == ""
+
+
+def test_a_cleared_run_that_matches_again_is_a_new_sighting():
+    """A run closed early is closed like one whose window ran out: the same
+    kind coming back opens a new run and counts a strike."""
+    det, now = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    det.scan(_Screen(WEEKLY), now=1010.0)
+    view = det.view(now=1010.0)
+    assert view["strikes"] == 2
+    assert view["active"] is True
+    assert view["cleared"] == ""
+    assert view["since"] == "1970-01-01T00:16:50+00:00"
+
+
+def test_an_answered_prompt_clears_without_waiting_out_the_window():
+    """awaiting_input: the prompt leaving the screen is the keystroke made
+    visible, so the badge no longer sits out the fifteen minutes."""
+    det, now = _detector()
+    det.scan(_Screen(*AWAITING_PROMPT), now=1000.0)
+    assert det.view(now=1000.0)["kind"] == "awaiting_input"
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1005.0)
+    assert det.view(now=1005.0)["active"] is False
+
+
+def test_an_expired_record_is_not_rewritten_by_a_later_clear_scan():
+    """The early close marks runs that were still active; one that already
+    expired keeps its plain expiry."""
+    catalog = session_fault.load(
+        "version: 1\n"
+        "kinds:\n"
+        "  usage_limit: {label: usage limit, action: wait, window: 60, resolved_by: account}\n"
+        "common: []\n"
+        "harnesses:\n"
+        "  claude:\n"
+        "    - kind: usage_limit\n"
+        "      pattern: 'weekly limit'\n"
+    )
+    det, now = _detector(catalog=catalog)
+    det.scan(_Screen("You've hit your weekly limit"), now=1000.0)
+    det.scan(_Screen(*RECOVERED_SCREEN), now=1070.0)
+    view = det.view(now=1070.0)
+    assert view["active"] is False
+    assert view["cleared"] == ""
 
 
 def test_a_second_scan_inside_the_interval_is_throttled():
@@ -879,6 +1084,80 @@ def test_a_dead_session_has_no_fault(home, tmp_path):
     assert dead.info()["fault"] is None
 
 
+# ------------------------------------------------- the fault a pause left
+#
+# A pause kills the process, so the reading off the screen dies with it. The
+# fault-pause clock writes the fault into the session directory, and the
+# dead record reads it back while that pause is still in force
+# (claunch-9djny.1).
+
+PAUSED_AT = "2026-10-30T06:31:07+00:00"
+FAR = "2099-01-01T00:00:00+00:00"
+
+
+def _pause_record(name, *, until=FAR, paused_at=PAUSED_AT):
+    fault_pause.write_record(name, {
+        "kind": "usage_limit",
+        "label": "usage limit",
+        "harness": "claude",
+        "message": "You've hit your weekly limit · resets Nov 2, 9am (Asia/Seoul)",
+        "reset": "Nov 2, 9am (Asia/Seoul)",
+        "until": until,
+        "until_stated": True,
+    }, paused_at=paused_at)
+
+
+def _paused_dead(name, tmp_path, *, paused_at=PAUSED_AT, **kw):
+    return DeadSession(
+        SessionDef(name=name, harness="claude", cwd=str(tmp_path)),
+        exit_code=143,
+        paused_at=paused_at,
+        ended_by=kw.pop(
+            "ended_by", actors.make(actors.DAEMON, reason=fault_pause.REASON)
+        ),
+        **kw,
+    )
+
+
+def test_a_paused_dead_session_reports_the_fault_it_was_paused_for(home, tmp_path):
+    _pause_record("pz")
+    dead = _paused_dead("pz", tmp_path)
+    view = dead.fault()
+    assert view is not None
+    assert view["source"] == "pause-record"
+    assert view["kind"] == "usage_limit" and view["active"] is True
+    assert view["until"] == FAR
+    assert view["message"].startswith("You've hit your weekly limit")
+    # The rail reads /api/sessions, which is built from info().
+    assert dead.info()["fault"]["source"] == "pause-record"
+
+
+def test_a_resumed_or_archived_record_does_not_report_the_pause(home, tmp_path):
+    """Unpause clears paused_at, so the fault goes with it; archiving files
+    the record away and takes its pill down."""
+    _pause_record("p1")
+    _pause_record("p2")
+    resumed = _paused_dead("p1", tmp_path, paused_at=None)
+    archived = _paused_dead("p2", tmp_path, archived_at="2026-11-01T00:00:00+00:00")
+    assert resumed.fault() is None
+    assert archived.fault() is None
+
+
+def test_the_record_of_another_pause_is_not_read(home, tmp_path):
+    """A name reused by a later session carries its own stamp; the file left
+    by the earlier pause must not answer for it."""
+    _pause_record("p3", paused_at="2026-10-30T06:31:07+00:00")
+    later = _paused_dead("p3", tmp_path, paused_at="2026-10-31T09:00:00+00:00")
+    assert later.fault() is None
+
+
+def test_a_pause_record_out_of_its_window_reads_inactive(home, tmp_path):
+    _pause_record("old", until="2026-10-01T00:00:00+00:00")
+    dead = _paused_dead("old", tmp_path)
+    view = dead.fault()
+    assert view is not None and view["active"] is False
+
+
 # ------------------------------------------------------------------------ API
 
 def test_the_rail_field_list_carries_fault():
@@ -954,6 +1233,29 @@ def test_the_fleet_route_lists_active_faults(mgr, tmp_path):
     assert none["count"] == 0
 
 
+def test_the_fleet_route_lists_a_paused_sessions_fault(mgr, tmp_path):
+    """The row the dashboard could not draw before claunch-9djny.1: a session
+    the daemon stopped on a usage limit, whose screen reading died with the
+    process. It comes back from the pause record through the same route."""
+    _pause_record("pz")
+    mgr._sessions["pz"] = _paused_dead("pz", tmp_path)
+
+    async def scenario(client):
+        active = await (await client.get("/api/session-faults", headers=BEARER)).json()
+        every = await (await client.get(
+            "/api/session-faults?active=all", headers=BEARER)).json()
+        return active, every
+
+    active, every = _client(mgr, scenario)
+    assert active["count"] == 1
+    row = active["faults"][0]
+    assert row["session"] == "pz"
+    assert row["kind"] == "usage_limit"
+    assert row["source"] == "pause-record"
+    assert row["active"] is True
+    assert every["count"] == 1
+
+
 def test_the_fleet_route_carries_the_grade(mgr, tmp_path):
     """The rail's tooltip and the MCP tool both read this field off the row;
     a route that dropped it would say what is wrong on every row and never
@@ -991,3 +1293,14 @@ def test_the_route_filters_by_kind_and_expired(mgr, tmp_path):
     assert active["count"] == 0
     assert all_rows["count"] == 1 and all_rows["faults"][0]["active"] is False
     assert auth["count"] == 0
+
+
+def test_until_says_whether_the_harness_stated_it():
+    """A reset read off the screen is ``until_stated``; a window the kind
+    guessed is not (claunch-ijot0: only a stated reset is told to a person)."""
+    det, _ = _detector()
+    det.scan(_Screen(WEEKLY), now=1000.0)
+    assert det.view(now=1000.0)["until_stated"] is True
+    det, _ = _detector()
+    det.scan(_Screen("You've hit your weekly limit"), now=1000.0)
+    assert det.view(now=1000.0)["until_stated"] is False

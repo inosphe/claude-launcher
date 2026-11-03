@@ -51,6 +51,14 @@ SHELL_BUFFER_MAX = 256 * 1024
 #: copy the whole ring into one response and a slow reader stays cheap.
 READ_MAX = 64 * 1024
 
+#: How long :meth:`ShellPty.restart` waits for the retired child's reader
+#: thread to come out of its blocking ``read()``. The child is killed and its
+#: master fd closed before the wait starts, so the read ends at once on both
+#: backends; the bound is there so a backend that does not come back cannot
+#: hold the event loop -- the reader's own callbacks name the pty they read
+#: and are inert once it is retired either way.
+READER_RETIRE_TIMEOUT = 1.0
+
 #: Set for the CLI tab's shell only. The shell is a session leader that the
 #: daemon terminates as part of its own shutdown (``api._close_cli_shell``),
 #: so a ``claunch daemon restart`` typed into this tab is SIGHUPed between its
@@ -73,6 +81,11 @@ SUGGESTION_MAX_WHY = 1000
 SUGGESTION_PENDING_PER_SESSION = 10
 SUGGESTION_PENDING_MAX = 50
 SUGGESTION_KEEP_DECIDED = 200
+
+#: A nudge's note: what the user attaches when telling a session to look at
+#: its shell. Long enough for a sentence about what changed, short enough
+#: that the block stays a line in the session's terminal.
+NUDGE_MAX_TEXT = 2000
 
 
 def _now() -> str:
@@ -177,6 +190,15 @@ class ShellPty:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    def _session_env(self) -> Dict[str, str]:
+        """Env layered over the daemon's own for this shell's child.
+
+        The CLI tab's shell is the user's own terminal and nothing else: it
+        layers nothing. :class:`SessionShell` layers the template's common
+        env instead.
+        """
+        return {}
+
     def start_once(self) -> bool:
         """Spawn the child if this daemon never had one; report whether it
         is running now."""
@@ -186,35 +208,66 @@ class ShellPty:
             return False   # an exited shell stays exited until restart
         return self.restart()
 
+    def _retire_child(self) -> None:
+        """Kill and close the current child, then wait for its reader.
+
+        Clearing ``self._pty`` before the spawn is what makes the two
+        callbacks an old reader posts harmless: they compare the pty they
+        carry against ``self._pty``, and a retired one matches nothing.
+        Called on the event loop, so the join is bounded
+        (:data:`READER_RETIRE_TIMEOUT`) — the pty is closed first, which is
+        what ends the ``read()`` it is waiting in.
+        """
+        pty, reader = self._pty, self._reader
+        self._pty = None
+        self._reader = None
+        if pty is None:
+            return
+        try:
+            pty.terminate(force=True)
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+        try:
+            pty.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(READER_RETIRE_TIMEOUT)
+            if reader.is_alive():
+                log.warning("the retired shell's reader is still reading")
+
     def restart(self) -> bool:
         """Replace the child with a fresh shell, clearing its ring buffer.
+
+        The predecessor goes first, reader included (:meth:`_retire_child`):
+        its reader would otherwise post an EOF after the successor is up, and
+        that callback closed the *new* child -- a restart frame that arrived
+        for a live shell killed the one it started (claunch-742jf.1). The
+        callbacks carry the pty they read, so this holds whether or not the
+        reader got out in time.
 
         New viewers are told and so are attached ones: a ``init`` broadcast
         announces the new pid, and the fresh child's first bytes follow it.
         """
-        if self._pty is not None:
-            # Only ever reached for a dead child (restart is how an exited
-            # shell comes back), but a race that left one alive must not
-            # leave an orphan behind it.
-            try:
-                self._pty.terminate(force=True)
-                self._pty.close()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
-            self._pty = None
+        self._retire_child()
         self._buffer.clear()
         self._buffered = 0
         self._total = 0
         self.exited = False
         self.exit_code = None
-        # Same inheritance the session harness gets, and the same correction:
-        # this shell also draws into a terminal on the other end. The daemon's
-        # interpreter settings come out for the same reason as there -- a
-        # ``claunch`` typed into this tab cannot start with ``PYTHON_GIL=0``
-        # (see ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko).
+        # The daemon's own environment is the base, corrected the way a PTY
+        # child needs: the colour-answer family a parent leaves behind is
+        # wrong for a terminal (``pty_backend.strip_inherited_color_answers``),
+        # and the daemon's interpreter settings come out so a ``claunch``
+        # typed into this tab cannot start with ``PYTHON_GIL=0`` (see
+        # ``instance_manifest.INTERPRETER_ONLY_ENV``, claunch-t9xko). What the
+        # session harness adds on top of the same base -- the template's
+        # common env -- a SessionShell also layers here (``_session_env``);
+        # the CLI tab's shell layers nothing.
         env = pty_backend.strip_inherited_color_answers(dict(os.environ))
         for var in instance_manifest.INTERPRETER_ONLY_ENV:
             env.pop(var, None)
+        env.update(self._session_env())
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
@@ -241,7 +294,10 @@ class ShellPty:
         self._ever_started = True
         self.pid = self._pty.pid
         self._reader = threading.Thread(
-            target=self._read_pump, name="pty-read-cli", daemon=True
+            target=self._read_pump,
+            args=(self._pty,),
+            name="pty-read-cli",
+            daemon=True,
         )
         self._reader.start()
         self._broadcast(("init", (self._cols, self._rows, self.pid)))
@@ -267,19 +323,22 @@ class ShellPty:
     # ------------------------------------------------------------------ #
     # output pipeline (reader thread -> loop)
     # ------------------------------------------------------------------ #
-    def _read_pump(self) -> None:  # runs on the reader thread
+    def _read_pump(self, pty) -> None:  # runs on the reader thread
+        # ``pty`` is this thread's own incarnation, taken once: reading
+        # ``self._pty`` on each pass made a retired reader follow the
+        # successor -- two readers on one child (claunch-742jf.1).
         try:
             while True:
-                chunk = self._pty.read()
+                chunk = pty.read()
                 if not chunk:
                     break
-                self._loop.call_soon_threadsafe(self._on_output, chunk)
-            self._loop.call_soon_threadsafe(self._on_eof)
+                self._loop.call_soon_threadsafe(self._on_output, pty, chunk)
+            self._loop.call_soon_threadsafe(self._on_eof, pty)
         except RuntimeError:
             pass  # event loop already closed (daemon teardown)
 
-    def _on_output(self, chunk: bytes) -> None:
-        if self.exited:
+    def _on_output(self, pty, chunk: bytes) -> None:
+        if self.exited or pty is not self._pty:
             return
         self._buffer.append(chunk)
         self._buffered += len(chunk)
@@ -289,16 +348,19 @@ class ShellPty:
             self._buffer.popleft()
         self._broadcast(("data", chunk))
 
-    def _on_eof(self) -> None:
+    def _on_eof(self, pty) -> None:
+        # A retired incarnation ends quietly: restart() already killed and
+        # closed it, and its exit code belongs to a child nobody is reading.
+        if pty is not self._pty:
+            return
         if self.exited:
             return
         self.exited = True
-        self.exit_code = self._pty.exit_code() if self._pty is not None else None
-        if self._pty is not None:
-            try:
-                self._pty.close()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
+        self.exit_code = pty.exit_code()
+        try:
+            pty.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
         self._broadcast(("exit", self.exit_code))
 
     # ------------------------------------------------------------------ #
@@ -418,6 +480,11 @@ class SessionShell(ShellPty):
     ``claunch shell accept``) calls — the MCP tools have no accept tool and
     the route refuses a session-shaped accept (``daemon/shell_api.py``).
 
+    Where that agent read to is kept here (``last_read``), so "show me only
+    what is new" survives the agent's context: a reader that lost its offset
+    reads forward from the cursor instead of starting over at the tail, and
+    a nudge (:meth:`nudge_text`) can say where to read.
+
     Every shell here belongs to exactly one session and dies with it
     (``daemon/session_shells.py``), which is what makes the boundary
     legible: a proposal can only be made to the shell of the session that
@@ -430,6 +497,94 @@ class SessionShell(ShellPty):
         #: Input proposed by this session's agent, by suggestion id. A
         #: proposal is text and a reason; only the user's accept writes it.
         self._suggestions: Dict[str, dict] = {}
+        #: Where this session's agent last read to, and the pid of the child
+        #: that numbering belongs to. The daemon keeps it because the offset
+        #: a read returns otherwise lives only in the reader's own context,
+        #: and a compacted context loses it — after which every read is a
+        #: tail again and the output in between is never looked at. The pid
+        #: is part of the cursor: a restarted shell numbers its bytes from 0
+        #: again, so an offset from the previous child points into the new
+        #: one's middle.
+        self.last_read = 0
+        self.last_read_pid: Optional[int] = None
+
+    # ------------------------------------------------------------------ #
+    # the session's read cursor (the daemon's memory of it)
+    # ------------------------------------------------------------------ #
+    @property
+    def read_cursor(self) -> int:
+        """Where this session's next default read starts.
+
+        ``0`` when the cursor belongs to a previous child (the shell was
+        restarted): its numbering began again, so nothing of the current
+        output has been read.
+        """
+        return self.last_read if self.last_read_pid == self.pid else 0
+
+    @property
+    def unread_bytes(self) -> int:
+        """Output this session's agent has not been handed yet."""
+        return max(0, self.total - self.read_cursor)
+
+    def read_output(self, after: Optional[int] = None, limit: int = READ_MAX) -> dict:
+        """:meth:`ShellPty.read_output`, and the read moves the cursor.
+
+        Every read by this session advances ``last_read`` to where the
+        returned slice ended, so the next default read continues from there
+        instead of asking the agent to carry an offset across turns.
+        """
+        out = super().read_output(after, limit)
+        self.last_read = int(out["offset"])
+        self.last_read_pid = out["pid"]
+        return out
+
+    def read_from_last(self, limit: int = READ_MAX) -> dict:
+        """Read forward from where this session last read.
+
+        The pane's and the MCP tool's default read (``daemon/shell_api.py``
+        passes no ``after`` when the request names no offset). An offset
+        from a restarted shell is not usable, so that case reads the new
+        child from its first byte.
+        """
+        return self.read_output(self.read_cursor, limit)
+
+    def nudge_text(self, text: str = "") -> str:
+        """The block the user's nudge types into this session's terminal.
+
+        The user's note (optional) and the one fact worth carrying: where
+        the unread output starts. ``shell_read`` with no offset reads from
+        exactly there, so the session does not have to remember a number.
+        """
+        # One line for the note: a block the session reads at a glance beats
+        # a paragraph that no longer looks like a nudge.
+        note = " ".join((text or "").split())
+        if "\x00" in note:
+            raise ValueError("text must not contain NUL")
+        if len(note) > NUDGE_MAX_TEXT:
+            raise ValueError(f"text is longer than {NUDGE_MAX_TEXT} characters")
+        after = self.read_cursor
+        unread = self.unread_bytes
+        lines = ["[claunch nudge]" + (f" {note}" if note else "")]
+        lines.append(
+            f"Your session's shell has {unread} unread bytes from offset "
+            f"{after}; shell_read with no offset reads from there."
+        )
+        return "\n".join(lines)
+
+    def _session_env(self) -> Dict[str, str]:
+        """The template's common env (``template.env``), re-read per spawn.
+
+        The lowest layer :func:`claude_launcher.runner.child_env` applies to
+        the session's own harness child; this pane is where the user runs git
+        by hand, and it needs the same GIT_CONFIG_GLOBAL for the same
+        identity (claunch-ol3w0). A config the store cannot read must not
+        cost the session its shell.
+        """
+        try:
+            return store.template_env()
+        except Exception:  # noqa: BLE001 -- a broken config, not a lost shell
+            log.warning("cannot read the template env for the session shell", exc_info=True)
+            return {}
 
     # ------------------------------------------------------------------ #
     # input proposals (the agent proposes, the user decides)

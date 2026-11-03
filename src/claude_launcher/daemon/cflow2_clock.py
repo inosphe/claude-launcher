@@ -89,12 +89,12 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths, pools
+from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths, pools, session_fault
 from .session import STATUS_IDLE, delivery_wake
 
 log = logging.getLogger("claunch.daemon.cflow2")
@@ -485,6 +485,9 @@ class Cflow2Clock:
             except Exception:
                 log.exception("cflow2 clock could not end the side runs of %r", name)
             self._end_run_at_gate(name, cwd, now=now)
+            # An ending can settle a gate (the end gate above): the ended
+            # session's run is compared once more, since no pass drives it now.
+            self.sync_gates([name])
         return out
 
     def _end_run_at_gate(self, name: str, cwd: str, *, now: Optional[float] = None) -> None:
@@ -717,7 +720,40 @@ class Cflow2Clock:
                         log.exception("cflow2 clock failed on %s/%s", cwd, scope)
         finally:
             self._scanning = False
+        self.sync_gates()
         return notices
+
+    def sync_gates(self, names: Optional[Sequence[str]] = None) -> None:
+        """Compare the runs of the sessions this clock drives (live, held or
+        paused) -- or of ``names`` -- with the daemon's gate registry
+        (claunch-6vq2m.1), so a gate is recorded when it opens whether or not
+        a dashboard is polling. Each slot is read only when its files changed
+        since the last comparison (``cflow2_web.rail_entries``)."""
+        from . import cflow2_web, gate_registry
+
+        if gate_registry.active() is None:
+            return
+        pairs = []
+        try:
+            sessions = list(self.manager.list())
+        except Exception:  # noqa: BLE001
+            return
+        wanted = set(names) if names is not None else None
+        for session in sessions:
+            sdef = getattr(session, "sdef", None)
+            name = str(getattr(sdef, "name", "") or "")
+            cwd = str(getattr(sdef, "cwd", "") or "")
+            if not name or not cwd:
+                continue
+            if wanted is not None:
+                if name in wanted:
+                    pairs.append((name, cwd))
+            elif self.owns(name):
+                pairs.append((name, cwd))
+        try:
+            cflow2_web.rail_entries(pairs)
+        except Exception:  # noqa: BLE001 - the next pass compares again
+            log.exception("cflow2 clock could not compare the gate registry")
 
     # -- held drivers ------------------------------------------------------
     def _held(self, scope: str) -> bool:
@@ -876,6 +912,21 @@ class Cflow2Clock:
         except Exception:  # noqa: BLE001 - a broken session must not spam it
             return False
 
+    def _driver_faulted(self, scope: str) -> bool:
+        """Whether the slot's driver is stopped by a session fault right now
+        (:mod:`session_fault`: a usage limit, a rejected login, an API status
+        error ...). Such a harness answers every typed notice with the same
+        fault message, so a re-nudge only fills its screen (claunch-ijot0:
+        s29 under a weekly limit got one every ten minutes for eight hours).
+        A fault that comes straight back after its window stays held past
+        it, twice as long each time (claunch-16j5v, ``holds_notices``).
+        """
+        try:
+            session = self.manager.get(cstore.session_of(scope))
+        except Exception:
+            return False
+        return session_fault.holds_notices(session)
+
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:
         """Tell a run's driver again when the run has waited on it past the
@@ -887,7 +938,10 @@ class Cflow2Clock:
         the driver) and stops when the run stops waiting on its driver, so a
         resolved choose or a finished run cannot be nudged about again. A busy
         driver is skipped without spending the interval: when its turn ends,
-        the next pass re-nudges at once if the wait is already that old."""
+        the next pass re-nudges at once if the wait is already that old. A
+        driver in an active session fault is skipped the same way, so the
+        first pass after the fault's window (a usage limit's reset) tells it
+        once and the run picks up again (claunch-ijot0)."""
         key = (cwd, scope)
         if not _waits_on_driver(payload):
             self._driver_nudged.pop(key, None)
@@ -903,6 +957,8 @@ class Cflow2Clock:
             self._driver_nudged[key] = clock_now
             return
         if clock_now - last < interval or not self._driver_idle(scope):
+            return
+        if self._driver_faulted(scope):
             return
         self._driver_nudged[key] = clock_now
         notices.append((cwd, payload.get("driver") or _name(scope),

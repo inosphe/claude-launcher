@@ -10,6 +10,9 @@ the user decides. These tests pin the boundary, not the terminal protocol
   * a shell is addressed by its session and nothing else — two sessions'
     shells do not share proposals or cursors, and a proposal cannot be made
     for somebody else's shell;
+  * the read cursor is the daemon's, so a read that names no offset continues
+    from where that session last read, and a nudge tells the session where
+    that is (claunch-742jf);
   * the shell goes when its session ends;
   * the dashboard's CLI tab has no agent route at all (claunch-jg8pt rolled
     the sharing back to this shape).
@@ -36,13 +39,19 @@ REPL = [sys.executable, "-i", "-u", "-q"]
 
 
 class FakeManager:
-    """What the registry and the routes read: names, and exit hooks."""
+    """What the registry and the routes read: names, exit hooks, delivery."""
 
     def __init__(self, names):
-        self.sessions = {
-            name: SimpleNamespace(sdef=SimpleNamespace(name=name, cwd=None))
-            for name in names
-        }
+        #: (session name, text typed into its terminal) — a nudge's block.
+        self.delivered = []
+        self.sessions = {}
+        for name in names:
+            async def deliver(text, _name=name, **_kwargs):
+                self.delivered.append((_name, text))
+                return True
+            self.sessions[name] = SimpleNamespace(
+                sdef=SimpleNamespace(name=name, cwd=None), deliver=deliver
+            )
         self.exit_hooks = []
 
     def get(self, name):
@@ -61,6 +70,21 @@ async def _wait_for(shell, needle: str, timeout: float = 20.0) -> dict:
             return last
         await asyncio.sleep(0.05)
     raise AssertionError(f"{needle!r} never appeared; tail={last and last['text'][-500:]!r}")
+
+
+async def _wait_peek(shell, needle: str, timeout: float = 20.0) -> None:
+    """Wait until ``needle`` is in the output, reading without the cursor.
+
+    The peek goes through the base implementation on purpose: a session's
+    read (``SessionShell.read_output``) moves the cursor, and these tests
+    measure that cursor.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if needle in clipty.ShellPty.read_output(shell, shell.read_cursor)["text"]:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{needle!r} never appeared; total={shell.total}")
 
 
 def run(tmp_path, scenario, names=("s1", "s2")):
@@ -311,6 +335,168 @@ def test_the_shell_goes_when_its_session_ends(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_the_read_cursor_is_the_daemons_and_a_default_read_continues_from_it(tmp_path):
+    """The offset a read returns otherwise lives only in the reader's own
+    context; the shell keeps it, so a read with no offset hands back what is
+    new instead of the whole tail again (claunch-742jf)."""
+
+    async def scenario(req, registry, live):
+        shell = await live("s1")
+        base = "/api/sessions/s1/shell"
+
+        await shell.write_bytes(b"print('first')\r")
+        await _wait_peek(shell, "first")
+        status = await req("GET", base)
+        assert status["last_read"] == shell.read_cursor > 0
+        assert status["unread_bytes"] == status["offset"] - status["last_read"]
+
+        # No offset: continue from the cursor, which is what is unread.
+        first = await req("GET", base + "/output")
+        assert "first" in first["text"]
+        assert first["offset"] == first["total"] == shell.total
+        after = await req("GET", base)
+        assert after["last_read"] == first["offset"]
+        assert after["unread_bytes"] == 0
+
+        await shell.write_bytes(b"print('second')\r")
+        await _wait_peek(shell, "second")
+        second = await req("GET", base + "/output")
+        # Only what arrived since: the new line is there, the old one is not.
+        assert "second" in second["text"] and "first" not in second["text"]
+        assert second["start"] == first["offset"]
+
+        # An explicit offset is still honoured: 0 is the whole ring.
+        whole = await req("GET", base + "/output?offset=0")
+        assert "first" in whole["text"] and "second" in whole["text"]
+
+        # The cursor is per shell: reading s1's ring moved s1's cursor, and
+        # s2 has its own (its own reads moved that one).
+        await live("s2")
+        other = await req("GET", "/api/sessions/s2/shell")
+        assert other["last_read"] == registry.get("s2").read_cursor
+        assert other["unread_bytes"] == other["offset"] - other["last_read"]
+        assert shell.read_cursor == whole["offset"]
+
+    run(tmp_path, scenario)
+
+
+def test_a_nudge_wakes_the_session_at_its_cursor_and_is_the_users(tmp_path):
+    """The pane's nudge types the block into the session's own terminal —
+    the only channel that reaches it — and names the offset to read from."""
+
+    async def scenario(req, registry, live):
+        shell = await live("s1")
+        manager = registry._manager  # noqa: SLF001
+        base = "/api/sessions/s1/shell"
+
+        before = shell.read_cursor
+        await shell.write_bytes(b"print('marker')\r")
+        await _wait_peek(shell, "marker")
+
+        # A call shaped like a session's is refused: the nudge is the user's.
+        await req("POST", base + "/nudge", {"session": "s1", "text": "look"},
+                  status=403)
+        assert manager.delivered == []
+
+        sent = await req("POST", base + "/nudge", {"text": "look at the run"})
+        assert sent["ok"] is True and sent["delivered"] is True
+        assert sent["last_read"] == before
+        assert sent["unread_bytes"] > 0
+        name, block = manager.delivered[0]
+        assert name == "s1"
+        assert block.startswith("[claunch nudge] look at the run")
+        # The numbers in the block are the response's: one measurement, so
+        # the world cannot move between the route and the assertion.
+        assert (f"has {sent['unread_bytes']} unread bytes from offset "
+                f"{sent['last_read']}") in block
+        assert "shell_read with no offset" in block
+        # A nudge is a message to the session; it does not move the cursor,
+        # and it typed nothing into the shell (the probe reads through the
+        # base implementation, which leaves the cursor alone).
+        assert shell.read_cursor == before
+        assert "look at the run" not in clipty.ShellPty.read_output(shell, 0)["text"]
+
+        # The note is optional — an empty nudge is still a nudge.
+        empty = await req("POST", base + "/nudge", {})
+        assert empty["last_read"] == before
+        assert manager.delivered[1][1].startswith("[claunch nudge]\n")
+        # ...but it is bounded.
+        await req("POST", base + "/nudge", {"text": "x" * 2001}, status=400)
+
+        # No shell, no nudge — 404 for a session nobody opened, and for one
+        # that does not exist.
+        await req("POST", "/api/sessions/s2/shell/nudge", {}, status=404)
+        await req("POST", "/api/sessions/nope/shell/nudge", {}, status=404)
+
+    run(tmp_path, scenario)
+
+
+def test_a_restarted_shell_is_read_from_its_first_byte(tmp_path):
+    """Numbering begins again with the child, so a cursor from the previous
+    one is not reused: the new incarnation is unread in full."""
+
+    async def go():
+        shell = clipty.SessionShell(argv=REPL, cwd=str(tmp_path))
+        shell.start_once()
+        await _wait_for(shell, ">>>")
+        assert shell.read_cursor == shell.total > 0
+
+        # The pane's restart is for a shell that exited, so the child goes
+        # first and its reader finishes before the successor is spawned.
+        await shell.shutdown()
+        assert shell.exited is True
+        assert shell.restart() is True
+        # Numbering began again: none of the new child has been read.
+        assert shell.read_cursor == 0
+        assert shell.unread_bytes == shell.total
+
+        deadline = time.monotonic() + 20
+        got = shell.read_from_last()
+        assert got["start"] == 0 and got["pid"] == shell.pid
+        while ">>>" not in got["text"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            got = shell.read_from_last()
+        assert ">>>" in got["text"]
+        await shell.shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_live_shell_survives_its_own_restart(tmp_path):
+    """Replacing a child that was still running leaves a successor that
+    lives (claunch-742jf.1).
+
+    The retired reader used to post its EOF after ``restart`` had already
+    cleared ``exited``, and that callback closed the *new* pty: the fresh
+    shell died at once, the ring stayed empty and the caller saw an exited
+    shell with a pid that had only just been assigned.
+    """
+
+    async def go():
+        shell = clipty.SessionShell(argv=REPL, cwd=str(tmp_path))
+        shell.start_once()
+        await _wait_for(shell, ">>>")
+        first = shell.pid
+        assert shell.exited is False
+
+        assert shell.restart() is True
+        assert shell.pid != first
+        assert shell.exited is False
+
+        # The successor's prompt lands in the ring, and nothing of the
+        # retired child's reader takes it down afterwards.
+        await _wait_for(shell, ">>>")
+        await asyncio.sleep(0.5)          # a late EOF would arrive here
+        assert shell.exited is False
+        await shell.write_bytes(b"print(6 * 7)\r")
+        got = await _wait_for(shell, "42")
+        assert got["pid"] == shell.pid
+        assert shell.exited is False
+        await shell.shutdown()
+
+    asyncio.run(go())
+
+
 def test_a_cursor_from_an_earlier_incarnation_is_flagged(tmp_path):
     """A reader that kept an offset across a shell restart is told the
     cursor began again instead of being handed a silent empty read."""
@@ -334,6 +520,12 @@ def test_the_agent_surface_has_no_input_tool_and_names_no_session():
         "shell_withdraw",
     }
     assert not {"shell_accept", "shell_input", "shell_type", "shell_run"} & names
+    # A nudge is the user's, so there is no tool that sends one either.
+    assert not {"shell_nudge", "shell_wake"} & names
+    by_name = {tool["name"]: tool["description"] for tool in shell_mcp.SERVER.tools}
+    # The cursor the daemon keeps is what these two describe.
+    assert "last_read" in by_name["shell_status"] and "unread_bytes" in by_name["shell_status"]
+    assert "since your session last read" in by_name["shell_read"]
     merged = {tool["name"] for tool in mcp_server.TOOLS}
     assert names <= merged
     # The session is the caller's, never an argument: a tool that could name
@@ -359,14 +551,18 @@ def test_the_tools_address_the_callers_own_session(monkeypatch):
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
     shell_mcp.call_tool("shell_status", {})
     shell_mcp.call_tool("shell_read", {"offset": 10})
+    shell_mcp.call_tool("shell_read", {})
     shell_mcp.call_tool("shell_suggest", {"text": "ls", "why": "look"})
     shell_mcp.call_tool("shell_withdraw", {"suggestion": "sh-abc123"})
 
     assert calls[0] == ("GET", "/api/sessions/s1/shell")
     assert calls[1] == ("GET", "/api/sessions/s1/shell/output?offset=10")
-    assert calls[2] == ("POST", "/api/sessions/s1/shell/suggestions",
+    # No offset asks the same route with no cursor: the daemon fills in the
+    # session's last read, which is the whole point of keeping it there.
+    assert calls[2] == ("GET", "/api/sessions/s1/shell/output")
+    assert calls[3] == ("POST", "/api/sessions/s1/shell/suggestions",
                         {"session": "s1", "text": "ls", "why": "look"})
-    assert calls[3] == ("POST", "/api/sessions/s1/shell/suggestions/sh-abc123/withdraw",
+    assert calls[4] == ("POST", "/api/sessions/s1/shell/suggestions/sh-abc123/withdraw",
                         {"session": "s1"})
 
 
@@ -404,6 +600,7 @@ def test_the_cli_tab_keeps_no_agent_route():
         assert "/api/sessions/{name}/shell/ws" in paths
         assert "/api/sessions/{name}/shell" in paths
         assert "/api/sessions/{name}/shell/output" in paths
+        assert "/api/sessions/{name}/shell/nudge" in paths
         assert "/api/sessions/{name}/shell/suggestions" in paths
 
     asyncio.run(go())
@@ -421,6 +618,10 @@ def test_the_shell_pack_ships_on_demand():
     assert prompt_packs.loadable_copy(None, "mcp-shell").body == pack.body
     assert "shell_suggest" in pack.body and "only when the user accepts" in pack.body
     assert "session" in pack.body
+    # The cursor and the nudge are part of the guidance, not just the code.
+    assert "last read" in pack.body and "unread" in pack.body
+    assert "[claunch nudge]" in pack.body
+    assert len(pack.body) <= 3000
 
 
 def test_suggestions_broadcast_to_attached_viewers(tmp_path):

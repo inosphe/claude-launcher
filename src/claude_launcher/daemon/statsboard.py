@@ -52,8 +52,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from .. import metering, providers, store
-from . import sessionstats
+from .. import metering, model_prices, providers, store
+from . import sessionstats, tokenusage
 
 #: The windows the page offers, and how many local days each one spans
 #: (today is the current local day alone, so the page's bars line up with the
@@ -443,10 +443,22 @@ class Ledger:
         bucket = row["days"].setdefault(day, {}).setdefault(provider, {
             "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
             "requests": 0, "first": at, "last": at,
+            # model -> its own sums. The provider bucket answers "which
+            # backend", this one "which model on it": two models under one
+            # provider carry different prices, so the page needs the split
+            # (claunch-qs2ev).
+            "models": {},
         })
         for key, value in zip(("input", "cache_read", "cache_write", "output"), parts):
             bucket[key] += value
         bucket["requests"] += 1
+        model_bucket = bucket["models"].setdefault(model, {
+            "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+            "requests": 0,
+        })
+        for key, value in zip(("input", "cache_read", "cache_write", "output"), parts):
+            model_bucket[key] += value
+        model_bucket["requests"] += 1
         bucket["first"] = min(bucket["first"], at)
         bucket["last"] = max(bucket["last"], at)
         row["first"] = min(row["first"], at)
@@ -574,11 +586,19 @@ class Ledger:
                     acc = per_provider.setdefault(provider, {
                         "input": 0, "cache_read": 0, "cache_write": 0,
                         "output": 0, "requests": 0, "first": bucket["first"],
-                        "last": bucket["last"],
+                        "last": bucket["last"], "models": {},
                     })
                     for key in ("input", "cache_read", "cache_write",
                                 "output", "requests"):
                         acc[key] += bucket[key]
+                    for model, model_bucket in (bucket.get("models") or {}).items():
+                        macc = acc["models"].setdefault(model, {
+                            "input": 0, "cache_read": 0, "cache_write": 0,
+                            "output": 0, "requests": 0,
+                        })
+                        for key in ("input", "cache_read", "cache_write",
+                                    "output", "requests"):
+                            macc[key] += model_bucket[key]
                     acc["first"] = min(acc["first"], bucket["first"])
                     acc["last"] = max(acc["last"], bucket["last"])
                     day_totals[day] = day_totals.get(day, 0) + sum(
@@ -590,6 +610,15 @@ class Ledger:
                             else max(last, bucket["last"]))
             providers_out = []
             for provider, sums in per_provider.items():
+                models_out = [{
+                    "model": model,
+                    "input": m["input"], "cache_read": m["cache_read"],
+                    "cache_write": m["cache_write"], "output": m["output"],
+                    "total": sum(m[k] for k in
+                                 ("input", "cache_read", "cache_write", "output")),
+                    "requests": m["requests"],
+                } for model, m in sums["models"].items()]
+                models_out.sort(key=lambda m: (-m["total"], m["model"]))
                 providers_out.append({
                     "provider": provider,
                     "input": sums["input"], "cache_read": sums["cache_read"],
@@ -597,6 +626,7 @@ class Ledger:
                     "total": sum(sums[k] for k in
                                  ("input", "cache_read", "cache_write", "output")),
                     "requests": sums["requests"],
+                    "models": models_out,
                 })
             providers_out.sort(key=lambda p: (-p["total"], p["provider"]))
             switches, model = self._switch_series(row, since_epoch)
@@ -620,7 +650,8 @@ class Ledger:
     def series(self, window: str = "7d", *, sessions: Iterable[dict] = (),
                project: str = "", include_killed: bool = False,
                include_archived: bool = False,
-               now: Optional[float] = None) -> dict:
+               now: Optional[float] = None,
+               transcripts: Optional["TranscriptBins"] = None) -> dict:
         """The fleet's token use over time, for the Chart page's series.
 
         One point per bucket of :data:`SERIES_BUCKETS` chosen for the window,
@@ -636,11 +667,23 @@ class Ledger:
         contributes nothing and is counted in ``unmetered`` rather than
         drawn as zero, the same rule the overview's rows follow.
 
+        ``transcripts`` answers for the sessions the ledger has no record of:
+        an OAuth route writes no metering line, so such a session's bins come
+        from its own transcript (:class:`TranscriptBins`, claunch-gbj4h) and
+        are folded into the same points and ``by_session`` as a ledger
+        session's. Each ``by_session`` entry says which it came from in
+        ``source`` (``ledger`` or ``transcript``). Only a session the window
+        can have touched is read, at most :data:`MAX_TRANSCRIPTS` of them per
+        call (``transcript_skipped`` counts the rest, which stay unmetered),
+        and ``partial`` is set while part of a transcript is still being read
+        in the background. Omitting it leaves every such session unmetered.
+
         ``by_session`` carries the same four components per session over the
         same window and the same filters, so a row on the Chart page can print
         the figure the Stats page's table prints for it without a second read:
-        the two are one pass over one set of bins. A wanted session the ledger
-        cannot speak for is absent from the map (the page draws ``-`` there,
+        the two are one pass over one set of bins. A wanted session neither
+        the ledger nor a transcript can speak for is absent from the map (the
+        page draws ``-`` there,
         never a zero -- the overview's rule, claunch-ha2s9). Each entry also
         carries ``points``: the buckets in which that session spent anything,
         as ``[t, total, requests]`` on the same grid, so the row can draw when
@@ -657,6 +700,7 @@ class Ledger:
                 f"window must be one of: {', '.join(SERIES_WINDOWS)}")
         now = time.time() if now is None else now
         wanted = set()
+        metas: Dict[str, dict] = {}
         for item in sessions:
             name = str(item.get("name") or "")
             if not name:
@@ -667,16 +711,51 @@ class Ledger:
                        include_killed, include_archived):
                 continue
             wanted.add(name)
+            metas[name] = item
         # The ledger's own names are not added: a record whose session the
         # store no longer lists cannot be told killed from archived, so the
         # page's two boxes have nothing to act on. What the series draws is
         # what the rows beside it draw.
         unmetered = 0
-        bins = [(b, name) for name in wanted
-                for b in (self.sessions.get(name, {}).get("bins") or {})]
         span = SERIES_WINDOWS[window]
+        # (bin start, session, accumulator) from either source: the ledger's
+        # own bins, then a transcript's for a session the ledger never saw.
+        bins = [(b, name, acc) for name in wanted
+                for b, acc in (self.sessions.get(name, {}).get("bins")
+                               or {}).items()]
+        sources = {name: "ledger" for name in wanted if name in self.sessions}
+        transcript_skipped = 0
+        partial = False
+        if transcripts is not None:
+            # The aligned start can sit up to one (widest) bucket before
+            # `now - span`; reading from there leaves nothing out.
+            since = None if span is None else now - span - SERIES_BUCKETS[-1]
+            spend = transcripts.budget()
+            try:
+                read = 0
+                for name in sorted(wanted - set(sources)):
+                    item = metas.get(name) or {}
+                    sdef = item.get("sdef")
+                    last = _activity(item)
+                    if sdef is None or last is None:
+                        continue
+                    if since is not None and last < since:
+                        continue
+                    if read >= MAX_TRANSCRIPTS:
+                        transcript_skipped += 1
+                        continue
+                    read += 1
+                    got = transcripts.bins(sdef, spend, since=since)
+                    if got is None:
+                        continue
+                    own, behind = got
+                    partial = partial or behind
+                    sources[name] = "transcript"
+                    bins.extend((b, name, acc) for b, acc in own.items())
+            finally:
+                spend.release()
         if span is None:
-            start = min((b for b, _ in bins), default=None)
+            start = min((b for b, _, _ in bins), default=None)
             start = now - 86400 if start is None else float(start)
         else:
             start = now - span
@@ -705,14 +784,13 @@ class Ledger:
         # how the page tells "nothing here" from "not measured here".
         by_session: Dict[str, dict] = {
             name: {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
-                   "total": 0, "requests": 0}
-            for name in wanted if name in self.sessions
+                   "total": 0, "requests": 0, "source": source}
+            for name, source in sources.items()
         }
-        for at, name in bins:
+        for at, name, acc in bins:
             if at < start or at >= start + count * width:
                 continue
             slot = points[int((at - start) // width)]
-            acc = self.sessions[name]["bins"][at]
             slot["input"] += acc[0]
             slot["cache_read"] += acc[1]
             slot["cache_write"] += acc[2]
@@ -746,7 +824,7 @@ class Ledger:
                   ("input", "cache_read", "cache_write", "output",
                    "total", "requests")}
         for name in wanted:
-            if name not in self.sessions:
+            if name not in sources:
                 unmetered += 1
         return {
             "window": window,
@@ -761,6 +839,10 @@ class Ledger:
                             if totals["total"] else None),
             "sessions": len(wanted) - unmetered,
             "unmetered": unmetered,
+            "transcript_sessions": sum(1 for v in sources.values()
+                                       if v == "transcript"),
+            "transcript_skipped": transcript_skipped,
+            "partial": partial,
             "ledger_since": self.earliest_day(),
         }
 
@@ -824,6 +906,110 @@ class Transcripts:
     def forget(self, name: str) -> None:
         with self._lock:
             self._rows.pop(name, None)
+
+
+class TranscriptBins:
+    """Five-minute bins of the sessions the ledger cannot speak for, kept
+    up to date by folding only what each transcript gained since the last look.
+
+    The Chart page's series reads the ledger's :data:`SERIES_BIN_S` bins. A
+    session on an OAuth route has none, so its bins come from its transcript
+    instead (claunch-gbj4h). Both layers of that reading are incremental: the
+    file side is :mod:`tokenusage`'s follower (a transcript is parsed once and
+    then only from the offset where the last read stopped, shared with the
+    Stats page's reading), and this class keeps the bins built from the
+    requests the followers have produced and remembers how many of each
+    reader's requests it has already folded. A poll therefore costs the new
+    requests, not the session's history. A reader that was replaced (its file
+    shrank or was swapped, or the follower was dropped as idle) has lost the
+    count the bins were built on, and that session's bins are rebuilt from
+    the readers as they now stand.
+
+    ``source`` is ``sessionstats.follow_requests``'s shape and is injectable,
+    so a test can answer without a transcript on disk. Each bin is the ledger's
+    accumulator: ``[input, cache_read, cache_write, output, requests]``.
+    """
+
+    def __init__(self, *, width: int = SERIES_BIN_S, source=None,
+                 ttl: float = tokenusage.FOLLOWER_TTL) -> None:
+        self.width = width
+        self.ttl = ttl
+        self.source = source or sessionstats.follow_requests
+        #: name -> {"readers": {key: (reader, folded)}, "bins": {...}, "used"}
+        self._sessions: Dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def budget(self) -> "tokenusage.Budget":
+        """One request's reading budget, shared by every session it asks
+        about; release it once the request is done so what it left unread
+        goes to the catch-up thread."""
+        return tokenusage.Budget(sessionstats.STATS_BUDGET)
+
+    def bins(self, sdef, spend=None, since: Optional[float] = None
+             ) -> Optional[Tuple[Dict[float, list], bool]]:
+        """``(bins, partial)`` for one session, or ``None`` when it has no
+        transcript to read. ``partial`` is set while part of the files is
+        still being read in the background; the bins then hold what has been
+        read so far. Only bins starting at or after ``since`` are returned,
+        as a copy the caller may keep."""
+        name = str(getattr(sdef, "name", "") or "")
+        if not name:
+            return None
+        own = spend is None
+        if own:
+            spend = self.budget()
+        try:
+            followed = self.source(sdef, spend)
+        except Exception:  # noqa: BLE001 - a broken transcript is not a 500
+            followed = None
+        finally:
+            if own:
+                spend.release()
+        if followed is None:
+            with self._lock:
+                self._sessions.pop(name, None)
+            return None
+        readers, partial = followed
+        with self._lock:
+            state = self._sessions.get(name)
+            if state is None or any(
+                    key in state["readers"] and state["readers"][key][0] is not reader
+                    for key, reader in readers):
+                state = {"readers": {}, "bins": {}}
+                self._sessions[name] = state
+            state["used"] = time.monotonic()
+            acc = state["bins"]
+            width = self.width
+            for key, reader in readers:
+                folded = state["readers"].get(key, (reader, 0))[1]
+                requests = reader.requests
+                # The catch-up thread appends to this list while a poll reads
+                # it; the length taken once is the part that is complete.
+                upto = len(requests)
+                for at, fresh, cache_read, cache_write, output, _side in \
+                        requests[folded:upto]:
+                    slot = acc.setdefault(math.floor(at / width) * width,
+                                          [0, 0, 0, 0, 0])
+                    slot[0] += fresh
+                    slot[1] += cache_read
+                    slot[2] += cache_write
+                    slot[3] += output
+                    slot[4] += 1
+                state["readers"][key] = (reader, upto)
+            out = {at: list(v) for at, v in acc.items()
+                   if since is None or at >= since}
+            self._prune(state["used"])
+        return out, partial
+
+    def _prune(self, now: float) -> None:
+        stale = [n for n, st in self._sessions.items()
+                 if now - st.get("used", now) > self.ttl]
+        for name in stale:
+            self._sessions.pop(name, None)
+
+    def forget(self, name: str) -> None:
+        with self._lock:
+            self._sessions.pop(name, None)
 
 
 def transcript_window(reading: Optional[dict],
@@ -957,6 +1143,70 @@ def _hidden(category: str, include_killed: bool, include_archived: bool) -> bool
     return False
 
 
+def row_providers(row: dict) -> List[dict]:
+    """The per-provider parts a row counts toward in the provider filter.
+
+    A ledger row has its measured parts. A transcript row has none -- an
+    OAuth route writes no ledger line -- so its whole window figure is filed
+    under the provider its definition declares, marked ``declared``; without
+    it the strip on the Stats page could not name that provider and its
+    sessions would drop out of the table the moment any provider was picked.
+    A row with no figure at all (``source: "none"``) counts toward nothing.
+    """
+    if row.get("providers"):
+        return row["providers"]
+    declared = row.get("declared_provider") or ""
+    if row.get("source") != "transcript" or not declared:
+        return []
+    return [{
+        "provider": declared,
+        "input": row["input"], "cache_read": row["cache_read"],
+        "cache_write": row["cache_write"], "output": row["output"],
+        "total": row["total"], "requests": row["requests"],
+        "declared": True,
+    }]
+
+
+def _rate(rates: dict, key: str) -> float:
+    """One per-1M-token rate out of a price row, 0 where it is missing.
+
+    A rate that cannot be read counts as 0 rather than taking the page down:
+    the price table is hand-edited config, and one bad row must not hide the
+    estimates its neighbours still have.
+    """
+    try:
+        value = float(rates.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
+
+
+def estimate_cost(prices, provider: str, model: str,
+                  parts: dict) -> Optional[float]:
+    """What ``parts`` cost at the Settings price row for ``provider``/``model``.
+
+    ``prices`` is the stored table (``daemon.model_prices``, either shape);
+    :func:`model_prices.rate_for` resolves the provider's own row and then
+    the ``"*"`` row. ``None`` means "not priced" — the caller reports the
+    tokens as unpriced instead of printing a zero. The sum is the same one
+    the dashboard and :func:`daemon.llm_usage.line_cost` make: a rate the row
+    leaves unset counts as 0, except cache write, which falls back to the
+    read rate (most providers bill a cache write as plain input).
+    """
+    if not model:
+        return None
+    rates = model_prices.rate_for(prices, provider, model)
+    if not rates:
+        return None
+    write = rates.get("cache_write")
+    write_rate = (_rate(rates, "input") if write is None or write == ""
+                  else _rate(rates, "cache_write"))
+    return (_rate(rates, "input") * int(parts.get("input") or 0)
+            + _rate(rates, "cache_read") * int(parts.get("cache_read") or 0)
+            + write_rate * int(parts.get("cache_write") or 0)
+            + _rate(rates, "output") * int(parts.get("output") or 0)) / 1e6
+
+
 def _empty_row(name: str) -> dict:
     return {
         "session": name, "status": "", "category": "", "harness": "",
@@ -975,6 +1225,7 @@ def overview(*, window: str = "today", include_ended: bool = False,
              sessions: Iterable[dict] = (), ledger: Optional[Ledger] = None,
              labels: Optional[Dict[str, str]] = None,
              doc: Optional[dict] = None,
+             prices=None, currency: str = "$",
              transcripts: Optional["Transcripts"] = None) -> dict:
     """The Stats page's overview payload for one window.
 
@@ -992,6 +1243,13 @@ def overview(*, window: str = "today", include_ended: bool = False,
     ``include_killed`` and ``include_archived`` are the page's two boxes;
     ``include_ended`` turns both on at once and is what the older ``?ended=1``
     asked for.
+
+    ``prices`` is the Settings price table (``daemon.model_prices``, either
+    shape) and ``currency`` the symbol its estimates are written in. Every
+    ``models`` row carries its ``cost`` (``None`` when the table has no row
+    for it) and its ``priced_tokens``/``unpriced_tokens``, and ``estimate``
+    sums them for the window. A row with no price is reported as unpriced,
+    never as costing 0.
     """
     if window not in WINDOWS:
         raise ValueError(f"window must be one of: {', '.join(WINDOWS)}")
@@ -1139,15 +1397,73 @@ def overview(*, window: str = "today", include_ended: bool = False,
 
     rows.sort(key=lambda r: (-(r["total"] or 0), r["session"]))
 
+    # The strip's cards and, once one is picked, the page's summary tiles:
+    # each provider's part of every figure the window totals carry.
     by_provider: Dict[str, dict] = {}
     for row in rows:
-        for entry in row["providers"]:
-            acc = by_provider.setdefault(entry["provider"],
-                                         {"provider": entry["provider"],
-                                          "sessions": 0, "total": 0, "requests": 0})
+        for entry in row_providers(row):
+            acc = by_provider.setdefault(entry["provider"], {
+                "provider": entry["provider"], "sessions": 0, "declared": 0,
+                "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                "total": 0, "requests": 0})
             acc["sessions"] += 1
-            acc["total"] += entry["total"]
-            acc["requests"] += entry["requests"]
+            acc["declared"] += 1 if entry.get("declared") else 0
+            for key in ("input", "cache_read", "cache_write", "output",
+                        "total", "requests"):
+                acc[key] += entry[key]
+    for acc in by_provider.values():
+        acc["cache_share"] = (acc["cache_read"] / acc["total"]
+                              if acc["total"] else None)
+
+    # Provider + model, the split the page draws with the four token parts
+    # apart and an estimate from Settings → Model prices. A ledger row knows
+    # the model that answered (``providers[].models``). A transcript row -- an
+    # OAuth route, which writes no ledger line -- knows only its declared
+    # provider, so its tokens ride under the empty model and stay unpriced
+    # rather than borrowing another model's price.
+    by_model: Dict[Tuple[str, str], dict] = {}
+    for row in rows:
+        for entry in row_providers(row):
+            models = entry.get("models") or []
+            if not models and row.get("source") == "transcript":
+                models = [{
+                    "model": "", "declared": True,
+                    "input": entry["input"], "cache_read": entry["cache_read"],
+                    "cache_write": entry["cache_write"], "output": entry["output"],
+                    "total": entry["total"], "requests": entry["requests"],
+                }]
+            for item in models:
+                key = (entry["provider"], str(item.get("model") or ""))
+                acc = by_model.setdefault(key, {
+                    "provider": entry["provider"], "model": key[1],
+                    "input": 0, "cache_read": 0, "cache_write": 0,
+                    "output": 0, "total": 0, "requests": 0,
+                    "declared": bool(item.get("declared")),
+                    "_sessions": set(),
+                })
+                for k in ("input", "cache_read", "cache_write", "output",
+                          "total", "requests"):
+                    acc[k] += int(item.get(k) or 0)
+                acc["_sessions"].add(row["session"])
+    models_out: List[dict] = []
+    estimate = {"cost": 0.0, "priced_tokens": 0, "unpriced_tokens": 0,
+                "total": 0, "requests": 0}
+    for acc in by_model.values():
+        total_tokens = acc["total"]
+        cost = estimate_cost(prices, acc["provider"], acc["model"], acc)
+        acc["sessions"] = len(acc.pop("_sessions"))
+        acc["cost"] = cost
+        acc["priced_tokens"] = total_tokens if cost is not None else 0
+        acc["unpriced_tokens"] = 0 if cost is not None else total_tokens
+        estimate["total"] += total_tokens
+        estimate["requests"] += acc["requests"]
+        estimate["priced_tokens"] += acc["priced_tokens"]
+        estimate["unpriced_tokens"] += acc["unpriced_tokens"]
+        if cost is not None:
+            estimate["cost"] += cost
+        models_out.append(acc)
+    models_out.sort(key=lambda m: (-m["total"], m["provider"], m["model"]))
+
     totals = {k: sum(r[k] for r in rows) for k in
               ("input", "cache_read", "cache_write", "output", "total", "requests")}
     total = totals["total"]
@@ -1163,6 +1479,9 @@ def overview(*, window: str = "today", include_ended: bool = False,
         "include_archived": bool(include_archived),
         "totals": totals,
         "cache_share": (totals["cache_read"] / total) if total else None,
+        "currency": currency or "$",
+        "models": models_out,
+        "estimate": estimate,
         "providers": sorted(by_provider.values(),
                             key=lambda p: (-p["total"], p["provider"])),
         "sessions": rows,

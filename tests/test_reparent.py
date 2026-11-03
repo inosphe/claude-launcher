@@ -12,6 +12,7 @@ actor.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import sys
 import time
@@ -110,6 +111,54 @@ def test_an_exited_parent_is_refused(home):
         mgr.reparent("w1", "w2")
     assert "has exited" in str(exc.value)
     assert mgr.get("w1").sdef.parent == "lead"
+
+
+def test_escalate_to_an_explicit_parent_moves_the_live_children_only(home):
+    """The merge path (claunch-dsqhp): a quick-fork's live children follow the
+    work to the session that took the wrap-up. The copy's own record stays,
+    so an exited child still names a session that exists and is left alone."""
+    mgr = _tree()
+    mgr._sessions["w1a"] = _Fake("w1a", "w1", exited=True)
+    assert mgr.escalate_children("lead", to="solo") == ["w1", "w2"]
+    assert mgr.get("w1").sdef.parent == "solo"
+    assert mgr.get("w2").sdef.parent == "solo"
+    assert mgr.get("w1a").sdef.parent == "w1"
+
+
+def test_escalate_to_clears_the_orphan_mark_as_reparent_does(home):
+    """claunch-ikiys marks a child whose parent record was dropped; a move to
+    an explicit parent re-draws the edge, so the mark goes with it."""
+    mgr = _tree()
+    mgr._sessions["w1"].sdef = dataclasses.replace(
+        mgr._sessions["w1"].sdef, orphan_of="gone")
+    assert mgr.escalate_children("lead", to="solo") == ["w1", "w2"]
+    assert mgr.get("w1").sdef.orphan_of is None
+
+
+def test_adoptable_children_answers_without_moving(home):
+    """What the merge asks before it writes the report: the same list and the
+    same refusals as the move, with nothing changed."""
+    mgr = _tree()
+    assert mgr.adoptable_children("lead", "solo") == ["w1", "w2"]
+    assert mgr.get("w1").sdef.parent == "lead"
+    with pytest.raises(ManagerError) as exc:
+        mgr.adoptable_children("lead", "w1a")
+    assert "cycle" in str(exc.value)
+
+
+def test_escalate_to_refuses_a_cycle_an_exited_target_and_itself(home):
+    mgr = _tree()
+    with pytest.raises(ManagerError) as exc:
+        mgr.escalate_children("lead", to="w1a")  # under the children it moves
+    assert "cycle" in str(exc.value)
+    with pytest.raises(ManagerError) as exc:
+        mgr.escalate_children("lead", to="lead")
+    assert "own parent" in str(exc.value)
+    mgr._sessions["solo"] = _Fake("solo", None, exited=True)
+    with pytest.raises(ManagerError) as exc:
+        mgr.escalate_children("lead", to="solo")
+    assert "has exited" in str(exc.value)
+    assert mgr.get("w1").sdef.parent == "lead"  # nothing moved
 
 
 def test_the_depth_limit_holds_for_the_deepest_session_moved(home):

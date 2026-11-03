@@ -55,8 +55,20 @@ Schema::
       api_key: <key>            # empty = the feature is off (or CLAUNCH_RAG_API_KEY)
       embedding_model: <model id>
       rerank_model: <model id>  # optional; empty = vector ranking only
+      preset: <preset id>       # names one row of presets below; empty = the fields above
+      presets:                  # saved connections, switchable without retyping
+        - id: <preset id>       # lowercase letters, digits, hyphens
+          source: custom        # this preset's connection, same shape as the block's
+          base_url: https://host/v1
+          api_key: <key>
+          embedding_model: <model id>
+          rerank_model: <model id>
+          model_key: <identity>  # store identity; empty = derived from embedding_model.
+                                 # share one key across presets that reach the same
+                                 # real model via different providers or name aliases
       verify_tls: true          # false for a self-signed or mis-chained certificate
       dimensions: 0             # 0 = the model's own width; a smaller value truncates (Matryoshka)
+      rate_limit: 120           # embedding requests per 5 minutes; 0 = unlimited
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
     projects:                   # the tier above meshes/sessions; see :mod:`projects`
@@ -73,12 +85,14 @@ from __future__ import annotations
 
 import copy
 import datetime
+import re
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import uuid
 
 import yaml
+from urllib.parse import urlsplit
 
 from . import atomic, config
 
@@ -665,6 +679,13 @@ DAEMON_DEFAULTS = {
     # keep_alive sessions and those that would come back blank are never
     # held.
     "hold_idle_minutes": 60.0,
+    # Fault pause (daemon/fault_pause.py, claunch-ijot0): an idle session
+    # whose harness painted a usage limit (session fault kind usage_limit,
+    # active until its reset) is paused by the daemon, so typed notices stop
+    # reaching it and a leader's "leader stopped" card comes down. A session
+    # resumed by a person before the reset is not paused again for the same
+    # limit. Read live on every pass.
+    "fault_auto_pause": True,
     # Staggered restore (daemon/restore_queue.py, claunch-0j6gb.2): at a
     # daemon start, the sessions to bring back are not all launched at once.
     # Each one that would come back with its conversation is filed
@@ -1182,12 +1203,30 @@ RAG_DEFAULTS = {
     "embedding_model": "",
     "rerank_model": "",
     "verify_tls": True,
+    "root_serving": False,
     "dimensions": 0,
     "timeout": 120.0,
     "batch": 16,
     "candidates": 40,
     "rerank_top": 12,
     "watch_interval": 30.0,
+    #: Embedding requests a sliding window of five minutes may carry (0 =
+    #: unlimited). Document backfills are the burst this bounds -- a full
+    #: first index is hundreds of calls -- while interactive query
+    #: embeddings are metered but never delayed by it.
+    "rate_limit": 120,
+    #: The preset id the block points at, or "" for the block's own
+    #: connection (the pre-preset behavior).
+    "preset": "",
+    #: Derived, never read from the file: the identity key the vector
+    #: stores are kept under (see :func:`rag_model_key_slug`).
+    "model_key": "",
+    #: Derived, never read from the file: the collection a preset points at.
+    #: A preset names one with its own ``db`` field; without one this is the
+    #: preset's ``model_key``, which is the pre-``db`` behavior. Keeping the
+    #: two apart lets a preset be renamed, or its model swapped, without
+    #: moving its vectors (claunch-fhs7f.1).
+    "db": "",
     #: Derived, never read from the file: why ``source: profile`` resolved
     #: to no endpoint (empty when it did, or when the source is ``custom``).
     "profile_error": "",
@@ -1210,6 +1249,239 @@ RAG_SOURCE_FIELDS = {
     "custom": ("base_url", "api_key", "embedding_model", "rerank_model"),
     "profile": ("profile", "embedding_model", "rerank_model"),
 }
+
+
+#: A rag preset's name. Lowercase alphanumerics and hyphens, short enough
+#: for a select -- the same shape :data:`claude_launcher.daemon.briefing.PRESET_ID_RE`
+#: uses for the briefing backend presets.
+RAG_PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+#: Most presets one block may hold. A picker, not a collection.
+RAG_MAX_PRESETS = 20
+
+#: The fields a rag preset carries. Block-level knobs (``verify_tls``,
+#: ``dimensions``, ``timeout``, ``batch``, ``candidates``, ``rerank_top``,
+#: ``watch_interval``, ``rate_limit``) stay on the block: switching a preset
+#: changes which backend answers, and must not quietly change how a call is
+#: made or how fast backfills may run. ``model_key`` is the identity the
+#: vector stores are kept under; empty means "derive it from
+#: ``embedding_model``" -- set it explicitly when two presets reach the same
+#: real model through different providers or name aliases and should share
+#: one store (claunch-7m5v8). ``db`` names the collection directly and wins
+#: over ``model_key`` when set: a preset can then change model or be renamed
+#: and still read the vectors it already has (claunch-fhs7f.1).
+RAG_PRESET_FIELDS = (
+    "source", "profile", "base_url", "api_key",
+    "embedding_model", "rerank_model", "model_key", "db",
+)
+
+#: A model key stays short enough for a directory name.
+RAG_MODEL_KEY_MAX = 48
+
+
+def rag_model_key_slug(name: str) -> str:
+    """The store-identity slug for a model name.
+
+    Model ids arrive as free text (``qwen/qwen3-embedding-8b``, ``bge-m3``,
+    ``jina-embeddings-v4 (prod)``); the vector store's directory needs one
+    stable, filename-safe form. Lowercase, every run of other characters a
+    hyphen, trimmed and capped. Returns ``""`` when nothing usable remains.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
+    return slug[:RAG_MODEL_KEY_MAX]
+
+
+def clean_rag_preset(raw: object) -> Optional[dict]:
+    """One saved preset as a well-shaped dict, or ``None`` when unusable.
+
+    A preset with no id, an id that is not a preset name, or not one of the
+    known fields at all is dropped: a corrupt entry must cost its own row,
+    not the picker. Values are stripped strings, and an absent one is
+    simply absent. ``source`` is ``"profile"`` only when it says so.
+    ``root_serving`` is the one boolean: true only when the stored row
+    says exactly that (claunch-rag-preset-always-hn5bc.1). ``db`` is stored
+    as a store slug, the same shape :func:`rag_model_key_slug` gives a
+    model name, because it becomes a directory name (claunch-fhs7f.1).
+
+    ``renamed_from`` is a **save-time hint, not a stored field**: the card
+    sets a preset's id and puts the old one here, and the caller uses it to
+    carry the saved secret over. Callers must drop it before writing the row
+    back -- a stored ``renamed_from`` would claim the row was just renamed.
+    """
+    if not isinstance(raw, dict):
+        return None
+    preset_id = str(raw.get("id") or "").strip()
+    if not RAG_PRESET_ID_RE.match(preset_id):
+        return None
+    out: dict = {"id": preset_id}
+    renamed_from = str(raw.get("renamed_from") or "").strip()
+    if renamed_from and renamed_from != preset_id and RAG_PRESET_ID_RE.match(renamed_from):
+        out["renamed_from"] = renamed_from
+    if raw.get("root_serving") is True:
+        out["root_serving"] = True
+    for field in RAG_PRESET_FIELDS:
+        value = str(raw.get(field) or "").strip()
+        if not value:
+            continue
+        if field == "source":
+            # case-insensitive, and anything that is not "profile" reads as
+            # the custom connection anyway -- keep only what is meaningful
+            if value.lower() == "profile":
+                out[field] = "profile"
+            continue
+        if field == "db":
+            # A directory name: refuse anything that slugs to nothing rather
+            # than keeping a value the path builder cannot use.
+            slug = rag_model_key_slug(value)
+            if slug:
+                out[field] = slug
+            continue
+        out[field] = value
+    return out
+
+
+def _rag_preset_rows(raw_list: object) -> List[dict]:
+    """Clean presets in stored order, duplicates dropped after the first.
+
+    The picker addresses a preset by its id, so a second row with the same
+    id would be unreachable and the active pointer ambiguous.
+    """
+    if not isinstance(raw_list, list):
+        return []
+    out: List[dict] = []
+    seen = set()
+    for raw in raw_list:
+        preset = clean_rag_preset(raw)
+        if preset is None or preset["id"] in seen:
+            continue
+        seen.add(preset["id"])
+        out.append(preset)
+    return out
+
+
+def rag_presets(doc: Optional[dict] = None) -> List[dict]:
+    """Every saved ``rag`` preset, in stored order, cleaned."""
+    doc = load() if doc is None else doc
+    block = doc.get("rag")
+    if not isinstance(block, dict):
+        return []
+    return _rag_preset_rows(block.get("presets"))
+
+
+def rag_active_preset(doc: Optional[dict] = None) -> str:
+    """The preset id the block points at, or ``""`` for the block's own rows.
+
+    A pointer that names no saved preset resolves to ``""`` rather than
+    failing: the row it named was deleted or hand-renamed, and the reader's
+    job is to show the fallback plainly beside the fields it fell back to.
+    """
+    doc = load() if doc is None else doc
+    block = doc.get("rag")
+    if not isinstance(block, dict):
+        return ""
+    wanted = str(block.get("preset") or "").strip()
+    if not wanted:
+        return ""
+    return wanted if any(p["id"] == wanted for p in rag_presets(doc)) else ""
+
+
+def rag_migrate_legacy_preset(doc: dict) -> Optional[dict]:
+    """The preset pointer every card session resolves to, creating it if needed.
+
+    The card is preset-only (claunch-rag-preset-always-hn5bc): there is no
+    "direct rows" mode left to fall back to, so a block whose pointer resolves
+    to nothing is migrated on the spot. Three cases, all of them idempotent —
+    a block with a resolving pointer is returned unchanged:
+
+    · Pointer empty, legacy rows carry a usable connection — wrap them into a
+      new preset named after the embedding model (``qwen3-embedding-8b``) and
+      point at it. This is the promised backfill of the pre-preset settings;
+      an id that is taken gets a ``-2`` suffix rather than clobbering.
+    · Pointer empty, presets exist but the rows carry nothing — point at the
+      first preset. With no direct mode left, a dangling pointer would leave
+      the card with nothing editable, and the first row is the visible,
+      predictable choice.
+    · Nothing configured anywhere — leave the block alone; the card offers
+      the empty fields as a draft for the first preset.
+
+    Returns a new document when the migration wrote something, else ``None``.
+    The caller persists it (``public_settings`` does, on its read).
+    """
+    block = doc.get("rag")
+    if not isinstance(block, dict):
+        return None
+    if rag_active_preset(doc):
+        return None
+    rows = rag_source_rows(block)
+    presets = _rag_preset_rows(block.get("presets"))
+    source = "profile" if block.get("source") == "profile" else "custom"
+    row = rows[source]
+    legacy_model = str(row.get("embedding_model") or "").strip()
+    legacy_connected = bool(legacy_model) and bool(
+        row.get("profile") if source == "profile" else row.get("base_url")
+    )
+    out = dict(doc)
+    out_block = dict(block)
+    if legacy_connected:
+        base = rag_model_key_slug(legacy_model) or "preset"
+        taken = {p["id"] for p in presets}
+        preset_id = base
+        n = 2
+        while preset_id in taken:
+            preset_id = f"{base}-{n}"
+            n += 1
+        preset: dict = {"id": preset_id, "source": source, "embedding_model": legacy_model}
+        for key in ("profile", "base_url", "api_key", "rerank_model"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                preset[key] = value
+        # The /v1 opt-out travels with the connection it describes: a
+        # hand-set legacy root_serving flag must land on the minted preset,
+        # or the preset branch would read a row without it and the
+        # correction would quietly break the endpoint again
+        # (claunch-rag-preset-always-hn5bc.1).
+        if block.get("root_serving") is True and source == "custom":
+            preset["root_serving"] = True
+        out_block["presets"] = presets + [preset]
+        out_block["preset"] = preset_id
+    elif presets:
+        out_block["preset"] = presets[0]["id"]
+    else:
+        return None
+    out["rag"] = out_block
+    return out
+
+
+def rag_normalize_base_url(url: str, root_serving: bool = False) -> str:
+    """The address embedding and rerank calls actually use.
+
+    The OpenAI-compatible root is the ``/v1`` root — ``/embeddings`` and
+    ``/rerank`` hang off it — but readers type the bare host as often as the
+    versioned root, and a bare host answers the protocol paths with 404
+    (measured live: oMLX with ``https://host`` set, selftest failing with
+    404 on ``/embeddings``, claunch-rag-preset-always-hn5bc). Appending
+    ``/v1`` when the path does not already end in a version segment turns
+    both spellings into one call. The stored value keeps what the reader
+    typed; this shapes only the request target.
+
+    A root-serving endpoint — TEI (Text Embeddings Inference) spells
+    ``/embeddings`` at the host root, so ``<host>/v1/embeddings`` does not
+    exist — opts out explicitly with ``root_serving`` (the preset row's
+    flag, or the legacy block's). The flag is the escape spelling the /v1
+    correction would otherwise leave no way to say
+    (claunch-rag-preset-always-hn5bc.1): set, the bare host is the call
+    target with nothing appended.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    trimmed = url.rstrip("/")
+    if root_serving:
+        return trimmed
+    path = urlsplit(trimmed).path or ""
+    if re.search(r"/v\d+$", path):
+        return trimmed
+    return f"{trimmed}/v1"
 
 
 def rag_source_rows(block: dict) -> Dict[str, dict]:
@@ -1260,6 +1532,22 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     ``CLAUNCH_RAG_API_KEY`` is a key for the typed endpoint and so applies to
     ``custom`` only.
 
+    ``preset`` names one row of ``presets``: a saved connection (endpoint,
+    key, models) under an id, switchable without retyping. While it names a
+    saved preset, that preset's fields are the connection in force and
+    ``source``/``sources`` are kept only as the fallback for an empty or
+    dangling pointer. Each preset may carry a ``model_key`` -- the identity
+    the vector stores are kept under. Two presets that reach the same real
+    model through different providers or name aliases share one store by
+    sharing one ``model_key``, so switching between them costs no
+    re-embedding; a preset without one derives the key from its
+    ``embedding_model`` (claunch-7m5v8). ``model_key`` is derived, never read
+    from the file.
+
+    ``rate_limit`` caps the embedding requests a five-minute window may
+    carry (0 = unlimited); it paces document backfills, never query
+    embeddings.
+
     ``provider`` is the derived provider name behind a ``profile`` source
     (empty for ``custom``), so the caller can apply that provider's request
     header rules. It is derived like ``profile_error`` and never read from
@@ -1272,12 +1560,47 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     if not isinstance(block, dict):
         block = {}
     out = dict(RAG_DEFAULTS)
-    out["source"] = "profile" if block.get("source") == "profile" else "custom"
-    rows = rag_source_rows(block)
-    for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
-        source = "profile" if key == "profile" else out["source"]
-        out[key] = str(rows[source].get(key) or "").strip()
+    # The active preset, when the block points at one that exists, owns the
+    # whole connection: its ``source`` says where the endpoint and key come
+    # from and its fields replace the legacy source/sources rows. A pointer
+    # that names nothing (deleted, hand-renamed) is the pre-preset behavior
+    # with ``preset`` read back as "", so the fallback is visible beside the
+    # fields it fell back to (the same rule briefing's active_preset uses).
+    preset_row = None
+    wanted = str(block.get("preset") or "").strip()
+    if wanted:
+        for candidate in _rag_preset_rows(block.get("presets")):
+            if candidate["id"] == wanted:
+                preset_row = candidate
+                break
+    out["preset"] = preset_row["id"] if preset_row is not None else ""
+    if preset_row is not None:
+        out["source"] = "profile" if preset_row.get("source") == "profile" else "custom"
+        for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
+            out[key] = str(preset_row.get(key) or "").strip()
+        given = str(preset_row.get("model_key") or "").strip()
+        out["model_key"] = rag_model_key_slug(given or out["embedding_model"])
+        # The collection this preset reads and writes. ``db`` on the row wins;
+        # otherwise it is the model identity, which is what every preset
+        # written before ``db`` existed meant (claunch-fhs7f.1).
+        out["db"] = rag_model_key_slug(str(preset_row.get("db") or "")) or out["model_key"]
+    else:
+        out["source"] = "profile" if block.get("source") == "profile" else "custom"
+        rows = rag_source_rows(block)
+        for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
+            source = "profile" if key == "profile" else out["source"]
+            out[key] = str(rows[source].get(key) or "").strip()
+        out["model_key"] = ""
+        out["db"] = ""
     out["profile_error"] = ""
+    # The /v1 correction's opt-out (claunch-rag-preset-always-hn5bc.1): a
+    # root-serving endpoint (TEI) says so on the preset row in force, or on
+    # the legacy block when no preset resolves.
+    out["root_serving"] = (
+        preset_row.get("root_serving") is True
+        if preset_row is not None
+        else block.get("root_serving") is True
+    )
     if out["source"] == "profile":
         out["base_url"], out["api_key"], out["provider"] = "", "", ""
         if not out["profile"]:
@@ -1293,6 +1616,10 @@ def rag_config(doc: Optional[dict] = None) -> dict:
         env_key = os.environ.get("CLAUNCH_RAG_API_KEY")
         if env_key:
             out["api_key"] = env_key.strip()
+        # Call shape, not stored shape: a bare-host address gets its /v1
+        # root here so both spellings reach the same protocol paths, unless
+        # the row opted out as root-serving.
+        out["base_url"] = rag_normalize_base_url(out["base_url"], out["root_serving"])
     out["verify_tls"] = block.get("verify_tls", True) is not False
     for key in ("dimensions", "batch", "candidates", "rerank_top"):
         try:
@@ -1313,6 +1640,15 @@ def rag_config(doc: Optional[dict] = None) -> dict:
         )
     except (TypeError, ValueError):
         out["watch_interval"] = RAG_DEFAULTS["watch_interval"]
+    # 0 means "no cap": a private endpoint may be able to take a full
+    # backfill as fast as the daemon can send it.
+    try:
+        raw = block.get("rate_limit")
+        out["rate_limit"] = max(
+            0, int(RAG_DEFAULTS["rate_limit"] if raw is None else raw)
+        )
+    except (TypeError, ValueError):
+        out["rate_limit"] = RAG_DEFAULTS["rate_limit"]
     return out
 
 

@@ -2,12 +2,14 @@
 
    The daemon decides which sessions count (a leader role, a category of
    running or hold, an active fault) and this poll only draws them. What has
-   to hold here: an alert becomes one fatal card that names the session and
-   cannot be dismissed while it is up; polling again raises nothing new; a
-   card is re-raised only when what it says changed; the card comes down when
-   the daemon stops listing the row (the fault cleared, or the session was
-   paused, killed or archived); a kind the reader hid raises nothing; a
-   failed request leaves the cards that are up alone rather than taking them
+   to hold here: an alert becomes one fatal card that names the session, does
+   not time out on its own, and carries the same × the other cards have
+   (claunch-8vl1s); polling again raises nothing new; a card is re-raised only
+   when what it says changed; the card comes down when the daemon stops
+   listing the row (the fault cleared, or the session was paused, killed or
+   archived) — including a card whose raised signature was lost, which the
+   sweep of the drawn cards still finds; a kind the reader hid raises nothing;
+   a failed request leaves the cards that are up alone rather than taking them
    down; and no signature is ever recorded for a card that was not drawn —
    with the history panel open, or a notify that answers null, the alert
    comes up on the first poll that can draw it instead of being swallowed. */
@@ -61,13 +63,19 @@ function harness() {
   const ctx = {
     LEADER_FAULT_PREFIX: "leader-fault-",
     leaderFaultRaised: new Map(),
+    // The cards notify has drawn, keyed the same way. The sweep reads it, so
+    // a poll that raises a card leaves an entry here just as the real notify
+    // does; tests seed it to stand for a card whose signature was lost.
+    notices: new Map(),
     noticeSourceShown: () => !hidden,
     noticePanelOpen: () => panel,
     notify: (title, sub, opts) => {
       raised.push({ title, sub, opts });
-      return drawing ? {} : null;   // null = recorded but drew no card
+      if (!drawing) return null;   // null = recorded but drew no card
+      ctx.notices.set((opts || {}).key, { node: {} });
+      return {};
     },
-    dismissNotice: (key) => { dismissed.push(key); },
+    dismissNotice: (key) => { dismissed.push(key); ctx.notices.delete(key); },
     api: async () => {
       if (failing) throw new Error("no daemon");
       return { ok: true, json: async () => ({ alerts: rows, count: rows.length }) };
@@ -100,7 +108,7 @@ async function cards() {
   is(/usage limit/.test(card.sub || ""), `sub carries the kind: ${card.sub}`);
   is((card.opts || {}).kind === "fatal", `kind is fatal: ${(card.opts || {}).kind}`);
   is((card.opts || {}).sticky === true, "a fatal card never times out");
-  is((card.opts || {}).dismissable === false, "a fatal card has no x");
+  is((card.opts || {}).dismissable !== false, "a fatal card carries the x");
   is((card.opts || {}).session === "s29", "the card opens the session");
   is((card.opts || {}).key === "leader-fault-s29", `card key: ${(card.opts || {}).key}`);
   is((card.opts || {}).source === "fault", `card source: ${(card.opts || {}).source}`);
@@ -143,6 +151,51 @@ async function cleared() {
   h.set([alert("s29")]);
   await h.run();
   is(h.raised.length === 2, "the same alert coming back raises again");
+}
+
+/* A card can outlive the signature this poll recorded for it: a page-level
+   reset that rebuilt the drawn set around it, or a key another path took
+   down and something else drew again. The sweep of the drawn cards finds it
+   on the next poll, so the card does not stand there with nothing left to
+   remove it (claunch-8vl1s). */
+async function orphaned() {
+  const h = harness();
+  h.ctx.notices.set("leader-fault-s29", { node: {} });
+  h.set([]);
+  await h.run();
+  is(h.dismissed.length === 1 && h.dismissed[0] === "leader-fault-s29",
+     `a drawn card whose signature was lost is taken down: ${h.dismissed}`);
+  is(h.ctx.notices.has("leader-fault-s29") === false, "and it leaves the drawn set");
+}
+
+/* The same sweep must leave a card alone while the daemon still lists it,
+   and must not reach for a card that is not one of this poll's. */
+async function swept() {
+  const h = harness();
+  h.set([alert("s29")]);
+  await h.run();
+  is(h.ctx.notices.size === 1, `the drawn card is recorded, ${h.ctx.notices.size}`);
+  await h.run();
+  await h.run();
+  is(h.dismissed.length === 0, `a live alert keeps its card: ${h.dismissed}`);
+  h.ctx.notices.set("n7", { node: {} });
+  h.set([]);
+  await h.run();
+  is(JSON.stringify(h.dismissed) === JSON.stringify(["leader-fault-s29"]),
+     `only the leader-fault card is swept: ${h.dismissed}`);
+}
+
+/* × puts the card away (the drawn set loses it). While the alert still says
+   the same thing the poll must not put it back — the signature already
+   recorded is what says the reader has seen this one. */
+async function dismissedStays() {
+  const h = harness();
+  h.set([alert("s29")]);
+  await h.run();
+  h.ctx.notices.delete("leader-fault-s29");   // the × press
+  await h.run();
+  is(h.raised.length === 1, `a dismissed card is not raised again, ${h.raised.length}`);
+  is(h.dismissed.length === 0, `the live row is not swept: ${h.dismissed}`);
 }
 
 async function many() {
@@ -222,6 +275,9 @@ async function undrawn() {
   await steady();
   await changed();
   await cleared();
+  await orphaned();
+  await swept();
+  await dismissedStays();
   await many();
   await hidden();
   await refused();

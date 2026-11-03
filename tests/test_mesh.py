@@ -2256,6 +2256,53 @@ def test_members_tool_response_is_linear_without_the_pair_table(monkeypatch):
     assert size_20 < 3.0 * size_10, f"{size_10} -> {size_20} looks quadratic"
 
 
+def test_the_spawn_schema_says_what_a_moved_child_changes():
+    """The four answers an agent gets wrong when it does not read further
+    (claunch-8fvr5): the board follows the workspace, the project does not
+    follow the directory, a reviewer needs `workflow: '-'`, and `profile` is
+    inherited because it is not offered. Each is a fact of the spawn path
+    pinned here so a shorter description cannot quietly drop it."""
+    from claude_launcher import mesh_mcp
+
+    spawn_tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "spawn")
+    props = spawn_tool["inputSchema"]["properties"]
+
+    def flat(text):
+        return " ".join(str(text).split()).lower()
+
+    blob = flat(spawn_tool["description"])
+    assert "which board" in blob and "refused rather than started without" in blob
+    assert "filed under your project" in blob
+    assert "spawn.allow_profile" in blob and "runs on yours" in blob
+    # the board rule is also on the two fields that move it
+    assert "board" in flat(props["workspace"]["description"])
+    assert "does not follow the directory" in flat(props["project"]["description"])
+    assert "board" in flat(props["issue"]["description"])
+    # the reviewer exception lives on the field a reviewer child sets
+    assert "reviewer" in flat(props["workflow"]["description"])
+    assert "filter_roles" in flat(props["workflow"]["description"])
+    # an omitted role is inferred from the handle, not "always free-role"
+    assert "inferred from the child" in flat(props["role"]["description"])
+    assert "free-role" in flat(props["role"]["description"])
+
+
+def _pack_text(pack_id):
+    from claude_launcher import prompt_packs
+
+    return " ".join(prompt_packs.shipped(pack_id).body.split())
+
+
+def test_the_child_agents_pack_names_the_four_spawn_exceptions():
+    """`mesh`/`workflow` are the omit-bydefault fields, and the pack says
+    only that. The four places where omitting is wrong are what agents get
+    wrong in practice (claunch-8fvr5)."""
+    text = _pack_text("child-agents")
+    for needle in ("workspace", "project", "filter_roles", "spawn.allow_profile",
+                   "free-role", "handle"):
+        assert needle in text, needle
+    assert "`workflow: '-'`" in text
+
+
 def test_every_offered_spawn_field_is_forwarded():
     """A field the schema offers but the forwarder drops is a silent no-op
     the caller reads as 'the daemon ignored me' — the two lists must not
@@ -2386,6 +2433,54 @@ def test_mesh_get_answers_which_member_the_asking_session_is(home, tmp_path):
     asyncio.run(run())
 
 
+def test_our_own_member_stays_local_before_the_uplink_names_this_daemon(
+    home, tmp_path,
+):
+    """``machine`` is blank between ``load_all`` and the relay handshake.
+
+    ``_load`` falls back to the ``self`` written in ``mesh.json`` so rank —
+    and therefore ``primary`` — is right before the uplink resolves our name;
+    ``_is_local`` did not share that fallback, so a row the roster had
+    stamped with our own name read as another daemon's and a local
+    ``mesh send`` as that member was refused with "lives on <our own
+    name>" (claunch-pbn2e).
+    """
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = mm.create("m")
+        # What a federated roster looks like on disk: peers rank the
+        # authority first (_absolutize_roster stamped every row with it).
+        mesh.peers = ["shared-daemon-main"]
+        mesh.me = "shared-daemon-main"
+        ours = mesh_mod.Member(
+            handle="alice", session="s1", machine="shared-daemon-main")
+        mesh.members["alice"] = ours
+
+        assert mm.machine == ""      # the uplink has not named us yet ...
+        assert mesh.primary == ""    # ... and we hold rank 0
+        assert mm._is_local(mesh, ours)
+
+        # Once the uplink names us the answer cannot change.
+        mm.machine = "shared-daemon-main"
+        assert mm._is_local(mesh, ours)
+
+        # A mirror whose uplink is not up keeps the same rule: the name on
+        # disk is ours, and a row stamped for another machine is not.
+        mm.machine = ""
+        mesh.peers = ["other-box", "shared-daemon-main"]
+        assert mesh.primary == "other-box"
+        assert mm._is_local(mesh, ours)
+        assert not mm._is_local(
+            mesh, mesh_mod.Member(handle="bob", session="s2",
+                                  machine="other-box"))
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_a_dead_member_is_not_rescanned_while_the_log_is_quiet(home, tmp_path):
     """A stranded backlog never drains on its own, so the delivery tick used
     to rescan the log from the dead member's cursor every second -- on a
@@ -2469,6 +2564,48 @@ def test_every_agent_broadcast_carries_the_broadcast_advisory(home, tmp_path):
         named = await mm.send("b", "leader", ["w1"], "yours is next.")
         assert named["notice"] is None
 
+        human = await mm.send("b", "operator", "*", "hello all", external=True)
+        assert human["notice"] is None
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_worker_may_not_broadcast_and_is_told_why(home, tmp_path):
+    """A worker's '*' is refused with the reason and what to send instead,
+    and nothing is logged (claunch-v0h29.2). The leader's '*' and the human's
+    dashboard '*' still go out; a worker's named send is untouched."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mesh = mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "worker_1"), ("s3", "worker_2")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            await mm.join("b", n, handle=h)
+        assert mesh.members["worker_1"].role == "worker"
+        # the briefing a worker joins with no longer offers '*'
+        told = mm.briefing_block(mesh, mesh.members["worker_1"])
+        assert "<to|*>" not in told and "may not send to '*'" in told
+        assert "<to|*>" in mm.briefing_block(mesh, mesh.members["leader"])
+        before = len(mesh.messages)
+
+        with pytest.raises(MeshError) as refused:
+            await mm.send("b", "worker_1", "*", "please review my branch")
+        why = str(refused.value)
+        assert "may not send to '*'" in why
+        assert "claunch-v0h29" in why
+        assert "by handle" in why and "@in_review" in why
+        assert len(mesh.messages) == before
+
+        await mm.send("b", "worker_1", ["leader"], "please review")
+        assert mesh.messages[-1]["to"] == ["leader"]
+
+        led = await mm.send("b", "leader", "*", "master moved.", type="fyi")
+        assert led["notice"].startswith("BROADCAST")
         human = await mm.send("b", "operator", "*", "hello all", external=True)
         assert human["notice"] is None
 

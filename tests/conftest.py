@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import config, provider_presets, pytest_venv, test_window
+from claude_launcher import config, provider_presets, pytest_venv, test_tiers, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -81,6 +81,17 @@ def _spend_only_the_grant(config, grant) -> None:
             f"({grant.cls} grant {grant.grant_id})",
             file=sys.stderr,
         )
+
+
+def pytest_collection_modifyitems(items):
+    """Put every test with a slow-tail source marker under the one tail marker.
+
+    ``-m "not slow_tail"`` is then the whole difference between the cheap
+    tiers and the full sweep (``claude_launcher/test_tiers.py``).
+    """
+    for item in items:
+        if test_tiers.is_tail(m.name for m in item.iter_markers()):
+            item.add_marker(getattr(pytest.mark, test_tiers.TAIL_MARKER))
 
 
 def pytest_sessionstart(session):
@@ -367,6 +378,18 @@ def cwd_restore():
     """No test leaves the worker in another directory (claunch-2yiij.1)."""
     with restored_cwd():
         yield
+
+
+@pytest.fixture(autouse=True)
+def no_installed_gate_registry(monkeypatch):
+    """No test inherits the gate registry an earlier test's app installed.
+
+    ``build_app`` installs its ``gates.db`` process-wide
+    (``gate_registry.install``, claunch-6vq2m.1) and uninstalls it only when
+    the app is cleaned up; an app built and never served would leave the next
+    test's rail reads comparing against a registry under a removed tmp_path.
+    """
+    monkeypatch.setattr("claude_launcher.daemon.gate_registry._ACTIVE", None)
 
 
 @pytest.fixture(autouse=True)

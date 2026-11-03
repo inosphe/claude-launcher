@@ -27,6 +27,14 @@ MEMBER_STATES = (
     "failed", "killed", "paused", "archived", "missing",
 )
 
+#: The intents that owe no reply, spelled here for the same reason as
+#: :data:`MEMBER_STATES`: ``daemon.mesh`` pulls aiohttp in and this module is
+#: loaded by every ``claunch mesh`` invocation. ``test_mesh_cli_owed`` pins the
+#: two sets equal, and ``--type``'s help is rendered from this tuple rather
+#: than typed out again — a hand-written sentence had already fallen out of
+#: step once (claunch-5sqtt.1).
+REPLY_OPTIONAL_INTENTS = ("ack", "decide", "fyi", "nudge", "ping")
+
 
 def relay_line(relay: Optional[dict]) -> str:
     """One-line relay connectivity summary, printed all over the CLI.
@@ -198,7 +206,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
         f"(role: {_role_label(member)}, session: {member['session']})"
     )
     print(
-        f"send: claunch mesh send {local} '*' \"...\"  |  "
+        f"send: claunch mesh send {local} <handle> \"...\"  |  "
         f"members: claunch mesh members {local}"
     )
     _print_relay(client.get("/api/daemon").get("relay"))
@@ -1499,7 +1507,8 @@ def register(sub) -> None:
     p.add_argument("mesh")
     p.add_argument(
         "to",
-        help="'*' (every connected member -- warned), '@in_review' (members "
+        help="'*' (every connected member -- warned; refused for a worker), "
+        "'@in_review' (members "
         "whose issue is in_review on your board), or a handle",
     )
     p.add_argument("text", nargs="+", help="message text ('-' reads stdin)")
@@ -1510,9 +1519,9 @@ def register(sub) -> None:
                    help="send as a non-member (e.g. a human operator)")
     p.add_argument("--type", default="say",
                    help="message intent: say (default) and ask invite a reply; "
-                        "fyi, ack, ping, decide and nudge do not -- nudge is a "
-                        "chaser for a request already on the record, so it "
-                        "opens no debt of its own")
+                        + ", ".join(REPLY_OPTIONAL_INTENTS) +
+                        " do not -- nudge is a chaser for a request already "
+                        "on the record, so it opens no debt of its own")
     p.add_argument("--reply-to", dest="reply_to", metavar="MSGID",
                    help="thread this message to an earlier message id "
                         "(ids are shown in delivery blocks and history)")

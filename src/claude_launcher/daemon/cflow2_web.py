@@ -909,7 +909,9 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     person reading the rail -- and answers it with ``gated`` and ``owed``.
     ``owed`` names what only a person releases: the holds that put the run
     in ``waiting_approval`` (a loop or visit limit, a halt, an ask that fell
-    to a human) and every open choice whose chooser is ``user``.
+    to a human), every open choice whose chooser is ``user``, and a wait on
+    the plan-waiting gate -- the round is stopped there until the user
+    decides in the plan panel (claunch-rzepk).
 
     ``started``/``updated``/``entered_at`` are the run's own clocks
     (claunch-c2emv): the dashboard's Chart page reads them to tell a run that
@@ -928,7 +930,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
                 "workflow": None, "current": [], "owed": [], "gated": False,
                 "answers": [], "urgent_asks": [], "started": None, "updated": None,
-                "entered_at": None}
+                "entered_at": None, "round": None, "round_now": None}
     inst = state.get("inst") or {}
     current = []
     owed = []
@@ -971,6 +973,18 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         # driver is held until somebody answers, whatever the status says.
         what = "report" if move.get("kind") == runtime.MOVE_KIND_REPORT else "move"
         owed.append(f"{what}: {move.get('title') or move.get('label') or move.get('node')}")
+    for iid, rec in sorted(inst.items()):
+        if rec.get("await") != runtime.AW_WAIT:
+            continue
+        try:
+            node = chart.node(rec.get("node"))
+        except Exception:  # noqa: BLE001
+            continue
+        if _is_plan_wait(node):
+            # The run is stopped until the person decides in the plan panel
+            # (claunch-rzepk). Nobody else releases it, so it is owed, and
+            # owed is what makes the rail row raise a card at all.
+            owed.append(f"plan: {node.id}")
     answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
     return {
         "cwd": str(st.cwd),
@@ -980,6 +994,11 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "status": status,
         "reason": state.get("reason"),
         "round": state.get("round"),
+        # The round a person should read: ``round`` above is the slot's run
+        # round and stays 1 for a workflow that loops its rounds inside one
+        # run (improv-worker-v2), so the rail says the loop iteration instead
+        # and the pages fall back to ``round`` when this is absent.
+        "round_now": runtime.current_round(state, chart),
         # The run's clocks: when it started, when it last moved (any write to
         # the state moves this), and when the oldest task it is in now was
         # entered (epoch seconds, the stamp the state carries per instance).
@@ -1003,9 +1022,116 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
 RAIL_PROMPT_MAX = 400
 
 
+#: What a one-line reader takes off a markdown prompt before flattening it:
+#: a v2 ask prompt is markdown (``## 일감``, ``- 하나``, ``**굵게**``,
+#: `` `경로` ``), and the terminal strip and the operator status line draw
+#: that field as plain text, so the markers used to be shown to the reader as
+#: characters (claunch-ns4kd.1). Only markers a line can be recognised by are
+#: matched, and only at the line start -- ``a_b`` and ``2*3`` are text.
+_MD_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_MD_RULE = re.compile(r"^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_QUOTE = re.compile(r"^\s{0,3}>\s?")
+_MD_BULLET = re.compile(r"^\s*[-*+]\s+")
+#: Up to two digits: a markdown ordered list runs 1., 2., … and a line that
+#: opens with four digits and a dot is a date (``2026. 11. 2. 회의``), which
+#: is text the reader wants to keep.
+_MD_ORDERED = re.compile(r"^\s{0,3}\d{1,2}[.)]\s+")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+#: Three-marker emphasis (``***굵게기울임***``, ``___x___``) before the paired
+#: two-marker form: run the two-marker pattern alone first and each side keeps
+#: one asterisk (``***x***`` -> ``*x*``).
+_MD_STRONG_ITALIC = re.compile(r"\*\*\*(.+?)\*\*\*|___(.+?)___")
+_MD_STRONG = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+#: Strikethrough, then subscript. The single-tilde form excludes a second
+#: tilde on either side and refuses whitespace, so the ``~`` of a path
+#: (``~/.config``) and a lone ``~`` in prose stay as they are.
+_MD_STRIKE = re.compile(r"~~(.+?)~~")
+_MD_SUBSCRIPT = re.compile(r"(?<!~)~([^~\s]+)~(?!~)")
+_MD_CODE = re.compile(r"`+([^`]*)`+")
+#: A GFM table is recognised by its delimiter row (``|---|``, ``|---|---|``,
+#: ``| :--- | ---: |``), which carries no text and is dropped; a row that opens
+#: with a pipe becomes its cells, separated by spaces. A table with no
+#: delimiter row still loses its outer pipes — they are table syntax either way.
+#: The cell group repeats zero or more times: a one-column table's delimiter
+#: row (``|---|``) has a single cell, and requiring a second one left it in the
+#: text as ``---`` (claunch-edhbu.1). A bare ``---`` is a rule and is dropped by
+#: :data:`_MD_RULE` on its own.
+_MD_TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
+_MD_TABLE_ROW = re.compile(r"^\s*\|")
+
+
+def _rail_table_row(line: str) -> str:
+    """A table row as its cells, joined by single spaces."""
+    cells = (cell.strip() for cell in line.strip().strip("|").split("|"))
+    return " ".join(cell for cell in cells if cell)
+
+
+def _rail_strip_markdown(text: Any) -> str:
+    """``text`` with its markdown markers taken off, line structure kept.
+
+    The one-line readers (the terminal strip ``#term-cflow`` and the operator
+    gate, which re-reads the same field) draw plain text, so the markdown a
+    card renders has to become prose before it reaches them. What goes: fence
+    and rule lines, heading/quote/list prefixes at the line start, table
+    delimiter rows, the pipes of a table row, and the paired inline markers
+    (``***``, ``**``, ``__``, ``~~``, ``~``, backticks) with the link and image
+    syntax reduced to its text. What stays: the words, and the line breaks —
+    :func:`_rail_prompt` does the flattening.
+    """
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in src.split("\n"):
+        if _MD_FENCE.match(line) or _MD_RULE.match(line) or _MD_TABLE_DELIM.match(line):
+            continue
+        if _MD_TABLE_ROW.match(line):
+            line = _rail_table_row(line)
+        line = _MD_HEADING.sub("", line)
+        line = _MD_QUOTE.sub("", line)
+        line = _MD_BULLET.sub("", line)
+        line = _MD_ORDERED.sub("", line)
+        lines.append(line)
+    out = "\n".join(lines)
+    out = _MD_IMAGE.sub(lambda m: m.group(1), out)
+    out = _MD_LINK.sub(lambda m: m.group(1), out)
+    out = _MD_STRONG_ITALIC.sub(
+        lambda m: m.group(1) if m.group(1) is not None else m.group(2), out
+    )
+    out = _MD_STRONG.sub(lambda m: m.group(1) if m.group(1) is not None else m.group(2), out)
+    out = _MD_STRIKE.sub(lambda m: m.group(1), out)
+    out = _MD_SUBSCRIPT.sub(lambda m: m.group(1), out)
+    out = _MD_CODE.sub(lambda m: m.group(1), out)
+    return out
+
+
 def _rail_prompt(text: Any) -> str:
-    flat = " ".join(str(text or "").split())
+    """``text`` as one line a reader can take in: markdown markers off,
+    whitespace collapsed, cut at :data:`RAIL_PROMPT_MAX`."""
+    flat = " ".join(_rail_strip_markdown(text).split())
     return flat if len(flat) <= RAIL_PROMPT_MAX else flat[:RAIL_PROMPT_MAX - 1] + "…"
+
+
+#: The same question kept as written, for the dashboard's ask card: a v2 ask
+#: prompt is markdown (headings, lists, fenced plans) and the card renders it
+#: as markdown, so flattening it to one line was what made a request read as a
+#: single wall of prose — and the 400-character cap above cut it mid-word
+#: (claunch-ns4kd). Larger than the strip's cap because only a gate that waits
+#: on a person carries it, and the strip does not read this field.
+RAIL_PROMPT_MD_MAX = 1600
+
+
+def _rail_markdown(text: Any) -> str:
+    """``text`` with its line structure kept, cut at :data:`RAIL_PROMPT_MD_MAX`.
+
+    Line endings are normalised and trailing spaces dropped, but no line is
+    joined: the markdown a card draws is the markdown the ask wrote. The cut
+    lands mid-line, which the dashboard's renderer takes as an unterminated
+    line rather than a broken document — the same way it already draws a
+    report whose fence never closes."""
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    src = "\n".join(line.rstrip() for line in src.split("\n")).strip("\n")
+    return src if len(src) <= RAIL_PROMPT_MD_MAX else src[:RAIL_PROMPT_MD_MAX - 1] + "…"
 
 
 #: How many of a run's urgent asks the rail row lists, newest first.
@@ -1034,13 +1160,45 @@ def _rail_urgent(state: dict) -> List[dict]:
     return out[:RAIL_URGENT_MAX]
 
 
+#: The gate a plan wait polls: ``claunch gate plan-waiting`` answers whether
+#: the session's plan still holds an unchosen decision for the user
+#: (claunch-rzepk). A run stopped on it waits on the person exactly as a
+#: ``user`` choice does, so the rail counts it as owed and raises a card.
+PLAN_WAIT_GATE = "plan-waiting"
+
+
+def _probe_words(probe: Any) -> List[str]:
+    """A compiled probe as its words. ``wait.probe`` is a command string or an
+    argv list (``frontend._command``) and the chart keeps it as written."""
+    if isinstance(probe, str):
+        return probe.split()
+    if isinstance(probe, (list, tuple)):
+        return [str(x) for x in probe]
+    return []
+
+
+def _is_plan_wait(node: Any) -> bool:
+    """Is this wait node polling the plan-waiting gate?
+
+    Matched on the probe, not on the node id: an id belongs to one workflow,
+    while the command says what the wait means -- the plan still owes the
+    user a decision. Any workflow that adopts the gate gets the card."""
+    probe = node.get("probe") if hasattr(node, "get") else None
+    words = _probe_words(probe)
+    if "gate" not in words:
+        return False
+    at = words.index("gate")
+    return at + 1 < len(words) and words[at + 1] == PLAN_WAIT_GATE
+
+
 def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     """What the terminal strip (#term-cflow) needs to answer each thing
     ``owed`` names, in the shape the run page posts: the instance to name,
     the question and the presses. Read from the same ``runtime.status``
     payload the run page draws, filtered to what only a person releases (a
     ``user`` choice, an ask that fell to a human, a loop or visit limit, a
-    halt, the driver's move request). A halt and an acceptance hold carry no press -- the dashboard has
+    halt, the driver's move request, a wait on the plan-waiting gate). A halt
+    and an acceptance hold carry no press -- the dashboard has
     no endpoint for them -- only the text.
 
     ``opened_at`` (claunch-l9znm.1) is the epoch second at which the run
@@ -1081,6 +1239,18 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
                                    f"{move.get('reason') or ''}"),
             **_rail_opened(move.get("at")),
         })
+    for w in payload.get("waits") or []:
+        if not _is_plan_wait(w):
+            continue
+        # No press: a plan decision is taken in the plan pane (app.js opens
+        # it from the card), and the run page has no route for it.
+        out.append({
+            "kind": "plan-wait", "instance": w.get("instance"), "label": "plan",
+            "prompt": _rail_prompt(
+                w.get("describe")
+                or "the plan still holds a decision for you -- decide it in the "
+                   "plan panel and the round goes on"),
+        })
     for c in payload.get("choices") or []:
         if c.get("chooser") != ir.CHOOSER_USER:
             continue
@@ -1100,9 +1270,16 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
         out.append({
             "kind": "ask", "instance": a.get("instance"), "ask": a.get("ask"),
             "urgent": bool(a.get("urgent")),
+            # What the step declared about its own notice (ask.criteria):
+            # keywords the dashboard shows by, carried through unchanged.
+            "criteria": [str(c) for c in (a.get("criteria") or [])],
             "label": a.get("label") or a.get("node"),
             "prompt": _rail_prompt(a.get("question_text") or a.get("prompt")
                                    or a.get("title")),
+            # The same question as the ask wrote it, for the card that renders
+            # it as markdown — the strip above shows one line (claunch-ns4kd).
+            "prompt_md": _rail_markdown(a.get("question_text") or a.get("prompt")
+                                        or a.get("title")),
             "require_reason": bool(a.get("require_reason")),
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in a.get("options") or []]
@@ -1154,6 +1331,11 @@ def _rail_opened(value: Any) -> Dict[str, Any]:
 #: an entry is recomputed only when its state or chart file changed.
 _RAIL: Dict[Tuple[str, str], Tuple[Any, Optional[dict]]] = {}
 
+#: The stamp an archived session's entry is cached under: it was never
+#: compared with the gate registry, so it matches no real stamp and a later
+#: compared read (a respawn) recomputes it and syncs.
+_UNCOMPARED = object()
+
 
 def _rail_stamp(cwd: str, scope: str) -> Any:
     st = store2.RunStore(cwd, scope)
@@ -1168,10 +1350,39 @@ def _rail_stamp(cwd: str, scope: str) -> Any:
     return tuple(out)
 
 
-def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
+def rail_entries(sessions: Sequence[Tuple[str, str]], *, registry: Any = None,
+                 force: bool = False, now: Optional[float] = None,
+                 settled: Sequence[Tuple[str, str]] = (),
+                 filed: Sequence[Tuple[str, str]] = ()) -> Dict[str, dict]:
     """``GET /api/cflow2/rail``: ``{session: rail_entry}`` for each
     ``(session, cwd)`` that drives a v2 run; sessions without one are left
-    out."""
+    out.
+
+    With a ``registry`` (:class:`.gate_registry.GateRegistry`) every entry
+    recomputed here -- its slot's files changed, or ``force`` -- is compared
+    with the session's recorded gates (claunch-6vq2m.1): the registry hears of
+    a gate opening or closing exactly when the run's files say so, and an
+    unchanged slot costs three ``stat`` calls and no write. A slot whose
+    state file is gone closes the session's gates as ``run ended``. Without
+    one, the daemon's installed registry (:func:`.gate_registry.active`).
+
+    ``settled`` are ``(session, cwd)`` of ended sessions that hold no open
+    gate (claunch-6vq2m.1): their line is still shown (the session list's
+    badge, "Spawn same setup", the chart page), but nobody drives their run,
+    so an entry read once is served from the cache without a ``stat`` on
+    later polls, and its ``answers`` are emptied -- what such a run still
+    owes raised no gate in the registry, so it raises no card either.
+
+    ``filed`` are ``(session, cwd)`` of archived sessions: served the same way
+    (read once, ``answers`` emptied), but never compared with the registry --
+    their gates were closed when they were filed away, and reading their run
+    must not open them again. Their cache entry is marked uncompared, so a
+    respawn's first read recomputes it and the registry opens what the run
+    still owes."""
+    from . import gate_registry
+
+    if registry is None:
+        registry = gate_registry.active()
     out: Dict[str, dict] = {}
     for name, cwd in sessions:
         if not name or not cwd:
@@ -1181,18 +1392,63 @@ def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
             stamp = _rail_stamp(cwd, name)
         except (OSError, ValueError):
             continue
+        hit = _RAIL.get(key)
         if stamp[0] is None:
             _RAIL.pop(key, None)
+            if registry is not None and (hit is not None or force):
+                try:
+                    registry.sync(name, cwd, name, None, now=now)
+                except Exception:  # noqa: BLE001 - the rail still answers
+                    log.exception("gate registry sync of %s/%s failed", cwd, name)
             continue
-        hit = _RAIL.get(key)
-        if hit is not None and hit[0] == stamp:
+        if hit is not None and hit[0] == stamp and not force:
             entry = hit[1]
         else:
             entry = rail_entry(cwd, name)
             _RAIL[key] = (stamp, entry)
+            if registry is not None:
+                try:
+                    registry.sync(name, cwd, name, entry, now=now)
+                except Exception:  # noqa: BLE001 - the rail still answers
+                    log.exception("gate registry sync of %s/%s failed", cwd, name)
+                    # Read again next time: the comparison is owed.
+                    _RAIL.pop(key, None)
         if entry is not None:
             out[name] = dict(entry)
+    once = [(name, cwd, True) for name, cwd in settled]
+    once += [(name, cwd, False) for name, cwd in filed]
+    for name, cwd, compare in once:
+        if not name or not cwd:
+            continue
+        key = (cwd, name)
+        hit = _RAIL.get(key)
+        if hit is None or (compare and hit[0] is _UNCOMPARED):
+            try:
+                stamp = _rail_stamp(cwd, name)
+            except (OSError, ValueError):
+                continue
+            hit = (stamp, rail_entry(cwd, name) if stamp[0] is not None else None)
+            _RAIL[key] = hit if compare else (_UNCOMPARED, hit[1])
+            if compare and registry is not None and hit[1] is not None:
+                # Read for the first time in this process: a gate it still
+                # owes is recorded (and the next poll reads it as held).
+                try:
+                    registry.sync(name, cwd, name, hit[1], now=now)
+                except Exception:  # noqa: BLE001 - the rail still answers
+                    log.exception("gate registry sync of %s/%s failed", cwd, name)
+        if hit[1] is not None:
+            row = dict(hit[1])
+            row["answers"] = []
+            out[name] = row
     return out
+
+
+def forget_rail(name: str) -> None:
+    """Drop the cached rail entries of session ``name``, so the next read
+    recomputes them (and compares them with the gate registry again): a
+    lifecycle hook closed its gates without its run file changing."""
+    for key in [k for k in list(_RAIL) if k[1] == name]:
+        _RAIL.pop(key, None)
 
 
 def _epoch(value: Any) -> Optional[float]:

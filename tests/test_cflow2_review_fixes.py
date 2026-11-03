@@ -958,9 +958,15 @@ def test_withdraw_on_timeout_hop_and_cancellation(tmp_path, _env):
     assert _env[-1][0]["decision"] == "cancelled"
 
 
+# A group of a role that is asked as a whole (not ``reviewer``, which asks one
+# member at a time -- claunch-v0h29.1): the group keeps the question until
+# every member asked has abstained.
+GROUP_ROUTED = ROUTED.replace("role: reviewer, scope: any", "role: qa, scope: any")
+
+
 def test_one_abstention_leaves_the_question_with_the_group(tmp_path, _env):
-    d = Drv(tmp_path, ROUTED, driver=SCOPE)
-    _route(d, {"r1": _member("r1", "reviewer"), "r2": _member("r2", "reviewer")})
+    d = Drv(tmp_path, GROUP_ROUTED, driver=SCOPE)
+    _route(d, {"r1": _member("r1", "qa"), "r2": _member("r2", "qa")})
     rec = next(iter(d.state()["asks"].values()))
     out = runtime.answer(rec["id"], "abstain", by_session="s-r1", **d.kw())
     assert out["moved"] is False
@@ -971,13 +977,31 @@ def test_one_abstention_leaves_the_question_with_the_group(tmp_path, _env):
 
 
 def test_everyone_abstaining_moves_the_question_on(tmp_path, _env):
-    d = Drv(tmp_path, ROUTED, driver=SCOPE)
-    _route(d, {"r1": _member("r1", "reviewer"), "r2": _member("r2", "reviewer")})
+    d = Drv(tmp_path, GROUP_ROUTED, driver=SCOPE)
+    _route(d, {"r1": _member("r1", "qa"), "r2": _member("r2", "qa")})
     rec = next(iter(d.state()["asks"].values()))
     runtime.answer(rec["id"], "abstain", by_session="s-r1", **d.kw())
     out = runtime.answer(rec["id"], "abstain", by_session="s-r2", **d.kw())
     assert out["moved"] is True
     assert d.state()["asks"][rec["id"]]["group"] == 1
+
+
+def test_a_reviewer_group_moves_on_only_after_each_reviewer_abstained(tmp_path, _env):
+    d = Drv(tmp_path, ROUTED, driver=SCOPE)
+    members = {"r1": _member("r1", "reviewer"), "r2": _member("r2", "reviewer"),
+               "lead": _member("lead", "leader")}
+    _route(d, members)
+    rec = next(iter(d.state()["asks"].values()))
+    assert [e["handle"] for e in rec["asked"]] == ["r1"]
+    assert runtime.answer(rec["id"], "abstain", by_session="s-r1", **d.kw())["moved"] is True
+    assert d.state()["asks"][rec["id"]]["group"] == 0
+    _route(d, members)
+    rec = d.state()["asks"][rec["id"]]
+    assert [e["handle"] for e in rec["asked"]] == ["r2"]
+    runtime.answer(rec["id"], "abstain", by_session="s-r2", **d.kw())
+    _route(d, members)
+    rec = d.state()["asks"][rec["id"]]
+    assert rec["group"] == 1 and [e["handle"] for e in rec["asked"]] == ["lead"]
 
 
 # ---------------------------------------------------------------------------

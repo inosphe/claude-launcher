@@ -539,6 +539,7 @@ def test_a_permanent_refusal_is_one_event_per_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
     _, rows = reporting(tmp_path, "leader")
     clock = Clock(live_manager(), q, batch=True, spawn=refuse, policy=(5, 3600))
+    asyncio.run(clock.tick())  # claims the tip; its watcher starts once it runs (claunch-1rsgm)
     asyncio.run(clock.tick())
 
     recorded = rows("leader")

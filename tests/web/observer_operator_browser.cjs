@@ -8,6 +8,7 @@
    the dock's narrow column, a row press and 「← 목록」 moving between them, a
    message going to the thread on screen, 「+ 새 thread」 opening one with a
    title and an attached image, and the dispatch card kept in its thread.
+   The pane on screen scrolls inside the threads grid (claunch-vxep1).
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/observer_operator_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -208,10 +209,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       window.setInterval = (fn, ms, ...args) => interval(fn, ms === 10000 ? 1000 : ms, ...args);
       // Chromium will not settle an action on an element whose box moves
       // between paints, so the page's own animations go off as well.
+      //
+      // The dashboard's notices go too. Under load a /api/health probe can
+      // outlast HEALTH_TIMEOUT_MS; the page then posts "daemon offline" and,
+      // on the next tick, "daemon back" into #notices -- a fixed card over the
+      // top right, the whole top band on a phone. That card took the click on
+      // "+ 새 operator" and the session line's row in the stepped-page probe
+      // (claunch-iu6z2.1.2, .1.3). Nothing here measures a notice.
       window.addEventListener("DOMContentLoaded", () => {
         const style = document.createElement("style");
         style.textContent = "*, *::before, *::after { animation: none !important;"
-          + " transition: none !important; scroll-behavior: auto !important; }";
+          + " transition: none !important; scroll-behavior: auto !important; }"
+          + " #notices { display: none !important; }";
         document.head.appendChild(style);
       });
     });
@@ -243,6 +252,16 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => document.querySelectorAll("#observer-operators .op-entry").length > 0);
     await page.waitForFunction(() => !document.querySelector("#observer-operators .op-badge.unseen"));
     assert(lastSent("POST", "/api/operators/op1/seen"), "the open operator is marked seen");
+    // The poll after the seen mark reads nothing new and draws nothing
+    // (claunch-iu6z2.1): the view kept the pre-seen count and rebuilt the
+    // conversation on the next poll, which on a loaded machine landed
+    // between the steps below picking an entry and dragging over it.
+    {
+      await page.evaluate(() => { window.__entry = document.querySelector("#observer-operators .op-entry"); });
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      await page.evaluate(() => globalThis.ObserverOperators.refresh());
+      assert.equal(await page.evaluate(() => window.__entry.isConnected), true, "a poll after the seen mark redraws nothing");
+    }
     assert.equal(await page.locator("#observer-operators .op-badge").innerText(), "2", "two asks still wait");
     assert.match(await page.locator("#observer-operators .op-scope").innerText(), /범위: alpha · 정지됨/);
     // The session line above the conversation (claunch-iw5i8.13): outside the
@@ -259,7 +278,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 20);
     await page.click("text=이전 대화 5건 펼치기");
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 25);
-    assert.deepEqual(await innerScrollers(page), ["div.op-area"], "the expanded conversation scrolls inside the dock, nothing else does");
+    assert.deepEqual(await innerScrollers(page), ["div.op-threads-grid"], "the expanded conversation scrolls inside the threads grid, nothing else does");
     assert.match(await page.locator('.op-entry[data-entry="d1"]').innerText(), /→ s1: 테스트 결과를 보고하십시오/);
     assert.equal(await page.locator('.op-entry[data-entry="p19"]').evaluate(e => e.classList.contains("op-reply")), true);
     assert.equal(await page.locator('.op-entry[data-entry="p19"] a.op-ref').getAttribute("href"), "#/observer/session/s1");
@@ -387,20 +406,43 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await visible(".op-thread-list"), false);
     assert.equal(await page.locator("#observer-operators .op-thread-title").innerText(), "이전 대화");
     // The thread's head holds to the top of the conversation as it scrolls
-    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it.
+    // (claunch-1ruqi): 「← 목록」 stays where the reader needs it. The dock's
+    // column is the narrow layout, so the grid is the scroller
+    // (claunch-vxep1).
     const pinnedHead = await page.evaluate(() => {
-      const area = document.querySelector("#observer-operators .op-area");
-      area.scrollTop = area.scrollHeight;
-      const box = area.getBoundingClientRect();
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      grid.scrollTop = grid.scrollHeight;
+      const box = grid.getBoundingClientRect();
       const headBox = document.querySelector("#observer-operators .op-thread-head");
       const head = headBox.getBoundingClientRect();
       const back = document.querySelector("#observer-operators .op-thread-back").getBoundingClientRect();
-      // The row covers the scroller's top padding too: a point just under the
-      // scroller's own top edge lands in the head, not in an entry.
+      // The row covers the scroller's top edge: a point just under it lands
+      // in the head, not in an entry.
       const probe = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
-      return { scrolled: area.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
+      return { scrolled: grid.scrollTop > 0, offset: Math.round(head.top - box.top), back: back.width > 0 && back.top >= box.top - 1 && back.bottom <= box.bottom, covers: !!probe && headBox.contains(probe) };
     });
     assert.deepEqual(pinnedHead, { scrolled: true, offset: 0, back: true, covers: true }, "the head covers the top of the scroller, padding included, and keeps 「← 목록」");
+    // A rebuild keeps the inner scroller's place (innerKeep in render(),
+    // claunch-vxep1.1): the grid scrolled to its end stays at its end, and
+    // one scrolled partway keeps its offset. Pressing the tab that is
+    // already selected redraws without a data change — refresh() alone
+    // skips the render while the read is unchanged — and render() replaces
+    // the nodes, so the grid is re-queried after each press.
+    const endTop = await page.evaluate(() => document.querySelector("#observer-operators .op-threads-grid").scrollTop);
+    await page.evaluate(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]').click());
+    const keptEnd = await page.evaluate(() => {
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      return { top: grid.scrollTop, atEnd: grid.scrollHeight - grid.scrollTop - grid.clientHeight < 24 };
+    });
+    assert.deepEqual(keptEnd, { top: endTop, atEnd: true }, "a rebuild leaves the grid at its end");
+    const midTop = await page.evaluate(() => {
+      const grid = document.querySelector("#observer-operators .op-threads-grid");
+      grid.scrollTop = Math.min(50, grid.scrollHeight - grid.clientHeight);
+      return grid.scrollTop;
+    });
+    await page.evaluate(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]').click());
+    assert.equal(await page.evaluate(() => document.querySelector("#observer-operators .op-threads-grid").scrollTop), midTop,
+      "a rebuild keeps a mid-scroll offset");
     await page.click("#observer-operators .op-thread-back");
     assert.equal(await visible(".op-thread-list"), true);
     assert.equal(await visible(".op-thread-view"), false);
@@ -489,9 +531,24 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => !document.querySelector('.observer-card[data-session="s2"] .observer-ask-operator')?.disabled);
 
     // Create: two projects by check box, with a profile; then a name clash.
+    // The name is typed while the form's profile list is still on its way:
+    // the redraw that list brings must leave the caret in the field, so the
+    // rest of the name lands. It used to drop it -- on a loaded machine the
+    // list arrived inside a fill, the name stayed empty and 「만들기」 was
+    // refused by the required field (claunch-iu6z2).
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route("**/api/profiles", async route => { await held; await route.continue(); });
     await page.click("text=+ 새 operator");
     await page.waitForSelector("#observer-operators .op-projects input[value=beta]");
-    await page.fill("#observer-op-name", "two");
+    await page.click("#observer-op-name");
+    await page.keyboard.type("tw");
+    const typed = await page.$("#observer-op-name");
+    release();
+    await page.waitForFunction(field => !field.isConnected, typed);
+    await page.unroute("**/api/profiles");
+    await page.keyboard.type("o");
+    assert.equal(await page.inputValue("#observer-op-name"), "two", "a redraw of the form keeps the field being typed in");
     await page.check("#observer-operators .op-projects input[value=alpha]");
     await page.check("#observer-operators .op-projects input[value=beta]");
     await page.selectOption("#observer-op-profile", "p1:claude");
@@ -613,6 +670,11 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForSelector('#observer-operators .op-thread-row[data-thread="th-a"]', { state: "attached" });
     await page.click("#observer-operators .op-thread-back");
     await page.click('#observer-operators .op-thread-row[data-thread="th-a"]');
+    // One probe lost and the next answered, as a loaded run meets it: the
+    // "daemon back" card is posted and the page re-reads everything. The
+    // measure below still holds (claunch-iu6z2.1.2).
+    await page.evaluate(async () => { setDaemonOnline(false); await pollOnce(); });
+    assert.match(await page.evaluate(() => document.getElementById("notices").textContent), /daemon back/);
     await page.waitForFunction(() => document.querySelector("#observer-operators .op-thread-title")?.textContent === "이전 대화"
       && document.querySelector("#observer-operators .op-entry"));
     const pageHead = await page.evaluate(() => {
@@ -649,6 +711,12 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
       await page.setViewportSize({ width: 1280, height: 900 });
       await tab("ops-a").click();
       await page.waitForFunction(() => document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("ops-a"));
+      // The form's lists (/api/projects, /api/profiles) answer after the
+      // form is drawn; under load that answer has landed between the press's
+      // down and up and its redraw took the button away (claunch-iu6z2.1.1).
+      // The profiles answer is held here and let go inside the press.
+      let releaseLists; const listsHeld = new Promise(r => { releaseLists = r; });
+      await page.route("**/api/profiles", async route => { await listsHeld; await route.continue(); });
       await page.click("#observer-operators .op-actions button:has-text('설정')");
       await page.waitForSelector("#observer-operators .op-form");
       // The box is read in the page: Playwright's own action check wants the
@@ -659,16 +727,67 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         return { x: r.left, y: r.top, width: r.width, height: r.height };
       });
       const saves = sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length;
-      // Down on the button, one poll's redraw in between, then up. The click
-      // the browser dispatches after the up has to reach the form.
+      // Down on the button, the form's lists answering and one poll's redraw
+      // in between, then up. The click the browser dispatches after the up
+      // has to reach the form.
       await page.mouse.move(saveBox.x + saveBox.width / 2, saveBox.y + saveBox.height / 2);
       await page.mouse.down();
+      releaseLists();
+      await page.waitForResponse(r => r.url().endsWith("/api/profiles"));
+      // The page reads the body and draws after the response: give it that turn.
+      await page.evaluate(() => new Promise(r => setTimeout(r, 200)));
+      await page.unroute("**/api/profiles");
       await page.evaluate(() => globalThis.ObserverOperators.refresh());
       await page.mouse.up();
       // The save closes the form; the press that never landed leaves it open.
-      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 });
+      // A timeout says what the page held: whether the PATCH went out and
+      // what sat under the pointer.
+      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"), null, { timeout: 5000 })
+        .catch(async error => {
+          const state = await page.evaluate(({ x, y }) => {
+            const at = document.elementFromPoint(x, y);
+            return { form: !!document.querySelector("#observer-operators .op-form"),
+              under: at ? `${at.tagName.toLowerCase()}${at.id ? "#" + at.id : ""}.${[...at.classList].join(".")} ${at.textContent.trim().slice(0, 30)}` : null,
+              notices: document.getElementById("notices")?.textContent.slice(0, 80) || "" };
+          }, { x: saveBox.x + saveBox.width / 2, y: saveBox.y + saveBox.height / 2 });
+          state.patches = sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length - saves;
+          throw new Error(`${error.message}\nsave press state: ${JSON.stringify(state)}`);
+        });
       assert.equal(sent.filter(r => r.method === "PATCH" && r.url === "/api/operators/op1").length, saves + 1,
         "the press lands although a poll ran between its down and its up");
+    }
+
+    // The lists held by that press are drawn on its release even when the
+    // press put the caret in a form field. A poll's redraw waits for the
+    // field to lose focus; the lists did too, and a form opened fresh sat on
+    // "불러오는 중…" for as long as the reader stayed in the name field
+    // (claunch-iu6z2.1.1, s404-rev). The redraw is visible as the profile
+    // select being replaced, and the caret stays in the name field.
+    {
+      let releaseLists; const listsHeld = new Promise(r => { releaseLists = r; });
+      await page.route("**/api/profiles", async route => { await listsHeld; await route.continue(); });
+      await page.click("#observer-operators .op-actions button:has-text('설정')");
+      await page.waitForSelector("#observer-operators .op-form");
+      const nameBox = await page.evaluate(() => {
+        window.__profileSelect = document.getElementById("observer-op-profile");
+        const r = document.getElementById("observer-op-name").getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(nameBox.x, nameBox.y);
+      await page.mouse.down();
+      releaseLists();
+      await page.waitForResponse(r => r.url().endsWith("/api/profiles"));
+      await page.evaluate(() => new Promise(r => setTimeout(r, 200)));
+      await page.unroute("**/api/profiles");
+      await page.mouse.up();
+      await page.waitForFunction(() => document.getElementById("observer-op-profile") !== window.__profileSelect,
+        null, { timeout: 2000 }).catch(error => {
+        throw new Error(`${error.message}\nthe form's lists stayed held while the name field had focus`);
+      });
+      assert.equal(await page.evaluate(() => document.activeElement?.id), "observer-op-name",
+        "the caret stays in the name field across the lists' redraw");
+      await page.click("#observer-operators .op-form button:has-text('취소')");
+      await page.waitForFunction(() => !document.querySelector("#observer-operators .op-form"));
     }
 
     // A press that ends PAST the view's edge still releases it. The flag that

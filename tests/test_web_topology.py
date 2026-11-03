@@ -368,6 +368,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -460,6 +461,7 @@ CHECKS = [
         "createonboard_check.js",
         "formusage_check.js",
         "openingimages_check.js",
+        "openingcontexts_check.js",
         "meshattach_check.js",
         "reborrow_check.js",
         "sessionkey_check.js",
@@ -496,6 +498,7 @@ CHECKS = [
         "commandcopy_check.js",
         "termtitlecopy_check.js",
         "osc52_check.js",
+        "hostcopy_check.js",
         "termselect_check.js",
         "promptpresets_check.js",
         "prompter_check.js",
@@ -509,7 +512,9 @@ CHECKS = [
         "linkwatch_check.js",
         "snapshot_check.js",
         "notice_check.js",
+        "planwaitcard_check.js",
         "leaderfault_check.js",
+        "faultreset_check.js",
         "restartgate_check.js",
         "ptyhostbadge_check.js",
         "statusline_check.js",
@@ -529,6 +534,7 @@ CHECKS = [
         "briefingtop_check.js",
         "briefmodel_check.js",
         "model_settings_check.js",
+        "modeltiers_check.js",
         "modelprice_check.js",
         "faqsettings_check.js",
         "briefrow_check.js",
@@ -562,6 +568,7 @@ CHECKS = [
         "usage_check.js",
         "railctx_check.js",
         "ctxpoll_check.js",
+        "pollstamp_check.js",
         "railmodel_check.js",
         "railcwd_check.js",
         "wfscroll_check.js",
@@ -575,12 +582,15 @@ CHECKS = [
         "leak_check.js",
         "pingbox_check.js",
         "newform_check.js",
+        "provider_warning_check.js",
         "decisionstack_check.js",
         "pollselect_check.js",
         "beads_check.js",
         "beadsstream_check.js",
         "beadsdetailroot_check.js",
         "ragsearch_check.js",
+        "ragpreset_check.js",
+        "beadssearch_check.js",
         "relaysettings_check.js",
         "profilesettings_check.js",
         "providerinstall_check.js",
@@ -612,6 +622,7 @@ CHECKS = [
         "railtimer_check.js",
         "termtimer_check.js",
         "mdrender_check.js",
+        "noticeaskmd_check.js",
         "railseen_check.js",
         "raillife_check.js",
         "dotgrade_check.js",
@@ -651,9 +662,12 @@ CHECKS = [
         "commitpage_check.js",
         "chartpage_check.js",
         "hivepage_check.js",
+        "prpage_check.js",
         "profileusage_check.js",
         "glossarypage_check.js",
+        "glossarycomposer_check.js",
         "knowledgepage_check.js",
+        "retrospectionpage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
         "simpage_check.js",
@@ -663,6 +677,10 @@ CHECKS = [
         "threadshistory_check.js",
         "megathread_check.js",
         "talkpane_check.js",
+        "wrapuppane_check.js",
+        "planpane_check.js",
+        "planpage_check.js",
+        "globalscope_check.js",
         "splitframe_check.js",
         "sessioncli_check.js",
         "specpage_check.js",
@@ -674,6 +692,8 @@ CHECKS = [
         "cflow2question_check.js",
         "cflow2graph_check.js",
         "safe_listen_check.js",
+        "pollstuck_check.js",
+        "skipconfirm_check.js",
 ]
 
 
@@ -689,6 +709,7 @@ BROWSER_CHECKS = [
     "chart_browser.cjs",
     "hive_browser.cjs",
     "megathread_browser.cjs",
+    "resendactions_browser.cjs",
     "sessionprs_browser.cjs",
     "commandcopy_browser.cjs",
     "termcflow_browser.cjs",
@@ -718,6 +739,7 @@ BROWSER_CHECKS = [
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
         "railreveal_browser.cjs",
+        "railorphan_browser.cjs",
     "quietpoll_browser.cjs",
         "chat_browser.cjs",
         "promptpacks_browser.cjs",
@@ -745,6 +767,9 @@ BROWSER_CHECKS = [
         "sessionkey_browser.cjs",
         "noticeplace_browser.cjs",
         "noticecost_browser.cjs",
+        "noticewrap_browser.cjs",
+        "noticefold_browser.cjs",
+        "sessiontooltip_browser.cjs",
 ]
 
 
@@ -797,6 +822,7 @@ def test_every_harness_is_registered():
         )
 
 
+@pytest.mark.browser
 @pytest.mark.parametrize("script", BROWSER_CHECKS)
 def test_browser_harness(script):
     """Real scroll geometry and native touch input need a browser.
@@ -845,3 +871,89 @@ def test_browser_harnesses_strip_the_real_boot_call():
                 f"{harness.name} strips boot() with a pattern other than "
                 f"{BOOT_STRIP}: {line.strip()}"
             )
+
+
+def test_the_prose_that_opens_the_gate_selects_what_it_says():
+    """CLAUDE.md says how to open the gate above (claunch-odk2w).
+
+    ``tools/changed_tests.py`` selects no test for a markdown file, so nothing
+    else notices the document drifting from the code it describes. Two ways it
+    can drift, and both leave the printed command green:
+
+    * ``-k browser_harness`` is a substring match, so it reaches
+      ``test_browser_harnesses_strip_the_real_boot_call`` whether or not the
+      parametrized ``test_browser_harness`` still exists. Rename that one and
+      the selection collects 1 node instead of 58, runs no harness, and
+      reports pass.
+    * the section states how many harnesses there are. Add one and the number
+      it prints is wrong while every harness still passes.
+
+    A third way has no source-level tell at all (claunch-qx1rp): the list the
+    parametrize receives can be cut down — ``BROWSER_CHECKS[:3]`` reads as
+    ``BROWSER_CHECKS`` to the checks below, leaves ``len(BROWSER_CHECKS)`` at
+    its full value and leaves the document's count correct, while the printed
+    command collects four nodes instead of fifty-eight. So the last assertion
+    runs that command against this module and counts what it collects.
+
+    So the assertions are about the selection, not only about the prose.
+    """
+    doc = (WEB.parents[1] / "CLAUDE.md").read_text(encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert "tests/test_web_topology.py" in doc, (
+        "CLAUDE.md no longer names this module in the section that opens the "
+        "browser-harness gate"
+    )
+    assert "-k browser_harness" in doc
+    assert "NODE_PATH" in doc
+    lines = source.splitlines()
+    selecting = [line[len("def "):].split("(")[0] for line in lines
+                 if line.startswith("def ") and "browser_harness" in line]
+    assert "test_browser_harness" in selecting, (
+        f"'-k browser_harness' would collect only {selecting} from this module "
+        f"({len(BROWSER_CHECKS)} harnesses would go uncollected), so the "
+        "document's command would report green having run none of them"
+    )
+    # the count the keyword collects comes from BROWSER_CHECKS: one node per
+    # entry, plus the boot-strip check the substring also matches
+    at = lines.index("def test_browser_harness(script):")
+    assert "parametrize(" in lines[at - 1] and "BROWSER_CHECKS" in lines[at - 1], (
+        f"test_browser_harness is no longer parametrized over BROWSER_CHECKS: "
+        f"{lines[at - 1].strip()}"
+    )
+    assert len(BROWSER_CHECKS) > 1, f"only {len(BROWSER_CHECKS)} browser harness(es)"
+    assert f"{len(BROWSER_CHECKS)}개" in doc, (
+        f"CLAUDE.md states a harness count that is not {len(BROWSER_CHECKS)}"
+    )
+    # The source checks above cannot see a cut-down list, and the document's
+    # count cannot either. So run the documented selection and count its
+    # nodes. `--collect-only` executes no test body, so this cannot recurse
+    # into itself; the child inherits this run's window grant rather than
+    # acquiring a second one (tests/conftest.py's `inherited_grant`).
+    here = Path(__file__).resolve()
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(here), "--collect-only", "-q",
+         "-k", "browser_harness", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+        cwd=str(here.parents[1]),
+    )
+    assert proc.returncode == 0, (
+        "the document's `-k browser_harness` selection does not run cleanly "
+        f"against this module:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+    )
+    nodes = proc.stdout.splitlines()
+    harness_nodes = sum(1 for line in nodes if "::test_browser_harness[" in line)
+    assert harness_nodes == len(BROWSER_CHECKS), (
+        f"`-k browser_harness` collects {harness_nodes} harness node(s) from "
+        f"this module, not one per BROWSER_CHECKS entry "
+        f"({len(BROWSER_CHECKS)}): a sliced, filtered or renamed parametrize "
+        "list leaves the source checks above and the document's count green "
+        "while the printed command runs fewer harnesses than it claims"
+    )
+    boot_nodes = sum(
+        1 for line in nodes
+        if line.endswith("::test_browser_harnesses_strip_the_real_boot_call")
+    )
+    assert boot_nodes == 1, (
+        f"`-k browser_harness` collects {boot_nodes} copies of the boot-strip "
+        "check; the document counts it once"
+    )

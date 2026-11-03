@@ -331,7 +331,10 @@
       <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
       <a href="#/hive" data-page="hive"><span>⬢</span>Hive</a>
       <a href="#/vm" data-page="vm"><span>▭</span>VM<span id="vm-nav-badge" class="chat-badge-count" hidden></span></a>
+      <a href="#/pr" data-page="pr"><span>⇄</span>PR</a>
+      <a href="#/plan" data-page="plan"><span>☷</span>Plan</a>
       <a href="#/knowledge" data-page="knowledge"><span>◆</span>Knowledge</a>
+      <a href="#/retrospection" data-page="retrospection"><span>↺</span>Retrospection</a>
       <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
       <a href="#/category" data-page="category"><span>⌘</span>Category</a>
@@ -685,12 +688,26 @@
       <button id="term-chartbtn" class="term-btn split-btn hidden" type="button" aria-pressed="false"
               title="this pi-durable session's run as a flow chart">◇ chart</button>
       <!-- The same pane, showing this session's own shell (cli-pane.js,
-           daemon/session_shells.py): a PTY with the user's privileges, and
-           the input this session's agent proposes for the user to run or
-           dismiss. The CLI tab (#cli) is the user's own shell and takes no
-           agent input at all (claunch-jg8pt). -->
+           daemon/session_shells.py): a PTY with the user's privileges, the
+           input this session's agent proposes for the user to run or
+           dismiss, and the user's nudge button — it types a note into the
+           session's terminal saying where its unread output starts
+           (claunch-742jf). The CLI tab (#cli) is the user's own shell and
+           takes no agent input at all (claunch-jg8pt). -->
       <button id="term-clibtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's own shell and the input its agent proposes">❯ cli</button>
+      <!-- The same pane, showing the glossary, category and knowledge
+           entries this session filed as drafts (wrapup-pane.js,
+           daemon/wrapup_api.py, claunch-ar8jn); lit while one waits on the
+           user. Nothing reaches the workspace until it is confirmed here. -->
+      <button id="term-wrapupbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="this session's wrap-up drafts">✎ wrap-up</button>
+      <!-- The same pane, showing this session's plan (plan-pane.js,
+           daemon/plan_api.py, claunch-7jzp8): its steps, the branches it
+           asks you to pick, and the checks and followups that keep it open;
+           lit while one waits on you. -->
+      <button id="term-planbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="this session's plan and the decisions it waits on">☰ plan</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
            and opened by itself when the session changes a question. This
@@ -746,6 +763,17 @@
          of the terminal's, which is refitted when the strip changes. -->
     <div id="term-cflow" class="hidden" role="region"
          aria-label="cflow answer needed"></div>
+    <!-- The provider warning (claunch-1ztit.1): this session runs the claude
+         harness on a provider that is not Claude's own, so the permission
+         classifier's calls can add Claude usage. Two answers: restart it on
+         yolo mode (the details panel's skip-permissions restart, here where
+         the reader is), or stop showing this for this session — the second is
+         recorded on the session's definition, so it survives a reload, a
+         daemon restart and a respawn. Every session without that record shows
+         the strip, which is how the rule reaches the sessions that existed
+         before it. Rendered by renderTermProviderWarn(). -->
+    <div id="term-provider-warn" class="hidden" role="region"
+         aria-label="provider warning"></div>
     <!-- The briefing card the top toggle folds open: the strip that belongs to
          the summary, between the header and the terminal, so the answer sits
          on top of the thing it is about. Empty and hidden except while the
@@ -860,7 +888,7 @@
       <!-- Image files, several at once: each is stored by the daemon
            (POST .../paste-image?stage=1) and held on the line with the ones
            above, so they go out with its send. -->
-      <button id="term-glossary-open" class="term-btn" type="button" title="용어집 검색 · 선택한 문구를 참조로 바꾸기">용어집</button>
+      <button id="term-glossary-open" class="term-btn" type="button" title="용어집 열기 · 선택한 문구를 참조로 만들기">용어집</button>
       <button id="term-image-pick" class="term-btn" type="button"
               title="attach image files to this line (several at once) — they are sent with it"
               aria-label="attach image files to this line">🖼</button>
@@ -1064,6 +1092,19 @@
           <label id="new-effort-row" class="hidden">
             Reasoning effort <select name="effort"></select>
           </label>
+          <!-- The recommendation the four rows above make by themselves.
+               On the claude harness, a provider that is not Claude's own
+               still has the harness's permission classifier billed to
+               Claude, so a session created here spends Claude usage on top
+               of the provider it was pointed at; skip permissions is the
+               switch that avoids it, and that switch sits inside the fold.
+               So the line is on the face of the form, directly under the
+               rows it is about. Silent on a Claude provider (nc, sr and the
+               built-in default), once the box is ticked, and on a child
+               whose parent's answer the spawn policy locked. Drawn by
+               renderProviderHint from profile_details[].provider and
+               .provider_service. -->
+          <p id="new-provider-hint" class="hidden"></p>
           <!-- What the selected pair cannot say by itself. Three rows still in
                the fold change what this pick MEANS — --borrow runs it on
                another profile's token, --null on none at all, and a profile
@@ -1093,9 +1134,15 @@
                  this launch: changing it here changes the pick for every
                  session of that profile (h_profile_key_strategy). No `name`:
                  it is not a field the create request carries. -->
-            <label id="new-strategy-row" class="new-usage-strategy hidden">Strategy
+            <div id="new-strategy-row" class="new-usage-strategy hidden">
+              <label for="new-key-strategy">Strategy</label>
               <select id="new-key-strategy"></select>
-            </label>
+              <!-- random's re-draw (claunch-i985h): the draw is stored in the
+                   pool, so pressing this re-decides the key the next launch
+                   takes, as many times as the operator presses it. -->
+              <button id="new-key-roll" class="new-usage-roll hidden" type="button"
+                title="draw another key for random — the draw is what the next launch takes">roll</button>
+            </div>
             <p id="new-usage-note" class="wf-note hidden"></p>
           </div>
         </fieldset>
@@ -1298,6 +1345,20 @@
           <textarea name="task" rows="8"
             placeholder="typed in once it has booted — what it is for"></textarea>
           <div id="new-task-prompter" class="hidden"></div>
+          <!-- Context items beside the task (gds6-bfu7): an error log, a spec
+               excerpt -- each its own title and text instead of being pasted
+               under the request. Sent as `opening_contexts`; the daemon keeps
+               each as a file in the session's state directory and ends the
+               opening with one "[claunch context] <n>. <title> ..." line per
+               item and how to read it (MCP context_read). -->
+          <div id="new-task-contexts" class="new-task-contexts">
+            <div class="new-task-contexts-head">
+              <span class="new-task-images-hint">Additional context: an error log, a spec excerpt — each kept as its own item beside the task</span>
+              <button type="button" class="wf-btn" id="new-task-contexts-add">+ Add context</button>
+            </div>
+            <ol class="new-task-contexts-list" id="new-task-contexts-list"></ol>
+            <p class="new-task-images-note hidden" id="new-task-contexts-note"></p>
+          </div>
           <!-- Images that go out with the opening (claunch-jmrmc): pasted into
                the task box, dropped on this area, or picked. Uploaded when the
                form is submitted; the daemon keeps them with the session and
@@ -1637,9 +1698,18 @@
     <!-- The daemon's VM panel (vm.html) in a frame, built on entering the tab
          and removed on leaving it (vm-page.js). -->
     <div id="vm-view" class="hidden"></div>
+
+    <!-- Pull requests the sessions recorded, per project and on a date
+         timeline, each row naming the session that opened it; drawn by
+         pr-page.js from /api/prs (recorded rows only, no gh call). -->
+    <div id="pr-view" class="hidden"></div>
     <!-- Workspace knowledge records: decisions, vision, needs, principles
          (knowledge-page.js, claunch-269q1). -->
     <div id="knowledge-view" class="hidden"></div>
+    <!-- Session retrospectives: what each session wrote about its own work
+         and the cflow definition it followed, recorded from its wrap-up
+         drafts (retrospection-page.js, claunch-lmnlv). Read only. -->
+    <div id="retrospection-view" class="hidden"></div>
     <div id="profile-usage-view" class="hidden"></div>
     <!-- System performance: CPU, memory, disk I/O history and disk
          capacity (sysperf-page.js). -->
@@ -1682,6 +1752,8 @@
       <div id="cli-term"></div>
     </div>
     <div id="glossary-view" class="hidden"></div>
+    <!-- Every running session's stage (claunch-7jzp8.2); drawn by plan-page.js. -->
+    <div id="plan-view" class="plan-host hidden"></div>
     <!-- World-model simulations (docs/simulation.md); drawn by sim-page.js. -->
     <div id="sims-view" class="sim-host hidden"></div>
     <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
@@ -1775,8 +1847,11 @@
 <script src="static/hive-page.js"></script>
 <script src="static/vm-page.js"></script>
 <script src="static/vm-session-pane.js"></script>
+<script src="static/pr-page.js"></script>
 <script src="static/glossary-page.js"></script>
+<script src="static/plan-page.js"></script>
 <script src="static/knowledge-page.js"></script>
+<script src="static/retrospection-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>
 <script src="static/category-page.js"></script>
@@ -1788,6 +1863,8 @@
 <script src="static/megathread-page.js"></script>
 <script src="static/split-frame.js"></script>
 <script src="static/cli-pane.js"></script>
+<script src="static/wrapup-pane.js"></script>
+<script src="static/plan-pane.js"></script>
 <script src="static/talk-pane.js"></script>
 <script src="static/glossary-composer.js"></script>
 <script src="static/operator_fab.js"></script>

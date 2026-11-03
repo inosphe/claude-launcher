@@ -53,9 +53,10 @@ const server = http.createServer((req, res) => {
    default compact card — and the per-density rules reach it because
    sessionGridTipStyles re-scopes every `#session-list …` rule onto `#sg-tip`
    verbatim, `[data-rail-mode="compact"]` and all.
-   Compact tips hide session actions and both refreshes; the key picker is
-   independently covered by sessionkey_browser. Hidden controls must stay
-   hidden when the copied card narrows. */
+   Compact tips draw the spawn+pin pair (claunch-g6ecv — the pair the compact
+   card wears by name) and hide the other session actions and both refreshes;
+   the key picker is independently covered by sessionkey_browser. Hidden
+   controls must stay hidden when the copied card narrows. */
 const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info",
   ".sess-status-check-rowref", ".sess-brief-rowref"];
 const ACTIONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info"];
@@ -94,6 +95,15 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
         width: tip.getBoundingClientRect().width,
         actions: actions && mid(actions),
         nameWidth: name && name.getBoundingClientRect().width,
+        /* Two guards on the name at 320px. nameHeight catches the failure
+           this block exists for — the name stacking a character per line
+           (claunch-ku033), which is a HEIGHT event. nameWidth keeps the
+           readable-width floor from claunch-pua72 at its original bar: the
+           spawn+pin pair rides the card's own full-width buttons line (the
+           base .rail-actions rule, flex-basis: 100%), so it takes nothing
+           from the name line — at 320px the tip's name measures the same
+           width with and without this branch. */
+        nameHeight: name && name.getBoundingClientRect().height,
         buttons: Object.fromEntries(buttons.map((sel) => {
           const el = card && card.querySelector(sel);
           return [sel, el ? box(el) : null];
@@ -116,12 +126,16 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
     assert.ok(got.pinned, "a right-click pins the card");
     assert.ok(got.actions !== null, "the pinned card holds the list's row");
     assert.deepEqual(offActions(got), [], `every painted button sits on the buttons line at ${got.width}px`);
-    // The five actions are only drawn on the extended card; the tip is a copy
-    // of a compact row, so at this density they are expected absent -- and
-    // that expectation is pinned, so this file cannot quietly stop covering
-    // them by having them disappear for another reason.
+    // The spawn+pin pair is drawn on the compact card by name (claunch-g6ecv)
+    // and the tip is a copy of one; the other three actions are expanded-only
+    // — and both expectations are pinned, so this file cannot quietly stop
+    // covering them by having them disappear for another reason.
     assert.equal(got.mode, "compact", "the tip copies the list row's compact density");
-    for (const sel of ACTIONS) {
+    for (const sel of [".sess-plus", ".sess-pin"]) {
+      assert.ok(painted(got).includes(sel),
+        `${sel} rides the compact card, so the compact tip draws it`);
+    }
+    for (const sel of [".sess-observe", ".sess-note-edit", ".sess-info"]) {
       assert.ok(unpainted(got).includes(sel),
         `${sel} is the expanded card's, so the compact tip does not draw it`);
     }
@@ -139,6 +153,8 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
       assert.ok(unpainted(narrow).includes(sel), `${sel} stays hidden at 320px`);
     }
     assert.deepEqual(painted(narrow), painted(got), "narrowing does not take a control away");
+    assert.ok(narrow.nameHeight <= 22,
+      `at 320px the name stays one line instead of stacking (${narrow.nameHeight}px tall)`);
     assert.ok(narrow.nameWidth >= 100,
       `at 320px the name keeps a readable width (${narrow.nameWidth}px)`);
     assert.deepEqual(errors, []);

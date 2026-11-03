@@ -49,8 +49,8 @@ async def _details(app, ws, items):
     (:func:`daemon.session.session_category`: running, hold, delayed, failed,
     paused, killed, archived) and ``status`` is what a live screen reads
     (busy, idle, starting). The page shows ``running · busy`` for the live
-    ones and ``killed``/``archived`` for records that are done -- the two
-    filters on the page are built on ``life``.
+    ones and ``killed``/``archived`` for records that are done -- the page's
+    "running only" mode and the two finished-partition boxes read ``life``.
     """
     from .session import session_category  # local: session imports late
 

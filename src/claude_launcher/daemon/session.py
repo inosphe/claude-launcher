@@ -120,7 +120,7 @@ TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.
 #: prompt answers "no" every time they stop to think — and a five-second pause
 #: is not the end of a message, it is the middle of one. So the composer's
 #: state is tracked as well as its timing: while characters are sitting in it
-#: unsent (see :func:`draft_state_from_bytes`) the keyboard counts as busy for
+#: unsent (see :func:`draft_edit_from_bytes`) the keyboard counts as busy for
 #: this much longer, and it is released the moment the human submits (Enter)
 #: or clears the line — not on a timer. The cap is only for the person who
 #: types one character and walks away.
@@ -133,6 +133,15 @@ DRAFT_GUARD = float(os.environ.get("CLAUNCH_DRAFT_GUARD") or 180.0)
 #: mark was the last thing it ever sent. Text in the composer gets
 #: DRAFT_GUARD; text that never reached the composer gets this.
 COMPOSING_GUARD = float(os.environ.get("CLAUNCH_COMPOSING_GUARD") or 10.0)
+
+#: How long an escape sequence cut off at a frame boundary waits for the rest
+#: of itself (seconds). The web terminal sends one frame per keystroke event
+#: and a terminal sequence is one event, but the halves can still land in
+#: different frames (a socket split, a reader that handed back half a write).
+#: Holding the tail makes the second half read as the end of a key rather
+#: than as a letter somebody typed; dropping it after this long keeps one
+#: abandoned fragment from swallowing the next person's first keystroke.
+DRAFT_PARTIAL_TTL = float(os.environ.get("CLAUNCH_DRAFT_PARTIAL_TTL") or 2.0)
 
 #: How long a FORCED delivery ("deliver now", pressed by a person) waits for
 #: the keyboard before it stops waiting. The ordinary wait is
@@ -238,61 +247,256 @@ class _SubmittedLineTracker:
         return submitted
 
 
-def draft_state_from_bytes(data: bytes) -> Optional[bool]:
+#: ESC + one of these opens a control *string* (OSC, DCS, SOS, PM, APC) that
+#: runs to BEL or ST. On the input side they are the terminal's own replies —
+#: an OSC 10/11 colour answer, a DCS XTVERSION — never something typed.
+_ESC_STRING_INTRODUCERS = frozenset(b"]PX^_")
+
+
+def _input_tokens(data: bytes):
+    """Split terminal input into ``(kind, start, end)`` spans.
+
+    ``kind`` is ``"report"`` for what the terminal emulator writes on its own
+    account — a reply to a query (OSC/DCS strings, DA, cursor position,
+    DECRQM), a mouse report in either encoding, a focus report — and
+    ``"seq"`` / ``"byte"`` for keys a person pressed. The web terminal sends
+    both down one socket (xterm's ``onData``), so they arrive mixed in the
+    same frames.
+    """
+    i = 0
+    n = len(data)
+    while i < n:
+        b = data[i]
+        if b != 0x1B:
+            yield "byte", i, i + 1
+            i += 1
+            continue
+        nxt = data[i + 1] if i + 1 < n else None
+        if nxt in _ESC_STRING_INTRODUCERS:
+            j = i + 2
+            while j < n:
+                if data[j] == 0x07:
+                    j += 1
+                    break
+                if data[j] == 0x1B and j + 1 < n and data[j + 1] == 0x5C:
+                    j += 2
+                    break
+                j += 1
+            yield "report", i, j
+            i = j
+            continue
+        if nxt == 0x5B:  # CSI — parameters up to the final byte
+            j = i + 2
+            while j < n and not (0x40 <= data[j] <= 0x7E):
+                j += 1
+            final = data[j] if j < n else None
+            params = data[i + 2:j]
+            j += 1
+            if final == 0x4D and not params:
+                # X10 mouse: CSI M and three raw bytes (button, column, row),
+                # each >= 0x20 and so indistinguishable from typed text.
+                yield "report", i, min(j + 3, n)
+                i = min(j + 3, n)
+                continue
+            report = (
+                (params[:1] == b"<" and final in (0x4D, 0x6D))  # SGR mouse
+                or (not params and final in (0x49, 0x4F))  # focus in/out
+                or (params[:1] in (b"?", b">") and final == 0x63)  # DA
+                or final == 0x52 and b";" in params  # cursor position
+                or params[:1] == b"?" and params.endswith(b"$") and final == 0x79
+            )
+            yield ("report" if report else "seq"), i, j
+            i = j
+            continue
+        if nxt == 0x4F:  # SS3 — one final byte
+            yield "seq", i, min(i + 3, n)
+            i += 3
+            continue
+        yield "seq", i, min(i + 2, n)  # ESC alone, or Alt-<key> / ESC + Enter
+        i += 2 if nxt is not None else 1
+
+
+def is_terminal_report(data: bytes) -> bool:
+    """Whether ``data`` is nothing but the terminal emulator's own replies
+    and reports (see :func:`_input_tokens`) — no key a person pressed.
+
+    Such a frame is not a human at the keyboard: it must neither open a
+    draft nor keep one alive. A mouse hover under ``?1003`` or a focus report
+    otherwise restarts the draft clock forever and holds the session's mail
+    over a composer nobody is writing in.
+    """
+    if not data:
+        return False
+    return all(kind == "report" for kind, _, _ in _input_tokens(data))
+
+
+def _split_incomplete_escape(data: bytes) -> Tuple[bytes, bytes]:
+    """Split a trailing escape sequence that has not finished arriving.
+
+    ``(complete, pending)``: ``complete`` ends on a token boundary and
+    ``pending`` is the unfinished sequence's bytes, to be read with the next
+    frame's. Without this an ``ESC[`` frame followed by an ``A`` frame reads
+    as an arrow's prefix and then a typed letter, and the daemon opens a
+    draft over a composer nobody touched (claunch-wzx2r).
+
+    A lone ``ESC`` is not pending. As far as any terminal can tell it is the
+    Escape key, and holding it back would turn the next frame's Enter into
+    Alt-Enter — a newline where the person pressed submit, which weakens the
+    protection instead of removing a false alarm.
+    """
+    esc = data.rfind(b"\x1b")
+    if esc < 0:
+        return data, b""
+    rest = data[esc + 1:]
+    if not rest:
+        return data, b""
+    intro = rest[0]
+    if intro in _ESC_STRING_INTRODUCERS:
+        # A control string runs to BEL or ST; until one arrives it is whole
+        # unknown, so nothing after it may be read as a key.
+        j = 1
+        while j < len(rest):
+            if rest[j] == 0x07:
+                return data, b""
+            if rest[j] == 0x1B:
+                if j + 1 < len(rest):
+                    return data, b""  # ST: the string ended here
+                return data[:esc], data[esc:]  # maybe the start of ST
+            j += 1
+        return data[:esc], data[esc:]
+    if intro == 0x5B:  # CSI — parameters, then one final byte
+        j = 1
+        while j < len(rest) and not (0x40 <= rest[j] <= 0x7E):
+            j += 1
+        if j >= len(rest):
+            return data[:esc], data[esc:]  # no final byte yet
+        if rest[j] == 0x4D and j == 1:
+            # X10 mouse: three raw bytes follow the final byte and all three
+            # are printable, so a missing one must not be read as typing.
+            if len(rest) - j - 1 < 3:
+                return data[:esc], data[esc:]
+        return data, b""
+    if intro == 0x4F:  # SS3 — exactly one final byte
+        return (data, b"") if len(rest) >= 2 else (data[:esc], data[esc:])
+    return data, b""
+
+
+def _split_incomplete_utf8(data: bytes) -> Tuple[bytes, bytes]:
+    """Split a trailing UTF-8 character that has not finished arriving.
+
+    A Hangul syllable is three bytes, and a frame can end after one of them.
+    Counting the halves as two characters would leave a character's worth of
+    credit in the composer after the person deleted the only character they
+    typed — the false hold this counting exists to remove, by another route.
+    """
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:
+            continue  # a continuation byte; the lead byte is further back
+        if byte < 0x80:
+            return data, b""
+        if byte & 0xE0 == 0xC0:
+            need = 2
+        elif byte & 0xF0 == 0xE0:
+            need = 3
+        elif byte & 0xF8 == 0xF0:
+            need = 4
+        else:
+            return data, b""
+        return (data, b"") if back >= need else (data[:-back], data[-back:])
+    return data, b""
+
+
+def draft_edit_from_bytes(
+    data: bytes, *, in_paste: bool = False
+) -> Tuple[int, bool, bool]:
     """What ``data`` — keystrokes a human just sent — did to their composer.
 
-    ``True`` = there is now an unsent draft in it, ``False`` = it was just
-    submitted or cleared, ``None`` = neither (nothing about the draft
-    changed). The last one matters as much as the others: an arrow key, a
-    lone Escape or a backspace must leave a draft *open*, because a message
-    typed into the terminal at that moment is still typed into a line
-    somebody is writing.
+    ``(delta, cleared, in_paste)``. ``cleared`` is True when the frame
+    submitted the line (a bare Enter) or discarded it (``C-c``, ``C-u``): the
+    composer is empty after those, whatever was in it. ``delta`` is the net
+    number of *characters* the frame put in the composer after the last such
+    key: printable text counts one per character (a committed Hangul syllable
+    is one character and three bytes; a pasted run is counted the same way), a
+    backspace or a forward Delete subtracts one, and a newline inserted *into*
+    the draft (Alt/Shift-Enter, backslash + Enter, a line break inside a
+    bracketed paste) adds one.
+
+    ``in_paste`` is the bracketed-paste state the frame ended in. A frame can
+    end between the paste's start marker and its body (:data:`ESC[200~` in one
+    frame, the text in the next), and reading each frame on its own made the
+    next frame's newline a submit instead of a pasted line break — the line
+    was cleared and the draft with it (claunch-wzx2r.1). The caller passes the
+    value back in with the following frame's bytes; only the caller can time
+    out a marker whose body never finished (see
+    :meth:`Session._carried_paste`).
+
+    ``(0, False)`` means the frame said nothing about the composer: an arrow
+    key, a lone Escape, Home, the terminal's own reports. That case matters
+    as much as the others — a message typed into the terminal while somebody
+    is writing a line is still typed into that line — and it is why the
+    count lives on the session (:attr:`Session._draft_chars`) rather than in
+    this answer: only the composer's running total can tell "backspace in a
+    line" from "backspace in an empty one".
 
     Read from the bytes, not from the screen. A composer's contents are a
     guess to make from a rendered grid — placeholder hints look exactly like
     text once the colours are gone — but they are a fact on the wire: this is
     the keyboard, and these are the keys.
-
-    Rules, in the order they are tested:
-
-    * an escape sequence (arrows, function keys, a bracketed-paste *marker*)
-      changes nothing — its bytes are not characters, whatever they look like;
-    * ``ESC`` + Enter and backslash + Enter insert a newline *into* the
-      composer rather than submitting it (Alt/Shift-Enter, the continuation
-      most TUIs take), so they open a draft rather than closing one;
-    * a bare Enter submits, and ``C-c`` / ``C-u`` discard: the composer is
-      empty after either, so the draft is closed;
-    * anything printable — including the multi-byte UTF-8 of a committed
-      Hangul syllable, and text arriving inside a bracketed paste — opens one.
     """
-    state: Optional[bool] = None
-    i = 0
-    n = len(data)
-    while i < n:
-        b = data[i]
-        if b == 0x1B:  # ESC: a chord or a control sequence, not typing
-            nxt = data[i + 1] if i + 1 < n else None
-            if nxt in (0x5B, 0x4F):  # CSI / SS3 — skip to the final byte
-                i += 2
-                while i < n and not (0x40 <= data[i] <= 0x7E):
-                    i += 1
-                i += 1
-                continue
-            if nxt in (0x0D, 0x0A):  # Alt/Shift-Enter: a newline in the draft
-                state = True
-                i += 2
-                continue
-            i += 2 if nxt is not None else 1  # ESC alone, or Alt-<key>
+    delta = 0
+    cleared = False
+    run = bytearray()
+
+    def flush() -> None:
+        nonlocal delta
+        if run:
+            delta += len(bytes(run).decode("utf-8", errors="replace"))
+            run.clear()
+
+    for kind, i, j in _input_tokens(data):
+        if kind == "report":
+            flush()
             continue
+        if kind == "seq":
+            flush()
+            seq = data[i:j]
+            if seq == b"\x1b[200~":
+                in_paste = True
+            elif seq == b"\x1b[201~":
+                in_paste = False
+            elif seq == b"\x1b[3~" and not in_paste:
+                # Delete forward removes a character, the same way a
+                # backspace does. A line erased with Home + Delete used
+                # to leave the count positive over an empty composer, and
+                # the phantom draft held the session's mail for
+                # DRAFT_GUARD (claunch-m2v4w). Inside a bracketed paste
+                # the same bytes are literal text, not a keypress.
+                delta -= 1
+            elif j - i == 2 and data[i + 1] in (0x0D, 0x0A):
+                delta += 1  # Alt/Shift-Enter: a newline in the draft
+            continue
+        b = data[i]
         if b in (0x0D, 0x0A):
-            # Backslash-Enter is the other "newline, don't send" spelling.
-            state = True if (i and data[i - 1] == 0x5C) else False
+            flush()
+            if in_paste:
+                delta += 1  # a pasted line break stays in the composer
+            elif i and data[i - 1] == 0x5C:
+                delta += 1  # backslash + Enter: the other newline spelling
+            else:
+                delta = 0
+                cleared = True
         elif b in (0x03, 0x15):  # C-c, C-u — the line is gone
-            state = False
-        elif b >= 0x20 and b != 0x7F:  # printable (0x7F is backspace)
-            state = True
-        i += 1
-    return state
+            flush()
+            delta = 0
+            cleared = True
+        elif b in (0x08, 0x7F):  # backspace — one character less
+            flush()
+            delta -= 1
+        elif b >= 0x20:  # printable; collected so one Hangul syllable is one
+            run.append(b)
+    flush()
+    return delta, cleared, in_paste
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -469,6 +673,21 @@ async def _deliver_after_hold(session, text, **kwargs) -> bool:
     return await current.deliver(text, **kwargs)
 
 
+
+def _signallable(session) -> bool:
+    """Whether an ending asked of ``session`` now reaches a program: one is
+    attached, or the boot is adopting one (:attr:`Session.adopting`)."""
+    return session.pty is not None or getattr(session, "adopting", None) is not None
+
+
+def _terminate(session, force: bool) -> None:
+    """Signal ``session``'s program, or owe the signal to
+    :meth:`Session.adopt` while there is no PTY to signal yet."""
+    if session.pty is not None:
+        session.pty.terminate(force=force)
+    else:
+        session._ending_owed = bool(session._ending_owed) or force
+
 class Session:
     """Owns one PTY child; created and torn down by the SessionManager.
 
@@ -487,6 +706,17 @@ class Session:
     #: screen; :meth:`screen_synced` waits on it. A class default, so a
     #: session put together without ``__init__`` (tests do) reads None.
     _seed_done: Optional[asyncio.Event] = None
+
+    #: The key of the profile's pool this session's last launch handed the
+    #: child (``harness.launch_key``), or None when it took none (no pool, a
+    #: null-token session, a borrow) or has not launched yet. Kept in memory
+    #: rather than in the definition: every launch recomputes it, and what it
+    #: answers is "which key was that process on" — a fact about this daemon's
+    #: process, not a setting that outlives it. The rail's key modal reads it
+    #: (claunch-i985h); the profile's token file cannot answer, because every
+    #: launch of the pool writes it. A class default for the same reason as
+    #: ``_seed_done``.
+    launched_key: Optional[str] = None
 
     def __init__(
         self,
@@ -510,6 +740,19 @@ class Session:
         #: The PTY host record :meth:`detach` made (claunch-xnnct.1).
         self.detached_pty: Optional[dict] = None
         self._detaching = False
+        #: The saved PTY host record while the boot adopts this session
+        #: (claunch-opirg): staged, its screen being built off the loop, not
+        #: attached yet. The loop runs meanwhile, so a persist must still
+        #: find the host session (:meth:`pty_record`), and an ending asked
+        #: for has no PTY to signal yet -- it is owed (:attr:`_ending_owed`)
+        #: and :meth:`adopt` delivers it once attached.
+        self.adopting: Optional[dict] = None
+        #: ``force`` of an ending asked for while :attr:`adopting`; None when
+        #: none was.
+        self._ending_owed: Optional[bool] = None
+        #: A resize asked for while :attr:`adopting`, for :meth:`adopt` to
+        #: pass to the program once attached.
+        self._resize_owed = False
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
@@ -592,6 +835,11 @@ class Session:
         #: shutdown (manager.ended_by_os): the exit is recorded, but the
         #: record stays one the next boot restores.
         self.ended_by_os = False
+        #: Set at the exit when the PTY host went away under the session (it
+        #: stopped, or its connection was lost) rather than the program
+        #: ending (claunch-hor3b.1). The manager relaunches it, as a restart
+        #: without the host would, instead of filing it as failed.
+        self.ended_by_host = False
         # Archiving is a retained record's lifecycle marker. A live session
         # always starts outside the archive; respawn therefore clears it by
         # constructing a new Session from the retained definition.
@@ -705,7 +953,7 @@ class Session:
         self._last_terminal_input = 0.0
         #: Whether characters typed at such a terminal are still sitting in
         #: the composer unsent. Opened and closed by the keys themselves (see
-        #: :func:`draft_state_from_bytes`), never by a timer: a delivery typed
+        #: :func:`draft_edit_from_bytes`), never by a timer: a delivery typed
         #: into a half-written line is the corruption all of this exists to
         #: prevent, and the human's own Enter is what says it is safe again.
         self._draft_open = False
@@ -717,6 +965,30 @@ class Session:
         #: no closing bytes at all, and DRAFT_GUARD would hold this
         #: session's mail for minutes over a draft that never existed here.
         self._draft_uncommitted = False
+        #: What the composer holds, in characters, as far as the keys have
+        #: said: +1 per character typed or pasted, -1 per backspace, reset by
+        #: a submit or a discard. ``_draft_open`` is set from this whenever
+        #: bytes arrive, so a line that was typed and then erased closes the
+        #: draft instead of holding the session for DRAFT_GUARD over an empty
+        #: composer (claunch-wzx2r). A composing mark opens a draft with this
+        #: still at 0 — nothing has reached the composer yet.
+        self._draft_chars = 0
+        #: Bytes of an escape sequence or a UTF-8 character that were cut off
+        #: at the end of the last keystroke frame, and when they arrived. They
+        #: are read with the next frame's bytes instead of being taken for
+        #: keys (see :meth:`_complete_keystroke_frame`).
+        self._input_partial = b""
+        self._input_partial_at = 0.0
+        #: Whether the last keystroke frame ended inside a bracketed paste —
+        #: its start marker has arrived and its end marker has not. The marker
+        #: and the pasted text can land in different frames, and a newline
+        #: read without this is a submit rather than a line break in the
+        #: paste (claunch-wzx2r.1). Timed out like :attr:`_input_partial`: a
+        #: marker whose body never finishes must not turn a later Enter into
+        #: a pasted newline, which would hold this session's mail over a
+        #: composer the person did submit.
+        self._input_paste = False
+        self._input_paste_at = 0.0
         #: A person's standing "don't type anything in here" — set from the
         #: dashboard, not derived from the keyboard. Every hold above is the
         #: daemon *guessing* from timing that now is a bad moment; this one
@@ -816,7 +1088,10 @@ class Session:
             name=self.sdef.name,
         ))
 
-    def adopt(self, handle, replay: bytes, reply: dict, saved: dict) -> None:
+    def adopt(
+        self, handle, replay: bytes, reply: dict, saved: dict,
+        screen: Optional[ScreenState] = None,
+    ) -> None:
         """Take over a session the PTY host kept across a daemon restart
         (claunch-xnnct.1) instead of starting a program.
 
@@ -832,29 +1107,80 @@ class Session:
         alone and the log is left as it is, so it can miss what the program
         wrote between the crash and now.
 
+        ``screen`` is that rebuilt screen when the caller already made it
+        with :meth:`adopted_screen` -- the boot does, on a worker thread
+        (claunch-opirg) -- and is built here otherwise. It must be built
+        before the replay is appended below: the tail it reads ends where
+        the replay begins.
+
         The replay is not fed to the activity or compaction scanners: it is
         old output, and the clocks those drive must not read it as new.
         """
+        if screen is None:
+            screen = self.adopted_screen(
+                replay, saved, self.screen.cols, self.screen.rows,
+                self.screen.history_limit,
+            )
         self.argv = list(saved.get("argv") or [])
         self._started_mono = time.monotonic()
         gap = int(reply.get("gap") or 0)
         if saved.get("seq") is not None:
-            tail = self._replay_tail()
-            if tail:
-                self.screen.feed(tail)
-            self.screen.apply_modes(saved.get("modes") or {})
             if gap:
                 self._append_log(lost_output_note(gap))
             if replay:
                 self._append_log(replay)
-        if replay:
-            self.screen.feed(replay)
+        self.screen.adopt(screen)
         # The program is running and has drawn; it is not STARTING, and it
         # took input before the restart.
         self._saw_output = True
         self._input_ready = True
         self._last_output_mono = time.monotonic()
+        self.adopting = None
         self._attach(handle)
+        if self._resize_owed:
+            self._resize_owed = False
+            self.pty.resize(self.sdef.cols, self.sdef.rows)
+        owed, self._ending_owed = self._ending_owed, None
+        if owed is not None:
+            # Asked for while the screen was being built: delivered now, so
+            # the exit reads as that kill, pause or hold.
+            self.pty.terminate(force=owed)
+
+    async def _until_adopted(self, timeout: float = 30.0) -> None:
+        """Wait while the boot adopts this session (:attr:`adopting`): a
+        writer that reaches it between its stage and its attach is held for
+        the attach (a fraction of a second) instead of told it has exited."""
+        deadline = time.monotonic() + timeout
+        while (self.pty is None and getattr(self, "adopting", None) is not None
+               and not self.exited and time.monotonic() < deadline):
+            await asyncio.sleep(0.02)
+
+    def adopted_screen(
+        self, replay: bytes, saved: dict, cols: int, rows: int, limit: int
+    ) -> ScreenState:
+        """The screen :meth:`adopt` takes over, built apart from the
+        session's own.
+
+        Safe on a worker thread: it reads the log and fills a screen of its
+        own, and touches nothing the loop holds (``cols``/``rows``/``limit``
+        are read off the session's screen by the caller, on the loop). The
+        log it reads is not written meanwhile: the session is not attached
+        yet, so nothing reads its program, and :meth:`adopt` appends the
+        replay only after this returns. The
+        pyte work is the boot's largest part -- 0.3s a session, 59.1s of a
+        112.1s restore of 162 sessions on 2026-10-28 (claunch-opirg) -- and
+        off the loop the loop serves everything else meanwhile.
+        """
+        screen = ScreenState(cols, rows, history=self._scrollback)
+        screen.set_history_limit(limit)
+        if saved.get("seq") is not None:
+            tail = self._replay_tail()
+            if tail:
+                screen.feed(tail)
+            screen.apply_modes(saved.get("modes") or {})
+        if replay:
+            screen.feed(replay)
+        return screen
 
     async def detach(self, timeout: float = 5.0) -> Optional[dict]:
         """Let go of a session that runs in the PTY host, leaving it running
@@ -906,6 +1232,8 @@ class Session:
         detached = self.detached_pty
         if detached is not None:
             return detached
+        if self.adopting is not None:
+            return dict(self.adopting)
         pty = self.pty
         sid = getattr(pty, "sid", None)
         if self.exited or sid is None or not callable(getattr(pty, "detach", None)):
@@ -1234,6 +1562,7 @@ class Session:
             task.cancel()
         reap = getattr(self.pty, "reap", None)
         self.exit_code = reap() if reap is not None else self.pty.exit_code()
+        self.ended_by_host = bool(getattr(self.pty, "host_ended", False))
         self.exited_at = _utcnow()
         self._status = STATUS_EXITED
         # The last words of a session are the ones somebody reads afterwards,
@@ -1761,6 +2090,49 @@ class Session:
             await asyncio.sleep(0.2)
         self._input_ready = True
 
+    def _complete_keystroke_frame(self, data: bytes, now: float) -> bytes:
+        """``data`` minus any escape sequence or character cut off at its end.
+
+        The cut-off bytes are held and read with the next frame's (see
+        :func:`_split_incomplete_escape` and :func:`_split_incomplete_utf8`),
+        so a sequence split across two frames stays one key and a character
+        split across two frames stays one character. A held fragment that
+        never finishes is dropped after :data:`DRAFT_PARTIAL_TTL`, so an
+        abandoned half cannot swallow the next person's first keystroke.
+        """
+        pending = getattr(self, "_input_partial", b"")
+        if (
+            pending
+            and now - getattr(self, "_input_partial_at", 0.0) > DRAFT_PARTIAL_TTL
+        ):
+            pending = b""
+        complete, pending = _split_incomplete_escape(pending + data)
+        complete, tail = _split_incomplete_utf8(complete)
+        if tail:
+            pending = tail + pending
+        self._input_partial = pending
+        self._input_partial_at = now
+        return complete
+
+    def _carried_paste(self, now: float) -> bool:
+        """Whether the previous keystroke frame left a bracketed paste open.
+
+        A paste start marker with no body yet belongs to the frame that
+        follows it (:meth:`draft_edit_from_bytes`), so it is carried the same
+        way a cut-off escape sequence is. It is dropped after
+        :data:`DRAFT_PARTIAL_TTL` for the same reason: a marker whose body
+        never arrives must not make an unrelated later Enter read as a pasted
+        line break — the person submitting their line would otherwise leave a
+        draft open behind them.
+        """
+        if not getattr(self, "_input_paste", False):
+            return False
+        if now - getattr(self, "_input_paste_at", 0.0) > DRAFT_PARTIAL_TTL:
+            self._input_paste = False
+            self._input_paste_at = 0.0
+            return False
+        return True
+
     def note_human_input(
         self,
         *,
@@ -1787,7 +2159,7 @@ class Session:
         what moves the draft state: the timing above says *when* somebody
         last touched the keyboard, ``data`` says whether what they touched it
         for is still sitting unsent in the composer (see
-        :func:`draft_state_from_bytes`). ``composing`` is the web terminal's
+        :func:`draft_edit_from_bytes`). ``composing`` is the web terminal's
         equivalent claim for keys that produced no bytes yet — an IME
         mid-syllable is a draft being written even though the wire is quiet.
         A draft it opens is marked *uncommitted*, though: nothing is in the
@@ -1797,11 +2169,18 @@ class Session:
         Both are terminal-only: ``send-keys`` types a line and its Enter
         together, and holding *itself* behind its own text would deadlock.
         """
-        on_command = getattr(self, "on_command_submitted", None)
-        if data and on_command is not None:
-            for line in self._submitted_lines.feed(data):
-                on_command(self, line)
         now = time.monotonic()
+        if data:
+            data = self._complete_keystroke_frame(data, now)
+            if data and is_terminal_report(data):
+                # The emulator answering a query or reporting the mouse/focus:
+                # nobody pressed a key, so neither clock moves and no draft
+                # opens.
+                return
+            on_command = getattr(self, "on_command_submitted", None)
+            if data and on_command is not None:
+                for line in self._submitted_lines.feed(data):
+                    on_command(self, line)
         self._last_human_input = now
         if not at_terminal:
             return
@@ -1820,12 +2199,46 @@ class Session:
                 self._draft_uncommitted = True
             self._draft_open = True
         if data:
-            state = draft_state_from_bytes(data)
-            if state is not None:
-                self._draft_open = state
-                # Bytes settle the question either way: a committed
-                # character is a real draft now, a submit/clear closed it.
+            delta, cleared, paste = draft_edit_from_bytes(
+                data, in_paste=self._carried_paste(now)
+            )
+            self._input_paste = paste
+            self._input_paste_at = now if paste else 0.0
+            if cleared:
+                # The line went away with its submit (or was discarded);
+                # only what was typed after it, in this same frame, remains.
+                self._draft_chars = max(0, delta)
+                self._draft_open = self._draft_chars > 0
                 self._draft_uncommitted = False
+            elif delta:
+                self._draft_chars = max(
+                    0, getattr(self, "_draft_chars", 0) + delta
+                )
+                # A line typed and then erased is an empty composer, and an
+                # empty composer is not a draft: it must not hold this
+                # session's mail for DRAFT_GUARD (claunch-wzx2r). Bytes settle
+                # the question either way — a committed character is a real
+                # draft now, a submit/clear closed it.
+                self._draft_open = self._draft_chars > 0
+                self._draft_uncommitted = False
+        if data or composing:
+            # claunch-m2v4w: a held draft is diagnosed from this line after
+            # the fact. When a session is held over a composer its operator
+            # calls empty, the frames that built the held draft have to be
+            # readable from the daemon log — without them the next
+            # investigation of a false positive reconstructs the model from
+            # nothing, as the round that added this line had to.
+            name = getattr(getattr(self, "sdef", None), "name", None) or "?"
+            log.debug(
+                "draft %s: chars=%d open=%s uncommitted=%s "
+                "(frame=%r composing=%s)",
+                name,
+                getattr(self, "_draft_chars", 0),
+                self._draft_open,
+                self._draft_uncommitted,
+                (data or b"")[:32],
+                composing,
+            )
 
     def draft_open(self) -> bool:
         """Whether a human has an unsent line in this terminal's composer.
@@ -2083,7 +2496,10 @@ class Session:
         """
         await self.write_bytes(b"\r")
         self._draft_open = False
+        self._draft_chars = 0
         self._draft_uncommitted = False
+        self._input_paste = False
+        self._input_paste_at = 0.0
         await asyncio.sleep(FORCE_DRAFT_SETTLE)
 
     async def paste(self, text: str, *, enter: bool = False) -> bytes:
@@ -2216,6 +2632,7 @@ class Session:
         with a replacement character. See
         ``claunch-pty-shared-decoder-across-writers-o3cy4``.
         """
+        await self._until_adopted()
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         # One writer at a time. A session has several -- each viewer, the
@@ -2238,7 +2655,8 @@ class Session:
             self.pty.forget_writer(writer)
 
     def resize(self, cols: int, rows: int) -> None:
-        if self.exited or self.pty is None:
+        adopting = self.pty is None and getattr(self, "adopting", None) is not None
+        if self.exited or (self.pty is None and not adopting):
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         if cols == self.sdef.cols and rows == self.sdef.rows:
             # Same size, nothing changed — and a broadcast here has teeth now:
@@ -2247,7 +2665,12 @@ class Session:
             # The web terminal re-asserts the size on focus regain, so this is
             # not a rare corner; keep the no-op a no-op.
             return
-        self.pty.resize(cols, rows)
+        if adopting:
+            # Owed to the attach; the screen takes the size now, and
+            # :meth:`adopt` keeps it when it swaps the built one in.
+            self._resize_owed = True
+        else:
+            self.pty.resize(cols, rows)
         self.screen.resize(cols, rows)
         self.sdef = dataclasses.replace(self.sdef, cols=cols, rows=rows)
         self._broadcast(("resize", (cols, rows)))
@@ -2281,12 +2704,12 @@ class Session:
             self.ended_by = dict(by)
 
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         if by:
             self.note_ender(by)
         self.kill_requested = True
-        self.pty.terminate(force=force)
+        _terminate(self, force)
 
     def pause(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as paused rather than killed.
@@ -2298,7 +2721,7 @@ class Session:
         running with the marker set, which the rail draws as "pausing" — the
         same window a plain kill has, made visible.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         self.paused_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2309,7 +2732,7 @@ class Session:
         Marker before signal, for the reason :meth:`pause` gives: the exit
         funnel reads it to decide that nothing has ended.
         """
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         self.held_at = _utcnow()
         self.kill(force=force, by=by)
@@ -2325,12 +2748,19 @@ class Session:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        if self.exited or self.pty is None:
+        if self.exited or not _signallable(self):
             return
         # An asked-for ending like kill(): redefine, migrate, archive and
         # clear --running end sessions through here, not through kill().
         self.kill_requested = True
-        self.pty.terminate(force=False)
+        _terminate(self, False)
+        # Mid-adoption the terminate is owed until the attach: wait for it,
+        # so the caller (archive, redefine) gets the session ended, not
+        # "still running".
+        if self.pty is None:
+            await self._until_adopted()
+        if self.pty is None:
+            return
         deadline = time.monotonic() + grace
         while not self.exited and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
@@ -2587,6 +3017,12 @@ class Session:
     def info(self) -> dict:
         return {
             **self.sdef.to_dict(),
+            # Which key of the profile's pool this session's process is on
+            # (see the attribute). Separate from ``key_id``, which is the pin
+            # the operator chose: a session can run on a strategy-picked key
+            # with no pin at all, and the pin can be set for a launch that has
+            # not happened yet.
+            "launched_key": self.launched_key,
             "status": self.status(),
             "pid": self.pid,
             "exit_code": self.exit_code,
@@ -2894,10 +3330,24 @@ class DeadSession:
             "ended_by": self.ended_by,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
-            # A record has no live screen to scan; a fault it showed before
-            # ending was a live session's reading, and it is not persisted.
-            "fault": None,
+            # A record has no live screen to scan, so a fault it showed while
+            # running is gone -- except the one the fault-pause clock stopped
+            # it for, which that clock wrote to the session directory.
+            "fault": self.fault(),
         }
 
     def fault(self) -> Optional[dict]:
-        return None
+        """The fault the fault-pause clock stopped this session for, or None.
+
+        A pause kills the process, so the live reading (:mod:`session_fault`,
+        taken off the screen) dies with it and this record answered ``None``
+        for the days between the pause and its reset -- a session visibly
+        stopped with nothing on the dashboard saying why (claunch-9djny.1).
+        While the pause is still in force (not unpaused, not archived) and
+        the record on disk is that pause's, its fault is answered here in the
+        shape a live reading has, with ``source: "pause-record"``.
+        """
+        # Imported here: fault_pause imports this module for STATUS_IDLE.
+        from . import fault_pause
+
+        return fault_pause.paused_fault(self)

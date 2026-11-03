@@ -788,6 +788,16 @@ async def _pump_cli(
 async def _cli_control(
     ws: web.WebSocketResponse, shell, raw: str
 ) -> None:
+    """A control frame from a raw shell's viewer.
+
+    ``restart`` is the pane's revive control, and the pane offers it only for
+    a shell that exited. A frame that arrives while the child is live is
+    refused and answered with ``{"type":"restart","ok":false,"reason":"live"}``
+    rather than replacing a child somebody is using -- a socket frame is
+    something any client can send, and the panel is not the only writer
+    (claunch-742jf.1). ``ShellPty.restart`` is safe for a live child as well;
+    the check here is about who may ask, not about what restart does.
+    """
     try:
         msg = json.loads(raw)
     except ValueError:
@@ -801,6 +811,14 @@ async def _cli_control(
         except (KeyError, ValueError, TypeError):
             pass
     elif kind == "restart":
+        if not shell.exited:
+            await ws.send_str(
+                json.dumps(
+                    {"type": "restart", "ok": False, "reason": "live",
+                     "pid": shell.pid}
+                )
+            )
+            return
         shell.restart()
 
 
@@ -828,7 +846,7 @@ async def _pump_from_client(
             # is only half the question — the other half is whether
             # what they typed is still sitting in the composer
             # unsent, and only these bytes can say (Session.
-            # note_human_input / draft_state_from_bytes).
+            # note_human_input / draft_edit_from_bytes).
             if _is_codex_osc_color_response(session.sdef.harness, msg.data):
                 continue
             session.note_human_input(at_terminal=True, data=msg.data)

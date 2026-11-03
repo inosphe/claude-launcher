@@ -134,6 +134,22 @@ def test_task_validation_errors():
     assert "unknown task 'zz'" in err("body: zz\n")
 
 
+def test_ask_criteria_is_a_declared_keyword_list():
+    """``ask.criteria`` (thread th-3b3470): what a step says about the notice
+    its question raises, as keywords rather than a rank. The words are a
+    closed set — the dashboard acts on them, so an unknown one is refused
+    where it is written instead of silently doing nothing."""
+    chart = C("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: [deferrable]}}\n")
+    assert chart.node("x").get("ask")["criteria"] == ["deferrable"]
+    # Absent means "no declaration", not "some default word".
+    plain = C("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q}}\n")
+    assert plain.node("x").get("ask")["criteria"] == []
+    msg = err("body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: [someday]}}\n")
+    assert "someday" in msg and "deferrable" in msg
+    assert "list of names" in err(
+        "body: x\n", "nodes:\n  x: {prompt: p, ask: {prompt: q, criteria: deferrable}}\n")
+
+
 def test_fragments_expand_nested_and_text_id_ignores_values():
     chart = C("body: x\n", """
         fragments:
@@ -269,6 +285,27 @@ body:
     assert "loop needs max" in err("body:\n  loop: {while: 'true', do: a}\n")
     assert "retry needs max" in err("body:\n  retry: {do: a}\n")
     assert "exactly one of while / until" in err("body:\n  loop: {max: 2, do: a}\n")
+
+
+def test_a_loop_marks_itself_as_rounds():
+    """``loop.rounds`` (claunch-oxmso.1): the definition says which loop's
+    iterations are the workflow's rounds, and the display value ``round_now``
+    reads that mark instead of guessing from the loop's position."""
+    chart = C("""
+body:
+  - loop: {while: "$data.n < 3", max: 5, do: a, rounds: true}
+  - loop: {while: "$data.n < 3", max: 5, do: a}
+""")
+    assert chart.node("body.0").get("rounds") is True
+    assert chart.node("body.1").get("rounds") is False
+    # Only ``while``/``until`` loops take the mark; a foreach or retry is not a
+    # round and the frontend says so rather than accepting a dead key.
+    assert "unknown key 'rounds'" in err("body:\n  foreach: {in: $data.x, do: a, rounds: true}\n")
+    assert "unknown key 'rounds'" in err("body:\n  retry: {do: a, max: 2, rounds: true}\n")
+    # A string is not a declaration; the value has to be a boolean. (Bare
+    # ``yes`` is not the case to test -- YAML reads it as true.)
+    assert "loop.rounds must be true or false" in err(
+        "body:\n  loop: {while: 'true', max: 2, do: a, rounds: 'yes'}\n")
 
 
 def test_par_settle():

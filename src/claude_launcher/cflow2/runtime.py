@@ -3343,6 +3343,10 @@ def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Opti
     option = opt["name"]
     r.inst[iid]["await"] = None
     r.inst[iid]["frame"]["option"] = option
+    # the chooser's reason travels with the option: an ask opened under it
+    # shows why it was reached (``_ask_because``, claunch-0rjnn.2)
+    r.inst[iid]["frame"]["option_reason"] = reason
+    r.inst[iid]["frame"]["option_by"] = by
     if opt.get("interval"):
         r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
     r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
@@ -4323,11 +4327,18 @@ def _force_target_id(chart: ir.Chart, ref: str) -> str:
     raise FlowError(f"no node {ref!r} (force targets: {known})")
 
 
-def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any],
+          reason: Optional[str] = None, by: str = CALLER_USER) -> Optional[Dict[str, Any]]:
     """Point instance ``iid`` at the child ``slot`` names, as if it had
     reached that child on its own: the frame field that tracks the child, any
     hold of its own released. Returns the environment the child is entered
-    with (what the combinator would have given it), or ``None``."""
+    with (what the combinator would have given it), or ``None``.
+
+    A choice seated this way records the move's ``reason`` and ``by`` as its
+    option's, the way ``_take_option`` does: an ask the move opens under it
+    shows why it was reached (``_ask_because``), and a reason an earlier pick
+    of another option left on the frame does not stand next to the new
+    option (claunch-hvyof)."""
     inst = r.inst[iid]
     frame = inst["frame"]
     inst["await"] = None
@@ -4344,6 +4355,8 @@ def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dic
         frame["branch"] = slot["branch"]
     elif t == ir.T_CHOOSE:
         frame["option"] = slot["option"]
+        frame["option_reason"] = reason
+        frame["option_by"] = by
     elif t == ir.T_LOOP:
         if not frame.get("iter"):
             frame.update({"iter": 1, "base": 0, "values": [], "extra": 0, "last": None})
@@ -4416,7 +4429,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
               if granted else {}))
     moved.update(node=tid, label=node.label or None, at=r.inst[cur]["node"], left=left)
     _cancel_children(r, cur, "forced")
-    env = _seat(r, cur, r.node_of(cur), path[k][1] or {})
+    env = _seat(r, cur, r.node_of(cur), path[k][1] or {}, reason, by)
     parent = cur
     for j in range(k, len(path) - 1):
         nid, slot = path[j]
@@ -4429,7 +4442,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         _queue_triggers(r, iid, mid, AT_ENTER)
         if mid.type == ir.T_SCOPE and not _scope_params(r, iid, mid):
             return
-        env = _seat(r, iid, mid, path[j + 1][1] or {})
+        env = _seat(r, iid, mid, path[j + 1][1] or {}, reason, by)
         parent = iid
     _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
 
@@ -5533,6 +5546,68 @@ def rule(name: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
             "deliver": body.get("deliver"), "effect": body.get("effect")}
 
 
+def _instance_depth(inst: Dict[str, Any], iid: str) -> int:
+    """How many live parents ``iid`` has inside the run (0 for a root child)."""
+    depth = 0
+    seen: Set[str] = {iid}
+    parent = (inst.get(iid) or {}).get("parent")
+    while parent and parent in inst and parent not in seen:
+        seen.add(parent)
+        depth += 1
+        parent = (inst.get(parent) or {}).get("parent")
+    return depth
+
+
+def current_round(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
+    """The round a run is in, as a person reads it off the rail and the pages.
+
+    Two workflows count rounds in two ways, and the display has to follow the
+    one the definition uses. A recurring workflow (``recur``) ends its run each
+    round and starts the next one, so its round is the slot's ``round``
+    (:func:`_new_run`). One that does not recur (improv-worker-v2,
+    perf-monitor-v2) runs its rounds as iterations of a loop inside the same
+    run -- ``state["round"]`` stays 1 there -- so its round is the iteration of
+    the loop its definition marked ``rounds: true`` (docs 2.3, ``loop``).
+    ``None`` when neither applies: a run outside a recurring round and outside
+    a round loop has no round to show, and the caller falls back to
+    ``state["round"]``.
+
+    The declaration is what makes this readable. Before it (claunch-oxmso) the
+    rule was "the outermost live while/until loop", which named the iteration
+    of a watch loop -- ``operator-v2``'s ``service`` polls ``claunch operators
+    watch`` and has no rounds at all -- so a session's rail counted its polling
+    passes as rounds (claunch-oxmso.1).
+    """
+    if (chart.meta or {}).get("recur"):
+        value = state.get("round")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    inst = state.get("inst") or {}
+    best: Optional[Tuple[int, int]] = None      # (depth, iteration)
+    for iid, rec in inst.items():
+        node_id = rec.get("node")
+        try:
+            node = chart.node(node_id)
+        except ir.IRError:
+            continue
+        if node.type != "loop" or node.get("mode") not in (ir.LOOP_WHILE, ir.LOOP_UNTIL):
+            continue
+        if node.get("rounds") is not True:
+            continue
+        frame = rec.get("frame") or {}
+        try:
+            # ``iter`` counts from 1 and ``base`` is what a reset dropped;
+            # the difference is the round number a person sees.
+            iteration = int(frame.get("iter") or 0) - int(frame.get("base") or 0)
+        except (TypeError, ValueError):
+            continue
+        if iteration <= 0:
+            continue
+        depth = _instance_depth(inst, iid)
+        if best is None or depth < best[0] or (depth == best[0] and iteration > best[1]):
+            best = (depth, iteration)
+    return None if best is None else best[1]
+
+
 def status(*, cwd: Optional[str] = None, scope: Optional[str] = None,
            now: Optional[float] = None, tick: bool = True) -> Dict[str, Any]:
     """The run as the driver needs it: active tasks with rendered prompts,
@@ -5580,6 +5655,11 @@ def describe(r: Run) -> Dict[str, Any]:
         out["pending_triggers"] = len(s.get("triggers") or [])
     if s.get("round"):
         out["round"] = s["round"]
+    # ``round`` is the slot's run round (recur); a run that loops its rounds
+    # inside one run keeps that at 1, so the display value is its own field.
+    round_now = current_round(s, r.chart)
+    if round_now is not None:
+        out["round_now"] = round_now
     if s.get("side"):
         out["side"] = s["side"]
     sides = (r.chart.meta or {}).get("sides") or {}
@@ -5966,6 +6046,11 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
         "on_unroutable": raw.get("on_unroutable") or None,
         "urgent": raw.get("urgent") is True,
+        # What the step says about its own notice besides ``urgent``: keywords
+        # the dashboard reads, never a rank (frontend.ASK_CRITERIA). Charts
+        # compiled before this key was normalised simply carry none.
+        "criteria": [str(c) for c in (raw.get("criteria") or [])
+                     if isinstance(c, str)],
         "options": list(options) if options else None,
     }
 
@@ -6171,12 +6256,16 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "default_option": spec["default_option"], "timeout": spec["timeout"],
         "on_decline": None if spec["options"] else spec["on_decline"],
         "on_unroutable": spec.get("on_unroutable"), "urgent": bool(spec.get("urgent")),
+        "criteria": list(spec.get("criteria") or []),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
         "retry_at": None, "opened": store_mod.utcnow(), "opened_at": r.now,
         "visit": int((r.state.get("visits") or {}).get(node_key(node)) or 0),
     }
+    because = _ask_because(r, iid)
+    if because:
+        rec["because"] = because
     if brief is not None:
         rec.update(format=brief["format"], brief=brief["brief"],
                    question_text=brief["question_text"], intro=rec["prompt"],
@@ -6197,6 +6286,44 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
            otherwise=spec["otherwise"])
     if not spec["from"]:
         _ask_fall(r, rec, "the ask declares no 'from' candidates")
+
+
+def _ask_because(r: Run, iid: str) -> Optional[Dict[str, Any]]:
+    """Why the run reached the ask ``iid``: the nearest enclosing choice whose
+    option it sits under, with the reason its chooser gave (``None`` when no
+    choice encloses it). The card and the responders' message show it, so a
+    person does not have to read the journal to learn why the question
+    opened (claunch-0rjnn.2: s6086's landing-review stood before a person
+    with only its static prompt; the delta-0 reason was in the journal)."""
+    seen = set()
+    cur = (r.inst.get(iid) or {}).get("parent")
+    while cur and cur in r.inst and cur not in seen:
+        seen.add(cur)
+        inst = r.inst[cur]
+        frame = inst.get("frame") or {}
+        if frame.get("option"):
+            node = r.chart.nodes.get(inst.get("node"))
+            label = (shown_label(r.chart, node) if node is not None else None) \
+                or inst.get("node")
+            return {"choice": label, "instance": cur, "option": frame["option"],
+                    "reason": frame.get("option_reason") or "",
+                    "by": frame.get("option_by") or ""}
+        cur = inst.get("parent")
+    return None
+
+
+def _ask_route(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The groups the question went through before it stood where it is now,
+    each with who was in it and why it moved on (``skipped`` records, in
+    order) -- the card's "who was asked" trail (claunch-0rjnn.1)."""
+    cands = rec.get("from") or []
+    out = []
+    for s in rec.get("skipped") or []:
+        g = s.get("group")
+        group = _cand_text(cands[g]) if isinstance(g, int) and 0 <= g < len(cands) else ""
+        out.append({"group": g, "candidates": group, "who": s.get("candidate") or "",
+                    "reason": s.get("reason") or ""})
+    return out
 
 
 def _cand_text(c: Dict[str, Any]) -> str:
@@ -6299,6 +6426,23 @@ def _ask_escalate(r: Run, rec: Dict[str, Any], why: str) -> None:
     who = ", ".join(e.get("handle") or e.get("session") or "?" for e in rec.get("asked") or [])
     rec.setdefault("skipped", []).append(
         {"group": rec.get("group"), "candidate": who or "nobody", "reason": why})
+    if rec.get("single"):
+        # A single-responder group (asks.SINGLE_RESPONDER_ROLES) asked one
+        # member: the next untried member of the same group is asked before
+        # the question leaves it. Routing skips the group once nobody is left
+        # in it (claunch-v0h29.1).
+        group = int(rec.get("group") or 0)
+        passed = rec.get("passed") or {}
+        if passed.get("group") != group:
+            passed = {"group": group, "handles": []}
+        passed["handles"] = list(passed["handles"]) + [
+            e.get("handle") for e in rec.get("asked") or [] if e.get("handle")]
+        rec["passed"] = passed
+        rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+        rec["abstained"] = []
+        rec["resolution"] = RES_ROUTING
+        _ask_sync_approval(r, rec)
+        return
     rec["group"] = int(rec.get("group") or 0) + 1
     rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
     rec["abstained"] = []
@@ -6431,6 +6575,7 @@ def ask_apply_route(plans: List[Dict[str, Any]], *, cwd: Optional[str] = None,
                 rec["wired"] = list(plan["wired"])
             if plan.get("asked"):
                 rec["group"] = int(plan["group"])
+                rec["single"] = bool(plan.get("single"))
                 rec["asked"] = list(plan["asked"])
                 rec["mesh"] = plan.get("mesh") or rec.get("mesh")
                 rec["resolution"] = RES_ASKED
@@ -6488,12 +6633,15 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "options": [{"name": o["name"], "description": o.get("description") or ""}
                     for o in _ask_choices(rec)],
         "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),
+        "criteria": [str(c) for c in (rec.get("criteria") or [])],
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
         # when the ask was opened (``_open_ask``): the notification's age is
         # this stamp, not when a browser first saw the card (claunch-l9znm.1)
         "opened_at": rec.get("opened_at"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
+        "route": _ask_route(rec),
+        "because": rec.get("because"),
         "how": _ask_how(iid, rec),
         **(_ask_question(r, rec) if rec.get("brief") is not None else {}),
     }
@@ -6624,7 +6772,8 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                    channel="responder")
             # one member's abstention leaves the question with the rest of
             # its group; it moves on when every member abstained (or the
-            # group's deadline passes)
+            # group's deadline passes) -- to the group's next untried member
+            # when the group asks one at a time, else to the next group
             rec.setdefault("abstained", []).append(session)
             asked = {e.get("session") for e in rec.get("asked") or []}
             if asked <= set(rec["abstained"]):
@@ -6632,7 +6781,7 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                               + (f" (last: {handle}: {reason})" if reason else ""))
                 receipt["moved"] = True
                 receipt["note"] = ("recorded as an abstention; everyone asked abstained, so "
-                                   "the question moved on to the next candidate group (or to "
+                                   "the question moved on to the next candidate (or to "
                                    "its fallback)")
             else:
                 receipt["moved"] = False

@@ -16,6 +16,7 @@ not an operation that exists.
 
   GET  /api/sessions/{name}/shell                     status and read cursor
   GET  /api/sessions/{name}/shell/output?offset=&limit=  output since a cursor
+  POST /api/sessions/{name}/shell/nudge               user: wake the session
   GET  /api/sessions/{name}/shell/suggestions?state=  the proposal queue
   POST /api/sessions/{name}/shell/suggestions         propose {session, text, why?}
   POST /api/sessions/{name}/shell/suggestions/{id}/accept   user: type and run
@@ -29,9 +30,17 @@ exception: it creates the session's shell record (not its child) so an agent
 can propose before anyone has looked at the pane, which is the order this
 feature is normally used in.
 
-Reading is not rate-limited and carries no side effect; a reader that fell
-behind the ring is told how many bytes it missed (``dropped``) rather than
-being handed a silent gap (``read_output``).
+Reading is not rate-limited and carries no side effect beyond the cursor: a
+reader that fell behind the ring is told how many bytes it missed
+(``dropped``) rather than being handed a silent gap (``read_output``).
+
+The cursor is why this module remembers anything at all. An ``offset`` lives
+in the reading agent's own context, and a context that was compacted loses
+it; the shell keeps the last one (``SessionShell.last_read``), so a read
+that names no offset continues from there — only the new output, never the
+whole ring again. ``nudge`` is the user's half of that: it types a block
+into the session's terminal saying where the unread output starts, because
+the session cannot see the pane the user just used.
 """
 
 from __future__ import annotations
@@ -110,6 +119,10 @@ def install(app) -> None:
             "cols": shell.cols,
             "rows": shell.rows,
             "offset": shell.total,
+            #: Where this session next reads by default, and how much it has
+            #: not read. Both are the shell's memory, not the caller's.
+            "last_read": shell.read_cursor,
+            "unread_bytes": shell.unread_bytes,
             "pending": len(pending),
         }
 
@@ -155,7 +168,44 @@ def install(app) -> None:
             return web.json_response(
                 {"error": "offset and limit must be non-negative integers"}, status=400
             )
+        # No offset: continue from where this session last read, so a caller
+        # that lost its cursor (a compacted context) still gets what is new.
+        # An explicit offset=0 asks for the whole ring, as it always has.
+        if after is None:
+            return web.json_response(shell.read_from_last(limit))
         return web.json_response(shell.read_output(after, limit))
+
+    async def h_nudge(request):
+        """The user wakes this session and points it at its unread output.
+
+        The session's shell is on the other side of the pane the user is
+        looking at, and the session's own terminal is the only channel that
+        reaches it — so the block goes there (``Session.deliver``, the same
+        path a message takes). A call shaped like a session's is refused:
+        an agent that could nudge itself would be sending itself mail, and
+        the cursor is advanced by reading, not by this.
+        """
+        name, shell = _shell(request)
+        body = await json_body(request)
+        if _session_of(body):
+            return web.json_response(
+                {"error": "only the user nudges a session's shell"}, status=403
+            )
+        text = body.get("text")
+        if text is not None and not isinstance(text, str):
+            return web.json_response({"error": "'text' must be a string"}, status=400)
+        try:
+            block = shell.nudge_text(text or "")
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        session = manager.get(name)
+        delivered = await session.deliver(block)
+        return web.json_response({
+            "ok": True,
+            "delivered": bool(delivered),
+            "last_read": shell.read_cursor,
+            "unread_bytes": shell.unread_bytes,
+        })
 
     async def h_suggestions(request):
         _name, shell = _shell(request)
@@ -233,6 +283,7 @@ def install(app) -> None:
     r = app.router
     r.add_get(base, h_status)
     r.add_get(base + "/output", h_output)
+    r.add_post(base + "/nudge", h_nudge)
     r.add_get(base + "/suggestions", h_suggestions)
     r.add_post(base + "/suggestions", h_suggest)
     r.add_post(base + "/suggestions/{sid}/accept", h_accept)

@@ -26,7 +26,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 from . import atomic, config, daemon_client, reposync, store, workspaces
 from .daemon.paths import daemon_dir, session_scratch_dir
@@ -350,11 +350,87 @@ def plan_facts(repo: str, p: reposync.Plan, rows: List[dict],
     }
 
 
+def selected_plans(repo: str, remotes: Sequence[str], *, do_fetch: bool,
+                   branch: Optional[str] = None,
+                   basis: Optional[str] = None,
+                   workspace: Optional[str] = None
+                   ) -> Tuple[dict, Dict[str, "reposync.Plan"]]:
+    """The plans for the remotes the Sync panel has checked (claunch-y3tuk).
+
+    ``plans`` keeps one row per remote, in the order given: its card, or the
+    error that kept a plan from being made. The basis is the remote whose tip
+    is the newest -- the one a fast-forward or rebase lands on -- and
+    ``sync_order`` starts there, then lists the rest oldest tip to newest
+    (they are pushes once the basis is in). ``incompatible`` names pairs whose
+    tips are not ancestor-related: no single local branch can equal both, so
+    nothing may run. A requested ``basis`` that is older than another gets
+    ``basis_error`` and the computed basis is used instead.
+
+    The second value is remote name -> :class:`reposync.Plan`, for callers
+    that need the object rather than the card.
+    """
+    names = reposync.remotes(repo)
+    unknown = [r for r in remotes if r not in names]
+    if unknown:
+        return ({"error": f"no remote named {', '.join(unknown)} "
+                          f"(have: {', '.join(names) or 'none'})"}, {})
+    rows: List[dict] = []
+    made: Dict[str, "reposync.Plan"] = {}
+    tips: Dict[str, str] = {}
+    for remote in remotes:
+        key = reposync.url_key(names.get(remote, ""))
+        row = {"remote": remote, "key": key}
+        rows.append(row)
+        try:
+            p = reposync.plan(repo, remote, branch, do_fetch=do_fetch)
+        except reposync.SyncError as exc:
+            row["error"] = str(exc)
+            continue
+        made[remote] = p
+        if p.upstream:
+            tips[remote] = p.upstream
+        row["plan"] = plan_card(p, workspace=workspace, key=key)
+    branches = {(p.branch, p.local) for p in made.values()}
+    if len(branches) > 1:
+        # one local branch is the unit of a sync; remotes whose default
+        # branches differ cannot be brought level together
+        detail = ", ".join(f"{remote}={p.branch}" for remote, p in made.items())
+        return ({"error": f"the checked remotes disagree on the branch ({detail})"}, made)
+    order, bad = reposync.tip_chain(repo, tips)
+    out: dict = {"plans": rows, "incompatible": [list(pair) for pair in bad],
+                 "basis": "", "sync_order": []}
+    if bad:
+        return out, made
+    heads = [n for n in order
+             if not any(tips[m] != tips[n] and reposync.is_ancestor(repo, tips[n], tips[m])
+                        for m in order)]
+    chosen = ""
+    if basis:
+        if basis not in made:
+            out["basis_error"] = f"no plan for basis remote {basis!r}"
+        elif basis not in heads:
+            newest = heads[0] if heads else ""
+            out["basis_error"] = (
+                f"basis {basis} is behind {newest}; syncing through it would push "
+                f"{newest}'s commits to it")
+        else:
+            chosen = basis
+    if not chosen:
+        remembered = reposync.git(repo, "config", "--get", reposync.REMOTE_CONFIG, check=False)
+        chosen = remembered if remembered in heads else (heads[0] if heads else "")
+    out["basis"] = chosen
+    out["sync_order"] = ([chosen] if chosen else []) + [n for n in order if n != chosen]
+    return out, made
+
+
 def remote_comparisons(repo: str, *, branch: Optional[str], do_fetch: bool,
-                       already_fetched: Optional[str] = None) -> List[dict]:
-    """Web-only comparison of every remote, including aliases and local URLs."""
+                       already_fetched: Optional[str] = None,
+                       only: Optional[Sequence[str]] = None) -> List[dict]:
+    """Web-only comparison of every remote, including aliases and local URLs.
+    ``only`` narrows it to the remotes the Sync panel has checked, so an
+    unselected remote is not fetched (claunch-y3tuk)."""
     rows = []
-    for remote in reposync.remotes(repo):
+    for remote in (only if only is not None else reposync.remotes(repo)):
         row = {"remote": remote, "branch": branch, "state": "unknown",
                "ahead": None, "behind": None, "fetched": False}
         rows.append(row)
@@ -398,7 +474,9 @@ def remote_comparisons(repo: str, *, branch: Optional[str], do_fetch: bool,
 
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
-                     branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
+                     branch: Optional[str] = None, machine: Optional[str] = None,
+                     remotes: Optional[Sequence[str]] = None,
+                     basis: Optional[str] = None) -> dict:
     """One workspace as the web UI's Sync panel shows it: its remotes, the
     peers that share an address with it, and the plan a sync would carry out.
     ``peers`` is what the daemon could read off the relay; an unreadable peer
@@ -408,7 +486,12 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
     this one, whose own prefix it leaves out. ``unmerged`` lists the local
     branches the remote's master does not hold yet (:func:`unmerged_branches`).
     ``history`` is what this machine synced, pushed and pulled in the
-    repository, newest first (:func:`read_history`)."""
+    repository, newest first (:func:`read_history`).
+
+    ``remotes`` is the set the Sync panel has checked (claunch-y3tuk): the
+    answer then carries ``plans`` (one row per remote), ``selected_remotes``,
+    ``basis`` and ``sync_order``, and ``plan`` is the basis plan. Without it
+    one remote is chosen as before (:func:`reposync.choose_remote`)."""
     try:
         repo = reposync.toplevel(path)
     except reposync.SyncError as exc:
@@ -420,6 +503,34 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         "problems": list(problems), "branches": local_branches(repo),
         "fetched": bool(do_fetch), "history": read_history(repo),
     }
+    if remotes:
+        multi, made = selected_plans(repo, remotes, do_fetch=do_fetch, branch=branch,
+                                     basis=basis, workspace=workspace)
+        if multi.get("error"):
+            out["plan_error"] = multi["error"]
+            return out
+        out["selected_remotes"] = list(remotes)
+        out["plans"] = multi["plans"]
+        out["incompatible"] = multi["incompatible"]
+        out["basis"] = multi["basis"]
+        out["sync_order"] = multi["sync_order"]
+        if multi.get("basis_error"):
+            out["basis_error"] = multi["basis_error"]
+        chosen = multi["basis"] or next(
+            (r["remote"] for r in multi["plans"] if r.get("plan")), "")
+        if multi["incompatible"]:
+            out["plan_error"] = (
+                "the checked remotes cannot be brought to one branch: "
+                + ", ".join(f"{a} / {b}" for a, b in multi["incompatible"]))
+        elif chosen and chosen in made:
+            out["plan"] = next((r["plan"] for r in multi["plans"]
+                                if r["remote"] == chosen), None)
+            out.update(plan_facts(repo, made[chosen], rows, machine))
+        else:
+            out["plan_error"] = next(
+                (r["error"] for r in multi["plans"] if r.get("error")),
+                "no plan for the selected remotes")
+        return out
     try:
         name = reposync.choose_remote(repo, remote, [r["key"] for r in rows] if rows else None)
         p = reposync.plan(repo, name, branch, do_fetch=do_fetch)

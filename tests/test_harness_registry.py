@@ -33,6 +33,21 @@ def test_image_paste_transport_is_declared_and_validated(home):
         }}})
 
 
+def test_copy_transport_is_declared_and_validated(home):
+    """Codex copies to the daemon machine's clipboard without OSC 52, so the
+    web page relays that clipboard for it (claunch-tn5ba)."""
+    reg = harnesses.registry()
+    assert reg["codex"].copy_transport == "host"
+    assert reg["codex"].to_dict()["copy_transport"] == "host"
+    assert reg["claude"].copy_transport == "terminal"
+    assert reg["claude"].to_dict()["copy_transport"] == "terminal"
+    assert reg["pi"].copy_transport == "terminal"
+    with pytest.raises(HarnessConfigError, match="copy_transport"):
+        harnesses.parse({"harnesses": {"x": {
+            "command": "x", "copy_transport": "invalid",
+        }}})
+
+
 def test_image_paste_marker_is_declared_and_validated(home):
     """Claude Code draws ``[Image #N]`` once it has taken an image; an
     opening with images waits for that before submitting (claunch-1lfrh)."""

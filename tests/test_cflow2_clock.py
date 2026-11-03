@@ -406,6 +406,62 @@ def test_a_busy_driver_is_not_renudged(tmp_path, monkeypatch):
     assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
 
 
+class FaultSession(StatusSession):
+    """A fake idle driver whose fault() reading the re-nudge gate reads."""
+
+    def __init__(self, name, cwd, fault=None):
+        super().__init__(name, cwd)
+        self._fault = fault
+
+    def fault(self):
+        return self._fault
+
+
+def test_a_driver_in_a_session_fault_is_not_renudged(tmp_path, monkeypatch):
+    """claunch-ijot0: a harness under a usage limit (any active session fault)
+    answers each notice with the fault message, so it is not re-nudged; the
+    first pass after the fault clears tells it once."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    session = FaultSession("own", str(tmp_path),
+                           fault={"kind": "usage_limit", "active": True})
+    clock = _clock(FakeManager(session), renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert clock.scan(now=T0 + 601) == []
+    assert clock.scan(now=T0 + 1300) == []
+    session._fault = {"kind": "usage_limit", "active": False}
+    notices = clock.scan(now=T0 + 1301)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
+def test_an_expired_fault_does_not_hold_back_the_renudge(tmp_path, monkeypatch):
+    """The last fault is kept after its window for the rail's tooltip; only
+    an active one holds the re-nudge."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    session = FaultSession("own", str(tmp_path),
+                           fault={"kind": "network", "active": False})
+    clock = _clock(FakeManager(session), renudge_interval=600.0)
+    clock.scan(now=T0)
+    notices = clock.scan(now=T0 + 601)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
+def test_a_held_fault_past_its_window_still_holds_the_renudge(tmp_path, monkeypatch):
+    """claunch-16j5v: a fault that came straight back after its last hold is
+    ``held`` past its window; the re-nudge waits until the hold ends too."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, CHOOSE_RUN)
+    session = FaultSession("own", str(tmp_path),
+                           fault={"kind": "rate_limit", "active": False, "held": True})
+    clock = _clock(FakeManager(session), renudge_interval=600.0)
+    clock.scan(now=T0)
+    assert clock.scan(now=T0 + 601) == []
+    session._fault = {"kind": "rate_limit", "active": False, "held": False}
+    notices = clock.scan(now=T0 + 602)
+    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+
+
 def test_resolving_the_choice_stops_its_renudge(tmp_path, monkeypatch):
     """After flow_select the run's wait on the driver is a new one: no second
     nudge about the resolved choose, and the next interval names what now

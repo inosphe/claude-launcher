@@ -60,6 +60,29 @@ def _pooled_profile(name: str = "p1"):
     return prof, [key.id for key in pool.keys]
 
 
+def _borrowing_pair():
+    """A keyed-harness profile that borrows a pooled lender (claunch-e48es).
+
+    Returns ``(runtime, lender, [lender key ids])``. The runtime profile holds
+    a token of its own, so a launch that read *its* file instead of the
+    lender's pool would be told apart.
+    """
+    from claude_launcher import lineage, store
+
+    store.update(
+        lambda doc: doc.setdefault("harnesses", {}).update(
+            {"keyed": {"command": sys.executable, "auth": "api-key",
+                       "token_env": "KEYED_API_KEY"}}
+        )
+    )
+    runtime = profile_mod.create("work")
+    lineage.set_harness(runtime, "keyed")
+    credentials.save_token(runtime, "own-secret")
+    lender, ids = _pooled_profile("lender")
+    lineage.set_harness(lender, "claude")
+    return runtime, lender, ids
+
+
 def _manager() -> SessionManager:
     return SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
 
@@ -167,6 +190,82 @@ def test_build_command_leaves_a_stale_pin_to_the_strategy(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# which key a launch was given (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_launch_key_reads_the_key_out_of_the_childs_environment(home, tmp_path):
+    """The one exact answer to "which key is this session on".
+
+    The profile's token file is written by every launch of the pool, so after
+    the spawn it can name another session's key. The token the child was given
+    is in its environment, and that is what ``launch_key`` matches back.
+    """
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    sdef = SessionDef(
+        name="s", harness="py", profile=prof.selector, cwd=str(tmp_path)
+    )
+
+    assert harness_mod.launch_key(sdef, {"CLAUDE_CODE_OAUTH_TOKEN": TOKENS[1]}) == ids[1]
+    # A token from outside the pool names no key of it.
+    assert harness_mod.launch_key(sdef, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-nobody"}) is None
+    assert harness_mod.launch_key(sdef, {}) is None
+
+
+def test_launch_key_answers_none_for_a_launch_that_takes_no_key(home, tmp_path):
+    """A null-token session injects no token, so it names no key."""
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    env = {"CLAUDE_CODE_OAUTH_TOKEN": TOKENS[0]}
+
+    sdef = SessionDef(name="n", harness="py", profile=prof.selector, cwd=str(tmp_path),
+                      null_token=True)
+    assert harness_mod.launch_key(sdef, env) is None
+
+
+def test_launch_key_of_a_borrow_names_the_lenders_key(home, tmp_path):
+    """A borrow spends the lender's token, so the key is the lender's (claunch-e48es)."""
+    plain = profile_mod.create("plain")
+    lender, ids = _pooled_profile("lender")
+    _register_py_harness()
+    sdef = SessionDef(name="b", harness="py", profile=plain.selector, cwd=str(tmp_path),
+                      borrow=lender.name)
+
+    assert harness_mod.key_pool_profile(sdef).name == lender.name
+    assert harness_mod.launch_key(sdef, {"CLAUDE_CODE_OAUTH_TOKEN": TOKENS[1]}) == ids[1]
+
+
+def test_a_borrowed_launch_writes_the_pinned_lender_key(home, tmp_path):
+    """The pin of a borrowing session names a lender key, and the launch uses it."""
+    runtime, lender, ids = _borrowing_pair()
+    # Another launch of the lender's pool left its token file on the first key.
+    profile_keys.select_for_launch(lender)
+    assert credentials.stored_token(lender) == TOKENS[0]
+
+    sdef = harness_mod.normalize(SessionDef(
+        name="b", profile=runtime.name, cwd=str(tmp_path), borrow=lender.name,
+        key_id=ids[1],
+    ))
+    _, env, _ = harness_mod.build_command(sdef, restoring=True)
+
+    assert env["KEYED_API_KEY"] == TOKENS[1]
+    assert credentials.stored_token(runtime) == "own-secret"
+    assert harness_mod.launch_key(sdef, env) == ids[1]
+
+
+def test_an_unpinned_borrowed_launch_advances_the_lenders_strategy(home, tmp_path):
+    runtime, lender, ids = _borrowing_pair()
+    before = profile_keys.load(lender).cursor
+
+    sdef = harness_mod.normalize(SessionDef(
+        name="b", profile=runtime.name, cwd=str(tmp_path), borrow=lender.name,
+    ))
+    _, env, _ = harness_mod.build_command(sdef)
+
+    assert profile_keys.load(lender).cursor != before
+    assert env["KEYED_API_KEY"] in TOKENS
+
+
+# --------------------------------------------------------------------------- #
 # the definition
 # --------------------------------------------------------------------------- #
 def test_the_pin_round_trips_through_the_record(home):
@@ -267,15 +366,72 @@ def test_set_key_refusals_touch_nothing(home, tmp_path, monkeypatch):
         with pytest.raises(ManagerError):
             await mgr.set_key("s3", ids[0])
 
-        # A borrowing session authenticates with the lender's token.
+        # A borrowing session pins a key of the lender's pool, not its own.
+        lender, lender_ids = _pooled_profile("lender")
         mgr.create(
             SessionDef(
                 name="s4", harness="py", profile=prof.selector, cwd=str(tmp_path),
-                borrow=prof.name,
+                borrow=lender.name,
             )
         )
         with pytest.raises(ManagerError):
             await mgr.set_key("s4", ids[0])
+        assert mgr.get("s4").sdef.key_id is None
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_set_key_on_a_borrowing_session_pins_a_lender_key(home, tmp_path, monkeypatch):
+    """claunch-e48es: the lender's token is what it runs on, so its keys are offered."""
+    plain = profile_mod.create("plain")
+    lender, ids = _pooled_profile("lender")
+    _register_py_harness()
+    monkeypatch.setattr(harness_mod, "build_command", _fake_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(name="s1", harness="py", profile=plain.selector,
+                       cwd=str(tmp_path), borrow=lender.name)
+        )
+        relaunched = await mgr.set_key("s1", ids[1])
+
+        assert relaunched.sdef.key_id == ids[1]
+        assert relaunched.sdef.borrow == lender.name
+        event = mgr.events.rows(relaunched)[-1]
+        assert event["details"]["profile"] == lender.name
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_reborrow_drops_the_pin_of_the_previous_pool(home, tmp_path, monkeypatch):
+    """A pin names a key of the pool the old auth read; a new auth reads another."""
+    prof, ids = _pooled_profile()
+    lender, _lender_ids = _pooled_profile("lender")
+    _register_py_harness()
+    monkeypatch.setattr(harness_mod, "build_command", _fake_build_command)
+    from claude_launcher import harnesses as harness_registry
+
+    entry = harness_registry.get("py")
+    monkeypatch.setattr(type(entry), "borrowable", property(lambda self: True),
+                        raising=False)
+    monkeypatch.setattr(
+        "claude_launcher.borrowing.require_allowed",
+        lambda runtime, value, **kw: (profile_mod.require(value), None),
+    )
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(name="s1", harness="py", profile=prof.selector,
+                       cwd=str(tmp_path), key_id=ids[0])
+        )
+        relaunched = await mgr.reborrow("s1", lender.name)
+
+        assert relaunched.sdef.borrow == lender.name
+        assert relaunched.sdef.key_id is None
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -464,6 +620,9 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             # `add` left on the second key, so the rotation lands on the first.
             first_pid, first_token = await _await_record(marker)
             assert first_token == TOKENS[0]
+            # The session says which key it is on, from the token it was given
+            # (claunch-i985h) — the token file cannot say this later.
+            assert mgr.get("s1").info()["launched_key"] == ids[0]
 
             relaunched = await mgr.set_key("s1", ids[1])
 
@@ -472,6 +631,7 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             assert second_token == TOKENS[1], "the new process runs on the chosen key"
             assert credentials.stored_token(prof) == TOKENS[1]
             assert relaunched.sdef.key_id == ids[1]
+            assert relaunched.info()["launched_key"] == ids[1]
             assert relaunched.sdef.conversation_id == session.sdef.conversation_id
             assert not relaunched.exited
             assert mgr.get("s1") is relaunched
@@ -479,3 +639,122 @@ def test_switching_the_key_restarts_the_harness_on_that_key(home, tmp_path):
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the create form's "use this key" (claunch-i985h)
+# --------------------------------------------------------------------------- #
+def test_a_session_created_pinned_runs_on_that_key_and_keeps_it(home, tmp_path):
+    """The pin travels with the create request and holds across launches.
+
+    This is the rail modal's guarantee applied at creation: the key the
+    operator presses in the Runs-as block is written into the definition, so
+    every launch of that session puts exactly that key in the harness's
+    environment — a restore included, and even though the pool's strategy and
+    some other session's launch point elsewhere.
+    """
+    from claude_launcher import store
+
+    prof, ids = _pooled_profile()
+    marker = tmp_path / "harness.env"
+    _register_env_recording_harness(marker)
+    store.set_profile_field(prof.name, "harness", "keyed")
+    # The pool's own answer is the OTHER key: an unpinned launch takes ids[1].
+    profile_keys.set_strategy(prof, "manual", ids[1])
+
+    async def run():
+        mgr = _manager()
+        try:
+            pinned = mgr.create(
+                SessionDef(
+                    name="s1", harness="keyed", profile=prof.selector,
+                    cwd=str(tmp_path), key_id=ids[0],
+                )
+            )
+            first_pid, first_token = await _await_record(marker)
+            assert first_token == TOKENS[0], "the created session runs on its pin"
+            assert pinned.sdef.key_id == ids[0]
+            assert pinned.info()["launched_key"] == ids[0]
+
+            # Somebody else's launch moves the profile's token file.
+            other = mgr.create(
+                SessionDef(name="s2", harness="keyed", profile=prof.selector,
+                           cwd=str(tmp_path))
+            )
+            other_pid, other_token = await _await_record(marker, not_pid=first_pid)
+            assert other_token == TOKENS[1]
+            # Each session reports its own key, though both share one token
+            # file: this is the fact the rail's modal draws (claunch-i985h).
+            assert other.info()["launched_key"] == ids[1]
+            assert mgr.get("s1").info()["launched_key"] == ids[0]
+
+            # A relaunch through the restore path writes the pin back. Wait on
+            # the LAST record, not the first: the other session's launch is in
+            # the file and satisfies "not the first pid".
+            restored = await mgr.redefine("s1", cols=100)
+            assert restored.sdef.key_id == ids[0]
+            restored_pid, restored_token = await _await_record(
+                marker, not_pid=other_pid
+            )
+            assert restored_token == TOKENS[0]
+            assert restored_pid != first_pid
+            assert restored.info()["launched_key"] == ids[0]
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_creating_a_pinned_session_refuses_a_key_the_pool_does_not_hold(
+    home, tmp_path
+):
+    """A create naming a key the pool has no business holding is a 400.
+
+    Without this the bad id would be stored on the definition and only surface
+    at the first launch, as a warning and a silent fall back to the strategy.
+    """
+    from claude_launcher import store
+
+    prof, _ids = _pooled_profile()
+    _register_env_recording_harness(tmp_path / "harness.env")
+    store.set_profile_field(prof.name, "harness", "keyed")
+
+    async def run():
+        mgr = _manager()
+        try:
+            client = await _serve(mgr, tmp_path)
+            auth = {"Authorization": "Bearer sekrit"}
+            try:
+                resp = await client.post(
+                    "/api/sessions",
+                    json={
+                        "name": "s9", "profile": prof.selector,
+                        "cwd": str(tmp_path), "key_id": "k-nope",
+                    },
+                    headers=auth,
+                )
+                assert resp.status == 400
+                assert "not in the key pool" in (await resp.json())["error"]
+            finally:
+                await client.close()
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_create_that_borrows_pins_a_key_of_the_lenders_pool(home):
+    """claunch-e48es: the create form offers the lender's keys under a borrow."""
+    from claude_launcher.daemon import api
+
+    prof, own_ids = _pooled_profile()
+    lender, lender_ids = _pooled_profile("lender")
+
+    def check(**body):
+        return asyncio.run(api._checked_key_pin({"profile": prof.selector, **body}))
+
+    assert check(borrow=lender.name, key_id=lender_ids[1]) is None
+    refused = check(borrow=lender.name, key_id="k-nope")
+    assert refused and repr(lender.name) in refused
+    # Without a borrow the profile's own pool is still the one checked.
+    assert check(key_id=own_ids[0]) is None

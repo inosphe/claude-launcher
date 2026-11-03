@@ -375,7 +375,7 @@ const ev = (key, over = {}) => Object.assign({
   check("the main region has session tabs", html.includes('id="session-tabs"'), true);
   check("the old pinned strip styles are removed", css.includes("li.session-pinbar"), false);
   check("the pins are part of the rail's rebuild signature",
-        src.includes("[briefingLLM, sessionsCache, groupOrder, meshCache, pins]"), true);
+        src.includes("[briefingLLM, sessionsCache.map(rowStamp), groupOrder, meshCache, pins]"), true);
 
   if (failures) process.exit(1);
   console.log("sessionpins_check: ok");

@@ -93,18 +93,23 @@ function makeNode(tag) {
   };
   node.appendChild = (child) => { node.children.push(child); return child; };
   node.append = (...items) => { node.children.push(...items); };
+  node.addEventListener = (type, fn) => {
+    (node.listeners[type] ||= []).push(fn);
+  };
+  node.click = () => (node.listeners.click || []).forEach((fn) => fn({}));
   return node;
 }
 
 const IDS = [
   "new-usage", "new-usage-who", "new-usage-when", "new-usage-refresh",
   "new-usage-windows", "new-usage-keys", "new-strategy-row",
-  "new-key-strategy", "new-usage-note",
+  "new-key-strategy", "new-key-roll", "new-usage-note",
 ];
 const nodes = {};
 for (const id of IDS) nodes[id] = makeNode("div");
 const document = { createElement: makeNode };
-const $ = (id) => (id === "new-session" ? { profile: {} } : nodes[id] || null);
+const form = { profile: {} };
+const $ = (id) => (id === "new-session" ? form : nodes[id] || null);
 
 /* ---- stub daemon ---- */
 const fetches = [];
@@ -131,6 +136,10 @@ let formOnScreen = true;
 const env = {
   $, document, api,
   newProfileSelector: () => selectorNow,
+  // A borrow moves the block to the lender's pool (claunch-e48es).
+  borrowInPlay: (select) => (select && !select.disabled ? String(select.value || "") : ""),
+  spawnParent: () => null,
+  baseProfileName: (s) => String(s || "").split(":")[0],
   sessionFormHeld: () => formOnScreen,
   Date, Math, Number, String, JSON, encodeURIComponent, Promise,
 };
@@ -141,10 +150,14 @@ const build = new Function(
   slice("newUsageLevel") + slice("newUsageMoney") + slice("newUsageReset") +
   slice("newUsageWindowText") + slice("newUsageWindowLine") +
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
+  slice("newUsageLender") + slice("newUsageSelector") +
   slice("renderNewUsage") + slice("startNewUsageRead") +
-  slice("setNewKeyStrategy") +
-  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy, newUsageAge,"
-  + " state: newUsageState };",
+  slice("setNewKeyStrategy") + slice("newUsageProfileName") +
+  slice("newFormCreatesTopLevel") + slice("setNewKeyChoice") +
+  slice("rollNewKey") + slice("applyNewKeyStrategy") +
+  "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy,"
+  + " setNewKeyChoice, rollNewKey, applyNewKeyStrategy, newUsageAge,"
+  + " state: newUsageState, pin: () => newSessionKeyId };",
 );
 const usage = build(...Object.values(env));
 
@@ -152,6 +165,7 @@ const box = nodes["new-usage"];
 const windowsBox = nodes["new-usage-windows"];
 const keysBox = nodes["new-usage-keys"];
 const select = nodes["new-key-strategy"];
+const roll = nodes["new-key-roll"];
 const strategyRow = nodes["new-strategy-row"];
 const note = nodes["new-usage-note"];
 const who = nodes["new-usage-who"];
@@ -163,7 +177,7 @@ function windowLine(name, utilization) {
 function doc(over = {}) {
   return {
     profile: "work", owner: null, pooled: false, strategy: null,
-    strategies: ["rotation", "usage-min", "usage-max", "random"],
+    strategies: ["rotation", "usage-min", "usage-max", "random", "manual"],
     next: null, next_unknown: null, unmeasurable: null, keys: [],
     usage: {
       source: "oauth-usage", cached: true, updated_at: Date.now() / 1000,
@@ -258,42 +272,100 @@ async function main() {
   check("the strategy row is offered for a pool",
     strategyRow.classList.contains("hidden"), false);
   check("the strategy select holds every strategy",
-    select.children.map((o) => o.value), ["rotation", "usage-min", "usage-max", "random"]);
+    select.children.map((o) => o.value),
+    ["rotation", "usage-min", "usage-max", "random", "manual"]);
   check("the strategy select shows the pool's answer", select.value, "rotation");
   check("a pool with two keys may set the strategy", select.disabled, false);
 
-  /* ---- a usage strategy is arithmetic here, not a preview ---- */
+  /* ---- a usage strategy names its pick, marked as this read's answer ---- */
   selectorNow = "work:claude";
   usage.state.at = 0;
   usage.renderNewUsage();
   settle(pending.length - 1, {
     body: doc({
       pooled: true, owner: "work", strategy: "usage-min",
-      next: null,
-      next_unknown: "usage-min reads every key's usage at launch and takes the lowest",
+      next: { key_id: "k-2", strategy: "usage-min", fallback: null, exact: false },
       keys: [
         { id: "k-1", label: "main", masked: "sk-A…1111", current: false,
           next: false, usage: { windows: [windowLine("five_hour", 12)], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
+          next: true, usage: { windows: [windowLine("five_hour", 80)], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  check("a usage strategy marks the row the server named",
+    [keysBox.children[0].children[0].textContent,
+     keysBox.children[1].children[0].textContent], ["", "next"]);
+  check("the note names that key and its strategy",
+    note.textContent.includes("next launch takes spare (usage-min)"), true);
+  check("...and says the launch reads the accounts again",
+    note.textContent.includes("the launch reads the accounts again"), true);
+  check("no row is marked by arithmetic any more",
+    keysBox.children[0].children.length, 6);
+
+  /* ---- the per-row manual choice writes manual + that key ---- */
+  // Pressing "use" is the manual strategy and, at creation, the pin: one
+  // click decides the profile's next key AND the session this form makes.
+  selectorNow = "work:claude";
+  calls.length = 0;
+  keysBox.children[1].children[5].click();
+  check("the row's use button is a strategy write with the key",
+    calls[0] && calls[0].url, "/api/profiles/work/keys/strategy");
+  check("...for manual, naming that key",
+    calls[0] && JSON.parse(calls[0].opts.body),
+    { strategy: "manual", key_id: "k-2" });
+  check("...and the session this form creates is pinned to it",
+    usage.pin(), "k-2");
+  settle(pending.length - 1, {
+    body: { profile: "work", owner: "work", strategy: "manual",
+            pick: "k-2", keys: 2 },
+  });
+  await flush();
+  check("the write is acknowledged", usage.state.flash, "strategy saved: manual");
+
+  /* ---- roll: random's re-draw, as many times as pressed ---- */
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "random",
+      next: { key_id: "k-1", strategy: "random", fallback: null, exact: true },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: false,
+          next: true, usage: { windows: [windowLine("five_hour", 12)], error: null } },
         { id: "k-2", label: "spare", masked: "sk-B…2222", current: false,
           next: false, usage: { windows: [windowLine("five_hour", 80)], error: null } },
       ],
     }),
   });
   await flush();
-  const first = keysBox.children[0];
-  const second = keysBox.children[1];
-  check("no row claims to be the next launch's",
-    [first.children[0].textContent, second.children[0].textContent], ["", ""]);
-  check("the lowest row is marked as arithmetic on the numbers",
-    first.children[5] && first.children[5].textContent, "lowest now");
-  check("the higher row is not marked", second.children.length, 5);
-  check("the note says the pick happens at launch",
-    note.textContent.includes("usage-min reads every key's usage"), true);
+  check("roll is offered for a pool", roll.classList.contains("hidden"), false);
+  check("the draw is named as the next launch's key",
+    note.textContent.includes("next launch takes main (random)"), true);
+  check("...and a stored draw is not hedged",
+    note.textContent.includes("reads the accounts again"), false);
+
+  calls.length = 0;
+  roll.onclick();
+  check("roll asks the daemon to draw", calls[0] && calls[0].url,
+    "/api/profiles/work/keys/roll");
+  check("...with a POST", calls[0] && calls[0].opts.method, "POST");
+  settle(pending.length - 1, {
+    body: { profile: "work", owner: "work", strategy: "random", pick: "k-2",
+            key: { id: "k-2", label: "spare", masked: "sk-B…2222" } },
+  });
+  await flush();
+  check("the draw is acknowledged", usage.state.flash, "drew spare");
+  check("a roll re-reads the block", fetches[fetches.length - 1],
+    "/api/usage/keys?profile=work%3Aclaude&refresh=auto");
+  settle(pending.length - 1, { body: doc({}) });
+  await flush();
 
   /* ---- one key in the pool: the row is offered, the choice is not ---- */
   selectorNow = "work:claude";
-  usage.state.at = 0;
-  usage.renderNewUsage();
+  usage.startNewUsageRead("work:claude", false);  // owns the block from here
   settle(pending.length - 1, {
     body: doc({
       pooled: true, owner: "work", strategy: "rotation",
@@ -357,6 +429,137 @@ async function main() {
   await flush();
   check("a refused write says what the daemon said", usage.state.flash,
     "unknown strategy 'weighted'");
+
+  /* ---- after a write, the block repaints from the answer ---- */
+  // The select and the NEXT marker are the group the report was about: a
+  // saved usage-max has to come back as usage-max, name the key the server
+  // picked, and say the launch reads the accounts again (claunch-gxmh1).
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      next: { key_id: "k-1", strategy: "rotation", fallback: null },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true,
+          usage: { windows: [windowLine("five_hour", 12)], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false,
+          usage: { windows: [windowLine("five_hour", 80)], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  check("the block starts on the stored strategy", select.value, "rotation");
+  const saved = usage.setNewKeyStrategy("work", "work:claude", "usage-max");
+  settle(pending.length - 1, {
+    body: { profile: "work", owner: "work", strategy: "usage-max", keys: 2 },
+  });
+  await saved;
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "usage-max",
+      next: { key_id: "k-2", strategy: "usage-max", fallback: null, exact: false },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: false,
+          usage: { windows: [windowLine("five_hour", 12)], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: true,
+          usage: { windows: [windowLine("five_hour", 80)], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  check("the select shows the strategy that was saved", select.value, "usage-max");
+  check("the NEXT marker follows the server's pick",
+    [keysBox.children[0].children[0].textContent,
+     keysBox.children[1].children[0].textContent], ["in use", "next"]);
+  check("...and the note names that key and strategy",
+    note.textContent.includes("next launch takes spare (usage-max)"), true);
+  check("a usage pick is hedged, not promised",
+    note.textContent.includes("the launch reads the accounts again"), true);
+
+  /* ---- a borrow reads the lender's pool (claunch-e48es) ---- */
+  // The launch runs on the lender's token, so the keys a pin can name are
+  // the lender's; the block asks for them under the lender's bare name.
+  selectorNow = "work:claude";
+  usage.startNewUsageRead("work:claude", false);  // owns the block from here
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false },
+      ],
+    }),
+  });
+  await flush();
+  keysBox.children[1].children[5].click();
+  check("a pin taken on the own profile", usage.pin(), "k-2");
+  form.borrow = { value: "lend", disabled: false };
+  fetches.length = 0;
+  usage.renderNewUsage();
+  check("a borrow asks for the lender's pool", fetches[0],
+    "/api/usage/keys?profile=lend&refresh=auto");
+  check("...and drops the own profile's pin before the answer lands",
+    usage.pin(), "");
+  settle(pending.length - 1, {
+    body: doc({
+      profile: "lend", pooled: true, owner: "lend", strategy: "rotation",
+      keys: [
+        { id: "k-9", label: "lender-a", masked: "sk-L…9999", current: true, next: true },
+        { id: "k-8", label: "lender-b", masked: "sk-L…8888", current: false, next: false },
+      ],
+    }),
+  });
+  await flush();
+  check("the block says the pool is borrowed", who.textContent, "Usage · lend · borrowed");
+  check("the lender's keys are listed", keysBox.children.length, 2);
+  calls.length = 0;
+  keysBox.children[1].children[5].click();
+  check("a lender key is chosen on the lender's pool",
+    calls[0] && calls[0].url, "/api/profiles/lend/keys/strategy");
+  check("...and the session this form creates is pinned to it", usage.pin(), "k-8");
+  settle(pending.length - 1, {
+    body: { profile: "lend", owner: "lend", strategy: "manual", pick: "k-8", keys: 2 },
+  });
+  await flush();
+  form.borrow = undefined;
+
+  /* ---- the strategy select writes the pool the block is showing ---- */
+  // Under a borrow the row draws the lender's keys, so the write has to land
+  // on the lender's pool too. Addressing the form's own profile saved a
+  // strategy the borrowed launch never reads, and the re-read then repainted
+  // the pool the row was not showing — the select and the NEXT marker stayed
+  // on the old answer (claunch-gxmh1).
+  selectorNow = "work:claude";
+  form.borrow = { value: "lend", disabled: false };
+  usage.startNewUsageRead("lend", false);
+  settle(pending.length - 1, {
+    body: doc({
+      profile: "lend", pooled: true, owner: "lend", strategy: "rotation",
+      keys: [
+        { id: "k-9", label: "lender-a", masked: "sk-L…9999", current: true, next: true },
+        { id: "k-8", label: "lender-b", masked: "sk-L…8888", current: false, next: false },
+      ],
+    }),
+  });
+  await flush();
+  calls.length = 0;
+  fetches.length = 0;
+  // Not awaited before the answer: the write is the pending request below.
+  const writing = usage.applyNewKeyStrategy(form, "usage-min");
+  check("a borrow's strategy write lands on the lender's pool",
+    calls[0] && calls[0].url, "/api/profiles/lend/keys/strategy");
+  check("...carrying the strategy that was picked",
+    calls[0] && JSON.parse(calls[0].opts.body).strategy, "usage-min");
+  settle(pending.length - 1, {
+    body: { profile: "lend", owner: "lend", strategy: "usage-min", keys: 2 },
+  });
+  await writing;
+  await flush();
+  check("...and the block re-reads the lender's pool", fetches[fetches.length - 1],
+    "/api/usage/keys?profile=lend&refresh=auto");
+  form.borrow = undefined;
 
   /* ---- refresh forces the account reads ---- */
   // Not awaited: the request is issued before the first await inside, which

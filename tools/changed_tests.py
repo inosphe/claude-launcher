@@ -77,7 +77,9 @@ nine test modules and not ``test_daemon_wedge``, which is the one that guards
 it, because ``test_daemon_wedge`` imports ``claude_launcher.cli`` and ``cli``
 is what imports ``cli_sessions`` -- one hop past rule 2b. A red batch landed
 through exactly that (``claunch-uf7m``). :func:`reached_indirectly` names those
-modules without running them; widening the rule to select them was measured
+modules without running them, in both directions a hop can take: through
+``src``, and from a changed *test* module to another test that imports it by
+name (``claunch-d8scd.1``). Widening the rule to select them was measured
 and costs a median 26 of 119 modules against the current 3.
 
 **A path no rule can map is reported, never passed over** --
@@ -117,6 +119,15 @@ not ``HEAD``, because uncommitted work is the point of this tool) and looks
 for a green receipt filed under that hash *and* this selection. If one is
 there it prints what it stood on and runs nothing; when it does run, it
 leaves the receipt behind.
+
+The file name carries those two. Two more elements of the key live in the
+receipt body (:data:`REUSE_FIELD`): the merge base the selection was derived
+from, and the interpreter and installed packages pytest runs under
+(:func:`environment_identity`). A receipt is reused only when all four are
+equal; a missing or unmeasurable element counts as different, and the refusal
+names the element (:func:`reuse_mismatch`). Receipts filed before these
+fields existed are not reused to skip a run, and ``--check`` still reads them
+with a note that they carry no base or environment.
 
 That is the largest measured waste in a worker's round, and it is not an
 estimate. s150 ran sixteen modules by hand in 578s and the same round's gate
@@ -239,7 +250,7 @@ from typing import List, Optional, Tuple
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import pytest_basetemp, test_window
+from claude_launcher import pytest_basetemp, test_tiers, test_window
 
 
 def _load_sweep():
@@ -349,6 +360,13 @@ EXPLICIT_GUARDS = (
         # in the deferred sweep (claunch-8x0xw).
         ("src/claude_launcher/pytest_basetemp.py",),
         ("tests/test_gates_run_this_checkout.py",),
+    ),
+    (
+        # No same-named module and no test names the file: cflow2/relocate.py
+        # is exercised through SessionManager.migrate, whose tests live here
+        # (the slot-move tests landed with it, claunch-51gyl).
+        ("src/claude_launcher/cflow2/relocate.py",),
+        ("tests/test_migrate_session.py",),
     ),
 )
 
@@ -860,6 +878,28 @@ def module_name(rel: str) -> Optional[str]:
     return ".".join(parts) or None
 
 
+def test_module_name(rel: str) -> Optional[str]:
+    """``tests/test_mesh.py`` -> ``test_mesh``, the name one test imports.
+
+    Tests are not a package: ``tests/test_reposync_workflows.py`` reaches its
+    neighbour with ``from test_cflow2_improv_worker import _medium_flow``, and
+    that bare spelling is what :func:`test_imports` records. So a hop out of a
+    changed *test* module is looked up by this name, the way a hop out of a
+    changed source module is looked up by :func:`module_name`.
+
+    ``None`` for anything :func:`test_imports` does not parse -- a
+    subdirectory (``tests/web/``), a module that is not ``test_*.py``, a path
+    outside ``tests/``. That set is what the rest of this file means by "a
+    test module": reading one subset here and a wider one there would name
+    modules the selection can never contain, and a name nobody can select is
+    not a caveat a reader can act on.
+    """
+    p = Path(rel)
+    if p.suffix != ".py" or len(p.parts) != 2 or p.parts[0] != "tests":
+        return None
+    return p.stem if p.stem.startswith("test_") else None
+
+
 def _is_dunder(p: Path) -> bool:
     """``__init__.py`` / ``__main__.py`` -- excluded from rule 2c, measured.
 
@@ -1022,19 +1062,33 @@ def reached_indirectly(repo: Path, paths: List[str], picked) -> List[tuple]:
     * **Not truncated.** A capped list reads as a complete one. If the number
       is large that is the finding, and the count is printed with it.
 
-    One hop only, and by ``src``: it is the distance a re-export or an
+    One hop only, in the two directions a change can sit one hop from a test.
+    From a changed *source* module it is the distance a re-export or an
     aggregator adds, which is the shape ``cli.py`` has and the shape this
-    package uses throughout. Returns ``(test module, changed path, via)``, so
-    the reader can check the claim rather than take it.
+    package uses throughout. From a changed *test* module it is another test
+    that imports it by name (``from test_cflow2_improv_worker import
+    _medium_flow``), which :func:`test_module_name` names. The second
+    direction was missing until ``claunch-d8scd.1``: :func:`module_name`
+    answers ``None`` outside ``src``, the path was skipped whole, and the note
+    said nothing sat outside a selection that had left
+    ``tests/test_reposync_workflows.py`` out.
+
+    Returns ``(test module, changed path, via)``, so the reader can check the
+    claim rather than take it.
     """
     picked = set(picked)
     found: dict = {}
     graph = src_importers(repo)
     for rel in paths:
         mod = module_name(rel)
-        if not mod:
-            continue
-        for via in sorted(graph.get(mod, ())):
+        if mod:
+            vias = sorted(graph.get(mod, ()))
+        else:
+            test_mod = test_module_name(rel)
+            if not test_mod:
+                continue
+            vias = [test_mod]
+        for via in vias:
             for name in importers(repo, via):
                 if name in picked or name in found:
                     continue
@@ -1478,6 +1532,114 @@ def find_receipt(
     return receipt if receipt_passes(receipt) else None
 
 
+#: The receipt field that holds the parts of the reuse key the file name does
+#: not carry. The name is ``<tree>-<selection_key>.json`` and stays that way:
+#: ``merge_ready`` and the tests read receipts by body, and a rename would
+#: strand every receipt already filed.
+REUSE_FIELD = "reuse"
+
+#: Printed by ``python -c`` under the interpreter pytest will use. Plain data,
+#: no repository imports, so it answers the same from any working directory.
+_ENVIRONMENT_PROBE = (
+    "import hashlib, json, sys, importlib.metadata as m\n"
+    "pk = sorted({'%s==%s' % (d.metadata['Name'].lower(), d.version)"
+    " for d in m.distributions() if d.metadata['Name']})\n"
+    "print(json.dumps({'python': sys.version.split()[0],"
+    " 'implementation': sys.implementation.name, 'platform': sys.platform,"
+    " 'packages': hashlib.sha1('\\n'.join(pk).encode()).hexdigest()[:12],"
+    " 'package_count': len(pk)}))\n"
+)
+
+
+def environment_identity(repo: Path) -> Optional[dict]:
+    """Which interpreter and installed packages the selection will run under.
+
+    The tree names what pytest reads from the repository. It does not name
+    what pytest runs *on*: ``pyproject.toml`` and ``uv.lock`` are in the tree,
+    but a ``.venv`` that was synced earlier, with another extra, or by hand,
+    is not. A green verdict under one interpreter or package set says nothing
+    about another (the same reasoning as ``interpreter_tag`` for base
+    verdicts, claunch-wuaup.1), so the identity is part of the reuse key.
+
+    Asked of the interpreter ``build_command`` will use (``uv run --no-sync``
+    in ``repo``), not of the one running this tool: ``python tools/...`` from
+    another venv would otherwise key the run by an environment pytest never
+    sees. None when it cannot be read -- the caller then neither reuses nor
+    claims a key, which costs one run and never the gate.
+    """
+    try:
+        done = subprocess.run(
+            ["uv", "run", "--no-sync", "python", "-I", "-c", _ENVIRONMENT_PROBE],
+            cwd=str(repo), capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        identity = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    return identity if isinstance(identity, dict) else None
+
+
+def reuse_key(
+    tree: str,
+    base_commit: Optional[str],
+    files: List[str],
+    deselect: tuple,
+    environment: Optional[dict],
+) -> dict:
+    """Everything a verdict stood on, as the receipt records it.
+
+    ``key`` is one digest over the four parts so a reader can compare two
+    receipts at a glance; :func:`reuse_mismatch` compares the parts one by
+    one so a refusal can say which one moved.
+    """
+    parts = {
+        "tree": tree,
+        "base_commit": base_commit,
+        "selection": selection_key(files, deselect),
+        "environment": environment,
+    }
+    digest = hashlib.sha1(
+        json.dumps(parts, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    return {**parts, "key": digest}
+
+
+def reuse_mismatch(receipt: dict, wanted: dict) -> Optional[str]:
+    """Why ``receipt`` may not answer for ``wanted``, or None when it may.
+
+    An element the receipt does not record, or one that could not be
+    measured now, is a mismatch and not a pass: "unknown" is not "equal", and
+    the cost of the wrong answer is a verdict handed to code nobody ran.
+    Receipts filed before this field existed carry none and are reported as
+    such so the caller can decide what a read-only check does with them.
+    """
+    recorded = receipt.get(REUSE_FIELD)
+    if not isinstance(recorded, dict):
+        return LEGACY_RECEIPT
+    for name in ("tree", "base_commit", "selection", "environment"):
+        have, want = recorded.get(name), wanted.get(name)
+        if have is None or want is None:
+            return f"{name} is not known on one side (receipt: {have!r}, now: {want!r})"
+        if have != want:
+            return f"{name} differs (receipt: {_short(have)}, now: {_short(want)})"
+    return None
+
+
+#: What :func:`reuse_mismatch` answers for a receipt that has no reuse key.
+LEGACY_RECEIPT = "recorded before the reuse key existed (no base or environment on file)"
+
+
+def _short(value) -> str:
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in sorted(value.items()))
+    text = str(value)
+    return text[:12] if len(text) > 40 else text
+
+
 RECEIPT_STAMP = "%Y%m%dT%H%M%SZ"
 
 
@@ -1600,10 +1762,17 @@ def build_command(
     basetemp: Optional[str] = None,
     workers: Optional[int] = None,
     deselect: tuple = (),
+    with_tail: bool = False,
 ) -> List[str]:
-    """pytest over exactly ``files``, parallel only when it pays."""
+    """pytest over exactly ``files``, parallel only when it pays.
+
+    The slow tail (``claude_launcher/test_tiers.py``) is left to the full
+    sweep unless ``with_tail``.
+    """
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     cmd = ["uv", "run", "--no-sync", "pytest", *files, "-q"]
+    if not with_tail:
+        cmd += ["-m", test_tiers.CORE_EXPR]
     if len(files) > 1:
         width = MAX_WORKERS if workers is None else max(1, workers)
         cmd += ["-n", str(min(width, len(files)))]
@@ -1938,6 +2107,53 @@ def foreign_pytest(repo: Path, cmd: List[str]) -> Optional[str]:
     )
 
 
+#: pytest's exit code for "no tests were collected".
+_PYTEST_NO_TESTS = 5
+
+
+def collect_without_core_filter(cmd: List[str]) -> List[str]:
+    """``cmd`` turned into a collection of the same selection, tail included.
+
+    Drops the ``-m`` core expression and the xdist width (collection needs no
+    workers) and keeps everything else -- paths and ``--deselect`` -- so what
+    it collects is what the tier would have run had it not left the tail out.
+    """
+    out: List[str] = []
+    skip = 0
+    for i, arg in enumerate(cmd):
+        if skip:
+            skip -= 1
+            continue
+        if arg == "-m" and cmd[i + 1:i + 2] == [test_tiers.CORE_EXPR]:
+            skip = 1
+        elif arg == "-n":
+            skip = 1
+        else:
+            out.append(arg)
+    return [*out, "--collect-only", "-q"]
+
+
+def selection_is_all_tail(
+    repo: Path, cmd: List[str], environment: Optional[dict[str, str]] = None
+) -> bool:
+    """True when ``cmd`` collected nothing only because the tail was left out.
+
+    Exit 5 under ``-m "not slow_tail"`` has two causes: every selected test is
+    in the tail (this tier's empty answer), or the selection holds no tests at
+    all (a deleted module, a ``--deselect`` that removed everything), which was
+    a failure before the tiers existed and stays one.
+    """
+    proc = subprocess.run(
+        collect_without_core_filter(cmd),
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        env=environment,
+    )
+    return proc.returncode == 0
+
+
 def run_and_record(
     repo: Path,
     files: List[str],
@@ -1952,6 +2168,7 @@ def run_and_record(
     included: tuple = (),
     known_failures: Optional[str] = None,
     compare_at: Optional[str] = None,
+    reuse: Optional[dict] = None,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -1989,6 +2206,18 @@ def run_and_record(
         sys.stdout.flush()
         lines.append(line)
     code = proc.wait()
+    tail_excluded = test_tiers.CORE_EXPR in cmd
+    if (
+        code == _PYTEST_NO_TESTS
+        and tail_excluded
+        and selection_is_all_tail(repo, cmd, environment)
+    ):
+        # Every selected test is in the slow tail, which this tier leaves to
+        # the full sweep: pytest reports "no tests collected" (5), and that is
+        # this tier's empty answer, not a failure. A selection that holds no
+        # tests even with the tail included stays exit 5.
+        print("every selected test is in the slow tail; none ran in this tier")
+        code = 0
     finished = datetime.now(timezone.utc)
     output = "".join(lines)
     write_run_summary(basetemp, {
@@ -2041,6 +2270,8 @@ def run_and_record(
         "known_failures": known_failures,
         # Which tests did not run, and why; ``counts`` only says how many.
         "skips": sweep.parse_skips(junit) if junit else None,
+        # What the file name does not say; see ``reuse_mismatch``.
+        REUSE_FIELD: reuse,
     }
     if comparison is not None:
         receipt.update(comparison)
@@ -2285,6 +2516,14 @@ def main(argv: Optional[list] = None) -> int:
         ),
     )
     ap.add_argument(
+        "--with-tail",
+        action="store_true",
+        help=(
+            "also run the slow tail (worktree, slow_shim, browser tests) in the "
+            "selected modules; by default it is left to the full sweep"
+        ),
+    )
+    ap.add_argument(
         "--no-compare-base",
         action="store_true",
         help=(
@@ -2429,7 +2668,9 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 0                          # a pass, for --check too: see below
 
-    cmd = build_command(files, basetemp=args.basetemp, deselect=deselect)
+    cmd = build_command(
+        files, basetemp=args.basetemp, deselect=deselect, with_tail=args.with_tail,
+    )
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
         f"vs {base}{_base_note(how)}:"
@@ -2463,11 +2704,26 @@ def main(argv: Optional[list] = None) -> int:
             file=sys.stderr,
         )
 
+    # A receipt does not record whether the tail ran, so --with-tail never
+    # stands on one: a green without the tail must not answer for a run that
+    # asks for it.
     found = (
         find_receipt(repo, tree, files, args.receipts, deselect)
-        if tree is not None
+        if tree is not None and not args.with_tail
         else None
     )
+
+    # The rest of the key: what the file name does not carry. Measured only
+    # when there is a tree to key (no tree, no receipt, nothing to compare).
+    # --list reads nothing and runs nothing, so it pays for nothing.
+    key_now: Optional[dict] = None
+    if tree is not None and not args.list_only:
+        key_now = reuse_key(
+            tree, merge_base(repo, base), files, deselect, environment_identity(repo)
+        )
+    refusal: Optional[str] = None
+    if found is not None and key_now is not None:
+        refusal = reuse_mismatch(found, key_now)
 
     if args.check:
         # The reviewer's door. A peer-review responder is a different session
@@ -2484,12 +2740,30 @@ def main(argv: Optional[list] = None) -> int:
                 f"counted."
             )
             return CANNOT_TELL
+        if refusal == LEGACY_RECEIPT:
+            # Read-only door, and what it has always answered: a receipt for
+            # this tree and selection. Said as such, not passed off as keyed.
+            print(f"NOTE: this receipt was {refusal}; it speaks for the tree and selection only.")
+        elif refusal is not None:
+            print(
+                f"a green receipt exists for tree {tree[:12]} but does not answer "
+                f"for this run: {refusal} -- abstain, or ask the author to run "
+                f"'python tools/changed_tests.py --base {args.base}'."
+            )
+            return CANNOT_TELL
         print(f"green receipt for tree {tree[:12]}: {describe(found)}")
         return 0
 
     if args.list_only:
         print(f"$ {' '.join(cmd)}", flush=True)
         return 0
+
+    if found is not None and refusal is not None:
+        # A green receipt at this tree and selection that may not answer for
+        # this run. Running is the safe side; saying why keeps it from
+        # looking like the reuse check was skipped.
+        print(f"not reusing the green receipt for tree {tree[:12]}: {refusal}")
+        found = None
 
     if found is not None and not args.no_reuse:
         # The measured waste this exists to remove: s150 ran these same
@@ -2556,7 +2830,10 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     cmd = apply_worker_advice(
-        build_command(files, basetemp=args.basetemp, deselect=deselect),
+        build_command(
+            files, basetemp=args.basetemp, deselect=deselect,
+            with_tail=args.with_tail,
+        ),
         grant.advisory_n,
     )
     compare_at = None if args.no_compare_base else merge_base(repo, base)
@@ -2577,6 +2854,7 @@ def main(argv: Optional[list] = None) -> int:
                 str(args.known_failures) if args.known_failures is not None else None
             ),
             compare_at=compare_at,
+            reuse=key_now,
         )
     finally:
         grant.release()

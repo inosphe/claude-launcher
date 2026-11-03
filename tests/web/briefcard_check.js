@@ -98,6 +98,20 @@ function mkel(tag) {
     get() { return text; },
     set(v) { text = v; node.children.length = 0; },
   });
+  /* applyBriefingCards clears the row line's failed/stale marks when a
+     refresh lands (claunch-lluxq); briefrow_check pins what they mean. */
+  Object.defineProperty(node, "classList", {
+    value: {
+      toggle(c, force) {
+        const has = node.className.split(" ").includes(c);
+        if (force === undefined) force = !has;
+        if (force && !has) node.className = (node.className + " " + c).trim();
+        else if (!force) node.className =
+          node.className.split(" ").filter((x) => x !== c).join(" ");
+        return force;
+      },
+    },
+  });
   return node;
 }
 
@@ -255,6 +269,14 @@ const kv = (li) => kvOf(card(li));
   check("a row digest suppresses the identical card title", one(rows.s1), null);
   check("the full card retains its title", ctx.fullCard("s1").querySelector(".sess-brief-one").textContent,
         "착지를 관리한다");
+  /* The row line marked by the poll as failed or stale is the previous
+     answer's; a refresh that just landed repaints it, and the marks would
+     otherwise keep dimming (or reddening) the new text until the next poll. */
+  digest.className = "rail-brief failed stale";
+  digest.textContent = "이전 요약";
+  ctx.apply();
+  check("a landed refresh clears the row line's failed and stale marks",
+        [digest.className, digest.textContent], ["rail-brief", "착지를 관리한다"]);
   digest.remove();
   ctx.apply();
 

@@ -406,6 +406,27 @@ def test_spawn_files_a_gated_request_for_a_top_level_worker(world, monkeypatch):
     assert "rejected" in ops.feed(ops.get(world.alpha["id"]))[-1]["text"]
 
 
+def test_poll_ships_a_held_request_without_its_stopped_clock(world, monkeypatch):
+    """A request taken over by hand is still pending, but its clock is paused.
+
+    The stored deadline is only where the countdown stopped, so shipping it
+    would read to the operator as "expires soon" (claunch-iv4mh)."""
+    gate = _gated(world, monkeypatch)
+    ops = world.ops
+    msg = run(ops.message(world.alpha["id"], {"text": "로그인 버그 고쳐줘"}))
+    rid = run(ops.spawn("opa", {"task": "로그인 버그 수정", "reason": "맡은 세션 없음",
+                                "on_behalf_of": msg["id"]}))["request"]["id"]
+    (pending,) = run(ops.poll("opa"))["requests"]
+    assert pending["id"] == rid and pending["hold"] is None and pending["deadline"]
+
+    gate.manual(rid, decided_by="user")
+    (held,) = run(ops.poll("opa"))["requests"]
+    assert held["id"] == rid
+    assert held["hold"] == "manual"
+    assert held["deadline"] is None
+    assert gate.get(rid)["deadline"]      # the record keeps it; only the snapshot drops it
+
+
 def test_spawn_needs_the_users_word_and_a_project_in_scope(world, monkeypatch):
     _gated(world, monkeypatch)
     ops = world.ops

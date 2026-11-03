@@ -614,9 +614,14 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
 
     A request's context is what it sent to the model: fresh input, cache read
     and cache write added. Subagent requests run in their own context and are
-    left out (``sides`` is accepted for the callers that pass the followers),
-    as is the output. After a compaction the next request's context is the
-    summary, so the series falls there.
+    left out (``sides`` is accepted for the callers that pass the followers).
+    The output is not part of the context the chart draws, but each point
+    carries it too, so the caller can price the request from the same rows
+    (the overlay's ``≈`` estimate), and ``totals`` sums every component over
+    the window's requests — not over the drawn points, which past ``points``
+    requests are the largest of their group and would undercount. After a
+    compaction the next request's context is the summary, so the series falls
+    there.
 
     Each point is one request (``n`` = its number from the start of the
     conversation). Past ``points`` requests, consecutive requests are grouped
@@ -631,7 +636,9 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
     requests = sorted(r for r in main.requests if not r[5])
     if not requests:
         return {"window": window, "points": [], "compactions": [], "count": 0,
-                "since": None, "until": end}
+                "since": None, "until": end,
+                "totals": {"input": 0, "cache_read": 0, "cache_write": 0,
+                           "output": 0}}
     first = requests[0][0]
     numbered = list(enumerate(requests, 1))
     if window == "cap":
@@ -640,20 +647,27 @@ def series(main: StatsReader, sides: List[StatsReader], window: str = "cap",
     end = max(end, requests[-1][0])
     start = min(start, end - 60.0)
     step = max(1, -(-len(numbered) // points))
+    totals = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    for _n, (_at, fresh_in, cache_read, cache_write, output, _side) in numbered:
+        totals["input"] += fresh_in
+        totals["cache_read"] += cache_read
+        totals["cache_write"] += cache_write
+        totals["output"] += output
     rows = []
     for i in range(0, len(numbered), step):
         group = numbered[i:i + step]
-        n, (at, fresh, cache_read, cache_write, _out, _side) = max(
+        n, (at, fresh, cache_read, cache_write, output, _side) = max(
             group, key=lambda g: g[1][1] + g[1][2] + g[1][3])
         rows.append({"t": group[0][1][0], "n": group[0][0], "count": len(group),
                      "input": fresh, "cache_read": cache_read,
-                     "cache_write": cache_write})
+                     "cache_write": cache_write, "output": output})
     return {
         "window": window,
         "since": first,
         "until": end,
         "start": start,
         "points": rows,
+        "totals": totals,
         "compactions": [b for b in sorted(main.bounds) if start <= b <= end],
         "requests": len(requests),
         "count": len(numbered),
@@ -695,6 +709,49 @@ def _event_epoch(value) -> Optional[float]:
 
 # -- reading ----------------------------------------------------------------
 
+def _follow_all(path: Path, cls: Type[StatsReader], spend: tokenusage.Budget
+                ) -> Optional[Tuple[List[tokenusage._Follower], bool]]:
+    """The followers of one transcript and its subagent files, brought up to
+    date as far as ``spend`` allows, and whether any of them is still being
+    read in the background. ``None`` when the transcript cannot be read. The
+    conversation's own file comes first."""
+    tokenusage._maybe_prune()
+    main = tokenusage._follow(path, cls, spend, NAMESPACE)
+    if main is None:
+        return None
+    followers = [main]
+    for sub in cls.subagent_files(path):
+        other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
+        if other is not None:
+            followers.append(other)
+    return followers, any(f.behind or f.key in spend.late for f in followers)
+
+
+def follow_requests(sdef, spend: tokenusage.Budget
+                    ) -> Optional[Tuple[List[Tuple[str, StatsReader]], bool]]:
+    """The readers holding one session's timestamped requests, keyed by the
+    file each follows, and whether part of them is still being read.
+
+    The followers are the ones the Stats page reads under the same namespace,
+    so the two share one pass over each file: a transcript is parsed once from
+    the start and afterwards only from where the last read stopped. A reader
+    is replaced when its file shrank or was replaced, or when an idle follower
+    was dropped; a caller that keeps derived figures tells that apart by the
+    reader's identity. ``None`` when the session has no transcript to read.
+    """
+    head, path = locate(sdef)
+    if path is None:
+        return None
+    cls = READERS.get(head["harness"])
+    if cls is None:
+        return None
+    followed = _follow_all(Path(path), cls, spend)
+    if followed is None:
+        return None
+    followers, partial = followed
+    return [(f.key, f.reader) for f in followers], partial
+
+
 def read_file(path: Path, harness: str, unit: str = "day",
               zone: Optional[tzinfo] = None,
               spend: Optional[tokenusage.Budget] = None) -> Optional[dict]:
@@ -710,16 +767,11 @@ def read_file(path: Path, harness: str, unit: str = "day",
     if own:
         spend = tokenusage.Budget(STATS_BUDGET)
     try:
-        tokenusage._maybe_prune()
-        main = tokenusage._follow(path, cls, spend, NAMESPACE)
-        if main is None:
+        followed = _follow_all(path, cls, spend)
+        if followed is None:
             return None
-        followers = [main]
-        for sub in cls.subagent_files(path):
-            other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
-            if other is not None:
-                followers.append(other)
-        partial = any(f.behind or f.key in spend.late for f in followers)
+        followers, partial = followed
+        main = followers[0]
         out = {"harness": harness,
                **summarize(main.reader, [f.reader for f in followers[1:]], unit, zone)}
         if partial:
@@ -742,16 +794,11 @@ def read_series(path: Path, harness: str, window: str = "cap",
     if own:
         spend = tokenusage.Budget(STATS_BUDGET)
     try:
-        tokenusage._maybe_prune()
-        main = tokenusage._follow(path, cls, spend, NAMESPACE)
-        if main is None:
+        followed = _follow_all(path, cls, spend)
+        if followed is None:
             return None
-        followers = [main]
-        for sub in cls.subagent_files(path):
-            other = tokenusage._follow(sub, cls.for_subagent, spend, NAMESPACE)
-            if other is not None:
-                followers.append(other)
-        partial = any(f.behind or f.key in spend.late for f in followers)
+        followers, partial = followed
+        main = followers[0]
         out = {"harness": harness,
                **series(main.reader, [f.reader for f in followers[1:]], window, points)}
         if partial:

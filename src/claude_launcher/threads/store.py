@@ -19,7 +19,9 @@ Rows:
             NULL when there are none; ``files`` lists the other files the
             user attached (claunch-5gpcf, daemon/uploads.py), NULL when there
             are none; ``kind``, ``ref`` and ``data`` carry an operator
-            conversation's structure (below)
+            conversation's structure (below) -- and, on a user message, its
+            resend/revert marks: ``resent_at`` (every resend's stamp) and
+            ``reverted_at`` (claunch-tpbqz)
 
 Who may write. The user (the dashboard) may open, post, close and reopen in
 any session's threads; a session may do the same only in its own. Posting to
@@ -1033,6 +1035,31 @@ class ThreadStore:
             db.execute("UPDATE messages SET data = ? WHERE seq = ?", (raw, int(seq)))
             if touch:
                 db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (_now(), r["thread"]))
+            return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (int(seq),)).fetchone())
+
+    def record_delivery(self, owner: str, seq: int, *, resent: bool = False, reverted: bool = False) -> dict:
+        """Record a resend/revert on ``owner``'s user message ``seq``
+        (claunch-tpbqz). The flags live in the message's ``data``:
+        ``resent_at`` is every resend's stamp (newest last) and
+        ``reverted_at`` the first revert's -- reverting twice does not move
+        it, and neither flag clears. Only a user's message can be resent or
+        reverted: an agent's or guest's words are read in the thread, never
+        typed into a session, so there is nothing to resend. The thread
+        counts the mark as activity (``updated_at``)."""
+        with self._write() as db:
+            r = db.execute("SELECT * FROM messages WHERE seq = ? AND session = ?", (int(seq), owner)).fetchone()
+            if r is None:
+                raise NotFound(f"{owner} has no message {seq}")
+            if r["author"] != USER:
+                raise Forbidden(f"message {seq} is {r['author']}'s; only a user's message can be resent or reverted")
+            data = json.loads(r["data"] or "{}")
+            now = _now()
+            if resent:
+                data.setdefault("resent_at", []).append(now)
+            if reverted and not data.get("reverted_at"):
+                data["reverted_at"] = now
+            db.execute("UPDATE messages SET data = ? WHERE seq = ?", (_data(data), int(seq)))
+            db.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, r["thread"]))
             return _message(db.execute("SELECT * FROM messages WHERE seq = ?", (int(seq),)).fetchone())
 
     def open_asks(self, owner: str) -> int:

@@ -198,16 +198,20 @@ def test_claude_takes_every_preset_and_its_model_choices():
     assert "luna" not in got  # a codex model choice
 
 
-def test_codex_takes_only_declared_presets_and_its_model_choices(monkeypatch):
+def test_codex_takes_the_default_role_then_its_declared_presets_and_choices(monkeypatch):
+    """``default`` is always listed: codex launches it with no model argument
+    (the harness's own default), so the catalog offers what spawn resolves."""
     _codex()
     got = input_options.Catalog().models("cx")
-    assert not set(provider_spec.MODEL_ROLES) & set(got)
+    assert set(provider_spec.MODEL_ROLES) & set(got) == {"default"}
     assert "luna" in got and "sonnet" not in got
     monkeypatch.setattr(input_options.providers, "spec_for",
                         lambda prof, **kw: _Declares({"small": "gpt-mini"}))
     got = input_options.Catalog().models("cx")
     # subagent falls back to small, as the provider spec resolves it
-    assert [m for m in got if m in provider_spec.MODEL_ROLES] == ["small", "subagent"]
+    assert [m for m in got if m in provider_spec.MODEL_ROLES] == [
+        "default", "small", "subagent"
+    ]
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex"])

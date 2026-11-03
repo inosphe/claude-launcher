@@ -22,17 +22,23 @@ TOOLS = [
             "login, an API status error, a network outage, a policy refusal, "
             "or a prompt waiting for a keystroke. Read from the bottom of each "
             "session's terminal by the daemon; this tool only reads the "
-            "record. Each row carries 'resolved_by' -- what clears the stop: "
+            "record. A session the daemon paused on a usage limit has no "
+            "screen left -- its process is gone -- so its row is read from the "
+            "record that pause wrote, and says so in 'source': "
+            "'pause-record' rather than 'screen'. Each row carries "
+            "'resolved_by' -- what clears the stop: "
             "'input' (someone presses a key on that terminal), 'account' "
             "(billing, plan, login), 'provider' (the service recovers or time "
             "passes) or 'policy' (the session changes how it asks). 'strikes' "
             "counts the runs of one kind: a sighting opens its own window and "
             "never extends the previous one, so a line that comes back after "
-            "its window is a second sighting rather than the same stop "
-            "stretched out. Defaults "
+            "its run ended is a second sighting rather than the same stop "
+            "stretched out. A run also ends early when the message leaves the "
+            "bottom of a changing screen -- the stop is visibly over then -- "
+            "and the row says when ('cleared'). Defaults "
             "to active faults across the fleet. Pass 'session' for one "
-            "session, 'active' false for expired records too, or 'kind'/"
-            "'harness' to narrow."
+            "session, 'active' false for expired and cleared records too, or "
+            "'kind'/'harness' to narrow."
         ),
         "inputSchema": {
             "type": "object",
@@ -43,7 +49,7 @@ TOOLS = [
                 },
                 "active": {
                     "type": "boolean",
-                    "description": "true (default): only faults still inside their window; false: expired records too",
+                    "description": "true (default): only faults still inside their window and not cleared; false: expired and cleared records too",
                 },
                 "kind": {
                     "type": "string",

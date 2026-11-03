@@ -137,6 +137,18 @@ class FakeBr:
         if cmd == "show":
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
+        if cmd == "search":
+            # Substring over id, title and description, closed included —
+            # what the board page's text-search fallback asks for
+            # (claunch-w3wrk).
+            needle = rest[0].lower()
+            rows = [
+                r for r in self.issues.values()
+                if needle in (r.get("id") or "").lower()
+                or needle in (r.get("title") or "").lower()
+                or needle in (r.get("description") or "").lower()
+            ]
+            return 0, json.dumps({"issues": rows}), ""
         if cmd == "dep":
             if rest[0] == "list":
                 return 0, json.dumps(self.deps.get(rest[1], [])), ""
@@ -1097,6 +1109,102 @@ def test_reading_the_edges_does_not_throw_away_the_listing_it_came_from(repo):
         await board.br(repo, ["dep", "add", "kid", "epic"], actor="s1")
         rows = await board.issues(repo)
         assert sum(1 for c in br.calls if "list" in c and "dep" not in c) == 2
+
+    asyncio.run(run())
+
+
+def test_edges_are_read_in_parallel(repo):
+    """Each ``br dep list`` is its own subprocess, so a wide board's edge
+    scan forks concurrently under a bounded fan-out instead of paying one
+    ``br`` startup after another: the in-flight count passes 1 while every
+    edge and its order survive."""
+    br = FakeBr()
+    br.add(id="epic")
+    for n in range(6):
+        br.add(id=f"kid-{n}")
+        br.link(f"kid-{n}", "epic")
+    state = {"inflight": 0, "max": 0}
+
+    async def gated(argv, cwd):
+        if "dep" in argv and "list" in argv:
+            state["inflight"] += 1
+            state["max"] = max(state["max"], state["inflight"])
+            try:
+                await asyncio.sleep(0.02)
+            finally:
+                state["inflight"] -= 1
+        return await br(argv, cwd)
+
+    board = beads_mod.Board(gated, root_for=lambda cwd: repo if cwd else None)
+
+    async def run():
+        rows = await board.issues(repo)
+        edges = await board.edges(repo, rows)
+        assert state["max"] > 1, "dep reads ran one at a time"
+        # gather keeps the listing's order: one entry per child, in order.
+        assert [(e["from"], e["to"]) for e in edges] == [
+            (f"kid-{n}", "epic") for n in range(6)
+        ]
+
+    asyncio.run(run())
+
+
+def test_reads_of_an_existing_board_run_without_the_board_lock(repo):
+    """The board lock exists for creation and rebuild, not reads: a read
+    against a board whose database already exists answers even while the
+    lock is held, and a write still queues behind it."""
+    br = FakeBr()
+    br.add(id="a")
+    board = _board(br, repo)
+
+    async def run():
+        lock = board._locks.setdefault(str(repo), asyncio.Lock())
+        await lock.acquire()
+        try:
+            rows = await asyncio.wait_for(board.issues(repo), timeout=1)
+            assert [r["id"] for r in rows] == ["a"]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    board.br(repo, ["create", "b"], actor="s1"), timeout=0.2
+                )
+        finally:
+            lock.release()
+        await board.br(repo, ["create", "b"], actor="s1")
+        assert sum(1 for c in br.calls if "create" in c) == 1
+        assert any(i["title"] == "b" for i in br.issues.values())
+
+    asyncio.run(run())
+
+
+def test_edge_cache_outlives_the_listing_ttl_but_dies_on_write(repo):
+    """Edges cost one fork per issue with dependencies, so they keep a
+    longer TTL than the listing: a re-read past CACHE_TTL is still
+    answered from the cache, and a write through the daemon still drops
+    it -- the page never draws a hierarchy from before its own edit."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    now = [1000.0]
+    board = beads_mod.Board(
+        br, root_for=lambda cwd: repo if cwd else None, clock=lambda: now[0]
+    )
+
+    async def dep_calls():
+        return sum(1 for c in br.calls if "dep" in c and "list" in c)
+
+    async def run():
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 1
+        now[0] += beads_mod.CACHE_TTL + 1  # past the listing TTL, ...
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 1  # ... the edges are still cached
+        await board.br(repo, ["dep", "add", "kid", "epic"], actor="s1")
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        assert await dep_calls() == 2  # a write drops them
 
     asyncio.run(run())
 
@@ -2980,6 +3088,24 @@ def test_the_assignment_comment_names_both_ends_of_the_move():
     assert beads_mod.assign_note("a", "", "s1") == "UNQUEUED by dashboard: taken off s1"
 
 
+def test_the_board_head_carries_the_issue_prefix(repo):
+    """The web UI's markdown renderer links mentions of issue ids whose
+    prefix is a known board's (claunch-jpqat has no digit). The head is
+    where the page learns a board's prefix; a board without a config.yaml
+    still answers, with the slug of its root's name."""
+    board = _board(FakeBr(), repo)
+    head = board.board_head(repo)
+    assert head["board_exists"] is True
+    assert head["issue_prefix"] == "repo"  # slug of the root's name
+    (repo / ".beads" / "config.yaml").write_text(
+        "# Beads Project Configuration\nissue_prefix: legacy\n", encoding="utf-8")
+    board._refs = {}   # ref_for caches; force the re-read the config edit needs
+    assert board.board_head(repo)["issue_prefix"] == "legacy"
+    gone = repo.parent / "gone"
+    gone.mkdir()
+    assert "issue_prefix" not in board.board_head(gone)
+
+
 def test_the_queues_view_draws_a_lane_per_session_and_the_pool(repo):
     """Sessions first in the daemon's order, then assignees the daemon does
     not know (a card must have a row to be dragged back from); an exited
@@ -3702,3 +3828,53 @@ def test_a_pending_session_is_told_its_issue_is_coming(home, tmp_path, repo):
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("ending", ["kill", "archive", "remove"])
+def test_a_pause_keeps_the_issue_until_it_becomes_an_ending(home, repo, ending):
+    """A pause is resumed like a hold (claunch-ijot0): the session's
+    in_progress issue stays where it is. The sweep runs when the paused
+    record is killed, archived or removed -- once."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.exit_hooks.append(board.session_exited)
+        mgr.settle_hooks.append(board.session_settled)
+        mgr.create(_sdef("w1", repo))
+        try:
+            mgr.pause("w1")
+            await _wait_for(lambda: mgr.get("w1").exited, "w1 paused")
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["w"]["status"] == "in_progress"
+            assert not br.comments.get("w")
+            if ending == "kill":
+                assert mgr.unpause("w1")
+            elif ending == "archive":
+                mgr.archive("w1")
+                assert mgr.get("w1").paused_at
+            else:
+                mgr.remove("w1")
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["w"]["status"] == "open"
+            assert len(br.comments["w"]) == 1
+            if ending == "archive":
+                assert not mgr.settle_pause("w1")  # swept once
+        finally:
+            await mgr.shutdown_all()
+            await board.cancel_all()
+
+    asyncio.run(run())
+
+
+def test_a_paused_record_is_not_swept_at_boot(home, repo):
+    """A restart retires records it does not relaunch and sweeps them; a
+    paused one is left for its resume (claunch-ijot0)."""
+    _register_py_harness()
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+    mgr._retire(_sdef("p", repo), {"paused_at": "2026-10-30T00:00:00+00:00"})
+    mgr._retire(_sdef("k", repo), {})
+    assert [d.sdef.name for d in mgr.take_retired_for_sweep()] == ["k"]

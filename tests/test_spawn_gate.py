@@ -253,6 +253,46 @@ def test_a_held_request_still_counts_against_the_asker(home, tmp_path):
     assert err.value.status == 409
 
 
+def test_a_form_stays_linkable_after_extend_restarts_the_clock(home, tmp_path):
+    """`+5 min` on a request whose form is open answers the CLOCK, not the
+    form. While it cleared the hold (claunch-uzo40) the two paths raced: the
+    link was refused 409 and the deadline went on to create a second session
+    beside the one the form made (claunch-uzo40.1)."""
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.manual(rid)
+        world.gate.extend(rid)
+        assert rid in world.gate._timers, "the countdown is running again"
+        linked = world.gate.link(rid, "hand-made")
+        await world.gate.cancel()
+        return world, rid, linked
+
+    world, rid, linked = asyncio.run(run())
+    assert linked["status"] == "approved" and linked["setup"] == "custom"
+    assert linked["created"] == "hand-made"
+    assert world.created == [], "the extension did not create a session either"
+    assert rid not in world.gate._timers, "the answer took the timer with it"
+    with pytest.raises(spawn_gate.GateRefused):
+        world.gate.link(rid, "again")
+
+
+def test_extend_does_not_make_a_request_linkable(home, tmp_path):
+    """The other direction: extend is not a take-over, so a request nobody
+    ever opened in a form is still refused (claunch-uzo40.1)."""
+    async def run():
+        world = _World(tmp_path, timeout=0.05)
+        rid = _spawn(world)["id"]
+        world.gate.extend(rid)
+        with pytest.raises(spawn_gate.GateRefused) as err:
+            world.gate.link(rid, "hand-made")
+        await world.gate.cancel()
+        return err
+
+    err = asyncio.run(run())
+    assert err.value.status == 409
+
+
 def test_link_refuses_a_request_nobody_took_over(home, tmp_path):
     world = _World(tmp_path)
     rid = _spawn(world)["id"]
@@ -494,9 +534,12 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
             rows = (await (await client.get("/api/spawn-requests", headers=AUTH)).json())["requests"]
             assert two in {r["id"] for r in rows if r["status"] == "pending"}
             resp = await client.post(f"/api/spawn-requests/{two}/created",
-                                     json={"session": "by-hand"}, headers=AUTH)
+                                     json={"session": "by-hand", "created_as": "child"},
+                                     headers=AUTH)
             linked = (await resp.json())["request"]
             assert linked["created"] == "by-hand"
+            # the form's tab, not the root scope it was asked as (claunch-oaxni)
+            assert linked["created_as"] == "child"
             assert linked["status"] == "approved" and linked["setup"] == "custom"
             assert "hold" not in linked
 
@@ -600,6 +643,47 @@ def test_a_child_ask_approved_or_taken_by_hand(home, tmp_path):
     two = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
     record = world.gate.manual(two)
     assert record["setup"] == "custom" and "spawn child form" in world.notes[-1][1]
+
+
+# claunch-oaxni: the Manual form offers both tabs whatever the request's
+# scope, and the link says which one the person created it from.
+def test_a_child_ask_taken_by_hand_can_be_made_top_level(home, tmp_path):
+    world = _World(tmp_path)
+    rid = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    assert world.gate.manual(rid)["created_as"] == "child"   # the scope's guess
+    linked = world.gate.link(rid, "solo", "root")
+    assert linked["status"] == "approved" and linked["setup"] == "custom"
+    assert linked["created_as"] == "root" and linked["scope"] == "child"
+    note = world.notes[-1][1]
+    assert "solo" in note and "top-level, not as your child" in note
+    assert world.created == [], "the form made it; the gate created nothing"
+
+
+def test_a_root_ask_taken_by_hand_can_be_put_under_the_asker(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    linked = world.gate.link(rid, "kid", "child")
+    assert linked["created_as"] == "child"
+    assert "as your child, not top-level" in world.notes[-1][1]
+
+
+def test_a_link_without_created_as_keeps_the_scopes_answer(home, tmp_path):
+    world = _World(tmp_path)
+    rid = world.gate.submit_spawn(session="op", spec=dict(CHILD), reason="r", scope="child")["id"]
+    world.gate.manual(rid)
+    assert world.gate.link(rid, "kid")["created_as"] == "child"
+    assert world.notes[-1][1].endswith("(web), as your child.")
+
+
+def test_a_link_refuses_an_unknown_created_as(home, tmp_path):
+    world = _World(tmp_path)
+    rid = _spawn(world)["id"]
+    world.gate.manual(rid)
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        world.gate.link(rid, "kid", "sideways")
+    assert err.value.status == 400
+    assert world.gate.get(rid)["status"] == "pending", "a refused link settles nothing"
 
 
 @pytest.mark.parametrize("kw", [{"scope": "sideways"}, {"child_spec": "x"}])
@@ -752,9 +836,11 @@ def test_card_facts_keep_what_the_spec_names(home, tmp_path):
     assert facts["profile"] == {"value": "p2", "inherited": False}
     # a named project with no directory starts in its default workspace
     assert facts["workspace"] == {"value": "hq", "inherited": False}
-    # a declined workflow and a missing role read as none
-    assert facts["workflow"] == {"value": "", "inherited": False}
-    assert facts["role"] == {"value": "", "inherited": False}
+    # a declined workflow and a missing role read as none — and the card says
+    # WHICH none, so a dash is not read as "the daemon lost it" (claunch-8fvr5)
+    assert facts["workflow"] == {"value": "", "inherited": False, "note": "no run"}
+    assert facts["role"] == {"value": "", "inherited": False,
+                             "note": "from the handle, else free-role"}
     named = spawn_gate.card_facts({"workspace": "hq"}, asker)["workspace"]
     assert named == {"value": "hq", "inherited": False}
 
@@ -773,9 +859,10 @@ def test_card_facts_show_the_workflow_a_child_inherits(home):
     assert named["workflow"] == {"value": "other", "inherited": False}
     declined = spawn_gate.card_facts({"workflow": "-"}, asker,
                                      paired_workflow="improv-worker-v2")
-    assert declined["workflow"] == {"value": "", "inherited": False}
+    assert declined["workflow"] == {"value": "", "inherited": False, "note": "no run"}
     # no pair: still none
-    assert spawn_gate.card_facts({}, asker)["workflow"] == {"value": "", "inherited": False}
+    assert spawn_gate.card_facts({}, asker)["workflow"] == {
+        "value": "", "inherited": False, "note": "no run"}
 
 
 def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monkeypatch):
@@ -813,7 +900,8 @@ def test_the_card_route_reads_the_pair_for_a_child_request(home, tmp_path, monke
     assert by_id[kid]["facts"]["workflow"] == want
     assert got["request"]["facts"]["workflow"] == want
     # a declined pair is not looked up and reads as none
-    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False}
+    assert by_id[named]["facts"]["workflow"] == {"value": "", "inherited": False,
+                                                 "note": "no run"}
     assert set(asked) == {("op", "/w/op", "/w/op")}
 
 

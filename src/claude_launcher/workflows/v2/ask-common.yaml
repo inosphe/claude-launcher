@@ -72,6 +72,10 @@ procedures:
       # settle-stall·retrospective도 부르고, 그 질문까지 카드가 되면 안 된다
       # (claunch-q4cqy.4).
       nudge: {type: str, default: "", description: 질문을 대기시키며 flow_nudge를 부르라는 지시 문구. 빈 값이면 지시 없음}
+      # 이 질문의 알림이 갖는 기준 키워드(frontend.ASK_CRITERIA). 순위가 아니라
+      # 선언이다 — 대시보드는 이 말을 읽어 창의「Waiting on you」에서 접을지
+      # 정한다. 비우면(기본값) 선언 없음: 다른 게이트와 같은 기준을 갖는다.
+      criteria: {type: list, default: null, description: "이 질문 알림의 기준 키워드. deferrable 하나를 선언하면 지금 답하지 않아도 되는 질문이라는 뜻"}
     returns:
       ok: {decision: str, reason: "str?", by: str, brief: dict}
       reframe: {reason: str, brief: dict}
@@ -129,6 +133,7 @@ procedures:
           choices: ${params.choices}
           from: ${params.from}
           require_reason: ${params.require_reason}
+          criteria: ${params.criteria}
           otherwise: human
     body:
       - try:

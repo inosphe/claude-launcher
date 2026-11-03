@@ -357,3 +357,149 @@ def test_api_migrate_into_a_worktree_of_the_sessions_repo(home, tmp_path, monkey
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# what follows the definition: cflow v2 run slots and the project filing
+# --------------------------------------------------------------------------- #
+def _slot(runs_root, name, state="{}"):
+    slot = runs_root / name
+    slot.mkdir(parents=True)
+    (slot / "state.json").write_text(state, encoding="utf-8")
+    return slot
+
+
+def test_migrate_moves_the_sessions_cflow_slots(home, tmp_path):
+    """Runs are keyed (cwd, scope): the session's slots travel to the new
+    directory, a slot of another session in the same runs root stays."""
+    _register_py_harness()
+    a, b = tmp_path / "dirA", tmp_path / "dirB"
+    a.mkdir(), b.mkdir()
+    runs_a = a / ".cflow2" / "runs"
+    main = _slot(runs_a, "s1@main")
+    side = _slot(runs_a, "s1@main+stack")
+    other = _slot(runs_a, "s9@main")
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
+        session, _ = await mgr.migrate("s1", str(b))
+        assert session.sdef.cwd == str(b)
+        runs_b = b / ".cflow2" / "runs"
+        assert (runs_b / "s1@main" / "state.json").is_file()
+        assert (runs_b / "s1@main+stack" / "state.json").is_file()
+        assert not main.exists() and not side.exists()
+        # another session's run in the same directory is not dragged along
+        assert other.exists()
+        assert (runs_a / "s9@main" / "state.json").is_file()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_migrate_rolls_back_moved_slots_when_the_relaunch_fails(home, tmp_path, monkeypatch):
+    _register_py_harness()
+    a, b = tmp_path / "dirA", tmp_path / "dirB"
+    a.mkdir(), b.mkdir()
+    _slot(a / ".cflow2" / "runs", "s1@main")
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
+
+        def refuse(*args, **kwargs):
+            raise harness_mod.HarnessError("no relaunch today")
+
+        monkeypatch.setattr(SessionManager, "_recreate", refuse)
+        with pytest.raises(harness_mod.HarnessError):
+            await mgr.migrate("s1", str(b))
+        # the slot came back with the definition
+        assert (a / ".cflow2" / "runs" / "s1@main" / "state.json").is_file()
+        assert not (b / ".cflow2" / "runs" / "s1@main").exists()
+        assert mgr.get("s1").sdef.cwd == str(a)
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_migrate_refuses_an_unknown_project_before_touching_anything(home, tmp_path):
+    _register_py_harness()
+    a, b = tmp_path / "dirA", tmp_path / "dirB"
+    a.mkdir(), b.mkdir()
+    _slot(a / ".cflow2" / "runs", "s1@main")
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
+        with pytest.raises(ManagerError, match="no project named"):
+            await mgr.migrate("s1", str(b), project="nope")
+        kept = mgr.get("s1")
+        assert kept.sdef.cwd == str(a)
+        assert (a / ".cflow2" / "runs" / "s1@main" / "state.json").is_file()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_migrate_with_project_refiles_the_definition(home, tmp_path):
+    _register_py_harness()
+    a, b = tmp_path / "dirA", tmp_path / "dirB"
+    a.mkdir(), b.mkdir()
+    from claude_launcher import projects
+
+    projects.add("hq")
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
+        session, _ = await mgr.migrate("s1", str(b), project="hq")
+        assert session.sdef.project == "hq"
+        # without the argument the project filing stays as it was
+        c = tmp_path / "dirC"
+        c.mkdir()
+        session, _ = await mgr.migrate("s1", str(c))
+        assert session.sdef.project == "hq"
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_api_migrate_accepts_project(home, tmp_path):
+    _register_py_harness()
+    a, b = tmp_path / "dirA", tmp_path / "dirB"
+    a.mkdir(), b.mkdir()
+    from claude_launcher import projects
+
+    projects.add("hq")
+
+    async def run():
+        mgr = _manager()
+        client = await _serve(mgr, tmp_path)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
+            mgr.create(SessionDef(name="c1", harness="py", cwd=str(a), parent="s1"))
+            resp = await client.post(
+                "/api/sessions/s1/migrate",
+                json={"cwd": str(b), "children": True, "project": "hq"},
+                headers=BEARER,
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["project"] == "hq"
+            # a follower keeps its own filing
+            assert "project" not in (await (await client.get(
+                "/api/sessions/c1", headers=BEARER)).json())
+            assert mgr.get("c1").sdef.project is None
+            # an unknown project is a 400, not a half-moved session
+            resp = await client.post(
+                "/api/sessions/s1/migrate",
+                json={"cwd": str(a), "project": "nope"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert mgr.get("s1").sdef.cwd == str(b)  # the first move stands
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

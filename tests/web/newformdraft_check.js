@@ -171,6 +171,10 @@ function buildForm() {
     }
   });
   for (const r of f.beads) r.addEventListener("change", () => calls.push("beads-row"));
+  // The controls captureNewFormPristine walks (claunch-130zs). Empty on
+  // purpose: this harness is about the draft, and a capture with nothing to
+  // walk is the no-op a form with no controls gets.
+  f.querySelectorAll = () => [];
   return f;
 }
 
@@ -213,8 +217,14 @@ let newFormDraftRestoring = false;
 let newFormDraftRestored = false;
 let newWfPicked = false;
 let pendingWorktreeMode = "";
+// The form as the page ships it (claunch-130zs). This stub form has no
+// controls to walk, so the capture is a no-op here and the restore keeps the
+// rows as the draft left them — the browser harness is where the capture is
+// exercised.
+let newFormPristine = null;
 ` + ["readNewFormDraft", "newFormDraftAnswer", "saveNewFormDraft",
-     "setNewFormDraftSelect", "setNewFormDraftCheck", "restoreNewFormDraft"]
+     "setNewFormDraftSelect", "setNewFormDraftCheck",
+     "captureNewFormPristine", "restoreNewFormDraft"]
       .map(slice).join("\n") + `
 Object.assign(ctx, {
   save: saveNewFormDraft, restore: restoreNewFormDraft, read: readNewFormDraft,

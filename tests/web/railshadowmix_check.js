@@ -347,10 +347,20 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
         [list.querySelectorAll("li[data-name]").filter((n) => n.dataset.name === "s1").length,
          !!s1Remote], [1, true]);
   check("sessionsCache never takes a shadow", ctx.cache(), ["s1", "s2", "s3"]);
-  check("the ⊕ sits on the open mesh's header row, on no tab",
+  check("on All projects an open mesh's header has no ⊕ (claunch-teipq)",
         [tabs().map((t) => t.querySelectorAll(".session-group-new").length),
          groupHeader.dataset.value, groupHeader.querySelectorAll(".session-group-new").length],
-        [[0, 0, 0, 0, 0], "alpha", 1]);
+        [[0, 0, 0, 0, 0], "alpha", 0]);
+  pick("default");
+  await ctx.refresh({ cached: true });
+  await open("alpha");
+  check("the ⊕ sits on the open mesh's header row once a project is picked, on no tab",
+        [tabs().map((t) => t.querySelectorAll(".session-group-new").length),
+         groupHeader.dataset.value, groupHeader.querySelectorAll(".session-group-new").length],
+        [[0, 0, 0, 0], "alpha", 1]);
+  pick("");
+  await ctx.refresh({ cached: true });
+  await open("alpha");
 
   /* ---- ownership -------------------------------------------------------- */
   pick("default");

@@ -548,7 +548,7 @@ def policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 async def default_ask(cfg: Dict[str, Any], state: Dict[str, Any], qs: Dict[str, dict],
                       model: str) -> Dict[str, Any]:
-    return await jev.system_one(cfg, state, qs, model=model)
+    return await jev.system_one(cfg, state, qs, model=model, feature="megathread")
 
 
 async def evaluate(

@@ -114,6 +114,17 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
   시작은 드라이버가 한다.
 - 회차 번호: 슬롯의 상태 `round`. 새 런은 이전 런(같은 슬롯, 같은 정의 이름)에
   `next_round`가 있으면 그 번호 + 1, 없으면 1이다. `flow_status`가 `round`를 싣는다.
+- 표시용 회차 `round_now` (claunch-oxmso, claunch-oxmso.1): `recur`하지 않고 같은
+  런 안의 루프로 회차를 도는 정의(`improv-worker-v2`·`perf-monitor-v2`의 `rounds`)는
+  `round`가 1에 머물므로, `flow_status`·`rail_entry`·`run_detail`이 표시용 값
+  `round_now`를 따로 싣는다. `recur` 정의에서는 `round`와 같다. 그 밖에는 정의가
+  `loop`의 `rounds: true`로 선언한 루프의 살아 있는 인스턴스 가운데 가장 바깥 것의
+  `frame.iter - frame.base`(지금 반복 번호)이고, 그런 인스턴스가 없으면 실리지
+  않는다 — 화면은 그때 `round`로 떨어진다. 어떤 루프가 회차인지는 정의가 밝히고,
+  엔진은 「가장 바깥 루프」처럼 모양으로 추측하지 않는다: `operator-v2`의 `service`
+  같은 감시 루프(`claunch operators watch` 폴링)는 회차가 아니므로 선언하지 않으며,
+  그 런의 표시는 `round`(1)에 머문다. `round`의 의미는 바뀌지 않는다 — 런 이력과
+  공용 API는 계속 `round`를 읽는다.
 - `recur: true`: 드라이버가 다음 회차를 시작한다(`flow_start`). 끝난 런의
   `flow_status`가 `next_round`와 그 안내를 싣는다.
 - `recur: {auto: true}`: 데몬의 cflow2 clock이 끝난 슬롯에서 `next_round.auto`를
@@ -290,6 +301,7 @@ ask:
   on_decline: declined    # 거절 시 작업의 결과 이름(기본 declined)
   on_unroutable: unrouted # 선택. 명단을 읽지 못해 아무도 찾지 못했을 때의 결과 이름
   urgent: true            # 선택. 사람의 응답을 바로 기다리는 승인(기본 false)
+  criteria: [deferrable]  # 선택. 이 질문의 알림이 갖는 기준 키워드(기본 없음)
   # options: {pass: {outcome: ok, description: …}, changes: {description: …}}
 ```
 
@@ -341,7 +353,17 @@ ask:
   `urgent_asks`(열림·응답됨, 결정)와 `answers[]`의 `urgent`·`ask`이며,
   `flow_status`의 `asks` 항목도 `urgent`를 싣는다. 끄면 지금까지와 같다.
   예: `improv-worker-v2`의 coding-approval.
-- 게이트가 열린 시각(claunch-l9znm.1): `/api/cflow2/rail`의 `answers[]` 항목마다
+- `criteria`: 이 질문의 알림이 갖는 **기준 키워드** 목록(기본 없음). 순위가 아니라
+  선언이다 — 대시보드는 알림을 순위로 줄 세우지 않고, 어떤 말을 가졌는지로 보여 줄지
+  정한다. 지금 스텝이 선언할 수 있는 말은 `deferrable` 하나다: 「지금 답하지 않아도
+  되는 질문」이라는 뜻이고, 알림 창의 「Waiting on you」가 접혀 있을 때 그 행을
+  접힌다(스레드 th-3b3470, 2026-10-30). 나머지 말은 대시보드가 알림 자체에서
+  유도한다 — `fatal`(리더가 멈춰 프로젝트가 서 있음), `blocking`(게이트 종류),
+  `urgent`(`urgent: true`), `expiring`(기한이 30분 안). `deferrable`은 `urgent`나
+  `fatal`에 지므로, 두 선언이 겹치면 보이는 쪽이 이긴다. 목록의 기본값은 빈
+  목록이고, 이 키가 없는 워크플로(예전에 컴파일된 차트 포함)는 지금과 같다.
+  `/api/cflow2/rail`의 `answers[]`와 `flow_status`의 `asks` 항목이 `criteria`를 싣는다.
+  예: `improv-worker-v2`의 `release-decision`·`end-decision`.
   `opened_at`(epoch 초)이 실린다 — 런이 그 요청으로 사람을 기다리기 시작한 시각이다.
   ask는 `asks` 기록의 `opened`(열 때 `utcnow()`)에서, `choose`는 인스턴스의
   `entered_at`에서, move는 요청의 `at`에서, 루프·방문 한도와 halt·acceptance는
@@ -355,6 +377,52 @@ ask:
   다시 시작한다. 데몬과의 연결이 끊겼다 돌아오면 그 값을 버리고 다음 응답에서
   다시 읽는다. `flow_status`의 `asks`·`choices`·`loop_limits`·`visit_limits` 항목도
   같은 `opened_at`을 싣는다.
+- 질문 본문의 markdown(claunch-ns4kd): `/api/cflow2/rail`의 `answers[]` 항목은
+  `prompt`(한 줄로 접고 400자에서 자른 값 — 터미널 스트립과 상태 줄이 읽는다)와
+  `prompt_md`(ask가 쓴 그대로의 줄바꿈을 보존하고 1600자에서 자른 값)를 함께 싣는다.
+  대시보드의 알림 카드와 기록 행은 `prompt_md`를 markdown으로 그리고, 없는 응답
+  (이 필드가 생기기 전의 데몬, 그리고 v1 런 — 그쪽은 런 행의 `ask.prompt`를 쓴다)은
+  지금까지대로 `prompt`를 평문으로 그린다. 두 상한은
+  `cflow2_web.RAIL_PROMPT_MAX`·`RAIL_PROMPT_MD_MAX`다.
+  `prompt`는 한 줄로 접기 전에 markdown 표시자를 벗긴다(claunch-ns4kd.1,
+  claunch-edhbu) — `cflow2_web._rail_strip_markdown`이 줄 머리의 제목(`#`)·
+  인용(`>`)·목록 표시자와 짝지은 `***`·`**`·`__`·`~~`·`~`·backtick, 링크·그림
+  문법을 걷어내고, 코드 펜스와 구분선 줄은 버린다. 표는 구분선 행(`|---|`)을
+  버리고 파이프로 시작하는 행을 칸으로 나눠 공백으로 잇는다 — 한 칸짜리 표
+  (`| a |`/`|---|`/`| 1 |`)의 구분선도 같은 자리에서 버린다(claunch-edhbu.1). 터미널
+  스트립(`#term-cflow`)과 운영자 상태 줄은 이 필드를
+  평문으로 그리므로, 벗기지 않으면 `## 선택지`·`- **approve-once**`·`| 칸 |`이
+  그대로 보인다. 표시자처럼 보이지만 아닌 글자(`a_b_c`, `2*3`,
+  `2026. 11. 2. 회의`, `~/.config`, `a | b`)는 그대로 둔다.
+  `prompt_md`는 벗기지 않는다 — 카드가 그리는 값이다.
+- 세션 상태(claunch-6vq2m): 세션이 끝나도 그 세션이 남긴 런은 디스크에서 계속
+  사람을 기다린다. 그래서 `/api/cflow2/rail`의 행마다 그 세션의
+  `session_category`(`running`·`hold`·`delayed`·`failed`·`killed`·
+  `paused`·`archived`, `session.session_category`)와 `session_status`(살아 있으면
+  `busy`·`idle`·`starting`, 끝났으면 `exited`)를 응답마다 싣는다. 대시보드는
+  `archived` 세션의 게이트로 코너 카드·「Waiting on you」 레코드를 만들지 않는다
+  (런 페이지에서는 여전히 답할 수 있다). 알림 카드와 기록 행의 세션 이름 옆에는 이
+  상태가 표시되고, 세션 폴과 rail 폴이 끝날 때마다 다시 읽힌다.
+- 게이트 레지스트리(claunch-6vq2m.1, `daemon/gate_registry.py`): 사람을 기다리는
+  게이트(위 `answers[]`의 항목)는 데몬 디렉터리의 `gates.db`에 한 번 열리고 한 번
+  닫히는 행으로 기록된다. 열 때는 `opened_at`(런의 시각, 없으면 처음 기록한 시각)을,
+  닫을 때는 `closed_at`과 사유(`resolved` 답함·런 진행, `run ended` 런 종료·abort·
+  아카이브, `session archived`, `session removed`)를 남긴다. 쓰는 쪽은 데몬
+  하나다 — 원천은 계속 런의 `state.json`이고, 데몬은 슬롯 파일의 stamp가 바뀐
+  경우에만 런을 다시 읽어 레지스트리와 비교한다(`cflow2_web.rail_entries`). 비교가
+  일어나는 자리는 rail 폴, cflow2 clock의 패스(이 데몬이 모는 live·hold·paused 세션,
+  대시보드가 열려 있지 않아도), 세션 종료 직후 한 번이다. 세션이 아카이브되거나
+  레코드가 지워지면(`SessionManager.filed_hooks`) 그 세션의 열린 게이트가 닫힌다.
+  kill·fail·hold·pause로 끝난 세션의 게이트는 열린 채로 남는다. rail 폴이 폴마다
+  stat하는 것은 살아 있는 세션과 열린 게이트가 있는 종료 세션의 런 파일뿐이다.
+  열린 게이트가 없는 종료 세션은 데몬 프로세스마다 한 번 읽어 캐시에서 내주고
+  (`answers`는 비운다 — 카드를 만들지 않는다). 아카이브된 세션도 같은 방식으로
+  내주되 레지스트리와 비교하지 않는다 — 닫힌 게이트를 다시 열지 않고, 행의
+  워크플로·시작 입력은 「Spawn same setup」의 시드로 남는다.
+  `answers[]` 항목은 `gate_id`(레지스트리 행의 `seq`)를 싣는다. 레지스트리가 처음 생길 때 이미 열려 있던 게이트는 데몬
+  기동 시 한 번 기록된다(`gate_registry.backfill`, 아카이브되지 않은 세션만,
+  멱등, 결과는 `meta`의 `backfilled_count`). `GET /api/gates?state=open|closed|all
+  [&session=][&limit=]`가 행과 그 결과를 돌려준다.
 - 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
   시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
   `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가
@@ -392,6 +460,14 @@ ask:
   없다(드라이버의 하위 세션은 명단에서 이미 빠진다).
 - 답의 이름: 옵션 이름은 대소문자를 구별하지 않고 비교하며, 기록과 결과에는 정의에
   적힌 철자를 쓴다(`LGTM`에 `lgtm`으로 답하면 결과 `LGTM`).
+- 리뷰어 그룹은 한 명에게 묻는다: `role: reviewer` 그룹은 응답 가능한 멤버 전원이
+  아니라 한 명에게만 질문을 보낸다(`asks.SINGLE_RESPONDER_ROLES`,
+  claunch-v0h29.1). 고르는 규칙은 기계적이다 — 이 세션과 이미 연결된 멤버, 그다음
+  idle인 멤버, 그다음 그룹의 순서(`Pool.pick_one`). `connect: true`도 그 한 명에게만
+  연결한다. 그 한 명이 기권하거나 기한을 넘기면 같은 그룹에서 아직 묻지 않은 다음
+  멤버를 같은 규칙으로 골라 다시 묻는다(`ask.passed`에 물은 멤버가 쌓인다). 그룹의
+  응답 가능한 멤버를 모두 물은 뒤에 다음 그룹으로 간다. `responders` 미리보기도 그
+  한 명을 보여 준다. 다른 역할 그룹은 전원에게 묻는다.
 - 기권: `abstain`은 그 응답자만 질문에서 빠지게 한다. 같은 그룹의 다른 응답자는 계속
   답할 수 있다. 그룹의 모든 응답자가 기권하거나 그룹의 `deadline`이 지나면 다음
   그룹으로 간다. 이미 기권한 응답자의 두 번째 답은 거절된다.
@@ -418,6 +494,18 @@ ask:
 - 드라이버가 MCP로 ask에 답할 수 있는 경로는 `self` 해소 단계의 `flow_approve`
   하나다. 위의 셸 경로는 CLI 검사와 거부 규칙이 막지만, 런타임 직접 호출은 막지
   못한다.
+- 열린 이유와 거쳐 온 경로(claunch-0rjnn): ask가 어떤 `choose`의 선택지 아래에서
+  열리면, 레코드의 `because`에 가장 가까운 그 선택(`choice` 라벨, `option`, 고른
+  쪽 `by`, 그 `reason`)이 실린다(`runtime._ask_because`). 선택지 아래가 아니면
+  `null`이다. 사람의 강제 이동(force move, 2.11)이 그 선택을 다른 선택지에
+  앉히면 `by`와 `reason`은 이동한 쪽과 이동 사유로 바뀐다(사유 없이 이동하면
+  빈 값, claunch-hvyof). 앞서 다른 선택지를 고를 때 남은 사유는 남지 않는다.
+  `flow_status`·`GET /api/cflow2/run`의 `asks[]`는 `because`와
+  `route`(그룹마다 `{group, candidates, who, reason}` — 그 그룹의 후보 선언, 물은
+  세션이나 후보, 다음으로 넘어간 사유, 레코드의 `skipped` 순서)를 싣는다.
+  `skipped`(사유 문자열 목록)는 그대로 둔다. 응답자 메시지(`asks.question_text`)는
+  `because`를 `Why this question is open:` 줄로, 웹 UI의 ask 카드는 둘을 「Why this
+  is open」·「Who was asked before you」 칸으로 그린다(`cf2AskWhy`).
 - 질문과 선택지를 앞 작업의 결과에서 만드는 형태(`brief`, `format`, `choices`)와
   답 `reframe`은 2.10에 있다.
 - 위임 실행 단위 아래의 작업에 `ask`가 있거나 `chooser: user` 선택이 있으면 정적
@@ -548,7 +636,7 @@ body:
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
 | `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
-| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T}` | 조건 루프. `max` 필수 |
+| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
 | `retry` | `retry: {do: T, max: N, every: SECONDS, until: EXPR, between: T}` | 재시도. `between`은 시도 사이에 실행하는 트리 |
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
@@ -794,9 +882,10 @@ inputs:
   `acceptance`는 선언과 무관하게 이미 그렇다. 그룹의 스위치처럼 블록의 다른
   칸 전체에 걸리는 입력에 쓴다.
 
-improv-worker-v2는 `코딩 승인`(require_coding_approval), `리뷰어`
-(reviewer_profile·reviewer_harness), `라우팅`(session_routing·delegate_profile·
-delegate_model), `PR`(force_pr·force_no_pr) 네 블록을 두고, `session_routing`이
+improv-worker-v2는 `코딩 승인`(require_coding_approval), `착지 승인`
+(require_merge_approval — 착지 요청 직전 사용자 승인 게이트, claunch-boxug),
+`리뷰어`(reviewer_profile·reviewer_harness), `라우팅`(session_routing·delegate_profile·
+delegate_model), `PR`(force_pr·force_no_pr·auto_merge) 다섯 블록을 두고, `session_routing`이
 `wide`다. 블록의 입력이 하나여도 그 입력은 자기 블록을 갖는다 — 종전에는
 무그룹이던 `require_coding_approval`이 회차 상한(`max_rounds`)과 한 블록에
 짝지어 섰다(claunch-kzun2).
@@ -1240,6 +1329,11 @@ nodes:
   - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
     쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
     (`fell back to '<세션>' at <cwd>`)을 적는다.
+  - `parent:landing`이 mesh leader의 큐에 닿으면(부모 없음, 병합할 수 있는 조상 없음,
+    병합하는 조상이 leader) 그 요청은 independent로 강등된 것이고, `trigger_done`
+    사유와 `claunch gate landing-target --json`의 `demoted`가
+    `stacked demoted to independent: <사유>, ...`로 그 사실을 적는다(claunch-0ka8c).
+    leader가 그 저장소를 받지 못하면 강등할 곳이 없으므로 그대로 대상 없음이다.
   - 어느 쪽이든 데몬은 결과를 런의 드라이버 터미널에 `landing request routed` 블록으로
     타이핑한다(`daemon/cflow2_clock.landing_block`, claunch-g0ttr.1): `result: queued --
     <trigger_done 사유>` 또는 `result: NOT queued -- <trigger_skipped 사유>`. 라우팅은
@@ -1730,8 +1824,17 @@ Finding이다.
 `end-decision`)는 같은 id의 `call: ask-user`(`choices`로 원래 옵션 이름을 고정,
 `require_reason: true`, `from` 없음)와 `$data.<bind>.decision`으로 갈라지는 `cond`로
 바뀌었다. 원래 옵션의 설명은 `topic`에 「선택지:」 줄로 옮겼다.
+예외 하나: `test-skip-gate`(claunch-dsr4o)는 `chooser: user` choose로 남는다 — 표적 테스트 루프 `tests`와 `settle: race` par로 묶인 멈춤 버튼(옵션 `skip` 하나, `raise: user-skipped` → `test-skipped`)이라 브리프가 필요한 결정이 아니고, `ask-user`로 쓰면 테스트와 나란히 `ask-frame` 작업이 하나 더 서고 테스트 내내 런이 `waiting_approval`이 된다. 허용 목록은 이 이름 하나다(`tests/test_cflow2_improv_worker.py`의 `USER_CHOOSE_ALLOWED`).
 `workspace-gate`는 바꾸지 않았다: 답이 승인 하나이고 보류는 답하지 않는 것이므로
 선택지가 둘 이상인 `decision` 형식에 맞지 않는 승인(ask, `options` 없음)이다.
+같은 형태의 승인 둘이 뒤에 더해졌다(claunch-101wi). 둘 다 에이전트의 자체 판정
+(`chooser: agent`, `require_reason`)이 부정일 때만 서고, 거절(`decline`)은
+`on_decline` 결과로 끝나 감싸는 `try`가 받는다:
+`feasibility-gate`(worker-round의 `feasibility-check`가 `unjustified` — 일감과 코딩
+승인 앞; 거절은 `infeasible` → `feasibility-hold`가 `HOLD:`를 남기고 batch를 빠져
+wrapup으로)와 `landing-channel-gate`(land의 `landing-channel`이 `no-channel` —
+`integration-request`·`await-landing` 바로 앞; 거절은 `no-channel-declined` → land가
+`blocked`로 끝나고 보드는 `in_review`로 가지 않는다).
 `landing-review`·`peer-review`의 ask는 사용자가 아니라 다른 세션에 묻는 것이라
 대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
 바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
@@ -2113,7 +2216,7 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `seq` | 복합 상태(순차) | `children`, `pass_prev` |
 | `cond` | 가드 전이를 가진 복합 상태 | `branches: [{guard, child}]` |
 | `choose` | 외부 선택 전이 | `prompt`, `chooser`, `options: [{name, description, guard, child}]` |
-| `loop` | 복합 상태 + 자기 전이 | `mode`(while/until/foreach/retry), `guard`, `max`, `child`, `between`, `every`, `items`, `as`, `parallel` |
+| `loop` | 복합 상태 + 자기 전이 | `mode`(while/until/foreach/retry), `guard`, `max`, `child`, `between`, `every`, `items`, `as`, `parallel`, `rounds`(선언한 루프의 반복이 회차라는 표시, 2.1) |
 | `par` | 병렬 영역 | `branches: {name: child}`, `settle` |
 | `timeout` | 시간 전이를 가진 복합 상태 | `child`, `seconds`, `else` |
 | `try` | 복합 상태 + 결과 전이 | `child`, `catch: {outcome: child}`, `finally` |
@@ -2217,8 +2320,13 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 - 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
   때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
   조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
-  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow 5
-  more」는 5, 「Allow 15 more」는 15)은 상한을 N만큼 올린다. `--reset`(본문
+  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`은 상한을 N만큼
+  올리고, 웹 카드·터미널 스트립의 두 버튼도 같은 것을 한다 — 그 값은 그 루프의
+  `max`에 비례한다: 1/5과 3/5(정수 내림, 각각 최소 1, 두 값은 서로 다름)라 상한
+  25인 루프는 「Allow 5 more」·「Allow 15 more」, 상한 5인 await-landing 루프는
+  「Allow 1 more」·「Allow 3 more」다(`daemon/flow_nudge.py`의 `loop_raise_steps`,
+  `app.js`의 `cf2LimitPresses`). 상한을 싣지 않은 옛 페이로드에는 5·15가 남는다.
+  `--reset`(본문
   `reset: true`, CLI·API 전용이며 웹 카드에는 버튼이 없다)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
   그때까지 올린 상한은 버린다. 반복의 위치는 유지된다: `foreach`는 다음 항목부터
   이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
@@ -2911,7 +3019,8 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `<sha> @ <remote>/<ref>`로 쓰고(docs/remote-commit-protocol.md), rebase 기준은
   `<remote>/<base>`(브랜치 upstream)다.
 - 결과는 `data.landing`(`medium`, `reason`, `remote`, `repo`, `base`, `pr_url`,
-  `pr_number`)에 묶인다.
+  `pr_number`, `tip`)에 묶인다. `tip`은 게시(`pr-publish`)가 PR이 가리키는
+  커밋으로 채운다(10a.1의 `PR SUBMITTED` 마커가 이 값을 쓴다).
 - 게시: 동료 리뷰 통과 뒤 `medium == 'pr'`이면 프로시저 `pr-publish`(작업
   `pr-open`)가 명시 refspec으로 push하고 `git ls-remote`로 원격 SHA를 확인한 뒤 PR을
   열거나(이미 같은 브랜치의 OPEN PR이 있으면 갱신만) 결과를 `data.landing`에 다시
@@ -3104,6 +3213,43 @@ PR은 닫고 브랜치는 지웠다.
 남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
 표에 행을 더한다.
 
+### 10a.1 PR 제출에서 회차를 끝내기 (auto_merge, claunch-ijkge)
+
+시작 입력 `auto_merge`(bool, 기본 `true`)는 PR을 연 뒤 머지까지 갈지, 제출에서
+회차를 끝낼지 정한다. 기본값은 변수 도입 전의 동작(착지 요청 → 상위/리더의 머지
+→ landed)이고, `false`가 사용자가 PR을 직접 머지하는 선택 경로다.
+
+| `auto_merge` | PR을 연 뒤 | 이슈 | 회차 결과 |
+|---|---|---|---|
+| `true`(기본) | 착지 요청(integration-request) → 상위·리더의 머지 → landed | landed에서 닫힌다 | `landed` |
+| `false` | 착지 요청을 세우지 않는다. `gh pr merge`도 하지 않는다 | `in_review` + `PR SUBMITTED @ <tip> <url>` 마커 | `pr-submitted` |
+
+- `false`의 판정 자리는 `land`의 `submit` 루프에서 `issue-gate` 뒤,
+  `publish`(`pr-publish`)가 끝난 다음이다. `data.landing.medium == 'pr'`이고
+  `land`의 `mode`가 `full`일 때만 서고, 로컬 착지와 위임 전용 회차
+  (`mode: stack-only`)에는 적용하지 않는다.
+- 마커를 쓰는 작업은 `nodes.pr-submitted-mark`다. 대상은 `items-pass`의 실린
+  이슈 전부이고(주 이슈가 증거 코멘트를 갖고 나머지는 `batch of <주 이슈>` 한 줄),
+  상태 전이는 `integration-request`가 하던 것과 같다 — 다른 점은 머지가 없다는
+  것이다.
+- `pr-submitted`는 `land.returns`에 선언된 다섯째 결과다. `worker-round`의 배치
+  `try` catch가 `break: batch`로 받으므로 배치를 다시 돌지 않고 wrapup·회차 보고를
+  지난다(선언만 하고 catch가 없으면 fail로 탈출해 queue-recheck를 건너뛴다 —
+  `blocked`가 그랬던 것과 같은 경로).
+- `wrapup`은 이 결과에서 이슈를 닫지 않는다. `settle-check`는 `in_review`이면서
+  이 세션이 쓴 `PR SUBMITTED @` 코멘트가 있는 이슈를 정산된 것으로 읽는다 — PR이
+  원격에 있으므로 세션이 끝나도 작업이 유실되지 않고, 머지는 세션의 행위가 아니다.
+  두 조건이 함께 서지 않는 `in_review`는 지금처럼 미정산이다.
+- 머지 뒤에 그 이슈를 닫는 것은 사용자 또는 후속 회차의 몫이다. 마커가 그 줄을
+  적으므로(위 요약 코멘트) in_review로 남은 이슈가 잊히지 않는다.
+- PR 불가(gh 미설치·미로그인·원격 없음)로 로컬 착지로 내려온 회차는 `land`의
+  `local-warning`이 `pr-local-notice`로 사용자에게 경고를 남긴다: 사유, 이 회차가
+  로컬 브랜치로만 남는다는 사실, 세션·워크트리 정리나 머신 교체로 커밋이 유실될 수
+  있다는 위험, `gh auth login` 뒤 push·PR로 복구하는 방법. `force_pr`·`force_no_pr`로
+  사용자가 직접 로컬을 고른 회차는 경고하지 않는다(그 선택은 이미 사람의 것이다).
+  보드의 `LANDING MEDIUM: local (PR 불가: <사유>)` 코멘트는 `remote-setup`이 그대로
+  남긴다.
+
 ## 10b. 리뷰어의 profile·harness (improv-worker-v2, claunch-gqgcz)
 
 `reviewer-ensure`가 세우는 자식 리뷰어는 기본으로 워커 세션의 profile과 harness를
@@ -3210,7 +3356,9 @@ PR은 닫고 브랜치는 지웠다.
   그래야 다시 선 `sim-recheck`가 같은 `sim_id`를 이어 받는다.
 - 회차에서 `sim-check`가 돌지 않으면 `sim-precheck`의 else가 `sim-idle` 절차로 `data.sim`을
   초기값으로 되돌린다. 회차 중에 `required`로 바뀌어도 앞 회차의 `findings: clear`로 게이트를 통과하지 않는다.
-- stack-only 회차에서는 게이트가 막지 않는다.
+- stack-only 회차에서는 게이트가 막지 않는다. 첫 회차를 착지 절차로 시작하는
+  회차(`start_at=landing`, 회차 종류 `land-only`)에서도 마찬가지다 — 두 회차
+  종류 모두 `sim-gate`의 조건(`mode == 'full'`)에 들지 않는다.
 - 결과 해석과 원천 규칙은 `docs/simulation.md`의 해당 절에 있다.
 
 ## 11. 단계
@@ -3289,8 +3437,8 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   tip이 실패하면 covered 작업은 그대로 두고, `unbatch --job <tip>`이 그것들을 개별
   `queued` 작업으로 풀어(`bisect_of`=tip, 저장소 pause 중에도 실행) 개별 스윕으로 원인 머지를
   좁힌다. tip을 `cancel`하면 covered 작업은 묶기 풀로 돌아간다.
-- 감시 자식: 데몬 Clock이 tip마다 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
-  spawn한다(동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
+- 감시 자식: 데몬 Clock이 tip이 `running`이 된 뒤에 `sweep-job-v2` 런을 도는 자식 세션을 리더의 자식으로
+  spawn한다(창 순번을 기다리는 `queued` tip에는 세션이 없다. 동시에 3개까지, 실패하면 300초 뒤 재시도, 실패해도 스윕은 돈다). 스윕 프로세스는
   전과 같이 데몬이 시작하고 테스트 창에서 priority -1로 대기한다. 자식은 직접 테스트를
   돌리지 않는다.
 - 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
@@ -3299,6 +3447,12 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
   (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
   좁히기 후 리더에게 한 줄을 보낸다.
+- 대기 상한: 자식은 단발성이다. 알림 8회(약 2시간) 동안 판정이 없으면 `timed-out` 단계가
+  `timed_out`, 작업 id, 큐 상태 한 줄을 보고하고 런이 끝난다(kill-on-end). `loop.max`는 상한이
+  아니다(`loop_limit`으로 사람을 기다린다). 상한 뒤에는 같은 job(같은 generation)에 감시 자식을
+  다시 세우지 않는다(`retry-watcher`가 새로 요청한다). 결과는 감시 자식과 무관하게 Clock이 소유
+  리더에게 `claunch delayed-sweep: result` 블록으로 전달하며, failed·stuck 블록은 `unbatch --job <tip>`
+  명령을 함께 싣는다.
 - 우선순위: 스윕은 priority -1이라 대기 중 단위 테스트(0)를 막지 않는다. 실행 중인 스윕은
   완료까지 독점한다.
 

@@ -10,7 +10,7 @@
 # `--overrides` pointing zvec at that wheel. pyproject.toml stays unchanged.
 #
 # Linux (and WSL) and macOS are both handled; `uname -s` picks the branch. On
-# macOS the system packages come from Homebrew (`brew install srtp
+# macOS the system packages come from Homebrew (`brew install srtp openssl
 # pkg-config`), the C++ compiler from the Xcode Command Line Tools
 # (`xcode-select --install`), and the p2p build is given the Homebrew include
 # and library paths that clang does not search on its own.
@@ -20,7 +20,7 @@
 #
 # One feature is optional: the fast direct link between the browser page and
 # the daemon. Without it the page still works and falls back to the relay
-# server, which is slower. Building that link needs two system libraries that
+# server, which is slower. Building that link needs three system packages that
 # are often missing, so the script checks for them first (about a second) and
 # tells you what to install, instead of finding out after the 9-minute build
 # and quietly installing without it. The technical name for the feature is
@@ -37,6 +37,7 @@
 #   CLAUNCH_FT_ZVEC_REPO   zvec git URL (default: https://github.com/alibaba/zvec)
 #   CLAUNCH_FT_WHEELS      wheel cache directory (default: ~/.cache/claunch/zvec-wheels)
 #   CLAUNCH_FT_ZVEC_WHEEL  path to an existing cp314t zvec wheel; skips the build
+#   CLAUNCH_FT_SRTP_VERSION  pylibsrtp version rebuilt and retagged for p2p (default: 1.0.0)
 #   CLAUNCH_FT_ROOT        tool environment and bin (default: ~/.local/share/claunch-nogil)
 #   CLAUNCH_FT_SHIM_DIR    where `claunch-nogil` is written (default: ~/.local/bin)
 #
@@ -85,6 +86,7 @@ ZVEC_REPO="${CLAUNCH_FT_ZVEC_REPO:-https://github.com/alibaba/zvec}"
 ZVEC_REF="${CLAUNCH_FT_ZVEC_REF:-8d4996924bce78f8b072a353803c305101bcc807}"
 CACHE_ROOT="${CLAUNCH_FT_WHEELS:-${XDG_CACHE_HOME:-$home_dir/.cache}/claunch/zvec-wheels}"
 PYTHON_SPEC="3.14t"
+SRTP_VERSION="${CLAUNCH_FT_SRTP_VERSION:-1.0.0}"
 FT_ROOT="${CLAUNCH_FT_ROOT:-$home_dir/.local/share/claunch-nogil}"
 SHIM_DIR="${CLAUNCH_FT_SHIM_DIR:-$home_dir/.local/bin}"
 export UV_TOOL_DIR="$FT_ROOT/tools" UV_TOOL_BIN_DIR="$FT_ROOT/bin"
@@ -114,10 +116,10 @@ cd "$repo_root"
 [ -f pyproject.toml ] || { echo "pyproject.toml not found in $repo_root" >&2; exit 1; }
 
 if [ "$os_kind" = "macos" ]; then
-    p2p_install_cmd="brew install srtp pkg-config"
+    p2p_install_cmd="brew install srtp openssl pkg-config"
     cxx_hint="xcode-select --install"
 else
-    p2p_install_cmd="sudo apt install -y libsrtp2-dev pkg-config"
+    p2p_install_cmd="sudo apt install -y libsrtp2-dev libssl-dev pkg-config"
     cxx_hint="apt install build-essential"
 fi
 
@@ -125,7 +127,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)" >&2; exit 
 need uv "https://docs.astral.sh/uv/"
 need git "needed to fetch zvec and its submodules"
 
-# One optional feature needs two system libraries: the fast direct link that
+# One optional feature needs three system packages: the fast direct link that
 # lets the browser page talk to the daemon without going through the relay
 # server. Without it everything still works; the page takes the relay path,
 # which is slower. The libraries are often already installed and sometimes
@@ -139,6 +141,13 @@ p2p_missing() {
     fi
     if ! pkg-config --exists libsrtp2 2>/dev/null; then
         echo "이 컴퓨터에 libsrtp2(빠른 통신 기능이 쓰는 암호화 라이브러리)가 없어서, 브라우저와 데몬을 직접 연결하는 기능을 켤 수 없습니다."
+        return 0
+    fi
+    # pylibsrtp links -lcrypto as well. A machine with only the OpenSSL runtime
+    # (libcrypto.so.3, no libssl-dev) passed the libsrtp2 check and then failed
+    # at the link step with `cannot find -lcrypto`.
+    if ! pkg-config --exists libcrypto 2>/dev/null; then
+        echo "이 컴퓨터에 OpenSSL 개발 파일(libcrypto, libssl-dev 패키지)이 없어서, 브라우저와 데몬을 직접 연결하는 기능을 켤 수 없습니다."
         return 0
     fi
     return 1
@@ -193,10 +202,11 @@ fi
 # pylibsrtp (under aiortc) compiles against libsrtp2 with the compiler's default
 # search paths. Homebrew puts headers and libraries under its own prefix
 # (/opt/homebrew on Apple Silicon), which clang does not search, so the build
-# would fail after pkg-config found the library. pkg-config knows the prefix.
+# would fail after pkg-config found the library. OpenSSL (libcrypto, which
+# pylibsrtp also links) sits under a prefix of its own. pkg-config knows both.
 if [ "$os_kind" = "macos" ] && [ "$extras" = ".[p2p]" ]; then
-    export CPPFLAGS="${CPPFLAGS:+$CPPFLAGS }$(pkg-config --cflags libsrtp2)"
-    export LDFLAGS="${LDFLAGS:+$LDFLAGS }$(pkg-config --libs-only-L libsrtp2)"
+    export CPPFLAGS="${CPPFLAGS:+$CPPFLAGS }$(pkg-config --cflags libsrtp2 libcrypto)"
+    export LDFLAGS="${LDFLAGS:+$LDFLAGS }$(pkg-config --libs-only-L libsrtp2 libcrypto)"
 fi
 
 mkdir -p "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" "$SHIM_DIR"
@@ -238,6 +248,29 @@ echo "zvec wheel: $wheel"
 overrides="$(mktemp "${TMPDIR:-/tmp}/claunch-ft-overrides.XXXXXX")"
 trap 'rm -f "$overrides"' EXIT
 printf 'zvec @ file://%s\n' "$wheel" > "$overrides"
+
+# p2p pulls pylibsrtp through aiortc. Its setup.py stamps every CPython wheel
+# `cp310-abi3`, and 3.14t refuses abi3 wheels, so uv builds it and then rejects
+# the result. cffi already compiles the extension without the limited API
+# (`_binding.cpython-314t-*.so`); only the tag is wrong. Build it once from the
+# sdist, retag it cp314-cp314t, cache it, and override pylibsrtp to that wheel.
+if [ "$p2p_installed" = 1 ]; then
+    srtp_dir="$CACHE_ROOT/pylibsrtp-$SRTP_VERSION"
+    if [ "$rebuild" = 1 ]; then rm -rf "$srtp_dir"; fi
+    srtp_wheel="$(ls "$srtp_dir"/pylibsrtp-*-cp314t-*.whl 2>/dev/null | head -n 1 || true)"
+    if [ -z "$srtp_wheel" ]; then
+        mkdir -p "$srtp_dir"
+        echo "building pylibsrtp $SRTP_VERSION for $PYTHON_SPEC"
+        uv tool run --python "$PYTHON_SPEC" pip wheel --quiet --no-deps --no-binary pylibsrtp \
+            --wheel-dir "$srtp_dir" "pylibsrtp==$SRTP_VERSION"
+        uv tool run --python "$PYTHON_SPEC" wheel tags --python-tag cp314 --abi-tag cp314t --remove \
+            "$srtp_dir"/pylibsrtp-"$SRTP_VERSION"-*abi3*.whl
+        srtp_wheel="$(ls "$srtp_dir"/pylibsrtp-*-cp314t-*.whl 2>/dev/null | head -n 1 || true)"
+        [ -n "$srtp_wheel" ] || { echo "pylibsrtp wheel not found in $srtp_dir after the build" >&2; exit 1; }
+    fi
+    echo "pylibsrtp wheel: $srtp_wheel"
+    printf 'pylibsrtp @ file://%s\n' "$srtp_wheel" >> "$overrides"
+fi
 
 install() {
     uv tool install --python "$PYTHON_SPEC" --editable "$1" --reinstall --overrides "$overrides"

@@ -224,7 +224,7 @@ globalThis.HivePage = (() => {
     if (v2) {
       add("workflow", v2.workflow || "cflow2");
       add("status", v2.status + (v2.gated ? " · 사람 대기" : ""));
-      add("round", v2.round);
+      add("round", v2.round_now ?? v2.round);
       add("현재", (v2.current || []).join(", "));
       add("대기", (v2.owed || []).join("\n"));
       if (v2.status === "error") add("error", v2.error);

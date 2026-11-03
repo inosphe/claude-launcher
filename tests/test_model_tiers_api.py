@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from claude_launcher import store
+from claude_launcher import lineage, profile as profile_mod, store
 from claude_launcher.daemon import api, model_tiers
 from claude_launcher.profile import create as create_profile
 
@@ -43,6 +43,16 @@ def _setup_profile(name: str = "a") -> None:
     store.update(_mutate)
     prof = create_profile(name)
     store.set_profile_field(prof.name, "provider", "ds")
+
+
+def _setup_codex_profile(name: str = "cx") -> None:
+    """A codex profile whose provider declares no role models: the first
+    profile the settings card's Add tier would seed (claunch-61vj3)."""
+    from claude_launcher import lineage
+
+    prof = create_profile(name)
+    lineage.set_harness(prof, "codex")
+    store.set_profile_field(name, "allowed_harnesses", ["codex"])
 
 
 _BLOCK = {"tiers": [{"id": "economy",
@@ -87,6 +97,40 @@ def test_put_refuses_a_body_without_tiers(home):
     status, body = put({"active": {}})
     assert status == 400
     assert "tiers" in body["error"]
+
+
+def test_put_accepts_the_block_add_tier_makes_for_a_codex_profile(home):
+    """Add tier seeds ``entries: [{profile}]`` with no model; the PUT must
+    land instead of answering 400 (claunch-61vj3)."""
+    _setup_codex_profile()
+    status, body = put({"tiers": [{"id": "misc",
+                                   "entries": [{"profile": "cx"}]}]})
+    assert status == 200
+    assert body["block"]["tiers"][0]["entries"] == [{"profile": "cx"}]
+    # The editor's Model select is built from this list.
+    assert "default" in body["models"]["cx"]
+    assert body["block"]["tiers"][0]["id"] == "misc"
+
+
+def test_the_editor_model_choices_are_the_validation_list_per_entry_harness(home):
+    """The card's Model select asks per (profile, entry harness): ``validate``
+    reads the entry's own harness, so one list per profile would hide valid
+    presets and offer invalid ones (claunch-61vj3 review)."""
+    _setup_profile("a")
+    store.set_profile_field("a", "allowed_harnesses", ["claude", "codex"])
+    _setup_codex_profile("cx")
+    status, body = get()
+    assert status == 200
+    doc = store.load()
+    by = body["models_by_harness"]
+    for name in ("a", "cx"):
+        prof = profile_mod.require(name)
+        effective = lineage.effective_harness(prof, doc)
+        assert by[name][""] == model_tiers._model_choices(prof, effective, doc)
+        for harness in body["harnesses"][name]:
+            assert by[name][harness] == model_tiers._model_choices(prof, harness, doc)
+    # The lists really differ for 'a' (claude default, codex also allowed).
+    assert by["a"]["claude"] != by["a"]["codex"]
 
 
 def test_put_validation_error_does_not_touch_the_stored_block(home):

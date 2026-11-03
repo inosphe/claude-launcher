@@ -188,7 +188,10 @@ nodes:
         같다, (c) 표적 테스트 수치(트리 해시 포함) — 자식이 셀프 게이트로
         표적 테스트를 생략했으면 수치 대신 그 이슈의 `TESTS SKIPPED @ <해시>:`
         코멘트와 그 판정이 diff에 맞는지(동작을 바꾸지 않는 파일뿐인가)를
-        본다(claunch-77cu6), (d) `git merge-tree
+        본다(claunch-77cu6). 그 마커의 사유가 `user — `로 시작하면 사람이
+        자식의 표적 테스트 실행 중에 생략한 것이므로(test-skip-gate,
+        claunch-dsr4o) diff 대조 없이 「표적 테스트 미실행(사람 생략)」으로
+        적는다, (d) `git merge-tree
         $(git merge-base <세션>-stack <자식>) <세션>-stack <자식>` 프리뷰가
         깨끗하다 — 하나라도 비면 머지하지 않고 되돌려 보충을 요청한다
         (`flow_collection` set status deferred, 결과 skipped).

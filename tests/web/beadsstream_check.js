@@ -33,7 +33,8 @@ function renderBeads() { shown.push(beadsCache && beadsCache.marker); }
 async function refreshBeadsDetail() {}
 function refreshBeadsRelated() {}
 function api(url) { return new Promise(resolve => requests.push({ url, resolve })); }
-` + slice("loadBeadsPage") + slice("restartBeadsStream")
+` + "let beadsIdPrefixes = new Set();\n" + slice("beadsNotePrefixes") + "\n"
++ slice("loadBeadsPage") + slice("restartBeadsStream")
   + slice("beadsReadPage") + slice("beadsGoToPage") + slice("beadsPageCount") + slice("beadsStatusQuery"), ctx);
 
 function reply(n, marker, { more = true, total = 200 } = {}) {

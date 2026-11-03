@@ -51,6 +51,14 @@ function constant(name) {
   return src.slice(start, start + end + 2);
 }
 
+/* A `const NAME = { ... };` object literal, the way constant() takes arrays. */
+function objectConstant(name) {
+  const start = src.indexOf(`const ${name} = {`);
+  if (start < 0) throw new Error(`constant ${name} not found in app.js`);
+  const end = src.slice(start).search(/\};\r?\n/);
+  return src.slice(start, start + end + 2) + "\n";
+}
+
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), handlers: {},
@@ -108,6 +116,10 @@ let statsIncludeArchived = false;
 let statsOverview = null;
 let statsOverviewError = "";
 let statsProvider = "";
+let statsLlm = null;
+let statsLlmError = "";
+let statsLlmProvider = "";
+let statsLlmSeq = 0;
 const STATS_COMPARE_MAX = 12;
 const document = { createElementNS: (_ns, tag) => el(tag) };
 let currentName = "s1";
@@ -141,14 +153,24 @@ new Function(
   + constant("STATS_WINDOWS") + constant("STATS_CATEGORIES")
   + constant("STATS_METHOD") + constant("STATS_WINDOW_METHOD")
   + constant("STATS_PALETTE") + constant("STATS_SWITCH_KINDS")
-  + slice("usageShort") + slice("profileHarnessLabel")
+  + objectConstant("STATS_LLM_FEATURES") + slice("statsLlmTokens")
+  + slice("usageShort") + slice("usageCost") + slice("usageShare")
+  + slice("profileHarnessLabel")
+  + slice("sessionInfoTooltip")
   + ["openStatsPage", "stopStatsPoll", "statsSchedule",
      "refreshStats", "refreshStatsOverview", "refreshStatsDetail",
+     "refreshStatsLlm", "setStatsLlmProvider", "statsLlmTable", "statsLlmBar",
+     "statsLlmCalls", "statsLlmParts", "statsLlmCost", "statsLlmFigureHeads",
+     "statsLlmFigures", "statsLlmChips", "statsLlmProviderStrip", "statsLlmDays",
+     "statsLlmSection",
      "statsPct", "statsBucketLabel", "statsStamp", "statsCard", "statsChart",
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
      "setStatsProvider", "statsProviderStrip",
-     "statsRowTotal", "statsRowRequests", "statsOverviewRows",
+     "statsRowParts", "statsRowTotal", "statsRowRequests",
+     "statsSummaryFigures", "statsOverviewRows",
+     "statsModelRows", "statsModelTotals", "statsModelBar", "statsModelCost",
+     "statsModelTable", "statsModelEstimate", "statsModelSection",
      "statsOverviewTable", "statsOverviewRow", "statsSwitchList",
      "statsDetailWindow", "statsReadingSections", "statsDetailPanel",
      "statsControls", "renderStatsOverview", "renderStats", "parseHash",
@@ -244,6 +266,17 @@ const overview = {
   totals: { input: 110, cache_read: 990, cache_write: 0, output: 0, total: 1100,
             requests: 5 },
   cache_share: 0.9,
+  currency: "₩",
+  models: [
+    { provider: "fireworks", model: "m1", input: 100, cache_read: 900,
+      cache_write: 0, output: 0, total: 1000, requests: 4, sessions: 1,
+      cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 0, declared: false },
+    { provider: "kimi", model: "k3", input: 10, cache_read: 90,
+      cache_write: 0, output: 0, total: 100, requests: 1, sessions: 1,
+      cost: null, priced_tokens: 0, unpriced_tokens: 100, declared: false },
+  ],
+  estimate: { cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 100,
+              total: 1100, requests: 5 },
   providers: [
     { provider: "fireworks", sessions: 1, totals: 0, total: 1000, requests: 4 },
     { provider: "kimi", sessions: 1, total: 100, requests: 1 },
@@ -276,9 +309,50 @@ const overview = {
   partial: false,
 };
 
+/* The daemon's own LLM calls (claunch-60y0d, daemon/llm_usage.py). */
+const llm = {
+  window: "today", since: "2026-10-29T00:00:00+09:00",
+  until: "2026-10-29T12:00:00+09:00", ledger_since: "2026-10-29",
+  all_providers: [{ provider: "ds", total: 900, calls: 3 },
+                  { provider: "fw", total: 0, calls: 1 }],
+  currency: "₩",
+  totals: { calls: 4, errors: 1, unreported: 1, total: 900, input: 500,
+            cache_read: 300, cache_write: 0, output: 100,
+            cost: 0.0012, priced_tokens: 600, unpriced_tokens: 300 },
+  features: [
+    { feature: "briefing", calls: 2, errors: 1, unreported: 0, total: 300,
+      input: 200, cache_read: 50, cache_write: 0, output: 50,
+      cost: 0, priced_tokens: 0, unpriced_tokens: 300,
+      purposes: [{ purpose: "card", calls: 2, total: 300 }] },
+    { feature: "observer", calls: 1, errors: 0, unreported: 0, total: 600,
+      input: 300, cache_read: 250, cache_write: 0, output: 50,
+      cost: 0.0012, priced_tokens: 600, unpriced_tokens: 0,
+      purposes: [{ purpose: "pass", calls: 1, total: 600 }] },
+    { feature: "rerank", calls: 1, errors: 0, unreported: 1, total: 0,
+      purposes: [{ purpose: "query", calls: 1, total: 0 }] },
+  ],
+  providers: [{ provider: "ds", calls: 3, errors: 1, unreported: 0, total: 900,
+                models: [{ model: "deepseek-flash", calls: 3, total: 900 }],
+                features: [{ feature: "briefing", calls: 2, total: 300 }] }],
+  sessions: [
+    { session: "s1", calls: 3, errors: 1, unreported: 0, total: 900,
+      input: 500, cache_read: 300, cache_write: 0, output: 100,
+      cost: 0.0012, priced_tokens: 600, unpriced_tokens: 300,
+      features: [{ feature: "observer", calls: 1, total: 600 }],
+      providers: ["ds"], last_at: "2026-10-29T11:00:00+09:00" },
+    { session: "", calls: 1, errors: 0, unreported: 1, total: 0,
+      features: [{ feature: "rerank", calls: 1, total: 0 }],
+      providers: ["fw"], last_at: "2026-10-29T10:00:00+09:00" },
+  ],
+  days: [{ day: "2026-10-29", calls: 4, total: 900,
+           features: { briefing: 300, observer: 600 } }],
+};
+
 const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   ? { ok: true, status: 200, body: { ...overview, ...(over || {}) } }
-  : { ok: true, status: 200, body: reading };
+  : url.includes("/api/stats/llm-usage")
+    ? { ok: true, status: 200, body: llm }
+    : { ok: true, status: 200, body: reading };
 
 (async () => {
   check("the rail has a Stats tab next to Window",
@@ -303,6 +377,56 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         !fetched.some((u) => u.includes("/stats?unit=")), fetched);
   check("a finished overview polls slowly",
         timers.length === 1 && timers[0].ms === 30000, timers.map((t) => t.ms));
+
+  // ---- the daemon's own LLM calls -------------------------------------
+  check("the daemon-LLM section is asked for the same window",
+        fetched.includes("/api/stats/llm-usage?window=today"), fetched);
+  const llmBox = withClass("stats-llm")[0];
+  check("the section draws per feature, per provider and per session",
+        llmBox && ["By feature", "By provider", "By session (2)", "briefing",
+                   "observer", "deepseek-flash", "(no session)"]
+          .every((w) => llmBox.words().includes(w)),
+        llmBox && llmBox.words());
+  const llmHeads = withClass("stats-llm-table")[0].all()
+    .filter((n) => n.tag === "th").map((n) => n.text);
+  check("the tables split tokens into read, cached read and output, then the cost",
+        JSON.stringify(llmHeads) === JSON.stringify(
+          ["feature", "purpose", "tokens", "read", "cached read", "output",
+           "est. cost", "calls"]), llmHeads);
+  check("no cache write column while the window holds no cache write",
+        !llmBox.words().includes("cache write |"), llmBox.words());
+  const costCells = withClass("stats-llm-cost");
+  check("a priced row shows its estimate in the table's currency",
+        costCells.some((n) => n.text === "≈ ₩0.0012"), costCells.map((n) => n.text));
+  check("a row with no price row shows —, not ₩0",
+        costCells.some((n) => n.all().some((k) => k.text === "—")),
+        costCells.map((n) => n.words()));
+  check("a partly priced row is marked and says what it leaves out",
+        costCells.some((n) => n.classes.has("stats-llm-cost-partial") &&
+                              n.title.includes("300 tokens")),
+        costCells.map((n) => [n.className, n.title]));
+  check("the summary carries an Est. cost card",
+        llmBox.words().includes("Est. cost") &&
+        llmBox.words().includes("Cached read"), llmBox.words());
+  check("a session row links to that session's stats",
+        llmBox.all().some((n) => n.tag === "a" && n.href === "#/stats/s1"));
+  check("a feature whose calls reported no count shows —, not 0",
+        withClass("stats-llm-table")[0].all().some(
+          (n) => classesOf(n).has("stats-llm-unreported") && n.text === "—"));
+  check("failed calls are marked",
+        llmBox.words().includes("1 failed"), llmBox.words());
+  check("one day column, split by feature",
+        withClass("stats-llm-day").length === 1 &&
+        withClass("stats-llm-seg").length === 2);
+  const llmChip = withClass("stats-llm-providers")[0].all()
+    .find((n) => n.dataset && n.dataset.llmProvider === "ds");
+  llmChip.handlers.click[0]();
+  await tick();
+  check("a provider card asks the section again, narrowed to it",
+        fetched.includes("/api/stats/llm-usage?window=today&provider=ds"), fetched);
+  withClass("stats-llm-providers")[0].all()
+    .find((n) => n.dataset && n.dataset.llmProvider === "").handlers.click[0]();
+  await tick();
 
   check("a window tab per unit of time, Today pressed",
         withClass("stats-window").length === 1 &&
@@ -349,6 +473,30 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         view.words().includes("metering ledger"),
         withClass("stats-method").length);
 
+  // ---- provider + model ------------------------------------------------
+  const modelTable = withClass("stats-model-table")[0];
+  check("the overview splits the window one provider's model at a time",
+        modelTable && withClass("stats-model-row").length === 2 &&
+        modelTable.words().includes("fireworks") &&
+        modelTable.words().includes("m1") &&
+        modelTable.words().includes("k3"), modelTable && modelTable.words());
+  const modelHeads = modelTable.all().filter((n) => n.tag === "th")
+    .map((n) => n.text);
+  check("each model row keeps read, cached read and output apart, then the estimate",
+        JSON.stringify(modelHeads) === JSON.stringify(
+          ["provider", "model", "tokens", "read", "cached read", "output",
+           "est. cost", "requests", "sessions"]), modelHeads);
+  check("a priced model shows its estimate and an unpriced one shows —, not 0",
+        withClass("stats-model-cost").some((n) => n.text === "≈ ₩0.0012") &&
+        withClass("stats-model-cost").some(
+          (n) => n.all().some((k) => k.text === "—")),
+        withClass("stats-model-cost").map((n) => n.words()));
+  check("the summary carries an Est. cost tile with what it leaves out",
+        withClass("window-summary")[0].words().includes("Est. cost") &&
+        withClass("window-summary")[0].words().includes("₩0.0012") &&
+        withClass("window-summary")[0].words().includes("100 tokens unpriced"),
+        withClass("window-summary")[0].words());
+
   // A provider narrows the table to the rows that used it.
   withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
     .handlers.click[0]();
@@ -359,10 +507,93 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("the provider card is the pressed one",
         withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
           .classes.has("active"));
+  check("picking a provider narrows the model table to its models",
+        withClass("stats-model-row").length === 1 &&
+        withClass("stats-model-row")[0].words().includes("k3"),
+        withClass("stats-model-row").map((r) => r.words()));
+  check("the narrowed Est. cost tile counts only that provider's tokens",
+        withClass("window-summary")[0].words().includes("100 tokens unpriced"),
+        withClass("window-summary")[0].words());
   withClass("stats-provider").find((b) => b.dataset.provider === "kimi")
     .handlers.click[0]();
   check("picking it again shows every provider",
-        ctx.state().provider === "" && withClass("stats-row").length === 3);
+        ctx.state().provider === "" && withClass("stats-row").length === 3 &&
+        withClass("stats-model-row").length === 2,
+        withClass("stats-model-row").length);
+
+  // The summary tiles follow the picked provider, and a transcript row is
+  // filed under the provider its profile declares (statsboard.row_providers).
+  ctx.setAnswer(byUrl({
+    providers: [
+      { provider: "fireworks", sessions: 1, declared: 0, input: 100,
+        cache_read: 900, cache_write: 0, output: 0, total: 1000, requests: 4 },
+      { provider: "claude", sessions: 1, declared: 1, input: 300,
+        cache_read: 0, cache_write: 0, output: 100, total: 400, requests: 7 },
+      { provider: "kimi", sessions: 1, declared: 0, input: 10, cache_read: 90,
+        cache_write: 0, output: 0, total: 100, requests: 1 },
+    ],
+    sessions: [...overview.sessions, sessionRow({
+      session: "oauth2", source: "transcript", harness: "claude",
+      provider: "claude", declared_provider: "claude", providers: [],
+      input: 300, cache_read: 0, cache_write: 0, output: 100, total: 400,
+      requests: 7, switches: [], days: { "2026-10-21": 400 },
+    })],
+  }));
+  ctx.refresh();
+  await tick();
+  const summaryText = () => withClass("window-summary")[0].words();
+  withClass("stats-provider").find((b) => b.dataset.provider === "claude")
+    .handlers.click[0]();
+  check("a transcript row is kept under its declared provider",
+        withClass("stats-row").map((r) => r.dataset.session).join() === "oauth2",
+        withClass("stats-row").map((r) => r.dataset.session));
+  check("the summary tiles carry the picked provider's figures",
+        summaryText().includes("400") && summaryText().includes("7 requests") &&
+        summaryText().includes("of 3 in the window, 1 by declared provider") &&
+        summaryText().includes("0.0%"), summaryText());
+  check("the page says the figures are narrowed",
+        withClass("stats-provider-note").length === 1 &&
+        view.words().includes("showing claude only"));
+  withClass("stats-provider").find((b) => b.dataset.provider === "fireworks")
+    .handlers.click[0]();
+  check("another provider's tiles replace them",
+        summaryText().includes("1.00k") && summaryText().includes("4 requests") &&
+        summaryText().includes("90.0%"), summaryText());
+  withClass("stats-provider").find((b) => b.dataset.provider === "")
+    .handlers.click[0]();
+  check("All providers restores the window's figures",
+        ctx.state().provider === "" && summaryText().includes("1.10k") &&
+        withClass("stats-provider-note").length === 0, summaryText());
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
+
+  // The cache-write column appears only when a shown row has cache writes;
+  // a daemon that predates the split draws no section at all rather than an
+  // empty one.
+  ctx.setAnswer(byUrl({
+    models: [{ ...overview.models[0], cache_write: 500 }],
+  }));
+  ctx.refresh();
+  await tick();
+  const writeHeads = withClass("stats-model-table")[0].all()
+    .filter((n) => n.tag === "th").map((n) => n.text);
+  check("a cache write column appears only when a shown row has one",
+        writeHeads.includes("cache write"), writeHeads);
+  ctx.setAnswer((url) => url.includes("/api/stats/overview")
+    ? { ok: true, status: 200,
+        body: { ...overview, models: undefined, estimate: undefined } }
+    : url.includes("/api/stats/llm-usage")
+      ? { ok: true, status: 200, body: llm }
+      : { ok: true, status: 200, body: reading });
+  ctx.refresh();
+  await tick();
+  check("a daemon without the model split draws no section, not an empty one",
+        withClass("stats-model-table").length === 0 &&
+        !view.words().includes("By provider and model"), view.words());
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
 
   // The two ways a session ends have a box each, and each asks for its own.
   const boxes = withClass("stats-ended-box");

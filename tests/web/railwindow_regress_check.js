@@ -241,6 +241,7 @@ new Function(
   + [
       constant("RAIL_WINDOW_MIN_ROWS"), constant("RAIL_WINDOW_OVERSCAN_PX"),
       constant("RAIL_ROW_EST_PX"), constant("RAIL_WINDOW_SCROLL_MS"),
+      constant("RAIL_SCROLL_TOP_ANIM_MS"),
       optionalConstant("RAIL_WINDOW_SLACK_PX", ""),
       optionalConstant("RAIL_ESTIMATE_SAMPLE", "const RAIL_ESTIMATE_SAMPLE = 32;"),
       optionalConstant("RAIL_ANCHOR_CARDS", ""),
@@ -263,12 +264,14 @@ new Function(
   + slice("railMeasureRows") + slice("railWindowForPass")
   + optionalSlice("railSliceCovers")
   + slice("railWireWindowScroll") + optionalSlice("railClearWindow")
+  + slice("railScrollTopMarked") + slice("scrollSessionListTop")
   + optionalSlice("railTakeAnchor") + optionalSlice("railPlanAnchor")
   + optionalSlice("railRestoreAnchor")
   + slice("refreshSessions")
   + `
 const __api = {
   refresh: refreshSessions,
+  top: scrollSessionListTop,
   railRowPx, railSeen, railSeenKeys, railEstimatePx, railRowPxOf, railRowKey,
   railWindowPlan, railWindowForPass, railMeasureRows,
   held(on) { railHeldOn = on; },
@@ -638,6 +641,71 @@ const resetWindow = () => {
     A.search("");
     A.railSearchRedraw();
     await wait(0);
+  }
+
+  /* ---- 12. a scroll-to-top press runs to its end (claunch-7vd4v) ----------
+     "스크롤바의 위치를 옮길 때 한번에 안옮겨지고 중간에 이동이 끊기는 경우가
+     있어, (대표적으로 목록 상단 헤더를 눌러서 최상단으로 이동시)". The press
+     smooth-scrolls the rail to its top; a pass that ran while the animation
+     was moving restored the position with an instant `scrollTop` write, and
+     an instant write aborts a smooth scroll (CSSOM View) -- the rail froze
+     where the pass found it, and the next press advanced it only as far as
+     the pass after that. While the press's mark stands, the scroll handler
+     asks for no rebuild and a rebuild writes no position; reaching the top
+     (or the animation's end) takes the mark off and runs the covering check
+     the wait skipped. */
+  const zSessions = await settle("z", 300);
+  const zPlan = list._railWindowPlan;
+  assert.ok(zPlan, "the fleet is windowed");
+  const zOffsets = railOffsets(list._railRows).offsets;
+  // Count the position writes a pass makes: the fix's contract is that a
+  // marked press sees none -- an instant write is what aborts the animation.
+  let topWrites = 0, topValue = list.scrollTop;
+  Object.defineProperty(list, "scrollTop", {
+    configurable: true,
+    get: () => topValue,
+    set: (v) => { topWrites++; topValue = v; },
+  });
+  const scrolledTo = [];
+  list.scrollTo = (opts) => { scrolledTo.push(opts); };
+  A.top();
+  check("the press smooth-scrolls the rail to its top",
+        scrolledTo, [{ top: 0, behavior: "smooth" }]);
+  check("...and marks the list for the animation's run",
+        list._railScrollTopUntil > Date.now(), true);
+
+  // Mid-animation: a scroll event at a position the drawn slice does not
+  // cover asks for no rebuild while the mark stands.
+  list.scrollTop = zOffsets[100];
+  topWrites = 0;                       // the animation's own step does not count
+  scrollListeners[0]();
+  await wait(250);
+  check("the handler leaves a marked press alone mid-animation",
+        list._railWindowPlan === zPlan, true);
+
+  // A poll that lands mid-animation writes no position either: neither the
+  // kept number nor the anchor restore -- both are instant scrolls.
+  list._sessionsSignature = null;
+  served = { sessions: zSessions.map((s) => (
+    s.name === "z301" ? { ...s, status: "busy" } : s)) };
+  await refresh();
+  check("a poll mid-animation restores nothing",
+        [topWrites, list.scrollTop], [0, zOffsets[100]]);
+
+  // The animation reaches the top: the handler takes the mark off and the
+  // covering check the wait deferred runs -- one rebuild, around the top.
+  list.scrollTop = 0;
+  topWrites = 0;
+  scrollListeners[0]();
+  await wait(250);
+  check("reaching the top ends the wait", list._railScrollTopUntil, 0);
+  const zTop = list._railWindowPlan;
+  check("...and a fresh slice around the top is drawn",
+        !!zTop && zTop !== zPlan, true);
+  if (zTop) {
+    check("the top slice starts at the rail's first row", zTop.first, 0);
+    check("...and covers the viewport below it",
+          zTop.offsets[zTop.last] >= Math.min(listViewport, zTop.total), true);
   }
 
   /* ---- 9. the helpers the page keeps are the ones under test ---------- */

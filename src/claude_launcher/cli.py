@@ -41,6 +41,7 @@ from . import (
     cli_transcript,
     cli_vm,
     cli_window,
+    cli_nudge,
     cli_worktree,
     cli_project,
     cli_reposync,
@@ -53,6 +54,7 @@ from . import (
     lineage,
     metering,
     migrate as migrate_mod,
+    onboarding,
     migrate_config,
     pi_provider,
     provider_spec,
@@ -503,6 +505,59 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             failed += 1
             reason = " ".join(result.reason.split())[:60]
             print(f"{p.selector:<20} FAIL  {reason}")
+        if entry.builtin:
+            # Read-only: whether the first-run screens are already skipped.
+            # It never fails validate; 'claunch onboard' is what writes it.
+            if onboarding.state(p) == onboarding.DONE:
+                print(f"{'':<20} onboarding: done")
+            else:
+                print(
+                    f"{'':<20} onboarding: missing "
+                    f"(run 'claunch onboard {p.name}')"
+                )
+    return 1 if failed else 0
+
+
+def _cmd_onboard(args: argparse.Namespace) -> int:
+    if bool(args.name) == bool(args.all):
+        raise profile.ProfileError("give a profile name or --all, not both")
+    targets = (
+        [profile.require_selector(args.name)] if args.name else profile.list_all()
+    )
+    if not targets:
+        print("no profiles to onboard")
+        return 0
+    failed = 0
+    for p in targets:
+        if not runner.profile_harness(p).builtin:
+            print(f"{p.selector:<20} skip  not the claude harness")
+            continue
+        current = onboarding.state(p)
+        if args.check:
+            print(f"{p.selector:<20} {current}")
+            if current != onboarding.DONE:
+                failed += 1
+            continue
+        if current == onboarding.DONE:
+            print(f"{p.selector:<20} done  (already set)")
+            continue
+        if not onboarding.has_credential(p):
+            # Without a credential the first-run screens are the way in:
+            # skipping them would leave claude with nothing to log in with.
+            failed += 1
+            print(
+                f"{p.selector:<20} FAIL  no auth "
+                f"(run 'claunch login {p.name}' or "
+                f"'claunch set-token {p.name}' first)"
+            )
+            continue
+        try:
+            onboarding.mark(p)
+        except onboarding.OnboardingError as exc:
+            failed += 1
+            print(f"{p.selector:<20} FAIL  {exc}")
+            continue
+        print(f"{p.selector:<20} done  {onboarding.FLAG} set in {onboarding.config_path(p)}")
     return 1 if failed else 0
 
 
@@ -1468,7 +1523,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="target the named daemon instance (tmux -L style; every daemon/"
         "session/mesh command then talks to that instance's server — equivalent "
-        "to setting CLAUNCH_DAEMON=NAME)",
+        "to setting CLAUNCH_DAEMON=NAME). 'main' is the default daemon: "
+        "'claunch -L main run' is 'claunch run'",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1725,6 +1781,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_validate.set_defaults(func=_cmd_validate)
 
+    p_onboard = sub.add_parser(
+        "onboard",
+        help="mark a profile's Claude Code onboarding done so its first run "
+        "skips the theme/login screens (needs a stored credential)",
+    )
+    p_onboard.add_argument("name", nargs="?", help="profile to onboard")
+    p_onboard.add_argument(
+        "--all", action="store_true", help="every profile on the claude harness"
+    )
+    p_onboard.add_argument(
+        "--check",
+        action="store_true",
+        help="only report done/missing; exit 1 if any is missing",
+    )
+    p_onboard.set_defaults(func=_cmd_onboard)
+
     p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
     p_usage.add_argument("name")
     p_usage.add_argument("--json", action="store_true", help="print raw JSON")
@@ -1870,6 +1942,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_shell.register(sub)
     cli_commits.register(sub)
     cli_window.register(sub)
+    cli_nudge.register(sub)
     cli_worktree.register(sub)
     cli_vm.register(sub)
     cli_connections.register(sub)
@@ -1892,9 +1965,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             # Into the environment so daemon paths, auto-started daemons and
             # any spawned children all target the same instance.
-            os.environ[daemon_paths.INSTANCE_ENV] = daemon_paths.validate_instance(
-                args.instance
-            )
+            # -L main is the default instance: drop the variable rather than
+            # set it, so a shell that inherited another instance comes back.
+            name = daemon_paths.select_instance(args.instance)
+            if name:
+                os.environ[daemon_paths.INSTANCE_ENV] = name
+            else:
+                os.environ.pop(daemon_paths.INSTANCE_ENV, None)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

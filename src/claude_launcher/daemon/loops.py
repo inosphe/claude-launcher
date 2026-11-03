@@ -24,6 +24,8 @@ when, what would resume it, and what to do then. Three writers:
 * nobody, for reply-waits: those are read straight off the mesh's response
   watches (:func:`reply_waits`) — a delivered ask already has a record that
   a threaded reply clears, and a second copy of it here would only drift.
+  Closing one by hand goes the same way (:func:`close_reply_wait`): it
+  deletes the watch, because that watch is the only record the wait has.
 
 Entries expire. An open loop nobody closed is not proof the wait is still
 real, so past ``expires_at`` a re-briefing marks it *stale* rather than
@@ -355,6 +357,60 @@ def reply_waits(session: str, mesh_mgr) -> List[dict]:
             )
     out.sort(key=lambda r: str(r.get("since") or ""))
     return out
+
+
+#: The id prefix :func:`reply_waits` gives the derived kind.
+REPLY_PREFIX = "reply:"
+
+
+def close_reply_wait(
+    session: str, loop_id: str, mesh_mgr, note: str = ""
+) -> Optional[dict]:
+    """Close a derived ``reply:`` wait by the id a listing prints.
+
+    These rows have no stored line -- :func:`reply_waits` reads them off the
+    mesh's response watches -- so closing one deletes the watch, through the
+    mesh's own settle path. A ``reply:`` id a listing printed could not be
+    closed before this existed: :func:`close` scans the stored rows, found
+    nothing, and the watch kept driving the response nudge.
+
+    ``None`` when the id is not a reply-wait or names no watch of this
+    session's. ``note`` has no row to be stored on and is logged.
+    """
+    ident = str(loop_id or "")
+    if not ident.startswith(REPLY_PREFIX):
+        return None
+    settle = getattr(mesh_mgr, "settle_response_watch_for", None)
+    if settle is None:
+        return None
+    try:
+        watch = settle(session, ident[len(REPLY_PREFIX):])
+    except Exception as exc:  # noqa: BLE001 — a mesh that cannot answer is a miss
+        log.warning("loops: cannot close reply wait %r: %s", ident, exc)
+        return None
+    if watch is None:
+        return None
+    closed_note = " ".join(str(note or "").split())
+    if closed_note:
+        log.info("loops: %s closed reply wait %r: %s", session, ident, closed_note)
+    return {
+        "id": ident,
+        "kind": "reply",
+        "what": (
+            f"reply from {watch.get('to')} to your message "
+            f"{watch.get('id')} in mesh {watch.get('mesh')}"
+        ),
+        "since": str(watch.get("delivered_at") or ""),
+        "resume_when": f"{watch.get('to')} answers with --reply-to",
+        "then": "act on the answer",
+        "refs": {
+            "mesh": watch.get("mesh"), "message": watch.get("id"),
+            "handle": watch.get("to"),
+        },
+        "closed_at": _iso(utcnow()),
+        "closed_note": closed_note,
+        "derived": True,
+    }
 
 
 # --------------------------------------------------------------------------- #

@@ -75,11 +75,13 @@ def test_the_endpoint_answers_with_the_routers_own_verdict(home, monkeypatch, re
             assert resp.status == 200
             doc = await resp.json()
             assert set(doc) >= {"owner", "holder", "why", "passed", "refused",
-                                "undecidable", "relation"}
+                                "undecidable", "demoted", "relation"}
             assert doc["relation"] == relation
             # no mesh, no parent: nobody, and definitely so
             assert doc["holder"] is None
             assert doc["undecidable"] is False, doc["why"]
+            # a demotion is only reported with a target (claunch-0ka8c)
+            assert doc["demoted"] == ""
         finally:
             await mgr.shutdown_all()
             await client.close()

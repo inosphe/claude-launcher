@@ -27,18 +27,28 @@ llm:
     - id: big
       profile: ds4            # 프로필을 적으면 그 프로필의 endpoint/key를 쓴다
       model: large
+      key_id: k-ab12cd        # 프로필이 키 풀을 가지면 그 풀의 어느 키로 부를지
   max_tokens: 10000           # 블록의 값. 프리셋은 이 값을 갖지 않는다
 ```
+
+`key_id`는 프로필이 키 풀(`.launcher-keys.json`, `profile_keys`)을 가질 때만
+뜻을 가진다. 적으면 브리핑 호출이 그 키의 토큰으로 인증하고, 비우면 지금까지처럼
+프로필의 토큰 파일이 들고 있는 키를 쓴다. 풀을 읽기만 할 뿐 rotation을 앞당기거나
+토큰 파일을 다시 쓰지 않는다 — 그 쓰기는 launch 경로(`select_for_launch`)의
+몫이다. 풀에 없는 `key_id`는 `BriefingError`다: 운영자가 고르지 않은 다른
+자격증명으로 조용히 대체되지 않고, 카드의 `error` 줄에 사유가 선다. 프로필이 없는
+`key_id`는 가리키는 풀이 없으므로 저장 시 버려진다.
 
 해석 규칙은 `daemon/briefing.py:llm_config()` 하나에 있다.
 
 | 상황 | 브리핑 호출이 쓰는 값 |
 | --- | --- |
-| `preset:`이 저장된 프리셋을 가리킨다 | 그 프리셋의 네 필드. 블록 자체의 `profile`/`model`/`endpoint`/`api_key`는 읽지 않는다 |
-| `preset:`이 비어 있다 | 블록 자체의 네 필드 (예전과 같은 동작) |
+| `preset:`이 저장된 프리셋을 가리킨다 | 그 프리셋의 필드들. 블록 자체의 `profile`/`model`/`endpoint`/`api_key`/`key_id`는 읽지 않는다 |
+| `preset:`이 비어 있다 | 블록 자체의 필드들 (예전과 같은 동작) |
 | `preset:`이 없는 이름을 가리킨다 | 블록 자체의 필드로 되돌아간다. 기능이 꺼지지 않는다. 카드가 그 이름과 사유를 `error` 줄로 알린다 |
 | 프리셋이 `profile`을 적었다 | 그 프로필의 `endpoints.openai`와 key. 프리셋의 `endpoint`/`api_key`는 쓰지 않는다 |
 | 프리셋에 `model`이 없다 | 프로필의 `models.default` |
+| `key_id`를 적었다(프로필과 함께) | 그 프로필의 풀에서 그 id의 키. 없으면 기능이 꺼지고 카드에 사유가 선다 |
 
 `max_tokens`와 `params`는 블록의 것이다. 프리셋을 바꿔도 호출이 쓸 수 있는
 토큰 예산은 변하지 않는다 — 백엔드를 바꾸는 일과 지출 한도를 바꾸는 일은
@@ -76,9 +86,16 @@ llm:
 `GET /api/briefing/llm`의 응답에 세 키가 늘었다.
 
 - `preset` — 지금 켜진 프리셋 id (없으면 `""`)
+- `key_id` — 블록 자체의 키 핀(프리셋의 핀은 그 행이 싣는다). 키 id이지
+  비밀 값이 아니다. `resolved.key_id`는 호출이 실제로 쓰는 풀 키다 — 핀이
+  있으면 그 핀이고, 없으면 토큰 파일의 키가 풀의 어느 키인지다.
 - `presets` — 저장된 프리셋 목록. 각 행은 `id`, `profile`, `model`, `endpoint`,
-  `api_key_set`, `resolved`(호출이 실제로 쓸 endpoint·model·키 유무), `error`
+  `key_id`, `api_key_set`, `resolved`(호출이 실제로 쓸 endpoint·model·키
+  유무·풀 키 id), `error`
   (프로필이 해석되지 않을 때의 사유). **키 값 자체는 응답에 실리지 않는다.**
+- `profiles`의 각 행 — 프로필이 키 풀을 가지면 `keys`에 풀의 키 목록이
+  실린다(`id`, `label`, `masked`, `current`). 마스크뿐이고 토큰은 나가지
+  않는다. 풀 파일을 읽지 못하면 `keys_error`에 사유가 선다.
 - `max_presets`, `preset_name_re` — 편집기가 이름을 검사할 때 쓰는 상한과 정규식
 
 `PUT /api/briefing/llm`은 `presets`(목록 전체 교체)와 `preset`(포인터)를 받는다.
@@ -94,21 +111,30 @@ llm:
   자격증명이 사라진다. 유지 규칙은 `previous_id` → 새 `id` 순서로 찾는다
   (`api.py:_llm_block_update`).
 - 저장할 수 없는 값은 400으로 거절한다: 이름 규칙 위반, 중복 id, `profile`도
-  `endpoint`도 없는 행, 상한 초과, 저장된 목록에 없는 `preset`.
+  `endpoint`도 없는 행, 상한 초과, 저장된 목록에 없는 `preset`. 블록 자체의
+  `key_id`는 그 프로필의 풀에 실제로 있는 키여야 한다 — 없는 id를 저장하면
+  이후 모든 브리핑 호출이 실패하므로 저장 시점에 400으로 거절한다. 프리셋 행의
+  `key_id`는 저장 시 검사하지 않는다: 목록 전체가 한 번에 거절되므로, 풀에서
+  지워진 키를 핀한 옛 프리셋 하나가 무관한 저장을 전부 막는 일을 피한다. 낡은
+  프리셋 핀은 대신 `error` 줄과 꺼진 브리핑으로 드러난다.
 
 `POST /api/briefing/llm/test`는 카드의 **Test connection**이 부르는 경로다.
 저장하지 않은 편집값을 그대로 받아 최소 호출을 한 번 보내고 결과를 돌려준다.
 
-- 본문은 `profile`, `model`, `endpoint`, `api_key`, `preset` 다섯 필드만 받는다.
+- 본문은 `profile`, `model`, `endpoint`, `api_key`, `key_id`, `preset` 여섯
+  필드만 받는다.
   `presets`·`max_tokens`는 400으로 거절한다 — 시험 대상은 백엔드 하나이고,
   조용히 버린 필드가 있으면 요청한 것과 다른 것을 보고하게 된다.
 - `preset`은 저장된 행을 가리키며, **보내지 않은 필드의 출처**다. 저장된 목록에
   없는 이름은 블록으로 되돌아간다(`llm_config()`와 같은 규칙).
 - 빈 값의 뜻은 필드마다 다르다. `api_key`가 빈 문자열이면 그 행에 저장된 키를
-  쓰고(`null`은 제거), `profile`·`model`·`endpoint`가 비면 빈 값 그대로다 —
+  쓰고(`null`은 제거), `profile`·`model`·`endpoint`·`key_id`가 비면 빈 값
+  그대로다 —
   저장 경로에서도 빈 상자는 그 필드를 지우므로 두 경로가 같은 것을 뜻한다.
   카드의 비밀번호 상자는 비밀을 되받지 못해 늘 비어 오므로 이 구분이 필요하다:
   없으면 저장된 활성 프리셋의 키가 다른 프리셋의 endpoint로 나간다.
+  `key_id`는 비밀이 아니므로 빈 값이 「핀 없음」을 뜻한다 — 저장된 행의 핀을
+  승계하지 않는다.
 - 해석 규칙은 `llm_config()`와 같다: `profile`이 있으면 그 프로필의 endpoint와
   키를 쓰고 보낸 endpoint·키는 쓰지 않는다.
 - 요청은 브리핑 호출과 같은 경로를 탄다: 같은 `briefing_request_headers()`,
@@ -138,6 +164,18 @@ llm:
 
 고르는 것이 스위치의 전부다. 고른 뒤 저장하면 `preset` 포인터가 그 행을
 가리키고, `custom`을 고른 뒤 저장하면 포인터가 빈 값이 된다.
+
+### 프로필 키 선택 (multi-key 프로필)
+
+- 고른 프로필이 키 풀을 가지고 키가 둘 이상이면 Profile 아래에 **Profile
+  key** 선택 상자가 선다. 선택지는 풀의 각 키(`label — 마스크`, 현재 토큰
+  파일의 키에는 `(current)`)와 기본값 `— default: the key the token file
+  holds —` 하나다. 기본값은 핀이 없는 상태로, 지금까지의 동작 그대로다.
+- 프로필을 바꾸면 핀은 지워진다 — 핀은 이전 프로필의 풀에 있는 키를 가리키므로
+  새 프로필에 들고 가 봐야 가리키는 키가 없다.
+- 풀이 사라진 핀(키를 `claunch keys remove`로 지운 경우)도 선택지에
+  `(not in the pool)`로 남는다 — 조용히 기본값으로 바꿔 치우면 저장 전에는
+  핀이 낡았다는 사실이 보이지 않는다.
 
 ### 저장된 프리셋은 읽기 전용이다 — Edit → Save
 
@@ -187,6 +225,11 @@ llm:
   없는 이름, `max_tokens` 미상속), 목록 정제와 중복 제거, 표시용 목록에 키가
   없는지, 제출 목록 검증, 그리고 `GET`/`PUT /api/briefing/llm`의 저장·전환·
   키 보존·거절·이름 변경 시 키 승계, 없는 이름을 가리키는 포인터의 `error` 보고.
+  키 핀(`key_id`): 핀된 풀 키로의 해석, 핀이 없으면 토큰 파일(읽기는 풀을
+  움직이지 않는다), 풀에 없는 핀·풀 없는 프로필의 핀은 `BriefingError`, 낡은
+  핀은 기능 off, 프리셋의 핀, 저장 경로의 핀 검증(없는 키 400, 프로필 없는 핀은
+  버림, 빈 값은 핀 해제), Test connection이 핀된 키를 `Authorization`으로
+  보내는지.
 - `tests/web/briefmodel_check.js` — 카드가 프리셋을 라디오로 그리고 `custom`
   행을 세우는지, 고른 프리셋의 endpoint·model을 필드에 옮기고, 프리셋이
   읽기 전용이며(이름 포함) 잠긴 필드가 입력을 받지 않는지, Edit이 아무것도
@@ -196,4 +239,7 @@ llm:
   아무것도 쓰지 않는지, 이름 없이 저장하면 카드가 거절하는지, 이름을 나중에
   정해 저장하는지, 버려진 새 행이 사라지는지, 삭제가 포인터를 비우는지,
   이름 변경이 키를 승계하는지, **Test connection**이 저장하지 않은 필드로
-  `/api/briefing/llm/test`를 부르고 결과를 카드에 남기는지.
+  `/api/briefing/llm/test`를 부르고 결과를 카드에 남기는지. 키 풀을 가진
+  프로필에 **Profile key** 선택 상자가 서는지, 고른 키가 저장 본문과 시험
+  본문에 실리는지, 프로필을 바꾸면 핀이 지워지는지, 풀 없는 프로필에는 선택
+  상자가 서지 않는지.

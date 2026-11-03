@@ -62,7 +62,8 @@ sides:
 #   branch-setup          -> branch-setup
 #   work                  -> work                   (group found 안)
 #   test-decision         -> test-decision          (choose)
-#   test-skipped          -> test-skipped
+#   test-skipped          -> test-skipped           (셀프 게이트 skip, 그리고 표적
+#                            테스트 실행 중 사람의 test-skip-gate — claunch-dsr4o)
 #   review                -> review, targeted-test
 #   commit                -> commit
 #   queue-next            -> queue-next             (choose, worker-round)
@@ -74,6 +75,8 @@ sides:
 #   rebase                -> merge-ready, rebase   (loop align)
 #   reviewer-ensure       -> reviewer-ensure
 #   peer-review           -> peer-review            (ask: 리뷰어)
+#   merge-approval        -> merge-approval         (ask: 사람, require_merge_approval
+#                            켜져 있을 때만 submit의 publish 직전에 선다 — claunch-boxug)
 #   integration-request   -> integration-request
 #   await-landing         -> await-landing          (choose, loop await)
 #   landing-withdraw      -> landing-withdraw
@@ -100,13 +103,31 @@ sides:
 #                            claunch-q4cqy.6)
 #   end-hold              -> end-hold (keep-alive + delivery-hold)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
+#   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
+#                            (코딩 전 사용자 협의 — worker-round의 일감 귀속 뒤,
+#                            작업 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞.
+#                            요청이 저장소를 바꾸는 작업인지 에이전트가 판정하고,
+#                            질문·협의면 브랜치도 만들지 않고 협의 단계에서 사용자의
+#                            작업 지시를 기다린다. claunch-xpnae)
+#   (v2 전용)              -> feasibility-check(choose), feasibility-gate(ask: 사람),
+#                            feasibility-hold
+#                            (착수 정당성 점검 — worker-round의 batch 첫 자리, 일감·코딩
+#                            승인 앞. 부정 판정만 사람의 승인·거절에 선다. claunch-101wi)
+#   (v2 전용)              -> landing-channel(choose), landing-channel-gate(ask: 사람)
+#                            (착지 요청 수신자와의 메시지 채널 점검 — land의 submit에서
+#                            integration-request·await-landing 바로 앞. 채널이 없을 때만
+#                            사람의 조치와 승인·거절에 선다. claunch-101wi)
 #   (v2 전용)              -> category-tag, category-refresh
-#                            (워크스페이스 카테고리 자동 갱신 — intake 뒤·코딩 전과
-#                            wrapup 뒤, 제안이 아니라 즉시 반영. claunch-06fwj)
+#                            (워크스페이스 카테고리 배치 — intake 뒤·코딩 전과
+#                            wrapup 뒤. 세션의 wrap-up 임시본으로 남기고 사용자가
+#                            확정할 때 반영. claunch-06fwj, claunch-ar8jn)
 #   (v2 전용)              -> knowledge-recall, knowledge-record
 #                            (워크스페이스 지식 기록 — category-tag 뒤 참조,
-#                            category-refresh 뒤 기록. 시작 입력 knowledge_recall·
-#                            knowledge_record가 켠다. claunch-269q1)
+#                            category-refresh 뒤 임시본. 시작 입력 knowledge_recall·
+#                            knowledge_record가 켠다. claunch-269q1, claunch-ar8jn)
+#   (v2 전용)              -> glossary-draft
+#                            (용어집 임시본 — knowledge-record 뒤, round-report 앞.
+#                            시작 입력 glossary_draft가 켠다. claunch-ar8jn)
 #   (v2 전용)              -> end-watch(loop), self-improve(call — self-improve-common의
 #                            프로시저: review, discuss, align(ask-user), register)
 #                            (end-decision의 self-improve, claunch-c4e6f / .1)
@@ -124,7 +145,9 @@ sides:
 # - await-landing <-> landing-nudge 순환(interval: 600) -> loop await 안의
 #   choose 옵션 nudge의 interval: 600(docs 「choose interval」). 루프 전체를
 #   멈추는 every가 아니다 -- 재촉 간격 안에서도 landed·rebase·declined를 고를
-#   수 있어야 한다(claunch-jbk5w). 상한 25에 닿으면 런이 사람의 승인(loop_limit)에 선다.
+#   수 있어야 한다(claunch-jbk5w). 상한 5에 닿으면 런이 사람의 승인(loop_limit)에
+#   선다 — 25회(약 4시간)는 fault를 사람이 알아채기까지 너무 길어 5회(약 50분)로
+#   낮췄다(사용자 지시 2026-10-30).
 # - rework 간선(peer-review changes, landing-withdraw, rework-gate -> work) ->
 #   land가 rework로 끝나고 worker-round의 try/catch가 배치 루프를 다시 돈다.
 #   착지 거절(declined) 뒤의 되감기는 `rework-budget`이 `$visits['rework-gate']`로
@@ -170,6 +193,18 @@ inputs:
     # 런이 시작된 이슈. 비워 두고 시작한 뒤 사용자·부모가 지정하면 flow_input으로
     # 한 번 채운다(docs 2.6). 회차가 확정한 이슈의 기록은 이 입력이 아니다.
     set_by: [agent]
+  # 이 런의 첫 회차를 어디서 시작하는가(claunch-d8scd). landing이면 첫 회차가
+  # 목표 수립·착수 판정·일감 처리를 건너뛰고 곧바로 착지 절차로 들어간다 —
+  # 워크플로 밖에서 이미 커밋을 쌓아 둔 세션이 그 커밋을 착지시키는 경우다.
+  # 그 회차가 끝나면 queue-recheck가 data.recheck.mode를 full로 다시 쓰므로
+  # 둘째 회차부터는 일반 회차다(무효화). full이 기본값이라 기존 런의 동작은
+  # 달라지지 않는다.
+  start_at:
+    type: enum
+    choices: [full, landing]
+    default: full
+    label: 시작 지점
+    help: landing이면 첫 회차가 코딩 없이 착지 절차로만 돈다. 이미 커밋된 브랜치를 착지시킬 때 쓴다. 그 회차 뒤에는 일반 회차로 돌아간다
   scope:
     type: list
     label: 범위(경로·glob)
@@ -201,6 +236,16 @@ inputs:
     # item의 coding-approval-check가 일감마다 읽으므로, 사람이 런 도중에 켜면
     # 다음 일감부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
+  require_merge_approval:
+    type: bool
+    default: false
+    label: 착지(머지) 요청 전 사용자 승인
+    help: 켜면 착지 요청(통합 대기 표 오르기) 직전에 사용자 승인을 기다린다. 승인해야만 요청이 올라가고, 거절하면 이번 회차는 동결로 마감되어 다음 회차가 다시 요청한다. 끄면 기존처럼 기계 확인(landing의 다섯 확인) 후 자동으로 요청한다
+    # 코딩 승인과 다른 결정이라 자기 블록을 쓴다(claunch-kzun2과 같은 이유).
+    group: 착지 승인
+    # land의 submit이 회차·재요청마다 읽으므로, 사람이 런 도중에 켜면 다음
+    # 착지 시도부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
+    set_by: [user]
   # PR 착지 매체를 정하는 두 스위치(claunch-qke6g). 폼에서 한 블록으로 묶여
   # gh 준비 상태 줄과 함께 놓인다.
   force_pr:
@@ -214,6 +259,18 @@ inputs:
     label: PR 금지(force not to make PR)
     group: PR
     help: PR을 만들지 않고 기존의 로컬 착지(리더의 --no-ff 머지)만 쓴다. 둘 다 끄면 PR을 먼저 시도하고, 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다
+  # PR을 제출한 뒤 자동 머지까지 갈지, 제출에서 회차를 끝낼지 고른다. 기본
+  # true는 지금 구조 그대로다(착지 요청 → 상위/리더의 머지 → 착지 확인).
+  # false면 PR만 열고 이슈를 in_review + `PR SUBMITTED` 마커로 남긴 뒤 회차를
+  # 끝낸다 — 머지는 사용자가 PR에서 직접 한다. 로컬 착지(PR 없음)에는 적용하지
+  # 않는다. 사람이 런 도중에 바꿀 수 있다(set_by: [user]).
+  auto_merge:
+    type: bool
+    default: true
+    label: PR 자동 머지(auto merge)
+    group: PR
+    help: 켜면(기본) PR을 제출한 뒤 착지 요청을 올리고 상위/리더의 머지까지 간다. 끄면 PR 제출에서 회차를 끝내고 사용자가 PR을 직접 머지한다(이슈는 in_review + PR SUBMITTED 마커로 남는다). 로컬 착지에는 적용되지 않는다
+    set_by: [user]
   relation:
     type: enum
     choices: [stacked, independent]
@@ -362,7 +419,33 @@ inputs:
     label: 지식 기록 남기기
     help: >-
       켜면 회차 마감 뒤(카테고리 갱신 다음) 이번 회차에서 확정된 의사결정·사용자 니즈·원칙·교훈을
-      knowledge_record로 남긴다. 끄면 기록하지 않는다
+      세션의 wrap-up 임시본으로 남긴다. 사용자가 wrap-up pane에서 확정해야 지식 기록에 쓰인다.
+      끄면 남기지 않는다
+    group: 지식 기록
+    set_by: [user]
+  # 용어집 임시본(claunch-ar8jn): 지식 기록 뒤에 선다. 기본은 켜짐.
+  glossary_draft:
+    type: bool
+    default: true
+    label: 용어집 임시본 남기기
+    help: >-
+      켜면 회차 마감 뒤(지식 기록 다음) 이번 회차에서 뜻을 정한 용어 가운데 용어집에 없는 것을
+      세션의 wrap-up 임시본으로 남긴다. 사용자가 wrap-up pane에서 확정해야 용어집에 쓰인다.
+      끄면 남기지 않는다
+    group: 지식 기록
+    set_by: [user]
+  # 세션 회고 기록(claunch-lmnlv): settle 끝의 retrospective가 회고를 Retrospection
+  # 페이지에 남긴다. 켜져 있으면 데몬이 바로 확정하고(사용자 상호작용 없음), 꺼져
+  # 있으면 다른 wrap-up 임시본처럼 사용자가 확정한다. 노드가 설 때 읽으므로 런 도중에
+  # 바꾸면 그 뒤의 회고부터 적용된다.
+  retrospection_auto_record:
+    type: bool
+    default: true
+    label: 회고 자동 기록
+    help: >-
+      켜면 세션 회고(정산 뒤, 종료 결정 전)를 Retrospection 페이지에 바로 기록한다 — 사용자가
+      확정하지 않아도 된다. 끄면 회고를 세션의 wrap-up 임시본으로 남기고, 사용자가 wrap-up
+      pane(Retrospection 탭)에서 확정할 때 기록한다
     group: 지식 기록
     set_by: [user]
 
@@ -429,6 +512,19 @@ data:
   # decision이 approve-always면 이 런의 이후 일감·회차에서 게이트가 서지
   # 않는다 — 런이 끝날 때까지 유지되고, 되돌리는 답은 없다.
   coding_approval: {decision: null}
+  # 착지 대상 없음에 대한 사람의 마지막 결정(claunch-1aj1a.1): ask-user의 답
+  # {decision, reason, tip, repo, owner, issue, relation}. land의 no-target
+  # 갈래가 묻기 전에 읽는다. 다시 묻는 조건은 기록이 없는 것, 또는 사람이
+  # 답한 자리(repo·relation)가 바뀐 것뿐이다 — tip이 움직인 것은 질문의
+  # 근거가 아니다(ANSWER 30759: tip이 바뀌면 결정은 유지하고 행동만 다시
+  # 한다). tip·owner는 그 답이 가리키던 사실이고, 재사용할 때 행동 값에
+  # 이번 회차의 tip을 새로 싣는다.
+  landing_route: {decision: null, reason: null, tip: null, repo: null,
+                  owner: null, issue: null, relation: null}
+  # 이 회차 마지막 커밋의 보고 — commit 노드가 내는 {commits, tip}이고 item이
+  # 묶는다(bind: commit). landing_route.tip과 비교해 「지금 브랜치 끝에 대한
+  # 결정인가」를 가른다: 끝이 움직였으면 지난 답을 다시 쓰지 않고 묻는다.
+  commit: {}
   round: {}
   # 이 회차의 선행 맥락 검색 결과(prior-context, 그것이 실패하면
   # prior-context-fallback). intake-issue가 읽는다. 회차마다 덮어쓴다.
@@ -507,19 +603,61 @@ rules:
       round-report는 wrapup 반환값만 받아 대화에만 있던 판단과 실패 경위를 보고서에
       실을 수 없었다.
     deliver: [work, review, targeted-test, rebase]
+  plan-panel:
+    text: |
+      ── plan 패널: 사용자가 읽는 계획 (claunch-7jzp8) ──
+      사용자는 수십 개 세션을 함께 본다. 산문 보고를 읽게 하지 않고, 이
+      세션의 plan 패널(대시보드의 ☰ plan)에서 계획을 읽고 갈래를 고르게 한다.
+      쓰는 길은 plan_* MCP 도구다(plan_set, plan_node, plan_get).
+      · plan에 쓰는 글(title, goal, detail, 선택지의 label·effect·risk)은
+        한국어로 쓴다(claunch-lp7c6). 명령·경로·식별자·오류 메시지 인용은
+        원문 그대로 둔다.
+      · 착수할 때(coding-plan, 그 단계가 없으면 plan-seed, 그것도 없으면
+        work를 시작할 때) plan_set으로 쓴다: title은 목표 요지, goal은 목표·범위
+        한두 줄, issue는 회차 이슈.
+        steps는 단계마다 한 줄이고 detail은 몇 줄까지다. 사용자가 정해야 하는
+        갈래(범위·방식·우선순위)만 decision 노드로 두고, 선택지마다 effect(기대
+        효과)와 risk(리스크)를 적고 권장안 하나에 recommended를 붙인다. 바로
+        실행해도 되는 결정은 decision으로 만들지 않는다. 고르기 전에는 그 갈래
+        아래 단계만 기다리고 나머지 단계는 진행한다.
+      · 진행하면서 plan_node로 단계 status를 옮긴다(doing, done, blocked).
+        방향이 바뀌면 plan_get으로 읽고 id를 그대로 둔 채 plan_set으로 다시
+        쓴다 — id를 바꾸면 사용자가 이미 내린 결정이 사라진다. plan_set이
+        revision으로 거절되면 다시 읽는다(사용자가 방금 결정했을 수 있다).
+      · wrapup에서 closure를 채운다: 사람이 직접 확인해야 하는 것(UI 동작,
+        라이브 데몬에서의 확인)은 verify로, detail에 무엇을 어떻게 확인할지
+        적는다. 이 회차와 연관된 후속 작업 후보는 followup으로 둔다. 사용자가
+        「여기서 진행」이나 「이슈로 넘김」을 고른 followup은 처리한 뒤
+        plan_node status=done으로 닫는다. 패널은 남은 항목이 없을 때 「닫아도
+        됨」을 표시한다.
+      · 사용자의 결정과 의견은 `[claunch plan]` 블록으로 터미널에 온다. 그
+        블록이 말하는 갈래를 따르고 plan을 그에 맞게 고친다.
+      plan_* 도구가 없거나 데몬이 거절하면(재기동 전 데몬) 그 사실을 보고에
+      한 줄 적고 진행한다 — 이 규칙은 회차를 막지 않는다.
+    why: >-
+      claunch-7jzp8: 사용자 1명이 세션 수십~백수십 개와 계획을 맞추는 일이 병목이었고,
+      정제되지 않은 산문 보고는 1:m 보고 관계에서 읽히지 않았다. 세션을 닫지 못하는
+      이유(사람 확인 미완, 연관 후속 작업)도 패널의 closure로 드러낸다(th-0b38dc).
+    deliver: [coding-plan, work, wrapup]
 
 # ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
 # 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
 # 두 자리에 적으면 갈리므로 조각 하나를 ${frag:...}로 전개한다.
-# 이 호출은 제안이 아니다: 사용자 결정(2026-10-23, claunch-06fwj)으로 에이전트의
-# `category_assign {new}`는 기본이 즉시 등록이고, 제안 큐는 사람이 체크박스로
-# 고를 때(`proposal: true`)만 쓴다. 겹치는 라벨은 여전히 409로 거절되므로 트리에
-# 한 키워드가 두 노드로 갈라지지는 않는다.
+# 배치는 트리에 바로 쓰지 않고 세션의 wrap-up 임시본으로 남긴다(사용자 결정
+# 2026-10-30, claunch-ar8jn — claunch-06fwj의 「즉시 등록」을 대체한다). 사용자가
+# wrap-up pane에서 수정·삭제·확정하고, 확정할 때 데몬이 그 인자로 category_assign과
+# 같은 연산을 실행한다. 겹치는 라벨은 그 확정에서 409로 거절되고 임시본은 failed로
+# 남는다.
 fragments:
   category-tag: |
-    이 세션과 그 이슈를 워크스페이스 카테고리 트리에 배치한다. 이 호출은
-    제안이 아니라 즉시 반영이다 — 새 카테고리를 만들 때 `proposal`을 주지
-    않는다(claunch-06fwj, 사용자 결정).
+    이 세션과 그 이슈를 워크스페이스 카테고리 트리의 어디에 둘지 정해
+    **임시본으로 남긴다**. 트리는 사용자가 확정할 때만 바뀐다(claunch-ar8jn,
+    사용자 결정 — 사용자 확인 없이 공유 트리를 바꾸지 않는다). 아래에서
+    `category_assign {...}`이라고 적은 호출은 직접 부르지 않는다: 그 인자를
+    그대로 MCP `wrapup_draft {kind: category, payload: <그 인자>, reason}`으로
+    남긴다. 사용자가 세션의 wrap-up pane(Category 탭)에서 그 임시본을 고치거나
+    지우거나 확정한다. `category_assign`을 직접 부르는 것과 `proposal`을 주는
+    것은 이 절차에 없다.
     1. MCP `category_tree`로 이 워크스페이스의 트리와 어휘를 읽는다.
        필요하면 `category_search`로 후보를 찾고, `category_items`로 그 노드에
        이미 무엇이 있는지 본다.
@@ -560,16 +698,60 @@ fragments:
     3. 맞는 노드가 없으면 가장 가까운 노드의 자식으로(가까운 것이 없으면
        최상위로) 짧은 키워드 라벨·다른 표기의 별칭·한 줄 설명을 만들고
        `category_assign {new: {parent_id, label, aliases, description},
-       reason}`으로 지금 만든다. 기존 라벨·별칭과 겹치면 도구가 409로 그
-       노드를 알려 준다 — 새 이름을 짓지 말고 그 노드에 배정한다.
-    4. `category_assign`을 정확히 한 번 부른다(2b의 group 뒤에 F 아래 새
-       노드가 필요한 경우만 두 번이다). `items`를 생략하면 이 세션과
-       그 이슈가 배치된다. 이번 회차에 만든 인수인계 이슈도 같은 주제면
-       `items`에 함께 넣는다.
-    5. 보고에 결과를 적는다: 배치된 경로, 새로 만든 라벨(있으면), 도구를 쓸 수
-       없었으면 그 사유. 카테고리는 회차를 막지 않는다 — 도구가 없거나
-       (「not configured」) 데몬에 닿지 않으면 한 줄로 사유를 적고
-       assigned=false로 보고한 뒤 다음 단계로 간다.
+       reason}`의 인자로 임시본을 남긴다. 기존 라벨·별칭과 겹치는지는
+       `category_search`로 먼저 본다 — 겹치면 새 이름을 짓지 말고 그 노드에
+       배치하는 `{node_id}` 임시본을 남긴다.
+    4. 임시본은 하나다(2b의 group 뒤에 F 아래 새 노드가 필요한 경우만 둘이다).
+       먼저 `wrapup_list`로 이 세션의 category 임시본을 본다: 아직 확정되지
+       않은 것(draft·failed)이 있으면 새로 남기지 않고 `wrapup_update {id,
+       revision, payload}`로 그것을 고친다 — 같은 배치를 두 번 묻지 않는다.
+       `items`를 생략하면 남기는 시점의 이 세션과 그 이슈가 대상이 된다.
+       이번 회차에 만든 인수인계 이슈도 같은 주제면 `items`에 함께 넣는다.
+    5. 보고에 결과를 적는다: 임시본 id와 확정되면 배치될 경로, 새로 만들
+       라벨(있으면), 도구를 쓸 수 없었으면 그 사유. `assigned`는 임시본을
+       남겼거나 고쳤으면 true다(트리 반영은 사용자의 확정이 한다). 카테고리는
+       회차를 막지 않는다 — 도구가 없거나(「unknown tool」, 「not
+       configured」) 데몬에 닿지 않으면 한 줄로 사유를 적고 assigned=false로
+       보고한 뒤 다음 단계로 간다.
+
+  # 회차가 거듭될 때 앞 회차가 남긴 임시본을 소급해 고치는 절차(claunch-oqn6t).
+  # category-refresh·knowledge-record·glossary-draft가 함께 전개한다 — 문구를
+  # 세 자리에 적으면 갈리므로 조각 하나에만 둔다.
+  retro-fix: |
+    ── 소급 점검: 앞 회차가 남긴 임시본 ──
+    이 세션은 회차를 거듭하며 같은 워크스페이스에 임시본을 남긴다. 앞 회차의
+    임시본이 이번 회차의 변경으로 더 이상 맞지 않으면 그대로 두지 않는다.
+    새로 남기기만 하면 사용자가 확정을 판단하는 wrap-up 패널에 지금 상태와
+    다른 항목이 쌓인다. 이 점검은 이번 회차에 남길 종류만 보지 않고 이 세션의
+    임시본 전부를 본다 — 카테고리·지식·용어집은 같은 변경을 서로 다른 자리에서
+    말한다.
+    · 읽는다 — MCP `wrapup_list {settled: true}`로 이 세션이 남긴 임시본을 id,
+      종류, 상태(draft·applying·confirmed·failed·discarded), revision과 함께
+      읽는다. 확정된 항목은 그 확정이 남긴 `applied`(어디에 쓰였는가)도 함께
+      온다.
+    · 고친다 — 상태가 draft·failed이고 이번 회차가 그 내용(정의·결정·배치·
+      범위)을 바꿨다. `wrapup_update {id, revision, payload}`로 payload 전체를
+      다시 써서 고친다. 필드 하나만 바꾸는 경로는 없으므로 지금도 맞는 값도
+      함께 적는다.
+    · 철회한다 — 상태가 draft·failed이고 이번 회차로 그 내용이 더 이상 사실이
+      아니며 대신할 내용도 없다. `wrapup_withdraw {id, revision}`.
+    · 손대지 않는다 — 상태가 confirmed·applying·discarded인 항목. 확정된 기록은
+      사용자의 것이고 세션은 그것을 고치거나 철회할 수 없다
+      (`wrapup/store.py`의 `OPEN = ("draft", "failed")`). 지금과 어긋나면 새 기록을
+      남기며 대체를 표시한다: 확정된 knowledge 임시본이 쓴 기록 id는 그 항목의
+      `applied.id`다(확정이 `{"workspace","id","title"}`을 남긴다 — `wd-…`인
+      임시본 id가 아니다). 새 knowledge 기록의 `supersedes`에는 그 `applied.id`를
+      준다. `applied.id`가 없거나 `md:`로 시작하면(파일 기록) 대체 표시가 되지
+      않는다 — 없는 id를 주면 `knowledge._supersede`가 에러 없이 넘어가 옛
+      기록이 active로 남으므로, 그때는 `supersedes`를 주지 않고 그 id와 어긋난
+      점을 note에 적는다. 다른 종류도 그 id와 어긋난 점을 note에 적는다.
+    · 그대로 둔다 — 이번 회차가 건드리지 않은 항목. 내용을 못 박지 않은 항목을
+      습관적으로 철회하지 않는다.
+    · 보고에 `id: 무엇을 왜` 한 줄씩 적는다 — 고친·철회한 항목과, 손대지 않은
+      확정 항목 가운데 어긋난 것이 있으면 그 id와 어긋난 점이다.
+    · 이 점검은 회차를 막지 않는다 — `wrapup_list`·`wrapup_update`·
+      `wrapup_withdraw` 가운데 하나라도 없거나(「unknown tool」, 「not
+      configured」) 데몬에 닿지 않으면 사유를 한 줄 적고 다음 단계로 간다.
 
 nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────
@@ -588,6 +770,13 @@ nodes:
       - 목표: ${data.inputs.goal}
       - 이슈: ${data.inputs.issue}
       - 시작 입력 범위(고쳐도 되는 경로): ${data.inputs.scope}
+      시작 입력 start_at이 landing이면(지금 ${data.inputs.start_at}) 이 회차는
+      코딩 없이 착지 절차로만 돈다 — 착수 판정·일감 처리·표적 테스트·커밋
+      단계를 건너뛰고 곧바로 land로 간다. 그때의 목표는 「지금 체크아웃 브랜치에
+      이미 쌓인 커밋을 착지시킨다」이고, 보고에는 그 브랜치 이름, 기준(master)
+      해시, 아직 master에 없는 커밋 수(`git rev-list --count $(git merge-base
+      master HEAD)..HEAD`)를 적는다. 새로 만들 것을 계획하지 않는다 — 구현은
+      이미 끝난 상태이고 이 회차가 하는 일은 그 커밋을 착지 요청에 싣는 것이다.
       오프닝에 `start issue pending:`으로 시작하는 줄이 있으면 이 세션은 「기존
       이슈, 아직 고르지 않음」으로 만들어졌다(claunch-5p2j4): 데몬은 이슈를
       만들지도 배정하지도 않았고, 시작 이슈는 나중에 지정된다. 보드를 뒤지거나
@@ -987,6 +1176,108 @@ nodes:
       (상위가 없거나 닿지 않으면 그 사실을 적는다).
     effects: [board.write, mesh.send]
 
+  pre-coding-consult-hold:
+    title: 코딩 전 사용자 협의 — 작업 지시를 기다린다
+    # claunch-xpnae: consult-check가 consult를 골랐을 때만 선다. 이 작업이 열린
+    # 채 남아 있는 것이 hold다 — 사용자의 다음 말이 같은 작업을 다시 깨우므로,
+    # 답을 마친 턴은 보고 없이 끝낸다(tests/test_worker_v2_pre_coding_consult.py).
+    # hold 동안 저장소는 바뀌지 않는다: 브랜치·커밋·착지 요청·wrapup이 모두
+    # 일감 처리에서 나오고, 이 자리는 일감 처리 앞이다.
+    prompt: |
+      이번 요청은 저장소를 바꾸는 작업이 아니라 질문·확인·협의로 판정됐다.
+      판정 근거는 앞 선택 consult-check의 reason에 있다(`claunch cflow2 journal
+      -n 5`). 이 작업은 사용자가 실제 작업을 지시할 때까지 이 자리에서 기다린다.
+
+      1. 질문에 답한다. 근거는 코드·보드·명령 출력으로 대고, 확인한 파일 경로와
+         명령을 함께 적는다. 답은 터미널에 쓰고, 이 회차 이슈가 있으면
+         `claunch beads comments add ${data.claim.issue} -f <본문 파일>`로 같은
+         내용을 보드에도 남긴다. 고칠 것이 보이더라도 이 자리에서는 바꾸지
+         않는다 — 사용자가 지시하면 3이 그 작업을 이어받는다.
+      2. 답을 마치면 보고하지 않고 턴을 끝낸다. 이 작업이 열린 채 남아 있는 것이
+         곧 hold이고, 사용자의 다음 말이 이 작업을 다시 깨운다. 추가 질문에는 1을
+         다시 하고 같은 방식으로 기다린다. 코드·테스트·문서·브랜치는 이 단계에서
+         바꾸지 않았으므로 기다리는 동안 잃는 것이 없다.
+         데몬의 시계는 열린 작업을 「운전자를 기다리는 중」으로 보고 10분마다
+         재알림을 보낸다(`cflow2_renudge_interval`, `# claunch cflow2: the run
+         moved`). 그 알림으로 깨어났는데 사용자의 새 말이 없으면 답을 다시 쓰지
+         않고 곧바로 턴을 끝내 같은 자리에서 계속 기다린다.
+      3. 사용자가 저장소를 바꾸는 일을 지시하면(무엇을 바꿀지 정해진 경우)
+         회차 이슈의 범위·완료 기준을 그 지시로 고치고(`claunch beads update <id>
+         --description ...`) 한 줄 요지로 이 작업을 ok로 보고한다. 그 보고 뒤에
+         이 회차는 착수 정당성 점검·일감 처리를 지나 코딩 승인 게이트로 이어진다.
+         지시가 모호하면 지어내지 않고 사용자에게 다시 묻는다.
+    done_when: |
+      사용자가 저장소를 바꾸는 일을 지시했고(무엇을 바꿀지 정해졌다), 그 지시가
+      회차 이슈의 범위·완료 기준에 반영되어 있다(이슈가 없는 회차면 그 사실이
+      보고에 있다).
+    returns:
+      ok: {work: str}
+    effects: [board.write, fs.read]
+
+  feasibility-gate:
+    title: 착수 정당성 부정 — 사용자 승인
+    # claunch-101wi: worker-round의 feasibility-check가 unjustified를 골랐을 때만
+    # 선다. 응답자는 사람뿐이다(from 없음). timeout을 두지 않는다 — 시간으로
+    # 저절로 열리면 에이전트가 부정한 작업이 승인 없이 착수된다.
+    # 거절(decline)은 결과 infeasible로 끝나고, worker-round가 그것을 받아
+    # feasibility-hold를 지나 착수 없이 회차를 마감한다.
+    ask:
+      prompt: |
+        이 회차의 작업을 시작하기 전에 워커가 착수 정당성을 스스로 점검했고,
+        「정당하지 않다」고 판정했다. 판정 항목과 근거는 앞 선택
+        feasibility-check의 reason에 있다(`claunch cflow2 journal -n 3`).
+        이슈: ${data.claim.issue}
+
+        이 작업을 그대로 시작하는 것을 승인하는가?
+
+        승인하면: 런이 일감 처리로 넘어간다(require_coding_approval이 켜져
+        있으면 그 다음에 코딩 승인 게이트가 선다). 워커는 이 승인을 이슈에
+        `FEASIBILITY OVERRIDE` 코멘트로 남기고 작업을 시작한다.
+        거절하면: 코드를 바꾸지 않고 이 회차를 착지 없이 마감한다. 이슈에
+        `HOLD:` 코멘트가 남고(닫지 않는다), 회차 정리(wrapup)와 회차 보고를
+        지난다. 거절 사유를 함께 적는다 — 그 사유가 HOLD 코멘트에 실린다.
+        보류하면: 답하지 않는 동안 런은 이 게이트에 서 있고 세션은 살아 있다.
+        아직 코드 변경이 없으므로 잃는 것은 없다.
+      otherwise: human
+      urgent: true
+      on_decline: infeasible
+    prompt: |
+      사용자가 정당성 부정 판정에도 이 작업의 착수를 승인했다. 이 스텝에서 할
+      일은 기록 하나다: 이 회차 이슈에 `FEASIBILITY OVERRIDE: <부정 판정의
+      항목 요지> — 사용자 승인` 한 줄을 남긴다. 승인에 사유가 있으면 함께
+      옮긴다. 이슈 없는 회차면 남길 곳이 없으므로 그 사실을 보고에 적는다.
+
+      그리고 **같은 턴에서** 이 작업의 결과를 보고한다 — 승인은 났는데
+      아무것도 진행되지 않는 턴을 만들지 않는다.
+    done_when: |
+      사용자가 승인했고, 이 회차 이슈에 FEASIBILITY OVERRIDE 코멘트가 있다
+      (이슈 없는 회차면 그 사실이 보고에 있다).
+    effects: [board.write]
+
+  feasibility-hold:
+    title: 착수 거절 후 마감 (코드 변경 없이)
+    prompt: |
+      사용자가 feasibility-gate에서 이 작업의 착수를 거절했다. 이 회차는
+      코드 변경과 착지 없이 마감한다. 거절 사유는 저널에 있다
+      (`claunch cflow2 journal -n 5`); 없으면 터미널 사용자에게 묻는다.
+
+      · 이 회차 이슈에 `HOLD: feasibility rejected by user — <거절 사유>`
+        코멘트를 남긴다. 상태는 그대로 두고 닫지 않는다 — 머지가 없으므로
+        닫을 자격(`merged <해시>`)이 없다. 이슈의 처분(닫기·재배정·규격 수정)은
+        settle-check가 상위에게 묻는다.
+      · 브랜치에 이 회차의 커밋이 없는지 `git log --oneline <기준>..HEAD`로
+        확인해 보고에 적는다. 커밋이 있으면 지우지 않고 그 해시를 HOLD
+        코멘트에 함께 적는다.
+      · 메시에 속해 있으면 상위 세션에 fyi 한 줄: 이 회차는 사용자 거절로
+        착수 없이 마감한다는 것과 이슈 id.
+    done_when: |
+      이 회차 이슈에 `HOLD: feasibility rejected by user` 코멘트가 있고(닫지
+      않았다), 브랜치의 회차 커밋 유무와 상위 fyi의 메시지 id(상위가 없으면 그
+      사실)가 보고에 있다.
+    returns:
+      ok: {reason: str}
+    effects: [board.write, mesh.send]
+
   branch-setup:
     title: 작업 브랜치 준비
     prompt: |
@@ -1008,6 +1299,12 @@ nodes:
       · 이 회차의 목표를 담을 자리다 — 그 브랜치의 마지막 커밋이 이 목표와
         같은 일이거나, 그 브랜치가 이 세션의 회차 브랜치거나, 아래 2의
         함께 쓰는 세션이 지정한 작업선이다.
+      start_at=landing 회차(지금 ${data.inputs.start_at})는 이 네 조건을 그대로
+      적용하되 조건 4를 이렇게 읽는다: 목표가 「이미 이 브랜치에 쌓인 커밋을
+      착지시킨다」이므로, 지금 체크아웃의 브랜치가 이 세션의 것이고 그 커밋이
+      아직 기준에 들어가지 않았으면 조건 4를 만족한다. 새 브랜치를 파지 않고
+      지금 브랜치를 그대로 쓴다 — 이 회차의 산출물은 새 커밋이 아니라 이미
+      있는 커밋이다.
 
       ── 2. 어느 브랜치를 쓰는가 ──
       · **이 세션의 이번 회차 브랜치가 이미 있다** — 재시작·재진입으로 이
@@ -1036,7 +1333,9 @@ nodes:
       브랜치 기준은 시작 입력 relation(=${data.inputs.relation})이 정한다.
       · stacked(기본): 상위 통합 대상이 기준이다. 부모가 스택을 둔 워커면 부모의
         스택 브랜치(또는 부모가 지정한 선행 자식 브랜치), 부모가 리더면 이 회차
-        시작 시점의 통합 대상 브랜치(master)다.
+        시작 시점의 통합 대상 브랜치(master)다. 부모가 없거나 부모가 착지를 받지
+        못하는 세션(스택을 두지 않은 워커, 워크플로 없는 루트)도 master다 — 그
+        착지는 independent처럼 리더 큐로 강등된다(land의 여섯째 확인, claunch-0ka8c).
       · independent: 부모가 워커여도 통합 대상 브랜치(master)가 기준이다. 착지
         요청은 부모가 아니라 리더의 착지 큐로 간다(integration-request). 부모의
         스택 브랜치에 있는 코드가 필요해지면 혼자 기준을 바꾸지 않는다 — 부모에게
@@ -1148,7 +1447,9 @@ nodes:
       · ready가 아니고 force_pr가 꺼져 있고 원격 편성이 아니면 **local**. reason은
         blockers를 `; `로 이은 것이다. 이 회차 이슈에 `LANDING MEDIUM: local
         (PR 불가: <reason>)` 코멘트를 남긴다 — PR이 기본인데 이 회차가 로컬로
-        간 이유가 보드에 남아야 한다.
+        간 이유가 보드에 남아야 한다. 사용자에게 보이는 경고(스레드)는 이
+        자리에서 열지 않는다 — 착지 절차의 local-warning이 같은 사실과
+        「로컬 브랜치 유실 위험」을 한 번 남긴다(claunch-ijkge).
       · ready가 아니고 force_pr가 켜져 있거나 원격 편성이면 outcome **blocked**.
         reason은 blockers다. 이슈에 `BLOCKED: remote-setup (<reason>)`을 남긴다.
         설치·로그인은 사용자가 한다 — 세션은 대화형 로그인을 할 수 없고 토큰을
@@ -1255,6 +1556,93 @@ nodes:
                                issues: "$result['pr-open'].value.issues"}}
         when: "$outcome == 'ok'"
     effects: [fs.write, git.push, board.write]
+
+  pr-submitted-mark:
+    title: PR 제출 마감 (수동 머지, auto_merge=false)
+    prompt: |
+      이 회차는 PR 제출에서 끝난다 — 시작 입력 auto_merge=false다. PR은 열렸고
+      (url=${data.landing.pr_url}, 번호=${data.landing.pr_number},
+      tip=${data.landing.tip}), 이 세션은 머지를 하지 않는다. 머지는 사용자가
+      PR 페이지에서 직접 한다. 이 스텝은 그 사실을 보드에 남긴다.
+
+      ── 실린 이슈 ──
+      주 이슈: ${data.claim.issue}
+      함께 실린 이슈: ${result['items-pass'].value}
+      이 값은 `items-pass` 노드의 것이고 회차마다 완료된다. `[]`면 이 회차는
+      단일 일감이다 — 대상은 주 이슈 하나다. 항목의 `issue`가 이슈 id다.
+      이 목록의 id를 그대로 쓴다. 보드 목록에서 고르지 않는다 — 같은 세션이
+      다른 이슈(HOLD된 앞 회차 이슈 등)를 in_progress로 쥐고 있을 수 있다.
+      주 이슈가 null이면(이슈 없이 가기로 한 회차, claim.how=none) 보드에
+      쓸 것이 없다 — 3번만 한다.
+
+      1. 대상 이슈를 전부 in_review로 옮긴다:
+         `claunch beads update <id> --status in_review`
+         하나라도 옮기지 못하면 그 id와 오류를 보고의 reason에 적는다.
+
+      2. 주 이슈에 마커 코멘트를 한 번 남긴다
+         (`claunch beads comments add <id> -f <파일>`; 파일은 $CLAUNCH_SCRATCH에
+         쓴다). 첫 줄은 정확히 이 형식이다:
+         `PR SUBMITTED @ <tip> <url>`
+         배치면 첫 줄 끝에 ` batch: <id1,id2,...>`를 붙인다. 이어서:
+         · `머지: 하지 않음(auto_merge=false) — 사용자가 PR에서 직접 머지한다`
+         · `머지 뒤: 이 이슈를 닫는 것은 사용자 또는 후속 회차의 몫이다(이
+           회차는 닫지 않는다)`
+         · `증거: 이 회차의 다른 코멘트(표적 테스트 수치·리뷰 판정)에 있다`
+         나머지 이슈에는 한 줄만 남긴다:
+         `PR SUBMITTED @ <tip> (batch of <주 이슈 id>)`
+         이 마커는 settle-check가 이 회차의 이슈를 정산된 것으로 읽는 근거다 —
+         빠뜨리면 세션이 종료 정산에서 이 이슈 때문에 막힌다.
+
+      3. 상위에 fyi 한 줄을 보낸다(relation=${data.inputs.relation}): stacked면
+         부모 워커, independent면 리더. 형식:
+         `PR SUBMITTED <이슈 id들> <url> — auto_merge=false, 이 회차는 머지하지
+         않았다(사용자가 머지한다)`. 핸들을 모르거나 채널이 없으면 보내지
+         않는다 — 본체는 보드의 마커이고 이 알림은 회차를 막지 않는다.
+
+      하지 않는 것: `gh pr merge`, base 브랜치 push, 이슈 close. 이 셋은
+      사용자와 상위의 몫이다. PR을 닫거나 다시 만들지도 않는다.
+    done_when: |
+      실린 이슈가 전부 in_review이고, 주 이슈에 `PR SUBMITTED @ <tip> <url>`
+      마커가 있으며, 보고에 url·번호·tip과 「머지하지 않았다」가 있다.
+    returns:
+      ok: {url: "str?", number: "int?", tip: "str?"}
+    effects: [board.write, mesh.send]
+
+  pr-local-notice:
+    title: 로컬 착지 경고 (PR 제출 불가)
+    prompt: |
+      이 회차의 착지 매체가 local로 내려왔다. 사유: ${data.landing.reason}
+      이 회차는 PR 없이 로컬 브랜치로만 남는다. 로컬 브랜치는 이 머신의
+      체크아웃에만 있고, 세션·워크트리가 정리되거나 머신이 사라지면 커밋이
+      유실될 수 있다. 그 사실을 사용자에게 보이게 한 번 알린다.
+
+      1. 같은 주제의 스레드가 있으면 `thread_reply`, 없으면 `thread_open`으로
+         한 통을 남긴다. 제목: `PR 제출 불가 — 로컬 브랜치로만 남음`. 본문:
+         · 로컬로 내려온 사유(위 값 — gh 미설치·미로그인·원격 없음, 또는
+           사용자가 고른 local)
+         · 이 회차의 브랜치는 ${result['branch-setup'].value.branch}이고,
+           착지는 상위 세션의 --no-ff 머지로 이뤄진다
+         · 로컬 브랜치는 이 머신의 체크아웃에만 있다 — 세션·워크트리 정리,
+           머신 교체·초기화로 커밋이 유실될 수 있다
+         · 복구: `gh auth login`(또는 원격 설정)을 마친 뒤 이 브랜치를
+           push하고 PR을 열면 원격에 사본이 남는다. 상위가 다른 머신이면
+           로컬 착지가 서지 않으므로 그 전에 알린다
+      2. 이슈에 `LANDING MEDIUM: local (PR 불가: <사유>)` 코멘트가 이미 있는지
+         본다(`claunch beads comments <id>`). 없으면 같은 형식으로 한 줄
+         남기고, 있으면 다시 쓰지 않는다. 이슈가 없으면(claim.issue null)
+         생략한다.
+      3. 경고는 회차를 막지 않는다. thread_open이 실패하면 그 사유를 보고의
+         reason에 적고 계속한다 — 로컬 착지 절차는 그대로 진행한다.
+    done_when: |
+      사용자에게 보이는 경고(스레드)에 사유와 로컬 브랜치 유실 위험이 있고,
+      이슈에 LANDING MEDIUM 코멘트가 있거나 이미 있었다. thread id 또는 실패
+      사유가 보고에 있다.
+    # 둘 다 선택이다: 경고가 서지 못해도 회차는 계속 가므로(위 3번) 보고가
+    # 값 없이도 성립해야 한다. thread_id가 null이면 실패한 것이고 그 사유는
+    # 보고의 reason에 있다.
+    returns:
+      ok: {thread_id: "str?", warned: "bool?"}
+    effects: [fs.read, board.write, thread.write]
 
   # ── 일감 하나 (item) ─────────────────────────────────────────────────
   # ── 시뮬레이션(claunch-qrh0a) ─────────────────────────────────────────
@@ -1389,30 +1777,116 @@ nodes:
       구현하는 비용보다 크다. 위임을 권장하면 brief에 자식에게 넘길 작업
       단위(파일, 할 일, 완료 기준)를 한 단락으로 적는다 — 위임 자식이 그
       단락을 그대로 받는다.
+
+      ── 사용자 요약 스레드 (coding-approval 직전 전달) ──
+      승인 게이트가 이번 일감에 선다면(시작 입력 require_coding_approval이
+      true이고 아직 approve-always를 답하지 않아 coding-approval 또는
+      coding-approval-routing이 묻는다면) brief를 다 쓴 뒤 사용자 스레드
+      하나를 연다(`thread_open`). 터미널 출력과 이슈 코멘트는 사용자에게
+      알림이 가지 않으므로, 사용자가 승인 카드의 전체 계획을 펼쳐 보기
+      전에 다섯 항목 요약을 대시보드 알림으로 받는 길이 이 스레드다.
+      승인을 구하는 일감이면 항상 연다 — 스위치로 끌 수 있는 선택지가
+      없고, 회차가 돌아 거절 뒤 재승인을 구할 때도 매번 다시 연다. 게이트
+      자체가 서지 않으면(입력이 꺼져 있거나 approve-always 뒤의 일감) 이
+      스레드를 열지 않는다 — 그 경우 이 일감에는 승인 질문이 오르지
+      않는다.
+
+      스레드 제목은 한 줄로 이 일감을 가리키게 적는다(이슈 id 포함).
+      본문은 마크다운으로 brief에서 가져온 다음 다섯 항목을 적는다 — 이
+      단계에서 새로 조사하지 않는다:
+      - 문제제기: 이 일감이 왜 필요한가 — 이슈·코드에서 확인한 사실
+      - 작업 목표: 이번에 달성할 것
+      - 작업 범위: 포함하는 것과 제외하는 것
+      - 기대효과: 완료되면 나아지는 것
+      - 리스크: 계획에 있는 위험·주의점
+
+      거절 사유를 반영해 계획을 다시 쓰면(루프가 coding-plan으로 돌아오면)
+      바뀐 계획으로 같은 형태의 스레드를 다시 연다. thread_open이 실패하면
+      그 사유를 보고에 적고 스레드 없이 진행한다 — 전달은 필수이나 게이트를
+      세우는 승인이 아니므로 이 작업의 실패로 보고하지 않는다.
+
+      ── plan_waiting: 계획에 남은 결정 수 (claunch-rzepk) ──
+      plan_set(또는 plan_node)의 응답에 있는 `summary.waiting`을 plan_waiting에
+      그대로 적는다. 그 값이 0보다 크면 이 회차는 게이트 앞에서 멈추고 사용자가
+      계획 패널에서 결정하기를 기다린다 — 게이트의 유무와 관계없다. 값을 읽지
+      못했으면(plan_set 실패, 데몬 거절) plan_waiting에 -1을 적고 사유를 함께
+      적는다. 모르는 값을 「결정 없음」으로 적지 않는다.
     done_when: |
       사용자가 구현 착수 여부를 판단할 구체적인 계획과 근거가 brief에 있다.
-      session_routing이 true면 difficulty·recommend·why도 있다.
+      session_routing이 true면 difficulty·recommend·why도 있다. 승인 게이트가
+      이번 일감에 서면 사용자 요약 스레드의 id가 보고에 있다. 단
+      thread_open이 실패한 경우에는 thread_id 대신 그 실패 사유가 보고에
+      있다 — 실패는 이 작업의 실패로 보고하지 않는다. plan_set 응답의
+      `summary.waiting`이 plan_waiting에 있다(읽지 못했으면 -1과 사유).
     returns:
-      ok: {brief: str, difficulty: "str?", recommend: "str?", why: "str?"}
+      ok: {brief: str, plan_waiting: "int?", difficulty: "str?", recommend: "str?", why: "str?", thread_id: "str?"}
+    effects: [fs.read, thread.write]
+
+  plan-seed:
+    title: 계획 확보 (계획 단계를 건너뛴 경로)
+    prompt: |
+      이 회차는 coding-plan을 건너뛰었다(approve-always 이후이거나 자동 경로다).
+      그래도 work를 시작하기 전에 plan 패널의 상태를 확정해야 한다 — plan에
+      미결정이 남아 있으면 work를 시작하지 않는다(claunch-rzepk 규칙 1).
+
+      `plan_get`으로 이 세션의 plan을 읽는다.
+      · plan이 이미 있으면 손대지 않는다. 지금 `summary.waiting` 값을
+        plan_waiting에 적는다.
+      · plan이 없으면 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
+        (title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈, steps는
+        이번 일감의 단계), 그 응답의 `summary.waiting`을 plan_waiting에 적는다.
+        work가 계획을 처음 쓰는 자리를 이 노드가 대신하는 것이다 — work는
+        그 뒤 `plan_get`으로 읽은 것을 이어 쓴다(id를 유지한다).
+      plan_get·plan_set이 없거나 데몬이 거절하면 plan_waiting을 비우지 말고
+      -1을 적고, 그 사유를 보고에 한 줄 남긴다. 모르는 값을 「결정 없음」으로
+      적지 않는다.
+    done_when: |
+      plan_waiting에 이 세션 plan의 `summary.waiting`이 있거나, 도구를 쓸 수
+      없어 -1과 그 사유가 있다.
+    returns:
+      ok: {plan_waiting: "int?"}
+    effects: [fs.read]
+
+  plan-wait-unclear:
+    title: plan 상태를 읽지 못했다 — 사람이 정한다
+    # 대기 probe가 세 번 연속 판정 불가(exit 2)로 끝났을 때만 선다. 규칙 1은
+    # 모르는 값을 「결정 없음」으로 읽지 말라고 정하므로, 계속 기다릴지 진행할지는
+    # 사람이 고른다. keep-waiting은 계획부터 다시 도는 루프다.
+    ask:
+      prompt: |
+        `claunch gate plan-waiting`이 세 번 연속 판정 불가로 끝났다. 데몬의
+        plan 기록을 읽지 못했거나 이 세션에 plan이 서 있지 않다. 규칙은 모르는
+        값을 「결정 없음」으로 읽지 말라고 정하고 있어, 여기서 사람이 정한다.
+        계속 기다리려면 plan 패널에 계획을 쓰거나 데몬이 돌아온 뒤 「계속
+        기다린다」를 고른다.
+      otherwise: human
+      options:
+        keep-waiting: {outcome: ok, description: 계획 패널을 정리한 뒤 다시 기다린다 (계획부터 다시)}
+        proceed: {outcome: skipped, description: plan 상태를 읽지 못한 채로 work를 진행한다}
+    prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
 
   coding-approval:
     title: 코딩 시작 전 사용자 승인
     ask:
       prompt: |
-        시작 입력 require_coding_approval이 켜져 있어 구현 착수 전에
+        시작 입력 `require_coding_approval`이 켜져 있어 구현 착수 전에
         사용자 승인이 필요하다. 아래 계획에 따라 코딩을 시작할지 결정한다.
 
         ${result['coding-plan'].value.brief}
 
-        approve-once: 이번 일감만 승인한다. 위 범위의 구현과 검증을
-        진행하고, 다음 일감에서는 다시 묻는다.
-        approve-always: 이번 일감을 승인하고, 이 런의 이후 일감·회차에서는
-        이 승인을 다시 묻지 않는다(변경 계획도 다시 쓰지 않는다).
-        reject: 구현하지 않고 거절 사유를 반영해 변경 계획을 다시 쓴다
-        (coding-plan으로 돌아간다). 이유를 함께 적는다.
-        보류: 답하지 않으면 코드 변경 없이 이 단계에서 기다린다.
-        변경으로 인한 리스크는 계획에 기재된 내용과 같다.
+        ## 선택지
+
+        - **approve-once** — 이번 일감만 승인한다. 위 범위의 구현과 검증을
+          진행하고, 다음 일감에서는 다시 묻는다.
+        - **approve-always** — 이번 일감을 승인하고, 이 런의 이후 일감·회차에서는
+          이 승인을 다시 묻지 않는다(변경 계획도 다시 쓰지 않는다). 계획
+          패널에 남은 미결정은 이 답과 관계없이 work 앞에서 그대로 기다린다.
+        - **reject** — 구현하지 않고 거절 사유를 반영해 변경 계획을 다시 쓴다
+          (coding-plan으로 돌아간다). 이유를 함께 적는다.
+
+        답하지 않으면 코드 변경 없이 이 단계에서 기다린다. 변경으로 인한
+        리스크는 계획에 기재된 내용과 같다.
       otherwise: human
       # 사용자의 응답을 바로 기다리는 승인: 대시보드 알림 채널(코너 카드·알림
       # 기록·종의 대기 수)에 다른 승인 게이트와 같이 뜬다(claunch-x76l8.1).
@@ -1426,7 +1900,7 @@ nodes:
       # 결과 rejected를 받아 coding-plan으로 돌아간다.
       options:
         approve-once: {outcome: ok, description: 이번 일감만 승인한다 — 다음 일감에서 다시 묻는다}
-        approve-always: {outcome: ok, description: 이번 일감을 승인하고 이 런의 이후 일감에서는 묻지 않는다}
+        approve-always: {outcome: ok, description: 이번 일감을 승인하고 이 런의 이후 일감에서는 묻지 않는다 — 계획 패널의 미결정은 그때도 기다린다}
         reject: {outcome: rejected, description: 구현하지 않고 계획을 다시 쓴다}
     prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
@@ -1439,25 +1913,35 @@ nodes:
     # (cflow2/question.RESERVED_NAMES) — 그래서 approve-as-planned다.
     ask:
       prompt: |
-        시작 입력 require_coding_approval과 session_routing이 켜져 있다. 아래
-        계획으로 코딩을 시작할지, 시작하면 누가 구현할지 결정한다.
+        시작 입력 `require_coding_approval`과 `session_routing`이 켜져 있다.
+        아래 계획으로 코딩을 시작할지, 시작하면 누가 구현할지 결정한다.
 
         ${result['coding-plan'].value.brief}
 
-        난이도: ${result['coding-plan'].value.difficulty} / 권장:
-        ${result['coding-plan'].value.recommend}
-        근거: ${result['coding-plan'].value.why}
+        ## 난이도
 
-        approve-as-planned: 계획의 권장(direct면 이 세션, delegate면 하위
-        설정 자식)대로 구현한다.
-        approve-no-delegate: 이 세션이 직접 구현한다.
-        approve-down-delegate: 이 세션의 대화를 fork한 자식이 하위 profile·
-        모델로 구현한다(이 브랜치에 직접 커밋, 리뷰·착지는 이 세션).
-        approve-always: 계획의 권장대로 구현하고, 이 런의 이후 일감·회차에서는
-        이 승인을 다시 묻지 않는다(이후 일감도 계획의 권장대로 간다).
-        reject: 구현하지 않고 이유를 반영해 계획을 다시 쓴다.
-        위의 세 승인은 이번 일감만의 승인이다 — 다음 일감에서 다시 묻는다.
+        - 난이도: ${result['coding-plan'].value.difficulty}
+        - 권장: ${result['coding-plan'].value.recommend}
+        - 근거: ${result['coding-plan'].value.why}
+
+        ## 선택지
+
+        - **approve-as-planned** — 계획의 권장(direct면 이 세션, delegate면
+          하위 설정 자식)대로 구현한다.
+        - **approve-no-delegate** — 이 세션이 직접 구현한다.
+        - **approve-down-delegate** — 이 세션의 대화를 fork한 자식이 하위
+          profile·모델로 구현한다(이 브랜치에 직접 커밋, 리뷰·착지는 이 세션).
+        - **approve-always** — 계획의 권장대로 구현하고, 이 런의 이후
+          일감·회차에서는 이 승인을 다시 묻지 않는다(이후 일감도 계획의
+          권장대로 간다).
+        - **reject** — 구현하지 않고 이유를 반영해 계획을 다시 쓴다.
+
+        `approve-always`를 뺀 세 승인(as-planned·no-delegate·down-delegate)은
+        이번 일감만의 승인이다 — 다음 일감에서 다시 묻는다. `approve-always`는
+        이 런의 이후 일감에서 다시 묻지 않는다.
         답하지 않으면 코드 변경 없이 이 단계에서 기다린다.
+        어느 답이든 계획 패널에 남은 미결정은 이 게이트와 별개로 work 앞에서
+        기다린다 — `approve-always`도 그 대기를 끄지 않는다.
       otherwise: human
       urgent: true
       # approve-always는 coding-approval의 것과 같은 이름·뜻이다(claunch-sxdnc):
@@ -1467,10 +1951,58 @@ nodes:
         approve-as-planned: {description: 계획의 권장(직접 또는 위임)대로 구현한다 — 이번 일감만}
         approve-no-delegate: {description: 이 세션이 직접 구현한다 — 이번 일감만}
         approve-down-delegate: {description: 하위 설정 자식에게 fork 위임한다 — 이번 일감만}
-        approve-always: {description: 계획의 권장대로 구현하고 이 런의 이후 일감에서는 묻지 않는다}
+        approve-always: {description: 계획의 권장대로 구현하고 이 런의 이후 일감에서는 묻지 않는다 — 계획 패널의 미결정은 그때도 기다린다}
         reject: {description: 구현하지 않고 계획을 다시 쓴다}
     prompt: 사용자의 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
     effects: [fs.read]
+
+  merge-approval:
+    title: 착지 요청 전 사용자 승인
+    # 시작 입력 require_merge_approval이 켜져 있을 때만 land의 submit이 이
+    # 질문을 선다(claunch-boxug). 착지 요청 직전 — rebase·동료 리뷰를 지난
+    # 뒤, publish(통합 대기 표 오르기) 바로 앞. 거절은 이번 회차 동결
+    # 마감(held)이고 다음 회차가 다시 묻는다. 상위 세션 승인(landing-review)과
+    # 겹치지 않는다 — 이것은 사람만 여는 문이다.
+    ask:
+      prompt: |
+        시작 입력 `require_merge_approval`이 켜져 있어 착지 요청(통합 대기 표
+        오르기) 전에 사용자 승인이 필요하다. 이번 회차의 착지 증거를 보고
+        요청을 올릴지 결정한다.
+
+        - 회차 이슈: ${data.claim.issue}
+        - 작업 브랜치: ${result['branch-setup'].value.branch}
+        - 기계 확인(landing의 다섯 확인)은 이미 통과했다 — 작업 트리 깨끗,
+          표적 수치가 tip의 것, 미리 병합 충돌 0, 열린 제동 마커 없음,
+          동결 지시 없음.
+        - 증거 묶음(기능·머지 커밋 해시, 테스트 수치, 양방향 diff)은 이슈의
+          `COMMIT <해시>` 코멘트와 리뷰 판정 코멘트에 있다:
+          `claunch beads comments ${data.claim.issue}`
+
+        ## 선택지
+
+        - **approve** — 착지 요청을 올린다(통합 대기 표에 오르고, 머지 실행은
+          상위 세션).
+        - **hold** — 올리지 않고 이번 회차를 동결로 마감한다. 사유를 함께
+          적는다.
+
+        답하지 않으면 이 단계에서 기다린다.
+      otherwise: human
+      # 사용자의 응답을 바로 기다리는 승인: 대시보드 알림 채널에 다른 승인
+      # 게이트와 같이 뜬다(claunch-x76l8.1).
+      urgent: true
+      options:
+        approve: {outcome: ok, description: 착지 요청을 올린다 — 머지 실행은 상위 세션}
+        hold: {outcome: hold, description: 올리지 않고 이번 회차를 동결로 마감한다 — 사유를 함께 적는다}
+    prompt: |
+      사용자의 머지 승인 답을 기다린다. 이 작업은 ask가 답을 받으면 끝난다.
+      hold 답이 오면 이번 회차는 held(동결 마감)다. 그때 이슈에 한 줄을
+      남긴다: `MERGE APPROVAL DECLINED @ <tip> — <사유>`. 이 줄은 사람이
+      읽는 기록이지 제동 마커가 아니다 — `HOLD:`로 쓰지 않는다. 착지 확인 4는
+      `HOLD:`를 만나 escalate로 본다.
+    returns:
+      ok: {}
+      hold: {reason: "str?"}
+    effects: [board.write, fs.read]
 
   route-planned:
     title: 구현 주체 확정 (계획의 권장)
@@ -1783,6 +2315,21 @@ nodes:
       처리한다.
       보고의 수치 칸은 비우지 않고 `tests: skipped (TESTS SKIPPED @ <해시>)`로
       적는다. 「0/0 green」처럼 실행한 것으로 읽히는 값을 쓰지 않는다.
+
+      ── 사람이 실행 중에 생략한 경우 (test-skip-gate, claunch-dsr4o) ──
+      이 작업이 test-decision의 skip(셀프 게이트)이 아니라 표적 테스트가 도는
+      동안 사람이 고른 test-skip-gate의 skip으로 열렸으면(flow_status의
+      `person_picks` 마지막 항목이 test-skip-gate다) 셀프 게이트 셋은 판정
+      근거가 아니다 — 생략을 정한 것은 사람이다. 그때는:
+      · 셸에서 아직 돌고 있는 표적 테스트 명령이 있으면 먼저 멈춘다.
+      · 마커의 사유를 `user — `로 시작하고 사람이 남긴 reason을 그대로 잇는다:
+        `TESTS SKIPPED @ <HEAD 해시>: user — <사람의 reason> — files: <바뀐 파일
+        목록>`. 생략 전에 끝난 측정이 있으면 그 수치와 영수증을 마커 뒤에
+        `partial: <수치>`로 붙인다 — 끝나지 않은 측정의 수치는 붙이지 않는다.
+      · 아직 커밋하지 않은 테스트 작성분은 버리지 않는다 — 다음 commit이 함께
+        싣는다.
+      뒤 단계는 사유가 `user — `로 시작하는 마커를 셀프 게이트 셋으로
+      재판정하지 않는다: 그 마커 해시 이후에 바뀐 파일이 있는지만 본다.
     done_when: |
       표적 테스트 생략 선택의 reason, 생략 대상, 남은 검증 범위가 보고에
       기록되어 있고, 이슈에 `TESTS SKIPPED @ <해시>:` 코멘트가 있다.
@@ -2491,48 +3038,69 @@ nodes:
     # 증거 묶음을 건너뛰므로 워커(agent)가 고를 수 없다.
     ask:
       prompt: &landing_review_ask |
-        워커 세션 하나가 이번 목표를 자기 브랜치에 커밋했고 표적 테스트가
-        green이다. 그 세션은 이 질문을 보낸 세션이다(질문 목록의 from_session.
-        사람이 받았으면 이 질문이 떠 있는 세션). 지금 그 브랜치를 상위 세션의
-        통합 대기 표에 올리게 하는가(워커는 먼저 통합 대상 위로 rebase한 뒤
-        증거 묶음을 만들어 요청을 보낸다), 아니면 브랜치를 동결해 두고 이
-        회차를 마감하게 하는가?
+        워커 세션 하나가 이번 회차의 착지를 스스로 정하지 못하고 묻는다. 그
+        세션은 이 질문을 보낸 세션이다(질문 목록의 from_session. 사람이
+        받았으면 이 질문이 떠 있는 세션). 고를 것은 둘이다:
+        - request — 그 브랜치를 상위 세션의 통합 대기 표에 올리게 한다(워커는
+          먼저 통합 대상 위로 rebase한 뒤 증거 묶음을 만들어 요청을 보낸다).
+        - hold — 브랜치를 동결해 두고 이 회차를 마감하게 한다. 착지할 것이
+          없거나, 이 브랜치를 통합 대기 표 밖의 경로로 착지시킬 계획일 때다.
 
-        이 질문이 열린 사유는 둘 중 하나다. (1) 워커의 기계 확인(실을 커밋
-        1건 이상, 작업 트리 깨끗, 표적 green, 미리 병합 충돌 0, 열린 제동 마커
-        없음, 동결 지시 없음) 중 하나가 깨졌다. (2) 확인은 통과했지만 워커가
-        착지 경로를 스스로 정할 수 없다고 판단했다. 확인이 전부 통과하고 경로가
-        분명하면 워커는 이 질문 없이 직접 요청을 올린다. 어느 사유인지는 워커가
-        select의 reason에 적어 저널에 남겼다: `claunch cflow2 journal -t <그 세션>
-        -n 10` 이 그것이고, 거기부터 읽는다.
+        ── 먼저 볼 것: 왜 열렸는가 ──
+        워커가 이 질문을 열면서 남긴 사유가 질문 위에 붙어 있다(웹 카드의
+        「Why this is open」, 응답자 메시지의 「Why this question is open」 줄
+        — 엔진이 그 선택의 reason을 그대로 싣는다). 그 줄 첫머리의
+        `사유:`와 `권장:`이 판단의 출발점이다. 사유는 셋 중 하나다:
+        1. delta-0 — 실을 커밋이 0건이다(`git rev-list --count $(git
+           merge-base <통합 대상> HEAD)..HEAD` = 0). 분석만 한 회차이거나,
+           커밋이 이미 다른 경로로 통합 대상에 들어갔다. 이미 들어갔다는
+           증거(`git merge-base --is-ancestor <tip> <통합 대상>` 참, 머지 해시)가
+           사유에 있으면 답은 hold다 — request로 올려도 실을 것이 없다.
+        2. check-failed:<번호> — 워커의 기계 확인(작업 트리 깨끗, 표적 수치가
+           지금 tip의 것, 미리 병합 충돌 0, 열린 제동 마커 없음, 동결 지시
+           없음) 중 그 번호가 깨졌다. 무엇이 어떻게 깨졌는지 사유에 있다.
+           고칠 수 있는 것이면 hold로 답하고 이유에 고칠 것을 적는다.
+        3. route-unclear — 확인은 통과했지만 워커가
+           착지 경로를 스스로 정할 수 없다고 판단했다(통합 대상을 모른다,
+           운영자가 다른 경로를 지시했다 등). 경로를 아는 쪽이 답한다.
+        확인이 전부 통과하고 경로가 분명하면 워커는 이 질문 없이 직접 요청을
+        올린다. 사유 줄이 없거나 더 필요하면 저널이 원본이다:
+        `claunch cflow2 journal -t <그 세션> -n 10`.
 
-        이 질문은 먼저 그 워커의 상위 세션(스택을 둔 부모 워커, 또는 리더)에게
-        간다. 응답할 상위 세션이 없거나 30분 안에 답이 없으면 사람에게 온다.
-        판단 기준은 같다. request를 고르면 워커는 통합 대기 표(부모 워커의 스택,
-        또는 리더의 착지 큐)에 요청을 올린다. 이 브랜치를 그 밖의 경로로 착지시킬
-        계획이면 hold다 — 예: 사람이 직접 머지한다, quick-fork 세션이면 web UI의
-        merge로 결과를 원 세션에 넘기고 원 세션이 착지를 처리한다.
-
-        나머지 판단 근거는 보드와 런 상태에 있다. 그 워커의 이슈 id는
-        `claunch cflow2 status -t <그 세션> --json`의 data.claim.issue이고, 바꾼 파일과 요지는 같은 출력의 data.work_report다.
+        ── 나머지 근거 ──
+        그 워커의 이슈 id는 `claunch cflow2 status -t <그 세션> --json`의
+        data.claim.issue이고, 바꾼 파일과 요지는 같은 출력의 data.work_report다.
         브랜치·커밋 해시·tip·테스트 수치는 그 워커가 커밋 단계에서 이슈에 남긴
         코멘트(`COMMIT <해시>` 줄과 증거 묶음)에 있다 — `claunch beads show <id>
         --json`, `claunch beads comments <id>`.
-        지금 줄을 세울 여력이 있는지, 대기 중인 다른 브랜치와 충돌하는지, 스윕
-        배치 타이밍이 맞는지는 통합 대기 표를 가진 상위 세션이 판단한다.
-
         어느 쪽을 골라도 이 워커가 머지하는 일은 없다. 머지 실행은 상위
         세션의 몫이고, master 머지는 그중 리더의 통합 단계에서만 일어난다.
+        이 브랜치를 그 밖의 경로로 착지시킬 계획이면 hold다 — 예: 사람이 직접
+        머지한다, quick-fork 세션이면 web UI의 merge로 결과를 원 세션에 넘기고
+        원 세션이 착지를 처리한다.
 
-        이 질문에는 문이 둘이다. 터미널의 사용자도 같은 결정을 동시에 내릴
-        수 있고, 사용자가 먼저 답하면 상위 세션의 답은 성립하지 않는다 — 그때는
-        질문이 닫혔다는 통지가 상위 세션에 간다. 충돌하면 사용자 지침이 이긴다.
-        그러니 상위 세션은 답할 수 있으면 지금 답하고, 근거가 없으면 추측하지
-        말고 abstain으로 넘긴다.
+        ── 누가 답하는가 ──
+        이 질문은 먼저 그 워커의 상위 세션(스택을 둔 부모 워커, 또는 리더)에게
+        간다. 응답할 상위 세션이 없거나, 모두 abstain했거나, 30분 안에 답이
+        없으면 사람에게 온다. 거쳐 온 경로는 웹 카드의 「Who was asked before
+        you」에 있다. 판단 기준은 사람이든 상위 세션이든 같다. 터미널의
+        사용자도 같은 결정을 언제든 내릴 수 있고, 사용자가 먼저 답하면 상위
+        세션의 답은 성립하지 않는다(그때는 질문이 닫혔다는 통지가 간다).
+        충돌하면 사용자 지침이 이긴다.
+
+        상위 세션에게: 지금 줄을 세울 여력이 있는지, 대기 중인 다른 브랜치와
+        충돌하는지, 스윕 배치 타이밍이 맞는지는 통합 대기 표를 가진 네가
+        판단한다. 답할 수 있으면 지금 답하고, 근거가 없거나 이 저장소의
+        착지를 받지 않는 세션이면 추측하지 말고 abstain으로 넘긴다.
+      # 리더 그룹은 landing-review-leader와 같다(claunch-0ka8c): 부모 체인에
+      # 착지를 받을 세션이 없는 stacked 회차는 착지가 리더 큐로 강등되므로
+      # (Router.stacked의 demoted), 그 착지를 묻는 질문도 independent처럼
+      # 연결되지 않은 루트 리더까지 닿아야 한다. 순서는 가까운 쪽부터다.
       from:
         - {role: worker, scope: ancestor}
-        - {role: leader, scope: ancestor}
-        - {role: leader, scope: sibling}
+        - {role: leader, scope: ancestor, connect: true}
+        - {role: leader, scope: sibling, connect: true}
+        - {role: leader, scope: root, connect: true}
       otherwise: human
       timeout: 1800
       options: &landing_review_options
@@ -2860,6 +3428,8 @@ nodes:
     # [ancestor, sibling]. 아무도 답하지 않으면 pass로 무응답 통과
     # (self:pass) — bare self는 워커에게 선택을 돌려 교착을 만든다(claunch-wdzd).
     # timeout 900이 안전장치다: 응답자가 받아 놓고 침묵해도 런이 굳지 않는다.
+    # reviewer 그룹은 한 명씩 묻는다(claunch-v0h29.1): 기권·기한 초과면 같은
+    # 그룹의 다음 리뷰어, 그룹이 다 되면 다음 그룹. 기한은 리뷰어마다 900이다.
     ask:
       prompt: |
         이 메시의 워커 하나가 한 회차의 목표를 자기 브랜치에 커밋했고
@@ -2902,13 +3472,24 @@ nodes:
         파일이 동작을 바꾸지 않는 종류(스타일·문구·문서·주석)이고, 그
         파일을 이름으로 부르는 테스트가 없는가(`grep -rl "<파일 이름>"
         tests/`). 동작을 바꾸는 줄이 하나라도 보이면 CHANGES REQUESTED에
-        「표적 테스트 필요: <파일>」을 적는다. 스타일과
+        「표적 테스트 필요: <파일>」을 적는다. 마커의 사유가 `user — `로
+        시작하면 사람이 표적 테스트 실행 중에 생략한 것이다(test-skip-gate,
+        claunch-dsr4o) — 그 생략의 정당성은 심사하지 않고(사람의 결정이다)
+        셋째 항목을 판정 코멘트에 「표적 테스트 미실행(사람 생략)」으로 적는다.
+        그것만으로 CHANGES REQUESTED를 내지 않는다. 스타일과
         취향은 여기서 다루지 않는다 — 이 문이 막는 것은 잘못된 변경이지
         다른 변경이 아니다.
 
         판정은 이 답과 별개로 네가 보드에 남긴다:
         `claunch beads comments add <id> "REVIEWED: pass @ <tip>"` 또는
         `claunch beads comments add <id> "CHANGES REQUESTED @ <tip>: <무엇을>"`.
+        **이 코멘트를 이 답보다 먼저 남긴다.** 순서가 규칙인 이유는 워커의
+        착지 확인 4가 (b) 갈래를 시각으로 짝짓기 때문이다: 코멘트 머리 시각이
+        답의 저널 `at`보다 앞서야 그 줄이 그 답의 회차에 든다. 답한 뒤에 쓰면
+        머리가 답 뒤로 밀려 구간 밖으로 나가고 (b)는 그 줄을 놓쳐 제동으로
+        떨어뜨린다(escalate 방향이라 잘못된 통과는 아니다 — 그래도 한 번 더
+        도는 회차가 된다). 보드 쓰기가 실패하면 답하기 전에 그 사실을 밝히고
+        답한다 — 순서를 뒤집는 것보다 낫다.
         두 형태 모두 심사한 tip을 함께 적는다: `@ <tip>`이 없으면 그 판정이
         어느 회차의 것인지 보드에서 갈리지 않고, 워커의 착지 확인 4가 그
         마커를 재심 대기로 읽을 수 없다(읽지 못하면 escalate다 —
@@ -2924,9 +3505,10 @@ nodes:
         이슈는 지금 상태(in_progress, 재요청 회차면 in_review) 그대로이고,
         표를 움직이는 것은 워커의 착지 요청이다.
 
-        근거를 못 읽었으면 추측하지 말고 abstain으로 넘긴다. 기권은 다음
-        그룹으로 넘어가고, 아무도 답하지 않으면 리뷰 없이 통과한다 — 그
-        경우 방어선은 리더의 통합 후 전체 스윕이다.
+        근거를 못 읽었으면 추측하지 말고 abstain으로 넘긴다. 이 질문은
+        리뷰어 한 명에게 간다 — 기권하면 같은 그룹의 다음 리뷰어에게,
+        그룹이 다 되면 다음 그룹으로 넘어가고, 아무도 답하지 않으면 리뷰
+        없이 통과한다 — 그 경우 방어선은 리더의 통합 후 전체 스윕이다.
       from:
         - {role: reviewer, scope: descendant}
         - {role: reviewer, scope: sibling, connect: true}
@@ -3021,6 +3603,11 @@ nodes:
 
 
       증거 묶음은 그 코멘트에 담는다 — 상위가 심사하는 자리가 거기다:
+      - relation이 stacked인데 `claunch gate landing-target --json`의
+        `demoted`가 비어 있지 않으면(부모 없음, 부모가 착지를 받지 못함, 부모가
+        리더 — claunch-0ka8c) 묶음 첫머리에 「relation: stacked였으나 <demoted의
+        사유>로 리더 큐로 라우팅(independent로 강등)」 한 줄을 싣는다. 받는
+        리더가 이 요청이 부모의 스택을 거치지 않았다는 것을 그 줄로 안다.
       - 리뷰 판정이 누구에 의한 것인지 — flow_status의
         `result['peer-review'].value.by`를 본다. 응답자의 핸들이면 묶음에
         「리뷰: REVIEWED: pass @ <tip> (<핸들>, peer-review <ask id>)」를
@@ -3252,7 +3839,8 @@ nodes:
         실렸을 때. 내용은 이슈 id(없으면 PR url)와 tip, 요청 후 시간,
         재촉 횟수, 라우팅 결과, 사용자가 고를 수 있는 길(PR 직접 머지,
         이슈를 만들어 큐에 등록, 요청 철회)이다. 이후에는 상태가 바뀌었을
-        때와 6번째 재촉마다(약 1시간) 한 번씩만 다시 올린다. 런이
+        때와 4번째 재촉(약 40분)에 한 번만 다시 올린다 — 대기 상한이 5회라
+        그보다 뒤의 주기 알림은 상한에 닿기 전에 돌아오지 않는다. 런이
         loop_limit에 닿아 사람의 승인을 기다리게 되면 `flow_nudge`로
         대시보드 카드를 올린다. await-landing이 상위를 기다리는 동안은
         런이 사람에게 빚진 것이 없어 `flow_nudge`가 거절된다
@@ -3515,8 +4103,9 @@ nodes:
       이 호출은 회차 앞이다: intake(일감 귀속)가 끝났고 아직 코딩을 시작하지
       않았다. 이번 회차의 목표가 트리에 드러나게 배치한다.
     done_when: |
-      `category_assign`을 불렀고(또는 쓸 수 없었다는 사유를 적었고) 배치 경로·
-      새 라벨·사유 가운데 해당하는 값이 보고에 있다.
+      category 임시본(`wrapup_draft kind=category`)을 남겼거나 고쳤고(또는 쓸 수
+      없었다는 사유를 적었고) 임시본 id·배치될 경로·새 라벨·사유 가운데 해당하는
+      값이 보고에 있다.
     returns:
       ok: {assigned: bool, path: "str?", created: "str?", note: str}
     # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
@@ -3528,12 +4117,16 @@ nodes:
       ${frag:category-tag}
       이 호출은 회차 마감 뒤다: wrapup이 정리·마감 코멘트·인수인계 이슈를 남긴
       뒤이므로 이번 회차가 실제로 무엇이었는지가 가장 정확히 드러나는 시점이다.
-      트리를 다시 읽고, 이번 회차의 작업이 앞(category-tag)에서 고른 노드와
-      다른 주제가 되었으면 그 항목을 옮긴다. 같은 노드가 여전히 맞으면 다시
-      배정해도 된다(항목은 한 노드에만 있고 같은 노드 배정은 결과가 같다).
+      트리와 `wrapup_list`를 다시 읽고, 이번 회차의 작업이 앞(category-tag)에서
+      고른 노드와 다른 주제가 되었으면 그 배치를 바꾼다: 앞의 임시본이 아직
+      확정되지 않았으면 `wrapup_update`로 고치고, 사용자가 이미 확정했으면 옮기는
+      임시본을 새로 남긴다. 같은 노드가 여전히 맞으면 아무것도 남기지 않고 그
+      판단을 note에 적는다. 배치를 정한 뒤에는 이 세션의 다른 임시본까지 소급해
+      점검한다.
+      ${frag:retro-fix}
     done_when: |
-      트리를 다시 읽은 뒤의 배치 경로(옮겼으면 새 경로)와, 옮기지 않은 이유
-      또는 도구를 쓸 수 없었던 사유가 보고에 있다.
+      트리와 임시본을 다시 읽은 뒤의 배치될 경로(바꿨으면 새 경로와 임시본 id)와,
+      바꾸지 않은 이유 또는 도구를 쓸 수 없었던 사유가 보고에 있다.
     returns:
       ok: {assigned: bool, path: "str?", created: "str?", note: str}
     # 카테고리 트리는 저장소 밖의 워크스페이스 상태다 — 배치가 그것을 쓴다.
@@ -3574,8 +4167,10 @@ nodes:
     title: 지식 기록 남기기 (wrapup 뒤)
     prompt: |
       회차가 끝났다(wrapup·카테고리 갱신 뒤). 이번 회차에서 다음 세션이 알아야 할
-      것 가운데 코드·이슈·커밋 메시지에 남지 않는 것을 워크스페이스 지식 기록으로
-      남긴다.
+      것 가운데 코드·이슈·커밋 메시지에 남지 않는 것을 워크스페이스 지식 기록의
+      **임시본**으로 남긴다. 지식 기록은 사용자가 세션의 wrap-up pane(Knowledge
+      탭)에서 확정할 때만 쓰인다(claunch-ar8jn, 사용자 결정) — `knowledge_record`를
+      직접 부르지 않는다.
       남길 것(있을 때만, 회차당 보통 0~3건):
       · decision — 사용자나 상위가 정한 방향과 그 이유(대안이 있었으면 버린 이유).
       · need — 사용자가 말한 요구와 그 배경(무엇을 원하는가, 왜).
@@ -3587,23 +4182,64 @@ nodes:
       **본문(body)은 markdown으로 쓴다** — 제목(`##`), 목록(`-`), 표, 코드 펜스
       (```), 링크. Knowledge 탭이 markdown으로 렌더링하므로 별표·샵을 이스케이프하지
       않는다. 한 문단으로 몰지 말고 읽는 사람이 훑을 수 있게 나눈다.
-      1. 먼저 `knowledge_search`로 같은 주제의 기록이 있는지 본다. 같은 결정이
-         이미 있으면 새로 쓰지 않는다. 이번 회차가 그 결정을 바꿨으면 새 기록에
+      1. 먼저 `knowledge_search`로 같은 주제의 기록이 있는지, `wrapup_list`로 이
+         세션이 이미 남긴 knowledge 임시본이 있는지 본다. 같은 결정이 이미 있으면
+         새로 쓰지 않는다(아직 확정되지 않은 임시본이면 `wrapup_update`로 고친다). 이번 회차가 그 결정을 바꿨으면 새 기록에
          `supersedes: <그 기록 id>`를 준다(파일 기록 `md:...`은 대체 표시가 되지
          않으므로 그 사실을 note에 적는다). 대체 표시도 그 기록의 이력에 버전으로
          남는다 — 과거 판단이 필요하면 `knowledge_history {id}`로 읽는다.
-      2. 기록마다 MCP `knowledge_record`를 한 번 부른다: kind, title(한 줄로 무엇을
-         정했는가), body(markdown — 이유와 맥락), tags(카테고리 라벨과 같은 낱말),
-         refs(이 회차 이슈 ${data.claim.issue}, 관련 이슈·경로).
-      3. 남길 것이 없으면 기록하지 않고 그 판단을 note에 적는다.
+      2. 기록마다 MCP `wrapup_draft {kind: knowledge, payload, reason}`을 한 번
+         부른다. payload는 `knowledge_record`의 인자 그대로다: kind, title(한 줄로
+         무엇을 정했는가), body(markdown — 이유와 맥락), tags(카테고리 라벨과 같은
+         낱말), refs(이 회차 이슈 ${data.claim.issue}, 관련 이슈·경로), 대체하면
+         supersedes. reason은 사용자가 확정 여부를 판단할 한 줄이다.
+      3. 남길 것이 없으면 기록하지 않고 그 판단을 note에 적는다. 이어서 앞
+         회차가 남긴 임시본을 소급해 점검한다.
+      ${frag:retro-fix}
       4. 도구가 없거나 데몬에 닿지 않으면 사유를 적고 recorded=false로 보고한다.
          기록은 회차를 막지 않는다.
     done_when: |
-      남긴 기록의 id 목록(없으면 남기지 않은 이유), 또는 도구를 쓸 수 없었던 사유가
-      보고에 있다.
+      남긴 knowledge 임시본의 id 목록(없으면 남기지 않은 이유), 또는 도구를 쓸 수
+      없었던 사유가 보고에 있다.
     returns:
       ok: {recorded: bool, ids: list, note: str}
     # 지식 기록은 저장소 밖의 워크스페이스 상태다(카테고리와 같다).
+    effects: [board.write]
+
+  # ── 용어집 임시본(claunch-ar8jn) ─────────────────────────────────────
+  # 지식 기록 뒤, 회차 보고서 앞. 시작 입력 glossary_draft가 꺼졌을 때만 건너뛴다.
+  glossary-draft:
+    title: 용어집 임시본 남기기 (wrapup 뒤)
+    prompt: |
+      회차가 끝났다. 이번 회차에서 새로 정하거나 처음 쓰게 된 용어 가운데 이
+      워크스페이스의 용어집에 없는 것을 용어집 **임시본**으로 남긴다. 용어집은
+      사용자가 세션의 wrap-up pane(Glossary 탭)에서 확정할 때만 쓰인다
+      (claunch-ar8jn, 사용자 결정).
+      남길 것(있을 때만, 회차당 보통 0~5건): 이번 회차의 이슈·코드·보고에서
+      의미를 정한 낱말 — 새 상태 이름, 새 기능·화면 이름, 사용자와 합의한 말의
+      뜻. 남기지 않을 것: 일반 프로그래밍 용어, 파일·함수 이름 그 자체,
+      뜻을 확인하지 못한 낱말.
+      1. 후보마다 MCP `glossary_search {query: <용어>}`로 이미 있는지 본다.
+         같은 용어(또는 별칭)가 있으면 남기지 않는다. `wrapup_list`에 이 세션이
+         이미 남긴 같은 용어의 임시본이 있어도 남기지 않는다(필요하면
+         `wrapup_update`로 고친다).
+      2. 용어마다 `wrapup_draft {kind: glossary, payload: {term, definition,
+         aliases, source}, reason}`을 한 번 부른다. definition은 이 저장소에서의
+         뜻을 한두 문장으로, source는 그 뜻이 정해진 자리(이슈 ${data.claim.issue},
+         파일 경로)다.
+      3. 남길 것이 없으면 그 판단을 note에 적는다. 이어서 앞 회차가 남긴
+         임시본을 소급해 점검한다.
+      ${frag:retro-fix}
+      4. 끝으로 `wrapup_list`로 이 세션의 미확정 임시본(draft·failed) 수를 세어
+         보고의 pending에 적는다. 0보다 크면 사용자가 wrap-up pane에서 확정하거나
+         지워야 한다 — 세션이 그 전에 끝나면 대시보드가 사용자에게 알린다.
+      5. 도구가 없거나 데몬에 닿지 않으면 사유를 적고 drafted=false로 보고한다.
+         용어집은 회차를 막지 않는다.
+    done_when: |
+      남긴 glossary 임시본의 id 목록(없으면 남기지 않은 이유)과 이 세션의 미확정
+      임시본 수, 또는 도구를 쓸 수 없었던 사유가 보고에 있다.
+    returns:
+      ok: {drafted: bool, ids: list, pending: int, note: str}
     effects: [board.write]
 
   # ── 회차 마감 ────────────────────────────────────────────────────────
@@ -3642,6 +4278,15 @@ nodes:
         hold로 동결했으면 닫지 않는다 — `claunch beads comments add <id> "HOLD:
         <이유>, <브랜치> @ <tip>"`(상태는 그대로 in_progress — 상위가 본다;
         배치면 실린 이슈마다).
+        PR만 제출하고 끝난 회차로 왔으면(auto_merge=false — land_out에 url·
+        번호·tip이 있고 머지 해시가 없다) 닫지 않는다. 이슈는 이미
+        in_review이고 `PR SUBMITTED @ <tip> <url>` 마커가 있다 — 여기서
+        상태를 다시 옮기거나 마커를 중복으로 쓰지 않고, `HOLD:` 코멘트도
+        쓰지 않는다. 머지는 사용자가 PR 페이지에서 직접 한다. 마감 fyi에는
+        PR url과 「머지 대기(사용자 수동)」를 한 줄로 적는다.
+        사용자가 착수를 거절해 왔으면(feasibility-gate의 거절 → feasibility-hold)
+        `HOLD: feasibility rejected by user` 코멘트가 이미 있다 — 닫지 않고
+        HOLD를 다시 쓰지 않는다. 이 회차에는 착지도 착지 요청도 없다.
         큐에 남았는데 착수하지 않은 일감(queue-next가 drained로 끊은
         것)은 여기서 손대지 않는다 — 상태도 assignee도 그대로다. 다음
         스텝 queue-recheck가 그것을 보드에서 다시 읽어 다음 회차의 주
@@ -3966,8 +4611,14 @@ nodes:
       출력된 팩의 지시를 이 자리에서 그대로 수행한다: (A) 세션 회고,
       (B) 이 세션이 따른 cflow 정의(`improv-worker-v2` — 정본은 패키지의
       `workflows/v2/improv-worker-v2.yaml`)의 리뷰와 개선 제안, 그리고 주
-      이슈에 `RETRO @ <런 id>` 코멘트로 기록. 이 노드는 런 안에서 부른
+      이슈에 `RETRO @ <런 id>` 코멘트와 Retrospection 기록(`wrapup_draft
+      kind=retrospection`, claunch-lmnlv)으로 기록. 이 노드는 런 안에서 부른
       경우이므로, 팩의 4절대로 기록을 마친 뒤 이 노드의 결과를 보고한다.
+      팩 4절 3의 값은 이렇다: `trigger: run`, `run: <런 id — flow_status의 run>`, `workflow:
+      improv-worker-v2`, `issue: ${data.claim.issue}`, 그리고 `auto:
+      ${data.inputs.retrospection_auto_record}`(시작 입력
+      retrospection_auto_record — true면 데몬이 바로 기록하고, false면 사용자가
+      wrap-up pane에서 확정한다. 값이 비어 있으면 기본값 true다).
       회고 중에는 코드·정의 파일을 고치지 않고 이슈를 새로 만들지 않는다 —
       위의 settle-check가 이미 정산을 마쳤고, 새 이슈는 그 판정을 무효로 만든다.
       팩을 읽지 못하면(데몬 미응답, 팩 없음) 명령 출력을 그대로 보고하고
@@ -3975,13 +4626,15 @@ nodes:
     done_when: |
       `claunch retro --print`로 읽은 팩의 (A)·(B) 두 절을 담은 회고가 주 이슈에
       `RETRO @ <런 id>` 코멘트로 붙어 있고(주 이슈가 없으면 `$CLAUNCH_SCRATCH`의
-      파일 경로), 보고에 그 위치와 개선 제안 수가 있다. 제안이 0건이면 그
+      파일 경로), 같은 회고의 Retrospection wrap-up 항목(draft id와 상태 —
+      confirmed 또는 사용자 확정 대기 draft, 도구를 쓸 수 없었으면 그 사유)이
+      보고에 있다. 보고에 그 위치와 개선 제안 수가 있다. 제안이 0건이면 그
       판단의 근거가 회고에 있다.
     # 회고 대상은 이 세션의 대화 자체라서 위임하지 않는다: 새 컨텍스트의
     # 서브에이전트는 이 세션이 무엇을 겪었는지 모른다.
     executor: [inline]
     returns:
-      ok: {where: str, proposals: int, problems: int}
+      ok: {where: str, proposals: int, problems: int, record: "str?"}
     effects: [fs.read, fs.write, board.write]
 
   # ── 세션 정산 (settle) ───────────────────────────────────────────────
@@ -4179,6 +4832,8 @@ nodes:
       1. `claunch gate landing-target --json` — 데몬의 Router가 낸 답이다.
          `why`가 탈락 사유 전체이고, `passed`는 지나온 세션과 그 이유,
          `refused`는 거절된 후보, `undecidable`은 판정 불가 여부다.
+         `owner`·`holder`는 그 답이 가리키는 수신자다 — 종료 코드 1이면
+         둘 다 null이다. null도 그대로 옮긴다(빠뜨리지 않는다).
       2. `claunch mesh members <이 런의 메시>` — 지금 명부다. 각 구성원의
          역할이 보이고, 누가 `merger`나 `leader`를 갖는지 여기서 읽힌다.
       3. `claunch cflow2 status --json`의 `data.inputs.relation` — 이 런이
@@ -4192,10 +4847,11 @@ nodes:
       코멘트를 「상위가 멈추라고 했다」로 읽는다.
       **보드를 건드리지 않는다**: 이슈를 in_review로 전이하지 않고
       `LANDING REQUEST` 코멘트도 남기지 않는다(요청을 세우지 않는 회차다).
-      보고 형식: {why: <1의 why 그대로>, members: <2의 요약>, relation: <3>}.
+      보고 형식: {why: <1의 why 그대로>, members: <2의 요약>, relation: <3>,
+      owner: <1의 owner — null이면 null 그대로>}.
     done_when: |
-      `claunch gate landing-target --json`의 출력(특히 `why`의 문장)이 보고에
-      그대로 옮겨져 있고, 메시 명부에서 누가 무슨 역할인지가 그 출력과 함께
+      `claunch gate landing-target --json`의 출력(특히 `why`의 문장과 `owner`)이
+      보고에 그대로 옮겨져 있고, 메시 명부에서 누가 무슨 역할인지가 그 출력과 함께
       있다. 이슈에 `NO LANDING TARGET: <why>` 코멘트가 있고 그 마커에
       BLOCKED·HOLD·CHANGES REQUESTED가 없다. 보드는 in_review로 전이되지
       않았고 `LANDING REQUEST` 코멘트도 없다.
@@ -4203,7 +4859,66 @@ nodes:
     # 잰 것이고, 새 컨텍스트의 서브에이전트는 그 런을 모른다.
     executor: [inline]
     returns:
-      ok: {why: str, members: str, relation: "str?"}
+      ok: {why: str, members: str, relation: "str?", owner: "str?"}
+    effects: [fs.read, board.write]
+
+  landing-channel-gate:
+    title: 착지 요청 수신자와의 메시지 채널 없음 — 사용자 조치·승인
+    # claunch-101wi: land의 landing-channel이 no-channel을 골랐을 때만 선다.
+    # 응답자는 사람뿐이다(from 없음). 이 워커가 수신자와 이어지지 않은 것을
+    # 사람에게 물어 봐야 그 수신자는 답할 수 없다. timeout을 두지 않는다.
+    # 거절(decline)은 결과 no-channel-declined로 끝나고, land가 그것을 받아
+    # 요청을 세우지 않고 blocked로 마감한다(보드는 그대로다).
+    ask:
+      prompt: |
+        이 회차는 착지 요청(integration-request)을 올리고 상위의 답을 기다리는
+        단계(await-landing) 바로 앞에 있다. 워커가 착지 요청 수신자와의 메시지
+        채널을 점검했고, 채널이 없다고 판정했다. 수신자, 런의 메시, 점검 명령의
+        출력은 앞 선택 landing-channel의 reason에 있다(`claunch cflow2 journal
+        -n 3`).
+
+        채널이 없으면 await-landing의 재촉(landing-nudge)과 상위의 착지 통지가
+        이 세션과 수신자 사이에 오가지 못한다. 그 상태로 대기에 들어가면 대기
+        루프의 상한(5회, 10분 간격)을 다 쓸 때까지 그 사실이 드러나지 않는다.
+
+        필요한 조치(사용자): 두 세션을 같은 메시에서 잇는다 — `claunch mesh
+        connect <메시> <이 세션의 핸들> <수신자의 핸들>`(인자는 메시 핸들이다 —
+        `claunch mesh members <메시>` 첫 열; 셋째 열 `<데몬>/<세션>`이 세션
+        이름이다), 또는 대기 중인 연결 요청을
+        `claunch mesh wire-requests <메시>`에서 승인한다. 수신자가 런의 메시에
+        없으면 그 메시에 수신자를 넣거나 런의 메시를 수신자가 있는 메시로
+        바꾼다(`claunch cflow2 mesh <메시>`).
+
+        승인하면: 워커가 채널을 다시 점검해 결과를 이슈에 남기고 착지 요청과
+        대기로 간다. 조치 없이 승인해도 진행한다 — 그때는 이 회차의 재촉과
+        통지가 닿지 않을 수 있다는 것을 받아들인 것이다.
+        거절하면: 착지 요청을 세우지 않고 이 회차를 blocked로 마감한다. 이슈는
+        in_review로 가지 않고 LANDING REQUEST 코멘트도 생기지 않는다. 브랜치와
+        커밋은 그대로 남고, 착지 경로는 사람이 정한다.
+        보류하면: 답하지 않는 동안 런은 이 게이트에 서 있고 세션은 살아 있다.
+      otherwise: human
+      urgent: true
+      on_decline: no-channel-declined
+    prompt: |
+      사용자가 착지 요청과 대기로 가는 것을 승인했다. 채널을 다시 점검한다 —
+      landing-channel과 같은 명령이다(수신자: `claunch gate landing-target
+      --json`의 owner — 세션 이름이다. 핸들: `claunch mesh members <런의 메시>`
+      명부의 셋째 열 `<데몬>/<세션>`이 그 세션인 줄의 첫 열, 이 세션도 같다.
+      간선: 같은 출력의 connected pairs에서 `<내 핸들> <-> <수신자 핸들>` 또는
+      `<수신자 핸들> <-> <내 핸들>` 줄. pairs는 핸들로 적히므로 세션 이름으로
+      찾지 않는다).
+      이 회차 이슈에 한 줄 남긴다:
+          LANDING CHANNEL: <수신자> <connected|missing> — 사용자 승인
+      missing이면 사용자가 조치 없이 진행을 승인한 것이다. 그 사실을 보고에
+      적는다. 마커에 BLOCKED·HOLD·CHANGES REQUESTED를 넣지 않는다 — landing의
+      넷째 확인이 그 세 문자열을 제동 마커로 읽는다.
+
+      그리고 **같은 턴에서** 이 작업의 결과를 보고한다.
+    done_when: |
+      사용자가 승인했고, 다시 잰 채널 상태(connected|missing)와 그 명령 출력의
+      해당 줄이 보고에 있으며, 이 회차 이슈에 `LANDING CHANNEL:` 코멘트가 있다.
+    returns:
+      ok: {receiver: str, channel: str}
     effects: [fs.read, board.write]
 
 procedures:
@@ -4267,6 +4982,19 @@ procedures:
       - return: ok
         value: {sim_id: null, run_seq: null, assessment: null, findings: null,
                 open: null, limits: []}
+  landing-entry:
+    description: >-
+      start_at=landing으로 시작한 런의 첫 회차 mode를 세운다(claunch-d8scd).
+      회차 종류는 이미 data.recheck.mode가 나르는 값이고(회차 호출의 with가
+      그것을 worker-round의 mode로 넘긴다), 회차가 끝나면 queue-recheck가
+      다시 쓴다 — 그 갈래가 next-round·done에 mode: full을 내므로 둘째 회차
+      부터는 일반 회차다. 그래서 이 프로시저는 루프에 들어가기 전에 한 번만
+      불린다.
+    returns:
+      ok: {next: str, mode: str}
+    body:
+      - return: ok
+        value: {next: next-round, mode: land-only}
   local-landing:
     params:
       reason: {type: str, required: true}
@@ -4376,7 +5104,7 @@ procedures:
       force_pr: {type: bool, default: false}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", tip: "str?"}
     body:
       id: publish-blocked
       call: pr-or-local
@@ -4398,7 +5126,8 @@ procedures:
                     remote: "$params.landing.remote", repo: "$params.landing.repo",
                     base: "$result['pr-open'].value.base",
                     pr_url: "$result['pr-open'].value.url",
-                    pr_number: "$result['pr-open'].value.number"}
+                    pr_number: "$result['pr-open'].value.number",
+                    tip: "$result['pr-open'].value.tip"}
 
   resolve-issue:
     description: >-
@@ -4602,7 +5331,8 @@ procedures:
       위임 측정(실패가 0이 될 때까지) 또는 생략 기록 -> 커밋·보고(v1 work,
       test-decision, review, test-skipped, commit). work의 반환값은
       $data.work_report에 남는다. require_coding_approval이 켜져 있으면
-      방문마다 변경 계획을 제시하고 사용자 승인을 받은 뒤 work에 진입한다 —
+      방문마다 변경 계획을 제시하고(coding-plan, 이때 사용자 요약 스레드를
+      연다), 사용자 승인을 받은 뒤 work에 진입한다 —
       사용자가 approve-always로 답했으면 이 런의 이후 방문은 묻지 않는다.
       session_routing이 켜져 있으면(claunch-yl0to) 계획이 난이도와 위임 권장을
       내고, 쉬운 일감은 fork한 하위 설정 자식이 구현한다(delegate-work). 위임
@@ -4639,6 +5369,24 @@ procedures:
                 - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
                   then:
                     - coding-plan
+                    # 계획의 결정이 해소되기 전에는 게이트도 서지 않는다
+                    # (claunch-rzepk 규칙 2·3: 순서는 plan 결정 → 게이트 → work).
+                    # probe는 `claunch gate plan-waiting`: 0 plan이 비었다(통과),
+                    # 1 아직 결정이 남았다, 그 밖은 판정 불가. seconds를 주지
+                    # 않는다 — 규칙 1의 「멈춘다」에 상한이 없고, 판정 불가가 세 번
+                    # 쌓이면 undecidable로 사람에게 간다.
+                    - id: plan-wait-before-gate
+                      wait:
+                        probe: [claunch, gate, plan-waiting]
+                        poll: 30
+                        undecided_max: 3
+                        describe: "plan 미결정이 해소되기를 기다린다 — 사용자가 계획 패널에서 결정하면 이어 간다"
+                      on:
+                        undecidable:
+                          try: [plan-wait-unclear]
+                          catch:
+                            ok: {continue: plan-work}
+                            skipped: []
                     - cond:
                         - if: "$data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always' and $data.inputs.session_routing == true"
                           then:
@@ -4657,7 +5405,24 @@ procedures:
                             catch:
                               rejected: {continue: plan-work}
                         - else: {seq: [route-planned], bind: route}
-                - else: []
+                - else:
+                    # 게이트가 없는 경로도 plan 미결정이면 work 앞에서 멈춘다
+                    # (claunch-rzepk 규칙 1·3, docs/plan-coding-approval.md 3절 4번).
+                    # coding-plan이 없으니 계획을 먼저 확보하고(work가 처음 쓰는
+                    # 자리를 대신한다) 같은 대기를 한 번 둔다.
+                    - plan-seed
+                    - id: plan-wait-after-seed
+                      wait:
+                        probe: [claunch, gate, plan-waiting]
+                        poll: 30
+                        undecided_max: 3
+                        describe: "plan 미결정이 해소되기를 기다린다 — 사용자가 계획 패널에서 결정하면 이어 간다"
+                      on:
+                        undecidable:
+                          try: [plan-wait-unclear]
+                          catch:
+                            ok: {continue: plan-work}
+                            skipped: []
             - id: work-group
               group:
                 name: found
@@ -4753,48 +5518,97 @@ procedures:
                   run:
                     description: 표적 테스트를 실행하고 결과를 기록한다.
                     then:
-                      id: tests
-                      loop:
-                        # 새 실패 수로 끝난다(claunch-wuaup). new_failed가 없는 보고는
-                        # null이라 첫 비교가 거짓이 되고, 이전 조건(failed == 0)으로 판정된다.
-                        until: "$result['targeted-test'].value.new_failed == 0 or $result['targeted-test'].value.failed == 0"
-                        max: 5
-                        do:
-                          - review
-                          - targeted-test
-                          # 위임한 작업에 부모의 표적 테스트가 실패했다: 사람이 다음 진행을 정한다
-                          - cond:
-                              - if: "$data.inputs.session_routing == true and $data.route.mode == 'delegate' and $result['targeted-test'].value.failed > 0"
-                                then:
-                                  id: test-rework-route
-                                  try: [delegated-rework-approval]
-                                  catch:
-                                    # rework-direct: 경로만 바꾼다 — 고치는 것은 이 루프의
-                                    # 다음 review(앞 측정의 실패부터 고친다)다
-                                    rework-direct: {seq: [route-direct], bind: route}
-                                    rework-delegate:
-                                      - {seq: [route-delegate], bind: route}
-                                      # 다시 멈추거나 실패한 자식도 같은 게이트로 받는다
-                                      - id: redelegated
-                                        loop:
-                                          while: "$data.route.mode == 'delegate'"
-                                          max: 5
-                                          do:
-                                            try:
-                                              - {seq: [delegate-work], bind: work_report}
-                                              - {break: redelegated}
+                      id: tests-gate
+                      # 테스트 루프와 사람의 스킵 문이 race로 경합한다(claunch-dsr4o): 먼저 끝난
+                      # 갈래가 다른 갈래를 취소한다. 루프가 끝나면 열린 문(chooser: user)이
+                      # 취소되어 대시보드에서 사라지고, 사람이 skip을 고르면 루프가 취소되고
+                      # raise가 catch의 test-skipped로 간다.
+                      try:
+                        - id: tests-race
+                          par:
+                            settle: race
+                            branches:
+                              tests:
+                                id: tests
+                                loop:
+                                  # 새 실패 수로 끝난다(claunch-wuaup). new_failed가 없는 보고는
+                                  # null이라 첫 비교가 거짓이 되고, 이전 조건(failed == 0)으로 판정된다.
+                                  until: "$result['targeted-test'].value.new_failed == 0 or $result['targeted-test'].value.failed == 0"
+                                  max: 5
+                                  do:
+                                    - review
+                                    - targeted-test
+                                    # 위임한 작업에 부모의 표적 테스트가 실패했다: 사람이 다음 진행을 정한다
+                                    - cond:
+                                        - if: "$data.inputs.session_routing == true and $data.route.mode == 'delegate' and $result['targeted-test'].value.failed > 0"
+                                          then:
+                                            id: test-rework-route
+                                            try: [delegated-rework-approval]
                                             catch:
-                                              escalated: *delegated-rework
-                                              failed: *delegated-rework
-                                    reject:
-                                      - {seq: [route-direct], bind: route}
-                                      - {continue: plan-work}
-                              - else: []
+                                              # rework-direct: 경로만 바꾼다 — 고치는 것은 이 루프의
+                                              # 다음 review(앞 측정의 실패부터 고친다)다
+                                              rework-direct: {seq: [route-direct], bind: route}
+                                              rework-delegate:
+                                                - {seq: [route-delegate], bind: route}
+                                                # 다시 멈추거나 실패한 자식도 같은 게이트로 받는다
+                                                - id: redelegated
+                                                  loop:
+                                                    while: "$data.route.mode == 'delegate'"
+                                                    max: 5
+                                                    do:
+                                                      try:
+                                                        - {seq: [delegate-work], bind: work_report}
+                                                        - {break: redelegated}
+                                                      catch:
+                                                        # par 갈래 안이라 plan-work 루프에 닿지 않는다(par 갈래는 바깥
+                                                        # 루프가 보이지 않는 영역이다) — 위의 &delegated-rework와 같고, reject만
+                                                        # raise replan으로 tests-gate의 catch에 넘긴다.
+                                                        escalated: &tests-delegated-rework
+                                                          try: [delegated-rework-approval]
+                                                          catch:
+                                                            rework-direct: {seq: [route-direct], bind: route}
+                                                            rework-delegate: {seq: [route-delegate], bind: route}
+                                                            reject:
+                                                              - {seq: [route-direct], bind: route}
+                                                              - {raise: replan}
+                                                        failed: *tests-delegated-rework
+                                              reject:
+                                                - {seq: [route-direct], bind: route}
+                                                - {raise: replan}
+                                        - else: []
+                              skip-gate:
+                                id: test-skip-gate
+                                choose:
+                                  chooser: user
+                                  require_reason: true
+                                  prompt: |
+                                    표적 테스트가 도는 동안(review → targeted-test 루프) 사람이 그 실행을
+                                    멈추고 다음 단계로 넘길 수 있는 문이다(claunch-dsr4o). 에이전트는 이
+                                    선택을 할 수 없다(chooser: user). 고르지 않으면 아무 일도 없다: 테스트
+                                    루프가 끝나는 순간 이 문은 race로 정리되어 사라지고, 회차는 테스트
+                                    결과대로 커밋으로 간다.
+                                    skip을 고르면 진행 중인 review·targeted-test 작업이 런에서 취소되고
+                                    test-skipped가 「사람이 생략」 마커를 남긴 뒤 커밋으로 간다. 취소는 런의
+                                    작업만 거둔다 — 셸에서 이미 돌고 있는 테스트 명령은 에이전트가 직접
+                                    멈춘다(런이 옮겨졌다는 알림을 받은 뒤). 셀프 게이트의 skip 조건 셋은 이 경로에 적용되지 않는다 —
+                                    생략을 정한 것은 사람이고, 그 사유는 선택의 reason이다.
+                                  options:
+                                    skip:
+                                      description: 진행 중인 표적 테스트를 멈추고 생략을 기록한 뒤 다음 단계(커밋)로 간다.
+                                      then: {raise: user-skipped}
+                      catch:
+                        user-skipped: test-skipped
+                        # 위임 재작업을 거절했다: 계획 재작성(plan-work의 다음 회차)으로
+                        replan: {continue: plan-work}
                   skip:
                     description: 셀프 게이트 셋이 전부 참 — 표적 테스트를 생략하고 사유를 보드에 기록한 뒤 착지 요청으로 간다.
                     then: test-skipped
             - {break: plan-work}
-      - commit
+      # 보고의 tip을 런 데이터에 남긴다(claunch-1aj1a.1): land의 no-target 갈래가
+      # 「사람이 답한 브랜치 끝」과 「지금 브랜치 끝」을 비교해 같은 질문을 다시
+      # 서지 않게 한다. 회차가 커밋 없이 끝나면 앞 회차의 값이 남는데, 그때는
+      # 브랜치도 앞 회차 그대로다.
+      - {seq: [commit], bind: commit}
 
   confirm-landed:
     description: >-
@@ -4843,14 +5657,59 @@ procedures:
               timeout: {call: landed-unclear, with: {why: timeout}}
           record: landed
 
+  landing-route-replay:
+    description: >-
+      사람이 이미 고른 착지 경로를 이번 회차의 답으로 다시 낸다(claunch-1aj1a.1).
+      다시 묻는 조건은 둘뿐이다: 기록이 없는 것, 또는 사람이 답한 자리
+      (repo·relation — 어느 저장소로 어느 방향의 요청인가)가 바뀐 것.
+      **tip은 조건이 아니다**: 새 커밋으로 브랜치 끝이 움직인 것은 그 답을
+      다시 물을 근거가 아니고(ANSWER 30759 — 「tip이 바뀌면 결정은 유지하고
+      행동만 다시 한다」), 행동은 호출부가 이번 회차의 tip으로 다시 한다.
+      수신자 구성의 변화는 이 가드가 재는 것이 아니다 — 이 갈래에 닿았다는
+      것 자체가 여섯째 확인(Router)이 방금 「받을 세션이 없다」를 새로 냈다는
+      뜻이고, 수신자가 생겼으면 그 회차는 request로 간다.
+      어느 이름을 낼지는 cases의 키로만 적는다. 손으로 쓴 decision 문자열
+      비교를 쓰지 않는 이유: 선택지 이름의 오타는 컴파일도 런타임도 거치지
+      않고 조용히 어긋나는데, 그 형태는
+      tests/test_cflow2_improv_worker.py의
+      test_no_ask_user_is_followed_by_a_handwritten_decision_cond가 막는다.
+    params:
+      previous: {type: dict, description: "landing_route로 묶인 지난 결정"}
+      repo: {type: str, default: "", description: "이번 회차의 착지 저장소($data.landing.repo)"}
+      relation: {type: str, default: "", description: "이 런의 요청 방향($data.inputs.relation)"}
+      choices: {type: list, description: "cases가 넘기는 선택지 이름들 — 본문은 쓰지 않는다"}
+    returns:
+      ok: {decision: str, reason: "str?", repo: "str?", owner: "str?", issue: "str?",
+           relation: "str?"}
+    body:
+      # 저장된 답의 자리와 지금 자리가 같고 결정이 있으면 그 답이다. 빈
+      # 문자열·null은 거짓이므로, 기록이 없을 때(decision null)는 첫 항이
+      # 이미 거짓이다.
+      - cond:
+          - if: "$params.previous.decision and $params.previous.repo == $params.repo and $params.previous.relation == $params.relation"
+            then:
+              return: ok
+              value:
+                decision: "$params.previous.decision"
+                reason: "$params.previous.reason"
+                repo: "$params.previous.repo"
+                owner: "$params.previous.owner"
+                issue: "$params.previous.issue"
+                relation: "$params.previous.relation"
+          - else:
+              return: ok
+              value: {decision: ask-again}
+
   landing-target-gate:
     description: >-
       착지 요청을 받을 세션이 아무도 없을 때(claunch-od1mx.1) 그 사실을 사람에게
       올리고 이 런의 착지 경로를 사람이 정하게 한다. 근거는 추측이 아니라
       라우팅 판정 그 자체다 — 데몬의 Router가 낸 탈락 사유를 그대로 싣는다.
       보드를 건드리지 않는다: in_review 전이도, LANDING REQUEST 코멘트도 없다.
-      결과는 land의 셋 중 하나로 낸다: rework(메시를 고쳐 다시 올린다),
-      blocked(사람이 직접 머지한다), held(동결하고 마감한다).
+      결과는 land의 둘 중 하나로 낸다: blocked(사람이 직접 머지하거나, 메시를
+      고친 뒤 다음 회차가 다시 잰다), held(동결하고 마감한다). 사람의 답은
+      land가 landing_route로 묶어 다음 회차가 같은 브랜치 끝에서 다시 묻지
+      않게 한다(claunch-1aj1a.1).
 
       ``reframe``은 ask-user가 세 번 다시 물은 뒤에도 선택지가 문제에 맞지
       않는다고 답한 경우다(ask-common). 이것을 선언하지 않으면 이 프로시저가
@@ -4861,9 +5720,16 @@ procedures:
     params:
       relation: {type: str, default: "", description: "이 런의 시작 입력 relation — 프로브가 어느 방향으로 재는지"}
     returns:
-      rework: {reason: str, rework: bool}
-      blocked: {reason: str}
-      held: {reason: str, rework: bool}
+      # decision·tip·repo는 이 선택을 런 데이터(landing_route)에 남기기 위한
+      # 값이다(claunch-1aj1a.1). decision은 어느 선택지였는지, tip은 그 결정을
+      # 내린 시점의 브랜치 끝이다 — 다음 회차의 land가 tip이 그대로면 같은
+      # 질문을 다시 하지 않는다.
+      # rework는 더 선언하지 않는다: 세 선택지가 전부 회차를 끝내므로 이
+      # 프로시저가 rework로 끝나는 갈래가 없다(claunch-1aj1a.1).
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
+                issue: "str?", relation: "str?"}
+      held: {reason: str, rework: bool, decision: "str?", tip: "str?", repo: "str?",
+             owner: "str?", issue: "str?", relation: "str?"}
     body:
       # 근거를 먼저 만든다. 질문을 여는 노드가 스스로 잰 값을 넘기는 것이
       # ask-common의 규약이고(ask-frame → ask-pose), 물어보는 사이에 명부가
@@ -4898,15 +5764,24 @@ procedures:
                 추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
               셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
           cases:
+            # rebase-and-repost는 rework가 아니라 blocked다(claunch-1aj1a.1).
+            # rework는 배치 루프를 다시 돌 뿐 이 게이트의 입력(런 cwd 저장소)을
+            # 바꾸지 못하므로, 같은 exit 1이 서고 같은 질문이 다시 열린다 —
+            # s6086에서 두 회차에 걸쳐 실측된 반복이다(claunch-i8cj4 코멘트
+            # 30083 → 30727 → 30737). 그 반복은 landing-declined의 재작업
+            # 예산도 세지 않는다(rework-budget은 landing의 declined 갈래에만
+            # 있다). 메시
+            # 구성은 워크플로 밖에서 사람이 고치는 일이므로, 회차를 끝내고
+            # 다음 회차가 새 명부로 다시 재게 한다.
             rebase-and-repost:
-              return: rework
-              value: {reason: "착지 대상을 만들지 못했다 — 사람이 메시 구성을 고쳐 다시 올린다", rework: true}
+              return: blocked
+              value: {reason: "착지 대상을 만들지 못했다 — 메시 구성을 고친 뒤 다음 회차가 새 명부로 다시 잰다", decision: rebase-and-repost, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
             merge-by-person:
               return: blocked
-              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다"}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 직접 머지한다", decision: merge-by-person, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
             freeze-and-close:
               return: held
-              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false}
+              value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false, decision: freeze-and-close, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
         catch:
           # 선택지 셋이 문제에 맞지 않는다는 답. 다시 물을 선택지가 이
           # 프로시저에 없으므로 사람이 경로를 정하겠다는 뜻으로 읽고
@@ -4987,13 +5862,15 @@ procedures:
       배치 하나의 착지(v1 stack-cut ... landed). 스택 컷(스택이 서 있을 때) ->
       착지 결정(깨끗하면 스스로 요청, 아니면 상위) -> 정렬·리뷰·통합 요청 ->
       착지 대기. 결과는 landed(머지 해시), held(동결로 마감), rework(작업으로
-      되돌아감), blocked(차단으로 요청을 세우지 않음) 넷 중 하나다.
+      되돌아감), blocked(차단으로 요청을 세우지 않음), pr-submitted(PR만 제출,
+      머지는 사용자가 함 — auto_merge=false) 다섯 중 하나다.
     params:
       mode: {type: str, default: full, description: "full | stack-only(위임 전용 회차: 스택 컷을 반드시 받는다)"}
       allow: {type: list, default: [request, escalate, no-target], description: "landing에서 고를 수 있는 갈래. no-target은 여섯째 확인(착지 요청을 받을 세션이 있는가)이 거짓일 때의 갈래다 — 기본값에 있어야 실제로 열린다"}
     returns:
       landed: {merge: str, tip: "str?"}
-      held: {reason: "str?", rework: "bool?"}
+      held: {reason: "str?", rework: "bool?", decision: "str?", tip: "str?", repo: "str?",
+             owner: "str?", issue: "str?", relation: "str?"}
       rework: {reason: "str?", rework: bool}
       # claunch-improver-integration-request-blocked-o6paj: 차단 때문에 착지
       # 요청을 세우지 않는 처분. landed(머지됨)·held(마감)·rework(되감기)
@@ -5002,7 +5879,20 @@ procedures:
       # 표현할 선언된 결과가 없어 엔진 자신의 실패 결과(fail)로 보고할 수밖에
       # 없고, catch가 없는 위층(round·rounds)을 그대로 탈출해 queue-recheck를
       # 건너뛴다(런 20261027-164135-3ad031 저널 02:33:08 실측).
-      blocked: {reason: str}
+      # decision·tip·repo는 landing-target-gate가 남기는 값이다
+      # (claunch-1aj1a.1). land가 no-target 갈래에서 그것을 landing_route로
+      # 묶어 두고, 다음 회차는 tip이 그대로면 같은 질문을 건너뛴다.
+      blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
+                issue: "str?", relation: "str?"}
+      # auto_merge=false로 PR만 제출하고 회차를 끝낸 처분(claunch-ijkge).
+      # 머지는 사용자가 PR 페이지에서 직접 한다. landed(머지 해시가 있다)도
+      # held(동결 마감)도 아니다 — PR은 열렸고 이슈는 in_review + `PR
+      # SUBMITTED` 마커로 남는다. worker-round의 catch가 이 결과를 받아
+      # 배치 루프를 나오고, wrapup은 이슈를 닫지 않는다. 값의 필드는 선택으로
+      # 둔다 — 머지 대신 보드의 마커가 정본이고, 값 검사에서 거절되면 이
+      # 결과가 fail로 탈출해 queue-recheck를 건너뛰기 때문이다(blocked가
+      # 그랬던 경로).
+      pr-submitted: {url: "str?", number: "int?", tip: "str?"}
     body:
       - id: stack-landing
         cond:
@@ -5032,11 +5922,20 @@ procedures:
           # 상위 세션의 답(landing-review)에만 있다. 22번 물어 22번 request였던 문을
           # 예외 쪽으로 옮긴 것이다(v1 주석의 저널 실측).
           chooser: agent
+          # reason은 landing-review 카드의 「Why this is open」에 그대로 실린다
+          # (runtime._ask_because, claunch-0rjnn.2) — 비면 사람이 저널을 읽어야 한다.
+          require_reason: true
           prompt: |
             이번 목표가 브랜치에 커밋됐고 표적 테스트가 green이다(또는 셀프
             게이트로 생략했고 이슈에 `TESTS SKIPPED @ <해시>:` 마커가 있다). 이 요청에
             「특별히 이슈가 없는가」를 기계로 확인해 스스로 정한다 — 상위
             세션에 물어 그 턴을 하나 쓰는 것은 확인이 깨졌을 때뿐이다.
+            start_at=landing 회차(지금 ${data.inputs.start_at})는 item의 review·
+            targeted-test를 지나지 않아 표적 테스트 근거가 아직 없다. 이 선택을
+            고르기 전에 이 브랜치의 표적 테스트를 직접 돌린다(바꾼 영역의 테스트만,
+            전체 스윕 금지 — `tools/changed_tests.py`). 결과를 이슈에
+            `TESTS @ <tip>: <명령> — <결과>`로 남기고, red면 request가 아니라
+            escalate다(무엇이 빨간지와 함께 상위에 올린다).
 
             ── 먼저: 실을 델타가 있는가 ──
             아래 다섯은 「깨끗한가」를 묻는다. 그 앞에 「실을 것이 있는가」가
@@ -5077,7 +5976,13 @@ procedures:
                test-decision의 skip 조건 셋을 그대로 만족하면 참이다(그 대조를
                reason에 적는다). 동작을 바꾸는 파일이 하나라도 섞였으면 거짓이고
                escalate다. 생략은 이 조건을 거짓으로 만들지 않는다 — 수치가
-               없다는 이유로 escalate하지 않는다
+               없다는 이유로 escalate하지 않는다.
+               마커의 사유가 `user — `로 시작하면 사람이 표적 테스트 실행 중에
+               생략한 것이다(test-skip-gate, claunch-dsr4o). 그 생략은 셀프 게이트
+               셋으로 대조하지 않는다 — 이 회차의 생략은 사람이 정했으므로 참이고,
+               reason에 그 마커를 옮긴다. 마커 뒤에 이 회차의 commit 단계 밖에서
+               얹은 커밋(보완 커밋, 자식 브랜치 머지)이 있으면 그 커밋의 파일에는
+               위의 판별을 그대로 적용한다
             3. 통합 대상 위로 미리 병합이 깨끗하다 —
                `git merge-tree $(git merge-base <대상> HEAD) <대상> HEAD` 에
                충돌 표시 0행(대상은 intake에서 정한 통합 대상: master, 또는
@@ -5113,11 +6018,206 @@ procedures:
                  (c) 확인 2가 지금 tip의 수치를 세웠다(또는 셀프 게이트 생략이
                      지금 tip에 대한 것이다) — 확인 2가 이미 요구하는 그 판정이다
                셋 중 하나라도 안 서면 escalate다. 「아마 고쳤다」는 판정이 아니다.
-               **tip의 자리는 정해져 있지 않다.** 마커의 `@ <tip>`을 줄 어디에서
-               찾든 마커의 tip이다 — `CHANGES REQUESTED: <무엇을> @ <tip>`
-               (이 런의 s162 판정이 그 형태다)과 `CHANGES REQUESTED @ <tip>:
-               <무엇을>`은 같은 판정이고, 판정은 오직 `@ <hex>`가 있는가와 그
-               해시뿐이다. 어느 쪽으로도 못 찾으면 escalate다.
+               **판정 주체를 먼저 본다 — 기본값은 「제동」이고, 리뷰어만 뺀다.**
+               `claunch beads comments <id>`는 코멘트마다 그 앞에 작성 주체를
+               `[sNNN] at <시각>` 꼴의 머리로 싣는다. 마커 줄의 주체는 그 줄 위에
+               가장 가까운 머리이고, 그 `[sNNN]`은 **세션 이름**이다.
+               판정은 두 갈래뿐이고, **위갈래부터 본다 — 리뷰 판정 셋 중 하나에
+               먼저 걸리면 리뷰 판정이고, 제동은 셋 어디에도 안 걸린 나머지뿐이다.**
+               이 순서가 필요한 이유: 같은 세션이 이번 회차 `peer-review`의
+               응답자이면서 `landing-review` 그룹에도 서는 편성이 있다(리더가
+               `peer-review`에 답할 때). 갈래가 겹칠 때 어느 쪽이 이기는지가
+               문면에 고정돼 있지 않으면 판독이 흔들린다(s1262-rev, 재심 4).
+                 · **리뷰 판정** — 다음 셋 중 하나면 리뷰 판정이다. 리뷰 판정이면
+                   tip 판독으로 내려간다.
+                   (a) 그 세션의 role이 `reviewer`다. role은 메시 명부에서
+                       읽는다: `claunch mesh members <mesh> --state all`의
+                       행은 `<핸들> <role> <데몬>/<세션>` 세 열이고, **머리의
+                       `[sNNN]`과 대조할 것은 첫 열(핸들)이 아니라 셋째 열의
+                       세션 이름**이다. 둘은 다르다 — `s404-rev`의 세션은
+                       `s573`, `s511-rev`는 `s523`, `s5874-indep-leader`는
+                       `s5878`, `s1276-storage`는 `s1438`이다. 핸들로 대조하면
+                       reviewer의 줄이 명부에서 안 맞아 제동으로 떨어진다.
+                       `responders --json`의 `groups[].asks`도 같은 이유로
+                       핸들이 실리므로 셋째 열로 옮겨 대조한다.
+                       명부는 **`--state all`로 읽는다** — 기본 열람은 현재
+                       구성원만 내므로 닫힌 세션의 role이 사라져 「명부에 없음」으로
+                       보인다(s1262-rev). `--state all`로도 그 세션이 안 나오면
+                       그때가 명부 밖이다.
+                   (b) 그 세션이 이 런의 `peer-review` 질문에 **실제로 답한**
+                       세션이고, 그 답이 **이 줄**을 낳았다. 판정은 세션이
+                       아니라 **줄 단위**다 — 세션 단위로 읽으면 한 번이라도
+                       답한 세션의 이후 제동 줄까지 리뷰 판정이 된다(s597-rev
+                       재심). `responders peer-review --json`의
+                       `groups[].asks`로는 갈리지 않는다 — 그것은 후보 목록이고
+                       `leader (sibling)` 그룹의 `asks`에 상위 리더(`s29`)가
+                       들어 있다. 그 목록을 그대로 쓰면 리더의 접두 없는
+                       `CHANGES REQUESTED`(claunch-o8pb7·claunch-u9m6z, 이
+                       이슈가 막으려던 바로 그 줄)가 다시 리뷰 판정이 된다
+                       (s511-rev 재심 실측: 이 런의 출력에
+                       `leader (sibling) asks = ['s29']`).
+                       답한 세션은 저널이 남긴다:
+                       `claunch cflow2 journal -t $CLAUNCH_SESSION`의
+                       `ask_answered {"ask": "<ask id>", "by": "<...>"}` 줄이다.
+                       같은 값이 런 결과의 `peer-review.value.by`에도 있다.
+                       다만 그 `by`는 **핸들**이다 — `cflow2/runtime.py`가
+                       응답자 갈래에서 `by=handle`로 emit하고(추상 갈래만
+                       `by_session`을 함께 싣는다), 이 런의 ask2-52e05d1a는
+                       `by: s511-rev`인데 그 세션은 `s523`이다(s597-rev 재심
+                       지적, 실측). 그래서 명부 셋째 열로 옮겨 대조한다 —
+                       (a)와 같은 이유·같은 변환이다. 그 값이 **그 줄을 쓴
+                       세션**의 이름과 같으면 (b)의 후보다 — 이 블록의 다른
+                       자리에서 「이 세션」은 `$CLAUNCH_SESSION`(워커 자신)을
+                       뜻하므로, 답한 세션을 「이 세션」과 비교하면 그 값이
+                       같을 수 없어 (b)가 영구히 서지 않는다(s597-rev·s511-rev·
+                       s1262-rev 재심). 그리고 후보 전부가 아니라 **그 줄을
+                       낳은 답**만 센다: 같은 세션의 `ask_answered` 가운데
+                       (i) `decision`이 `changes`이고, (ii) **그 줄이 그 답의
+                       회차에 속하는 것** — 시각으로 짝짓는다. `ask_answered`에
+                       는 tip이 없다(필드는 `ask`·`node`·`instance`·`decision`·
+                       `by`·`reason`·`channel`뿐이다). 답의 `reason`에도 tip이
+                       없는 경우가 흔하다 — 이 런의 peer-review 답 11건 중 5건이
+                       그렇다(s404-rev·s490-rev·s511-rev·s1262-rev 재심 실측.
+                       수치는 저널이 자라므로 세지 말고 그때 읽는다). 답의 tip을
+                       요구하면 (b)가 서지 못하는 줄이 생긴다. 그래서 저널 쪽 값은
+                       **`ask_routed`와
+                       `ask_answered`의 시각 구간**이다: 답한 세션의 `changes` 답
+                       가운데 그 ask의 `instance`가 `round/land/peer-review@<N>`인
+                       것을 고르고, 그 줄의 머리 시각(`[sNNN] at <시각>`, 보드가
+                       싣는 분 단위 값)이 그 ask의 `ask_routed` 시각부터
+                       `ask_answered` 시각까지의 구간에 드는지로 짝짓는다.
+                       거르는 값은 **머리 시각**과 **`instance`** 둘이다 —
+                       「`ask_answered`의 시각이 그 구간 안에 있는가」는 구간의
+                       끝이 그 시각 자신이라 정의상 늘 참이고 아무것도 거르지
+                       않는다(s1262-rev 지적). 그 절은 조건이 아니라 판독 절차의
+                       서술이므로 술어로 쓰지 않는다.
+                       **분과 초의 경계는 머리 쪽을 그 분 전체로 펼쳐 정한다**:
+                       저널 `at`은 초 단위(UTC)이고 머리 시각은 분 단위(UTC)이므로,
+                       머리 `HH:MM`을 `[HH:MM:00, HH:MM:59]` 구간으로 펼치고 그
+                       구간이 ask 구간과 **겹치면** 든다(양 끝 포함, 겹침 판정).
+                       내림도 올림도 쓰지 않는다 — **겹침이 셋 가운데 가장 넓다**.
+                       내림은 여는 분의 줄을 빠뜨리고(구간 10:05:30–10:29:08에서
+                       머리 10:05는 내림 False·올림 True), 올림은 답한 분의 줄을
+                       빠뜨린다(머리 10:29가 내림 True·올림 False). 겹침은 그 둘을
+                       **포함하고 그보다 넓다** — ask가 한 분 안에서 끝나면(구간
+                       10:05:10–10:05:40, 머리 10:05) 내림·올림이 둘 다 False인데
+                       겹침만 True다(s597-rev 재심). 그러므로 「둘의 합집합」이라고
+                       적지 않는다: 겹침의 술어는 `HH:MM:00 <= 답의 at` 이고
+                       `HH:MM:59 >= ask_routed의 at` 둘 다인 것이고, 그것이
+                       **내림과 올림 둘 다를 덮고 그 둘을 합친 것보다도 넓다**.
+                       내림·올림 어느 하나를 고르면 그 분의 줄이
+                       통째로 빠져 (b)가 서지 못하는 줄이 생긴다.
+                       **값을 치르는 자리도 적는다**: 겹침은 그 분의 앞부분에 쓴
+                       줄까지 후보에 넣으므로, 같은 세션이 ask가 열리기 **전** 같은
+                       분에 쓴 줄(앞 회차의 제동 줄 등)도 구간에 들 수 있다. 그
+                       경우 (b)가 **서는** 방향이다 — 그 줄이 리뷰 판정이 되어
+                       재심 대기가 열리고, 잘못된 통과는 만들어지지 않는다.
+                       반대 방향(리뷰 판정이 제동으로 떨어지는 것)보다 이쪽이
+                       싸다는 것이 이 선택의 근거다.
+                       줄의 `@ <tip>`은 이 판정에 쓰지 않는다 — 저널에 대조할
+                       tip 값이 없어서 꼴만 보고 맞추면 틀린다.
+                       **이 짝짓기는 「응답자가 보드에 먼저 쓰고 답한다」는 규칙
+                       위에 선다** — 관측된 습관이 아니라 규칙이다(s597-rev 실측:
+                       줄 17:29, `ask_answered` 17:29:08). 그 순서가 서지 않으면
+                       머리 시각이 답 뒤로 밀려 구간 밖으로 나가고 (b)는 그 줄을
+                       놓쳐 제동으로 떨어뜨린다(escalate 방향이라 잘못된 통과는
+                       아니다). 그래서 `peer-review` 질문의 지시문이 판정 코멘트를
+                       답보다 **먼저** 남기라고 요구한다 — 그 지시문이 이 규칙의
+                       강제 자리이고, 이 확인은 그 순서를 전제로 읽는다.
+                       「답 이후 첫 줄」은 방향이 반대다. 같은 회차에
+                       `changes` 답이 둘 이상이면 구간이 겹칠 수 있으므로, 그때는
+                       그 세션의 `changes` 답 가운데 구간에 드는 것을 전부
+                       후보로 두고 (b)를 **서게** 한다(제동으로 떨어뜨리지 않는다).
+                       이 짝짓기가 없으면 한 번 답한 세션이 그 뒤에 쓴 제동 줄이
+                       전부 리뷰 판정이 되고, 회차로만 묶으면 리더가 앞 회차에
+                       답하며 남긴 CHANGES가 이번 회차 재작업에서 (b)에 안 걸려
+                       제동이 된다 — (b)가 막으려던 s1262-rev 사례가 그대로 남는다.
+                       그래서 저널은 **런 전체**를 읽는다(회차 한정 없음. 이 런의
+                       줄 수를 문면에 박지 않는다 — 저널은 매 답마다 자라고,
+                       박아 둔 수는 곧 틀린다(s1262-rev 지적: 14줄이라 적었을 때
+                       이미 17줄이었다).
+                       저널을 읽을 수 없으면 (b)는 서지 않는다 — (a)나 (c)로만
+                       리뷰 판정이 서고, 아니면 제동이다.
+                   (c) 그 줄이 `REVIEWED: pass @ <tip>` 꼴이다. 다만 이 갈래는
+                       **role을 읽지 못했을 때의 대체**이고, 명부에 그 세션이
+                       없는 경우에는 서지 않는다 — 명부 밖 세션은 (a)·(b)·(c)
+                       어디에도 안 걸려 제동이다(아래 「명부에 없는 세션」).
+                       한계도 함께 읽는다: 상위의 제동 줄은 그 형태로 쓰이지
+                       않으므로 이 대체가 제동을 리뷰로 뒤집는 일은 없다.
+                       반대로 `CHANGES REQUESTED @ <tip>:` 꼴만으로는 리뷰
+                       판정이라 하지 않는다 — 상위도 그 꼴을 쓰기 때문이다.
+                       그래서 `changes` 판정은 role이나 답한 세션 여부로만
+                       갈린다.
+                 · **그 밖의 전부 — 상위의 제동이다.** 세 갈래 어디에도 안
+                   걸린 주체는 전부 이 갈래다: 상위 세션(부모 워커·리더·사람),
+                   role이 reviewer도 아니고 이 질문에 답하지도 않은 세션,
+                   **명부에 없는 세션**(`--state all`로도 안 나오는 세션이므로
+                   종료한 세션은 여기로 오지 않는다 — `--state all`은 닫힌
+                   세션의 role을 그대로 싣는다. 실측 s490·s300이 `[exited]`로
+                   나온다; s404-rev·s511-rev 재심. 종료했지만 명부에 남은
+                   부모 워커의 줄은 role이 worker이므로 (a)에서 걸리지 않아
+                   어차피 이 갈래다). escalate다: tip이 있든 없든,
+                   그 tip이 (i) 자리에 걸리든 마찬가지다.
+                   **자기 코멘트는 이 갈래에 들지 않는다.** 순서가 그것을
+                   정한다: 세 갈래를 먼저 보고, 어디에도 안 걸린 줄이 자기
+                   코멘트(`DECLINED:`·`REWORK`, 작성 주체가
+                   `$CLAUNCH_SESSION`)면 판정이 아니므로 마커로 세지 않고
+                   넘어간다 — 제동도 아니고 리뷰도 아니다. 이 문장이 「그 밖의
+                   전부」보다 뒤에 서므로 자기 코멘트가 제동 목록에 동시에
+                   서지 않는다(s490-rev 재심: 두 목록에 동시에 있었다).
+               **부모 워커가 있는 편성에서 상위는 첫 그룹 하나가 아니다.**
+               `claunch cflow2 responders landing-review --json`의 `groups`는
+               후보 그룹 목록이고, 그룹마다의 `resolves` 필드는 없다 —
+               `resolves`는 최상위에 하나뿐인 `any(asks)`다. 그래서 상위를
+               「첫 그룹」으로 좁히면 안 된다: 부모 워커가 답하는 편성에서
+               첫 그룹은 worker(ancestor)이고 리더 s29는 그 안에 없으며
+               role도 reviewer가 아니다. 좁히면 s29의 접두 없는 줄이 접두
+               규칙으로 떨어져 다시 리뷰 판정이 된다. 그래서 상위를 계산하지
+               않고 **기본값을 뒤집었다** — 리뷰 판정 셋에 안 걸리면 전부 제동이다.
+               **명부에 없는 세션은 제동이다 — 예외 없이 한 갈래다.**
+               그 세션이 명부(`claunch mesh members <mesh> --state all`)에서
+               안 읽히면
+               (a) role을 못 읽으므로 (a)가 아니고, 저널의 `ask_answered by`가
+               아니면 (b)도 아니며, (c)는 role을 못 읽었을 때의 대체지만 명부
+               밖 세션에는 서지 않는다 — 명부를 못 읽은 것과 그 세션이 명부에
+               없는 것은 다르다. 그래서 제동이다. 머리가 아예 없어 작성 주체
+               자체를 못 읽는 줄만 **줄 머리 접두가 마지막 대체다**:
+               `PR-REVIEW #<번호>`로 시작하면 제동이고(리더가 PR 심사 판정을
+               보드에 남기는 꼴, `improv-leader-v2`의 PR 절차 3번), 아니면
+               **여전히 제동이다** — 기본값이 제동이므로 대체는 그것을 뒤집지
+               않는다. 리뷰 판정으로 가려면 (a)·(b)·(c) 가운데 하나가 서야 하고,
+               머리가 없으면 셋 다 서지 않는다. 이 대체가 「아니면 리뷰 판정」이던
+               동안 기본값과 정면으로 충돌했다(s648-rev·s1236-rev2 재심: 명부에서
+               빠진 리더·사람의 줄이 접두만 없으면 다시 리뷰가 됐다).
+               이 대체는 **머리가 없을 때만** 쓰인다 —
+               머리는 있는데 그 세션이 명부에 없으면 접두를 보지 않고 제동이다
+               (s511-rev 재심: 이 세 처리의 문면이 서로 달랐다).
+               주체가 리뷰어인 줄은 접두가 붙어 있어도 리뷰 판정이고,
+               주체가 리뷰어가 아닌 줄은 접두가 없어도 제동이다.
+               왜 주체여야 하는가: 접두로만 가르던 동안 리더가 쓴
+               `PR-REVIEW #530 CHANGES REQUESTED @ e6daa14b: …`(claunch-75kfl.1)는
+               접두 덕에 걸렸지만, 접두 없이 쓴 리더의 `CHANGES REQUESTED @
+               568b0d19…`(claunch-o8pb7)·`CHANGES REQUESTED @ acc16d7b (s29):`
+               (claunch-u9m6z)·줄 끝 `@ b606bc15`(claunch-75kfl)는 리뷰 판정으로
+               읽혔다 — 셋 다 상위(s29)가 쓴 줄이다(claunch-eyz0s.2.1.1 실측).
+               상위 판정 줄을 가르는 근거는 해시의 자리도 접두도 아니라 그 줄을 쓴
+               주체이므로, 이 규칙이 자리 규칙보다 앞선다.
+               **tip의 자리는 둘 중 하나다 — 그 둘만 tip이다.** 상위 판정 줄이
+               아닌 마커 줄에서 tip으로 인정하는 `@ <hex>`는 다음 두 자리에 있는
+               것뿐이다:
+                 (i) 마커 낱말 **바로 뒤** — `CHANGES REQUESTED @ <tip>: <무엇을>`
+                     (리뷰어가 쓰는 형태다. 상위가 쓸 때는 위 규칙이 먼저 잡는다)
+                 (ii) 그 줄의 **마지막 토큰** — `CHANGES REQUESTED: <무엇을> @
+                      <tip>` (이 런의 s162 판정이 그 형태다)
+               **줄 본문 안의 다른 `@ <hex>`는 tip이 아니다.** 상위 세션이
+               거절하며 근거로 인용한 해시(`이전 tip은 @ e6daa14b였다` 같은
+               형태)가 그 자리에 있으면, 그 줄은 tip 없는 마커다 — 리뷰 판정이
+               아니라 상위의 제동이므로 escalate다. 이 배제가 없던 동안 상위의
+               거절이 「재심 대기」로 분류됐다(claunch-eyz0s.2.2: 리더가 쓴
+               `CHANGES REQUESTED` 첫 줄 29건에 `@<hex>`가 있다).
+               (i)과 (ii)가 **서로 다른 해시**를 가리키면 그 줄은 판독 불가다 —
+               어느 쪽이 심사한 tip인지 정할 근거가 없으므로 escalate다. 같은
+               해시면 그 해시다. 어느 쪽으로도 못 찾으면 escalate다.
                재심 대기를 request로 읽는 것이 방어선을 지우지 않는 이유는
                순서다: `submit`은 `align`(리베이스) → `reviewer-ensure` →
                `peer-review`를 `integration-request` **앞에서** 돈다. 그래서
@@ -5149,11 +6249,20 @@ procedures:
                 1 대상 없음 — 아무도 이 저장소의 착지 큐를 갖지 않는다. 여섯째 거짓.
                 2 판정 불가 — 데몬 미응답, 런을 읽지 못함, 명부를 읽지 못함.
                   여섯째 참도 거짓도 아니다.
+            relation이 stacked인데 0이고 JSON의 `demoted`가 비어 있지 않으면
+            부모 체인에 착지를 받을 세션이 없어(부모 없음, 부모가 착지를 받지
+            못함, 부모가 리더) 요청이 independent처럼 mesh 리더의 착지 큐로
+            강등된 것이다(claunch-0ka8c). 여섯째는 참이고 갈래는 그대로
+            request다 — 강등은 에러가 아니다. 그 `demoted` 문장을 reason에
+            옮기고, integration-request의 증거 묶음에 같은 사유를 싣는다.
+            리더가 이 저장소의 착지를 받지 못해 리더 큐로도 갈 수 없으면
+            게이트는 1이다 — 그 경우는 강등이 아니라 아래의 no-target이다.
             **1이면 request가 아니라 no-target이다.** escalate도 아니다 —
             escalate는 landing-review로 가서 *상위 세션*에게 묻는데, 대상이
             없는 편성에서 상위는 바로 그 병합할 수 없는 세션이다. 그 질문은
             후보 그룹을 차례로 비우고 사람 앞에 서며, 그동안 런은 상한까지
-            돈다(실측: 25회·약 4시간, claunch-od1mx). 없는 대상을 상위에
+            돈다(지금 상한은 5회·약 50분이고, 25회 상한 때의 실측이 25회·약
+            4시간이다, claunch-od1mx). 없는 대상을 상위에
             물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 곧바로
             사람이다.
             **2면 escalate다.** 모르는 것을 request로 밀지 않는다 — 그 규칙은
@@ -5170,6 +6279,20 @@ procedures:
             뿐이고 머지 실행도 배치 편성도 rebase 재요청도 여전히 상위의 것이다.
             이 문이 지키는 것은 master가 아니라 상위 세션의 턴이다 — 그 턴을
             아끼는 것이 지금 이 편성에서 가장 비싼 자원을 아끼는 것이다.
+
+            ── escalate의 reason 형식 ──
+            escalate의 reason은 엔진이 landing-review 질문 위에 그대로 붙인다
+            (웹 카드의 「Why this is open」, 응답자 메시지의 같은 줄). 그 질문을
+            받는 사람이나 상위 세션이 저널을 열지 않고 판단할 수 있게, reason의
+            첫 두 줄을 이 형식으로 쓴다:
+                사유: delta-0 | check-failed:<1~5> | route-unclear
+                권장: request | hold — <한 줄 이유>
+            그 아래에 근거를 적는다: 돌린 명령과 그 출력, 해시. delta-0이면
+            실을 커밋이 이미 통합 대상에 들어갔는지(`git merge-base
+            --is-ancestor <tip> <통합 대상>`, 머지 해시)를 재어 적는다 —
+            들어갔으면 권장은 hold다. check-failed면 어느 확인이 무엇으로
+            깨졌는지, route-unclear면 무엇을 모르는지(통합 대상, 운영자 지시)를
+            적는다. 권장은 내 판단일 뿐이고 답은 상위(또는 사람)가 한다.
 
             quick-fork 세션의 개시 블록에 있는 `merge:` 줄(「this session does NOT
             merge on its own」, 운영자가 web UI에서 merge를 누르면 wrap-up을 원
@@ -5196,8 +6319,70 @@ procedures:
               when: "'no-target' in $params.allow"
               then:
                 id: landing-target
-                call: landing-target-gate
-                with: {relation: "$data.inputs.relation"}
+                seq:
+                  # claunch-1aj1a.1: 같은 질문을 두 번 묻지 않는다. 여기까지
+                  # 왔다는 것은 여섯째 확인이 방금 「대상 없음」을 냈다는
+                  # 뜻이고, 그 질문의 답은 사람이 정한 착지 경로다. 다시
+                  # 묻는 조건은 둘뿐이다: 기록이 없거나, 사람이 답한 자리
+                  # (저장소·요청 방향)가 바뀐 것.
+                  #
+                  # **tip은 조건이 아니다**(ANSWER 30759): 새 커밋으로 끝이
+                  # 움직여도 결정은 유지하고 행동만 다시 한다 — 그래서 재사용
+                  # 값의 tip은 이번 회차의 $data.commit.tip이다(사람이 답한
+                  # 시점의 tip이 아니다). 수신자 구성의 변화도 이 가드가
+                  # 재는 것이 아니다: 이 갈래에 닿았다는 것 자체가 여섯째
+                  # 확인(Router)이 「받을 세션이 없다」를 이번 회차에 새로
+                  # 냈다는 뜻이고, 수신자가 생겼으면 그 회차는 request로 간다.
+                  #
+                  # 분기는 cases의 키로 적는다: 선택지 이름을 cond에 손으로
+                  # 비교하면 오타가 조용히 어긋난다(위 프로시저 설명). 키는
+                  # 게이트가 묻는 선택지와 같아야 하고,
+                  # tests/test_worker_v2_landing_target.py가 그 일치를 고정한다.
+                  - id: landing-target-replay
+                    call: landing-route-replay
+                    with:
+                      previous: "$data.landing_route"
+                      repo: "$data.landing.repo"
+                      relation: "$data.inputs.relation"
+                    cases:
+                      merge-by-person:
+                        return: blocked
+                        value:
+                          reason: "저장된 결정(merge-by-person)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 브랜치 끝은 이번 회차 값으로 싣는다"
+                          decision: merge-by-person
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
+                      rebase-and-repost:
+                        return: blocked
+                        value:
+                          reason: "저장된 결정(rebase-and-repost)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 메시를 고친 뒤의 착지는 다음 회차의 여섯째 확인이 새 명부로 다시 잰다"
+                          decision: rebase-and-repost
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
+                      freeze-and-close:
+                        return: held
+                        value:
+                          reason: "저장된 결정(freeze-and-close)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다. 브랜치 끝은 이번 회차 값으로 싣는다"
+                          rework: false
+                          decision: freeze-and-close
+                          tip: "$data.commit.tip"
+                          repo: "$data.landing_route.repo"
+                          owner: "$data.landing_route.owner"
+                          issue: "$data.landing_route.issue"
+                          relation: "$data.landing_route.relation"
+                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 묻는다.
+                      ask-again: []
+                  # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
+                  - id: landing-target-ask
+                    call: landing-target-gate
+                    with: {relation: "$data.inputs.relation"}
+                    bind: landing_route
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
@@ -5304,6 +6489,24 @@ procedures:
                               description: 리뷰 없이 진행한다(REVIEW SKIPPED 코멘트를 남긴다)
                               then: {break: peer-review-loop}
                   - {break: peer-review-loop}
+            # 시작 입력 require_merge_approval이 켜져 있으면 착지 요청 직전에
+            # 사용자 승인을 묻는다(claunch-boxug). rebase·동료 리뷰를 지난 뒤,
+            # publish(통합 대기 표 오르기) 바로 앞 — 승인한 트리가 요청되는
+            # 트리다. hold는 이번 회차 동결 마감(held)이고 다음 회차가 다시
+            # 묻는다. 끄면 이 cond는 통과하고 기존 경로 그대로다.
+            - id: merge-approval-gate
+              cond:
+                - if: "$data.inputs.require_merge_approval == true"
+                  then:
+                    # landing-review-route와 같은 형태 — seq의 on 핸들러로
+                    # hold 답을 받는다. ok는 핸들러 없이 다음 단계로 간다.
+                    - id: merge-approval-ask
+                      seq: [merge-approval]
+                      on:
+                        hold:
+                          return: held
+                          value: {reason: "$result['merge-approval'].value.reason", rework: false}
+                - else: []
             - id: publish
               cond:
                 - if: "$data.landing.medium == 'pr'"
@@ -5312,6 +6515,19 @@ procedures:
                     call: pr-publish
                     bind: landing
                     with: {landing: "$data.landing", force_pr: "$data.inputs.force_pr"}
+                - else: []
+            # PR 불가로 로컬 착지로 내려온 회차의 사용자 경고(claunch-ijkge).
+            # 로컬 브랜치는 이 머신의 체크아웃에만 있으므로, 세션·워크트리가
+            # 정리되면 커밋이 유실될 수 있다는 사실을 사용자에게 보이게 한다.
+            # 사용자가 직접 로컬을 고른 회차(force_pr·force_no_pr)는 경고하지
+            # 않는다 — 그 선택은 이미 사람의 것이다. board의
+            # `LANDING MEDIUM: local` 코멘트는 remote-setup이 남긴 것이고
+            # 이 스텝은 중복으로 쓰지 않는다. 스택만 싣는 회차(mode=stack-only)는
+            # 이 세션의 작업 브랜치가 없으므로 경고하지 않는다.
+            - id: local-warning
+              cond:
+                - if: "$params.mode == 'full' and $data.landing.medium == 'local' and $data.inputs.force_pr != true and $data.inputs.force_no_pr != true"
+                  then: [pr-local-notice]
                 - else: []
             # 방어 게이트(claunch-jx4xx): 이슈 없이 착지 요청을 올리지 않는다.
             # 귀속된 이슈가 비면 요청이 큐에 실리지 않는다(NOT queued). 사용자가
@@ -5324,11 +6540,85 @@ procedures:
                     call: ensure-issue
                     bind: claim
                 - else: []
+            # PR 제출로 회차를 끝내는 갈래(claunch-ijkge): 시작 입력
+            # auto_merge=false면 PR을 연 뒤 착지 요청을 세우지 않고 여기서
+            # 회차를 닫는다. 머지는 사용자가 PR 페이지에서 직접 한다. 이슈는
+            # in_review + `PR SUBMITTED @ <tip> <url>` 마커로 남는다 —
+            # integration-request가 하던 전이를 이 갈래가 대신한다. 로컬
+            # 착지에는 적용하지 않는다(auto_merge는 PR 경로에만 걸린다).
+            # 위임 전용 회차(mode=stack-only)는 이 세션의 작업 브랜치가 아니라
+            # 스택 브랜치를 싣는 회차이고 이슈 귀속 단계도 지나지 않으므로
+            # 두지 않는다 — 거기서 마커를 쓰면 주 이슈가 없어 보드에 아무것도
+            # 남지 않는다.
+            - id: pr-submitted-route
+              cond:
+                - if: "$params.mode == 'full' and $data.landing.medium == 'pr' and $data.inputs.auto_merge == false"
+                  then:
+                    - pr-submitted-mark
+                    - return: pr-submitted
+                      value: {url: "$data.landing.pr_url",
+                              number: "$data.landing.pr_number",
+                              tip: "$data.landing.tip"}
+                - else: []
+            # 착지 요청 수신자와의 메시지 채널 점검(claunch-101wi). 채널이 없다는
+            # 사실은 await-landing의 재촉이 실패하거나 상위의 통지가 오지 않는
+            # 것으로만 드러났고, 그 신호는 대기 루프(지금 상한 5회, 10분 간격)를 다
+            # 돈 뒤에야 사람 앞에 섰다. 그래서 대기 직전에 한 번 잰다.
+            # integration-request는 보드를 in_review로 옮기고 LANDING REQUEST를
+            # 남긴 뒤 곧바로 await-landing으로 넘어가는 한 번짜리 스텝이므로, 이
+            # 점검은 그 앞에 둔다 — 거절이 보드에 요청을 남기지 않게 하기 위해서다.
+            # rebase·remeasure로 submit이 다시 돌면 다시 잰다.
+            - id: landing-channel
+              choose:
+                chooser: agent
+                require_reason: true
+                prompt: |
+                  착지 요청을 올리고 상위의 답을 기다리기(await-landing) 직전이다.
+                  그 대기에서 오가는 것(재촉 landing-nudge, 상위의 착지·rebase·거절
+                  통지)은 전부 메시 메시지다. 이 세션과 착지 요청 수신자 사이에
+                  메시지 채널이 있는지 명령의 출력으로 판정한다:
+                  1. 수신자: `claunch gate landing-target --json`의 `owner`
+                     (relation ${data.inputs.relation} — independent면 리더, stacked면
+                     부모 워커부터). 종료 코드 0이 아니면 수신자를 정하지 못한
+                     것이다.
+                  2. 런의 메시: `claunch cflow2 status --json`의 `mesh`.
+                  3. 핸들: 1의 owner와 이 세션(`$CLAUNCH_SESSION`)은 **세션
+                     이름**이고, `claunch mesh members <런의 메시>`의 첫 열과
+                     connected pairs 줄은 **메시 핸들**이다 — 둘은 다를 수 있다
+                     (예: 핸들 s511-rev의 세션은 s523). 명부의 셋째 열
+                     `<데몬>/<세션>`에서 세션 이름이 1의 owner인 줄과 이
+                     세션인 줄을 찾아 그 첫 열(핸들)을 읽는다. 예:
+                     `claunch mesh members <메시> | awk '$3 ~ "/<세션 이름>$" {print $1}'`.
+                  4. 간선: connected pairs에 `<내 핸들> <-> <수신자 핸들>` 또는
+                     `<수신자 핸들> <-> <내 핸들>` 줄이 있다. 예:
+                     `claunch mesh members <메시> | grep -E "^\s+(<내 핸들> <-> <수신자 핸들>|<수신자 핸들> <-> <내 핸들>)\s*$"`.
+                  넷 다 서면 connected다. 하나라도 서지 않거나(수신자를 정하지
+                  못함, 명부에 그 세션 줄이 없음, 간선 없음) 명령이 판정을 내지 못했으면
+                  no-channel이다 — 재지 못한 것은 이어졌다고 잰 것이 아니다.
+                  넷이 다 섰는데 「그래도 물어보는 편이 안전하다」로 no-channel을
+                  고르지 않는다. 세션 이름을 그대로 pairs에서 찾지 않는다 — 핸들이
+                  다르면 간선이 있어도 0줄이 나온다. 실행한 명령과 수신자(세션·
+                  핸들)·메시·간선 줄(또는 없음)을 reason에 적는다.
+                options:
+                  connected:
+                    description: 수신자와 같은 메시에 간선이 있다 — 사람을 세우지 않고 착지 요청과 대기로 간다
+                    then: []
+                  no-channel:
+                    description: 수신자와의 간선이 없거나 판정하지 못했다 — 사용자에게 조치를 요청하고 승인·거절을 받는다
+                    then:
+                      try: [landing-channel-gate]
+                      catch:
+                        no-channel-declined:
+                          return: blocked
+                          value: {reason: "착지 요청 수신자와의 메시지 채널이 없다 — 사용자가 대기 진입을 거절했다"}
             - integration-request
             - id: await
               loop:
                 while: "true"
-                max: 25
+                # 25회(10분 간격, 약 4시간)는 답 없는 상위를 기다리는 동안 fault를
+                # 사람이 알아채기까지의 시간이 너무 길었다 — 5회(약 50분)로 낮춰
+                # 빨리 사람의 판단(loop_limit)으로 넘긴다(사용자 지시 2026-10-30).
+                max: 5
                 # 재촉 간격은 루프가 아니라 nudge 옵션의 interval이 진다
                 # (claunch-jbk5w). 루프에 every를 걸면 정지하는 10분 동안 선택이
                 # 닫혀, 상위가 머지해도 landed를 고를 수 없었다(s910, 머지 후 9분
@@ -5587,7 +6877,9 @@ procedures:
 
   worker-round:
     description: >-
-      회차 하나: 목표 수립 -> 일감 귀속(resolve-issue) -> 작업 위치(workspace) ->
+      회차 하나: 목표 수립 -> 일감 귀속(resolve-issue) -> 코딩 전 사용자
+      협의(pre-coding-consult; 질문·협의 요청이면 브랜치도 코드도 만들지 않고
+      협의 단계에서 사용자의 작업 지시를 기다린다) -> 작업 위치(workspace) ->
       브랜치 준비 -> 큐의 일감마다 item(배치 상한 10) -> 착지(land; rework면 배치를
       다시 돈다) -> 마감·회차 보고서. mode stack-only는 위임 전용 회차다(v1
       stack-round): 목표 수립과 일감 루프 없이 스택 컷만 착지시킨다.
@@ -5659,6 +6951,59 @@ procedures:
               - id: resolve
                 call: resolve-issue
                 bind: claim
+              # 코딩 전 사용자 협의(claunch-xpnae): 회차의 요청이 저장소를 바꾸는
+              # 작업인지 질문·협의인지 여기서 판정한다. 일감 귀속 뒤이면서 작업
+              # 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞이다 — 협의 요청은
+              # 브랜치를 만들지 않고 그 자리에서 기다린다. stack-only 회차는 이
+              # 갈래에 오지 않고(위의 then), land-only 회차는 코딩이 없으므로
+              # mode=full에서만 선다.
+              - id: pre-coding-consult
+                cond:
+                  - if: "$params.mode == 'full'"
+                    then:
+                      id: consult-check
+                      choose:
+                        chooser: agent
+                        require_reason: true
+                        prompt: |
+                          코딩 전 사용자 협의 단계다. 목표·이슈가 정해졌고 아직
+                          브랜치를 만들지 않았으며 코드도 바꾸지 않았다. 이번 요청이
+                          저장소를 바꾸는 작업인지, 질문·확인·협의인지 판정한다.
+                          판정 재료는 intake·prior-context·intake-issue의 보고,
+                          이슈 본문과 코멘트(`claunch beads show
+                          ${data.claim.issue} --json`, `claunch beads comments
+                          ${data.claim.issue}`), 오프닝 태스크와 사용자의 말이다.
+                          항목마다 확인한 것과 결과를 reason에 한 줄씩 적는다.
+
+                          다음이면 **consult**다 — 그 요청의 완료가 답이면 된다.
+                          · 의문문이거나 「알려 달라·확인해 달라·어떻게 생각하는가」의
+                            형태이고, 바꿀 대상(파일·동작·문구)이 지목되지 않았다.
+                          · 사용자가 조사·측정·원인 설명을 요청했고, 그 결과를
+                            고치라는 지시를 함께 주지 않았다.
+                          · 사용자가 이번에는 작업하지 말고 협의만 하자고 말했다.
+
+                          다음이면 **work**다 — 그 요청의 완료가 저장소의 변경이다.
+                          diff와 커밋이 결과물이고, 완료 기준을 테스트나 명령으로
+                          옮길 수 있다.
+                          · 고치기·추가하기·만들기·바꾸기·지우기 가운데 하나가
+                            지시됐다.
+                          · 이슈 본문의 범위·완료 기준이 동작이나 파일의 변경을 적고
+                            있다.
+                          · 질문 형태이지만 답이 「지금 코드가 틀렸다」로 끝나고,
+                            사용자가 그 수정을 함께 요청했다.
+
+                          판단이 서지 않으면 **consult**다. 이 자리의 consult는 작업을
+                          잃지 않는다: 사용자 협의 단계가 열려 있고, 사용자가 작업을
+                          지시하면 그 자리에서 이 회차가 이어진다. work를 잘못 고르면
+                          질문 하나에 브랜치·커밋·착지 요청이 따라온다.
+                        options:
+                          work:
+                            description: 저장소를 바꾸는 작업이다 — 착수 정당성 점검과 일감 처리(코딩 승인 게이트·작업)로 간다
+                            then: []
+                          consult:
+                            description: 질문·확인·협의다 — 코드를 바꾸지 않고 사용자 협의 단계에서 답한 뒤, 사용자가 작업을 지시할 때까지 기다린다
+                            then: [pre-coding-consult-hold]
+                  - else: []
               # 코딩 전 카테고리 배치(claunch-06fwj): intake가 일감 귀속을
               # 마쳤고 아직 작업을 시작하지 않은 자리다. 회차를 막지 않는다 —
               # 결과(assigned=false와 사유)는 노드가 보고로 낸다.
@@ -5693,6 +7038,59 @@ procedures:
           max: 25
           do:
             try:
+              # 착수 정당성 점검(claunch-101wi): 일감 처리(코딩 승인 게이트 포함)
+              # 앞에서 회차마다 한 번. 재작업으로 돌아온 패스와 stack-only 회차는
+              # 착수가 이미 결정됐거나 이 세션의 구현이 없으므로 다시 재지 않는다.
+              # 재작업 패스는 둘이다: land가 rework로 끝난 패스(land_out.rework)와
+              # sim-gate의 sim-recheck가 rework로 끝난 패스. 후자는 land_out을 쓰지
+              # 않고 data.sim에 rework 값을 묶으며, reason은 그 모양에만 있다
+              # (sim-check·sim-idle의 값에는 없다). 정당하면 사람을 세우지 않는다.
+              - id: feasibility
+                cond:
+                  - if: "$params.mode == 'full' and $data.land_out.rework != true and $data.sim.reason == null"
+                    then:
+                      id: feasibility-check
+                      choose:
+                        chooser: agent
+                        require_reason: true
+                        prompt: |
+                          목표·이슈·브랜치가 정해졌고 아직 코드를 바꾸지 않았다. 일감
+                          처리(코딩 승인 게이트, 작업)에 들어가기 전에 이 작업의 수행이
+                          정당한지 스스로 판정한다. 판정 재료는 intake·prior-context·
+                          intake-issue의 보고, 이슈 본문과 코멘트(`claunch beads show
+                          ${data.claim.issue} --json`, `claunch beads comments
+                          ${data.claim.issue}`), 저장소(`git log`, `git grep`)다.
+                          항목마다 확인한 것과 결과를 reason에 한 줄씩 적는다.
+                          1. 출처: 목표가 사용자 지시·리더 배정·이슈 본문 가운데 하나에
+                             근거한다. 지시를 지어내거나 넓혀 읽은 목표가 아니다.
+                          2. 필요성: 같은 일이 이미 master에 있거나(이미 해결됨) 다른
+                             이슈·살아 있는 세션이 같은 일을 맡고 있지 않다(prior-context의
+                             duplicate·related).
+                          3. 충돌: 정본 규칙·사용자 결정·리더 판정(doc 이슈, 판정 코멘트,
+                             리더 fyi의 답)과 어긋나지 않는다.
+                          4. 권한: 이 세션이 할 수 없는 행위(데몬 재기동·정지, master
+                             머지·push, 다른 저장소·다른 세션의 워크트리 수정, 실제 홈
+                             쓰기)가 없이는 목표가 서지 않는 경우가 아니다.
+                          5. 실현 가능성: 필요한 파일·도구·의존이 있고, 배치 밖 일감에
+                             막혀(blocked) 있지 않다.
+                          다섯이 전부 참이면 justified다. 하나라도 거짓이거나 판단이 서지
+                          않으면 unjustified다 — 사용자가 승인·거절한다. 다섯이 전부
+                          참인데 「그래도 물어보는 편이 안전하다」로 unjustified를 고르지
+                          않는다. 그 선택은 회차마다 사람을 세우고, 그렇게 서는 문은
+                          읽히지 않게 된다.
+                        options:
+                          justified:
+                            description: 다섯 항목이 전부 참이다 — 사람을 세우지 않고 일감 처리로 간다
+                            then: []
+                          unjustified:
+                            description: 하나라도 거짓이거나 판단이 서지 않는다 — 사용자에게 착수 승인·거절을 받는다
+                            then:
+                              try: [feasibility-gate]
+                              catch:
+                                infeasible:
+                                  - feasibility-hold
+                                  - {break: batch}
+                  - else: []
               - id: items-pass
                 cond:
                   # 첫 패스는 full 회차에서만 일감을 돈다. rework로 돌아온 패스는
@@ -5806,6 +7204,13 @@ procedures:
               # round·rounds가 차례로 fail이 되어 queue-recheck가 통째로
               # 건너뛰어졌다(런 20261027-164135-3ad031 저널 02:33:08).
               blocked: {break: batch}
+              # auto_merge=false로 PR 제출에서 끝난 회차(claunch-ijkge). 머지를
+              # 하지 않고 마감하므로 rework처럼 배치를 다시 돌지 않고, held·
+              # blocked와 같이 배치 루프를 나와 wrapup·회차 보고를 지난다.
+              # 이 갈래가 없으면 pr-submitted가 catch되지 않아 이 try 밖으로
+              # fail로 탈출하고 queue-recheck가 통째로 건너뛰어진다(blocked와
+              # 같은 이유).
+              pr-submitted: {break: batch}
       - wrapup
       # wrapup 뒤 카테고리 재확인(claunch-06fwj): 회차가 실제로 무엇이었는지가
       # 마감 기록까지 끝난 이 자리에서 가장 정확하다. 앞의 category-tag와 같은
@@ -5817,6 +7222,13 @@ procedures:
         cond:
           - if: "$data.inputs.knowledge_record != false"
             then: [knowledge-record]
+          - else: []
+      # 회차 마감 뒤 용어집 임시본(claunch-ar8jn): glossary_draft가 꺼졌을 때만
+      # 건너뛴다. 이 입력이 없던 런의 null은 기본값(켜짐)으로 읽는다.
+      - id: glossary-post
+        cond:
+          - if: "$data.inputs.glossary_draft != false"
+            then: [glossary-draft]
           - else: []
       - round-report
 
@@ -5858,13 +7270,19 @@ procedures:
                       print(json.dumps([i for i in d if i.get('status') not in ('closed',
                       'tombstone') and me in (i.get('created_by'), i.get('assignee'))],
                       ensure_ascii=False))"`. 목록이 비어야 완료다.
-                      남은 항목은 하나뿐인 예외를 빼고 전부 미정산이다 — 예외는 **상위의
+                      남은 항목은 두 예외를 빼고 전부 미정산이다 — 첫째는 **상위의
                       HOLD**다: `claunch beads comments <id> --json`에서 `author`가 이
                       세션이 아닌(상위·리더가 쓴) `HOLD:` 코멘트가 있고 그 뒤에 해소
                       코멘트가 없다. 이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold,
-                      wrapup의 hold 동결)는 예외가 아니다. 살아 있는 다른 세션이
-                      assignee라는 것도 정산이 아니다: 그 세션이 닫을 때까지 기다린다
-                      (자식에게 넘긴 일감도 같다).
+                      wrapup의 hold 동결)는 예외가 아니다. 둘째는 **이 세션이 PR만
+                      제출하고 머지를 남긴 이슈**다(claunch-ijkge): 상태가 in_review이고,
+                      `claunch beads comments <id> --json`에 `author`가 이 세션인
+                      `PR SUBMITTED @` 코멘트가 있다. auto_merge=false로 돈 회차는
+                      머지를 사용자가 PR에서 직접 하므로, 그 이슈가 in_review로 남은
+                      것은 유실이 아니라 정상 종료 상태다. 두 조건이 함께 서지 않으면
+                      (마커가 다른 세션의 것, 상태가 in_progress 등) 미정산이다.
+                      살아 있는 다른 세션이 assignee라는 것도 정산이 아니다: 그 세션이
+                      닫을 때까지 기다린다(자식에게 넘긴 일감도 같다).
                       정산 대상에서 빼는 것이 하나 더 있다 — **사용자가 보드 풀에 남기기로
                       승인한 self-improve 이슈**(claunch-c4e6f, 리더 승인 msg-74aacd2fcfd6).
                       세 조건을 모두 만족할 때만이다: (1) label에 `self-improve`가 있다,
@@ -5909,8 +7327,11 @@ procedures:
                       `kill`로 끝내는 것은 사용자 승인을 기다리는 요청이다(답은
                       `[claunch kill-request]` 블록으로 온다) — 답을 기다리는 동안 그
                       자식은 살아 있다. 리뷰어가 아닌 자식에게는 세션의 종료가 번지지
-                      않는다(한 단계 위로 올라가 살아남는다). 한 일을
-                      reason에 적는다.
+                      않는다 — 자식은 살아남고, kill로 끝난 세션의 자식은 부모 자리에 종료된
+                      그 세션이 그대로 남는다. 세션이 끝나서 자식이 옮겨지는 것은 두
+                      경우다: 그 세션의 기록이 지워질 때(한 단계 위로), 그리고 그 세션이
+                      quick-fork로서 merge를 마칠 때(wrap-up을 받은 세션 아래로).
+                      한 일을 reason에 적는다.
                       stack side 런이 아직 서 있으면(flow_status의 `sides.stack.live`가 true)
                       미정산이다 — 살아 있는 스택 자식이 있으면 queue-recheck가 stack-round를
                       냈어야 했고, 없으면 stack 런에서 seal을 먼저 고른다. stack 없이
@@ -6011,6 +7432,10 @@ procedures:
                     bind: end_decision
                     with:
                       require_reason: true
+                      # 종료 질문은 회차가 끝난 뒤에 서는 질문이라 답이 늦어도 잃는
+                      # 것이 없다 — 알림이 `deferrable`을 선언해 창의 접힌 목록에서
+                      # 빠진다(스레드 th-3b3470, 2026-10-30 사용자 결정).
+                      criteria: [deferrable]
                       # 질문이 사람 앞에 서는 순간을 대시보드에 올린다(claunch-q4cqy.4):
                       # 드라이버가 부르지 않으면 5분 기한이 도는 것도 사용자에게 닿지
                       # 않아, 답이 없어 auto-release로 넘어간 사실을 나중에야 알게 된다.
@@ -6089,6 +7514,13 @@ procedures:
               bind: release_decision
               with:
                 require_reason: true
+                # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
+                # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
+                # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
+                # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
+                # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
+                # 영향받지 않는다.
+                criteria: [deferrable]
                 # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
                 # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
                 nudge: |
@@ -6123,27 +7555,39 @@ procedures:
 
 body:
   try:
-    id: rounds
-    loop:
-      # max_rounds 입력이 있으면 그 수만큼만 돈다($visits.round = 끝난 회차 수).
-      # 회차 수에는 상한을 두지 않는다(claunch-0b8dx). 엔진은 반복마다 양의
-      # max를 요구하므로 실제로 닿지 않을 값을 둔다 — 닿으면 사람의 승인(loop_limit).
-      while: "$data.recheck.next != 'done' and ($data.inputs.max_rounds == null or $visits.round == null or $visits.round < $data.inputs.max_rounds)"
-      max: 10000
-      do:
-        # 사람의 강제 이동 대상(docs 2.11): 이 회차를 목표 수립부터 다시 한다
-        - id: round
-          call: worker-round
-          bind: round
-          force_target: true
-          with: {mode: "$data.recheck.mode", verify: "$params.verify"}
-        - cond:
-            - if: "$data.round.release == true"
-              then: {break: rounds}
-            - else:
-                id: recheck
-                call: queue-recheck
-                bind: recheck
+    # 진입 방식(claunch-d8scd): start_at=landing이면 첫 회차의 mode를 여기서
+    # 한 번 세운다. 루프 밖이라 회차마다 다시 돌지 않고, 회차가 끝나면
+    # queue-recheck가 data.recheck를 {next, mode: full}로 다시 쓰므로 둘째
+    # 회차부터는 일반 회차다 — 진입 상태의 무효화가 그 값에서 일어난다.
+    - id: entry-mode
+      cond:
+        - if: "$data.inputs.start_at == 'landing'"
+          then: {call: landing-entry, bind: recheck}
+        - else: []
+    - id: rounds
+      loop:
+        # 이 루프의 반복이 곧 회차다(claunch-oxmso.1). 표시용 round_now가 이
+        # 선언을 읽으므로, 회차 루프가 아닌 감시·대기 루프에는 붙이지 않는다.
+        rounds: true
+        # max_rounds 입력이 있으면 그 수만큼만 돈다($visits.round = 끝난 회차 수).
+        # 회차 수에는 상한을 두지 않는다(claunch-0b8dx). 엔진은 반복마다 양의
+        # max를 요구하므로 실제로 닿지 않을 값을 둔다 — 닿으면 사람의 승인(loop_limit).
+        while: "$data.recheck.next != 'done' and ($data.inputs.max_rounds == null or $visits.round == null or $visits.round < $data.inputs.max_rounds)"
+        max: 10000
+        do:
+          # 사람의 강제 이동 대상(docs 2.11): 이 회차를 목표 수립부터 다시 한다
+          - id: round
+            call: worker-round
+            bind: round
+            force_target: true
+            with: {mode: "$data.recheck.mode", verify: "$params.verify"}
+          - cond:
+              - if: "$data.round.release == true"
+                then: {break: rounds}
+              - else:
+                  id: recheck
+                  call: queue-recheck
+                  bind: recheck
   finally:
     id: settle
     call: settle

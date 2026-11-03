@@ -215,6 +215,11 @@ async def inherit_mesh(
       is the team the session was created into, and it is recorded, so it is
       a fact to read rather than a guess to make. A session that means its
       *other* mesh names it on the request.
+    * **None, but an ancestor is in a team** — the child joins the nearest
+      such ancestor's main mesh in the role it asked for, and a fallback
+      event says so (:func:`_ancestor_team_mesh`, claunch-3e47v). A
+      quick-fork copy of a leader is in no mesh itself; its children belong
+      with the leader's team.
     * **None** — one is opened for the pair and the parent joined into it
       (:func:`_open_mesh_for`). A parent nobody put in a mesh is not a parent
       that wants an unreachable child; it is one that never needed a mesh
@@ -245,10 +250,57 @@ async def inherit_mesh(
     mine = [m for m in mesh_mgr.meshes_for_session(parent)
             if not m.get("parent_channel")]
     if not mine:
+        found = _ancestor_team_mesh(parent, mesh_mgr)
+        if found:
+            # The parent is not in a team, but a session above it is (a
+            # quick-fork copy of a leader, say): the child joins that team
+            # in the role it asked for, so it reaches the leader. The
+            # parent stays connected through the parent channel.
+            ancestor, mesh = found
+            body["mesh"] = mesh
+            spawn_events.report(
+                parent, kind="fallback",
+                reason=(f"부모 {parent}가 어떤 팀 메시에도 속해 있지 않아 가장 가까운 조상 "
+                        f"{ancestor}의 메시 {mesh}에 자식 {child or '(이름 미정)'}이 "
+                        f"{body.get('role') or '요청한 역할'}로 합류한다"),
+                site="onboard.inherit_mesh", mesh=mesh, parent=parent,
+                ancestor=ancestor, **({"child": child} if child else {}),
+            )
+            return
         body["mesh"] = await _open_mesh_for(parent, mesh_mgr, project=project, child=child)
         body["role"] = FREE_ROLE
         return
     body["mesh"] = min(mine, key=_main_mesh_key)["mesh"]
+
+
+def _ancestor_team_mesh(parent: str, mesh_mgr) -> Optional[Tuple[str, str]]:
+    """The nearest ancestor of ``parent`` that is in a team mesh, as
+    ``(ancestor, mesh)``; ``None`` when none is.
+
+    Walks ``sdef.parent`` upward (``quick_fork_of`` when a session has no
+    parent), stopping at a name that no longer resolves and at a cycle.
+    ``mesh`` is the ancestor's main mesh (:func:`_main_mesh_key`); the
+    parent-child channels (``parent_channel``) are not teams.
+    """
+    manager = getattr(mesh_mgr, "manager", None)
+    if manager is None:
+        return None
+    seen = {parent}
+    current = parent
+    while True:
+        try:
+            sdef = manager.get(current).sdef
+        except Exception:  # a name that no longer resolves ends the walk
+            return None
+        nxt = (getattr(sdef, "parent", None) or getattr(sdef, "quick_fork_of", None) or "")
+        if not nxt or nxt in seen:
+            return None
+        seen.add(nxt)
+        current = nxt
+        teams = [m for m in mesh_mgr.meshes_for_session(current)
+                 if not m.get("parent_channel")]
+        if teams:
+            return current, min(teams, key=_main_mesh_key)["mesh"]
 
 
 def _main_mesh_key(entry: dict):

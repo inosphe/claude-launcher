@@ -217,7 +217,11 @@ new Function(
    slice("spawnParent"), slice("syncSpawnMode"),
    slice("syncSpawnProfileRow"), slice("pickProjectWhenEmpty"),
    slice("syncSpawnProjectRow"), slice("syncSpawnCwdRow"),
-   slice("syncSpawnOverRow"), slice("spawnChildFields")].join("\n") + `
+   slice("syncSpawnOverRow"),
+   // The permission row's open gate, shared with the submit's confirm step
+   // (skipconfirm_check pins the other half of that pair).
+   slice("newClaudePermissionOpen"),
+   slice("spawnChildFields")].join("\n") + `
 exports.refresh = refreshParentChoices;
 exports.sync = syncSpawnMode;
 exports.parentOf = spawnParent;

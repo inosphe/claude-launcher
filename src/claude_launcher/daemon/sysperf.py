@@ -28,6 +28,11 @@ A sample is the difference between two counter readings, so the first
 reading after start produces nothing; the collector reads once at start and
 the first sample arrives one interval later. Reading runs in a worker thread
 so a slow procfs (it happens under WSL) never stalls the event loop.
+
+Each sample also carries how many of the daemon's sessions were running,
+held and ended at that moment (``sessions``, claunch-cd6s9), so the page can
+draw the session load beside the machine load. The count is taken on the
+event loop, where the session registry lives, not in the reading thread.
 """
 
 from __future__ import annotations
@@ -504,6 +509,7 @@ class SysPerf:
         log_file: Optional[Path] = None,
         log_max_bytes: int = LOG_MAX_BYTES,
         log_backups: int = LOG_BACKUPS,
+        sessions: Optional[Callable[[], Dict[str, int]]] = None,
     ) -> None:
         self.interval = interval
         self.history: Deque[dict] = collections.deque(maxlen=max(int(history), 1))
@@ -515,6 +521,7 @@ class SysPerf:
         self._reader = reader
         self._usage_reader = usage
         self._usage_cache: Optional[Tuple[float, List[dict]]] = None
+        self._sessions = sessions
         self._prev: Optional[dict] = None
         self._task: Optional[asyncio.Task] = None
         # A logger of its own per collector: never propagated into
@@ -551,23 +558,50 @@ class SysPerf:
             self._log.removeHandler(handler)
             handler.close()
 
-    def tick(self, reading: dict, *, usage: Optional[List[dict]] = None) -> Optional[dict]:
+    def count_sessions(self) -> Optional[Dict[str, int]]:
+        """The session counts for the next sample, or None when this
+        collector has no registry to count or the count failed."""
+        if self._sessions is None:
+            return None
+        try:
+            return dict(self._sessions())
+        except Exception as exc:
+            log.warning("sysperf: counting sessions failed: %s: %s",
+                        type(exc).__name__, exc)
+            return None
+
+    def tick(self, reading: dict, *, usage: Optional[List[dict]] = None,
+             sessions: Optional[Dict[str, int]] = None) -> Optional[dict]:
         """Fold one reading in; return the new sample (None for the first).
 
         ``usage`` is the capacity list to carry in the sample; passing it
         here rather than appending afterwards keeps the log line, which is
-        written now, identical to the sample the page reads."""
+        written now, identical to the sample the page reads. ``sessions``
+        is the running / hold / ended count for the same moment."""
         prev, self._prev = self._prev, reading
         if prev is None:
             return None
         point = sample(prev, reading)
         if usage is not None:
             point["usage"] = usage
+        if sessions is not None:
+            point["sessions"] = sessions
         self.history.append(point)
         if self._handler is not None:
             self._log.info(json.dumps(point, separators=(",", ":"), sort_keys=True))
         return point
 
+    def poll_once(self, sessions: Optional[Dict[str, int]] = None) -> Optional[dict]:
+        try:
+            reading = self._reader()
+        except Exception as exc:  # a missing /proc file, a ctypes failure
+            message = f"{type(exc).__name__}: {exc}"
+            if message != self.error:
+                log.warning("sysperf: reading counters failed: %s", message)
+            self.error = message
+            return None
+        self.error = None
+        return self.tick(reading, usage=self.usage(), sessions=sessions)
     def usage(self) -> List[dict]:
         """The drives' capacity, reused for ``usage_ttl`` seconds: the badge
         is redrawn every few seconds, capacity moves far slower than that."""
@@ -583,18 +617,6 @@ class SysPerf:
             return []
         self._usage_cache = (now, value)
         return value
-
-    def poll_once(self) -> Optional[dict]:
-        try:
-            reading = self._reader()
-        except Exception as exc:  # a missing /proc file, a ctypes failure
-            message = f"{type(exc).__name__}: {exc}"
-            if message != self.error:
-                log.warning("sysperf: reading counters failed: %s", message)
-            self.error = message
-            return None
-        self.error = None
-        return self.tick(reading, usage=self.usage())
 
     def start(self) -> None:
         if not self.enabled:
@@ -615,7 +637,7 @@ class SysPerf:
 
     async def _run(self) -> None:
         while True:
-            await asyncio.to_thread(self.poll_once)
+            await asyncio.to_thread(self.poll_once, self.count_sessions())
             await asyncio.sleep(self.interval)
 
     def latest(self) -> Optional[dict]:
@@ -637,6 +659,33 @@ class SysPerf:
                 "backups": self.log_backups,
             }
         return out
+
+
+# --------------------------------------------------------------- sessions
+
+#: The page's three session lines, each a group of the lifecycle partition
+#: (``session.session_category``). A live process is ``running`` whether or
+#: not its delivery is held; ``hold`` takes the held records the boot has
+#: queued for relaunch (``delayed``) too; ``ended`` is every exited record
+#: that is not held. Archived records are not counted.
+SESSION_GROUPS = {
+    "running": ("running",),
+    "hold": ("hold", "delayed"),
+    "ended": ("paused", "killed", "failed"),
+}
+
+
+def count_sessions(sessions) -> Dict[str, int]:
+    """``{"running": n, "hold": n, "ended": n}`` for ``sessions``."""
+    from .session import session_category
+
+    group_of = {cat: group for group, cats in SESSION_GROUPS.items() for cat in cats}
+    counts = {group: 0 for group in SESSION_GROUPS}
+    for session in sessions:
+        group = group_of.get(session_category(session))
+        if group is not None:
+            counts[group] += 1
+    return counts
 
 
 # ------------------------------------------------------------------ routes
@@ -661,9 +710,14 @@ async def _stop(app: web.Application) -> None:
 def install(app: web.Application, *, interval: Optional[float] = None,
             collector: Optional[SysPerf] = None) -> SysPerf:
     if collector is None:
+        def sessions() -> Dict[str, int]:
+            manager = app.get("manager")
+            return count_sessions(manager.list() if manager is not None else ())
+
         collector = SysPerf(
             interval=INTERVAL if interval is None else interval,
             log_file=log_path(),
+            sessions=sessions,
         )
     app["sysperf"] = collector
     app.on_startup.append(_start)

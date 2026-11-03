@@ -27,7 +27,7 @@ from contextlib import contextmanager
 # Bound apart from the module: tests stand a stub in for `time` (monotonic
 # only), and the restore timings must not depend on what that stub carries.
 from time import perf_counter as _perf_counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -35,11 +35,13 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, credentials, harnesses as harness_registry
 from .. import profile as profile_mod
 from .. import profile_keys
+from .. import projects
 from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
-from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
+from ..cflow2 import relocate as slot_relocate
+from . import actors, briefing, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events, vm_guard
 from . import session_seq
@@ -182,6 +184,64 @@ def _brings_back(entry) -> bool:
     )
 
 
+@dataclass
+class HostRelaunch:
+    """What :meth:`SessionManager.relaunch_host_ended` did, by name: the
+    pass's share of the lists a boot fills for its restore queue and resume
+    nudge (claunch-hor3b.1)."""
+
+    relaunched: List[str] = field(default_factory=list)
+    #: Filed delayed, for a restore queue to wake (``restore_stagger`` set).
+    delayed: List[str] = field(default_factory=list)
+    #: Relaunch raised: filed failed.
+    failed: List[str] = field(default_factory=list)
+    #: Its program outlived the host (an orphan the host's SIGKILL left):
+    #: not relaunched, as a boot does not relaunch a session still running
+    #: in a host it cannot reach -- a second copy of one conversation.
+    running: List[str] = field(default_factory=list)
+    busy: List[str] = field(default_factory=list)
+    idle: Dict[str, Optional[str]] = field(default_factory=dict)
+    blank: List[str] = field(default_factory=list)
+
+
+class _Adoption:
+    """An adoption halfway through a restore (claunch-opirg).
+
+    :meth:`SessionManager._adopt_begin` stages the session and re-attaches
+    it to the PTY host; :meth:`build` rebuilds its screen from the log tail
+    and the host's replay; :meth:`SessionManager._adopt_finish` hands that
+    screen over and starts the session. ``build`` is the pyte work -- 0.3s
+    a session -- and touches nothing the event loop holds, so the boot runs
+    it on a worker thread; the synchronous restore runs it inline.
+    """
+
+    def __init__(self, host, sdef, entry, row, session, handle, replay, reply, rec):
+        self.host, self.sdef, self.entry, self.row = host, sdef, entry, row
+        self.session, self.handle = session, handle
+        self.replay, self.reply, self.rec = replay, reply, rec
+        # Read here, on the loop: the build must not touch session.screen.
+        screen = session.screen
+        self._size = (screen.cols, screen.rows, screen.history_limit)
+        self.screen = None
+        #: Raised by the build, kept for :meth:`_adopt_finish` to raise on
+        #: the loop -- an exception out of a worker thread would end the
+        #: boot's whole restore instead of this one adoption.
+        self.error: Optional[BaseException] = None
+        self.seconds = 0.0
+
+    def build(self) -> None:
+        t0 = _perf_counter()
+        try:
+            cols, rows, limit = self._size
+            self.screen = self.session.adopted_screen(
+                self.replay, self.rec, cols, rows, limit
+            )
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self.seconds = _perf_counter() - t0
+
+
 class SessionManager:
     #: Filesystem discovery for a rollout that Codex has not written yet is
     #: retried from ordinary manager reads.  One dashboard request can perform
@@ -269,6 +329,7 @@ class SessionManager:
         #: Seconds the current :meth:`restore_all` spent per launch step.
         self._restore_clock = {
             "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+            "yield": 0.0,
         }
         #: Names whose relaunch failed in the current :meth:`restore_all`.
         #: The pass is a generator now, so the return value cannot carry
@@ -330,6 +391,12 @@ class SessionManager:
         #: :attr:`exit_hooks`, and skips a failed session on the latter
         #: (claunch-0j6gb.1); every other exit hook already ran at the exit.
         self.settle_hooks: List[Callable[[AnySession], None]] = []
+        #: Called with ``(session, how)`` when a record leaves the working
+        #: fleet: ``how`` is ``archived`` (:meth:`archive`, the first time)
+        #: or ``removed`` (:meth:`remove`). The gate registry closes the
+        #: session's open gates here (claunch-6vq2m.1); an exit is not a
+        #: filing -- a killed or paused session's gates stay open.
+        self.filed_hooks: List[Callable[[AnySession, str], None]] = []
         #: Called with a session once its child is gone for good — whatever
         #: ended it. Registered by whoever has a stake in an ending (the
         #: board sweep, :mod:`claude_launcher.daemon.beads`); not called for
@@ -776,6 +843,23 @@ class SessionManager:
                                **_known(ended_by=getattr(session, "ended_by", None)))
             self.persist()
             return
+        if self._ended_with_host(session):
+            # The PTY host went away under the session (claunch-hor3b.1):
+            # the program did not end, its terminal did. Treated as a
+            # restart without the host treats it -- the record stays one the
+            # next boot restores (persist), the exit hooks do not run (the
+            # board keeps its in_progress issue), and the host watch
+            # relaunches it as soon as a new host is up
+            # (relaunch_host_ended).
+            log.warning(
+                "session %r ended with the PTY host (code %s); kept to be relaunched",
+                session.sdef.name, session.exit_code,
+            )
+            self.events.record(session, "exit", "PTY host 종료로 세션 프로세스 종료",
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
+            self.persist()
+            return
         if getattr(session, "held_at", None):
             # A hold ends the program, not the session (Session.held_at): the
             # board keeps its in_progress issue, side runs keep running, and
@@ -804,7 +888,9 @@ class SessionManager:
                 session.sdef.name, session.exit_code,
             )
         else:
-            self.events.record(session, "exit", "세션 프로세스 종료",
+            self.events.record(session, "exit",
+                               "PTY host 종료로 세션 프로세스 종료 (restore 꺼짐)"
+                               if self._host_took(session) else "세션 프로세스 종료",
                                exit_code=session.exit_code,
                                **_known(ended_by=getattr(session, "ended_by", None)))
         self.persist()
@@ -838,11 +924,34 @@ class SessionManager:
             return
         if id(session) in self._restarting:
             return
+        if self._host_took(session):
+            session.ended_by = actors.make(actors.DAEMON, reason="pty-host-ended")
+            return
         if getattr(session, "kill_requested", False):
             return
         if getattr(session, "paused_at", None) or getattr(session, "held_at", None):
             return
         session.ended_by = actors.make(actors.SELF)
+
+    def _ended_with_host(self, session: Session) -> bool:
+        """Whether an exit is the PTY host's going (:meth:`_host_took`) and
+        the record is one a boot would bring back: ``restore`` on, as
+        :meth:`_restore_entry` asks. Such a record is kept for
+        :meth:`relaunch_host_ended`; one with ``restore`` off ends there,
+        as a restart without the host leaves it (claunch-hor3b.1)."""
+        return bool(session.sdef.restore) and self._host_took(session)
+
+    def _host_took(self, session: Session) -> bool:
+        """Whether an exit is the PTY host's going rather than the
+        program's (claunch-hor3b.1): the handle said so, and nothing --
+        kill, pause, hold or relaunch -- asked for the ending."""
+        if not getattr(session, "ended_by_host", False):
+            return False
+        if getattr(session, "kill_requested", False):
+            return False
+        if getattr(session, "paused_at", None) or getattr(session, "held_at", None):
+            return False
+        return id(session) not in self._restarting
 
     def _failed_on_its_own(self, session: Session) -> bool:
         """Whether an exit is a failure: a nonzero code, and no kill, pause,
@@ -852,6 +961,10 @@ class SessionManager:
         if getattr(session, "kill_requested", False):
             return False
         if getattr(session, "paused_at", None) or id(session) in self._restarting:
+            return False
+        if self._host_took(session):
+            # Its terminal ended, not its program (claunch-hor3b.1): with
+            # restore off it is an ending, as at a restart, not a crash.
             return False
         code = session.exit_code
         return code is not None and code != 0
@@ -951,6 +1064,13 @@ class SessionManager:
             )
         except OSError:
             log.warning("could not record the VM-only hook for %r", session.sdef.name, exc_info=True)
+        # Which key the child is about to run on, from the token it was given
+        # (claunch-i985h). Recorded here, where the answer exists, because the
+        # profile's token file stops being able to answer it the moment another
+        # session of the pool launches: the rail's key modal shows this id as
+        # *this session's* key, and "whatever the token file held" was a guess
+        # dressed as a fact.
+        session.launched_key = harness_mod.launch_key(session.sdef, env)
         # A restoring launch replays the previous run's log next (launch,
         # launch_async): the relaunched program gets a brand-new screen, and
         # the daemon's pyte history is the only scrollback the web terminal
@@ -1232,6 +1352,7 @@ class SessionManager:
         if session is not None and getattr(session, "pty", None) is None:
             self._sessions.pop(name, None)
             line_sync.forget(name)
+            briefing.forget([name])
 
     def _check_name(self, name: str) -> None:
         if not _NAME_RE.match(name):
@@ -1787,7 +1908,7 @@ class SessionManager:
                 "(spawn.max_depth) — move fewer or shallower sessions"
             )
         previous = target.sdef.parent
-        target.sdef = replace(target.sdef, parent=parent)
+        target.sdef = replace(target.sdef, parent=parent, orphan_of=None)
         self.persist()
         return {
             "session": child,
@@ -1829,12 +1950,13 @@ class SessionManager:
                 f"session {child!r} cannot detach itself: a detach is done by "
                 "the session that commands it, or by an operator"
             )
-        previous = target.sdef.parent
+        previous = target.sdef.parent or target.sdef.orphan_of
         if not previous:
             raise ManagerError(f"session {child!r} has no parent to detach from")
         if actor:
             self.require_commands(actor, child)
-        target.sdef = replace(target.sdef, parent=None)
+        # An orphan's detach is how an operator says it is a root after all.
+        target.sdef = replace(target.sdef, parent=None, orphan_of=None)
         self.events.record(target, "detach", "부모-자식 관계 해제",
                            previous=previous, actor=actor or "operator")
         self.persist()
@@ -1876,8 +1998,12 @@ class SessionManager:
         of them racing — and the whole of its difference from a kill is in
         the record: the process is terminated the same way, the record stays
         respawnable the same way, and :meth:`respawn` clears the marker by
-        constructing a fresh Session. Idempotent like ``kill``: a session
-        that has already exited is left as it is, killed or paused.
+        constructing a fresh Session. The board is the one other place it
+        differs (claunch-ijot0): the session's in_progress issue is not
+        returned to open, as it is not for a hold -- the sweep runs when the
+        pause becomes an ending (:meth:`unpause`, :meth:`settle_pause`).
+        Idempotent like ``kill``: a session that has already exited is left
+        as it is, killed or paused.
         """
         session = self.get(name)
         if not session.exited:
@@ -1914,7 +2040,29 @@ class SessionManager:
             session.ended_by = dict(by)
         self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환", **_known(by=by))
         self.persist()
+        self._run_settle_hooks(session)
         return True
+
+    def settle_pause(self, name: str) -> bool:
+        """The board sweep a pause put off, owed when a paused record is
+        archived or removed (claunch-ijot0). A pause keeps the session's
+        in_progress issue for the resume; filing the record away is its real
+        ending. ``paused_at`` stays: an archived pause still reads paused.
+        Returns whether the sweep was owed."""
+        session = self.get(name)
+        if not session.exited or not getattr(session, "paused_at", None):
+            return False
+        if getattr(session, "swept_at", None):
+            return False
+        self._run_settle_hooks(session)
+        return True
+
+    def _run_settle_hooks(self, session: AnySession) -> None:
+        for hook in list(self.settle_hooks):
+            try:
+                hook(session)
+            except Exception:  # one hook must not silence the next
+                log.exception("settle hook %r failed for %r", hook, session.sdef.name)
 
     # ---- hold (claunch-5l35i) ------------------------------------------------ #
 
@@ -2003,11 +2151,7 @@ class SessionManager:
         if held:
             self._run_exit_hooks(session)
         else:
-            for hook in list(self.settle_hooks):
-                try:
-                    hook(session)
-                except Exception:  # one hook must not silence the next
-                    log.exception("settle hook %r failed for %r", hook, name)
+            self._run_settle_hooks(session)
         return True
 
     async def wake_async(self, name: str, *, by: str = "") -> AnySession:
@@ -2215,7 +2359,59 @@ class SessionManager:
         task.add_done_callback(self._wake_tasks.discard)
         return True
 
-    def escalate_children(self, name: str) -> List[str]:
+    def adoptable_children(self, name: str, to: str) -> List[str]:
+        """The live children of ``name`` that :meth:`escalate_children` with
+        ``to`` would move, or :class:`ManagerError` saying why it would not.
+
+        Nothing is changed. The merge path (claunch-dsqhp) asks this before
+        it writes the report, so the block names only children the move
+        will take; the move itself runs after the delivery and asks again.
+        The checks are those of :meth:`reparent`: a live target, no cycle,
+        ``spawn.max_depth``.
+        """
+        if to == name:
+            raise ManagerError(
+                f"session {name!r} cannot take its own children: a "
+                "session cannot be its own parent"
+            )
+        target = self.get(to)
+        if target.exited:
+            raise ManagerError(
+                f"session {to!r} has exited — an exited session cannot "
+                "take children"
+            )
+        if name in self._sessions and to in self.descendants(name):
+            raise ManagerError(
+                f"session {to!r} is under {name!r}: taking its children "
+                "would make a cycle"
+            )
+        moved = self.live_children(name)
+        if moved:
+            policy = spawn_mod.SpawnPolicy.load()
+            # Levels below the deepest moved child, which lands at
+            # ``depth(to) + 1`` itself -- the same arithmetic as
+            # :meth:`reparent`, measured from each child rather than
+            # from ``name``.
+            below = max(
+                (
+                    self.depth(d) - self.depth(child)
+                    for child in moved
+                    for d in self.descendants(child)
+                ),
+                default=0,
+            )
+            deepest = self.depth(to) + 1 + below
+            if deepest > policy.max_depth:
+                raise ManagerError(
+                    f"moving {name!r}'s children under {to!r} would put "
+                    f"one {deepest} level(s) deep and the limit is "
+                    f"{policy.max_depth} (spawn.max_depth)"
+                )
+        return moved
+
+    def escalate_children(
+        self, name: str, *, to: Optional[str] = None
+    ) -> List[str]:
         """Move ``name``'s direct children up to ``name``'s own parent.
 
         The step every record-dropping path takes before the ``del``. The tree
@@ -2232,13 +2428,34 @@ class SessionManager:
         it to be re-drawn by hand. The move is always *shallower*, so no depth
         check is needed, and the new parent is an ancestor of the children, so
         no cycle can be made. A grandparent that is itself gone (or absent —
-        ``name`` was a root) makes them roots, which is what they would have
-        become anyway.
+        ``name`` was a root) leaves them without a parent, but not as roots a
+        human started: each keeps ``name`` in ``orphan_of`` (claunch-ikiys),
+        so the listings show an orphan of ``name`` rather than a new root.
+
+        ``to`` names an explicit new parent instead, and that is the merge
+        path (claunch-dsqhp): a quick-fork that merges hands the sessions it
+        spawned to the session its wrap-up went to, because that one now
+        carries the work. The move is not necessarily shallower there — a
+        sibling-placed copy's children go under the origin, which is not
+        their old parent's parent — so ``to`` is checked for a cycle and for
+        ``spawn.max_depth``, as :meth:`reparent` checks them. Only
+        the LIVE children move: the copy's record stays, and an exited child
+        under it still names a record that exists.
 
         Returns the children moved, oldest first. The mesh edge to the new
         parent is the caller's, exactly as it is for :meth:`reparent`
         (:meth:`MeshManager.link_lineage`); this class knows nothing of meshes.
         """
+        if to is not None:
+            moved = self.adoptable_children(name, to)
+            for child in moved:
+                # A child of a live copy is no orphan, but the move is the
+                # same re-drawing :meth:`reparent` does, so it clears the
+                # mark the same way (claunch-ikiys).
+                self._sessions[child].sdef = replace(
+                    self._sessions[child].sdef, parent=to, orphan_of=None
+                )
+            return moved
         session = self._sessions.get(name)
         above = session.sdef.parent if session else None
         if above not in self._sessions or above == name:
@@ -2246,7 +2463,8 @@ class SessionManager:
         moved = self.children(name)
         for child in moved:
             target = self._sessions[child]
-            target.sdef = replace(target.sdef, parent=above)
+            target.sdef = replace(
+                target.sdef, parent=above, orphan_of=None if above else name)
         return moved
 
     def remove(
@@ -2287,6 +2505,8 @@ class SessionManager:
             )
         # Forgetting a held record is its real ending: settle what it owed.
         self.unhold(name)
+        self.settle_pause(name)
+        dropped: List[AnySession] = []
         if children == "remove":
             below = self.descendants(name)
             running = [n for n in below if not self._sessions[n].exited]
@@ -2297,9 +2517,10 @@ class SessionManager:
                     f"{name!r} on its own and let them move up to its parent"
                 )
             for child in below:
-                del self._sessions[child]
+                dropped.append(self._sessions.pop(child))
                 line_sync.forget(child)
             self.progress.forget(below)
+            briefing.forget(below)
             touched = below
         else:
             touched = self.escalate_children(name)
@@ -2307,12 +2528,15 @@ class SessionManager:
         # The shared session line lives beside the record, not in it; a name
         # created again later must not open on the deleted session's line.
         line_sync.forget(name)
-        # Same for the progress it published.
+        # Same for the progress it published, and its briefing.
         self.progress.forget([name])
+        briefing.forget([name])
         # Removing the last record leaves the set empty on purpose, so let this
         # one persist prune the store to empty past the empty-snapshot guard.
         self._allow_empty_persist = True
         self.persist()
+        for gone in [session, *dropped]:
+            self._run_filed_hooks(gone, "removed")
         return session, touched
 
     def set_keep_alive(self, name: str, on: bool) -> AnySession:
@@ -2326,6 +2550,20 @@ class SessionManager:
         """
         session = self.get(name)
         session.sdef = replace(session.sdef, keep_alive=bool(on))
+        self.persist()
+        return session
+
+    def set_provider_warning_ignored(self, name: str, on: bool) -> AnySession:
+        """Record (or clear) a session's dismissal of the provider warning.
+
+        The warning asks the operator to consider running a claude-harness
+        session on yolo mode when its provider is not Anthropic's own. "Ignore"
+        is a per-session answer, so it belongs to the definition rather than to
+        a browser: it survives a reload, a daemon restart and a respawn, and a
+        record that never carried it keeps showing the warning.
+        """
+        session = self.get(name)
+        session.sdef = replace(session.sdef, provider_warning_ignored=bool(on))
         self.persist()
         return session
 
@@ -2512,6 +2750,7 @@ class SessionManager:
         for name in sorted(names, key=self.depth):
             self.escalate_children(name)
         self.progress.forget(names)
+        briefing.forget(names)
         for name in names:
             del self._sessions[name]
             line_sync.forget(name)
@@ -2550,6 +2789,126 @@ class SessionManager:
             self._sessions[name] = session  # keep the exited record on failure
             raise
         return self._respawned(session, relaunched)
+
+    def host_ended(self) -> List[str]:
+        """The records waiting for :meth:`relaunch_host_ended`, in creation
+        order (a parent before the sessions it spawned, as at boot)."""
+        return [
+            s.sdef.name for s in self._sessions.values()
+            if s.exited and not s.archived_at and self._ended_with_host(s)
+        ]
+
+    def bound_to_host(self, client) -> List[str]:
+        """Live sessions whose terminal is still a handle of ``client`` --
+        the host connection whose loss is being handled. Their exits are on
+        the way; :meth:`relaunch_host_ended` waits for them first."""
+        return [
+            s.sdef.name for s in self._sessions.values()
+            if not s.exited and getattr(getattr(s, "pty", None), "_client", None) is client
+        ]
+
+    async def relaunch_host_ended(self) -> "HostRelaunch":
+        """Bring back every session the PTY host took down with it
+        (claunch-hor3b.1), through the same judgement the next boot's
+        :meth:`restore_all` makes of it (:meth:`_restore_entry`): only a
+        ``restore`` definition comes back (:meth:`_ended_with_host`), a
+        resumable one is filed *delayed* for a restore queue when
+        ``restore_stagger`` is set, the rest relaunch now with their
+        conversation, and each lands on :attr:`resumed_busy` /
+        :attr:`resumed_idle` / :attr:`resumed_blank` as at boot.
+
+        Those lists and :attr:`restore_queue` belong to the boot's nudge and
+        queue, which have run by now; the returned :class:`HostRelaunch`
+        carries this pass's share of them, for the caller to start its own.
+        A relaunch that raises leaves the record *failed*, as a delayed
+        record whose wake raised is (:meth:`fail_delayed`)."""
+        out = HostRelaunch()
+        for name in self.host_ended():
+            if self.shutting_down:
+                break
+            session = self._sessions.get(name)
+            if session is None or not session.exited or not self._ended_with_host(session):
+                continue
+            if self._outlived_host(session):
+                # Its terminal is gone but its program is not (the host was
+                # killed and the child did not take the hangup). Relaunching
+                # would run the conversation twice; it is left an exited
+                # record a person respawns once the orphan is dealt with,
+                # as restore_all leaves one stranded in an unreachable host.
+                session.ended_by_host = False
+                log.warning(
+                    "session %r outlived the PTY host (pid %s still running); "
+                    "not relaunching it", name, session.pid,
+                )
+                self.events.record(
+                    session, "restore",
+                    "PTY host 종료 뒤에도 프로세스가 실행 중이라 재실행하지 않음",
+                    pid=session.pid,
+                )
+                self.persist()
+                out.running.append(name)
+                continue
+            entry = self._registry_entry(session)
+            queued, blanked = len(self.restore_queue), len(self.resumed_blank)
+            del self._sessions[name]
+            failed: List[str] = []
+            self._restore_entry(entry, {}, None, None, failed, why="PTY host 종료")
+            if name not in self._sessions:
+                # _restore_entry left nothing in its place (the record would
+                # not parse back into a definition): the one taken off goes
+                # back, or the record would be gone from the list and, at
+                # the next persist, from disk (claunch-hor3b.2).
+                self._sessions[name] = session
+                failed.append(name)
+            if failed:
+                self._host_relaunch_failed(name)
+                out.failed.append(name)
+            elif name in self.restore_queue[queued:]:
+                out.delayed.append(name)
+            else:
+                out.relaunched.append(name)
+            if name not in failed:
+                if entry.get("was_busy"):
+                    out.busy.append(name)
+                else:
+                    out.idle[name] = entry.get("last_output_at")
+                if name in self.resumed_blank[blanked:]:
+                    out.blank.append(name)
+            # As restore_all_async does: the loop answers between records.
+            await asyncio.sleep(0)
+        if out.relaunched or out.delayed or out.failed or out.running:
+            log.warning(
+                "after the PTY host ended: relaunched %d, delayed %d, failed %d, "
+                "still running %d (%s)",
+                len(out.relaunched), len(out.delayed), len(out.failed), len(out.running),
+                ", ".join(out.relaunched + out.delayed + out.failed + out.running),
+            )
+        return out
+
+    def outlived_host(self) -> List[str]:
+        """The :meth:`host_ended` records whose program is still running."""
+        return [n for n in self.host_ended() if self._outlived_host(self._sessions[n])]
+
+    @staticmethod
+    def _outlived_host(session: AnySession) -> bool:
+        from .window import pid_alive
+
+        pid = getattr(session, "pid", None)
+        return bool(pid) and pid_alive(int(pid))
+
+    def _host_relaunch_failed(self, name: str) -> None:
+        """A record :meth:`relaunch_host_ended` could not bring back.
+        :meth:`_restore_entry` retired it as a plain exit owed a boot sweep;
+        mid-run nobody collects that, so it is filed failed now and its
+        exit hooks run as a failure's do (the board sweep waits for the
+        person settling it)."""
+        dead = self._sessions[name]
+        if dead in self._retired_for_sweep:
+            self._retired_for_sweep.remove(dead)
+        dead.failed_at = _now_iso()
+        self.events.record(dead, "fail", "PTY host 종료 뒤 세션 복원 실패")
+        self.persist()
+        self._run_exit_hooks(dead)
 
     def _respawn_take(self, name: str) -> AnySession:
         session = self.get(name)
@@ -2613,6 +2972,7 @@ class SessionManager:
             )
         # Filing a held record away is its real ending: settle what it owed.
         self.unhold(name)
+        self.settle_pause(name)
         if not session.archived_at:
             session.archived_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
@@ -2620,7 +2980,15 @@ class SessionManager:
             self.persist()
             self.events.record(session, "archive", "세션 보관",
                                **({"reason": reason} if reason else {}))
+            self._run_filed_hooks(session, "archived")
         return session
+
+    def _run_filed_hooks(self, session: AnySession, how: str) -> None:
+        for hook in list(self.filed_hooks):
+            try:
+                hook(session, how)
+            except Exception:  # noqa: BLE001 - a hook never breaks the verb
+                log.exception("filed hook %r failed for %s", hook, session.sdef.name)
 
     async def stop_and_archive(
         self, name: str, *, force: bool = False, by: Optional[dict] = None
@@ -2817,9 +3185,13 @@ class SessionManager:
                 else f"session {name!r} already runs on profile "
                      f"{old.profile!r}'s own token — nothing to clear"
             )
+        # A pin names a key of the pool the old answer read; a new answer to
+        # "whose token" reads another pool (or none), so the pin goes with it
+        # (claunch-e48es) and the new pool's strategy picks.
         relaunched = await self.redefine(
             name, borrow=lender, null_token=null_token,
             disable_artifact_tool=artifact_tool,
+            **({"key_id": None} if auth_changed else {}),
         )
         if auth_changed:
             details = {
@@ -2853,13 +3225,14 @@ class SessionManager:
 
         ``key_id`` must be a key of the pool the session's launch actually
         reads (``profile_keys.owner`` — a child holding no token of its own
-        pins a key of its nearest ancestor's pool). ``None`` unpins, and the
-        pool's strategy picks from the next launch on.
+        pins a key of its nearest ancestor's pool). For a borrowing session
+        that is the lender's pool, since the lender's token is what it
+        authenticates with (claunch-e48es). ``None`` unpins, and the pool's
+        strategy picks from the next launch on.
 
         Refused while nothing has been stopped: a session with no profile, a
         ``--null`` session (no token is injected, so there is no key to
-        switch), a borrowing session (the token comes from the lender), a
-        profile chain with no pool, an unknown key, and a no-op.
+        switch), a profile chain with no pool, an unknown key, and a no-op.
         """
         session = self.get(name)
         old = session.sdef
@@ -2868,18 +3241,13 @@ class SessionManager:
                 f"session {name!r} has no profile, so it reads no key pool"
             )
         try:
-            prof = profile_mod.require_selector(old.profile)
+            prof = profile_mod.require_selector(old.borrow or old.profile)
         except profile_mod.ProfileError as exc:
             raise ManagerError(str(exc)) from exc
         if old.null_token:
             raise ManagerError(
                 f"session {name!r} runs with no token (--null); there is no key "
                 "to switch"
-            )
-        if old.borrow:
-            raise ManagerError(
-                f"session {name!r} borrows {old.borrow!r}'s token; its own "
-                "profile's keys are not what this session authenticates with"
             )
         try:
             view = profile_keys.view(prof)
@@ -3024,7 +3392,7 @@ class SessionManager:
             )
         return await self.redefine(name, env=env)
 
-    async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
+    async def migrate(self, name: str, new_cwd: str, project: Optional[str] = None) -> Tuple[Session, bool]:
         """Move a session to another directory: stop it, carry its claude
         conversation's transcript, and relaunch it there.
 
@@ -3037,13 +3405,26 @@ class SessionManager:
         touched: the name, the pinned conversation id, the mesh memberships
         keyed on the name, the parent edge.
 
+        Two kinds of metadata travel with the directory change. The session's
+        cflow v2 run slots (keyed ``(cwd, scope)``, see
+        :mod:`claude_launcher.cflow2.store`) move to the same scope directory
+        under ``new_cwd`` — left behind, the session's ``flow_*`` calls would
+        resolve the run store under the new cwd and find nothing. And when
+        ``project`` is given, ``sdef.project`` is re-filed under it (validated
+        against the registry) — the mesh and the listings read the project
+        live from the definition, so nothing else needs re-keying. Archived
+        (finished) runs and the beads board's already-minted issues stay on
+        the old board; only where *new* issues mint moves, with the cwd.
+
         Refused while nothing has been stopped or moved: a target that is not
         a directory, a session already there, a claude session with no pinned
         conversation (its transcript cannot be identified, so moving it would
-        silently lose the conversation), and a profile that no longer exists.
+        silently lose the conversation), a profile that no longer exists, and
+        a ``project`` the registry does not hold.
         A relaunch that fails afterwards puts everything back — the transcript
-        returns to the old slug and the record keeps its old definition — so
-        the failure mode is "still where it was", not "half-moved".
+        returns to the old slug, moved run slots return to the old directory,
+        and the record keeps its old definition — so the failure mode is
+        "still where it was", not "half-moved".
 
         Returns the relaunched session and whether a transcript was actually
         carried (``False`` for other harnesses, and for a conversation that
@@ -3059,6 +3440,16 @@ class SessionManager:
             os.path.abspath(old.cwd or "")
         ):
             raise ManagerError(f"session {name!r} is already in {new_cwd}")
+        new_project = old.project
+        if project is not None:
+            try:
+                new_project = (
+                    None
+                    if projects.normalize(project) == projects.DEFAULT
+                    else projects.require(project).name
+                )
+            except projects.ProjectError as exc:
+                raise ManagerError(str(exc)) from exc
         config_dir = None
         if old.harness == harness_mod.CLAUDE_HARNESS:
             if not old.conversation_id:
@@ -3080,9 +3471,16 @@ class SessionManager:
                 moved = transcripts.relocate(
                     config_dir, old.conversation_id, old.cwd, new_cwd
                 )
+            moved_slots: List[str] = []
             try:
-                relaunched = self._recreate(name, session, replace(old, cwd=new_cwd))
+                moved_slots = slot_relocate.move_slots(old.cwd, new_cwd, name)
+                relaunched = self._recreate(
+                    name, session, replace(old, cwd=new_cwd, project=new_project)
+                )
             except Exception:
+                if moved_slots:
+                    # the slots go back with the transcript
+                    slot_relocate.move_slots(new_cwd, old.cwd, name)
                 if moved is not None:
                     # Restore the transcript alongside the old definition.
                     transcripts.relocate(
@@ -3091,7 +3489,9 @@ class SessionManager:
                 raise
         self.events.record(relaunched, "worktree", "세션 작업 디렉터리 이동",
                            previous=old.cwd, current=new_cwd,
-                           transcript_moved=moved is not None)
+                           transcript_moved=moved is not None,
+                           slots_moved=moved_slots,
+                           project=old.project if new_project != old.project else None)
         return relaunched, moved is not None
 
     async def shutdown_all(self, mode: str = "stop", *, reason: str = "stop") -> None:
@@ -3261,6 +3661,96 @@ class SessionManager:
         self._persist_handle = None
         self.persist()
 
+    def _registry_entry(self, session: AnySession) -> dict:
+        """The record :meth:`persist` writes for ``session`` -- also what
+        :meth:`relaunch_host_ended` hands :meth:`_restore_entry`, so a
+        session the PTY host took down is judged as the next boot would."""
+        return {
+            "def": session.sdef.to_dict(),
+            # An exit Windows caused at a logoff or shutdown counts
+            # as running: the machine went down around it, and the
+            # next boot is what brings it back (see ended_by_os).
+            # The flag, not the exit code: a record retired at an
+            # earlier boot keeps its code and must stay retired.
+            "was_running": not session.exited
+            or (self._ended_by_shutdown.get(session.sdef.name) is session
+                and not session.archived_at)
+            or (
+                getattr(session, "ended_by_os", False)
+                and not session.archived_at
+            )
+            # Likewise an exit the PTY host's going caused
+            # (claunch-hor3b.1): until the host watch relaunches
+            # it, the next boot is what brings it back.
+            or (
+                self._ended_with_host(session)
+                and not session.archived_at
+            ),
+            # Whether an agent was mid-turn here. persist() runs
+            # first in shutdown_all, before anything is torn down,
+            # so at a restart this is what the session was doing in
+            # the last moment before the daemon went down — the one
+            # question a restored-but-idle terminal cannot answer
+            # about itself (see daemon/resume.py).
+            "was_busy": session.status() == STATUS_BUSY
+            or session.sdef.name in self._delayed_busy,
+            "exit_code": session.exit_code,
+            # carried across restarts so a retired record keeps
+            # answering like the session it was
+            "pid": session.pid,
+            "created_at": session.created_at,
+            "last_output_at": session.last_output_at,
+            # When a person last looked in and last typed. Kept across
+            # the restart because that is exactly when the question
+            # gets asked: the sessions worth finding after a daemon
+            # comes back are the ones nobody has been near.
+            "last_visited_at": session.last_visited_at,
+            "last_input_at": session.last_input_at,
+            "exited_at": session.exited_at,
+            # Archive retains the record and only changes which fleet
+            # view owns it. Kept outside SessionDef because it is
+            # lifecycle state, not a launch option.
+            "archived_at": session.archived_at,
+            # The pause marker, kept for the same reason: a paused
+            # record that came back from a restart as a plain kill
+            # would drop out of the bulk resume it was paused for.
+            "paused_at": getattr(session, "paused_at", None),
+            # The hold marker (claunch-5l35i): a held record that came
+            # back from a restart as a plain kill would lose its wake
+            # and owe a board sweep it must not make.
+            "held_at": getattr(session, "held_at", None),
+            # The restore queue's marker (claunch-0j6gb.2): a boot
+            # that finds it relaunches the record through the queue
+            # again rather than leaving it a plain hold.
+            "delayed_at": getattr(session, "delayed_at", None),
+            # The failure marker (claunch-0j6gb.1): a failed record
+            # that came back as a plain kill would owe the board
+            # sweep its failure put off.
+            "failed_at": getattr(session, "failed_at", None),
+            # Whether this ending's board sweep was made. Without it
+            # every boot swept every exited record again, and the one
+            # write a sweep makes that does not change state -- the
+            # ORPHANED FOLLOW-UP comment -- piled up once per restart
+            # (claunch-fh8u1.2: 29 copies on one issue).
+            "swept_at": getattr(session, "swept_at", None),
+            # Who ended this incarnation (claunch-o6xws): only the
+            # live object knew, and a record retired at the next boot
+            # must keep answering the rail's "killed by whom".
+            "ended_by": getattr(session, "ended_by", None),
+            # A person's standing "type nothing in here". Written
+            # here so it survives the restart that has nothing to do
+            # with them; an exited record always reports False (see
+            # DeadSession.set_delivery_hold), so retiring a held
+            # session does drop the pin — the record has no terminal
+            # left to hold mail out of.
+            "delivery_hold": session.delivery_held(),
+            # The PTY host session it runs in (claunch-xnnct.1): what
+            # the next daemon matches to adopt it instead of
+            # relaunching it. None for a local PTY or an exited one.
+            "pty": (session.pty_record()
+                    if callable(getattr(session, "pty_record", None)) else None),
+        }
+
     def persist(self) -> None:
         handle = self._persist_handle
         if handle is not None and _on_running_loop():
@@ -3277,88 +3767,7 @@ class SessionManager:
             self.reconcile_models()
         except Exception:
             log.warning("model reconciliation failed; persisting as-is", exc_info=True)
-        entries = []
-        for session in self._sessions.values():
-            entries.append(
-                {
-                    "def": session.sdef.to_dict(),
-                    # An exit Windows caused at a logoff or shutdown counts
-                    # as running: the machine went down around it, and the
-                    # next boot is what brings it back (see ended_by_os).
-                    # The flag, not the exit code: a record retired at an
-                    # earlier boot keeps its code and must stay retired.
-                    "was_running": not session.exited
-                    or (self._ended_by_shutdown.get(session.sdef.name) is session
-                        and not session.archived_at)
-                    or (
-                        getattr(session, "ended_by_os", False)
-                        and not session.archived_at
-                    ),
-                    # Whether an agent was mid-turn here. persist() runs
-                    # first in shutdown_all, before anything is torn down,
-                    # so at a restart this is what the session was doing in
-                    # the last moment before the daemon went down — the one
-                    # question a restored-but-idle terminal cannot answer
-                    # about itself (see daemon/resume.py).
-                    "was_busy": session.status() == STATUS_BUSY
-                    or session.sdef.name in self._delayed_busy,
-                    "exit_code": session.exit_code,
-                    # carried across restarts so a retired record keeps
-                    # answering like the session it was
-                    "pid": session.pid,
-                    "created_at": session.created_at,
-                    "last_output_at": session.last_output_at,
-                    # When a person last looked in and last typed. Kept across
-                    # the restart because that is exactly when the question
-                    # gets asked: the sessions worth finding after a daemon
-                    # comes back are the ones nobody has been near.
-                    "last_visited_at": session.last_visited_at,
-                    "last_input_at": session.last_input_at,
-                    "exited_at": session.exited_at,
-                    # Archive retains the record and only changes which fleet
-                    # view owns it. Kept outside SessionDef because it is
-                    # lifecycle state, not a launch option.
-                    "archived_at": session.archived_at,
-                    # The pause marker, kept for the same reason: a paused
-                    # record that came back from a restart as a plain kill
-                    # would drop out of the bulk resume it was paused for.
-                    "paused_at": getattr(session, "paused_at", None),
-                    # The hold marker (claunch-5l35i): a held record that came
-                    # back from a restart as a plain kill would lose its wake
-                    # and owe a board sweep it must not make.
-                    "held_at": getattr(session, "held_at", None),
-                    # The restore queue's marker (claunch-0j6gb.2): a boot
-                    # that finds it relaunches the record through the queue
-                    # again rather than leaving it a plain hold.
-                    "delayed_at": getattr(session, "delayed_at", None),
-                    # The failure marker (claunch-0j6gb.1): a failed record
-                    # that came back as a plain kill would owe the board
-                    # sweep its failure put off.
-                    "failed_at": getattr(session, "failed_at", None),
-                    # Whether this ending's board sweep was made. Without it
-                    # every boot swept every exited record again, and the one
-                    # write a sweep makes that does not change state -- the
-                    # ORPHANED FOLLOW-UP comment -- piled up once per restart
-                    # (claunch-fh8u1.2: 29 copies on one issue).
-                    "swept_at": getattr(session, "swept_at", None),
-                    # Who ended this incarnation (claunch-o6xws): only the
-                    # live object knew, and a record retired at the next boot
-                    # must keep answering the rail's "killed by whom".
-                    "ended_by": getattr(session, "ended_by", None),
-                    # A person's standing "type nothing in here". Written
-                    # here so it survives the restart that has nothing to do
-                    # with them; an exited record always reports False (see
-                    # DeadSession.set_delivery_hold), so retiring a held
-                    # session does drop the pin — the record has no terminal
-                    # left to hold mail out of.
-                    "delivery_hold": session.delivery_held(),
-                    # The PTY host session it runs in (claunch-xnnct.1): what
-                    # the next daemon matches to adopt it instead of
-                    # relaunching it. None for a local PTY or an exited one.
-                    "pty": (session.pty_record()
-                            if callable(getattr(session, "pty_record", None)) else None),
-                }
-            )
+        entries = [self._registry_entry(session) for session in self._sessions.values()]
         try:
             # Prune only in steady state: while a restore is still filling the
             # set, deleting the records not loaded yet would be the very clobber
@@ -3402,8 +3811,9 @@ class SessionManager:
         and no opening task, which a restore does not replay — so "carry on"
         is not what they need and not what they are sent.
         """
-        for _ in self._restore_steps():
-            pass
+        for work in self._restore_steps():
+            if work is not None:
+                work.build()
         return self._restore_failed
 
     async def restore_all_async(self, progress=None) -> List[str]:
@@ -3423,8 +3833,17 @@ class SessionManager:
         tries to bring back; the rest are kept as exited records, which is
         cheap and happens in the same pass.
         """
-        for _ in self._restore_steps(progress=progress):
-            await asyncio.sleep(0)
+        steps = self._restore_steps(progress=progress)
+        for work in steps:
+            if work is not None:
+                # An adoption's screen, built on a worker thread while the
+                # loop serves everything else (claunch-opirg); the step
+                # resumes on the loop and hands it over.
+                await asyncio.to_thread(work.build)
+            else:
+                t0 = _perf_counter()
+                await asyncio.sleep(0)
+                self._restore_clock["yield"] += _perf_counter() - t0
         return self._restore_failed
 
     def _restore_steps(self, progress=None):
@@ -3468,6 +3887,7 @@ class SessionManager:
         self._loading = True
         self._restore_clock = {
             "prepare": 0.0, "spawn": 0.0, "attach": 0.0, "adopt": 0.0,
+            "yield": 0.0,
         }
         started = _perf_counter()
         try:
@@ -3483,7 +3903,12 @@ class SessionManager:
                 progress(0, relaunching)
             done = 0
             for entry in entries:
-                self._restore_entry(entry, kept, host, stranded, failed)
+                work = self._restore_entry(entry, kept, host, stranded, failed)
+                if work is not None:
+                    # The caller builds the adopted screen -- inline, or on a
+                    # worker thread for the boot -- and resumes us to finish.
+                    yield work
+                    self._finish_adoption(work, entry, stranded, failed)
                 # `done` counts the same population `total` does. The
                 # registry holds far more records than this boot brings
                 # back -- exited ones kept for respawn -- and counting every
@@ -3496,7 +3921,7 @@ class SessionManager:
                     done += 1
                     if progress is not None:
                         progress(done, relaunching)
-                yield
+                yield None
             for row in kept.values():
                 # Running in the host with no record here that owns it: a
                 # session this registry ended or forgot, or one whose record
@@ -3518,33 +3943,45 @@ class SessionManager:
             # restart is read off the log instead of re-measured by hand:
             # "prepare" is building the command and replaying the previous
             # run's scrollback, "spawn" is the process and pseudo console.
+            # "yield" is the loop's own turns between records: the boot
+            # hands it back after each one, and what the API, the sessions
+            # already back and the rest of the boot do in those turns is
+            # wall time of this restore too -- the 51.9s of 112.1s that
+            # used to be filed as "other" (claunch-opirg).
             clock = self._restore_clock
             now = _perf_counter()
             log.info(
                 "restore took %.1fs for %d session(s): prepare/replay %.1fs, "
-                "spawn %.1fs, attach %.1fs, adopt/replay %.1fs, persist %.1fs, "
-                "other %.1fs",
+                "spawn %.1fs, attach %.1fs, adopt/replay %.1fs, "
+                "loop turns %.1fs, persist %.1fs, other %.1fs",
                 now - started,
                 relaunching,
                 clock["prepare"],
                 clock["spawn"],
                 clock["attach"],
                 clock["adopt"],
+                clock["yield"],
                 now - persist_started,
                 (persist_started - started)
                 - clock["prepare"] - clock["spawn"]
-                - clock["attach"] - clock["adopt"],
+                - clock["attach"] - clock["adopt"] - clock["yield"],
             )
 
     def _restore_entry(
-        self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str]
-    ) -> None:
+        self, entry: dict, kept: Dict[str, dict], host, stranded, failed: List[str],
+        *, why: str = "데몬 재시작",
+    ) -> Optional["_Adoption"]:
         """One registry record, as :meth:`_restore_steps` walks them.
 
         Split out so the generator can yield between records: this is where
         a boot's seconds go (an adopt replays up to ``REPLAY_TAIL_BYTES`` of
         pyte work per session), and holding the event loop for all of it is
         what kept the port from answering during a restart.
+
+        An adoption is returned half done: its screen is still to be built
+        (:meth:`_Adoption.build`, which the boot runs on a worker thread),
+        and :meth:`_finish_adoption` takes it from there. Everything else is
+        handled here and returns None.
         """
         try:
             sdef = SessionDef.from_dict(entry.get("def") or {})
@@ -3558,15 +3995,54 @@ class SessionManager:
             # over as it is, before the restore queue and the
             # relaunch below, which are for programs that ended.
             try:
-                self._adopt(host, sdef, entry, row)
-                return
+                return self._adopt_begin(host, sdef, entry, row)
             except Exception:
-                log.exception(
-                    "failed to adopt session %r from the PTY host; "
-                    "ending it there and restoring it", sdef.name,
-                )
-                self._sessions.pop(sdef.name, None)
-                self._end_kept(host, row)
+                self._adopt_failed(host, sdef, row)
+        self._relaunch_entry(sdef, entry, stranded, failed, why=why)
+        return None
+
+    def _finish_adoption(
+        self, work: "_Adoption", entry: dict, stranded, failed: List[str]
+    ) -> None:
+        """The second half of an adoption :meth:`_restore_entry` began, once
+        its screen is built. A failure here falls back the way one in the
+        first half does: the host session is ended and the record restored
+        like a program that ended."""
+        try:
+            self._adopt_finish(work)
+        except Exception:
+            self._adopt_failed(work.host, work.sdef, work.row)
+            if work.session.kill_requested:
+                # Ended while its screen was built: the ending stands, and a
+                # relaunch would undo it.
+                ended = work.session
+                self._retire(work.sdef, {
+                    **work.entry, "exited_at": _now_iso(),
+                    "paused_at": getattr(ended, "paused_at", None),
+                    "held_at": getattr(ended, "held_at", None),
+                    "ended_by": getattr(ended, "ended_by", None),
+                })
+            else:
+                self._relaunch_entry(work.sdef, entry, stranded, failed)
+
+    def _adopt_failed(self, host, sdef: SessionDef, row: dict) -> None:
+        log.exception(
+            "failed to adopt session %r from the PTY host; "
+            "ending it there and restoring it", sdef.name,
+        )
+        dropped = self._sessions.pop(sdef.name, None)
+        if dropped is not None:
+            # A writer held for the attach (Session.write_bytes) is let go.
+            dropped.adopting = None
+        self._end_kept(host, row)
+
+    def _relaunch_entry(
+        self, sdef: SessionDef, entry: dict, stranded, failed: List[str],
+        *, why: str = "데몬 재시작",
+    ) -> None:
+        """The rest of :meth:`_restore_entry`: a record no PTY host session
+        carries over -- relaunched, deferred to the restore queue, or kept
+        as an exited record."""
         if stranded is not None and entry.get("pty") and entry.get("was_running"):
             # Still running in a PTY host this daemon could neither
             # use nor end (claunch-xnnct.1): a relaunch would run
@@ -3590,7 +4066,7 @@ class SessionManager:
         # get, not left a plain hold.
         if sdef.restore and (entry.get("was_running") or entry.get("delayed_at")):
             if self.restore_stagger > 0 and self._resumable_def(sdef):
-                self._defer_restore(sdef, entry)
+                self._defer_restore(sdef, entry, why=why)
                 return
             # Asked before the relaunch, not after: the answer is about
             # the transcript the *previous* daemon left behind, and the
@@ -3609,7 +4085,7 @@ class SessionManager:
                     last_input_at=entry.get("last_input_at"),
                     delivery_hold=bool(entry.get("delivery_hold")),
                 )
-                self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
+                self.events.record(restored, "resume", f"{why} 후 세션 복원")
                 if entry.get("was_busy"):
                     self.resumed_busy.append(sdef.name)
                 else:
@@ -3658,15 +4134,19 @@ class SessionManager:
             return None
         return kept.pop(str(rec.get("sid")))
 
-    def _adopt(self, host, sdef: SessionDef, entry: dict, row: dict) -> None:
+    def _adopt_begin(
+        self, host, sdef: SessionDef, entry: dict, row: dict
+    ) -> Optional["_Adoption"]:
         """Take over a session the PTY host kept across the restart.
 
-        Running: a :class:`Session` is staged on it and re-attached
-        (:meth:`Session.adopt`) -- same process, no relaunch, no resume.
+        Running: a :class:`Session` is staged on it and re-attached to the
+        host, and the adoption is returned for its screen to be built and
+        :meth:`_adopt_finish` to hand it over (:meth:`Session.adopt`) --
+        same process, no relaunch, no resume.
         Exited while no daemon was attached: the output it made since is
         logged, and it is filed as an ending the way :meth:`_retire` files
         one that happened across a restart (its board sweep is claimed at
-        boot), with the host's code and time.
+        boot), with the host's code and time. Nothing is left to do: None.
         """
         rec = entry["pty"]
         sid = str(rec["sid"])
@@ -3699,7 +4179,7 @@ class SessionManager:
                 log.debug("ack_exit for %s failed", sid, exc_info=True)
             self.events.record(dead, "exit", "데몬이 없는 동안 세션 프로세스 종료",
                                exit_code=code, ended_by=dead.ended_by)
-            return
+            return None
         session = self.stage(
             sdef,
             restoring=True,
@@ -3718,16 +4198,40 @@ class SessionManager:
         handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
         if clock is not None:
             clock["attach"] += _perf_counter() - t0
+        # The loop runs while the screen is built: a persist keeps the host
+        # session, and a kill, pause or hold is owed to the attach.
+        session.adopting = dict(rec)
+        return _Adoption(host, sdef, entry, row, session, handle, replay, reply, rec)
+
+    def _adopt_finish(self, work: "_Adoption") -> None:
+        """Hand an adopted session its built screen and start it."""
+        session, handle = work.session, work.handle
+        clock = self._restore_clock if self._loading else None
+        if clock is not None:
+            clock["adopt"] += work.seconds
+        if self._sessions.get(session.sdef.name) is not session:
+            # Dropped or replaced while its screen was built (an archive, a
+            # redefine): nothing is left to hand the program to. Ended
+            # before the handle is closed: a close drops the host session
+            # without ending its program, and the end then finds nothing
+            # (claunch-opirg.1).
+            session.adopting = None
+            self._end_kept(work.host, work.row)
+            handle.close()
+            return
         t1 = _perf_counter()
         try:
-            session.adopt(handle, replay, reply, rec)
+            if work.error is not None:
+                raise work.error
+            session.adopt(handle, work.replay, work.reply, work.rec, screen=work.screen)
         except Exception:
             handle.detach()
             raise
         finally:
             if clock is not None:
                 clock["adopt"] += _perf_counter() - t1
-        self.adopted.append(sdef.name)
+        reply, entry = work.reply, work.entry
+        self.adopted.append(session.sdef.name)
         # The nudge audience a relaunch fills (manager.persist writes
         # ``was_busy`` per record; the relaunch path reads it the same
         # way). An idle adopted session whose run is waiting on it — a
@@ -3735,11 +4239,11 @@ class SessionManager:
         # forever: the cflow2 clock only wakes a driver when a wait
         # actually fires, and a choose has none (claunch-slia4).
         if entry.get("was_busy"):
-            self.resumed_busy.append(sdef.name)
+            self.resumed_busy.append(session.sdef.name)
         else:
-            self.resumed_idle[sdef.name] = entry.get("last_output_at")
+            self.resumed_idle[session.sdef.name] = entry.get("last_output_at")
         self.events.record(session, "adopt", "데몬 재시작 후 PTY 호스트의 세션 인수",
-                           pid=session.pid, replayed=len(replay),
+                           pid=session.pid, replayed=len(work.replay),
                            gap=int(reply.get("gap") or 0))
         self.flush_queued_input(session)
         self._run_launch_hooks(session)
@@ -3751,7 +4255,8 @@ class SessionManager:
         except Exception:
             log.warning("could not end PTY host session %s", row.get("sid"), exc_info=True)
 
-    def _defer_restore(self, sdef: SessionDef, entry: dict) -> DeadSession:
+    def _defer_restore(self, sdef: SessionDef, entry: dict, *,
+                       why: str = "데몬 재시작") -> DeadSession:
         """File a session the boot owes a relaunch as *delayed* (a hold the
         restore queue owns, claunch-0j6gb.2) instead of relaunching it now.
 
@@ -3772,7 +4277,7 @@ class SessionManager:
             self._delayed_busy.add(sdef.name)
         else:
             self.resumed_idle[sdef.name] = entry.get("last_output_at")
-        self.events.record(dead, "delayed", "데몬 재시작 후 복원 대기열에 등록")
+        self.events.record(dead, "delayed", f"{why} 후 복원 대기열에 등록")
         return dead
 
     def _retire(self, sdef: SessionDef, entry: dict) -> DeadSession:
@@ -3816,9 +4321,10 @@ class SessionManager:
         # owed once per ending, and the only records still owing it are the
         # ones that ended across the restart or whose sweep never finished.
         # And so is a held one: a hold is not an ending (Session.held_at).
-        # And a failed one, for the same reason (claunch-0j6gb.1).
+        # And a failed one, for the same reason (claunch-0j6gb.1), and a
+        # paused one: its issue waits for the resume (claunch-ijot0).
         if (not dead.archived_at and not dead.swept_at and not dead.held_at
-                and not dead.failed_at):
+                and not dead.failed_at and not dead.paused_at):
             self._retired_for_sweep.append(dead)
         return dead
 

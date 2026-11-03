@@ -1133,13 +1133,25 @@ def _cmd_retro(args: argparse.Namespace) -> int:
     run did not end normally, so it was never asked by the run's last node.
     ``--print`` writes the same text to stdout instead and touches nothing:
     that is how a run's node has the agent read it in its own turn.
+
+    The pack ends by recording the retrospective on the dashboard's
+    Retrospection page (claunch-lmnlv). Sent bare, the daemon heads the block
+    with ``auto record=true``: the person who sent it asked for it, so it is
+    recorded at once; ``--review`` makes it a wrap-up draft the person
+    confirms. ``--print`` (the run's node) names no value: the node gives its
+    run input ``retrospection_auto_record``.
     """
     name = _resolve_session(args)
     if not name:
         return 2
     path = f"/api/sessions/{quote(name, safe='')}/retrospective"
+    query = {}
     if args.pack:
-        path += "?" + urlencode({"pack": args.pack})
+        query["pack"] = args.pack
+    if getattr(args, "review", False) and not args.print:
+        query["auto"] = "0"
+    if query:
+        path += "?" + urlencode(query)
     try:
         client = daemon_client.ensure_running()
         if args.print:
@@ -1314,6 +1326,11 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         if footer:
             print(footer)
         return 0
+    # Whether a parent still exists is read off the whole roster, not the
+    # project-narrowed rows: a live parent in another project still holds its
+    # child. When the daemon narrowed the answer (``?project=``) the roster is
+    # not whole, and only the daemon's own orphan record counts.
+    known = None if query else {s["name"] for s in everything}
     for s, depth in _by_lineage(sessions):
         state = s["status"]
         if state == "exited":
@@ -1342,10 +1359,20 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         # same CLI, run for a different purpose.
         harness = s["harness"] + (f"/{s['kind']}" if s.get("kind") else "")
         brief = progress_brief(s.get("progress"))
+        # A top-level row whose parent is gone is an orphan, not a root a
+        # human started (claunch-ikiys) -- the same reading the rail gives.
+        parent = s.get("parent")
+        lost = "" if depth else (
+            s.get("orphan_of")
+            or (parent if known is not None and parent and parent != s["name"]
+                and parent not in known else "")
+            or ""
+        )
         print(
             f"{label:<16} [{state:<10}] {harness:<8} {prof:<12} {proj}"
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
             + (f"  | {brief}" if brief else "")
+            + (f"  (orphan of {lost})" if lost else "")
         )
     exited = [s for s in sessions if s["status"] == "exited"]
     asleep = [s["name"] for s in exited if s.get("held_at")]
@@ -1430,6 +1457,8 @@ def _cmd_hold_dispatch(args: argparse.Namespace) -> int:
 def _cmd_migrate_session(args: argparse.Namespace) -> int:
     """Move a session (kill, carry its conversation, relaunch) elsewhere."""
     body: dict = {"children": bool(args.children)}
+    if args.project:
+        body["project"] = args.project
     if args.to:
         # Resolved against *this* shell before it travels: the daemon would
         # resolve a relative path against its own cwd, which is nowhere the
@@ -1454,7 +1483,8 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
         " — conversation carried" if info.get("transcript_moved")
         else ""
     )
-    print(f"session {info['name']!r} migrated to {where}{carried}")
+    project = f" — project {info['project']!r}" if info.get("project") else ""
+    print(f"session {info['name']!r} migrated to {where}{carried}{project}")
     failed = False
     for child in info.get("children") or []:
         if child.get("ok"):
@@ -3665,14 +3695,17 @@ def register(sub) -> None:
         "--workspace", "-w", metavar="NAME",
         help="run the child in a registered workspace instead of the "
              "parent's directory ('claunch workspace ls' lists them; "
-             "spawn.allow_workspace turns this off)",
+             "spawn.allow_workspace turns this off). The child's board is "
+             "the one in that directory, so --issue is looked up THERE",
     )
     p_spawn.add_argument(
         "--project", "-P", metavar="NAME",
         help="file the child under this project instead of the parent's "
              "('claunch project ls' lists them); without --workspace/"
              "--worktree the child starts in that project's default "
-             "workspace when it has one",
+             "workspace when it has one. The label does not follow the "
+             "directory: name this too when --workspace belongs to another "
+             "project",
     )
     p_spawn.add_argument(
         "args", nargs=argparse.REMAINDER,
@@ -3876,6 +3909,11 @@ def register(sub) -> None:
         "--pack", default="",
         help="another on-demand pack id (default: retrospective)",
     )
+    p_retro.add_argument(
+        "--review", action="store_true",
+        help="leave the Retrospection record as a wrap-up draft for you to "
+             "confirm instead of recording it at once (the default)",
+    )
     p_retro.set_defaults(func=_cmd_retro)
 
     p_flush = sub.add_parser(
@@ -3928,6 +3966,11 @@ def register(sub) -> None:
         "--children", action="store_true",
         help="also migrate the session's descendants that stand in the same "
              "directory (those already elsewhere stay put)",
+    )
+    p_migrate.add_argument(
+        "--project", metavar="NAME",
+        help="also re-file the session under this project (default: keep its "
+             "current project; followers always keep theirs)",
     )
     p_migrate.add_argument(
         "-a", "--attach", action="store_true", help="attach once migrated"

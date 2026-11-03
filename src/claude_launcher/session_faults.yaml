@@ -86,10 +86,12 @@ kinds:
   # terminal is the one who does. It is read here because it is the same
   # kind of stop (nobody else can move the session), and `resolved_by:
   # input` is what keeps it apart from the account and service faults above.
-  # The window is the length of the other short faults; detection reads the
-  # screen and cannot see that the key was pressed, so the badge stays for
-  # the window after the prompt is gone. Nothing acts on this record --
-  # there is no send-keys and no auto-release (claunch-pczoc.3).
+  # The window is the length of the other short faults; it is only the upper
+  # bound here, because an answered prompt leaves the screen's live region
+  # and the detector closes the run early when its message is gone from a
+  # changed screen (daemon/session_fault.py, claunch-4ghrr). Nothing acts on
+  # this record -- there is no send-keys and no auto-release
+  # (claunch-pczoc.3).
   awaiting_input:
     label: waiting for input
     action: answer the prompt on the session's terminal
@@ -154,6 +156,18 @@ common:
       You'?ve hit your (?:weekly|5-hour|daily) limit
     sample: |-
       You've hit your weekly limit · resets Oct 26, 9am (Asia/Seoul)
+  # A plan's quota spent, worded by the provider behind an `opencode` route
+  # (s6252, 2026-11-01: "Go usage limit exceeded" under a `claude` harness).
+  # The line also carries "Request rejected (429)", which alone reads as a
+  # 15-minute rate_limit; this match starts later on the same row, so it
+  # decides, and the session is held as a usage limit (24-hour window, the
+  # fault-pause clock's auto-pause) instead of being re-nudged every
+  # 15 minutes into the same 429 (claunch-16j5v).
+  - kind: usage_limit
+    pattern: |-
+      \busage limit exceeded\b
+    sample: |-
+      API Error: Request rejected (429) · Go usage limit exceeded
   # A provider answering with a JSON error body, whatever harness painted it.
   - kind: auth
     pattern: |-

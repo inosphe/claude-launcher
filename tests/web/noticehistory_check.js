@@ -55,7 +55,19 @@
    and countdown. Nothing is posted — the request stays pending on the daemon
    — and Mark unread counts it again. The flag survives a reload and reaches
    this browser's other tabs; a request that leaves the pending set is
-   forgotten, so a later one the daemon gives the same id is unread again. */
+   forgotten, so a later one the daemon gives the same id is unread again.
+
+   Reminders (claunch-6scxn, claunch-gnlui): beside Hide sit three exclusive
+   waits, 1h, 6h and 24h. A pick puts the card aside and brings it back once,
+   that long after the press rather than after the request arrived; a second
+   pick replaces the first, and a fired reminder is gone. A record the staged
+   first cut saved is read as the one wait it was on. Every gate kind is put
+   through the presses and its own poll (s490-rev: one kind reverting to the
+   old Hide path used to leave this green). It is a state of its own — Hide
+   clears a reminder, Show card ends one, and a reminder whose request
+   settles is forgotten with it — and the one-second tick that carries it
+   writes nothing while nothing is due, which is the cost contract
+   claunch-qnq1c. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -196,7 +208,8 @@ function build(opts) {
 
   const apiCalls = [];
   const apiBodies = [];
-  const gate = { restart: null, goto: [], reposync: [], nudges: [], meshjoin: [] };
+  const gate = { restart: null, goto: [], reposync: [], nudges: [], meshjoin: [],
+                 spawn: [], resume: [], kill: [] };
   const apiStub = async (p, opts) => {
     apiCalls.push(p);
     if (opts && opts.body) apiBodies.push([p, JSON.parse(opts.body)]);
@@ -209,6 +222,11 @@ function build(opts) {
     if (p === "/api/reposync/requests") return answer({ requests: gate.reposync });
     if (p === "/api/flow-nudges") return answer({ requests: gate.nudges });
     if (p === "/api/mesh-join-requests") return answer({ requests: gate.meshjoin });
+    // The three session gates (claunch-6scxn's per-kind loop draws one card
+    // of every kind, so these are answered even where no other block asks).
+    if (p === "/api/spawn-requests") return answer({ requests: gate.spawn });
+    if (p === "/api/resume-requests") return answer({ requests: gate.resume });
+    if (p === "/api/kill-requests") return answer({ requests: gate.kill });
     if (p === "/api/daemon/restart-request/reject") {
       gate.restart = { ...gate.restart, status: "rejected" };
       return answer({ ok: true });
@@ -270,16 +288,19 @@ function build(opts) {
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows", "BroadcastChannel",
     "confirm", "prompt",
-    "__doc", "__win",
+    "__doc", "__win", "sessionsCache",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, runGateSync," +
     " refreshNudgeGate, refreshMeshJoinGate, noticeGatePoll," +
+    " refreshSpawnGate, refreshResumeGate, refreshKillGate," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " noticeSyncTick, noticeSync, noticeMarkRead, noticeTabs, gateIsHidden," +
     " killReapedNotify," +
     " NOTICE_SOURCES, gatePending, gateHistoryOpen, noticeSourceSet, noticePanelPaint," +
     " noticeSettingsToggle, noticeBellPaint, noticeSourceOf, noticeGateRefresh," +
     " noticeAgesPaint, gateHistorySettle, gateSeenAt, gateHistoryOpened," +
+    " gateRemind, gateRemindOf, gateRemindDown, gateRemindLabel, gateRemindClear," +
+    " noticeRemindPaint, gateCardAside, NOTICE_REMIND_CHOICES, gateUnhide, gateHide," +
     " railSkewOf, noteRailReconnect, openedOnThisClock," +
     " get railSkew() { return railClockSkew; }," +
     // The rail poll is outside this slice, so a check that needs the page's
@@ -288,6 +309,8 @@ function build(opts) {
     " setRailSkew(v) { railClockSkew = v; }," +
     " noticeClocksPaint," +
     " noticeCardAdd, noticeFlipRead, noticeFlipMove, noticeNewerFirst," +
+    " noticeWaitingFoldSet, noticeCriteriaOf, noticeFoldedShows," +
+    " get noticeWaitingFolded() { return noticeWaitingFolded; }," +
     " mk: (cls, text) => el(\"div\", cls, text)," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -305,7 +328,7 @@ function build(opts) {
     o.hub ? o.hub.Channel : undefined,
     (q) => { dialogs.asked.push(["confirm", q]); return dialogs.confirm; },
     (q) => { dialogs.asked.push(["prompt", q]); return dialogs.prompt; },
-    target(listeners.document), target(listeners.window),
+    target(listeners.document), target(listeners.window), [],
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
@@ -1718,12 +1741,382 @@ function gotoRec(rec) {
     w.api.gateHistoryOpen("spawn", "s-new", "spawn new", "", {});
     w.api.noticePanelPaint();
     const rows = w.panelRows().filter((r) => r.classList.contains("pending"));
-    // Longest-waiting first (claunch-l9znm.1): the list is ordered by the
-    // same stamp the row shows as its age, so the request that has stood
-    // longest is the one to answer and reads its own age truthfully.
-    check("the waiting list has the longest-waiting request first, whatever its kind",
-          rows.length === 2 && /kill/i.test(rows[0].text()) && !/kill/i.test(rows[1].text()),
+    // Newest first (claunch-x3feh, which reverses claunch-l9znm.1): the
+    // request that just arrived is the one on top, whatever its kind. The
+    // list is ordered by the same stamp the row shows as its age, so the
+    // panel reads top to bottom as "newest first" the way the strip and
+    // History do.
+    check("the waiting list puts the request that just arrived first, whatever its kind",
+          rows.length === 2 && !/kill/i.test(rows[0].text()) && /kill/i.test(rows[1].text()),
           rows.map((r) => r.text()));
+    // And the order is the feed's own rule, not a second one written here:
+    // the function claunch-l9znm.1 kept beside it is gone, so the two
+    // surfaces cannot drift apart again.
+    check("the waiting list sorts by the feed's one rule",
+          /waiting\.sort\(\(a, b\) => noticeNewerFirst\(/.test(src));
+    check("and no second ordering rule is left for it",
+          src.split("function noticeWaitOrder(").length - 1 === 0);
+  }
+
+  /* --- Remind: pick 1h, 6h or 24h; the card comes back once ---------- */
+  /* (claunch-6scxn, claunch-gnlui) A waiting request the reader does not
+     want to answer now, but does want back later. The card offers three
+     exclusive waits; the pick takes the card down and the card comes back
+     once, that long after the press — counted from the press, which is what
+     the user asked for (「누른시간으로부터 재줘」). It is a state of its own:
+     Hide says "I have dealt with this", Remind says "show me again at 6h",
+     and a set that held both would make the panel's hidden line lie about
+     whichever it did not mean. */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    check("the goto card is up before Remind", w.strip().length === 1, w.said());
+    const picks = ["1h", "6h", "24h"].map((l) => w.press(w.nodes.notices, l));
+    check("a gate card offers the three waits beside Hide",
+          picks.every((b) => !!b) && !!w.press(w.nodes.notices, "Hide"), w.said());
+    check("and no single Remind press that walks them all",
+          !w.press(w.nodes.notices, "Remind") ||
+            w.press(w.nodes.notices, "Remind").className.includes("gate-remind-label"),
+          w.said());
+    picks[1].click();
+    check("6h takes the card down", w.strip().length === 0, w.said());
+    check("the request stays open on the daemon",
+          w.api.gatePending.goto.length === 1, w.api.gatePending.goto);
+    check("and it is a reminder, not a hide",
+          w.api.gateRemindDown("goto", "g1") === true &&
+            w.api.gateIsHidden("goto", "g1") === false,
+          [w.api.gateRemindDown("goto", "g1"), w.api.gateIsHidden("goto", "g1")]);
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("the record waits 6h from the press",
+          rec.after === 6 * 3600e3 && rec.due === rec.since + 6 * 3600e3,
+          rec);
+    // The poll that runs before the reminder comes due must not put it back:
+    // the card is down because the reader asked for that, not because the
+    // page lost track of it.
+    await w.api.refreshGotoGate();
+    check("a poll does not put a reminded card back", w.strip().length === 0, w.said());
+
+    // Nothing is due at 1h, and the pass writes nothing: the tick runs once
+    // a second over every open page, so the cost of an idle reminder is the
+    // contract (claunch-qnq1c). A 6h pick is not a 1h step on the way.
+    const callsBefore = w.apiCalls.length;
+    const nodesBefore = w.nodes.notices.children.length;
+    w.clock.at = rec.since + 3600e3;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("at 1h a 6h reminder refreshes nothing and touches no DOM",
+          w.apiCalls.length === callsBefore &&
+            w.nodes.notices.children.length === nodesBefore &&
+            w.strip().length === 0,
+          [w.apiCalls.length - callsBefore, w.nodes.notices.children.length]);
+
+    w.clock.at = rec.since + 6 * 3600e3;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("at 6h the card comes back", w.strip().length === 1, w.said());
+    check("and the reminder is gone rather than re-armed",
+          w.api.gateRemindOf("goto", "g1") === null, w.api.gateRemindOf("goto", "g1"));
+    check("the returned card offers the three waits again",
+          ["1h", "6h", "24h"].every((l) => !!w.press(w.strip()[0], l)), w.said());
+
+    // Nothing else is scheduled: a day later the card is where it was.
+    w.clock.at = rec.since + 48 * 3600e3;
+    w.api.noticeRemindPaint();
+    await w.api.refreshGotoGate();
+    check("a fired reminder does not hide the card later",
+          w.strip().length === 1 && w.api.gateCardAside("goto", "g1") === false,
+          w.said());
+  }
+
+  /* --- each wait is its own choice ------------------------------------- */
+  /* (claunch-gnlui) The first cut had one Remind press walk 1h, 6h and 24h
+     in turn. Each button now files exactly its own wait, and a second pick
+     replaces the first instead of adding a step. */
+  {
+    for (const [label, hours] of [["1h", 1], ["6h", 6], ["24h", 24]]) {
+      const w = build();
+      w.gate.goto = [gotoRec()];
+      await w.api.refreshGotoGate();
+      w.press(w.strip()[0], label).click();
+      const rec = w.api.gateRemindOf("goto", "g1");
+      check(`${label}: files a ${hours}h wait`,
+            !!rec && rec.after === hours * 3600e3 && rec.due === w.clock.at + hours * 3600e3,
+            rec);
+      w.clock.at += hours * 3600e3 - 1000;
+      w.api.noticeRemindPaint();
+      await new Promise((r) => setImmediate(r));
+      check(`${label}: still down a second before`, w.strip().length === 0, w.said());
+      w.clock.at += 1000;
+      w.api.noticeRemindPaint();
+      await new Promise((r) => setImmediate(r));
+      check(`${label}: back at ${hours}h, once`,
+            w.strip().length === 1 && w.api.gateRemindOf("goto", "g1") === null,
+            w.said());
+    }
+
+    // A second pick from the panel row replaces the first.
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.strip()[0], "24h").click();
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    w.clock.at += 60000;
+    w.press(row(), "1h").click();
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("a second pick replaces the first",
+          rec.after === 3600e3 && rec.due === w.clock.at + 3600e3, rec);
+    check("and the row names the new wait",
+          /remind 1h/.test(row().text()) && !/remind 24h/.test(row().text()),
+          row().text());
+  }
+
+  /* --- a reminder saved by the staged first cut ----------------------- */
+  /* A browser that pressed the old Remind kept {since, stage, due, down}.
+     Still down, it comes back when it was going to; already up, nothing is
+     left to wait for. */
+  {
+    const storage = memoryStorage();
+    storage.setItem("claunch.noticeRemind", JSON.stringify({
+      "goto:g1": { type: "goto", rid: "g1", since: BASE, stage: 1,
+                   due: BASE + 6 * 3600e3, down: true },
+      "goto:g2": { type: "goto", rid: "g2", since: BASE, stage: 1,
+                   due: BASE + 6 * 3600e3, down: false },
+    }));
+    const w = build({ storage });
+    const rec = w.api.gateRemindOf("goto", "g1");
+    check("an old record still down keeps its due time",
+          !!rec && rec.due === BASE + 6 * 3600e3 && rec.after === 6 * 3600e3, rec);
+    check("an old record already up is dropped",
+          w.api.gateRemindOf("goto", "g2") === null, w.api.gateRemindOf("goto", "g2"));
+  }
+
+  /* --- every gate kind carries both presses --------------------------- */
+  /* (s490-rev, claunch-6scxn) The reminder was asserted on the goto card
+     alone. Reverting one kind's aside test to gateIsHidden, or its buttons
+     to gateHideButton, left all three harnesses green while that kind lost
+     Remind — the claim "all nine kinds go through one path" was in a comment
+     and in no assertion. So each kind is built here from the page's own
+     source table and asked for both presses, and after Remind its own poll
+     runs once more: a kind that only *looks* right draws its card straight
+     back. */
+  {
+    const askRec = () => ({ id: "ask2-kk", session: "s5", cwd: "/w/s5", scope: "s5",
+      workflow: "improv-worker-v2", version: 2, kind: "ask",
+      label: "landing-review", prompt: "land it?",
+      presses: [{ label: "approve", path: "/api/cflow2/approve",
+                  body: { cwd: "/w/s5", scope: "s5", node: "i7", decision: "approve" } }] });
+    const KINDS = [
+      ["restart", "r1", (w) => { w.gate.restart = restartRec(); },
+       (w) => w.api.refreshRestartGate()],
+      ["goto", "g1", (w) => { w.gate.goto = [gotoRec()]; },
+       (w) => w.api.refreshGotoGate()],
+      ["reposync", "p1",
+       (w) => { w.gate.reposync = [{ id: "p1", session: "s4", status: "pending",
+         deadline: new Date(BASE + 120000).toISOString(),
+         plan: { workspace: "claude-launcher", summary: "push master" } }]; },
+       (w) => w.api.refreshReposyncGate()],
+      ["spawn", "sp1",
+       (w) => { w.gate.spawn = [{ id: "sp1", session: "s3", status: "pending",
+         reason: "another worker" }]; },
+       (w) => w.api.refreshSpawnGate()],
+      ["resume", "ru1",
+       (w) => { w.gate.resume = [{ id: "ru1", session: "s3", target: "s8",
+         status: "pending", reason: "carry on" }]; },
+       (w) => w.api.refreshResumeGate()],
+      ["kill", "k1",
+       (w) => { w.gate.kill = [{ id: "k1", session: "s3", target: "s4",
+         status: "pending", reason: "its work is reported" }]; },
+       (w) => w.api.refreshKillGate()],
+      // The id the page files a join under is "<mesh>/<id>" (two meshes may
+      // hold the same request id).
+      ["meshjoin", "m/req-1",
+       (w) => { w.gate.meshjoin = [{ mesh: "m", id: "req-1", machine: "pcB",
+         session: "sb", handle: "bob", requested_at: new Date(BASE).toISOString() }]; },
+       (w) => w.api.refreshMeshJoinGate()],
+      ["nudge", "n9",
+       (w) => { w.gate.nudges = [{ id: "n9", session: "s3",
+         items: ["ask: landing-review"], message: "recommended", status: "pending" }]; },
+       (w) => w.api.refreshNudgeGate()],
+      ["ask", "ask2-kk", () => {}, (w) => w.api.runGateSync([askRec()], [])],
+    ];
+    for (const [type, rid, seed, poll] of KINDS) {
+      const w = build();
+      seed(w);
+      await poll(w);
+      check(`${type}: one card`, w.strip().length === 1, w.said());
+      const card = w.strip()[0] || { text: () => "" };
+      const hide = w.press(card, "Hide");
+      const remind = w.press(card, "24h");
+      check(`${type}: the card offers Hide and the Remind waits`, !!hide && !!remind, card.text());
+      if (!remind) continue;
+      remind.click();
+      check(`${type}: 24h takes the card down`, w.strip().length === 0, w.said());
+      await poll(w);
+      check(`${type}: and its next poll leaves it down`, w.strip().length === 0, w.said());
+      check(`${type}: as a reminder, not a hide`,
+            w.api.gateRemindDown(type, rid) === true &&
+              w.api.gateIsHidden(type, rid) === false,
+            [w.api.gateRemindDown(type, rid), w.api.gateIsHidden(type, rid)]);
+    }
+  }
+
+  /* --- the reminder counts from the press, not from the request -------- */
+  {
+    const w = build();
+    // A request that has already stood for five hours: its 1h reminder is
+    // still an hour away, because the reader pressed Remind now.
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.api.gateHistoryOpened("goto", "g1", (BASE - 5 * 3600e3) / 1000);
+    w.api.noticePanelPaint();
+    w.press(w.nodes.notices, "1h").click();
+    w.clock.at += 30 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("half an hour after the press the card is still down",
+          w.strip().length === 0, w.said());
+    w.clock.at += 30 * 60 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("an hour after the press it comes back, however old the request",
+          w.strip().length === 1, w.said());
+  }
+
+  /* --- Hide and Remind are two answers, not two layers ---------------- */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "1h").click();
+    check("Remind alone puts the request in the reminder state",
+          !!w.api.gateRemindOf("goto", "g1") &&
+            w.api.gateIsHidden("goto", "g1") === false);
+    // Hide is the reader saying they are done with the card: a reminder
+    // still standing would bring it back over that decision.
+    w.api.gateHide("goto", "g1");
+    check("Hide clears a reminder instead of stacking with it",
+          !w.api.gateRemindOf("goto", "g1") && w.api.gateIsHidden("goto", "g1") === true,
+          [w.api.gateRemindOf("goto", "g1"), w.api.gateIsHidden("goto", "g1")]);
+    w.api.gateUnhide("goto", "g1");
+    check("Show card on a reminded request ends the reminder",
+          (w.api.gateRemind("goto", "g1"), w.api.gateUnhide("goto", "g1"),
+           !w.api.gateRemindOf("goto", "g1")),
+          w.api.gateRemindOf("goto", "g1"));
+  }
+
+  /* --- a reminder does not outlive the request it is about ------------ */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "1h").click();
+    // The request is answered elsewhere: its card must not come back at 1h.
+    w.gate.goto = [];
+    await w.api.refreshGotoGate();
+    check("a settled request's reminder is forgotten with it",
+          !w.api.gateRemindOf("goto", "g1"), w.api.gateRemindOf("goto", "g1"));
+    w.clock.at += 2 * 3600 * 1000;
+    w.api.noticeRemindPaint();
+    await new Promise((r) => setImmediate(r));
+    check("and nothing comes back for it", w.strip().length === 0, w.said());
+  }
+
+  /* --- the panel row says what the card says about a reminder --------- */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    w.press(w.nodes.notices, "1h").click();
+    w.api.noticePanelToggle(true);
+    const row = () => w.panelRows().find((r) => r.classList.contains("pending"));
+    check("the row of a reminded request says which step is coming",
+          !!row() && /remind 1h/.test(row().text()), row() && row().text());
+    check("and offers Show card to bring it back now",
+          !!w.press(row(), "Show card"), row().text());
+    check("without calling it hidden", !/hidden/.test(row().text()), row().text());
+    w.press(row(), "Show card").click();
+    check("Show card from the row drops the reminder",
+          !w.api.gateRemindOf("goto", "g1"), w.api.gateRemindOf("goto", "g1"));
+  }
+
+  /* --- a reminder outlives the page and reaches this browser's tabs ---- */
+  {
+    const storage = memoryStorage();
+    const a = build({ storage });
+    a.gate.goto = [gotoRec()];
+    await a.api.refreshGotoGate();
+    a.press(a.nodes.notices, "1h").click();
+    const saved = storage.getItem("claunch.noticeRemind") || "";
+    check("the reminder is kept in this browser", /goto:g1/.test(saved), saved);
+    check("and apart from the hidden set",
+          !/goto:g1/.test(storage.getItem("claunch.noticeHidden") || "[]"),
+          storage.getItem("claunch.noticeHidden"));
+    const reloaded = build({ storage });
+    check("a reload reads the reminder back",
+          reloaded.api.gateRemindDown("goto", "g1") === true,
+          reloaded.api.gateRemindOf("goto", "g1"));
+
+    // Tabs: one tab's Remind press takes the card down in the other, since
+    // the card is drawn per tab from the same pending request. Both share
+    // the one localStorage a browser gives two tabs — the reminder record
+    // travels between them through it.
+    const hub = tabHub();
+    const t1 = build({ hub, storage });
+    const t2 = build({ hub, storage });
+    // A second request: the one above already carries a reminder in this
+    // shared storage, and a card that is down has no press to make.
+    t1.gate.goto = [gotoRec({ id: "g2" })];
+    await t1.api.refreshGotoGate();
+    t2.gate.goto = [gotoRec({ id: "g2" })];
+    await t2.api.refreshGotoGate();
+    // The second tab's clock is minutes behind the first's, so a tab that
+    // pressed here would file a `since` of its own — which is exactly what
+    // the assertion below must see as different.
+    t2.clock.at += 120000;
+    t1.press(t1.nodes.notices, "1h").click();
+    await hub.flush();
+    check("a Remind in one tab puts the card down in the other",
+          t2.api.gateRemindDown("goto", "g2") === true,
+          t2.api.gateRemindOf("goto", "g2"));
+    // The due time is the presser's: a tab that pressed from its own clock
+    // would bring the card back at a different moment, so the record the
+    // presser saved is the one both tabs run.
+    const mine = t1.api.gateRemindOf("goto", "g2");
+    const theirs = t2.api.gateRemindOf("goto", "g2");
+    check("and both tabs count the wait from the same press",
+          theirs.since === mine.since && theirs.after === mine.after &&
+            theirs.due === mine.due,
+          [mine.since, theirs.since, mine.due, theirs.due]);
+  }
+
+  /* --- a tab that cannot read the presser's record files the same wait -- */
+  /* (claunch-gnlui.1) When the receiving tab finds no saved record for the
+     key — its storage is not the presser's, or the read came back empty —
+     it files the reminder itself from the message. The wait it files is the
+     one the reader picked, carried as `after`; without it the tab would fall
+     back to the first choice and bring a 6h card back at 1h. */
+  {
+    const hub = tabHub();
+    const t1 = build({ hub, storage: memoryStorage() });
+    const t2 = build({ hub, storage: memoryStorage() });
+    t1.gate.goto = [gotoRec()];
+    await t1.api.refreshGotoGate();
+    t2.gate.goto = [gotoRec()];
+    await t2.api.refreshGotoGate();
+    t1.press(t1.nodes.notices, "6h").click();
+    await hub.flush();
+    const sent = hub.sent.find((m) => m.t === "gate-remind");
+    check("the press tells the other tabs which wait it picked",
+          !!sent && sent.after === 6 * 3600e3, sent);
+    const theirs = t2.api.gateRemindOf("goto", "g1");
+    check("a tab without the presser's record files the picked wait",
+          !!theirs && theirs.after === 6 * 3600e3 &&
+            theirs.due === theirs.since + 6 * 3600e3 &&
+            t2.api.gateRemindLabel("goto", "g1") === "6h",
+          theirs);
+    check("and takes the card down there too", t2.strip().length === 0, t2.said());
   }
 
   /* --- both surfaces put the newer notice above the older --------------- */
@@ -2269,6 +2662,19 @@ function gotoRec(rec) {
           w.api.noticeHistory.length === 133 &&
             w.api.noticeHistory.every((e) => stamps.get(e.id) === e.at),
           w.api.noticeHistory.length);
+    /* Ordinary history has its own budget (claunch-0z1ij.4). The cap counts
+       the rows it can trim, not the length of the array: while it counted the
+       length, 133 waiting requests spent the whole 100-row budget and these
+       five replies trimmed down to the one newest row -- the History section,
+       which is where a thread reply lands, showed nothing at all. */
+    for (let i = 0; i < 5; i += 1) w.api.notify(`reply${i}`, "", { key: `reply${i}` });
+    const ordinaryRows = () =>
+      w.api.noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+    check("ordinary history keeps its own budget past the cap",
+          ordinaryRows().length === 5 && pendingRows().length === 133 &&
+            w.api.noticeHistory.length === 138,
+          { ordinary: ordinaryRows().length, pending: pendingRows().length,
+            total: w.api.noticeHistory.length });
     // Once they settle they are ordinary rows again, and the next row trims
     // the history back to the cap.
     w.api.runGateSync([], []);
@@ -2413,13 +2819,13 @@ function gotoRec(rec) {
     w.api.runGateSync([rec("new", undefined), rec("old", undefined)], []);
     const order = () => w.panelRows().filter((r) => r.classList.contains("pending"))
       .map((r) => (r.text().match(/s-(new|old)/) || [])[1]);
-    check("without stamps the list falls back to arrival, longest-waiting first",
-          order().join(",") === "new,old", order());
+    check("without stamps the list falls back to arrival, newest first",
+          order().join(",") === "old,new", order());
 
     w.clock.at += 1000;
     w.api.runGateSync([rec("new", (BASE - 7200e3) / 1000), rec("old", (BASE - 60e3) / 1000)], []);
     check("a stamp that arrives late moves its row to where it now belongs",
-          order().join(",") === "new,old", order());
+          order().join(",") === "old,new", order());
   }
   /* --- the clock correction does not jitter every age ---------------
      (claunch-l9znm.1)
@@ -2521,6 +2927,136 @@ function gotoRec(rec) {
           w.api.railSkewOf(undefined, null) === null,
           w.api.railSkewOf(undefined, null));
   }
+  /* --- the criteria a notice carries, and the folded waiting list -------
+     (thread th-3b3470, 2026-10-30)
+
+     The reader asked for a few consistent criteria instead of one card
+     being ordered against another. The words are derived from what a notice
+     already is (`fatal`, `blocking`, `urgent`, `expiring`) plus one a step
+     declares (`deferrable`, from ask.criteria), and a folded "Waiting on
+     you" keeps fatal ∪ urgent ∪ (blocking − deferrable). The fold starts
+     expanded, its state is this browser's, and a folded list still counts
+     everything: the heading's number is the whole waiting set. */
+  {
+    const w = build();
+    check("a gate is blocking", w.api.noticeCriteriaOf(
+      { gateType: "restart", id: "r1" }).has("blocking"), null);
+    check("a fatal notice is fatal", w.api.noticeCriteriaOf(
+      { kind: "fatal", source: "fault" }).has("fatal"), null);
+    check("an urgent gate is both blocking and urgent",
+      ["blocking", "urgent"].every((c) =>
+        w.api.noticeCriteriaOf({ gateType: "ask", urgent: true }).has(c)), null);
+    check("a deadline within the window makes a gate expiring",
+      w.api.noticeCriteriaOf({ gateType: "restart",
+        deadline: new Date(BASE + 60000).toISOString() }).has("expiring"), w.clock.at);
+    check("a far-off deadline does not",
+      !w.api.noticeCriteriaOf({ gateType: "restart",
+        deadline: new Date(BASE + 3600000).toISOString() }).has("expiring"), null);
+    check("a plain notice carries no criterion",
+      w.api.noticeCriteriaOf({ source: "thread", title: "reply" }).size === 0, null);
+    check("deferrable is read off the record",
+      w.api.noticeCriteriaOf({ gateType: "ask", criteria: ["deferrable"] })
+        .has("deferrable"), null);
+    check("folded keeps blocking but drops deferrable",
+      w.api.noticeFoldedShows(new Set(["blocking"])) &&
+        !w.api.noticeFoldedShows(new Set(["blocking", "deferrable"])), null);
+    check("folded keeps fatal and urgent",
+      w.api.noticeFoldedShows(new Set(["fatal"])) &&
+        w.api.noticeFoldedShows(new Set(["urgent"])), null);
+    check("folded shows nothing for a notice with no criterion",
+      !w.api.noticeFoldedShows(new Set()), null);
+  }
+  {
+    const w = build();
+    const landing = { id: "ask2-land", session: "s3", cwd: "/w/s3", scope: "s3",
+      version: 2, kind: "ask", label: "landing-review", prompt: "land it?",
+      presses: [] };
+    const ending = { id: "ask2-end", session: "s4", cwd: "/w/s4", scope: "s4",
+      version: 2, kind: "ask", label: "release-decision", prompt: "end or hold?",
+      criteria: ["deferrable"], presses: [] };
+    w.api.runGateSync([landing, ending], []);
+    w.api.noticePanelToggle(true);
+    check("both waiting requests are listed while the list is expanded",
+          /Waiting on you \(2\)/.test(w.panel()) && w.panelRows().length === 2, w.panel());
+    check("the fold starts expanded", w.api.noticeWaitingFolded === false, null);
+    check("and offers a Fold press", !!w.press(w.nodes["notice-panel-body"], "Fold"),
+          w.panel());
+    w.press(w.nodes["notice-panel-body"], "Fold").click();
+    check("folding keeps the blocking request",
+          w.panelRows().length === 1 && /landing-review/.test(w.panel()), w.panel());
+    check("and keeps the deferred one counted, not hidden silently",
+          /Waiting on you \(2\)/.test(w.panel()) && /1 more waiting/.test(w.panel()),
+          w.panel());
+    check("the choice is this browser's", w.storage.getItem("claunch.noticeWaitingFolded") === "true",
+          [...w.storage.data.entries()]);
+    const again = build({ storage: w.storage });
+    again.api.runGateSync([landing, ending], []);
+    again.api.noticePanelToggle(true);
+    check("a reload comes back folded",
+          again.api.noticeWaitingFolded === true && again.panelRows().length === 1,
+          again.panel());
+    again.press(again.nodes["notice-panel-body"], "Expand").click();
+    check("Expand shows them all again",
+          again.panelRows().length === 2 && !/more waiting/.test(again.panel()),
+          again.panel());
+    check("an urgent request survives the fold even when its step also deferred it",
+          (() => {
+            const w2 = build();
+            w2.api.runGateSync([{ ...ending, urgent: true }], []);
+            w2.api.noticeWaitingFoldSet(true);
+            w2.api.noticePanelToggle(true);
+            return w2.panelRows().length === 1;
+          })(), null);
+  }
+  /* --- what the corner shows is in the panel (claunch-0z1ij) -------------
+
+     The reader's report: with several floating cards up, the notification
+     window's list did not contain every one of them. The two surfaces are
+     drawn from different stores — the corner from its own `notices` map, the
+     panel from `gatePending` plus the history — so the invariant worth
+     holding is "every card on the corner has a row in the panel", checked
+     here for every kind rather than for the one the report happened to
+     show. The known exception, kept visible below rather than papered over,
+     is the 100-row history cap: a sticky notice whose row was trimmed stays
+     on the corner. */
+  {
+    const w = build();
+    const before = w.api.noticeHistory.length;
+    w.api.notify("a plain notice", "its sub", { key: "plain-1", source: "thread" });
+    w.api.notify("a warning", "its sub", { key: "warn-1", source: "page", kind: "warn" });
+    w.api.notify("a stopped leader", "its sub", { key: "fatal-1", source: "fault",
+                                                  kind: "fatal", dismissable: false });
+    w.gate.restart = restartRec();
+    await w.api.refreshRestartGate();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    const said = w.said();
+    check("the corner is showing several cards of different kinds",
+          w.strip().length === 5, said);
+    w.api.noticePanelToggle(true);
+    const panel = w.panel();
+    for (const t of ["a plain notice", "a warning", "a stopped leader",
+                     "daemon restart requested", "run move requested"]) {
+      check(`the panel lists the card "${t}"`, panel.includes(t), panel);
+    }
+    check("and the fatal card keeps its grade inside the panel",
+          /notice-row[^"]*fatal/.test(
+            w.panelRows().map((r) => r.className).join(" ")),
+          w.panelRows().map((r) => r.className));
+    check("no history row was lost raising them",
+          w.api.noticeHistory.length === before + 5, w.api.noticeHistory.length);
+  }
+  /* The other direction is not asserted here, and should not be: the history
+     cap (NOTICE_HISTORY_MAX) trims the row of a notice whose card is still
+     on the corner once 100 newer rows are recorded, and nothing re-records
+     it, so that card can outlive its row and be missing from the panel
+     (claunch-0z1ij). It is written down here instead of checked so the next
+     reader does not take this harness's green as "the surfaces agree in both
+     directions" — closing the gap means keeping the row of a notice that is
+     still up, which is a change to the cap's own rule. */
+  check("the panel's fatal row carries the card's red ground, not only its edge",
+        /\.notice-row\.fatal\s*\{[^}]*background:\s*#2a1615/.test(css) &&
+          /\.notice-row\.fatal\s*\{[^}]*border-color:\s*#6b2b28/.test(css), null);
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
   else console.log("noticehistory_check: ok");

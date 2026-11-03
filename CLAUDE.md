@@ -82,8 +82,10 @@
   끝나기(또는 유예 `beads_winddown_grace`초)를 기다렸다가 종료한다 — 두 번째
   kill이나 `--force`는 즉시. (3) exit: 어떤 이유로든 프로세스가 사라지면 그
   세션이 in_progress로 쥐고 있던 이슈는 `SESSION ENDED` 코멘트와 함께 open으로
-  돌아가고, 데몬이 만들었는데 손도 안 댄 자리표시 이슈는 닫힌다. 데몬 재기동은
-  exit가 아니라서 아무것도 쓸지 않는다. 설정 키는 `daemon.beads_auto_issue` /
+  돌아가고, 데몬이 만들었는데 손도 안 댄 자리표시 이슈는 닫힌다. hold·pause·
+  실패(failed)로 끝난 프로세스는 예외다 — 이슈는 in_progress로 남고, 그
+  기록이 kill·archive·remove로 종료될 때 같은 정리가 돈다(claunch-ijot0).
+  데몬 재기동은 exit가 아니라서 아무것도 쓸지 않는다. 설정 키는 `daemon.beads_auto_issue` /
   `beads_winddown` / `beads_winddown_grace`(store.DAEMON_DEFAULTS). 웹 UI의
   Beads 탭과 세션 레일의 Beads 블록이 이 매치(링크·assignee·created_by·task의
   `issue:` 참조)를 그대로 보여 준다.
@@ -159,6 +161,95 @@
     재현이 실제 `~/.claude-launcher/.claunch.yaml`을 덮은 사고(claunch-wo1zj)가
     그 자리였다. pytest 안의 같은 격리는 `tests/conftest.py`의 autouse `home`
     픽스처가 맡는다.
+
+## 테스트 계층 — T0·T1은 느린 꼬리를 제외하고 T2는 전부 실행한다
+
+- 세 계층의 정의(claunch-ov4zr):
+
+  | 계층 | 시점 | 명령 | 느린 꼬리 |
+  |---|---|---|---|
+  | T0 | 작업 중 | `tools/changed_tests.py` (변경 표적) | 제외 |
+  | T1 | 머지 전 프리뷰 | `tools/preview_land.py`가 병합 트리에서 실행하는 `tools/changed_tests.py` | 제외 |
+  | T2 | 머지 후 | `tools/sweep.py`의 `pytest tests` (`-m` 없음) | 포함 |
+
+  T0와 T1은 선택 규칙이 같고 실행 위치만 다르다. 허브 영역(변경 파일과 무관하게
+  T1에 더할 모듈)은 아직 정의하지 않았다. `--include`로 더하는 기존 경로만 있다.
+- 느린 꼬리는 마커 하나로 정의한다: `slow_tail`. 테스트에 직접 쓰지 않는다.
+  `tests/conftest.py`의 `pytest_collection_modifyitems`가 원천 마커
+  `worktree`, `slow_shim`, `browser` 중 하나를 가진 테스트에 `slow_tail`을 붙인다.
+  마커 목록과 `-m` 표현식은 `src/claude_launcher/test_tiers.py`가 한 곳에서 정한다.
+  T0·T1의 차이는 `-m "not slow_tail"` 한 줄이며, 필요하면
+  `tools/changed_tests.py --with-tail`로 꼬리를 포함해 실행한다.
+- 꼬리에 들어가는 테스트(`821da79b` 기준, 전체 수집 11,077건):
+
+  | 원천 마커 | 건수 | 위치 | 상태 |
+  |---|---|---|---|
+  | `worktree` | 116 | `test_worktree.py` 73, `test_worktree_create_hook.py` 21, `test_worktree_inventory.py` 19, `test_cli_beads.py` 2, `test_migrate_session.py` 1 | 기존 마커 |
+  | `slow_shim` | 31 | `test_routing.py` 21, `test_metering.py` 5, `test_routing_dynamic.py` 5 | 기존 마커 |
+  | `browser` | 57 | `test_web_topology.py::test_browser_harness` (`BROWSER_CHECKS`) | 신규 마커. Playwright가 없으면 모두 skip |
+
+  합계 204건이고 나머지 10,873건이 T0·T1 대상이다. 소요 시간 근거는 아직 없다.
+  `--durations` 데이터(claunch-ov4zr의 형제 작업 s29qf3-tc1)가 도착하기 전까지
+  위 세 마커 이외의 느린 테스트는 후보로만 두며 마커를 붙이지 않았다.
+- 누락이 없다는 확인은 `tests/test_test_tiers.py`가 한다: 수집된 모든 테스트가
+  `slow_tail`과 `not slow_tail` 중 정확히 하나에 속하고, 원천 마커를 가진 테스트는
+  모두 꼬리에 있고, `tools/sweep.py`의 명령에 `-m`이 없다. 그러므로 T2는 T0·T1에서
+  제외한 테스트를 포함해 전체를 실행한다.
+- 선택된 모듈의 테스트가 모두 꼬리여서 pytest가 exit 5(수집된 테스트 없음)를
+  내면 `changed_tests.py`는 이를 통과로 기록한다. 통과로 바꾸기 전에 같은 선택(경로와
+  `--deselect`)을 `-m` 없이 `--collect-only`로 한 번 더 수집하고, 1건 이상 수집될 때만
+  바꾼다(`selection_is_all_tail`). 꼬리를 포함해도 0건이면(삭제된 모듈, `--deselect`로
+  전부 빠진 선택) 이전처럼 실패로 기록한다. 영수증의 `command`에 `-m`이 있어
+  꼬리를 제외한 실행임을 확인할 수 있다. `--with-tail` 실행은 기존 영수증을
+  재사용하지 않는다.
+- `tests/test_test_tiers.py`는 `SOURCE_MARKERS`를 위 표의 세 마커
+  (`worktree`, `slow_shim`, `browser`)에 고정한다. 마커를 더하거나 빼려면 이 표와
+  테스트를 함께 바꾼다.
+- 수정 필요 항목: `worktree.py`나 `routing` 코드를 고친 라운드는 같은 이름의
+  테스트 모듈이 대부분 꼬리여서 T0에서 거의 아무것도 실행하지 않는다.
+  이 경우 `--with-tail`로 실행하거나 T2 결과를 기다려야 한다. 직접 대응하는
+  테스트 모듈을 변경한 경우 꼬리를 유지할지는 정책 결정이 필요하다.
+
+## 브라우저 하네스는 기본으로 skip된다 — 켜는 방법은 `NODE_PATH`
+
+- `tests/web/*_browser.cjs` 64개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
+  `test_browser_harness`가 `node -e "require.resolve('playwright')"`로 게이트를 열 때만
+  실행된다. 이 저장소에는 `package.json`도 `node_modules`도 없으므로 기본 실행에서 그
+  62건은 전부 `pytest.skip`이고, 그 실행의 초록에는 62건의 결과가 들어 있지 않다.
+- 켜는 방법은 환경변수 하나다. playwright가 설치된 `node_modules`를 `NODE_PATH`에 두고
+  같은 선별을 돌린다. `_run_node`는 `subprocess.run(argv, **kwargs)`로 호출되어
+  `env=`를 넘기지 않으므로, 셸의 값이 게이트 검사와 하네스 양쪽에 그대로 상속된다.
+
+  ```
+  npm i -g playwright
+  NODE_PATH=$(npm root -g) uv run --no-sync pytest tests/test_web_topology.py -k browser_harness
+  ```
+
+  Chromium은 `~/.cache/ms-playwright`에 있는 것을 쓰고, 없으면
+  `npx playwright install chromium`이 받는다.
+- 설치 없이도 열린다. npx가 이미 받아 둔 캐시(`~/.npm/_npx/<해시>/node_modules`)에
+  playwright가 있으면 그 경로를 그대로 `NODE_PATH`로 주면 된다(이 머신에는 1.64.1이
+  있다). 다만 그 디렉터리 이름은 npx 재계산으로 바뀌므로, 반복해서 쓰는 쪽은 위의
+  전역 설치 경로다.
+- `CLAUNCH_PLAYWRIGHT`(하네스 여럿이 `require(process.env.CLAUNCH_PLAYWRIGHT ||
+  'playwright')`로 playwright를 찾고, `docs/search-anything.md`가 안내하는 변수)만으로는
+  게이트가 열리지 않는다. `test_browser_harness`의 검사는 `require.resolve('playwright')`
+  하나이고 이 변수를 보지 않으므로, 그 경로만 주면 하네스 자신은 playwright를 찾지만
+  테스트는 그대로 skip된다(실측: 같은 경로를 이 변수로만 주면 게이트 검사는
+  `Cannot find module 'playwright'`로 exit 1, 하네스의 `require`는 exit 0). 게이트를
+  열려면 위의 `NODE_PATH`를 세운다.
+- 이 목적을 위해 저장소에 `package.json`·lockfile을 들이지 않는다. `npm install`은
+  브라우저 바이너리를 받지 않으므로 재현성이 늘지 않고, 파이썬 스위트가 node 툴체인에
+  의존하게 된다.
+- 켠 상태에서 빨간 하네스는 실제 회귀다. skip은 그 실패를 게이트에 보이지 않게 한다
+  (claunch-1bhp2.1: 부트 호출을 스트립하는 정규식이 깨져 네 하네스가 빨갰고, 하네스가
+  skip되는 동안 아무 게이트도 그것을 보고하지 않았다).
+- 선별 `-k browser_harness`가 모으는 것은 **65건**이다 — 하네스 64건과
+  `test_browser_harnesses_strip_the_real_boot_call` 1건이다(그 키워드는 이름의 부분
+  문자열로 걸리므로 두 테스트를 함께 고른다). 이 절을 쓴 시점의 실측(2026-10-28,
+  `8c13c594`, 당시 하네스 57건·선별 58건): **57 passed / 1 failed** — 실패 1건은 하네스
+  `spawngate_browser.cjs`(`claunch-odk2w.1`)이고, 나머지 하네스 56건과 부트 스트립
+  검사가 통과했다. 그러므로 이 수치는 「하네스 57건 중 1건 실패」가 아니다.
 
 
 --- 

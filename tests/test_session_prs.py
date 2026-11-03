@@ -61,3 +61,39 @@ def test_missing_and_corrupt_state_do_not_break_session_poll(home, tmp_path):
     "https://ghe.example.com/o/r/issues/7", "https://u:p@ghe.example.com/o/r/pull/7"])
 def test_only_safe_pr_urls_are_published(url):
     assert session_prs.clean({"url": url}) is None
+
+
+def test_collection_stamp_is_kept_and_rows_come_newest_first(home, tmp_path):
+    """The PR page files rows under the ``at`` the collection stamped
+    (claunch-ijkge). Reading the stamp has to survive ``clean`` -- until it
+    did, every row reached the page without a date and the timeline could
+    only show one undated bucket."""
+    st = RunStore(str(tmp_path), "s1")
+    st.write_chart(frontend.compile_text("""cflow: 2
+name: test-prs
+nodes:
+  wait: {prompt: wait}
+body: wait
+"""))
+    st.save_state({"data": {}, "collections": {"prs": {"items": [
+        {"url": "https://ghe.example.com/o/r/pull/1", "number": 1,
+         "at": "2026-11-01T10:00:00+00:00", "seq": 4},
+        {"url": "https://ghe.example.com/o/r/pull/2", "number": 2,
+         "at": "2026-11-02T10:00:00+00:00", "seq": 5},
+        # written before the stamp existed: it keeps the old order, after the
+        # dated rows, and the page says the date is unknown rather than
+        # inventing one
+        {"url": "https://ghe.example.com/o/r/pull/3", "number": 3},
+    ]}}})
+    rows = session_prs.for_session(str(tmp_path), "s1")
+    assert [r["number"] for r in rows] == [2, 1, 3]
+    assert rows[0]["at"] == "2026-11-02T10:00:00+00:00"
+    assert rows[0]["seq"] == 5
+    assert "at" not in rows[2]
+
+
+def test_wizard_records_carry_a_stamp(home, tmp_path):
+    session_prs.record("s1", {"ok": True, "pr": {"url": URL}, "branch": "b", "base": "master"},
+                       {"title": "t"})
+    [row] = session_prs.for_session(str(tmp_path), "s1")
+    assert isinstance(row.get("at"), str) and row["at"]

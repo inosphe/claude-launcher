@@ -354,6 +354,29 @@ def broadcast_notice(recipients: List[str]) -> str:
     )
 
 
+#: The role whose ``'*'`` sends the daemon refuses (claunch-v0h29.2).
+WORKER_ROLE = "worker"
+
+
+def worker_broadcast_refusal(handle: str) -> str:
+    """Why a worker's ``'*'`` is refused, and what to send instead.
+
+    A worker's message is for its parent, its reviewer or a peer it shares a
+    file with, never every member. Measured on claunch-v0h29: one worker's
+    peer-review nudge sent to ``'*'`` was typed into 844 terminals and came
+    back as 76 response nudges.
+    """
+    return (
+        f"{handle!r} is a worker, and a worker may not send to '*': it would "
+        "be typed into every connected terminal, and each of them spends a "
+        "turn on it (claunch-v0h29: one worker '*' reached 844 members and "
+        "drew 76 response nudges). Address the members it is for by handle "
+        "— your parent, your reviewer, a peer — or an audience selector ("
+        + ", ".join(sorted(AUDIENCE_SELECTORS))
+        + "). An announcement for the whole mesh goes through your leader."
+    )
+
+
 #: What ``exited`` and ``missing`` mean to a sender, and what to do about
 #: each. Split because the two need opposite actions: an exited session is
 #: waiting to be respawned, a missing one has had its record cleared and
@@ -570,6 +593,21 @@ _PEER_BACKOFF_MAX = 60.0
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _natural_name(name: str) -> tuple:
+    """Sort key that reads digit runs as numbers, so ``s9`` precedes ``s10``.
+
+    Session names are auto-generated with a counter, so a plain string sort
+    files the tenth session between the first and the second — which is how
+    the rail's shadow rows read once a fleet passes nine. Same key shape as
+    ``wizard._natural`` (a type tag first, so a digit run never meets a
+    letter run in one comparison).
+    """
+    return tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part)
+        for part in re.split(r"(\d+)", name) if part
+    )
 
 
 #: The role that leads a mesh, and the subrole every leader holds with it
@@ -958,6 +996,17 @@ class Mesh:
         #: and not the member's reply. Persisted next to the cursors, since
         #: it is per-member delivery state of exactly that kind.
         self.dismissed: Dict[str, set] = {}
+        #: handle -> ids of QUEUED messages the operator deleted before they
+        #: were typed in (the queued strip's per-row delete). Excluded from
+        #: :meth:`pending`, so delivery never types them, and from
+        #: :meth:`owed_all`, because a message nobody showed the member is no
+        #: debt of its even after the cursor has moved past it, and from
+        #: :meth:`delivery_of`, so the history never reads it as typed in.
+        #: Persisted next to the cursors and kept for as long as the member
+        #: is: the log is append-only, so the cursor passing a deleted id is
+        #: no sign that nothing reads it any more, and each entry is one
+        #: person's click.
+        self.discarded: Dict[str, set] = {}
         #: Reply-expecting deliveries without a threaded ack/reply.  This is
         #: a delivery receipt, so it persists with cursors across restarts.
         self.response_watches: Dict[str, dict] = {}
@@ -1283,6 +1332,9 @@ class Mesh:
         anything the fast path parked in ``provisional``."""
         start = self.cursors.get(handle, 0)
         done = self.delivered_ids.get(handle) or frozenset()
+        dropped = self.discarded.get(handle)
+        if dropped:
+            done = done | dropped
         log = self.messages
         out = [
             m for m in (log[k] for k in self._indexed().candidates(handle, start))
@@ -1324,6 +1376,8 @@ class Mesh:
                 remote.append(handle)
                 continue
             done = self.delivered_ids.get(handle) or frozenset()
+            if mid in (self.discarded.get(handle) or ()):
+                continue  # deleted from the queue: never typed in
             if mid in done or (
                 index is not None and index < self.cursors.get(handle, 0)
             ):
@@ -1438,6 +1492,7 @@ class Mesh:
         # an entry sent to someone else can be neither owed nor, by the
         # message order the join floor relies on, the first to predate it.
         index = self._indexed()
+        gone = self.discarded.get(handle) or frozenset()
         walk = [(m, m.get("id") in done) for m in reversed(self.provisional)]
         stop = False
         for m, delivered in walk:
@@ -1449,9 +1504,9 @@ class Mesh:
                 if age is not None and age > joined_ago:
                     stop = True
                     break  # predates this member's join — never its debt
-            if delivered and self.addressed_to(m, handle) and expects_reply(
-                msg_type_for(m, handle)
-            ):
+            if delivered and m.get("id") not in gone and self.addressed_to(
+                m, handle
+            ) and expects_reply(msg_type_for(m, handle)):
                 out.append(m)
         if not stop:
             floor = index.last_from.get(handle, -1) + 1
@@ -1462,6 +1517,8 @@ class Mesh:
                     if age is not None and age > joined_ago:
                         break  # predates this member's join — never its debt
                 if not (k < start or m.get("id") in done):
+                    continue
+                if m.get("id") in gone:
                     continue
                 if not self.addressed_to(m, handle):
                     continue
@@ -1618,10 +1675,20 @@ class MeshManager:
         The roster is absolute (v2): the primary's own members carry
         ``machine == ""``, guest members carry their guest's machine name. On
         a mirror, only members stamped with our machine are ours.
+
+        "Our machine" is ``mesh.me`` until the uplink names this daemon:
+        ``machine`` is blank between ``load_all`` and the relay handshake
+        (``daemon/__main__.py``), and ``_load`` already falls back to the
+        ``self`` written in ``mesh.json`` so rank — and therefore
+        ``primary`` — is right before that. Comparing against the blank
+        ``machine`` instead read every row the roster had stamped with our
+        own name as another daemon's, and a local ``mesh send`` as that
+        member was refused with "lives on <our own name>" (claunch-pbn2e).
         """
+        me = self.machine or mesh.me
         if mesh.primary:
-            return bool(self.machine) and member.machine == self.machine
-        return member.machine in ("", self.machine)
+            return bool(me) and member.machine == me
+        return member.machine in ("", me)
 
     #: Same question, asked from outside. The rule above is subtle enough
     #: (blank machine means two different things either side of `primary`)
@@ -2100,6 +2167,62 @@ class MeshManager:
                     flushed += went
                     handles.append(f"{handle}@{mesh.name}")
         return {"flushed": flushed, "handles": handles}
+
+    def discard_queued(
+        self,
+        session: str,
+        msg_id: str,
+        *,
+        mesh_name: Optional[str] = None,
+        handle: Optional[str] = None,
+    ) -> dict:
+        """Delete one held message from ``session``'s backlog, at a human's
+        say-so, so that it is never typed into the terminal.
+
+        The other answer to a row in the queued strip: "deliver now" types the
+        backlog in, this takes one message out of it. Only a message that is
+        in :meth:`queued_for_session` right now can be deleted — one that has
+        already gone in is the agent's to read, and an id that was never
+        queued for this session is refused rather than remembered, since it
+        would install a suppression nothing could ever clear. ``mesh_name``
+        and ``handle`` narrow the match when the session holds several
+        handles; without them every handle of the session holding that id is
+        cleared, which is what a person deleting "this message" means.
+
+        The log itself is untouched: the message stays in the mesh history
+        and is still delivered to every other recipient it was addressed to.
+        Returns ``{"discarded": [{mesh, handle, id}, ...]}``.
+        """
+        msg_id = str(msg_id)
+        hits: List[dict] = []
+        for mesh in self.list():
+            if mesh_name is not None and mesh.name != mesh_name:
+                continue
+            touched = False
+            for h in sorted(mesh.members):
+                if handle is not None and h != handle:
+                    continue
+                member = mesh.members[h]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                if not any(m.get("id") == msg_id for m in mesh.pending(h)):
+                    continue
+                mesh.discarded.setdefault(h, set()).add(msg_id)
+                if not mesh.pending(h):
+                    mesh._first_pending.pop(h, None)
+                hits.append({"mesh": mesh.name, "handle": h, "id": msg_id})
+                touched = True
+            if touched:
+                self._persist_cursors(mesh)
+        if not hits:
+            raise MeshError(
+                f"message {msg_id!r} is not queued for session {session!r}"
+            )
+        log.info(
+            "session %r: deleted queued message %r (%s)", session, msg_id,
+            ", ".join(f"{e['handle']}@{e['mesh']}" for e in hits),
+        )
+        return {"discarded": hits}
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -3446,8 +3569,13 @@ class MeshManager:
             + (
                 f"note: {hidden} other member(s) exist that you are not "
                 "connected to and cannot message\n" if hidden > 0 else ""
-            ) +
-            f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            ) + (
+                f"send: claunch mesh send {mesh.name} <to> \"...\" — a worker "
+                "may not send to '*' (the daemon refuses it); name the "
+                "handles it is for\n"
+                if member.role == WORKER_ROLE
+                else f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            )
             + self._stance_lines(mesh, member, inline=inline_stance) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
             "load the member protocol; if you have no such skill, run "
@@ -3578,12 +3706,13 @@ class MeshManager:
         if member is None:
             raise MeshError(f"no member {handle!r} in mesh {name!r}")
         if mesh.primary:
-            # Same shape as `_is_local`'s mirror arm, blank relay name and
-            # all: without the first clause an unnamed daemon compares "" to
-            # "" and waves a blank row through. `_peer_call` refuses that
-            # case a line later, so this is agreement rather than a fix — but
-            # a guard that reads differently from the rule it enforces is how
-            # the two got out of step to begin with.
+            # The mirror arm of `_is_local`, with our name taken strictly:
+            # without the first clause an unnamed daemon compares "" to ""
+            # and waves a blank row through. `_is_local` falls back to
+            # `mesh.me` while the uplink has not named us (claunch-pbn2e),
+            # but the peer call below needs a real relay name — so this
+            # guard keeps refusing in that window instead of letting the
+            # call fail a line later on the same missing name.
             if not (bool(self.machine) and member.machine == self.machine):
                 raise MeshError(
                     f"{handle!r} is not a member from this daemon — the "
@@ -3599,6 +3728,7 @@ class MeshManager:
         # write-offs made against whoever wore it last — the same reason the
         # member edges below are pruned.
         mesh.dismissed.pop(handle, None)
+        mesh.discarded.pop(handle, None)
         mesh.stranded_told.pop(handle, None)
         for told in mesh.stranded_told.values():
             if handle in told:
@@ -4101,7 +4231,9 @@ class MeshManager:
         # dashboard is not warned: the advisory is about agents spending
         # other agents' turns.
         broadcast = to == "*" and not external
-        recipients = self._resolve_recipients(mesh, from_handle, to)
+        if broadcast and member is not None and member.role == WORKER_ROLE:
+            raise MeshError(worker_broadcast_refusal(from_handle))
+        recipients =self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
             raise MeshError(self._nobody_to_deliver_to(mesh, from_handle))
         norm_sections = _normalize_sections(sections, recipients, from_handle)
@@ -8021,6 +8153,12 @@ class MeshManager:
         here (the default spelled out, as the mesh list spells it): a remote
         session has no project on this daemon, so the meshes it sits in are
         what decide which project's rail shows it.
+
+        The rows come back sorted by machine and then by session name with
+        its digit runs read as numbers (``_natural_name``): the rail draws
+        them in this order (``shadowLineage`` keeps it and lays a spawned
+        session under the one that spawned it), and a string sort would file
+        ``s100`` between ``s10`` and ``s11``.
         """
         rows: Dict[Tuple[str, str], dict] = {}
         for mesh in self.list():
@@ -8042,7 +8180,10 @@ class MeshManager:
                     "roles": list(member.roles),
                     "linked": host in mesh.links,
                 })
-        return [rows[k] for k in sorted(rows)]
+        return [
+            rows[k]
+            for k in sorted(rows, key=lambda k: (k[0], _natural_name(k[1])))
+        ]
 
     def shadow_route(self, machine: str, session: str) -> Tuple[Mesh, Member]:
         """The mesh (and member row) to reach ``machine``'s ``session`` through.
@@ -8325,6 +8466,7 @@ class MeshManager:
                     mesh.cursors.pop(handle, None)
                     mesh._first_pending.pop(handle, None)
                     mesh.dismissed.pop(handle, None)
+                    mesh.discarded.pop(handle, None)
             mesh.members = adopted
             self._persist_def(mesh)
             self._persist_cursors(mesh)
@@ -9923,6 +10065,11 @@ class MeshManager:
                         for k, v in (raw.get("dismissed") or {}).items()
                         if v
                     }
+                    mesh.discarded = {
+                        str(k): {str(i) for i in v}
+                        for k, v in (raw.get("discarded") or {}).items()
+                        if v
+                    }
                     mesh.response_watches = {
                         str(k): dict(v)
                         for k, v in (raw.get("response_watches") or {}).items()
@@ -9939,6 +10086,7 @@ class MeshManager:
                 mesh.cursors = {}
                 mesh.link_cursors = {}
                 mesh.dismissed = {}
+                mesh.discarded = {}
                 mesh.response_watches = {}
                 mesh.stranded_told = {}
         outbox_path = d / "outbox.jsonl"
@@ -10026,6 +10174,9 @@ class MeshManager:
             dismissed = {h: sorted(ids) for h, ids in mesh.dismissed.items() if ids}
             if dismissed:
                 doc["dismissed"] = dismissed
+            discarded = {h: sorted(ids) for h, ids in mesh.discarded.items() if ids}
+            if discarded:
+                doc["discarded"] = discarded
             if mesh.response_watches:
                 doc["response_watches"] = mesh.response_watches
             if mesh.stranded_told:
@@ -10178,6 +10329,55 @@ class MeshManager:
             for key in settled:
                 del mesh.response_watches[key]
             self._persist_cursors(mesh)
+
+    def settle_response_watch_for(
+        self, session: str, message_id: str
+    ) -> Optional[dict]:
+        """Close this session's own reply-wait on ``message_id`` by hand.
+
+        A reply-wait has no row in the session's ledger -- :func:`loops.reply_waits`
+        reads it off ``mesh.response_watches`` -- so closing one means
+        deleting the watch, and the delete goes through this store rather
+        than a copy of it. Without a door here the id a listing printed could
+        never be closed: ``loops.close`` scans the stored rows, finds nothing,
+        and the watch keeps driving the response nudge.
+
+        Scoped to the session's OWN member as the sender and to the exact
+        message id, so another member's watch of the same id, or a watch this
+        session owes to somebody else, is not this wait. Returns a copy of
+        the watch with the mesh's name added, or ``None`` when no such watch
+        exists.
+        """
+        if not message_id:
+            return None
+        try:
+            rows = self.meshes_for_session(session)
+        except Exception:  # noqa: BLE001
+            return None
+        for row in rows:
+            try:
+                mesh = self.get(row["mesh"])
+                member = self.member_for_session(mesh, session)
+            except Exception:  # noqa: BLE001
+                continue
+            if member is None:
+                continue
+            settled: Optional[dict] = None
+            for key, watch in list(mesh.response_watches.items()):
+                if (
+                    str(watch.get("id") or "") != message_id
+                    or str(watch.get("from") or "") != member.handle
+                ):
+                    continue
+                if settled is None:
+                    settled = dict(watch)
+                del mesh.response_watches[key]
+            if settled is None:
+                continue
+            settled["mesh"] = mesh.name
+            self._persist_cursors(mesh)
+            return settled
+        return None
 
     def _response_watch_tick(self, mesh: Mesh) -> None:
         """Tell each sender once, and drop what can no longer be answered.

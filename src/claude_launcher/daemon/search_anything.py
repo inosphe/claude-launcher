@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import os
+import shutil
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 from aiohttp import web
 from .. import store, workspaces
@@ -175,7 +177,7 @@ def _build(boards, snaps):
     return docs
 
 
-EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
+EDITABLE = {"source", "sources", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval", "rate_limit", "preset", "presets", "root_serving"}
 SOURCES = ("custom", "profile")
 
 
@@ -209,12 +211,84 @@ def proposed(body):
     ``base_url``/``api_key``/``embedding_model``/``rerank_model``/``profile``)
     still works: those land in the row ``source`` names. Only the chosen path
     is validated, so a profile-backed block needs no typed address.
+
+    ``presets`` replaces the block's saved preset list and ``preset`` points
+    at one of them (empty = the block's own rows). A preset carries its own
+    connection, so the validation below checks the connection in force -- the
+    active preset's fields when one resolves, else the legacy rows.
     """
     if not isinstance(body, dict) or set(body) - EDITABLE:
         raise ValueError("unsupported search setting")
     doc = store.load()
     block = dict(doc.get("rag") or {})
     rows = store.rag_source_rows(block)
+    if "presets" in body:
+        submitted = body["presets"]
+        if not isinstance(submitted, list):
+            raise ValueError("presets must be a list")
+        if len(submitted) > store.RAG_MAX_PRESETS:
+            raise ValueError(f"presets holds at most {store.RAG_MAX_PRESETS}")
+        saved_by_id = {p["id"]: p for p in store.rag_presets(doc)}
+        cleaned = []
+        seen = set()
+        for raw in submitted:
+            preset = store.clean_rag_preset(raw)
+            if preset is None:
+                raise ValueError(
+                    "each preset needs an id of lowercase letters, digits and hyphens"
+                )
+            if preset["id"] in seen:
+                raise ValueError(f"duplicate preset id {preset['id']!r}")
+            seen.add(preset["id"])
+            # ``renamed_from`` is the card saying "this row is the preset that
+            # used to be called X": the secret stays with the connection, not
+            # with the name. It is a save-time hint only — dropping it here is
+            # what keeps it out of the settings file (claunch-fhs7f.1).
+            renamed_from = preset.pop("renamed_from", "")
+            # An empty api_key field preserves the secret saved under this id,
+            # the same rule the connection rows use.
+            if not preset.get("api_key"):
+                saved = saved_by_id.get(preset["id"]) or (
+                    saved_by_id.get(renamed_from) if renamed_from else None)
+                if saved and saved.get("api_key"):
+                    preset["api_key"] = saved["api_key"]
+            cleaned.append(preset)
+        block["presets"] = cleaned
+    merged_presets = store._rag_preset_rows(
+        block.get("presets") if "presets" in body else (doc.get("rag") or {}).get("presets")
+    )
+    if "preset" in body:
+        wanted = body["preset"]
+        if not isinstance(wanted, str):
+            raise ValueError("preset must be text")
+        wanted = wanted.strip()
+        if wanted and wanted not in {p["id"] for p in merged_presets}:
+            raise ValueError(f"preset {wanted!r} is not one of the saved presets")
+        block["preset"] = wanted
+    # The connection the in-force path describes: the active preset's fields
+    # when one resolves (submitted or already saved), else the legacy rows.
+    # Flat keys keep writing the legacy rows either way -- they are the
+    # fallback a dangling preset pointer falls back to.
+    wanted_now = str(block.get("preset") or "").strip()
+    preset_row = next((p for p in merged_presets if p["id"] == wanted_now), None)
+    if preset_row is not None:
+        check_source = "profile" if preset_row.get("source") == "profile" else "custom"
+        check_rows = {
+            "custom": {
+                "base_url": preset_row.get("base_url", ""),
+                "api_key": preset_row.get("api_key", ""),
+                "embedding_model": preset_row.get("embedding_model", ""),
+                "rerank_model": preset_row.get("rerank_model", ""),
+            },
+            "profile": {
+                "profile": preset_row.get("profile", ""),
+                "embedding_model": preset_row.get("embedding_model", ""),
+                "rerank_model": preset_row.get("rerank_model", ""),
+            },
+        }
+    else:
+        check_source = ""
+        check_rows = rows
     if "sources" in body:
         submitted = body["sources"]
         if not isinstance(submitted, dict):
@@ -234,7 +308,7 @@ def proposed(body):
     pending = body.get("source") or block.get("source")
     active = "profile" if pending == "profile" else "custom"
     for key, value in body.items():
-        if key in ("source", "sources"):
+        if key in ("source", "sources", "preset", "presets"):
             continue
         if key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
             if not isinstance(value, str):
@@ -253,37 +327,47 @@ def proposed(body):
         elif key == "verify_tls":
             if not isinstance(value, bool):
                 raise ValueError("verify_tls must be boolean")
+        elif key == "root_serving":
+            # The /v1 correction's opt-out for root-serving endpoints (TEI):
+            # the block-level flag the legacy custom row and the test probe
+            # read, while a preset row carries its own (claunch-rag-preset-
+            # always-hn5bc.1).
+            if not isinstance(value, bool):
+                raise ValueError("root_serving must be boolean")
+            block[key] = value is True
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{key} must be a number")
-            if value < (0 if key == "watch_interval" else 1) or value > 10000:
+            if value < (0 if key in ("watch_interval", "rate_limit") else 1) or value > 10000:
                 raise ValueError(f"{key} is out of range")
-            if key in ("batch", "candidates", "rerank_top") and int(value) != value:
+            if key in ("batch", "candidates", "rerank_top", "rate_limit") and int(value) != value:
                 raise ValueError(f"{key} must be an integer")
         block[key] = value
     if "source" in body:
         block["source"] = body["source"]
-    source = active
+    source = check_source or active
+    check = check_rows
     # Only the path in force is validated. The card sends both rows on every
     # save, so "this request carried the profile row" says nothing about
     # whether the profile path is the one being chosen -- and a stale profile
     # name left in the row out of force (the card keeps it, so switching back
     # restores it) would block a custom save the reader meant to make
     # (claunch-pxxn4, found in review). The stale name is kept and diagnosed
-    # by ``profile_error`` when that path is chosen.
-    profile_name = rows["profile"].get("profile", "")
+    # by ``profile_error`` when that path is chosen. With a preset in force
+    # the same rule covers the preset's own rows.
+    profile_name = check["profile"].get("profile", "")
     if source == "profile":
         if not profile_name:
             raise ValueError("choose a profile for the profile connection")
         store.rag_profile_backend(profile_name, doc)
-    if source == "custom" and not rows["custom"].get("base_url"):
+    if source == "custom" and not check["custom"].get("base_url"):
         raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
-    if rows["custom"].get("base_url"):
+    if check["custom"].get("base_url"):
         # Well-formedness of the stored address is checked even while the
         # profile path is in force: the row is written either way, and an
         # address that cannot be parsed is refused at the moment it is given
         # rather than at the switch that would trust it.
-        address = urlsplit(rows["custom"]["base_url"])
+        address = urlsplit(check["custom"]["base_url"])
         if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
             raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
     block.pop("dimensions", None)  # Output width is learned from model responses.
@@ -318,6 +402,138 @@ def profile_rows(doc=None):
     return rows
 
 
+def _rag_base(service):
+    """The directory the collections live in for this service."""
+    root = getattr(service, "_root_dir", None)
+    return root if root is not None else rag.paths.rag_dir()
+
+
+def _read_paths(service, base, cfg):
+    """Which collection each reading config resolves to, keyed by preset id.
+
+    The pairing has to be the runtime's own ``rag.RagService._index_path``.
+    A name-based pairing misses the pre-preset ``<corpus>.zvec``: it carries
+    no ``identity`` and its sidecar may carry no ``model_key``, while
+    ``_index_path`` adopts it whenever the sidecar's key matches the model —
+    so a preset (or a direct config) reading that collection had no entry
+    beside its name and the delete guard let it go (claunch-fhs7f.1 review).
+    ``""`` is the active config.
+    """
+    try:
+        doc = store.load()
+    except (OSError, ValueError):
+        doc = {}
+    block = dict(doc.get("rag") or {}) if isinstance(doc, dict) else {}
+    out = {"": {service._index_path(base, kind, cfg) for kind in rag.KINDS}}
+    for preset in store.rag_presets(doc):
+        conf = store.rag_config({"rag": {**block, "preset": preset["id"]}})
+        out[preset["id"]] = {service._index_path(base, kind, conf) for kind in rag.KINDS}
+    return out
+
+
+def _store_rows(service, base):
+    """Every collection on disk, marked with who reads it.
+
+    ``rag.rag_stores`` answers what exists; this adds the two facts the DB
+    panel's delete rule needs: which presets read the store, and whether the
+    running config is the one reading it. Both are answered by the path the
+    runtime would open — ``_index_path`` — so a collection adopted under the
+    pre-preset rule is attributed to its reader like any other
+    (claunch-fhs7f.1).
+    """
+    cfg = service.config()
+    rows = rag.rag_stores(base)
+    readers = _read_paths(service, base, cfg)
+    active = readers.get("", set())
+    for row in rows:
+        path = Path(row["path"])
+        row["presets"] = [pid for pid, paths in readers.items() if pid and path in paths]
+        row["in_use"] = path in active
+    return rows
+
+
+def _preset_db(preset):
+    """The store identity a saved preset reads: ``db``, else its model key.
+
+    The same rule ``store.rag_config`` applies to the preset in force, so
+    the DB panel's rename and delete see a preset that never named a ``db``
+    reading the collection its model built (claunch-r4796).
+    """
+    named = store.rag_model_key_slug(str(preset.get("db") or ""))
+    if named:
+        return named
+    return store.rag_model_key_slug(
+        str(preset.get("model_key") or "") or str(preset.get("embedding_model") or ""))
+
+
+def _db_files(base, identity):
+    """Every collection directory and sidecar of one named DB.
+
+    A DB is a store identity shared by one collection per corpus
+    (``<corpus>.<identity>.zvec`` with its ``.meta.json``). A sidecar can
+    exist without its directory -- the corpus was configured but never
+    embedded -- and it still names the DB, so it moves and goes with it.
+    """
+    out = []
+    if not identity:
+        return out
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return out
+    for path in entries:
+        name = path.name
+        if name.endswith(".zvec") and path.is_dir():
+            stem = name[: -len(".zvec")]
+        elif name.endswith(".meta.json") and path.is_file():
+            stem = name[: -len(".meta.json")]
+        else:
+            continue
+        _corpus, _, ident = stem.partition(".")
+        if ident == identity:
+            out.append(path)
+    return out
+
+
+def _db_width_conflict(doc, base):
+    """Why the active preset's named DB cannot hold this model's vectors.
+
+    A preset that names its own ``db`` keeps that collection across a model
+    swap, which is the point of the field (claunch-fhs7f.1) — but a
+    collection's width is fixed when its vectors are written. Pointing a
+    4096-dimension model at a 768-dimension store fails at the first query
+    with ``dimension mismatch``, far from the save that caused it, so the
+    save is where it is refused.
+
+    Both numbers come from records already on disk: the target store's
+    sidecar, and the sidecar of a collection this same model built before.
+    Without that second record the model's width is unknown here and the
+    save goes through — the connection test learns the width and the card
+    compares it.
+    """
+    cfg = store.rag_config(doc)
+    active = cfg.get("preset") or ""
+    row = next((p for p in store.rag_presets(doc) if p["id"] == active), None)
+    named = store.rag_model_key_slug(str((row or {}).get("db") or ""))
+    if not named:
+        return None
+    model_slug = store.rag_model_key_slug(str(cfg.get("embedding_model") or ""))
+    rows = rag.rag_stores(base)
+    target = next((r["dims"] for r in rows if r["identity"] == named and r["dims"]), 0)
+    known = next((
+        r["dims"] for r in rows
+        if r["dims"] and r["identity"] != named
+        and (r["model_key"] == model_slug or store.rag_model_key_slug(r["model"]) == model_slug)
+    ), 0)
+    if not target or not known or target == known:
+        return None
+    return (
+        f"DB {named!r} holds {target}-dimension vectors and "
+        f"{cfg.get('embedding_model')!r} produces {known} — point the preset at a DB "
+        f"this model built, or give it a new DB name"
+    )
+
+
 def public_settings():
     """What the Settings card draws. No secret crosses this boundary.
 
@@ -329,6 +545,14 @@ def public_settings():
     changed models.
     """
     doc = store.load()
+    # Preset-only card (claunch-rag-preset-always-hn5bc): a pointer that
+    # resolves to nothing is migrated here, on the read the card opens with
+    # — legacy direct settings become a preset named after their model, and
+    # the picker never shows an unowned connection.
+    migrated = store.rag_migrate_legacy_preset(doc)
+    if migrated is not None:
+        store.save(migrated)
+        doc = migrated
     block = doc.get("rag") if isinstance(doc.get("rag"), dict) else {}
     cfg = store.rag_config(doc)
     custom = store.rag_config({"rag": {**block, "source": "custom"}})
@@ -342,15 +566,39 @@ def public_settings():
     # an extra key would be refused by ``_check_source_row``. Whether a key is
     # on file is the top-level ``api_key_set``.
     rows["custom"].pop("api_key", None)
-    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url", "sources"}}
+    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url", "sources", "presets"}}
+    # The secret never leaves the daemon here either: a preset row reports
+    # whether a key is on file, never the key -- the card posts these rows
+    # straight back and an empty api_key field preserves the saved secret.
+    # ``api_key_set`` answers the card's field placeholder: does the row the
+    # reader is editing carry a key. With a preset in force that is the
+    # preset row; the resolved custom config cannot answer it for a
+    # profile-source preset, whose backend lives outside the synthetic
+    # custom-spelled document (claunch-rag-preset-always-hn5bc).
+    stored = store.rag_source_rows(block)
+    active_row = next((p for p in store.rag_presets(doc) if p["id"] == cfg["preset"]), None)
+    key_on_file = bool((active_row or stored["custom"]).get("api_key"))
     out.update({
         "base_url": custom["base_url"],
-        "api_key_set": bool(custom["api_key"]),
+        "api_key_set": key_on_file,
         "configured": store.rag_configured(cfg),
         "profile_error": cfg["profile_error"],
+        "model_key": cfg.get("model_key") or "",
+        # The collection the active preset reads. Equal to ``model_key``
+        # unless the preset names one (claunch-fhs7f.1).
+        "db": cfg.get("db") or "",
+        # The saved-list ceiling the daemon enforces on the settings PUT, so
+        # the card can show "N/20" and pre-empt the server's refusal instead
+        # of erroring after the fact (claunch-rag-preset-always-hn5bc.2).
+        "preset_max": store.RAG_MAX_PRESETS,
         "resolved": {"base_url": cfg["base_url"], "has_key": bool(cfg["api_key"])},
         "profiles": profile_rows(doc),
         "sources": rows,
+        "presets": [
+            {**{k: v for k, v in p.items() if k != "api_key"},
+             "api_key_set": bool(p.get("api_key"))}
+            for p in store.rag_presets(doc)
+        ],
     })
     return out
 
@@ -370,6 +618,12 @@ def install(app):
             return web.json_response(public_settings())
         try:
             doc = proposed(await request.json())
+            # A named DB outlives a model swap, so a width the store cannot
+            # hold is refused here rather than at the first query
+            # (claunch-fhs7f.1).
+            conflict = _db_width_conflict(doc, _rag_base(service))
+            if conflict:
+                raise ValueError(conflict)
             # Stop old-model syncs before changing their endpoint or vectors.
             await service.shutdown()
             store.save(doc)
@@ -386,13 +640,23 @@ def install(app):
     async def test(request):
         stage, dimensions = "embedding", None
         try:
-            cfg = store.rag_config(proposed(await request.json()))
+            body = await request.json()
+            # The probe tests what is on screen, not what is saved: the card
+            # posts the field values as the legacy rows, and a saved preset
+            # pointer would make proposed()/rag_config resolve the preset's
+            # stored connection instead — the exact values the reader is
+            # about to change (claunch-rag-preset-always-hn5bc). Pointing the
+            # body at no preset leaves the submitted rows as the connection
+            # the probe validates and calls.
+            if isinstance(body, dict):
+                body["preset"] = ""
+            cfg = store.rag_config(proposed(body))
             if not store.rag_configured(cfg):
                 if cfg["profile_error"]:
                     return web.json_response({"error": f"Profile connection unavailable: {cfg['profile_error']}", "stage": "config"}, status=400)
                 raise ValueError("API address, key and embedding model are required")
             client = service._client(cfg)
-            vectors = await client.embed(["search connection test"])
+            vectors = await client.embed(["search connection test"], purpose="probe")
             dimensions = len(vectors[0])
             if cfg.get("rerank_model"):
                 stage = "rerank"
@@ -412,7 +676,250 @@ def install(app):
             raise web.HTTPNotFound()
         return web.json_response(event)
 
+    async def backfill_pause(request):
+        """Hold the backfill consumer; queued corpora keep their order."""
+        return web.json_response({"paused": service.pause_backfill()})
+
+    async def backfill_resume(request):
+        """Let the consumer drain the queue from where the pause left it."""
+        return web.json_response({"paused": service.resume_backfill()})
+
+    async def selftest(request):
+        """Sample a corpus and check its entries retrieve at threshold.
+
+        The check to run after switching presets: does the store the active
+        model opened answer its own entries within ``top_k`` at a similarity
+        of at least ``threshold``. Never rate-limited -- the embeddings are
+        the query path, which the limiter never delays.
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+            kind = str(body.get("kind") or "sessions")
+            if kind not in rag.KINDS:
+                raise ValueError(f"unknown corpus {kind!r}")
+            root = None
+            if kind == "beads":
+                root = await service.resolve_root(str(body.get("cwd") or ""))
+                if root is None:
+                    raise ValueError("cwd does not resolve to a known board")
+            result = await service.self_test(
+                kind, root,
+                sample=int(body.get("sample") or 20),
+                threshold=(body.get("threshold") if body.get("threshold") is not None else 0.5),
+                top_k=int(body.get("top_k") or 5),
+            )
+            return web.json_response(result)
+        except (ValueError, rag.RagError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+    async def dbs(request):
+        """Every collection on disk, with the presets that read it.
+
+        The DB panel's source. A preset names a collection with ``db`` and
+        falls back to its model identity; either way this lists what is
+        there — name, width, model, size — so the reader can point a preset
+        at a store it already has before a model swap (claunch-fhs7f.1).
+        """
+        cfg = service.config()
+        rows = _store_rows(service, _rag_base(service))
+        return web.json_response({
+            "dbs": rows,
+            "active": cfg.get("db") or "",
+            "model": cfg.get("embedding_model") or "",
+        })
+
+    async def dbs_delete(request):
+        """Remove one collection and its sidecar.
+
+        A store a preset reads is refused, and so is the one the active
+        config reads: the vectors cannot be rebuilt without asking the
+        provider again, and the row already names its readers, so the
+        reader clears the pointer first. Deleting a collection nobody
+        reads is the only case where nothing downstream changes
+        (claunch-fhs7f.1).
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be an object"}, status=400)
+        db = str(body.get("db") or "").strip()
+        if db:
+            return await _delete_db(db)
+        name = str(body.get("name") or "").strip()
+        row = next((r for r in _store_rows(service, _rag_base(service)) if r["name"] == name), None)
+        if row is None:
+            return web.json_response(
+                {"error": f"DB {name or '(이름 없음)'}을 찾지 못했습니다."}, status=400)
+        identity = row["identity"] or row["model_key"]
+        if row["presets"] or row["in_use"]:
+            readers = ", ".join(row["presets"]) if row["presets"] else "현재 활성 설정"
+            return web.json_response(
+                {"error": f"DB {identity or name}을 쓰는 곳이 있습니다: {readers} — "
+                          f"그 프리셓의 DB 이름을 먼저 바꾼 뒤 삭제하세요."}, status=400)
+        path = Path(row["path"])
+        # An open collection holds an exclusive lock on its directory, so it
+        # is closed before the directory goes -- and dropped from the table
+        # so a later open builds a fresh one rather than reusing a handle
+        # whose files are gone.
+        for key, index in list(service._indexes.items()):
+            if getattr(index, "path", None) == path:
+                service._indexes.pop(key, None)
+                index.close()
+        try:
+            shutil.rmtree(path)
+            sidecar = path.with_suffix(".meta.json")
+            if sidecar.exists():
+                sidecar.unlink()
+        except OSError as exc:
+            return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
+        return web.json_response({"deleted": name, "dbs": _store_rows(service, _rag_base(service))})
+
+    def _db_readers(base, identity):
+        """The presets (and the running config) reading one named DB."""
+        try:
+            doc = store.load()
+        except (OSError, ValueError, store.StoreError):
+            doc = {}
+        names = [p["id"] for p in store.rag_presets(doc) if _preset_db(p) == identity]
+        in_use = False
+        for row in _store_rows(service, base):
+            if row["identity"] != identity:
+                continue
+            names.extend(pid for pid in row["presets"] if pid not in names)
+            in_use = in_use or row["in_use"]
+        return names, in_use
+
+    async def _delete_db(identity):
+        """Remove every collection of one named DB, sidecars included.
+
+        The panel lists a DB once however many corpora it holds, so its
+        delete takes the whole DB. The reader rule is the per-collection
+        one: a DB a preset reads stays until that preset points elsewhere
+        (claunch-r4796).
+        """
+        base = _rag_base(service)
+        files = _db_files(base, identity)
+        if not files:
+            return web.json_response({"error": f"DB {identity}을 찾지 못했습니다."}, status=400)
+        readers, in_use = _db_readers(base, identity)
+        if readers or in_use:
+            who = ", ".join(readers) if readers else "현재 활성 설정"
+            return web.json_response(
+                {"error": f"DB {identity}을 쓰는 프리셋이 있습니다: {who} — "
+                          f"그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요."}, status=400)
+        for key, index in list(service._indexes.items()):
+            if getattr(index, "path", None) in files:
+                service._indexes.pop(key, None)
+                index.close()
+        try:
+            for path in files:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                elif path.exists():
+                    path.unlink()
+        except OSError as exc:
+            return web.json_response({"error": f"삭제하지 못했습니다: {exc}"}, status=400)
+        return web.json_response({"deleted": identity, "dbs": _store_rows(service, base)})
+
+    async def dbs_rename(request):
+        """Rename one named DB: its collections, sidecars and every reader.
+
+        A DB's name is the middle part of ``<corpus>.<identity>.zvec``, so a
+        rename moves each corpus's directory and sidecar to the new name and
+        rewrites ``db`` on every preset that read the old one -- a preset
+        that never named a ``db`` and read the store through its model key
+        gets the new name written down, or it would go on looking for the
+        old directory and embed the corpus again. The vectors do not change.
+        The service is stopped first (an open collection holds a lock on
+        its directory) and started again whatever happens; a move that
+        fails part-way is undone (claunch-r4796).
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            return web.json_response({"error": "body must be an object"}, status=400)
+        old = str(body.get("from") or "").strip()
+        new = store.rag_model_key_slug(str(body.get("to") or ""))
+        base = _rag_base(service)
+        if not old:
+            return web.json_response({"error": "이름을 바꿀 DB를 지정하세요."}, status=400)
+        if not new:
+            return web.json_response(
+                {"error": "새 DB 이름에 쓸 수 있는 글자가 없습니다 — 영문 소문자·숫자·하이픈을 쓰세요."},
+                status=400)
+        if new == old:
+            return web.json_response({"error": f"DB 이름이 이미 {old}입니다."}, status=400)
+        files = _db_files(base, old)
+        if not files:
+            return web.json_response({"error": f"DB {old}을 찾지 못했습니다."}, status=400)
+        if _db_files(base, new):
+            return web.json_response(
+                {"error": f"DB {new}이 이미 있습니다 — 다른 이름을 쓰세요."}, status=400)
+        try:
+            doc = store.load()
+        except (OSError, ValueError, store.StoreError) as exc:
+            return web.json_response({"error": f"설정 파일을 읽지 못했습니다: {exc}"}, status=400)
+        block = doc.get("rag") if isinstance(doc, dict) else None
+        moved_presets = []
+        if isinstance(block, dict) and isinstance(block.get("presets"), list):
+            for raw in block["presets"]:
+                clean = store.clean_rag_preset(raw)
+                if clean is not None and _preset_db(clean) == old:
+                    raw["db"] = new
+                    moved_presets.append(clean["id"])
+            # A preset that already names the new DB but has not built it yet
+            # would, after the move, read vectors another model made.
+            claimed = [
+                clean["id"]
+                for clean in map(store.clean_rag_preset, block["presets"])
+                if clean is not None and clean["id"] not in moved_presets
+                and _preset_db(clean) == new
+            ]
+            if claimed:
+                return web.json_response(
+                    {"error": f"프리셋 {', '.join(claimed)}이 이미 DB 이름 {new}을 씁니다 — 다른 이름을 쓰세요."},
+                    status=400)
+        await service.shutdown()
+        moved = []
+        try:
+            for path in files:
+                suffix = ".zvec" if path.name.endswith(".zvec") else ".meta.json"
+                corpus = path.name[: -len(suffix)].partition(".")[0]
+                target = base / f"{corpus}.{new}{suffix}"
+                os.replace(path, target)
+                moved.append((path, target))
+            if moved_presets:
+                store.save(doc)
+        except (OSError, store.StoreError) as exc:
+            for source, target in reversed(moved):
+                try:
+                    os.replace(target, source)
+                except OSError:
+                    pass
+            service.start()
+            return web.json_response({"error": f"이름을 바꾸지 못했습니다: {exc}"}, status=400)
+        service._indexes.clear()
+        service._progress.clear()
+        service.start()
+        await service.catch_up()
+        return web.json_response({
+            "renamed": old, "db": new, "presets": moved_presets,
+            "dbs": _store_rows(service, base),
+        })
+
     app.router.add_get("/api/rag/settings", settings)
     app.router.add_put("/api/rag/settings", settings)
+    app.router.add_get("/api/rag/dbs", dbs)
+    app.router.add_post("/api/rag/dbs/delete", dbs_delete)
+    app.router.add_post("/api/rag/dbs/rename", dbs_rename)
+    app.router.add_post("/api/rag/backfill/pause", backfill_pause)
+    app.router.add_post("/api/rag/backfill/resume", backfill_resume)
     app.router.add_post("/api/rag/test", test)
+    app.router.add_post("/api/rag/selftest", selftest)
     app.router.add_get("/api/search/records/{name}/{event}", record)

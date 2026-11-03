@@ -112,6 +112,19 @@ def home_mesh(session: str, *, cwd: Optional[str] = None,
     return str(getattr(pool, "mesh", "") or "")
 
 
+def because_lines(rec: Dict[str, Any]) -> List[str]:
+    """Why the question opened, for the responder's message: the choice the
+    driver took to get here and the reason it gave (``runtime._ask_because``).
+    Empty when the ask sits under no choice."""
+    b = rec.get("because") or {}
+    if not b.get("option"):
+        return []
+    head = f"Why this question is open: at {b.get('choice')!r} " \
+           f"{b.get('by') or 'the driver'} chose {b.get('option')!r}"
+    reason = str(b.get("reason") or "").strip()
+    return [head + (":" if reason else "."), *([reason] if reason else []), ""]
+
+
 def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
                   scope: str) -> str:
     """The message a responder receives: the question, the answers, the tool."""
@@ -123,6 +136,7 @@ def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
         "",
         str(rec.get("prompt") or "").strip(),
         "",
+        *because_lines(rec),
         "Answer with one of:",
         opts,
         "  - abstain: you have no basis to decide -- passes it further up",
@@ -229,6 +243,17 @@ def _driver(st: RunStore, state: Optional[Dict[str, Any]] = None) -> str:
     return runtime.driver_of(state)
 
 
+#: Roles whose group gets the question as one member, not all of them. A
+#: review is one reviewer's work (role-reviewer: "one reviewer per artifact"),
+#: and a group of every reviewer in the mesh put eight ``decide`` messages and
+#: seven withdrawals into eight terminals for one answer (claunch-v0h29.1).
+SINGLE_RESPONDER_ROLES = frozenset({"reviewer"})
+
+
+def _asks_one(cand: Any) -> bool:
+    return str(cand.role).lower() in SINGLE_RESPONDER_ROLES
+
+
 def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
     """Which group of ``rec`` answers, read off one roster (``pool``)."""
     from ..cflow import model as v1
@@ -241,13 +266,18 @@ def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
             and int(rec.get("deferrals") or 0) < runtime.MAX_ROSTER_DEFERRALS:
         plan["defer"] = getattr(pool, "problem", "") or "the mesh roster could not be read"
         return plan
+    passed = rec.get("passed") or {}
     while group < len(cands):
         c = cands[group]
         cand = v1.Candidate(role=c["role"], scope=c.get("scope") or v1.SCOPE_ANY,
                             connect=bool(c.get("connect")))
-        found, reason = pool.match(cand, autowire=True)
+        one = _asks_one(cand)
+        tried = frozenset(passed.get("handles") or ()) if passed.get("group") == group \
+            else frozenset()
+        found, reason = pool.match(cand, autowire=True, one=one, exclude=tried)
         if found:
             plan["asked"] = [m.to_dict() for m in found]
+            plan["single"] = one
             break
         plan["skipped"].append({"group": group, "candidate": cand.describe(),
                                 "reason": reason or "nobody matched"})
@@ -306,12 +336,16 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
             continue
         cand = v1.Candidate(role=c["role"], scope=c["scope"] or v1.SCOPE_ANY,
                             connect=c["connect"])
-        _, reason = pool.match(cand)
+        one = _asks_one(cand)
+        _, reason = pool.match(cand, one=one)
         named = pool.eligible(cand)
+        would = [m for m in named
+                 if m.answerable and (m.handle in pool.reachable or cand.connect)]
+        if one and would:
+            would = [pool.pick_one(would)]
         entry = {
             "candidate": cand.describe(),
-            "asks": [m.handle for m in named
-                     if m.answerable and (m.handle in pool.reachable or cand.connect)],
+            "asks": [m.handle for m in would],
             "relations": {m.handle: pool.relation(m.handle) for m in named if m.answerable},
         }
         if reason and not entry["asks"]:
@@ -470,6 +504,7 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
             continue
         out.append({
             "ask_id": rec["id"], "kind": rec.get("kind"), "prompt": rec.get("prompt"),
+            "because": rec.get("because"),
             "options": [o["name"] for o in runtime._ask_choices(rec)] + [runtime.ASK_ABSTAIN],
             "deadline": rec.get("deadline"), "workflow": state.get("workflow"),
             "task": rec.get("label") or rec.get("node"),

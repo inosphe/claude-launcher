@@ -927,6 +927,17 @@ fold-open for the bodies), worded as "held by YOUR typing" when this tab's
 keystrokes are the recent ones, and the session detail panel shows the same
 backlog under its send box. The payload also rides inside `/meta`.
 
+Each row of that backlog can be deleted (claunch-2onys):
+`DELETE /api/sessions/{name}/queued/{id}?mesh=&handle=` records the id in
+the member's `discarded` set (persisted in `cursors.json` next to
+`dismissed`), so `pending()` never hands it to delivery again — not on
+"deliver now", not on respawn, not after a daemon restart — and `owed()`
+does not count it once the cursor has passed it; the history annotation
+(`delivery_of`) does not list the member under `delivered` either. The set is
+kept while the member is, since the log is append-only. The log entry and every
+other recipient's copy stay. An id that is not in this session's backlog
+right now (already delivered, or never addressed here) is refused with 400.
+
 ## CLI (phase 1)
 
 ```
@@ -935,6 +946,7 @@ claunch mesh ls
 claunch mesh join <mesh> [--as HANDLE] [--role ROLE] [--session NAME]
 claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
+                                                # a worker's '*' is refused (claunch-v0h29.2)
 claunch mesh members <mesh> [--state STATE]      # default: current members
 claunch mesh history <mesh> [-n N]
 claunch mesh roles <mesh> [--yaml | --file ROLES.YAML | --reset]
@@ -1226,7 +1238,13 @@ does not exist afterwards, so the intent has no other home) and closes it on
 the next send that reaches that member; and nobody, for reply-waits — those
 are read off `response_watches` at composition time, since the watch a
 delivered ask opens and a threaded reply clears already has the loop's exact
-lifetime, and a second copy would only drift. The section is capped at ten
+lifetime, and a second copy would only drift. Closing one by hand goes the
+same way: `loop_close` on a `reply:` id deletes the watch
+(`MeshManager.settle_response_watch_for`, scoped to the session's own handle
+and the exact message id), and that delete is also what stops the watch's
+response nudge — before the door existed, `loops.close` scanned only the
+stored rows, so the id a listing printed answered `no open loop`
+(claunch-ozern). The section is capped at ten
 lines and placed just before the opening task.
 
 **Exclusive roles.** A role may declare `exclusive: true`: at most one **live**

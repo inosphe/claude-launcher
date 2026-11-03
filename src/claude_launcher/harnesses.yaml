@@ -94,6 +94,11 @@ harnesses:
     # (chat_composer/paste_input.rs, apply_paste). Avoid the shared native
     # clipboard: another application's lock can make Ctrl+V fail.
     image_paste_transport: path
+    # Codex 0.160.1 copies (/copy, Ctrl+O) to the native clipboard -- under
+    # WSL the Windows one via powershell.exe -- and writes OSC 52 only over
+    # SSH/tmux or when that fails (tui/src/clipboard_copy.rs). The web page
+    # relays the daemon clipboard instead (claunch-tn5ba).
+    copy_transport: host
     # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3).
     capabilities:
       mcp.claunch: true

@@ -34,6 +34,13 @@ const src = fs.readFileSync(
   "utf8"
 );
 
+/* The deadline `api` puts on a request, read off the shipped constant: the
+   check that a request nobody answers still settles must fail when the page
+   stops bounding its reads at all, and it moves with the value the page uses
+   rather than with a number retyped here. */
+const API_TIMEOUT = src.match(/const API_TIMEOUT_MS = (\d+);/);
+if (!API_TIMEOUT) throw new Error("cannot locate API_TIMEOUT_MS");
+
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
   if (start < 0) throw new Error("missing " + name);
@@ -50,11 +57,13 @@ function slice(name) {
 /* ---- the harness ------------------------------------------------------- */
 /* `api` is sliced in whole, so the batching decision under test is the one
    the page actually makes. fetch is a stub that records every request. */
-function build(handler) {
+function build(handler, extra = {}) {
   const calls = [];
-  const scope = {
+  const scope = Object.assign({
     calls,
     setTimeout,
+    clearTimeout,
+    AbortController: typeof AbortController === "function" ? AbortController : undefined,
     url: (p) => p,
     relogin: async () => false,
     showAuth: () => { scope.authShown = true; },
@@ -62,9 +71,11 @@ function build(handler) {
       calls.push({ url: u, method: (opts.method || "GET").toUpperCase(), opts });
       return handler(u, opts, calls.length);
     },
-  };
+  }, extra);
   const code = [
+    `const API_TIMEOUT_MS = ${API_TIMEOUT[1]};`,
     slice("api"),
+    slice("apiFetch"),
     slice("budgeted"),
     slice("batchResponse"),
     slice("batchResponses"),
@@ -88,10 +99,12 @@ function build(handler) {
     "return { api, batchable, batchFlush };",
   ].join("\n");
   const make = new Function(
-    "url", "fetch", "relogin", "showAuth", "setTimeout", "scope", code
+    "url", "fetch", "relogin", "showAuth", "setTimeout", "clearTimeout",
+    "AbortController", "scope", code
   );
   Object.assign(scope, make(
-    scope.url, scope.fetch, scope.relogin, scope.showAuth, scope.setTimeout, scope
+    scope.url, scope.fetch, scope.relogin, scope.showAuth, scope.setTimeout,
+    scope.clearTimeout, scope.AbortController, scope
   ));
   return scope;
 }
@@ -347,6 +360,66 @@ async function requestsPastTheBudgetWaitInThePage() {
   assert.strictEqual(app.calls.length, 7, "and every one of them was sent");
 }
 
+/* ---- 9. a request nobody answers still settles ------------------------- */
+/* The dashboard tick runs one batch at a time and this budget is what hands
+   the slots out, so a fetch that never answers held its slot for the life of
+   the page. Two of them and every later request waited here forever: the tick
+   never finished, `polling` stayed true, no refresh ran again, and the cards
+   the tick takes down stayed up while the page looked alive -- the leader
+   card, which has no timeout of its own, is how that was found
+   (claunch-8vl1s.1). The deadline is what makes an unanswered request
+   settle; `daemonHealth` has carried one since claunch-fm3ud. */
+async function aRequestNobodyAnswersStillSettles() {
+  const delays = [];
+  const hung = (u, opts = {}) => new Promise((resolve, reject) => {
+    const sig = opts.signal;
+    if (!sig || typeof sig.addEventListener !== "function") return;   // never settles
+    sig.addEventListener("abort", () => reject(new Error("aborted")));
+  });
+  // The deadline is not waited for: the timer fires on the next turn.
+  const app = build(hung, {
+    setTimeout: (fn, ms) => { delays.push(ms); return setTimeout(fn, 0); },
+  });
+
+  // Bounded by the harness as well: without the deadline the request never
+  // settles, and an `await` on it would end this file silently rather than
+  // failing it (the pass line is printed at the end, and node exits 0 when
+  // the loop drains).
+  const outcome = await Promise.race([
+    app.api("/api/hangs", { method: "POST", body: "{}" })
+      .then((resp) => `answered ${resp.status}`, (err) => `rejected ${err.message}`),
+    new Promise((resolve) => setTimeout(() => resolve("never settled"), 2000)),
+  ]);
+  assert.strictEqual(outcome, "rejected aborted",
+    "a request that is never answered is cut at the deadline");
+  assert.ok(delays.includes(Number(API_TIMEOUT[1])),
+            `the deadline is the constant app.js declares (${API_TIMEOUT[1]}), saw ${delays}`);
+
+  // The slot it held went back to the page: the budget is what the next
+  // request needs, and nothing was left in flight.
+  const ok = build(async () => jsonResponse({ ok: true }));
+  const done = await ok.api("/api/after", { method: "POST", body: "{}" });
+  assert.strictEqual(done.status, 200, "the page still talks to the daemon after a hang");
+
+  // A caller with a budget of its own keeps it, and one that wants none is
+  // left alone rather than silently bounded by this one.
+  const seen = [];
+  const own = new AbortController();
+  const plain = build(async (u, opts = {}) => {
+    seen.push(opts.signal);
+    return jsonResponse({ ok: true });
+  });
+  await plain.api("/api/own", { method: "POST", body: "{}", signal: own.signal });
+  assert.strictEqual(seen[0], own.signal, "a caller's own signal is the one used");
+  await plain.api("/api/free", { method: "POST", body: "{}", timeout: 0 });
+  assert.strictEqual(seen[1], undefined, "timeout: 0 leaves the request unbounded");
+  await plain.api("/api/bounded", { method: "POST", body: "{}" });
+  assert.ok(seen[2] && typeof seen[2].aborted === "boolean",
+            "an ordinary read carries a deadline signal");
+  assert.ok(!("timeout" in plain.calls[2].opts),
+            "the deadline is the page's, not an option handed to fetch");
+}
+
 (async () => {
   await cadenceStaysWithTheCaller();
   await requestsPastTheBudgetWaitInThePage();
@@ -356,5 +429,6 @@ async function requestsPastTheBudgetWaitInThePage() {
   await aRefusedReadKeepsItsRouteStatus();
   await anOlderDaemonStillServesThePage();
   await twoCallersOfOnePathEachReadTheirOwnAnswer();
+  await aRequestNobodyAnswersStillSettles();
   console.log("batchpoll_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

@@ -213,7 +213,7 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   const view = DF.mount(host, "sim-998894-run1", { doc, api, timers, interval: 1000 });
   await new Promise((r) => setTimeout(r, 0));
   const svg = view.view.svg;
-  const nodesG = svg.children[2];
+  const nodesG = svg.children[3];   // bands, heads, edges, nodes
   assert.strictEqual(calls[0], "/api/sessions/sim-998894-run1/durable?since=0");
   assert.match(host.children[1].textContent, /진행: formalize — reading/);
   const firstNodes = nodesG.children.slice();
@@ -246,6 +246,10 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   assert.strictEqual(view.view.nodes.get("ask:formalize:1").g, f1);
   assert.strictEqual(cleared, 1, "the poll stops once the session is gone");
   assert.match(host.children[0].children[1].textContent, /sim-998894 · 세션 종료 · 사건 18 · 질문 6/);
+  // The header carries the whole split, out included, so the four sides add
+  // up to the token figure in front of them (claunch-mejc8).
+  assert.match(host.children[0].children[1].textContent,
+    /· 토큰 36\.8k · read 6 · cached 0 \(0\.0%\) · write 36\.8k · out 6/);
   view.unmount();
 
   // A run that continued an earlier one: the first poll's `ancestors` are
@@ -308,7 +312,7 @@ assert.ok(by2.start.tip.some((t) => /run_start quick · 1 rounds/.test(t)));
 assert.strictEqual(by2["grp:B:clash"].label, "충돌 ×2");
 assert.strictEqual(by2["grp:B:clash"].status, "warn", "a cut-off answer marks its stage");
 assert.strictEqual(by2["grp:B:effects"].label, "효과 ×2");
-assert.strictEqual(by2["grp:B:effects"].sub, "B · 3.0k tok");
+assert.strictEqual(by2["grp:B:effects"].sub, "B · read 2\ncached 0 (0.0%) · write 3.0k");
 assert.strictEqual(by2["grp:B:effects"].col, by2["grp:B:clash"].col, "a stage keeps the column it opened");
 assert.strictEqual(by2["grp:A:1:p1"].label, "플레이 p1 ×1");
 assert.strictEqual(by2["grp:C:r1:j"].col, by2["grp:A:1:p1"].col);
@@ -329,6 +333,16 @@ const stopped = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "stopp
 assert.deepStrictEqual([stopped.nodes.at(-1).label, stopped.nodes.at(-1).status], ["중단", "warn"]);
 const broke = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "failed", error: "Harness is closed" }], true);
 assert.deepStrictEqual([broke.nodes.at(-1).label, broke.nodes.at(-1).status], ["실패", "fail"]);
+// claunch-9a1sg: a state the run named without an error (gds6 scenarios v2
+// stage A ends 'proposed', tuples awaiting approval) is a wait, not a failure.
+const endOf = (end) => { const n = DF.model([...SIM2.slice(0, 4), { event: "run_end", ...end }], true).nodes.at(-1); return [n.label, n.status, n.sub]; };
+assert.deepStrictEqual(endOf({ state: "proposed", stage: "A", tally: { B: { total: 177697 } } }), ["대기", "warn", "proposed · 177.7k tok"]);
+assert.deepStrictEqual(endOf({ state: "proposed", error: "boom" }).slice(0, 2), ["실패", "fail"], "an error still fails");
+assert.deepStrictEqual(endOf({ state: "failed" }).slice(0, 2), ["실패", "fail"], "failed without an error");
+assert.deepStrictEqual(endOf({ state: "interrupted" }).slice(0, 2), ["실패", "fail"]);
+assert.deepStrictEqual(endOf({}).slice(0, 2), ["실패", "fail"], "no state at all");
+assert.deepStrictEqual(endOf({ state: "done" }).slice(0, 2), ["끝", "ok"]);
+assert.strictEqual(DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "proposed" }], true).ended.failed, false);
 assert.deepStrictEqual(JSON.parse(JSON.stringify(DF.sim2Group("B:combat-ranged|x:0"))),
   { phase: "model", group: "B:combat-ranged", label: "기능 combat-ranged" });
 console.log("durableflow_check: sim2 ok");
@@ -336,6 +350,7 @@ console.log("durableflow_check: sim2 ok");
 // -- parallel work: unit / ask_start (claunch-qk2nc) -------------------------
 const ids = (mm) => Array.from(mm.edges, (e) => e.id).filter((x) => x !== "live-edge");
 const plain = (x) => JSON.parse(JSON.stringify(x));   // out of the vm realm, for deepStrictEqual
+
 // Every prefix keeps the places AND the edges the whole log gives.
 function stable(log, name) {
   const full = DF.model(log, false);
@@ -347,6 +362,55 @@ function stable(log, name) {
     for (const e of ids(part)) assert.ok(all.has(e), `${name} prefix ${k}: edge ${e} is not in the full model`);
   }
 }
+
+// -- the token split (claunch-mejc8) ----------------------------------------
+// An ask's usage carries input/cacheRead/output/totalTokens and no cacheWrite;
+// the write side is what the total leaves over. The run's own sums are the
+// same fields added up, so both levels answer with one formula.
+const SP = DF.model([
+  { event: "unit", unit: "u1", state: "start" },
+  { event: "ask", key: "k1", unit: "u1",
+    usage: { input: 100, cacheRead: 900, output: 50, totalTokens: 1050, generations: 1 } },
+  { event: "ask", key: "k2", unit: "u1",
+    usage: { input: 200, cacheRead: 300, output: 100, totalTokens: 1200, generations: 2 } },
+  { event: "ask", key: "k3",
+    usage: { input: 0, cacheRead: 0, output: 10, totalTokens: 400, generations: 1 } },
+], true);
+assert.deepStrictEqual(plain(SP.spend), { read: 300, cached: 1200, write: 990, out: 160, total: 2650 });
+assert.strictEqual(SP.spend.read + SP.spend.cached + SP.spend.write + SP.spend.out, SP.spend.total,
+  "read, cached, write and out are the total");
+// Every ask lands on exactly one node -- unit, sim2 stage group, or the plain
+// ask node a classic log draws -- so summing spend over the nodes gives the
+// header's figures back. k3 here is the plain ask node: it used to carry only
+// the drawn string, and the two levels disagreed by its whole usage.
+function nodeSpend(m) {
+  const s = { read: 0, cached: 0, write: 0, out: 0, total: 0 };
+  for (const n of m.nodes) {
+    if (!n.spend) continue;
+    for (const k of Object.keys(s)) s[k] += Number(n.spend[k]) || 0;
+  }
+  return s;
+}
+assert.deepStrictEqual(nodeSpend(SP), plain(SP.spend), "node spend sums to the header");
+assert.strictEqual(SP.spend.total, 1050 + 1200 + 400, "the header is each ask's totalTokens added up");
+assert.deepStrictEqual(nodeSpend(m), plain(m.spend), "the classic log's plain ask nodes add up too");
+const sp1 = SP.nodes.find((n) => n.id === "unit:u1");
+assert.deepStrictEqual(plain(sp1.spend), { read: 300, cached: 1200, write: 600, out: 150, total: 2250 });
+assert.strictEqual(sp1.sub, "물음 2 · read 300\ncached 1.2k (80.0%) · write 600",
+  "a unit shows the split and the hit rate over input+cacheRead");
+// A prompt that is all cache-read reports 100%, and one with no prompt at all
+// reports no rate rather than a division by zero.
+const allHit = DF.model([{ event: "ask", key: "c", usage: { input: 0, cacheRead: 500, output: 5, totalTokens: 505 } }], false);
+assert.match(allHit.nodes.find((n) => n.id === "ask:c").sub, /cached 500 \(100\.0%\)/);
+const noPrompt = DF.model([{ event: "ask", key: "n", usage: { output: 40, totalTokens: 40 } }], false);
+assert.strictEqual(noPrompt.nodes.find((n) => n.id === "ask:n").sub, "? · read 0\ncached 0 · write 0",
+  "no prompt counted: no rate to divide by, and nothing left on the write side");
+// A usage that already adds up leaves nothing on the write side.
+const tight = DF.model([{ event: "ask", key: "t", usage: { input: 10, cacheRead: 90, output: 20, totalTokens: 120 } }], false);
+assert.match(tight.nodes.find((n) => n.id === "ask:t").sub, /write 0$/);
+assert.deepStrictEqual(nodeSpend(tight), plain(tight.spend), "node sum = header when write is 0");
+assert.strictEqual(tight.spend.total, 120);
+console.log("durableflow_check: spend split ok");
 
 // (a) A sequential claunch simulation keeps its chain: the edges are the
 // consecutive pairs, and ask_start before each ask changes no node or edge.
@@ -416,11 +480,13 @@ assert.deepStrictEqual(ids(mu).filter((e) => e.includes("unit:")).sort(), after.
 assert.ok(!mu.edges.some((e) => e.to.id === "grp:B:noun" || e.from.id === "start"), "the chain does not run across units");
 assert.ok(mu.pending && mu.edges.some((e) => e.id === "live-edge"), "live: a pending node after the unit-less question");
 const sys = byu["unit:items/_system"];
-assert.deepStrictEqual([sys.label, sys.count, sys.tok, sys.status], ["_system", 2, 1500, "warn"], "a cut-off answer marks its unit");
-assert.strictEqual(sys.sub, "물음 2 · 1.5k tok");
-assert.deepStrictEqual([byu["unit:01-f"].status, byu["unit:13-f"].status, byu["unit:13-f"].sub], ["ok", "fail", "물음 1 · 10 tok · 실패"]);
+assert.deepStrictEqual([sys.label, sys.count, sys.spend.total, sys.status], ["_system", 2, 1500, "warn"], "a cut-off answer marks its unit");
+assert.strictEqual(sys.sub, "물음 2 · read 2\ncached 0 (0.0%) · write 1.5k");
+assert.deepStrictEqual([byu["unit:01-f"].status, byu["unit:13-f"].status, byu["unit:13-f"].sub],
+  ["ok", "fail", "물음 1 · read 1 · 실패\ncached 0 (0.0%) · write 8"]);
 assert.ok(byu["unit:13-f"].tip.includes("no json"));
-assert.deepStrictEqual([byu["unit:01-f/card-a"].status, byu["unit:01-f/card-a"].sub], ["run", "물음 0 · 0 tok · 진행 1"]);
+assert.deepStrictEqual([byu["unit:01-f/card-a"].status, byu["unit:01-f/card-a"].sub],
+  ["run", "물음 0 · read 0 · 진행 1\ncached 0 · write 0"]);
 assert.deepStrictEqual(plain([byu["unit:02-f/card-b"].status, byu["unit:02-f/card-b"].after]), ["skip", ["02-f"]], "an unknown after is dropped");
 assert.deepStrictEqual([mu.starts, mu.peak, mu.running, mu.asks], [16, 13, 1, 16]);
 stable(U, "units");
@@ -460,7 +526,7 @@ assert.deepStrictEqual([da.running, da.nodes[0].running, da.nodes[1].running, da
 for (const end of ["run_end", "done", "error", "interrupted", "session_shutdown"]) {
   const e = dm([{ event: end, state: "failed" }]);
   assert.deepStrictEqual([e.running, e.nodes[1].running, e.peak], [0, 0, 4], end);
-  assert.strictEqual(e.nodes[1].sub, "물음 0 · 0 tok", end);
+  assert.strictEqual(e.nodes[1].sub, "물음 0 · read 0\ncached 0 · write 0", end);
 }
 // The ask that comes after its start was closed counts into the start's unit and changes nothing else.
 const late = dm([{ event: "unit", unit: "b", state: "done" }, { event: "ask", key: "kb", usage: u(7) }]);
@@ -504,7 +570,7 @@ assert.strictEqual(p0.units, 6);
 // The run: the same nodes turn real, in place; an unplanned unit lands as before.
 const pf = DF.model(P, true), bf = byOf(pf);
 assert.deepStrictEqual(plain(["01-a", "02-b", "_system", "03-c"].map((x) => bf["unit:items/" + x].status)), ["ok", "ok", "run", "plan"]);
-assert.deepStrictEqual([bf["unit:items/02-b"].count, bf["unit:items/02-b"].sub], [1, "물음 1 · 5 tok"]);
+assert.deepStrictEqual([bf["unit:items/02-b"].count, bf["unit:items/02-b"].sub], [1, "물음 1 · read 1\ncached 0 (0.0%) · write 3"]);
 assert.ok(bf["unit:items/_system"].tip[0].includes(" 계획 items/_system"), "the plan stays in the tip");
 assert.deepStrictEqual(plain([bf["unit:late"].col, bf["unit:late"].row, bf["unit:late"].status]), [1, 2, "run"]);
 assert.deepStrictEqual(plain(pf.plan), { total: 6, done: 2 });
@@ -557,6 +623,133 @@ assert.strictEqual(DF.model([{ event: "plan", units: "nope" }], true).nodes.leng
 })().catch((e) => { console.error(e); process.exit(1); });
 console.log("durableflow_check: plan ok");
 
+// One log, two runs (gds6 scenarios v2: stage A proposes the tuples, B runs
+// them hours later). Each run gets its own named band and its own columns;
+// B's units start at depth 0 though they name A's unit as `after`, the edge
+// into the earlier run is not drawn, and an event that names a drawn unit is
+// a line in that unit, not a node of its own (claunch-papez).
+{
+  const T = (h, m) => `2026-10-2${h < 24 ? 8 : 9}T${String(h % 24).padStart(2, "0")}:${m}:00.000Z`;
+  const AB = [
+    { at: T(15, "39"), event: "session_start", attempt: 1 },
+    { at: T(15, "39"), event: "run_start", stage: "A" },
+    { at: T(15, "40"), event: "unit", unit: "features", state: "start" },
+    { at: T(15, "41"), event: "recheck", unit: "features", note: "tuple count" },
+    { at: T(15, "42"), event: "unit", unit: "features", state: "done" },
+    { at: T(15, "43"), event: "run_end", state: "proposed" },
+    { at: T(15, "43"), event: "agent_end" },
+    { at: T(15, "43"), event: "session_shutdown" },
+    { at: T(29, "19"), event: "tuples_approved", count: 2 },
+    { at: T(29, "19"), event: "session_start", attempt: 1 },
+    { at: T(29, "19"), event: "run_start", stage: "B" },
+    { at: T(29, "20"), event: "plan", units: [{ unit: "t1", after: ["features"] }, { unit: "t2", after: ["features"] }] },
+    { at: T(29, "20"), event: "unit", unit: "t1", state: "start" },
+    { at: T(29, "25"), event: "unit", unit: "t1", state: "done" },
+    { at: T(29, "26"), event: "unit", unit: "t2", state: "start" },
+  ];
+  const mab = DF.model(AB, true);
+  assert.deepStrictEqual(plain(mab.segs.map((g) => [g.label, g.from, g.to])), [["A 단계", 0, 2], ["B 단계", 3, 4]]);
+  const nab = Object.fromEntries(mab.nodes.map((n) => [n.id, n]));
+  assert.deepStrictEqual(plain(["unit:features", "unit:t1", "unit:t2"].map((id) => [nab[id].seg, nab[id].col])),
+    [[0, 1], [1, 4], [1, 4]], "B's units sit in B's own column, not after A's");
+  assert.ok(!mab.nodes.some((n) => /recheck/.test(n.id)), "a unit's recheck is no node of its own");
+  const eab = Object.fromEntries(mab.edges.map((e) => [e.id, e]));
+  assert.ok(eab["run_end>ev:tuples_approved"], "the approval follows A's end");
+  assert.strictEqual(eab["unit:features>unit:t1"].cross, true);
+  assert.deepStrictEqual(plain(DF.model(LOG, false).segs), [], "a single unnamed run has no bands");
+  assert.strictEqual(mab.ended, null, "A's end does not end the log while B runs");
+  assert.ok(mab.pending, "B, still running, shows its pending node");
+  const host = new El("div"), vw = DF.makeView(doc, host);
+  vw.draw(mab);
+  assert.match(vw.edges.get("unit:features>unit:t1").getAttribute("class"), /gone/);
+  assert.match(vw.svg.children[0].children.map((g) => g.children[1].textContent).join("|"), /^A 단계 · .*\|B 단계 · /);
+  // The sequence folds the night between the runs and fills the pane.
+  const sab = DF.sequence(AB, true, Date.parse(T(29, "30")));
+  assert.deepStrictEqual(plain(sab.segs.map((g) => g.label)), ["A 단계", "B 단계"]);
+  const sv = DF.makeSequenceView(doc);
+  sv.draw(sab, 1600);
+  assert.strictEqual(Number(sv.svg.getAttribute("width")), 1600);
+  const bar = (id) => sv.rows.get(id).g.children.find((c) => c.tag === "rect" && /dfl-seq-bar/.test(c.getAttribute("class") || ""));
+  const xa = Number(bar("u:features").getAttribute("x")), xb = Number(bar("u:t1").getAttribute("x"));
+  assert.ok(xb - xa < 1600 * 0.85, "B is not pushed to the right edge by the gap");
+  assert.ok(xa > 0 && xb > xa);
+}
+// A later run that reuses a unit id -- B approved again for the same tuple,
+// or a resume after an interrupted end -- draws that unit again in its own
+// band, and its sequence lane does not reach across the gap (s157-rev,
+// s215-rev on claunch-papez).
+{
+  const T = (m) => `2026-10-29T${m}:00.000Z`;
+  const runB = (h) => [
+    { at: T(h + ":00"), event: "session_start", attempt: 1 },
+    { at: T(h + ":00"), event: "run_start", stage: "B" },
+    { at: T(h + ":01"), event: "unit", unit: "t1", state: "start" },
+    { at: T(h + ":01"), event: "ask_start", key: "t1:write", unit: "t1" },
+    { at: T(h + ":04"), event: "ask", key: "t1:write", unit: "t1", usage: { totalTokens: 100 } },
+    { at: T(h + ":05"), event: "unit", unit: "t1", state: "done" },
+    { at: T(h + ":05"), event: "run_end", state: "done" },
+  ];
+  const BB = [...runB("00"), ...runB("01")];
+  const m = DF.model(BB, false);
+  const t1 = m.nodes.filter((n) => n.unit === "t1");
+  assert.deepStrictEqual(plain(t1.map((n) => [n.id, n.seg, n.count, n.status])),
+    [["unit:t1", 0, 1, "ok"], ["unit:t1#2", 1, 1, "ok"]], "each run keeps its own t1");
+  assert.deepStrictEqual(plain(m.segs.map((g) => [g.label, g.from <= g.to])), [["B 단계", true], ["B 단계", true]]);
+  assert.ok(t1[1].col > m.segs[0].to, "the second t1 sits in the second band");
+  assert.strictEqual(m.units, 2);
+  assert.strictEqual(m.running, 0);
+  const s = DF.sequence(BB, false, Date.parse(T("02:00")));
+  const lanes = s.lanes.filter((l) => l.unit === "t1");
+  assert.deepStrictEqual(plain(lanes.map((l) => [l.id, l.start, l.end, l.asks.length])), [
+    ["u:t1", Date.parse(T("00:01")), Date.parse(T("00:05")), 1],
+    ["u:t1#2", Date.parse(T("01:01")), Date.parse(T("01:05")), 1]], "one lane per run, each within its run");
+  stable(BB, "same unit twice");
+
+  // An interrupted run resumed: the units finished on the second attempt
+  // land in the second run's band, not on the first attempt's nodes.
+  const IR = [
+    { at: T("00:00"), event: "session_start", attempt: 1 },
+    { at: T("00:00"), event: "run_start" },
+    { at: T("00:01"), event: "unit", unit: "t1", state: "start" },
+    { at: T("00:02"), event: "run_end", state: "interrupted", error: "killed" },
+    { at: T("00:10"), event: "session_start", attempt: 2 },
+    { at: T("00:10"), event: "run_start" },
+    { at: T("00:11"), event: "unit", unit: "t1", state: "start" },
+    { at: T("00:12"), event: "unit", unit: "t1", state: "done" },
+    { at: T("00:13"), event: "run_end", state: "done" },
+  ];
+  const mi = DF.model(IR, false);
+  assert.deepStrictEqual(plain(mi.nodes.filter((n) => n.unit === "t1").map((n) => [n.seg, n.status])),
+    [[0, "run"], [1, "ok"]], "the resumed run's t1 is its own, done; the first attempt's stays as it was left");
+  const si = DF.sequence(IR, false, Date.parse(T("00:20")));
+  assert.deepStrictEqual(plain(si.lanes.filter((l) => l.unit === "t1").map((l) => [l.start, l.end])),
+    [[Date.parse(T("00:01")), Date.parse(T("00:02"))], [Date.parse(T("00:11")), Date.parse(T("00:12"))]]);
+  stable(IR, "resumed run");
+
+  // A question the interrupted run left unanswered ends with that run; the
+  // resumed run's question under the same key is closed by its own answer
+  // (s162 on claunch-papez).
+  const IQ = [
+    { at: T("00:00"), event: "session_start", attempt: 1 },
+    { at: T("00:01"), event: "ask_start", key: "k", unit: "t1" },
+    { at: T("00:02"), event: "run_end", state: "interrupted", error: "killed" },
+    { at: T("00:10"), event: "session_start", attempt: 2 },
+    { at: T("00:11"), event: "ask_start", key: "k", unit: "t1" },
+    { at: T("00:12"), event: "ask", key: "k", unit: "t1", usage: { totalTokens: 10 } },
+    { at: T("00:13"), event: "run_end", state: "done" },
+  ];
+  const sq = DF.sequence(IQ, false, Date.parse(T("00:20")));
+  assert.deepStrictEqual(plain(sq.lanes.filter((l) => l.unit === "t1").map((l) => l.asks.map((a) => [a.start, a.end, a.status]))), [
+    [[Date.parse(T("00:01")), Date.parse(T("00:02")), "run"]],
+    [[Date.parse(T("00:11")), Date.parse(T("00:12")), "ok"]]], "each question stays in its run");
+  const mq = DF.model(IQ, false);
+  assert.deepStrictEqual(plain(mq.nodes.filter((n) => n.unit === "t1").map((n) => [n.seg, n.count, n.running])),
+    [[0, 0, 0], [1, 1, 0]], "the answer counts on the resumed run's t1");
+  assert.strictEqual(mq.running, 0);
+  stable(IQ, "unanswered across runs");
+}
+console.log("durableflow_check: runs ok");
+
 // (f) edges (claunch-nn4fx): only the transitive reduction of ``after`` is
 // drawn, and no edge runs across a box. The live run gds6 rules-v2
 // 20261020-195925 named the root in every card's ``after`` next to its
@@ -570,7 +763,7 @@ function crossings(mm) {
   vw.draw(mm);
   const boxes = mm.nodes.map((n) => {
     const t = /translate\(([-\d.]+),([-\d.]+)\)/.exec(vw.nodes.get(n.id).g.getAttribute("transform"));
-    return { id: n.id, x: +t[1], y: +t[2], w: 168, h: 46 };
+    return { id: n.id, x: +t[1], y: +t[2], w: 168, h: 62 };
   });
   const out = [];
   for (const [id, path] of vw.edges) {

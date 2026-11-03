@@ -316,6 +316,31 @@ def _group(ws, group: dict, items: list, actor: str, reason: str) -> dict:
             "emptied": [" / ".join(e["path"]) for e in made["emptied"]]}
 
 
+def apply_body(ws, body: dict, items: list, actor: str, reason: str) -> dict:
+    """Carry out a ``category_assign`` body now: place ``items`` in an
+    existing node, or fold, split, group or create one. Shared by the MCP
+    call and by the user's confirm of a wrap-up draft (daemon/wrapup_api.py),
+    which has no calling session to read a job from. Raises
+    :class:`category.CategoryError` as the store does."""
+    if body.get("node_id"):
+        placed = category.assign(ws, items, body["node_id"], actor, reason)
+        return {"path": placed["node"]["path"], "node_id": placed["node"]["id"]}
+    if isinstance(body.get("fold"), dict):
+        return _fold(ws, body["fold"], items, actor, reason)
+    if isinstance(body.get("split"), dict):
+        return _split(ws, body["split"], items, actor, reason)
+    if isinstance(body.get("group"), dict):
+        return _group(ws, body["group"], items, actor, reason)
+    if isinstance(body.get("new"), dict):
+        new = dict(body["new"])
+        node = category.create_now(
+            ws, {**new, "reason": new.get("reason") or reason}, items, actor, reason)
+        return {"created": node["label"], "node_id": node["id"], "path": node["path"]}
+    raise AssignError(400, "give node_id (an existing category), new {label, ...}, "
+                           "fold {label, nodes, ...}, split {parts, ...} "
+                           "or group {label, nodes, place?, ...}")
+
+
 def agent_assign(manager, caller: str, body: dict) -> dict:
     """The ``category_assign`` MCP call. ``caller`` is the calling session: a
     category fork assigns its origin's items, anyone else its own."""
@@ -337,43 +362,25 @@ def agent_assign(manager, caller: str, body: dict) -> dict:
     items = body.get("items") or items_for(origin)
     reason = str(body.get("reason") or "")
     actor = f"agent {caller}"
+    # The job -- opened by "Assign to tree" -- records what the person asked
+    # for with its checkbox, and that decides. A direct call (a workflow step,
+    # a fork) has no such record unless the call itself carries `proposal`;
+    # without either, the node is created now.
+    wants_proposal = (bool(job.get("proposal")) if job else bool(body.get("proposal")))
     try:
-        if body.get("node_id"):
-            placed = category.assign(ws, items, body["node_id"], actor, reason)
-            result = {"path": placed["node"]["path"], "node_id": placed["node"]["id"]}
-        elif isinstance(body.get("fold"), dict):
-            result = _fold(ws, body["fold"], items, actor, reason)
-        elif isinstance(body.get("split"), dict):
-            result = _split(ws, body["split"], items, actor, reason)
-        elif isinstance(body.get("group"), dict):
-            result = _group(ws, body["group"], items, actor, reason)
-        elif isinstance(body.get("new"), dict):
+        if isinstance(body.get("new"), dict) and not body.get("node_id") and wants_proposal:
             new = dict(body["new"])
-            # The job -- opened by "Assign to tree" -- records what the person
-            # asked for with its checkbox, and that decides. A direct call (a
-            # workflow step, a fork) has no such record unless the call itself
-            # carries `proposal`; without either, the node is created now.
-            wants_proposal = (bool(job.get("proposal")) if job
-                              else bool(body.get("proposal")))
-            if wants_proposal:
-                proposal = category.propose(
-                    ws, {**new, "reason": new.get("reason") or reason, "items": items}, actor)
-                parent_path = []
-                if proposal.get("parent_id"):
-                    where = category.where(ws, "session", origin.sdef.name)
-                    parent_path = (where.get("node") or {}).get("path") or []
-                result = {"proposed": proposal["label"], "proposal_id": proposal["id"],
-                          "path": parent_path,
-                          "similar": [n["path"] for n in proposal["similar"]]}
-            else:
-                node = category.create_now(
-                    ws, {**new, "reason": new.get("reason") or reason}, items, actor, reason)
-                result = {"created": node["label"], "node_id": node["id"],
-                          "path": node["path"]}
+            proposal = category.propose(
+                ws, {**new, "reason": new.get("reason") or reason, "items": items}, actor)
+            parent_path = []
+            if proposal.get("parent_id"):
+                where = category.where(ws, "session", origin.sdef.name)
+                parent_path = (where.get("node") or {}).get("path") or []
+            result = {"proposed": proposal["label"], "proposal_id": proposal["id"],
+                      "path": parent_path,
+                      "similar": [n["path"] for n in proposal["similar"]]}
         else:
-            raise AssignError(400, "give node_id (an existing category), new {label, ...}, "
-                                    "fold {label, nodes, ...}, split {parts, ...} "
-                                    "or group {label, nodes, place?, ...}")
+            result = apply_body(ws, body, items, actor, reason)
     except category.CategoryError as exc:
         err = AssignError(exc.status, str(exc))
         err.extra = exc.extra  # type: ignore[attr-defined]

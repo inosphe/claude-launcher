@@ -69,8 +69,183 @@ That set was what both paths meant then, so `store.rag_source_rows()` reads
 it as both rows' initial values; the first save writes the rows and drops the
 flat keys. `CLAUNCH_RAG_API_KEY` is a key for the typed endpoint and applies
 to `custom` only. The embedding and rerank model ids are always typed in: a
-profile's `models` are chat models. Changing the source changes the
-base URL, so the index is rebuilt.
+profile's `models` are chat models. Changing the source row (or a preset's
+model to one of another identity) changes which collection answers; the old
+one is kept on disk, so switching back is cheap.
+
+### presets — switching models without re-embedding
+
+Saved connections under an id, the same shape `llm:` uses for its briefing
+backends (claunch-7m5v8). `preset` names the active one; empty (or naming a
+row that no longer exists) falls back to the block's own rows above.
+
+```yaml
+rag:
+  preset: local-qwen
+  presets:
+    - id: local-qwen
+      source: custom
+      base_url: https://omlx.inosphe.work/v1
+      api_key: <key>
+      embedding_model: mlx-community--Qwen3-Embedding-4B-mxfp8
+      model_key: qwen3-embedding-4b   # optional; see below
+    - id: cloud-qwen
+      source: custom
+      base_url: https://api.fireworks.ai/inference/v1
+      api_key: <key>
+      embedding_model: accounts/fireworks/models/qwen3-embedding-8b
+```
+
+Which collection a corpus opens is decided by the store's **identity**, not
+by the `(endpoint, model)` pair: each preset may carry a `model_key`, and
+without one the key derives from the `embedding_model` name (lower-cased,
+non-alphanumerics folded to hyphens). Two presets that reach the same real
+model through different providers or name aliases — a local oMLX id and a
+provider's id for the same weights — share one collection by sharing one
+`model_key`, so switching between them answers from the vectors already on
+disk instead of embedding the corpus again. A genuinely different model
+opens its own collection under `<corpus>.<model-key>.zvec` and the normal
+sync backfills it, paced by `rate_limit`; switching back reuses what the
+first pass stored. Without a preset, paths and behavior are unchanged
+(`<corpus>.zvec`), and a preset naming the model a pre-preset collection was
+built under adopts that directory rather than starting a second copy.
+
+The daemon still manages one embedding model at a time — the single sync
+queue is unchanged; a preset switch is a configuration choice, not a second
+concurrent embedder.
+
+`rate_limit` caps the embedding requests a five-minute sliding window may
+carry (default 120, 0 = unlimited). It paces document backfills so a corpus
+catch-up does not land on the endpoint as one burst; query embeddings are
+metered but never delayed by it.
+
+The engine records the resolved selection — which preset is in force, which
+model and store identity it resolved to, through which connection, when — in
+`<daemon dir>/rag/active.json`, and shows it in `rag status` and the
+dashboard's search card, so which model answered is a record rather than a
+guess.
+
+After switching, `POST /api/rag/selftest` checks the new store against its
+own entries: it samples the corpus, queries with each picked entry's text,
+and reports how many come back within `top_k` at a similarity of at least
+`threshold` (both parameters, with `sample`, in the JSON body; corpus
+`kind` and a board `cwd` for beads). Identical text embeds to the unit
+vector, so a healthy index scores self-hits near 1.0 — the failures list
+names what the index answered instead and the score it gave.
+
+**Settings ▸ Search settings** is preset-only (claunch-rag-preset-always-hn5bc):
+the picker addresses one preset, its values load into the connection fields,
+and 저장 writes them back over that preset — editing a preset and switching
+which is active are the same save. There is no "direct rows" mode left; a
+block whose `preset` pointer resolves to nothing is migrated on the first
+settings read — the pre-preset connection becomes a preset named after its
+`embedding_model` (a taken id gets a `-2` suffix), or, with nothing stored,
+the pointer wakes at the first saved preset. The connection test
+(`POST /api/rag/test`) probes the values on the card rather than the saved
+preset, so an edit is tested before it is written. A bare-host `base_url`
+is called with a `/v1` root appended — the OpenAI-compatible paths hang off
+it — while the stored spelling is left as typed. The `/v1` correction has
+one exclusion: a **root-serving endpoint** (TEI — Text Embeddings Inference
+— spells `/embeddings` at the host root, so `<host>/v1/embeddings` is 404)
+opts out with the preset row's `root_serving: true` flag, set from the
+card's "루트 경로에 직접 서빙 (TEI 등)" checkbox in the Custom API box; the
+call target is then the bare host with nothing appended. The flag also
+rides the test probe, so the connection test exercises the same escape
+spelling. The preset list travels
+through the settings API (`presets` in the payload, secrets reported as
+`api_key_set` only). A preset is deleted by writing the list without that
+row (`presets` minus the row, `preset` re-pointed at the first remaining
+row) — the card's 삭제 button does exactly that, moving the deleted row's
+screen values into the legacy fallback rows. The last preset cannot be
+deleted: the preset-only card keeps at least one, and the button refuses
+up front with that reason. Deletion is honest about the read-side safety
+net — if an empty list ever reached the server, the migration would
+immediately re-wrap the still-alive legacy connection as a model-named
+preset, so a "delete to zero" would silently do nothing; editing the last
+preset in place is the supported path for changing it. The saved list holds at most
+`store.RAG_MAX_PRESETS` (20) presets; the card shows the count as `N/20`
+and the server refuses a longer list, which keeps the settings PUT body two
+orders of magnitude under its measured breaking point (~205 bytes per
+preset row, so the aiohttp 1 MiB default body ceiling falls at roughly
+5,100 presets — the 20-preset ceiling binds far earlier).
+
+The card's storage follow-ups (claunch-fhs7f.1) make three things explicit.
+The save button reads **"<id> 저장하고 활성화"** (claunch-r4796; it was
+"선택한 프리셋 저장" before) and its result line names the row it overwrote:
+the form writes the *selected preset's* row (`saveBody`) and makes it the
+active preset in the same PUT, so the label says both. The backfill
+line under the title tells the two empty states apart — "프리셓 <id>의 색인은
+아직 없습니다 …" when a preset is in force and has no collection of its own,
+and "색인 미구동 — 아직 임베딩된 문서가 없습니다." only when no preset is
+active. The line right after a save is the first case, which is what the old
+single sentence got wrong: it read as "there are no documents". A preset can
+be **renamed in place**: the card writes the renamed row with
+`renamed_from: <old id>`, and the daemon carries the saved `api_key` over
+from the old id. The secret is filed under the preset id, so without that
+hint a rename would silently drop the key. The active pointer follows the
+rename only when the renamed preset is the one the daemon is running with;
+the picker's selection is not the active preset, and a settings PUT starts
+the pointed-at preset's model on the whole corpus, so moving the pointer for
+a name change alone would activate a preset the reader only renamed.
+`renamed_from` is a save-time input and is dropped before the row is written;
+it never appears in the settings file.
+
+A preset may also **name the collection** it reads and writes: `db:
+<store-name>`. Omitting it keeps the previous rule — the preset's `model_key`,
+which itself derives from `embedding_model` — so every preset written before
+the field existed resolves to exactly the directory it did before. Naming one
+decouples the vectors from the model: point a second preset at the same `db`
+— another provider, another model alias — and it answers from the vectors
+already on disk, which is what makes a provider change cheap without moving
+the data. The directory is `<corpus>.<db>.zvec`; its sidecar
+(`<corpus>.<db>.meta.json`) records the model and width the vectors were made
+with, and the resolved name is in `active.json` as `db`. `GET /api/rag/dbs`
+lists what is on disk — name, width, model, byte size, and the presets that
+read it — and the card shows that list under the DB field as a table with
+**one row per DB name** (claunch-r4796): the collections of every corpus
+that share an identity fold into one row (`ragDbGroups`), and a pre-preset
+`<corpus>.zvec` keeps a row of its own marked legacy. Clicking a row's name
+fills the DB field with it (for a legacy row, the slug of the model it was
+made with, which is the name a preset adopts it under); when the last
+connection test measured a different width the row carries a
+"차원 불일치" badge and the status line warns before anything is saved. The
+field shows the name it will actually be stored under (the same slug rule as
+`store.rag_model_key_slug`) while it is typed. Each row has 이름 변경 and 삭제.
+`POST /api/rag/dbs/rename` with `{"from": "<db>", "to": "<new name>"}`
+renames a DB: `to` is slugged, every `<corpus>.<from>.zvec` and sidecar is
+moved to `<corpus>.<to>…` after the RAG service is shut down (the index
+holds a LOCK file on its directory), every preset whose resolved DB is
+`from` gets `db: <to>` written, and the service starts again on the result.
+It is refused (400) for an unknown `from`, an empty `to`, the same name, a
+`to` that already exists on disk, or a `to` another preset already names as
+its `db` before anything was embedded there (the moved vectors would answer
+that preset's model); a failed move or save puts every moved file
+back. The zvec directory holds no absolute paths, so a moved directory
+opens as it was. `POST /api/rag/dbs/delete` with
+`{"name": "<directory stem>"}` removes a collection and its sidecar;
+`{"db": "<db name>"}` removes every collection of that DB name across corpora
+(the table's 삭제 sends this for a named row, `name` for a legacy row). A store
+a preset reads, or the one the active config reads, is refused: its vectors
+would have to be asked for from the provider again, and the row already
+names the readers, so the preset is pointed elsewhere first. "Reads" is the
+path `_index_path` would open, not the name a preset carries — a preset that
+adopts a pre-preset `<corpus>.zvec` (its sidecar matching the model) reads
+that directory and is named as its reader. Deleting a collection nothing
+reads is the only case where nothing downstream changes.
+
+A collection's width is fixed when its vectors are written, so pointing a
+model at a `db` of a different width is refused before the query reaches the
+storage engine, with both numbers named and `claunch rag reindex` given as the
+way out. The settings PUT refuses that save instead. Both come from sidecars
+already on disk — the target's, and one this same model built earlier; when
+the model's width is not recorded anywhere yet, the save goes through and the
+connection test is what reports it. The width the index checks against is the
+one it reads from the collection itself (`col.schema.vectors[0].dimension`),
+not the sidecar's `dims`: a sidecar is a file a later run can rewrite beside
+vectors it did not write, and a rewritten one made a 768-dimension query look
+compatible with a 4096-dimension collection until the engine answered
+`dimension mismatch` (claunch-rzepk.1). `save` writes `dims` from the
+collection's width for the same reason.
 
 The feature is on when the chosen source yields a base URL and a key and
 `embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the
@@ -137,8 +312,8 @@ write-up matches on any part.
 2. **Index.** `VectorIndex`: one JSON file per corpus under
    `<daemon dir>/rag/` (`beads-<root hash>.json`, `sessions.json`), float32
    vectors base64-encoded, model and width recorded so another model's file
-   is discarded rather than mixed. Machine-local derived data, like
-   `briefings.json`.
+   is discarded rather than mixed. Machine-local derived data, like the
+   per-session briefing cache (`sessions/<name>/briefing.json`).
 3. **Sync.** `RagService.ensure_sync` diffs documents against the index,
    drops what is gone, embeds what changed in batches, saves after every
    batch (an interrupted sync keeps what it did). One task per corpus; a
@@ -197,6 +372,9 @@ write-up matches on any part.
 | `GET /api/search?q=&kind=beads\|sessions&cwd=\|parent=&limit=&rerank=&wait=` | ranked results + `index: {total, indexed, pending, syncing, error}` + `timing` |
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
+| `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
+| `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it ; `{"db": "<db>"}` removes every collection of that DB name (claunch-r4796) |
+| `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same names and for a name taken on disk or by another preset (claunch-r4796) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
 | `GET /api/sessions` | now also `rag_configured` |
 

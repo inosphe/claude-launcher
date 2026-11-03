@@ -193,6 +193,102 @@ def test_progress_counts_only_the_records_a_boot_brings_back(home, monkeypatch):
     assert [done for done, _ in progress] == sorted(d for d, _ in progress)
 
 
+class _Work:
+    """Stands in for a half-done adoption (manager._Adoption)."""
+
+    def __init__(self, name):
+        self.name = name
+        self.built_on = None
+
+    def build(self):
+        import threading
+        self.built_on = threading.get_ident()
+
+
+def _adopting_manager(monkeypatch, names):
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+    entries = [{"name": n, "was_running": True} for n in names]
+    monkeypatch.setattr(mgr._store, "load_all", lambda: entries)
+    monkeypatch.setattr(mgr, "_restore_entry", lambda entry, *a: _Work(entry["name"]))
+    finished = []
+
+    def finish(work, entry, stranded, failed):
+        # The screen is built before the adoption is finished, never after.
+        assert work.built_on is not None
+        finished.append(work)
+
+    monkeypatch.setattr(mgr, "_finish_adoption", finish)
+    monkeypatch.setattr(mgr, "persist", lambda: None)
+    return mgr, finished
+
+
+def test_restore_all_async_builds_adopted_screens_off_the_loop(home, monkeypatch):
+    """The pyte replay of an adoption -- 59.1s of a 112.1s restore of 162
+    sessions on 2026-10-28 (claunch-opirg) -- runs on a worker thread, so
+    the loop serves the API and the sessions already back meanwhile; the
+    adoption itself is finished back on the loop."""
+    import threading
+
+    mgr, finished = _adopting_manager(monkeypatch, ["a0", "a1", "a2"])
+    progress = []
+
+    async def run():
+        loop_thread = threading.get_ident()
+        await mgr.restore_all_async(progress=lambda d, t: progress.append((d, t)))
+        return loop_thread
+
+    loop_thread = asyncio.run(run())
+    assert [w.name for w in finished] == ["a0", "a1", "a2"]
+    assert all(w.built_on != loop_thread for w in finished)
+    assert progress[0] == (0, 3) and progress[-1] == (3, 3)
+
+
+def test_restore_all_builds_adopted_screens_inline(home, monkeypatch):
+    import threading
+
+    mgr, finished = _adopting_manager(monkeypatch, ["b0", "b1"])
+    assert mgr.restore_all() == []
+    assert [w.built_on for w in finished] == [threading.get_ident()] * 2
+
+
+def test_a_failed_screen_build_is_kept_for_the_loop_to_raise(home):
+    """An exception out of the worker thread would end the boot's whole
+    restore; the build keeps it, and _adopt_finish raises it on the loop,
+    where the adoption falls back to a relaunch like any other failure."""
+    from claude_launcher.daemon.manager import _Adoption
+
+    class _Screen:
+        cols, rows, history_limit = 80, 24, 100
+
+    class _Session:
+        screen = _Screen()
+
+        def adopted_screen(self, *a):
+            raise RuntimeError("pyte choked")
+
+    work = _Adoption(None, None, {}, {}, _Session(), None, b"", {}, {})
+    work.build()
+    assert isinstance(work.error, RuntimeError) and work.screen is None
+    assert work.seconds >= 0.0
+
+
+def test_the_restore_log_names_the_loop_turns(home, monkeypatch, caplog):
+    """'other' used to hold the loop's own turns between records (51.9s of
+    112.1s on 2026-10-28, claunch-opirg); they are timed on their own now."""
+    import logging
+
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+    entries = [{"name": f"s{i}", "was_running": True} for i in range(2)]
+    monkeypatch.setattr(mgr._store, "load_all", lambda: entries)
+    monkeypatch.setattr(mgr, "_restore_entry", lambda *a: None)
+    monkeypatch.setattr(mgr, "persist", lambda: None)
+    with caplog.at_level(logging.INFO, logger="claude_launcher.daemon.manager"):
+        asyncio.run(mgr.restore_all_async())
+    line = next(r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("restore took"))
+    assert "loop turns " in line and "other " in line
+
+
 def test_restore_all_still_runs_synchronously(home, monkeypatch):
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
     monkeypatch.setattr(mgr._store, "load_all", lambda: [])

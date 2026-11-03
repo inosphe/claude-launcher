@@ -85,13 +85,48 @@ function relogin() {
   return reloginPromise;
 }
 
+/* A request the daemon never answers must still settle (claunch-8vl1s.1).
+   The dashboard tick runs one batch of reads at a time and the budget below
+   hands out two slots, so a fetch that hangs -- sent as the machine went to
+   sleep, answered by nothing at all -- keeps its slot for the life of the
+   page. Two of them and every later request waits in `httpWaiting` forever:
+   the tick never finishes, `polling` stays true, and nothing the tick does
+   ever runs again -- the sticky cards it would have taken down stay up while
+   the page looks alive, because the terminal's socket is not part of it.
+   `daemonHealth` has been bounded this way since claunch-fm3ud, for the same
+   reason and in its own words. 30 s is between that probe's 10 s and
+   POLL_STUCK_MS: long enough for the slowest page read on a loaded daemon
+   (the run page's read took seconds, claunch-02w8s), short enough that a
+   hang does not outlive the reader's patience. A caller with its own budget
+   passes `timeout` (0 turns this off) or its own `signal`. */
+const API_TIMEOUT_MS = 30000;
+
+function apiFetch(path, opts) {
+  const o = opts || {};
+  // `timeout: 0` turns the deadline off; a value that is not a number keeps
+  // the default rather than silently meaning "no limit".
+  const asked = o.timeout === undefined ? API_TIMEOUT_MS : Number(o.timeout);
+  const limit = asked === 0 ? 0 : (asked > 0 ? asked : API_TIMEOUT_MS);
+  const init = { credentials: "same-origin", ...o };
+  delete init.timeout;
+  // A caller's signal wins: it bounds the request for a reason of its own,
+  // and two signals cannot be merged without listening to both.
+  if (!limit || o.signal || typeof AbortController !== "function") {
+    return fetch(url(path), init);
+  }
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), limit);
+  init.signal = abort.signal;
+  return fetch(url(path), init).finally(() => clearTimeout(timer));
+}
+
 async function api(path, opts = {}) {
   const batched = batchQueue(path, opts);
   if (batched) return batched;
-  let resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
+  let resp = await budgeted(() => apiFetch(path, opts));
   if (resp.status === 401) {
     if (await relogin()) {
-      resp = await budgeted(() => fetch(url(path), { credentials: "same-origin", ...opts }));
+      resp = await budgeted(() => apiFetch(path, opts));
       if (resp.status !== 401) return resp;
     }
     showAuth();
@@ -1710,6 +1745,28 @@ function byLineage(sessions, visibleSessions = sessions) {
   return out;
 }
 
+/* Whether a session drawn at the top of the rail is an orphan rather than a
+   root, and why (claunch-ikiys). A root is a session a human started; an
+   orphan is one whose parent is gone: removed with no surviving session above
+   it to take the child (the daemon keeps that name in ``orphan_of``), or a
+   parent named by the record that is not among the current sessions at all
+   (archived). ``known`` is the set of every current session's name, taken
+   before the project pick and the state filter narrow it: a live parent those
+   filters hide still holds its child, and the child is not an orphan.
+   Without ``known`` only ``orphan_of`` counts. Returns {parent, title} or
+   null. */
+function railOrphanOf(s, known) {
+  if (s.orphan_of) {
+    return { parent: s.orphan_of,
+             title: `orphan: parent ${s.orphan_of} was removed` };
+  }
+  if (known && s.parent && s.parent !== s.name && !known.has(s.parent)) {
+    return { parent: s.parent,
+             title: `orphan: parent ${s.parent} is not among the current sessions` };
+  }
+  return null;
+}
+
 /* The rail's bulk bar. Verbs that act on the working fleet, each labelled
    with the number it would touch and hidden when that number is zero — so
    the bar is a reading of the rail rather than a fixed row of controls, half
@@ -1788,7 +1845,7 @@ function syncBulkActions(sessions, filter = "current") {
    safe answer and the destructive one side by side, one click apart. The
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
-function showModal({ title, body, actions, checkbox = null, choices = null }) {
+function showModal({ title, body, actions, checkbox = null, choices = null, controls = null }) {
   if (typeof sessionModal !== "undefined" && sessionModal) {
     sessionModalClose();
     if (sessionModal) return Promise.resolve(null);
@@ -1815,10 +1872,24 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
       label.append(check, document.createTextNode(checkbox.label));
       bodyEl.appendChild(label);
     }
+    // A caller's own row of controls, drawn between the question and the
+    // answers: the key picker puts the pool's strategy and the key its next
+    // launch takes there, so the choice below can be read against them
+    // (claunch-i985h). A node rather than more arguments, because what goes
+    // in it is that caller's business.
+    if (controls) bodyEl.appendChild(controls);
     // The first option is the one selected on open, so it is the safe answer
     // in every group: a modal dismissed with Enter must not take the
-    // destructive branch of a question the operator never read.
+    // destructive branch of a question the operator never read. An option may
+    // say ``selected`` when the caller knows which answer is already true
+    // (the key picker: the key this session is on), and the caller may take
+    // the change as it happens — the same press that moves the radio can be
+    // the write, when the question is "which one, and use it".
     let picked = choices ? choices.options[0] : null;
+    if (choices && choices.selected) {
+      const wanted = choices.options.find(choices.selected);
+      if (wanted) picked = wanted;
+    }
     if (choices) {
       const group = document.createElement("div");
       group.classList.add("modal-choices");
@@ -1836,6 +1907,7 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
               button.classList.toggle("danger", !!opt[action.dangerWhen]);
             }
           }
+          if (choices.onPick) choices.onPick(opt);
         });
         const text = document.createElement("span");
         text.textContent = opt.label;
@@ -1843,6 +1915,20 @@ function showModal({ title, body, actions, checkbox = null, choices = null }) {
           const hint = document.createElement("small");
           hint.textContent = opt.hint;
           text.appendChild(hint);
+          // Handed back like `detailEl` below: the key picker adds "next
+          // launch takes this" to the row once the pool's peek arrives, and
+          // that answer is not known when the modal opens.
+          opt.hintEl = hint;
+        }
+        // A second line the caller may still be reading when the modal opens
+        // (the key picker's usage): the node is handed back on the option so
+        // the answer can be written in place once it arrives.
+        if (opt.detail !== undefined) {
+          const detail = document.createElement("small");
+          detail.classList.add("modal-choice-detail");
+          detail.textContent = opt.detail;
+          text.appendChild(detail);
+          opt.detailEl = detail;
         }
         label.append(radio, text);
         group.appendChild(label);
@@ -4339,14 +4425,52 @@ function sessionGroupTabRows(rows, group) {
    rows start at the top, not at the scroll position the last group had. */
 let sessionGroupTabScrollReset = false;
 
+/* A header press sends the rail to its top with a smooth scroll, and that
+   animation has to survive the rail's own passes. A rebuild restores the
+   position with an instant `scrollTop` write (keptScrollTop, railRestoreAnchor),
+   and an instant write aborts a running smooth scroll (CSSOM View): the first
+   pass that ran while the animation was moving froze the rail where it stood --
+   partway up, with the scrollbar's thumb stopped mid-track -- and the next
+   press advanced it only as far as the pass after that. So the press marks the
+   list for the animation's run: while the mark stands, the scroll handler asks
+   for no rebuild and a rebuild writes no position. The mark is a deadline, not
+   a bare flag -- a browser that fires no `scrollend` (or an animation the
+   reader interrupts with the wheel) must not leave the rail without its
+   scroll-triggered rebuilds for more than this. */
+const RAIL_SCROLL_TOP_ANIM_MS = 3000;
+
+/* Whether a scroll-to-top press's animation is still running on `list`. */
+function railScrollTopMarked(list) {
+  const until = list && typeof list._railScrollTopUntil === "number"
+    ? list._railScrollTopUntil : 0;
+  return until > Date.now();
+}
+
 /* The rail back to its top: smoothly where the browser can. */
 function scrollSessionListTop() {
   const list = $("session-list");
-  if (list && typeof list.scrollTo === "function") {
-    list.scrollTo({ top: 0, behavior: "smooth" });
-  } else if (list) {
+  if (!list) return;
+  if (typeof list.scrollTo !== "function") {
     list.scrollTop = 0;
+    return;
   }
+  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
+  if (typeof list.addEventListener === "function") {
+    /* The animation settled: take the mark off and run the covering check the
+       scroll handler skipped while it stood, so the slice around the top is
+       drawn (the window covered where the animation started, not where it
+       ended). */
+    list.addEventListener("scrollend", () => {
+      list._railScrollTopUntil = 0;
+      const box = typeof $ === "function" ? $("session-list") : null;
+      if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
+      if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+      if (railSliceCovers(box)) return;
+      refreshSessions._forceRebuild = true;
+      refreshSessions({ cached: true });
+    }, { once: true });
+  }
+  list.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 /* A tab press. On another tab, open it; on the open one, take the rail back
@@ -4556,13 +4680,18 @@ function renderSessionGroupHeader(group, tab) {
     }
     head.appendChild(origins);
   }
-  if (group === "mesh" && tab.value !== "(no mesh)") {
+  /* The ⊕ opens the Create page with this mesh picked. It demands a
+     concrete project too: from "All projects" the form's Project row has
+     nothing to seed from, and sessions created that way keep arriving
+     misconfigured (claunch-teipq). */
+  if (group === "mesh" && tab.value !== "(no mesh)" && currentProject) {
     const add = document.createElement("button");
     add.className = "session-group-new";
     add.type = "button";
     add.textContent = "⊕";
     add.title = `create a new session in mesh ${tab.value}` +
-                " — the Create page with this mesh already picked";
+                ` (project ${currentProject})` +
+                " — the Create page with this mesh and project already picked";
     add.addEventListener("click", (e) => {
       e.stopPropagation();   // the row itself scrolls; this does not
       go(`#/new/${encodeURIComponent(tab.value)}`);
@@ -5070,6 +5199,30 @@ function sessionRowDigests(state) {
   return out;
 }
 
+/* One parse per distinct row text, and a shallow copy per poll
+   (claunch-hwbuc.3): the parsed row is the cache, the copy is what callers
+   may write to. Nested values are shared, which is what they were before --
+   every caller that mutates a row assigns a new value. */
+function takeParsed(text) {
+  const memo = takeParsed._byText || (takeParsed._byText = new Map());
+  let row = memo.get(text);
+  if (row === undefined) {
+    row = JSON.parse(text);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, row);
+  }
+  return Object.assign({}, row);
+}
+
+/* The text a row was parsed from, carried on the row for the redraw stamp
+   (claunch-hwbuc.2). Non-enumerable: every reader that serialises a row --
+   the stamp itself, rowSignature, the poll's own text -- sees the row it
+   always saw. */
+function keepRowText(row, text) {
+  if (!row || typeof row !== "object" || typeof text !== "string") return;
+  Object.defineProperty(row, "_pollText", { value: text, configurable: true, enumerable: false });
+}
+
 /* The poll's rows, whole, from an answer that may carry only the changed
    ones. null when the answer names a row this page does not hold -- the
    keep is dropped, so the next poll sends no digests and gets every row. */
@@ -5078,6 +5231,7 @@ function sessionRowsTake(state, data) {
   if (!data.delta || !Array.isArray(data.names)) {
     // A whole answer without digests: HTTP, or an older daemon.
     sessionRowsKept.delete(state);
+    for (const row of rows) keepRowText(row, JSON.stringify(row));
     return rows;
   }
   const kept = sessionRowsKept.get(state) || new Map();
@@ -5088,7 +5242,9 @@ function sessionRowsTake(state, data) {
   for (const name of data.names) {
     const row = changed.get(name);
     if (row) {
-      fresh.set(name, { hash: digests[name], text: JSON.stringify(row) });
+      const text = JSON.stringify(row);
+      fresh.set(name, { hash: digests[name], text });
+      keepRowText(row, text);
       out.push(row);
       continue;
     }
@@ -5098,10 +5254,57 @@ function sessionRowsTake(state, data) {
       return null;
     }
     fresh.set(name, held);
-    out.push(JSON.parse(held.text));
+    // Parsing the same text again every poll was 2.1 ms of a working poll
+    // (Trace-20261021T194912, claunch-hwbuc.3). The parse is memoised by the
+    // text it came from and the poll hands back a fresh shallow copy, so a
+    // caller that writes to its row (sessionRowsJoin replaces status_checks)
+    // still writes to its own object and not to the next poll's.
+    const again = takeParsed(held.text);
+    keepRowText(again, held.text);
+    out.push(again);
   }
   sessionRowsKept.set(state, fresh);
   return out;
+}
+
+/* The redraw stamp of one poll row, memoised by the row's own text
+   (claunch-hwbuc.2).
+
+   `refreshSessions` used to stringify the whole cache every poll -- 6.0/4.7 ms
+   of the main thread on a working fleet (Trace-20261021T194912). A delta poll
+   hands back the rows the daemon called unchanged re-parsed from the text this
+   page kept, so the text is the row's identity: the stamp computed for a text
+   is the answer for every row that text produces, and a poll that changed
+   nothing stringifies nothing. The text itself is carried on the row
+   (`_pollText`, non-enumerable) by sessionRowsTake. */
+function sessionRowStamp(row, unstamped) {
+  const text = row && row._pollText;
+  if (typeof text !== "string") return JSON.stringify(row, unstamped);
+  const memo = sessionRowStamp._byText || (sessionRowStamp._byText = new Map());
+  let stamp = memo.get(text);
+  if (stamp === undefined) {
+    stamp = JSON.stringify(JSON.parse(text), unstamped);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(text, stamp);
+  }
+  return stamp;
+}
+
+/* The status-check names and questions reach the rail through
+   `status_check_defs`, not through the rows, and `sessionRowsJoin` puts them
+   back only after `sessionRowsTake` took the poll's text. So a poll that
+   renames a check moves no row text: the row stamps stand still and the
+   redraw signature has to carry the defs itself, or the rail keeps drawing
+   the old names until something else in the signature moves
+   (claunch-hwbuc.2 review, s215-rev).
+
+   No memo here, deliberately: the defs are one record per configured check
+   -- a handful, whatever the fleet size -- so serialising them every poll is
+   O(checks) and is exactly the part of the old signature the row stamps were
+   meant to replace. */
+function statusCheckDefsStamp(defs) {
+  if (!defs || typeof defs !== "object") return "";
+  return JSON.stringify(defs);
 }
 
 /* The rail list names each status check once (`status_check_defs`, id ->
@@ -5361,6 +5564,14 @@ function railWireWindowScroll(list) {
       const box = typeof $ === "function" ? $("session-list") : null;
       if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
       if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+      /* A scroll-to-top press owns the position until its animation settles;
+         a rebuild here would restore the mid-animation position and abort the
+         smooth scroll. Reaching the top ends the wait -- no `scrollend` a
+         listener could miss is needed for that. */
+      if (railScrollTopMarked(box)) {
+        if ((box.scrollTop || 0) > 0) return;
+        box._railScrollTopUntil = 0;
+      }
       if (railSliceCovers(box)) return;
       refreshSessions._forceRebuild = true;
       // From the cache, not the daemon: a scroll asks for rows already in
@@ -5679,6 +5890,10 @@ async function refreshSessions(options) {
   // build a live xterm over a record the cache had never seen. Archived
   // records stay on demand: they are the one set that grows without bound.
   const state = (options && options.state) || "current";
+  // The poll's status-check names/questions, kept out here because the
+  // response is read inside a block and the signature is built after it
+  // (claunch-hwbuc.2).
+  let pollDefs = null;
   const matchesPollState = (session) => {
     if (state === "all") return true;
     if (state === "active") return session.status !== "exited";
@@ -5688,6 +5903,12 @@ async function refreshSessions(options) {
   // `cached`: redraw from the records already in hand, with no request --
   // what a project pick asks for, since every project is in the cache.
   const cached = !!(options && options.cached);
+  // A cached redraw sends no request, so it has no defs of its own. Signing
+  // "" there would differ from the poll that drew the rail, so every cached
+  // redraw would rebuild it -- and the poll after would rebuild it again --
+  // where nothing changed at all (claunch-hwbuc.2 review). The last poll's
+  // defs are kept on the function for exactly this path.
+  if (cached) pollDefs = refreshSessions._defs || null;
   if (!cached) {
     let data;
     // The row digests ride beside the read (claunch-4thlk.3); reduced
@@ -5719,6 +5940,8 @@ async function refreshSessions(options) {
     const incoming = rowKeep ? sessionRowsTake(state, data) : (data.sessions || []);
     if (!incoming) return;
     if (typeof sessionRowsJoin === "function") sessionRowsJoin(incoming, data.status_check_defs);
+    pollDefs = data && data.status_check_defs;
+    refreshSessions._defs = pollDefs;
     const incomingNames = new Set(incoming.map((s) => s.name));
     // A request answers for one category of records. Keep every cached record
     // outside that category (the archived ones an operator explicitly opened,
@@ -5732,10 +5955,16 @@ async function refreshSessions(options) {
     // Reduced embedded consumers execute this poll in isolation.  Keep that
     // contract while the full page reconciles the kill controls here.
     if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
+    // the state word beside each session named on a card (claunch-6vq2m)
+    if (typeof refreshGateSessionStates === "function") refreshGateSessionStates();
     briefingLLM = data.llm_configured !== false;
     ragConfigured = data.rag_configured === true;
     if (typeof renderRestoreQueueBanner === "function") renderRestoreQueueBanner(data.restore_queue);
     forgetDeadSessions();
+    // The provider warning reads the row this poll just replaced (its
+    // provider pair and the ignore record), so it is repainted here rather
+    // than on a second request.
+    if (typeof renderTermProviderWarn === "function") renderTermProviderWarn();
     // A session opened before its record arrived (a reload on its address)
     // moves the rail to its project now that the record is here.
     if (typeof projectFollowPending === "string" && projectFollowPending &&
@@ -5782,10 +6011,23 @@ async function refreshSessions(options) {
     // flight; the tps line below is swapped in place for it.
     (key === "live" && value && typeof value === "object" && "bin_s" in value)
   ) ? undefined : value;
+  // A row's stamp comes from sessionRowStamp when the harness carries it (the
+  // poll path), and from the whole row otherwise -- a sliced refreshSessions
+  // alone still serialises what it used to (claunch-hwbuc.2).
+  const rowStamp = (row) => (typeof sessionRowStamp === "function"
+    ? sessionRowStamp(row, unstamped)
+    : JSON.stringify(row, unstamped));
+  // The rows carry only their answers, so a renamed status check moves no row
+  // stamp; the defs ride in the signature on their own (claunch-hwbuc.2).
+  // Guarded like rowStamp: a sliced refreshSessions without the helper keeps
+  // the shape it had.
+  const defsStamp = typeof statusCheckDefsStamp === "function"
+    ? statusCheckDefsStamp(pollDefs)
+    : null;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
-    [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
+    [[briefingLLM, sessionsCache.map(rowStamp), groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList,
      // The open tab picks which rows are drawn.
      typeof sessionGroupTab === "object" ? sessionGroupTab : null,
@@ -5795,7 +6037,10 @@ async function refreshSessions(options) {
      typeof sessionFilter === "undefined" ? null : sessionFilter,
      // The key pools the rows' chips are drawn from, read beside this poll
      // rather than in it (keyPoolSignature).
-     typeof keyPoolSignature === "function" ? keyPoolSignature() : null],
+     typeof keyPoolSignature === "function" ? keyPoolSignature() : null,
+     // The checks' names and questions, which no row carries
+     // (claunch-hwbuc.2 review).
+     defsStamp],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -5928,6 +6173,9 @@ async function refreshSessions(options) {
   // nothing, the visible set comes back empty, and every row is laid out
   // as a root with no indent.
   const visibleSessions = railList.filter((s) => sessionMatchesFilter(s));
+  // Every current record, before the project pick and the state filter: the
+  // orphan tag asks whether the parent exists, not whether it is drawn.
+  const railKnownNames = new Set(sessionsCache.map((s) => s.name));
   const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
@@ -6360,6 +6608,22 @@ async function refreshSessions(options) {
       li.dataset.railDepth = String(Math.min(depth, 4));
       li.title = `spawned by ${s.parent}`;
     }
+    // A top-level row that a session did not start at the top: its parent
+    // was removed (orphan_of), or is not among the current sessions at all
+    // (railOrphanOf). A parent the filters hide is not gone.
+    const orphan = !depth && typeof railOrphanOf === "function"
+      ? railOrphanOf(s, typeof railKnownNames !== "undefined" ? railKnownNames : null)
+      : null;
+    let orphanTag = null;
+    if (orphan) {
+      li.classList.add("orphan");
+      li.dataset.orphanOf = orphan.parent;
+      li.title = orphan.title;
+      orphanTag = document.createElement("span");
+      orphanTag.className = "rail-orphan";
+      orphanTag.textContent = "고아";
+      orphanTag.title = orphan.title;
+    }
     if (kin) {
       li.classList.add("kin-outside");
       li.title = `${li.title ? li.title + " · " : ""}shown for its lineage`
@@ -6636,7 +6900,8 @@ async function refreshSessions(options) {
     // alias first, then what the session is, then what it is doing right
     // now, then where it belongs — identity reads left, state after,
     // belonging last.
-    head.append(label, keys, ...(handleBox ? [handleBox] : []),
+    head.append(label, ...(orphanTag ? [orphanTag] : []), keys,
+                ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []),
                 ...(watchBox ? [watchBox] : []),
@@ -6912,12 +7177,20 @@ async function refreshSessions(options) {
     railMeasureRows(list);
     if (railTailFix) railTailFix();
   }
-  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  // A scroll-to-top press in flight (its smooth animation owns the position):
+  // an instant write here would abort that animation -- the rail froze where
+  // the pass found it, partway up (see scrollSessionListTop). The settle
+  // path redraws the slice around the top once the animation lands. Inlined
+  // rather than read through railScrollTopMarked: the harnesses that slice
+  // this function out of app.js keep working without the helper.
+  const scrollTopAnim = typeof list._railScrollTopUntil === "number"
+    && list._railScrollTopUntil > Date.now();
+  if (rebuild && keptScrollTop && !scrollTopAnim) list.scrollTop = keptScrollTop;
   else if (rebuild && tabSwitched) list.scrollTop = 0;
   // ...and then the row the reader was looking at goes back where it was
   // (claunch-gpxur). The number above is right only while the model's heights
   // match the page; the row is right either way.
-  if (rebuild && railAnchor && typeof railRestoreAnchor === "function") {
+  if (rebuild && railAnchor && !scrollTopAnim && typeof railRestoreAnchor === "function") {
     railRestoreAnchor(list, railAnchor);
   }
   // The ancestor band above the list reads the rows this pass just drew (and
@@ -7500,6 +7773,8 @@ function syncSessionResourceButtons() {
     "term-chartbtn": isPiDurable(name),
     "term-qabtn": qaDoor && !!name && (qaRailCache[name]?.unresolved || 0) > 0,
     "term-threadsbtn": !operator && !!name && (threadsRailCache[name]?.open || 0) > 0,
+    "term-wrapupbtn": !!name && (wrapupRailCache[name]?.unresolved || 0) > 0,
+    "term-planbtn": !!name && (planRailCache[name]?.waiting || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
@@ -7647,6 +7922,54 @@ async function refreshQaRail() {
   maybeOpenQaPane();
 }
 
+/* Wrap-up drafts (wrapup-pane.js, daemon/wrapup_api.py, claunch-ar8jn): per
+   session with drafts, how many wait on the user by kind, whether the
+   session still runs and when it ended. Lights ✎ wrap-up, and a session
+   that ended with drafts waiting puts up a card (wrapupNoticeSync). */
+let wrapupRailCache = {};
+let wrapupRailSig = null;
+
+async function refreshWrapupRail() {
+  let data;
+  try {
+    const resp = await api("/api/wrapup/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === wrapupRailSig) return;
+  wrapupRailSig = sig;
+  wrapupRailCache = rows;
+  wrapupNoticeSync(rows);
+  syncSessionResourceButtons();
+}
+
+/* Session plans (plan-pane.js, daemon/plan_api.py, claunch-7jzp8): per
+   session with a plan, its summary -- how many of its nodes wait on the user,
+   whether it may close. Lights ☰ plan while something waits. */
+let planRailCache = {};
+let planRailSig = null;
+
+async function refreshPlanRail() {
+  let data;
+  try {
+    const resp = await api("/api/plan/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === planRailSig) return;
+  planRailSig = sig;
+  planRailCache = rows;
+  syncSessionResourceButtons();
+}
+
 /* Session-card labels for what waits on the reader in the talk panes
    (claunch-wp90t): a pill per kind on the rail row, from the same rail
    caches the terminal header buttons read (/api/qa/rail, /api/threads/rail).
@@ -7749,6 +8072,8 @@ async function refreshCflow2Rail() {
   // every person gate joins the notification channel, every poll
   // (claunch-whm4e.1; urgent asks only, before: claunch-x76l8.1)
   if (typeof runGateFeed === "function") runGateFeed();
+  // the rows carry each session's lifecycle (claunch-6vq2m)
+  if (typeof refreshGateSessionStates === "function") refreshGateSessionStates();
   if (sig === cflow2RailSig) return;
   cflow2RailSig = sig;
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
@@ -7773,7 +8098,10 @@ function cflow2RailLabel(r) {
   if (r.status === "done" || r.status === "failed" || r.status === "aborted")
     return r.status;
   const where = (r.current || []).join(", ");
-  const round = r.round ? ` · round ${r.round}` : "";
+  // round_now is the round a workflow that loops inside one run is in (its
+  // state round stays 1); a recurring run or an older daemon sends only round.
+  const shown = Number.isFinite(r.round_now) ? r.round_now : r.round;
+  const round = shown ? ` · round ${shown}` : "";
   return `${r.status || "running"}${round}${where ? " · " + where : ""}`;
 }
 
@@ -7868,24 +8196,42 @@ function railQuietFlags(name) {
      answers with. */
   if (s && s.fault && s.fault.active) {
     const f = s.fault;
+    /* A reading taken from the pause record (fault_pause.py, source
+       "pause-record") is not a live screen: the daemon stopped this session
+       on purpose and nothing resumes it at the reset, so the tooltip says
+       what the person has to decide instead of how the message would leave
+       a changing screen. Before claunch-9djny.1 such a row drew nothing at
+       all, and the reason was unreadable until the reset had passed. */
+    const paused = f.source === "pause-record";
     out.push({
       cls: "quiet-fault",
       glyph: "!",
       text: f.label || f.kind || "fault",
-      title:
-        `session fault — ${f.label || f.kind} (${f.harness})` +
-        (f.code ? ` · API ${f.code}` : "") + "\n" +
-        (f.resolved_by
-          ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
-          : "") +
-        `${f.message}\n` +
-        (f.reset ? `resets: ${f.reset}\n` : "") +
-        (f.action ? `what to do: ${f.action}\n` : "") +
-        (f.strikes > 1
-          ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
-            "window and never extends the last one\n"
-          : "") +
-        `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"}.`,
+      title: paused
+        ? `paused by the daemon — ${f.label || f.kind} (${f.harness})` +
+          (f.code ? ` · API ${f.code}` : "") + "\n" +
+          (f.resolved_by
+            ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
+            : "") +
+          `${f.message}\n` +
+          (f.reset ? `resets: ${f.reset}\n` : "") +
+          (f.until ? `paused until ${f.until}\n` : "") +
+          (f.action ? `what to do: ${f.action}\n` : "") +
+          "nothing resumes it at the reset — resume it yourself if you want it back."
+        : `session fault — ${f.label || f.kind} (${f.harness})` +
+          (f.code ? ` · API ${f.code}` : "") + "\n" +
+          (f.resolved_by
+            ? `cleared by: ${RESOLVED_BY_TEXT[f.resolved_by] || f.resolved_by}\n`
+            : "") +
+          `${f.message}\n` +
+          (f.reset ? `resets: ${f.reset}\n` : "") +
+          (f.action ? `what to do: ${f.action}\n` : "") +
+          (f.strikes > 1
+            ? `re-observed: ${f.strikes - 1}× — each sighting opens its own ` +
+              "window and never extends the last one\n"
+            : "") +
+          `seen ${f.last_seen || "?"}; stays on the rail until ${f.until || "?"} ` +
+          "or until the message scrolls off a changing screen.",
     });
   }
   // Exited rows are left out: a record with no terminal holds nothing back
@@ -8759,15 +9105,48 @@ function priceCurrency() {
   return (modelPrices && modelPrices.currency) || "$";
 }
 
-/* The rate row for a model id, or null where the table has no row for it.
-   Keyed by the id the transcript records (`context.model`), not the
-   shortened display form — the table is written against what the harness
-   actually answered on. */
-function priceRateFor(model) {
+/* The provider row the table keys rates under when no provider has its own
+   row for a model ("*" — the daemon names it in `any`). */
+function priceAnyProvider() {
+  return (modelPrices && modelPrices.any) || "*";
+}
+
+/* The provider a session's requests are priced under: the one its profile
+   resolves to (Settings → Providers; own, inherited, or the global default),
+   and for a borrowing session the lender's, the profile whose backend it
+   runs on. "" when the profile is unknown to the table's read. */
+function sessionPriceProvider(s) {
+  const map = modelPrices && modelPrices.profiles;
+  const prof = s && (s.borrow || s.profile);
+  if (!map || !prof) return "";
+  return map[String(prof).split(":")[0]] || "";
+}
+
+/* The rate row for a model id served by a provider, or null where the table
+   prices neither that provider's model nor the same id under "*". Keyed by
+   the id the transcript records (`context.model`), not the shortened display
+   form — the table is written against what the harness actually answered
+   on. A row with no rates counts as absent (the daemon's rate_for reads it
+   the same way), so it neither hides the "*" row nor prices at 0. */
+function priceRateFor(model, provider) {
   const table = modelPrices && modelPrices.prices;
   if (!table || !model) return null;
-  const rates = table[model];
-  return rates && typeof rates === "object" ? rates : null;
+  for (const p of [provider, priceAnyProvider()]) {
+    const rates = p && table[p] && table[p][model];
+    if (rates && typeof rates === "object" && Object.keys(rates).length) {
+      return rates;
+    }
+  }
+  return null;
+}
+
+/* The cache-write rate is optional: most providers bill tokens written to
+   cache as plain (non-cached) input, so a row that leaves it unset prices
+   them at its read rate. A rate set to 0 stays 0. */
+function cacheWriteRate(rates) {
+  const v = rates.cache_write;
+  if (v === undefined || v === null || v === "") return +rates.input || 0;
+  return +v || 0;
 }
 
 /* What one billed request costs at the given per-1M-token rates. A rate the
@@ -8778,7 +9157,7 @@ function readingCost(c, rates) {
   if (!c || !rates) return null;
   const cost = ((+rates.input || 0) * (c.input || 0) +
                 (+rates.cache_read || 0) * (c.cache_read || 0) +
-                (+rates.cache_write || 0) * (c.cache_write || 0) +
+                cacheWriteRate(rates) * (c.cache_write || 0) +
                 (+rates.output || 0) * (c.output || 0)) / 1e6;
   return Number.isFinite(cost) ? cost : null;
 }
@@ -8800,7 +9179,7 @@ function costBreakdown(c, rates) {
   const lines = [
     row("read", c.input, +rates.input || 0),
     row("cached read", c.cache_read, +rates.cache_read || 0),
-    row("write", c.cache_write, +rates.cache_write || 0),
+    row("cache write", c.cache_write, cacheWriteRate(rates)),
     row("output", c.output, +rates.output || 0),
   ];
   const cost = readingCost(c, rates);
@@ -9041,7 +9420,8 @@ function ctxRailLine(s) {
 function ctxTokensLine(s) {
   const c = s && s.context;
   if (!c) return null;
-  const rates = priceRateFor(c.model);
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
   const cost = readingCost(c, rates);
   const line = el("span", "rail-ctx-tokens");
   line.append(
@@ -9060,8 +9440,8 @@ function ctxTokensLine(s) {
     `cached ${(c.cache_read || 0).toLocaleString()} replayed from cache · ` +
     `write ${(c.cache_write || 0).toLocaleString()} written to cache`,
     rates ? costBreakdown(c, rates)
-          : "no per-1M rates for this model — add them in Settings → " +
-            "Model prices to see an estimate",
+          : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
+            " — add them in Settings → Model prices to see an estimate",
   ].join("\n");
   return line;
 }
@@ -9655,7 +10035,38 @@ function termSeriesTick(v) {
   return Number.isInteger(v) ? String(v) : String(Math.round(v * 10) / 10);
 }
 
-function termSeriesChart(data, zoom) {
+/* The rates the overlay prices this session's requests at, or null rates
+   where the table has none for it. The pair is the detail panel's own
+   (ctxCostDetailRow): the model the last context reading names — or, with no
+   reading yet, the model the token usage totals name — under the provider the
+   session's profile resolves to. Reusing readingCost/priceRateFor is what
+   keeps this estimate and the rail rows' from ever disagreeing
+   (claunch-i6xl2). */
+function termSeriesPrice(s) {
+  const c = s && s.context;
+  const usage = s && s.token_usage;
+  const model = (c && c.model) || (usage && usage.model) || "";
+  const provider = typeof sessionPriceProvider === "function" ? sessionPriceProvider(s) : "";
+  const rates = typeof priceRateFor === "function" ? priceRateFor(model, provider) : null;
+  return { rates, model, provider };
+}
+
+/* What a set of billed buckets costs at those rates, as the chart writes it:
+   "≈ $0.0123", or "" where there is nothing to price. `tokens` is a
+   window's totals or one request's point — readingCost takes either. Below a
+   cent the four decimals costText fixes would round a real estimate to
+   $0.0000, which reads as free; those get six decimals instead
+   (claunch-i6xl2). */
+function termSeriesCostText(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const cost = readingCost(tokens, price.rates);
+  if (cost === null) return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+  return `≈ ${currency}${amount}`;
+}
+
+function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
      picker derives its label-clearance floor from that height and the inset
@@ -9808,10 +10219,23 @@ function termSeriesChart(data, zoom) {
   const last = pts[pts.length - 1];
   const asked = data.count || pts.length;
   const of = data.requests > asked ? `the last ${asked} of ${data.requests}` : String(asked);
+  /* What the requests this chart stands for are estimated to have cost at
+     the Settings → Model prices rates (claunch-i6xl2). It prices the window's
+     totals, not the drawn points: past `points` requests a point is the
+     largest of its group, so summing points would undercount. With no rates
+     the chart says so in its tooltip rather than writing a $0. */
+  const cost = termSeriesCostText(price, data.totals);
+  const costOf = price && price.model
+    ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
+  const costLine = cost
+    ? `; ${cost} estimated for ${asked} request${asked > 1 ? "s" : ""} at Settings → Model prices${costOf}`
+    : (price && price.model && !price.rates
+        ? `; not priced — set rates for ${price.model} in Settings → Model prices` : "");
   box.title = `context of ${of} request${asked > 1 ? "s" : ""} over ${fmtAge(span)}; ` +
     `last ${usageShort(termSeriesTotal(last))}, largest ${usageShort(peak)}` +
     (compactions ? `; ${compactions} compaction${compactions > 1 ? "s" : ""}` : "") +
     (swaps.length ? `; ${swaps.length} profile swap${swaps.length > 1 ? "s" : ""}` : "") +
+    costLine +
     (zoom ? "" : "\nhover for the whole conversation");
   if (zoom) {
     const axis = el("div", "term-series-axis");
@@ -9832,7 +10256,9 @@ function termSeriesChart(data, zoom) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. */
+       pointer. The request's own estimate rides on the first line
+       (claunch-i6xl2): it names a request, so its cost belongs beside the
+       number, and the second line's token figures are the long one. */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -9842,7 +10268,9 @@ function termSeriesChart(data, zoom) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
+      const pcost = termSeriesCostText(price, p);
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
+        (pcost ? ` · ${pcost}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -9857,8 +10285,12 @@ function termSeriesChart(data, zoom) {
       when.textContent = " ";
       what.textContent = " ";
     });
-    box.append(axis, legend, readout);
+    /* The window's estimate under the legend, where it describes the whole
+       plot rather than the request under the pointer. */
+    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
+  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
   return box;
 }
 
@@ -9889,9 +10321,9 @@ function termSeriesRelease() {
   if (typeof renderTermTps === "function") renderTermTps();
 }
 
-function termSeriesMaker(small, zoomed, hover) {
+function termSeriesMaker(small, zoomed, hover, price) {
   const make = (slot) => {
-    const box = termSeriesChart(hover === slot ? zoomed : small, hover === slot);
+    const box = termSeriesChart(hover === slot ? zoomed : small, hover === slot, price);
     box.addEventListener("mouseenter", () => {
       if (termSeriesHover === slot) return;
       termSeriesHover = slot;
@@ -10078,6 +10510,17 @@ function renderTermTps() {
     const err = t && typeof tpsErrorText === "function" ? tpsErrorText(t) : "";
     const rateShown = !!(t && !t.idle && t.counted && Number.isFinite(t.tps));
     const errCls = t && typeof tpsErrorClass === "function" ? tpsErrorClass(t) : "";
+    /* What the big line means when no rate is being drawn (claunch-i6xl2.1).
+       The shim's live board knows only its own calls: "idle" there means no
+       call is out, not that the harness has nothing to do. A turn running a
+       local tool (bash, a build, a test run) has no call in flight for
+       minutes, and read as "idle" -- the same word a session waiting for a
+       prompt gets. `status` is the harness turn signal, so the two are read
+       together: a call out is the endpoint's wait, no call but busy is local
+       work, neither is idle. */
+    const liveCall = !!(t && t.live &&
+      (t.live.state === "waiting" || t.live.state === "streaming"));
+    const working = !liveCall && !!(s && s.status === "busy");
     let parts = null;
     if (show && !t) {
       parts = { live: false, usageOnly: true, cls: "term-tps-overlay" };
@@ -10089,7 +10532,7 @@ function renderTermTps() {
       parts = {
         live: true,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: tpsLiveText(l),
+        big: working ? "working" : tpsLiveText(l),
         series: Array.isArray(l.series) ? l.series : [],
         when: [model ? modelShort(model) : "",
           rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
@@ -10100,8 +10543,10 @@ function renderTermTps() {
       parts = {
         live: false,
         cls: "term-tps-overlay" + tpsStaleClass(t) + errCls,
-        big: rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t),
-        when: [t.model ? modelShort(t.model) : "", rateShown ? err : "", age]
+        big: working ? "working" : (rateShown ? `${tpsFmt(t.tps)} tok/s` : tpsText(t)),
+        when: [t.model ? modelShort(t.model) : "",
+          working && rateShown ? `last ${tpsFmt(t.tps)} tok/s` : "",
+          rateShown ? err : "", age]
           .filter(Boolean).join(" · "),
         metrics: [lastLat, avgLat, cache].filter(Boolean).join(" · "),
         title: tpsTooltip(t),
@@ -10115,8 +10560,15 @@ function renderTermTps() {
       ? termSeriesData(currentName, !!seriesHover) : null;
     const seriesSmall = seriesHover && seriesData ? termSeriesData(currentName, false) || seriesData
       : seriesData;
+    /* The rates to price the charted requests at, from the session's model
+       and provider (claunch-i6xl2). Recomputed every pass: the table is read
+       once and can change under Settings → Model prices, and the key below
+       makes that repaint the overlay. */
+    const seriesPrice = parts && typeof termSeriesPrice === "function"
+      ? termSeriesPrice(s) : null;
     if (parts && seriesData) {
-      parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}`;
+      parts.timeline = `${seriesData.window}|${seriesData.until}|${seriesData.requests}|${seriesHover}` +
+        `|${typeof modelPricesKey === "string" ? modelPricesKey : ""}`;
     }
     const key = parts ? JSON.stringify(parts) : null;
     if (parts && overlay._tpsKey !== key) {
@@ -10143,7 +10595,7 @@ function renderTermTps() {
           }
         }
       }
-      const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover) : null;
+      const makeChart = parts.timeline ? termSeriesMaker(seriesSmall, seriesData, seriesHover, seriesPrice) : null;
       /* One chart for the whole overlay, under the last block: the token
          series belongs to the session, so drawing it under each block showed
          the same chart twice. */
@@ -10334,7 +10786,8 @@ function usageRailLine(s) {
 function ctxCostDetailRow(dl, s) {
   const c = s && s.context;
   if (!c) return;
-  const rates = priceRateFor(c.model);
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
   const cost = readingCost(c, rates);
   dl.appendChild(el("dt", null, "last request"));
   const parts = [
@@ -10347,8 +10800,8 @@ function ctxCostDetailRow(dl, s) {
   const dd = el("dd", "ctx-cost-detail", parts.join(" · "));
   dd.title = rates
     ? costBreakdown(c, rates)
-    : "no per-1M rates for this model — set them in Settings → Model " +
-      "prices to see an estimate";
+    : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
+      " — set them in Settings → Model prices to see an estimate";
   dl.appendChild(dd);
 }
 
@@ -10486,6 +10939,18 @@ let railBeadsBusy = false;
 const RAIL_BEADS_EVERY = 5000;
 const RAIL_BEADS_MAX = 4;    // pills on a row before "+n"
 
+/* Collect the issue prefixes every board payload carries (board_head's
+   issue_prefix), so mdInline can link mentions of digit-less ids like
+   claunch-jpqat. Older daemons send no issue_prefix: the set simply stays
+   smaller and digit-bearing ids still link. */
+function beadsNotePrefixes(boards) {
+  for (const b of boards || []) {
+    if (b && typeof b.issue_prefix === "string" && b.issue_prefix) {
+      beadsIdPrefixes.add(b.issue_prefix);
+    }
+  }
+}
+
 async function refreshRailBeads() {
   const now = Date.now();
   if (railBeadsBusy || now - railBeadsAt < RAIL_BEADS_EVERY) return;
@@ -10495,6 +10960,7 @@ async function refreshRailBeads() {
     if (resp.status === 404) { railBeadsAt = now + 60000; return; }  // older daemon: stop asking for a while
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return;
+    beadsNotePrefixes(data.boards);
     railBeads = railBeadsIndex(data);
     railBeadsAt = Date.now();
     applyRailBeads();
@@ -11182,7 +11648,8 @@ function refreshRailSeen(list) {
     // a reading lands.
     const tk = li.querySelector(".rail-ctx-tokens");
     if (tk && typeof ctxTokensLine === "function") {
-      const tkKey = JSON.stringify([s.context || null, modelPricesKey]);
+      const tkKey = JSON.stringify([s.context || null, s.profile || "",
+                                    s.borrow || "", modelPricesKey]);
       if (tk._railKey !== tkKey) {
         const fresh = ctxTokensLine(s);
         if (fresh) swap(tk, fresh)._railKey = tkKey;
@@ -11566,7 +12033,11 @@ function applyBriefingCards() {
     const one = fresh && fresh.phase === "ok" && fresh.data && fresh.data.briefing
       && fresh.data.briefing["one-line-job-description"];
     const oline = li.querySelector(".rail-brief");
-    if (one && oline) oline.textContent = one;
+    if (one && oline) {
+      oline.textContent = one;
+      oline.classList.toggle("failed", false);
+      oline.classList.toggle("stale", false);
+    }
     if (li.dataset.railMode !== "expanded") continue;
     // Rendering never starts a summary job. Only explicit controls request one.
     li.appendChild(renderBriefingCard(name, briefingCache.get(name), {
@@ -11910,14 +12381,29 @@ function openRailNoteEditor(li, name) {
    here on every row rebuild; the card is applyBriefingCards'. */
 function decorateBriefingRow(li, s) {
   const one = (s.briefing && s.briefing.one_line) || "";
+  // A summary that failed is said on the row; one never asked for is not
+  // (claunch-lluxq): without this, both read as an empty row.
+  const failed = (s.briefing && s.briefing.failed) || null;
   let oline = li.querySelector(".rail-brief");
-  if (one) {
+  if (one || failed) {
     if (!oline) {
       oline = el("div", "rail-brief");
-      oline.title = "one-line job description — pick the session for the full briefing";
       li.appendChild(oline);
     }
-    oline.textContent = one;
+    oline.textContent = one || `Summary failed · ${failed.error || "error"}`;
+    oline.classList.toggle("failed", !one);
+    oline.classList.toggle("stale", !!(one && s.briefing.stale));
+    const notes = [one
+      ? "one-line job description — pick the session for the full briefing"
+      : "the last summary request failed — ⟳ to retry"];
+    if (one && s.briefing.stale) {
+      notes.push("written by the previous briefing model — ⟳ re-summarises with the current one");
+    }
+    if (failed) {
+      const age = seenAgo(failed.at);
+      notes.push(`last summary request failed${age ? ` ${age.text} ago` : ""}: ${failed.error || "error"}`);
+    }
+    oline.title = notes.join("\n");
   } else if (oline) {
     oline.remove();
   }
@@ -13689,12 +14175,40 @@ function lineageAncestors(base, list) {
 
 /* The sessions the rail draws: the cache, narrowed to the picked project,
    plus the ancestors and descendants of those sessions that are filed under
-   another one (lineageAncestors, lineageDescendants). */
+   another one (lineageAncestors, lineageDescendants).
+
+   Rows are ordered by the position of their lineage's root session in `list`
+   (the daemon's creation order), so a row never stands above the family it
+   belongs to and appended kin never land at the end of the list
+   (claunch-20j1s.1). Rows under one root keep `list` order, which keeps the
+   root above its descendants for byLineage. */
 function railSessions(list = sessionsCache) {
-  const base = (list || []).filter(sessionInCurrentProject);
+  const all = (list || []).filter(Boolean);
+  const base = all.filter(sessionInCurrentProject);
   if (!currentProject || typeof lineageDescendants !== "function") return base;
   const above = typeof lineageAncestors === "function" ? lineageAncestors(base, list) : [];
-  return [...base, ...above, ...lineageDescendants(base, list)];
+  const kin = [...above, ...lineageDescendants(base, list)];
+  if (!kin.length) return base;
+  const want = new Set(base.map((s) => s.name));
+  for (const s of kin) want.add(s.name);
+  const at = new Map(all.map((s, i) => [s.name, i]));
+  const byName = new Map(all.map((s) => [s.name, s]));
+  const rootAt = (s) => {
+    let cur = s;
+    const seen = new Set([s.name]);
+    while (cur.parent && cur.parent !== cur.name && byName.has(cur.parent)
+           && !seen.has(cur.parent)) {
+      seen.add(cur.parent);
+      cur = byName.get(cur.parent);
+    }
+    return at.get(cur.name);
+  };
+  return all
+    .map((s, i) => [s, i])
+    .filter(([s]) => want.has(s.name))
+    .map(([s, i]) => [s, rootAt(s), i])
+    .sort((a, b) => (a[1] - b[1]) || (a[2] - b[2]))
+    .map(([s]) => s);
 }
 
 /* Whether the rail draws `s` only because it is in the lineage of a session
@@ -16145,46 +16659,112 @@ function markCompactProblems(select) {
 }
 
 function renderProfileHint() {
-  const box = $("profile-hint");
-  if (!box) return;  // a page that predates the row still runs
   const f = $("new-session");
   if (!f || !f.profile) return;
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const picked = newProfileSelector(f);
   const detail = picked ? newProfileDetail(f, picked) : null;
-  const shown = detail && !detail.error
-    ? profileHarnessLabel(detail.profile || picked, detail.harness)
-    : profileHarnessLabel(picked, "");
-  const choseOverride = !!f.profile.value || !!(f.harness && f.harness.value);
-  const whose = (shown && (!parent || choseOverride))
-    ? shown : (parent ? `${parent.name}'s profile` : "this profile");
-  const base = baseProfileName(picked || "") ||
-    (detail && detail.profile) || "";
-  const compact = profileCompactProblems[base];
-  let text = "";
-  if (compact) {
-    text = `A session on this profile will be refused: ${compact}`;
-  } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
-    text = `--null: it boots with no token at all — ${whose}'s config and ` +
-           `skills, but somebody has to run /login inside before it works.`;
-  } else if (speaks("borrow") && f.borrow && f.borrow.value &&
-             !borrowIsOwnToken(f, parent)) {
-    text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
-           `and provider — only the credential is theirs, the config and ` +
-           `skills stay ${whose}'s.`;
-  } else if (detail && detail.error) {
-    text = `${shown}: ${detail.error}`;
-  } else if (detail && detail.harness_available === false) {
-    text = `${detail.harness || "its harness"} is not installed on this ` +
-           `machine — a session on ${shown} will not start until it is.`;
+  // Before the box guard below: the recommendation under the Runs-as rows is
+  // a different line with a different subject, and a page that predates
+  // #profile-hint is the only thing that guard is for.
+  renderProviderHint(f, parent, picked, detail);
+  const box = $("profile-hint");
+  if (box) {
+    const shown = detail && !detail.error
+      ? profileHarnessLabel(detail.profile || picked, detail.harness)
+      : profileHarnessLabel(picked, "");
+    const choseOverride = !!f.profile.value ||
+      !!(f.harness && f.harness.value);
+    const whose = (shown && (!parent || choseOverride))
+      ? shown : (parent ? `${parent.name}'s profile` : "this profile");
+    const base = baseProfileName(picked || "") ||
+      (detail && detail.profile) || "";
+    const compact = profileCompactProblems[base];
+    let text = "";
+    if (compact) {
+      text = `A session on this profile will be refused: ${compact}`;
+    } else if (speaks("null_token") && f.null_token && f.null_token.checked) {
+      text = `--null: it boots with no token at all — ${whose}'s config and ` +
+             `skills, but somebody has to run /login inside before it works.`;
+    } else if (speaks("borrow") && f.borrow && f.borrow.value &&
+               !borrowIsOwnToken(f, parent)) {
+      text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
+             `and provider — only the credential is theirs, the config and ` +
+             `skills stay ${whose}'s.`;
+    } else if (detail && detail.error) {
+      text = `${shown}: ${detail.error}`;
+    } else if (detail && detail.harness_available === false) {
+      text = `${detail.harness || "its harness"} is not installed on this ` +
+             `machine — a session on ${shown} will not start until it is.`;
+    }
+    box.textContent = text;
+    box.classList.toggle("hidden", !text);
   }
-  box.textContent = text;
-  box.classList.toggle("hidden", !text);
   // The usage block follows the same row and for the same reason: it answers
   // "whose token, and what is left of it". Every path that moves the pair
   // lands here, so this is the one place it has to be driven from.
   renderNewUsage();
+}
+
+/* The service name that makes a provider Claude's own (/api/profiles
+   provider_service, from providers.service). */
+const ANTHROPIC_SERVICE = "anthropic";
+
+/* The one recommendation the Runs-as rows make by themselves.
+
+   On the claude harness, a provider that is not Claude's own still has the
+   harness's permission classifier billed to Claude (Claude Code's `auto`
+   mode charges for those classifier requests), so a session created here
+   spends Claude usage on top of the provider it was pointed at. Skip
+   permissions is the switch that avoids it, and that switch is a row inside
+   the fold — so this line sits on the face of the form, directly under the
+   rows that decide it.
+
+   Silent on Claude's own service — the `claude` provider the nc and sr
+   profiles are on, and the built-in `default` — because there the classifier
+   is part of the usage those profiles exist to spend. Also silent once the
+   box is ticked, and on a child whose parent's answer the spawn policy
+   locked: the fold says that row is inherited and the parent hint says why,
+   so asking for it here would ask for something this form cannot do. */
+function renderProviderHint(f, parent, picked, detail) {
+  const box = $("new-provider-hint");
+  if (!box) return;  // a page that predates the line still runs
+  const harnessName = newProfileHarnessName(f, picked);
+  const owner = providerOwner(f, parent, picked, detail);
+  const provider = owner ? String(owner.provider || "") : "";
+  const service = owner ? String(owner.provider_service || "") : "";
+  const skip = f.skip_permissions;
+  const locked = !!parent && !!skip && !!skip.disabled;
+  let text = "";
+  if (harnessName === "claude" && provider && service &&
+      service !== ANTHROPIC_SERVICE && skip && !locked && !skip.checked) {
+    text = `${provider} is not a Claude provider: on the claude harness the ` +
+      `permission classifier is still billed to Claude, as extra usage on ` +
+      `top of ${provider}. Skip permissions is recommended here — ` +
+      `How it runs ▸ Claude runtime.`;
+  }
+  box.textContent = text;
+  box.classList.toggle("hidden", !text);
+}
+
+/* Which profile's backend the launch will actually talk to: the Borrow row's
+   lender when it names somebody else (the same rule modelIdsInPlay follows —
+   `--borrow` replaces the provider, not only the token), the selected profile
+   otherwise, and the parent's profile when a child names none of its own. */
+function providerOwner(f, parent, picked, detail) {
+  const borrow = f.borrow;
+  const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
+  const lender = speaks("borrow") && borrow && borrow.value &&
+    !borrowIsOwnToken(f, parent) ? baseProfileName(borrow.value) : "";
+  if (!lender) {
+    return detail || (parent && parent.profile
+      ? profileDetails[baseProfileName(parent.profile)] || null : null);
+  }
+  const selected = baseProfileName(picked || "") ||
+    (detail && detail.profile) || "";
+  if (lender === selected) return detail;
+  return profileDetails[lender] || null;
 }
 
 /* ---- what the selected credential reports, and what is left of it -------
@@ -16216,7 +16796,8 @@ const NEW_USAGE_STRATEGY_LABELS = {
   rotation: "rotation (one key per launch, in order)",
   "usage-min": "usage-min (lowest usage)",
   "usage-max": "usage-max (highest usage)",
-  random: "random",
+  random: "random (a drawn key — roll to re-draw)",
+  manual: "manual (the key you pick)",
 };
 const newUsageState = {
   // What `data` or `error` describes, and when it was read.
@@ -16230,6 +16811,18 @@ const newUsageState = {
   // read a save triggers would otherwise clear it before it was drawn.
   flash: "", flashFor: "",
 };
+
+/* The key the operator picked in the Runs-as block for the session this form
+   creates (claunch-i985h). It travels with the create request as
+   ``SessionDef.key_id``, like the rail modal's pin, so the session runs on
+   exactly that key on every launch. Held here rather than as a named form
+   field for the same reason the opening images are: there is no control whose
+   value it is, and it belongs to one profile's pool, so leaving that profile
+   drops it. */
+let newSessionKeyId = "";
+// The pool selector the pin was taken from: a borrow picked or dropped moves
+// the block to another pool before its read lands (claunch-e48es).
+let newSessionKeyFor = "";
 
 /* How long ago a stamp was. Two clocks reach this and they are written
    differently: the usage cache keeps an epoch in seconds, and profile_keys
@@ -16360,7 +16953,7 @@ function newUsageFillStrategies(select, strategies) {
   }
 }
 
-async function setNewKeyStrategy(profileName, selector, strategy) {
+async function setNewKeyStrategy(profileName, selector, strategy, keyId) {
   const st = newUsageState;
   let resp, doc;
   try {
@@ -16369,7 +16962,7 @@ async function setNewKeyStrategy(profileName, selector, strategy) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy }),
+        body: JSON.stringify(keyId ? { strategy, key_id: keyId } : { strategy }),
       },
     );
     doc = await resp.json().catch(() => null);
@@ -16391,12 +16984,93 @@ async function setNewKeyStrategy(profileName, selector, strategy) {
   startNewUsageRead(selector, false);
 }
 
+/* The profile a write from this block is about: the answer's own name when
+   the block is showing it, else the selector's profile half. The route takes
+   a profile, not a `name:harness` selector. */
+function newUsageProfileName(selector) {
+  const doc = newUsageState.selector === selector ? newUsageState.data : null;
+  return (doc && doc.profile) || baseProfileName(selector) || "";
+}
+
+/* The manual choice, in one press: the profile's strategy becomes manual with
+   this key, and the session this form creates is pinned to it. The pin is what
+   makes the answer certain rather than momentary — `SessionDef.key_id` is
+   written into the token file on every launch, restores included, so a later
+   change of the profile's strategy does not move a session that was created
+   here on this key (the guarantee the rail's key modal gives an existing
+   session). Clearing the pin, like unpinning there, is the rail's job. */
+async function setNewKeyChoice(selector, keyId) {
+  const profileName = newUsageProfileName(selector);
+  if (!profileName) return;
+  // The pin rides on a create request, which only the New session form sends;
+  // a Spawn child's definition is built under the spawn policy and has no key
+  // field. There the press still decides the profile's manual key, so the
+  // child launches on it by the strategy.
+  newSessionKeyId = newFormCreatesTopLevel() ? keyId : "";
+  newSessionKeyFor = newSessionKeyId ? selector : "";
+  await setNewKeyStrategy(profileName, selector, "manual", keyId);
+}
+
+/* Whether this form's submit creates a top-level session (the one request
+   that carries `key_id`). */
+function newFormCreatesTopLevel() {
+  const f = $("new-session");
+  if (!f) return false;
+  if (typeof sessionFormView === "function") {
+    return (sessionFormView().mode || "new") === "new";
+  }
+  return !(typeof spawnParent === "function" && spawnParent());
+}
+
+/* A fresh draw for a random pool. The daemon stores the draw, so what comes
+   back is the key the next launch takes — pressing it again draws again, which
+   is the "refresh several times" the strategy is here for (claunch-i985h). */
+async function rollNewKey(selector) {
+  const profile = newUsageProfileName(selector);
+  if (!profile) return;
+  const st = newUsageState;
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/profiles/${encodeURIComponent(profile)}/keys/roll`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    );
+    doc = await resp.json().catch(() => null);
+  } catch (e) {
+    resp = null;
+    doc = null;
+  }
+  if (!resp || !resp.ok) {
+    st.flash = (doc && doc.error) || "the daemon did not draw a key";
+    st.flashFor = selector;
+    renderNewUsage();
+    return;
+  }
+  st.flash = `drew ${(doc && doc.key && (doc.key.label || doc.key.masked)) || (doc && doc.pick) || "a key"}`;
+  st.flashFor = selector;
+  st.at = 0;
+  startNewUsageRead(selector, false);
+}
+
+/* Whose pool the block reads: the Profile row's, or under a borrow the
+   lender's. A borrow runs on the lender's token, so the lender's keys are the
+   ones a launch can take and a pin can name (claunch-e48es) — the create
+   request's key_id is checked against that same pool. Asked under the
+   lender's bare name, so its usage is read by the lender's own reader. */
+function newUsageLender(f) {
+  return borrowInPlay(f && f.borrow, spawnParent());
+}
+
+function newUsageSelector(f) {
+  return newUsageLender(f) || newProfileSelector(f);
+}
+
 function renderNewUsage() {
   const box = $("new-usage");
   if (!box) return;  // a page that predates the block still runs
   const f = $("new-session");
   if (!f || !f.profile) return;
-  const selector = newProfileSelector(f);
+  const selector = newUsageSelector(f);
   if (!selector) {
     box.classList.add("hidden");
     return;
@@ -16411,6 +17085,13 @@ function renderNewUsage() {
     return;
   }
   const st = newUsageState;
+  // A pin names a key of the pool it was taken from. A borrow picked or
+  // dropped (or another profile) moves the block to another pool, and the
+  // pin goes at once rather than when that pool's read lands (claunch-e48es).
+  if (newSessionKeyId && newSessionKeyFor !== selector) {
+    newSessionKeyId = "";
+    newSessionKeyFor = "";
+  }
   // An acknowledgment belongs to the profile it was written on.
   if (st.flash && st.flashFor !== selector) {
     st.flash = "";
@@ -16432,11 +17113,23 @@ function renderNewUsage() {
   }
   box.classList.remove("hidden");
 
+  // A pinned key belongs to one profile's pool. Moving the Runs-as pair to
+  // another profile, or the key being removed, leaves an id this form would
+  // otherwise send with the create request — and the daemon would refuse the
+  // whole launch for it. Dropped here instead, silently: the choice it
+  // expressed is gone from the screen too.
+  if (newSessionKeyId && doc &&
+      !((doc.keys || []).some((k) => k.id === newSessionKeyId))) {
+    newSessionKeyId = "";
+    newSessionKeyFor = "";
+  }
+
   const who = $("new-usage-who");
   if (who) {
     const owner = doc && doc.pooled && doc.owner && doc.owner !== doc.profile
       ? ` (pool of ${doc.owner})` : "";
-    who.textContent = `Usage · ${(doc && doc.profile) || selector}${owner}`;
+    const borrowed = newUsageLender(f) ? " · borrowed" : "";
+    who.textContent = `Usage · ${(doc && doc.profile) || selector}${owner}${borrowed}`;
   }
   const when = $("new-usage-when");
   if (when) {
@@ -16469,17 +17162,7 @@ function renderNewUsage() {
     keysBox.innerHTML = "";
     keysBox.classList.toggle("hidden", !multi);
     if (multi) {
-      // For a usage strategy the server does not preview a pick; the row the
-      // rule would take on the numbers below is marked as arithmetic instead.
-      const peaks = keys.map((k) => newUsagePeak(k.usage && k.usage.windows));
-      const measured = peaks.filter((p) => Number.isFinite(p));
-      let pick = null;
-      if (measured.length && strategy === "usage-min") {
-        pick = peaks.indexOf(Math.min(...measured));
-      } else if (measured.length && strategy === "usage-max") {
-        pick = peaks.indexOf(Math.max(...measured));
-      }
-      keys.forEach((key, index) => {
+      keys.forEach((key) => {
         const li = document.createElement("li");
         li.className = "new-usage-key" + (key.next ? " next" : "");
         const mark = document.createElement("span");
@@ -16507,13 +17190,21 @@ function renderNewUsage() {
           ? `used ${newUsageAge(key.last_used_at)}`
           : "never used";
         li.append(mark, name, token, use, used);
-        if (pick === index && !key.next) {
-          const now = document.createElement("span");
-          now.className = "new-usage-key-now";
-          now.textContent = strategy === "usage-min" ? "lowest now" : "highest now";
-          now.title = "as of the last read — the launch reads again and decides there";
-          li.appendChild(now);
-        }
+        // "use this key" — the manual choice, in one press: it makes the
+        // profile's strategy manual with this key (so it decides the NEXT
+        // marker above), and it pins the session this form is about to create
+        // to the same key, which is the guarantee the rail's key modal gives
+        // an existing session (claunch-i985h).
+        const take = document.createElement("button");
+        take.type = "button";
+        take.className = "new-usage-key-take";
+        take.textContent = key.next && strategy === "manual" ? "chosen" : "use";
+        take.title = key.next && strategy === "manual"
+          ? "the manual strategy already takes this key"
+          : "make the manual strategy take this key; a new session made here is also pinned to it";
+        take.disabled = !!(key.next && strategy === "manual") || reading;
+        take.addEventListener("click", () => setNewKeyChoice(selector, key.id));
+        li.appendChild(take);
         keysBox.appendChild(li);
       });
     }
@@ -16540,6 +17231,20 @@ function renderNewUsage() {
     }
   }
 
+  // The roll button — random's re-draw, and the only control here that exists
+  // for one strategy. Shown whenever the pool could hold a draw, so an
+  // operator who wants random can roll before choosing it (the draw is stored
+  // either way; `keys strategy … random` draws the first one).
+  const roll = $("new-key-roll");
+  if (roll) {
+    const shows = !!doc && multi;
+    roll.classList.toggle("hidden", !shows);
+    roll.disabled = reading;
+    roll.textContent = reading ? "rolling…" : "roll";
+    roll.title = "draw another key for random — the draw is what the next launch takes";
+    roll.onclick = () => rollNewKey(selector);
+  }
+
   // The one line that explains what the reader is looking at, or why a part
   // of it is missing.
   const note = $("new-usage-note");
@@ -16552,6 +17257,11 @@ function renderNewUsage() {
         const key = keys.find((k) => k.id === doc.next.key_id);
         const name = key ? (key.label || key.masked || key.id) : doc.next.key_id;
         notes.push(`next launch takes ${name} (${doc.next.strategy})`);
+        // A usage strategy compares keys again at launch, so this key is what
+        // the numbers say now; every other strategy stores its pick.
+        if (!doc.next.exact) {
+          notes.push("as of this read — the launch reads the accounts again");
+        }
         if (doc.next.fallback) notes.push(`fell back to rotation — ${doc.next.fallback}`);
       } else if (doc.next_unknown) {
         notes.push(`next key: ${doc.next_unknown}`);
@@ -16560,6 +17270,14 @@ function renderNewUsage() {
         notes.push(`one token — \`claunch keys add ${doc.profile}\` registers a pool`);
       } else if (keys.length === 1) {
         notes.push("1 key in the pool — a strategy applies with two or more");
+      }
+      // The pin is the part that survives a later strategy change, so it is
+      // said out loud rather than left to the row's button title.
+      if (newSessionKeyId) {
+        const pinned = keys.find((k) => k.id === newSessionKeyId);
+        if (pinned) {
+          notes.push(`this session will be pinned to ${pinned.label || pinned.masked || pinned.id}`);
+        }
       }
       if (doc.unmeasurable) notes.push(`keys cannot be compared: ${doc.unmeasurable}`);
       if (doc.usage_error) notes.push(`usage unavailable: ${doc.usage_error}`);
@@ -16745,6 +17463,143 @@ async function uploadOpeningImages() {
   }
   return ids;
 }
+
+/* ---- opening context items (gds6-bfu7) -----------------------------------
+   Separate pieces of context beside the opening task -- an error log, a spec
+   excerpt -- each with its own title and text, so the request and the
+   material it is about do not run together in one box. Held here (not as
+   named form fields: the count changes) and sent as `opening_contexts`; the
+   daemon writes each to a file in the session's state directory and ends the
+   opening with a "[claunch context]" line per item (daemon/opening_contexts.py).
+   The sizes mirror the daemon's ceilings, which keep the create request under
+   its body limit; a larger log goes in as a file. Cleared when a launch goes
+   through, like the task. */
+const OPENING_CONTEXTS_MAX = 20;                 // opening_contexts.MAX_ITEMS
+const OPENING_CONTEXT_MAX_BYTES = 256 * 1024;    // opening_contexts.MAX_ITEM_BYTES
+const OPENING_CONTEXTS_MAX_BYTES = 384 * 1024;   // opening_contexts.MAX_TOTAL_BYTES
+const openingContexts = [];      // [{title, text}]
+
+function utf8Bytes(text) {
+  return new TextEncoder().encode(String(text || "")).length;
+}
+
+function openingContextsNote(text) {
+  const note = $("new-task-contexts-note");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("hidden", !text);
+}
+
+/* The items worth sending: blank ones are dropped (an empty "+ Add context"
+   row is not an attachment), titles are trimmed. */
+function openingContextsPayload() {
+  return openingContexts
+    .filter((item) => String(item.text || "").trim())
+    .map((item) => ({ title: String(item.title || "").trim(), text: String(item.text) }));
+}
+
+/* What stops a submit, or "" -- the daemon's own checks, said before the
+   request is built, because a body over its limit is read as empty. */
+function openingContextsProblem(items) {
+  if (items.length > OPENING_CONTEXTS_MAX) {
+    return `an opening takes at most ${OPENING_CONTEXTS_MAX} context items`;
+  }
+  let total = 0;
+  for (let i = 0; i < items.length; i++) {
+    const size = utf8Bytes(items[i].text);
+    if (size > OPENING_CONTEXT_MAX_BYTES) {
+      return `context ${i + 1} (${items[i].title || "untitled"}) is ${humanSize(size)}; ` +
+        `an item is at most ${humanSize(OPENING_CONTEXT_MAX_BYTES)} — attach a larger log as a file`;
+    }
+    total += size;
+  }
+  if (total > OPENING_CONTEXTS_MAX_BYTES) {
+    return `the context items come to ${humanSize(total)}; together they are at most ` +
+      `${humanSize(OPENING_CONTEXTS_MAX_BYTES)} — attach larger logs as files`;
+  }
+  return "";
+}
+
+/* Rebuilt on add and remove only: typing updates the held item in place, so
+   the box being typed into keeps its focus and caret. */
+function renderOpeningContexts() {
+  const list = $("new-task-contexts-list");
+  if (!list) return;
+  list.innerHTML = "";
+  openingContexts.forEach((item, i) => {
+    const li = document.createElement("li");
+    li.className = "new-task-context";
+    const head = document.createElement("div");
+    head.className = "new-task-context-head";
+    const title = document.createElement("input");
+    title.type = "text";
+    title.className = "new-task-context-title";
+    title.placeholder = `context ${i + 1} — title (optional), e.g. pytest failure log`;
+    title.maxLength = 120;
+    title.value = item.title || "";
+    title.addEventListener("input", () => { item.title = title.value; });
+    const size = document.createElement("span");
+    size.className = "file-size";
+    const sized = () => { size.textContent = item.text ? humanSize(utf8Bytes(item.text)) : ""; };
+    sized();
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = "Remove this context item";
+    drop.addEventListener("click", () => {
+      openingContexts.splice(i, 1);
+      openingContextsNote("");
+      renderOpeningContexts();
+    });
+    head.append(title, size, drop);
+    const text = document.createElement("textarea");
+    text.className = "new-task-context-text";
+    text.rows = 6;
+    text.placeholder = "the context itself — a log, an excerpt, notes";
+    text.value = item.text || "";
+    text.addEventListener("input", () => { item.text = text.value; sized(); });
+    li.append(head, text);
+    list.appendChild(li);
+  });
+}
+
+function addOpeningContext(item) {
+  if (openingContexts.length >= OPENING_CONTEXTS_MAX) {
+    openingContextsNote(`an opening takes at most ${OPENING_CONTEXTS_MAX} context items`);
+    return false;
+  }
+  openingContexts.push({ title: (item && item.title) || "", text: (item && item.text) || "" });
+  openingContextsNote("");
+  renderOpeningContexts();
+  return true;
+}
+
+/* Replace the held items (a spawn request's spec opened with Manual). */
+function setOpeningContexts(items) {
+  openingContexts.splice(0);
+  for (const item of Array.isArray(items) ? items : []) {
+    if (openingContexts.length >= OPENING_CONTEXTS_MAX) break;
+    const entry = typeof item === "string" ? { text: item } : (item || {});
+    openingContexts.push({ title: String(entry.title || ""), text: String(entry.text || "") });
+  }
+  openingContextsNote("");
+  renderOpeningContexts();
+}
+
+function clearOpeningContexts() {
+  setOpeningContexts([]);
+}
+
+(() => {
+  const add = $("new-task-contexts-add");
+  if (!add) return;
+  add.addEventListener("click", () => {
+    if (!addOpeningContext()) return;
+    const boxes = document.querySelectorAll("#new-task-contexts-list .new-task-context-text");
+    const last = boxes[boxes.length - 1];
+    if (last) last.focus();
+  });
+})();
 
 /* ---- opening files (claunch-5gpcf) ----------------------------------------
    Files of any kind that go out with the opening: held here until the form is
@@ -17374,9 +18229,7 @@ function spawnChildFields(f, body) {
   const codexOpen = harnessName === "codex" && codexPanel &&
     !codexPanel.classList.contains("hidden") &&
     f.codex_yolo && !f.codex_yolo.disabled;
-  const claudeOpen = harnessName === "claude" && claudePanel &&
-    !claudePanel.classList.contains("hidden") &&
-    f.skip_permissions && !f.skip_permissions.disabled;
+  const claudeOpen = newClaudePermissionOpen(f, harnessName);
   if (codexOpen) {
     const original = f._codexRuntimeOriginal || { yolo: true, sandbox: false };
     const changed = f.codex_yolo.checked !== original.yolo ||
@@ -17440,6 +18293,60 @@ function spawnChildFields(f, body) {
   return body;
 }
 
+/* Whether this form is the one answering the permission-skipping row for the
+   session about to start. A child whose row the spawn policy keeps locked
+   (spawn.allow_args) inherits its parent's answer, and a harness with no
+   claude runtime panel (codex, pi) has no such row at all — neither answer is
+   given here, so neither is confirmed here. The panel's own visibility is the
+   harness test: renderNewClaudeRuntime toggles it on exactly
+   `harnessName === "claude"`, and a second spelling of that test is a second
+   definition to keep in step. */
+function newClaudePermissionOpen(f, harnessName) {
+  const panel = $("new-claude-runtime");
+  return harnessName === "claude" && !!panel &&
+    !panel.classList.contains("hidden") &&
+    !!(f.skip_permissions && !f.skip_permissions.disabled);
+}
+
+/* The permission-skipping answer this submit actually carries: false when the
+   form answers "off", true when it answers "on", and null when the answer is
+   not this form's to give (see above). */
+function newSkipPermissionsAnswer(f, parent) {
+  const harnessName = parent
+    ? newProfileHarnessName(f, newProfileSelector(f))
+    : (newProfileHarnessName(f, newProfileSelector(f)) || "claude");
+  if (!newClaudePermissionOpen(f, harnessName)) return null;
+  return !!f.skip_permissions.checked;
+}
+
+/* A session that starts with permission skipping off keeps Claude asking
+   before each tool use, and on a provider that is not Claude's own its
+   permission classifier still calls Claude, which can add Claude usage — the
+   same fact the provider hint above the form and the running session's strip
+   state. So a create that would go out with the box unticked is asked about
+   once more (claunch-1ztit.1.1).
+
+   "No" is the form, not an error: nothing is sent, the rows keep what was
+   typed, and #create-error stays empty. Escape and a backdrop press are the
+   same answer as "No", which is the direction showModal already resolves an
+   unanswered question in. An answer this form does not give — a locked child
+   row, another harness — is not asked about. */
+async function confirmStartWithoutSkipPermissions(f, parent) {
+  if (newSkipPermissionsAnswer(f, parent) !== false) return true;
+  const answer = await showModal({
+    title: "Start without skip permissions?",
+    body: "This session starts with permission skipping off, so Claude asks " +
+      "before each tool use. On a provider that is not Claude's own, its " +
+      "permission classifier still calls Claude, and those calls can add " +
+      "Claude usage. Start it anyway?",
+    actions: [
+      { label: "Back to the form", value: null },
+      { label: "Start without skip permissions", value: true },
+    ],
+  });
+  return answer === true;
+}
+
 document
   .querySelector("#new-session select[name=parent]")
   .addEventListener("change", () => {
@@ -17491,14 +18398,26 @@ if ($("new-usage-refresh")) {
     if (selector) startNewUsageRead(selector, true);
   });
 }
+/* The strategy row's one write (claunch-i985h, claunch-e48es). It is about the
+   pool the block is showing, which under a borrow is the LENDER's: writing
+   the form's own profile there saved a strategy the borrowed launch never
+   reads and re-read a pool the row is not drawing, so the select and the NEXT
+   marker stayed on the old answer. `newUsageSelector` is the selector every
+   other part of the block already uses. */
+async function applyNewKeyStrategy(f, value) {
+  const selector = f ? newUsageSelector(f) : "";
+  const profileName = newUsageProfileName(selector);
+  if (!profileName) return;
+  // Choosing another strategy says which key this launch should use, so a
+  // pin pressed earlier in the same form is dropped: the panel's NEXT marker
+  // and the session about to be created must name the same key.
+  if (value !== "manual") newSessionKeyId = "";
+  await setNewKeyStrategy(profileName, selector, value);
+}
+
 if ($("new-key-strategy")) {
   $("new-key-strategy").addEventListener("change", (ev) => {
-    const f = $("new-session");
-    const selector = f ? newProfileSelector(f) : "";
-    const doc = newUsageState.selector === selector ? newUsageState.data : null;
-    const profileName = (doc && doc.profile) || baseProfileName(selector);
-    if (!profileName) return;
-    setNewKeyStrategy(profileName, selector, ev.target.value);
+    applyNewKeyStrategy($("new-session"), ev.target.value);
   });
 }
 
@@ -17743,6 +18662,16 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The context items beside the task (gds6-bfu7); blank rows are dropped.
+  const contextItems = openingContextsPayload();
+  if (contextItems.length) body.opening_contexts = contextItems;
+  // The key the operator picked in the Runs-as block, when they picked one:
+  // the choice there makes the profile's strategy manual with that key AND
+  // pins this session to it, so the session runs on exactly that key from its
+  // first launch on — the guarantee the rail's key modal gives an existing
+  // session (claunch-i985h). Absent unless pressed; the daemon refuses an id
+  // the profile's pool does not hold.
+  if (newSessionKeyId) body.key_id = newSessionKeyId;
   // The operator's note goes on the session record with the launch
   // (claunch-zy9yk); empty is left off, which is "no note".
   if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
@@ -17776,6 +18705,18 @@ $("new-session").addEventListener("submit", async (e) => {
     body.fork_session = f.fork.checked;
   }
   const err = $("create-error");
+  // Said here rather than by the daemon: a body over its request limit is
+  // read as empty, and the refusal would name a missing field instead.
+  const contextProblem = openingContextsProblem(contextItems);
+  if (contextProblem) {
+    err.textContent = contextProblem;
+    err.classList.remove("hidden");
+    return;
+  }
+  // Asked last: every row above is settled, and nothing has been sent yet, so
+  // "No" leaves the form exactly as it was typed (claunch-1ztit.1.1). It is
+  // not an error, so #create-error is not written to.
+  if (!(await confirmStartWithoutSkipPermissions(f, parent))) return;
   const payload = sessionFormPayload(sessionFormView().mode, body);
   createBusy = true;
   setCreatePending(f, true, parent);
@@ -17848,6 +18789,12 @@ $("new-session").addEventListener("submit", async (e) => {
     // The opening's images and files went out with this launch, like its task.
     clearOpeningImages();
     clearOpeningFiles();
+    clearOpeningContexts();
+    // The key choice pinned THIS session; the next one gets its own answer
+    // (and a second child of the same profile should not silently inherit a
+    // pin nobody pressed for again). The profile's strategy stays manual —
+    // that was a setting, not this launch's property.
+    newSessionKeyId = "";
     // Say which rows the launch just spent, so the restore in
     // sessionModalClose steps over them. Without this the five clears above
     // are undone four lines later — the modal puts back whatever the form
@@ -17878,9 +18825,10 @@ $("new-session").addEventListener("submit", async (e) => {
     const made = info.session || info;
     // A Manual answer to an agent's spawn request (claunch-iw5i8.15/.16):
     // the request learns which session the person made from it, top-level
-    // or child.
+    // or child — the tab it was created from, which need not be the scope
+    // the agent asked for (claunch-oaxni).
     const spawnRid = sessionModal && sessionModal.spawnRequest;
-    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name);
+    if (spawnRid && made.name) spawnGateLink(spawnRid, made.name, parent ? "child" : "root");
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
@@ -19297,6 +20245,9 @@ function setStatusBadge(status) {
   // Guarded like the other optional painters here: the header harnesses
   // slice this function without it.
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // The provider warning does too: it is about the session this header just
+  // named, and the attach path is where a different one becomes current.
+  if (typeof renderTermProviderWarn === "function") renderTermProviderWarn();
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -20729,6 +21680,122 @@ function installOsc52(t) {
     });
     return true;
   });
+}
+
+/* A harness declared `copy_transport: host` (Codex 0.160.1) copies onto the
+   clipboard of the machine it runs on and writes OSC 52 only over SSH or
+   tmux, so the handler above never sees its copy: the daemon's history gains
+   the text and the computer the browser runs on gets nothing (claunch-tn5ba).
+   After a key that can copy in such a session — Enter (`/copy`, a choice in
+   its copy picker) or Ctrl+O — on the session terminal or the session line,
+   the page watches that history for HOST_COPY_WATCH_MS and puts the first
+   host entry newer than the baseline onto this computer's clipboard.
+   Entries the page posted itself (`source: browser`, an OSC 52 copy) are on
+   it already. The window is a key the person pressed plus a few seconds, the
+   span in which browsers still allow the execCommand fallback; whatever
+   reaches the daemon's clipboard inside it is relayed, including a copy
+   someone at that machine makes.
+   The baseline is taken at the key, from hostCopySeen (the newest id any
+   earlier watch read), because no read made after the key can be one: the
+   daemon samples the host every second on its own, so a copy can be in the
+   history before the first response comes back. The page's first watch has
+   no such id and takes every entry. Either way older host entries get
+   through, so an entry also has to be at most HOST_COPY_RECENT_MS older than
+   the daemon's `now` in the same response: what someone copied at that
+   machine minutes ago does not land on this computer's clipboard on the
+   next Enter. The daemon numbers its history from one again when it
+   restarts, and the page reconnects without reloading, so the held id is
+   kept with the history's `epoch` and counts only against entries of that
+   epoch; a read from a new epoch is a first watch again. */
+const HOST_COPY_WATCH_MS = 4000;
+const HOST_COPY_POLL_MS = 400;
+const HOST_COPY_RECENT_MS = HOST_COPY_WATCH_MS + 1000;
+let hostCopyWatch = null;   // {session, until, baseline}
+let hostCopySeen = null;    // {epoch, id}: newest history id a watch has read
+
+function sessionCopiesToHost(name) {
+  const rec = (sessionsCache || []).find((s) => s.name === name);
+  const harness = (rec && rec.harness) || "claude";
+  const detail = (typeof harnessDetails === "object" && harnessDetails)
+    ? harnessDetails[harness] : null;
+  return !!detail && detail.copy_transport === "host";
+}
+
+function isHostCopyKey(ev) {
+  if (ev.key === "Enter") return !ev.isComposing && !ev.shiftKey;
+  return ev.ctrlKey && !ev.altKey && !ev.metaKey && (ev.key === "o" || ev.key === "O");
+}
+
+async function hostCopyItems() {
+  try {
+    const response = await api("/api/clipboard");
+    if (!response.ok) return null;
+    const doc = await response.json();
+    if (!Array.isArray(doc.items)) return null;
+    const max = doc.items.reduce((m, item) => Math.max(m, Number(item.id) || 0), 0);
+    const held = hostCopySeen && hostCopySeen.epoch === doc.epoch ? hostCopySeen.id : 0;
+    hostCopySeen = { epoch: doc.epoch, id: Math.max(held, max) };
+    return { items: doc.items, now: Date.parse(doc.now), epoch: doc.epoch };
+  } catch {
+    return null;
+  }
+}
+
+function isRecentHostCopy(item, now) {
+  const at = Date.parse(item.copied_at);
+  return !Number.isFinite(now) || !Number.isFinite(at) || now - at <= HOST_COPY_RECENT_MS;
+}
+
+async function watchHostCopy() {
+  const name = currentName;
+  if (!name || !sessionCopiesToHost(name)) return;
+  const until = Date.now() + HOST_COPY_WATCH_MS;
+  if (hostCopyWatch && hostCopyWatch.session === name) {
+    hostCopyWatch.until = until;
+    return;
+  }
+  const watch = { session: name, until, baseline: hostCopySeen };
+  hostCopyWatch = watch;
+  try {
+    while (hostCopyWatch === watch && Date.now() <= watch.until) {
+      const read = await hostCopyItems();
+      if (hostCopyWatch !== watch || currentName !== name) return;
+      if (read) {
+        const baseline = watch.baseline && watch.baseline.epoch === read.epoch
+          ? watch.baseline.id : 0;
+        const fresh = read.items.find((item) => item.source === "host" &&
+          Number(item.id) > baseline && typeof item.text === "string" &&
+          isRecentHostCopy(item, read.now));
+        if (fresh) {
+          const ok = await copyToBrowserClipboard(fresh.text, document.body);
+          if (!ok) {
+            notify(
+              "Copy did not reach this computer's clipboard",
+              "The browser refused it — the Clipboard menu's Copy can still take it.",
+              { source: "page", key: "osc52" },
+            );
+          }
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, HOST_COPY_POLL_MS));
+    }
+  } finally {
+    if (hostCopyWatch === watch) hostCopyWatch = null;
+  }
+}
+
+/* The keys on the session terminal start a watch. Only the terminal on
+   screen counts, as for the session line: the watch is for `currentName`. */
+function installHostCopyRelay(t) {
+  t.element?.addEventListener("keydown", (ev) => {
+    if (t === term && isHostCopyKey(ev)) watchHostCopy();
+  }, true);
+}
+if (osc52SessionLine) {
+  osc52SessionLine.addEventListener("keydown", (ev) => {
+    if (isHostCopyKey(ev)) watchHostCopy();
+  }, true);
 }
 
 /* Read a logical line from the rendered PTY buffer, not a transport chunk:
@@ -22634,7 +23701,33 @@ async function flushQueued(name, btn) {
   return { doc, note };
 }
 
-function queuedMsgRow(m) {
+/* Delete one held message so it is never typed into `name`'s terminal: the
+   per-row answer beside "deliver now". The row carries mesh and handle, so
+   a session with several handles loses only the copy that was on screen.
+   Resolves to "" on success, otherwise the reason it did not happen (most
+   often: it was delivered between the poll and the click). */
+async function discardQueued(name, m) {
+  const q = new URLSearchParams();
+  if (m.mesh) q.set("mesh", m.mesh);
+  if (m.handle) q.set("handle", m.handle);
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/queued/` +
+      `${encodeURIComponent(m.id)}?${q}`,
+      { method: "DELETE" }
+    );
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    return "could not reach the daemon — nothing was deleted";
+  }
+  if (!resp.ok) return (doc && doc.error) || `HTTP ${resp.status}`;
+  return "";
+}
+
+/* `name` (the session the backlog belongs to) turns on the delete button;
+   `after(note)` is called once a delete has been tried, to redraw. */
+function queuedMsgRow(m, name, after) {
   const row = el("div", "tq-msg");
   const meta = el(
     "div", "tq-msg-meta",
@@ -22644,7 +23737,26 @@ function queuedMsgRow(m) {
       ? ` · waiting ${fmtAge(m.held_for)}` : "")
   );
   if (m.id) meta.title = m.id;
-  row.appendChild(meta);
+  if (name && m.id) {
+    const del = el("button", "tq-msg-del", "delete");
+    del.type = "button";
+    del.title =
+      "remove this message from the queue — it is never typed into this " +
+      "terminal. The mesh history and its other recipients keep it";
+    del.addEventListener("click", async () => {
+      if (!confirm(`Delete this queued message from ${m.from}? ` +
+                   `It will not be delivered to ${name}.`)) return;
+      del.disabled = true;
+      const note = await discardQueued(name, m);
+      del.disabled = false;
+      if (after) after(note);
+    });
+    const head = el("div", "tq-msg-head");
+    head.append(meta, del);
+    row.appendChild(head);
+  } else {
+    row.appendChild(meta);
+  }
   row.appendChild(el("div", "tq-msg-body", m.body || ""));
   return row;
 }
@@ -22707,7 +23819,8 @@ function renderTermQueued(q) {
   box.appendChild(row);
   if (tqOpen) {
     const list = el("div", "tq-list");
-    for (const m of msgs) list.appendChild(queuedMsgRow(m));
+    const redraw = (note) => { tqNote = note; refreshTermQueued(); };
+    for (const m of msgs) list.appendChild(queuedMsgRow(m, currentName, redraw));
     box.appendChild(list);
   }
   // Loudest exactly when the reader is the reason: their own keystrokes are
@@ -23261,7 +24374,7 @@ function termCflow2Answers(r, a, session) {
     }));
   }
   if (a.kind === "loop_limit" || a.kind === "visit_limit") {
-    return withWake(cf2LimitPresses(a.kind === "visit_limit").map(([label, , extra]) => ({
+    return withWake(cf2LimitPresses(a.kind === "visit_limit", a.max).map(([label, , extra]) => ({
       label,
       ...(extra.by ? { cls: "approve" } : {}),
       ...(extra.stop ? { title: "it finishes with outcome fail" } : {}),
@@ -23311,14 +24424,19 @@ function termCflowView() {
   const a = owed[0] || { kind: "", prompt: (r2.owed || []).join(" · ") };
   const more = owed.length > 1 ? ` (+${owed.length - 1} more)` : "";
   const question = termCflow2Question(a);
+  const presses = termCflow2Answers(r2, a, currentName);
   return {
     key: [r2.run, r2.status, a.kind, a.instance || "", owed.length],
     href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
     what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
       `${a.kind || "waiting"}${more}`,
-    question: termCflow2Answers(r2, a, currentName).length ? question
-      : `${question} — answer it on the run page`,
-    answers: termCflow2Answers(r2, a, currentName),
+    // A plan wait has no press on the run page: its decision is taken in the
+    // session's plan pane, so the strip points there instead (claunch-rzepk).
+    question: presses.length ? question
+      : a.kind === "plan-wait"
+        ? `${question} — decide it in the plan pane (☰ plan)`
+        : `${question} — answer it on the run page`,
+    answers: presses,
     after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
   };
 }
@@ -23378,6 +24496,151 @@ function renderTermCflow() {
   refitSoon(60);
 }
 
+/* ---- provider warning strip (#term-provider-warn) ----
+   The create form already advises skip permissions for a claude-harness
+   session whose provider is not Claude's own (#new-provider-hint). This is
+   the same advice for a session that is already running: its permission
+   classifier still calls Claude, and those calls can add Claude usage even
+   though the work itself goes to the other provider.
+
+   Two answers, and the second is a record rather than a hidden card:
+   "ignore" goes to POST /api/sessions/<name>/provider-warning and lands on
+   the session's definition, so it holds across a reload, a daemon restart and
+   a respawn. A session without that record shows the strip -- which is how
+   the rule reaches every session created before it existed, and why a new one
+   shows it until a person presses ignore once.
+
+   The provider pair rides the session row (``provider``/``provider_service``,
+   published by the daemon): a browser cannot open the config that decides it,
+   and a provider's name alone does not say whether it is Anthropic's (the
+   builtin ``default`` is Anthropic under another name). An empty service --
+   an older daemon, an unreadable config -- is "nothing to compare" and stays
+   silent rather than guessing. */
+function termProviderWarnView() {
+  const s = (typeof sessionsCache === "undefined" ? [] : sessionsCache || [])
+    .find((row) => row.name === currentName);
+  if (!s || s.harness !== "claude") return null;
+  const service = s.provider_service || "";
+  if (!service || service === ANTHROPIC_SERVICE) return null;
+  if (s.provider_warning_ignored) return null;
+  const capabilities = harnessDetails[s.harness] || {};
+  const group = (capabilities.skip_permissions_args || []).map(String);
+  const skipping = (typeof argvHasGroup === "function" && group.length)
+    ? argvHasGroup((s.args || []).map(String), group)
+    : false;
+  return { name: s.name, provider: s.provider || "", skipping,
+           canYolo: group.length > 0 };
+}
+
+function renderTermProviderWarn() {
+  const box = $("term-provider-warn");
+  if (!box) return;
+  const view = termProviderWarnView();
+  const sig = view
+    ? JSON.stringify([view.name, view.provider, view.skipping])
+    : "hidden";
+  // Rebuilt only when what it draws changes: the two-second poll answers the
+  // same thing on almost every tick, and replacing a button under the pointer
+  // is how a press gets lost.
+  if ((box.dataset.sig || "hidden") === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = "";
+  if (!view) {
+    box.classList.add("hidden");
+    refitSoon(60);
+    return;
+  }
+  box.appendChild(el("span", "tpw-mark", "⚠"));
+  const text = el("span", "tpw-text");
+  text.textContent =
+    (view.provider
+      ? `this session runs the claude harness on provider ${view.provider}, which is not Claude's own`
+      : "this session runs the claude harness on a provider that is not Claude's own") +
+    " — its permission classifier still calls Claude, and those calls can add Claude usage";
+  box.appendChild(text);
+  const btns = el("span", "tpw-buttons");
+  // A harness that declares no skip-permissions args has nothing to restart
+  // into: offering the press there would be a button that cannot do what it
+  // says. The warning and "ignore" still stand.
+  if (view.canYolo) {
+    const yolo = el(
+      "button", "tpw-btn tpw-yolo",
+      view.skipping ? "already on yolo mode" : "restart with yolo mode"
+    );
+    yolo.type = "button";
+    yolo.disabled = !!view.skipping;
+    yolo.title = view.skipping
+      ? "this session already runs with skip permissions"
+      : "restart it with skip permissions — same name, same conversation";
+    yolo.addEventListener("click", () => restartSessionYolo(view.name, yolo));
+    btns.appendChild(yolo);
+  }
+  const ignore = el("button", "tpw-btn", "ignore");
+  ignore.type = "button";
+  ignore.title = "stop showing this warning for this session";
+  ignore.addEventListener("click", () => ignoreProviderWarning(view.name, ignore));
+  btns.appendChild(ignore);
+  box.appendChild(btns);
+  box.classList.remove("hidden");
+  refitSoon(60);
+}
+
+async function restartSessionYolo(name, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/skip-permissions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip: true }),
+      }
+    );
+    if (!resp.ok) {
+      btn.disabled = false;   // the poll repaints the strip with the truth
+      return;
+    }
+    // The restart relaunched a fresh PTY under the same name; a terminal
+    // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      await refreshSessions();
+    }
+  } catch {
+    btn.disabled = false;   // offline — the health poll owns saying so
+  }
+}
+
+async function ignoreProviderWarning(name, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/provider-warning`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ignore: true }),
+      }
+    );
+    if (!resp.ok) {
+      btn.disabled = false;
+      return;
+    }
+    // The record is the answer: keep the cached row in step and repaint, so
+    // the strip goes now rather than on the next poll.
+    const row = (sessionsCache || []).find((r) => r.name === name);
+    if (row) row.provider_warning_ignored = true;
+    renderTermProviderWarn();
+  } catch {
+    btn.disabled = false;
+  }
+}
+
 /* ---- run gates for the notification channel (claunch-whm4e.1) ----
    Every run that stands on something only a person releases, one record per
    thing owed, for the corner card, the bell and the panel's "Waiting on you"
@@ -23402,11 +24665,18 @@ function personGateRecords() {
     if (!sessCflowGated(r) || r.status === "waiting_goto") continue;
     const session = scopeSession(r.scope, r.session);
     if (!session || (known.size && !known.has(session))) continue;
+    if (typeof gateSessionState === "function"
+        && gateSessionState(session) === "archived") continue;
     out.push({
       id: ["v1", r.cwd, r.scope, r.run, r.step_id, r.visit ?? "", r.status].join("|"),
       session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 1,
       kind: r.status, label: sessCflowGateStep(r) || "?",
       prompt: termCflowQuestion(r), presses: termCflowAnswers(r, session),
+      // A v1 run carries its ask prompt on the run row, and the card draws it
+      // as markdown like a v2 one (claunch-ns4kd). Only a real ask has one:
+      // a goto request, a hold or a decline is a sentence the daemon wrote,
+      // and the plain `prompt` above stays what the strip shows for all three.
+      prompt_md: String((r.ask && r.ask.prompt) || ""),
     });
   }
   const rail = (typeof cflow2RailCache === "object" && cflow2RailCache) || {};
@@ -23417,7 +24687,12 @@ function personGateRecords() {
       settled.push({ id: String(u.id), status: u.status === "answered"
         ? `answered: ${u.decision || "?"}` + (u.by ? ` by ${u.by}` : "") : u.status });
     }
-    if (!r.gated) continue;
+    // The rail lists every registered session, archived ones too, and a run
+    // its session left waiting stays waiting on disk: an archived session's
+    // visit limit kept a card up for days after the operator put the session
+    // away (claunch-6vq2m). Archiving is the operator's "done with this", so
+    // its gates raise no card; the run page still answers them.
+    if (!r.gated || r.session_category === "archived") continue;
     for (const a of r.answers || []) {
       if (!a || !a.kind) continue;
       const slot = [r.run, a.instance || "", a.kind].join("|");
@@ -23427,6 +24702,13 @@ function personGateRecords() {
         session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 2,
         kind: a.kind, label: a.label || a.instance || a.kind,
         urgent: !!a.urgent, prompt: termCflow2Question(a),
+        // What the step declared about its own notice (ask.criteria): keywords
+        // the panel shows by, never a rank (noticeCriteriaOf).
+        criteria: Array.isArray(a.criteria) ? a.criteria.slice() : [],
+        // The question as the ask wrote it, newlines and markers intact: the
+        // card below draws it as markdown, and the one-line `prompt` above is
+        // what the terminal strip reads (claunch-ns4kd).
+        prompt_md: typeof a.prompt_md === "string" ? a.prompt_md : "",
         presses: termCflow2Answers(r, a, session),
         // held since the run itself started waiting on a person, in the
         // daemon's epoch seconds (claunch-l9znm.1); absent for a daemon or a
@@ -23919,6 +25201,22 @@ const SPLIT_PANES = {
     on: "close this session's VM pane — the terminal takes the column back",
     off: "the VMs connected to this session — connect, disconnect, edit scopes and shared folders, or make a new one",
   },
+  // The glossary, category and knowledge entries this session filed as
+  // drafts (wrapup-pane.js, daemon/wrapup_api.py, claunch-ar8jn): they reach
+  // the workspace stores only when the user confirms them here.
+  wrapup: {
+    btn: "term-wrapupbtn", title: "✎ wrap-up",
+    on: "close the wrap-up pane — the terminal takes the column back",
+    off: "this session's wrap-up drafts (glossary, category, knowledge, retrospection) — edit, delete or confirm them",
+  },
+  // The session's plan (plan-pane.js, daemon/plan_api.py, claunch-7jzp8):
+  // its steps, the branches it asks the user to pick and the closure items
+  // that keep it open; each decision is typed back into the session.
+  plan: {
+    btn: "term-planbtn", title: "☰ plan",
+    on: "close the plan pane — the terminal takes the column back",
+    off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -23931,7 +25229,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "vm", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -24817,6 +26115,7 @@ function freshAttach(name) {
   // Guarded like onTermKeyEvent below, for the harnesses that boot this
   // function without the clipboard block.
   if (typeof installOsc52 === "function") installOsc52(term);
+  if (typeof installHostCopyRelay === "function") installHostCopyRelay(term);
   if (typeof installTerminalCommandCopy === "function") installTerminalCommandCopy(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {
@@ -26593,7 +27892,9 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
+    case "retrospection": return "retrospection";
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
@@ -26757,6 +28058,7 @@ const VIEWS = {
   chart: "chart-view",
   hive: "hive-view",
   vm: "vm-view",
+  pr: "pr-view",
   "profile-usage": "profile-usage-view",
   sysperf: "sysperf-view",
   cli: "cli-view",
@@ -26768,7 +28070,9 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  plan: "plan-view",
   knowledge: "knowledge-view",
+  retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
   wf: "wf-view",
@@ -26930,7 +28234,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "category", "chart", "packs", "vm", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -27004,6 +28308,12 @@ function openSplit(name, kind = "run") {
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
   // And the session's VMs (vm-session-pane.js): the VM page in a frame.
   if (kind === "vm") { globalThis.VmSessionPane?.mount(splitBody, name); return; }
+  // And the session's wrap-up drafts (wrapup-pane.js). A write there moves
+  // the header's light at once rather than at the next dashboard poll.
+  if (kind === "wrapup") { globalThis.WrapupPane?.mount(splitBody, name); return; }
+  // And the session's plan (plan-pane.js); a decision there relights ☰ plan
+  // at once.
+  if (kind === "plan") { globalThis.PlanPane?.mount(splitBody, name, { onChange: () => refreshPlanRail() }); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -27036,6 +28346,8 @@ function closeSplit() {
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
+  if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
+  if (splitKind === "plan") globalThis.PlanPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -27133,6 +28445,8 @@ $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // has one, and the daemon spawns it on the pane's first viewer.
 $("term-clibtn").addEventListener("click", () => toggleSplitPane("cli"));
 $("term-vmbtn").addEventListener("click", () => toggleSplitPane("vm"));
+$("term-wrapupbtn").addEventListener("click", () => toggleSplitPane("wrapup"));
+$("term-planbtn").addEventListener("click", () => toggleSplitPane("plan"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
 
@@ -27593,7 +28907,10 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
+  // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
+  if (parts[0] === "retrospection") return { page: "retrospection", id: parts[1] || "" };
   // #/category is the tree of the last workspace; #/category/<workspace> names one.
   if (parts[0] === "category") {
     return { page: "category", workspace: parts[1] ? decodeURIComponent(parts[1]) : "" };
@@ -27615,6 +28932,8 @@ function parseHash(h) {
   if (parts[0] === "settings") {
     return { page: "settings", section: parts[1] || "" };
   }
+  // Recorded pull requests, grouped by project on a date timeline (#/pr).
+  if (parts[0] === "pr") return { page: "pr" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
 
@@ -27662,6 +28981,7 @@ function route() {
   if (r.page !== "chart") globalThis.ChartPage?.stop();
   if (r.page !== "hive") globalThis.HivePage?.stop();
   if (r.page !== "vm") globalThis.VmPage?.stop();
+  if (r.page !== "pr") globalThis.PrPage?.stop();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
@@ -27671,7 +28991,9 @@ function route() {
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "megathreads") globalThis.MegaThreadPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
+  if (r.page !== "plan") globalThis.PlanPage?.stop();
   if (r.page !== "knowledge") globalThis.KnowledgePage?.stop();
+  if (r.page !== "retrospection") globalThis.RetrospectionPage?.stop();
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
@@ -27751,6 +29073,7 @@ function route() {
     case "chart": showView("chart"); globalThis.ChartPage.open(); break;
     case "hive": showView("hive"); globalThis.HivePage.open(); break;
     case "vm": showView("vm"); globalThis.VmPage.open(); break;
+    case "pr": showView("pr"); globalThis.PrPage.open(); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
     case "cli": openCli(); break;
@@ -27764,7 +29087,9 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
+    case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
@@ -29033,6 +30358,21 @@ const MD_BLOCK_START = /^\s{0,3}(#{1,6}\s|>|```|~~~)/;
 // renders as the link's own text — visible, inert, and not silently dropped.
 const MD_SAFE_HREF = /^(https?:\/\/|mailto:|#|\/)/i;
 
+/* Beads issue ids, as minted by `br`: a slug prefix, a dash, a base36
+   suffix, and an optional `.N` comment ordinal (gds6-bfu7.1). The mention
+   must not be glued to a word char, path, email, or another dash on either
+   side — "state-of-the-art" and "dir/claunch-x" stay text. */
+const MD_BEADS_ID = /^[a-z][a-z0-9]*-[a-z0-9]{3,}(?:\.\d+)?(?![\w@-])/;
+/* Issue prefixes the daemon's boards mint under (board_head.issue_prefix),
+   collected from every beads payload the page receives. A mention whose id
+   carries one of these prefixes links even with no digit in it
+   (claunch-jpqat); without the set, only digit-bearing ids link, which
+   measured at 81% of one real board. */
+let beadsIdPrefixes = new Set();
+/* >0 while mdLink renders a label: an issue id inside a link's text stays
+   text, so the renderer never nests an <a> in an <a>. */
+let mdLinkDepth = 0;
+
 /* Inline markers, in the order they must be tried: a code span swallows
    what is inside it, so it matches before emphasis can see the backticks.
    `_` comes after `*` on purpose and is guarded below — snake_case_names
@@ -29056,7 +30396,13 @@ function mdWrap(tag, cls, text) {
 function mdLink(text, href) {
   const label = text || href;
   if (!MD_SAFE_HREF.test(href)) return mdWrap("span", "md-link-inert", label);
-  const a = mdWrap("a", "md-link", label);
+  mdLinkDepth++;
+  let a;
+  try {
+    a = mdWrap("a", "md-link", label);
+  } finally {
+    mdLinkDepth--;
+  }
   a.setAttribute("href", href);
   if (/^https?:/i.test(href)) {
     a.setAttribute("target", "_blank");
@@ -29083,6 +30429,30 @@ function mdInline(src) {
     }
     // A mid-word underscore is part of the word: test_web_topology.py
     if (c === "_" && i > 0 && /\w/.test(text[i - 1])) { plain += c; i++; continue; }
+    // A beads issue id mentioned in prose links to its board page. Guarded
+    // from link labels (mdLinkDepth), mid-word/mid-path positions, and ids
+    // that carry no digit unless their prefix is a known board's — plain
+    // hyphenated words like "node-based" must stay text.
+    if (!mdLinkDepth && /[a-z0-9]/.test(c) &&
+        !(i > 0 && /[\w/.@-]/.test(text[i - 1]))) {
+      const m = MD_BEADS_ID.exec(text.slice(i));
+      if (m) {
+        const token = m[0];
+        const base = token.replace(/\.\d+$/, "");
+        const dash = base.indexOf("-");
+        const suffix = base.slice(dash + 1);
+        if (beadsIdPrefixes.has(base.slice(0, dash)) ||
+            (/\d/.test(base) && /[a-z]/.test(suffix))) {
+          flush();
+          const a = el("a", "md-link md-beads-link", token);
+          a.setAttribute("href", "#/beads/" + encodeURIComponent(base));
+          a.title = "beads issue " + base;
+          out.push(a);
+          i += token.length;
+          continue;
+        }
+      }
+    }
     let hit = null;
     if ("`*_~[".includes(c)) {
       for (const [re, make] of MD_INLINE) {
@@ -30073,11 +31443,14 @@ let beadsSection = "board"; // board | queues | reports
 let beadsQueues = null;    // the last /api/beads/queues payload
 let beadsQueuesError = "";
 let beadsDragging = "";    // the issue id a Queues card drag is carrying
-/* The board searched by meaning (the box in the filter bar, Enter). While a
-   query stands, the lanes give way to its ranked rows; Esc or the clear
-   button brings the lanes back. One request per board root the page shows,
-   merged best-first. */
-let beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+/* The board searched — the box in the filter bar. While a query stands,
+   the lanes give way to its ranked rows; Esc or the clear button brings
+   the lanes back. ``mode`` is the engine the last run used ("rag" |
+   "text"); ``active`` is the keyboard-walked row; ``draft`` is what the
+   box holds, which can run ahead of ``q``. One request per board root the
+   page shows, merged best-first. */
+let beadsSearch = { q: "", results: null, pending: false, error: "", index: null,
+                    reranked: false, mode: "", active: 0, draft: "" };
 /* The focused issue's nearest neighbours (/api/beads/<id>/related), drawn
    in the detail pane as the dedup question answered by the index. */
 let beadsRelated = null;   // { id, results, error }
@@ -30276,6 +31649,7 @@ async function loadBeadsPage(opts = {}) {
     const selected = boards.find((b) => b.root === beadsWorkspace);
     beadsLoadedWorkspace = beadsWorkspace;
     beadsCache = data;
+    beadsNotePrefixes(data.boards);
     beadsPage = page;
     beadsError = data.error || "";
     beadsMore = !!selected?.has_more;
@@ -30474,6 +31848,7 @@ async function loadBeadsNewOptions() {
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     beadsNew.boards = data.boards || [];
     beadsNew.workspaces = data.workspaces || [];
+    beadsNotePrefixes(beadsNew.boards);
   } catch (err) {
     beadsNew.error = String((err && err.message) || err);
     beadsNew.boards = [];
@@ -30785,26 +32160,87 @@ function beadsFilterBar() {
   return bar;
 }
 
-/* ---- search by meaning ------------------------------------------------ */
+/* ---- search ------------------------------------------------------------ */
+/* Two engines behind one box. With the rag configured the box ranks the
+   board by meaning; without it, a substring search over id/title/
+   description (br search, /api/beads/text-search) answers instead — the box
+   must do something useful in both states, not just refuse when the rag is
+   absent or its embeddings are down (claunch-w3wrk). Typing debounces into
+   a search, Enter runs one immediately, ↑/↓ walk the results and Enter on
+   a walked row opens it. `draft` is what the box holds, which can be ahead
+   of `q`, the query the shown results are for. */
+let beadsSearchTimer = null;
+/* Whether the search box held focus at the last render. The filter bar is
+   rebuilt on every render — a poll, a result landing, a walked row — and a
+   rebuilt box is born unfocused, which would cut a typing burst off at the
+   first answer. When this flag stands, the new box takes the focus back
+   (after attach; focusing a detached node is a no-op). */
+let beadsSearchFocus = false;
+const BEADS_SEARCH_DEBOUNCE = 300;
+
 function beadsSearchBox() {
   const box = document.createElement("input");
   box.type = "search";
   box.className = "beads-search";
   box.autocomplete = "off";
-  box.value = beadsSearch.q;
+  box.value = beadsSearch.draft || beadsSearch.q;
   box.placeholder = ragConfigured
-    ? "search the board by meaning — Enter"
-    : "search needs the rag: block in ~/.claude-launcher/.claunch.yaml";
-  box.title = "Enter ranks every issue of the board by meaning (and by id/title); Esc clears";
+    ? "search the board by meaning — type or press Enter"
+    : "search titles, descriptions and ids — type to search";
+  box.title = ragConfigured
+    ? "type to search as you pause; Enter searches now; ↑/↓ walk the results, Enter opens the walked one; Esc clears"
+    : "substring search over the whole board; ↑/↓ walk the results, Enter opens the walked one; Esc clears";
+  box.addEventListener("focus", () => { beadsSearchFocus = true; });
+  box.addEventListener("blur", () => { beadsSearchFocus = false; });
+  if (beadsSearchFocus) {
+    // The timeout defers to after this render has attached the box; a blur
+    // in between (the reader clicked away) cancels the hand-back.
+    setTimeout(() => {
+      if (!beadsSearchFocus) return;
+      box.focus();
+      const end = box.value.length;
+      if (typeof box.setSelectionRange === "function") {
+        try { box.setSelectionRange(end, end); } catch { /* not selectable */ }
+      }
+    }, 0);
+  }
   box.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); box.blur(); runBeadsSearch(box.value); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (beadsSearch.results && beadsSearch.results.length) {
+        e.preventDefault();
+        beadsSearchMove(e.key === "ArrowDown" ? 1 : -1);
+      }
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      box.blur();
+      // Enter opens the walked row when what is on screen matches what is
+      // in the box; typing something new first re-searches.
+      if (beadsSearch.results && beadsSearch.results.length
+          && box.value.trim() === beadsSearch.q) {
+        beadsSearchOpen();
+        return;
+      }
+      runBeadsSearch(box.value);
+    }
     if (e.key === "Escape") { box.value = ""; box.blur(); clearBeadsSearch(); }
+  });
+  box.addEventListener("input", () => {
+    beadsSearch.draft = box.value;
+    if (beadsSearchTimer) clearTimeout(beadsSearchTimer);
+    const value = box.value.trim();
+    if (!value) { clearBeadsSearch(); return; }
+    if (value.length < 2 || value === beadsSearch.q) return;
+    beadsSearchTimer = setTimeout(() => runBeadsSearch(box.value), BEADS_SEARCH_DEBOUNCE);
   });
   return box;
 }
 
 function clearBeadsSearch() {
-  beadsSearch = { q: "", results: null, pending: false, error: "", index: null, reranked: false };
+  if (beadsSearchTimer) { clearTimeout(beadsSearchTimer); beadsSearchTimer = null; }
+  beadsSearch = { q: "", results: null, pending: false, error: "", index: null,
+                  reranked: false, mode: "", active: 0, draft: "" };
   renderBeads();
 }
 
@@ -30814,30 +32250,59 @@ function beadsSearchRoots() {
   return roots.length ? roots : [""];
 }
 
+/* Walk the results list; wraps at both ends so holding an arrow keeps
+   moving instead of sticking. */
+function beadsSearchMove(delta) {
+  const n = (beadsSearch.results || []).length;
+  if (!n) return;
+  beadsSearch.active = (beadsSearch.active + delta + n) % n;
+  renderBeads();
+}
+
+/* Open the walked result the way clicking its id does. */
+function beadsSearchOpen() {
+  const r = (beadsSearch.results || [])[beadsSearch.active];
+  if (r && r.id) location.hash = "#/beads/" + encodeURIComponent(r.id);
+}
+
+async function beadsAskRag(root, q) {
+  const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
+  try {
+    const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30${where}`);
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? { root, data } : { root, error: data.error || `HTTP ${resp.status}` };
+  } catch (err) {
+    return { root, error: String(err) };
+  }
+}
+
+async function beadsAskText(root, q) {
+  const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
+  try {
+    const resp = await api(`/api/beads/text-search?q=${encodeURIComponent(q)}&limit=30${where}`);
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? { root: (data && data.root) || root, data }
+      : { root, error: (data && data.error) || `HTTP ${resp.status}` };
+  } catch (err) {
+    return { root, error: String(err) };
+  }
+}
+
 async function runBeadsSearch(q) {
   q = String(q || "").trim();
+  if (beadsSearchTimer) { clearTimeout(beadsSearchTimer); beadsSearchTimer = null; }
   if (!q) { clearBeadsSearch(); return; }
-  if (!ragConfigured) {
-    beadsSearch = { q, results: null, pending: false, index: null, reranked: false,
-                    error: "semantic search needs the rag: block in ~/.claude-launcher/.claunch.yaml" };
-    renderBeads();
-    return;
-  }
-  beadsSearch = { q, results: null, pending: true, error: "", index: null, reranked: false };
+  const mode = ragConfigured ? "rag" : "text";
+  beadsSearch = { q, results: null, pending: true, error: "", index: null,
+                  reranked: false, mode, active: 0, draft: q };
   renderBeads();
   const roots = beadsSearchRoots();
-  const answers = await Promise.all(roots.map(async (root) => {
-    const where = root ? `&cwd=${encodeURIComponent(root)}` : "";
-    try {
-      const resp = await api(`/api/search?kind=beads&q=${encodeURIComponent(q)}&limit=30${where}`);
-      const data = await resp.json().catch(() => ({}));
-      return resp.ok ? { root, data } : { root, error: data.error || `HTTP ${resp.status}` };
-    } catch (err) {
-      return { root, error: String(err) };
-    }
-  }));
-  if (beadsSearch.q !== q) return;
-  beadsSearch = beadsMergeSearch(q, answers);
+  const answers = await Promise.all(roots.map((root) =>
+    mode === "rag" ? beadsAskRag(root, q) : beadsAskText(root, q)));
+  if (beadsSearch.q !== q || beadsSearch.mode !== mode) return;
+  beadsSearch = mode === "rag"
+    ? beadsMergeSearch(q, answers)
+    : beadsMergeTextSearch(q, answers);
   renderBeads();
 }
 
@@ -30865,7 +32330,70 @@ function beadsMergeSearch(q, answers) {
   }
   const scoreOf = (r) => (r.rerank_score ?? r.score ?? 0);
   results.sort((x, y) => scoreOf(y) - scoreOf(x));
-  return { q, results, pending: false, error: errors.join("; "), index, reranked };
+  return { q, results, pending: false, error: errors.join("; "), index, reranked,
+           mode: "rag", active: 0, draft: q };
+}
+
+/* The text engine's merge: br search already ordered its rows, so the
+   merge keeps arrival order and only dedups across boards. */
+function beadsMergeTextSearch(q, answers) {
+  const results = [];
+  const errors = [];
+  for (const a of answers) {
+    if (a.error) {
+      errors.push(a.root ? `${beadsNameOfRoot(a.root)}: ${a.error}` : a.error);
+      continue;
+    }
+    for (const r of ((a.data && a.data.issues) || [])) {
+      results.push({ ...r, root: a.root || "" });
+    }
+  }
+  const seen = new Set();
+  const deduped = results.filter((r) => {
+    const key = `${r.root}\n${r.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { q, results: deduped, pending: false, error: errors.join("; "),
+           index: null, reranked: false, mode: "text", active: 0, draft: q };
+}
+
+/* Wrap every case-insensitive occurrence of the query in a hit mark, so
+   the reader sees why a row matched. Walks text nodes first and replaces
+   afterwards: replacing while walking would revisit the marks just made. */
+function beadsMarkHits(rootEl, q) {
+  const needle = String(q || "").trim().toLowerCase();
+  if (!needle || !rootEl) return;
+  const jobs = [];
+  (function walk(node) {
+    if (node.nodeType === 3) {
+      if ((node.nodeValue || "").toLowerCase().includes(needle)) jobs.push(node);
+      return;
+    }
+    for (const kid of [...(node.childNodes || [])]) walk(kid);
+  })(rootEl);
+  for (const node of jobs) {
+    const text = node.nodeValue;
+    const lower = text.toLowerCase();
+    const parent = node.parentNode;
+    if (!parent) continue;
+    const made = [];
+    let at = lower.indexOf(needle);
+    let last = 0;
+    while (at >= 0) {
+      if (at > last) made.push(document.createTextNode(text.slice(last, at)));
+      const mark = document.createElement("mark");
+      mark.className = "beads-hit";
+      mark.textContent = text.slice(at, at + needle.length);
+      made.push(mark);
+      last = at + needle.length;
+      at = lower.indexOf(needle, last);
+    }
+    if (last < text.length) made.push(document.createTextNode(text.slice(last)));
+    for (const m of made) parent.insertBefore(m, node);
+    parent.removeChild(node);
+  }
 }
 
 function ragScoreChip(row) {
@@ -30894,7 +32422,8 @@ function beadsSearchSection() {
   head.appendChild(el("span", "rag-head-text",
     s.pending ? `searching “${s.q}”…`
       : s.results ? `${n} result${n === 1 ? "" : "s"} for “${s.q}”` : `“${s.q}”`));
-  const cover = ragCoverageLine(s.index, s.reranked);
+  const cover = s.mode === "rag" ? ragCoverageLine(s.index, s.reranked)
+    : s.mode === "text" && !s.pending ? "substring match — titles, descriptions, ids" : "";
   if (cover) head.appendChild(el("span", "beads-bits", cover));
   const clear = el("button", "wf-btn clear", "clear");
   clear.type = "button";
@@ -30904,20 +32433,31 @@ function beadsSearchSection() {
   if (s.error) box.appendChild(el("p", "wf-warning", s.error));
   if (!s.results) return box;
   if (!n) {
-    box.appendChild(el("p", "wf-note", "nothing ranked for that — the index may still be filling"));
+    box.appendChild(el("p", "wf-note", s.mode === "rag"
+      ? "nothing ranked for that — the index may still be filling"
+      : "nothing contains that — ids, titles and descriptions were searched"));
     return box;
   }
   const list = el("div", "rag-results");
-  for (const r of s.results) {
-    const hit = el("div", "rag-hit");
+  s.results.forEach((r, i) => {
+    const hit = el("div", "rag-hit" + (i === s.active ? " on" : ""));
     const line = el("div", "rag-hit-line");
-    line.appendChild(ragScoreChip(r));
+    if (s.mode === "rag") line.appendChild(ragScoreChip(r));
     line.appendChild(beadsIssueRow(r, { compact: true }));
     hit.appendChild(line);
     if (r.excerpt) hit.appendChild(el("div", "beads-bits rag-excerpt", r.excerpt));
     list.appendChild(hit);
-  }
+    // The walked row says so without waiting for a click, and stays under
+    // the cursor when walking wraps a list taller than the viewport. After
+    // the append: scrolling an unmounted node is a no-op in every engine.
+    if (i === s.active && typeof hit.scrollIntoView === "function") {
+      hit.scrollIntoView({ block: "nearest" });
+    }
+  });
   box.appendChild(list);
+  // Highlighting after the list is assembled: the walker must not see the
+  // marks it is about to insert.
+  beadsMarkHits(list, s.q);
   return box;
 }
 
@@ -33276,6 +34816,10 @@ let statsIncludeArchived = false; // archived rows in the table
 let statsOverview = null;     // the window payload
 let statsOverviewError = "";
 let statsProvider = "";       // "" every provider, else one label
+let statsLlm = null;          // GET /api/stats/llm-usage: the daemon's own LLM calls
+let statsLlmError = "";
+let statsLlmProvider = "";    // that section's own provider filter
+let statsLlmSeq = 0;
 /* The API's own cap (statscompare.MAX_SESSIONS). */
 const STATS_COMPARE_MAX = 12;
 
@@ -33340,7 +34884,9 @@ function statsSchedule(partial) {
 async function refreshStats() {
   if (!statsPageOpen) return;
   if (statsCompare) return refreshStatsCompare();
-  await refreshStatsOverview();
+  // The section's request goes out first so the overview's stays the last
+  // one sent: both are one round trip and neither waits on the other.
+  await Promise.all([refreshStatsLlm(), refreshStatsOverview()]);
   if (statsSession) await refreshStatsDetail();
   statsSchedule(!!(statsCache && statsCache.partial));
   if (statsPageOpen) renderStats();
@@ -33367,6 +34913,28 @@ async function refreshStatsOverview() {
       statsOverview = data;
       statsOverviewError = "";
     }
+  } catch { /* api() owns auth and recovery */ }
+}
+
+/* The daemon's own LLM calls (briefing, observer, search embedding/rerank,
+   Jev) for the same window. They never reach the routing shim, so the
+   overview's ledger does not hold them: daemon/llm_usage.py keeps its own. */
+async function refreshStatsLlm() {
+  const seq = ++statsLlmSeq;
+  const q = `window=${statsWindow}` +
+    (statsLlmProvider ? `&provider=${encodeURIComponent(statsLlmProvider)}` : "");
+  try {
+    const resp = await api(`/api/stats/llm-usage?${q}`);
+    if (seq !== statsLlmSeq) return;
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404 && !data.error) {
+      statsLlmError = "this daemon predates the daemon-LLM ledger — ask the " +
+        "operator to restart the daemon to pick up this version";
+      statsLlm = null;
+    } else if (!resp.ok) {
+      statsLlmError = data.error || `HTTP ${resp.status}`;
+      statsLlm = null;
+    } else { statsLlm = data; statsLlmError = ""; }
   } catch { /* api() owns auth and recovery */ }
 }
 
@@ -33665,6 +35233,7 @@ function statsWindowTabs() {
       if (statsWindow === key) return;
       statsWindow = key;
       statsOverview = null;
+      statsLlm = null;
       renderStats();
       refreshStats();
     });
@@ -33737,31 +35306,67 @@ function statsProviderStrip(d) {
              el("span", "stats-provider-total", usageShort(p.total || 0)),
              el("span", "stats-provider-sessions", `${p.sessions} sessions`));
     b.title = `${p.provider}: ${(p.requests || 0).toLocaleString()} requests ` +
-      `over ${p.sessions} session(s) in this window`;
+      `over ${p.sessions} session(s) in this window` +
+      (p.declared ? `; ${p.declared} of them read from a transcript and ` +
+        "filed under the provider their profile declares" : "");
     b.addEventListener("click", () => setStatsProvider(on ? "" : p.provider));
     box.appendChild(b);
   }
   return box;
 }
 
+/* The per-provider parts a row counts toward, as the strip counts them
+   (statsboard.row_providers): a ledger row's measured parts, or a transcript
+   row's whole figure under the provider its profile declares. */
+function statsRowParts(row) {
+  if ((row.providers || []).length) return row.providers;
+  if (row.source !== "transcript" || !row.declared_provider) return [];
+  return [{ provider: row.declared_provider, input: row.input || 0,
+            cache_read: row.cache_read || 0, cache_write: row.cache_write || 0,
+            output: row.output || 0, total: row.total || 0,
+            requests: row.requests || 0, declared: true }];
+}
+
 /* A row's figure for the table: the whole window, or one provider's part of
    it when the strip is narrowed. */
 function statsRowTotal(row) {
   if (!statsProvider) return row.total || 0;
-  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
   return (hit && hit.total) || 0;
 }
 
 function statsRowRequests(row) {
   if (!statsProvider) return row.requests || 0;
-  const hit = (row.providers || []).find((p) => p.provider === statsProvider);
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
   return (hit && hit.requests) || 0;
+}
+
+/* The summary tiles' figures: the window's, or the picked provider's card
+   from the strip. A provider the window does not carry (picked under another
+   window) reads as zero rather than falling back to every provider. */
+function statsSummaryFigures(d) {
+  const counts = d.counts || {};
+  if (!statsProvider) {
+    return { totals: d.totals || {}, cacheShare: d.cache_share,
+             sessions: counts.sessions || 0,
+             detail: `${counts.metered || 0} metered, ` +
+               `${counts.unmetered || 0} unmetered` };
+  }
+  const p = (d.providers || []).find((x) => x.provider === statsProvider) || {};
+  const totals = {};
+  for (const k of ["input", "cache_read", "cache_write", "output", "total",
+                   "requests"]) totals[k] = p[k] || 0;
+  return { totals,
+           cacheShare: totals.total ? totals.cache_read / totals.total : null,
+           sessions: p.sessions || 0,
+           detail: `of ${counts.sessions || 0} in the window` +
+             (p.declared ? `, ${p.declared} by declared provider` : "") };
 }
 
 function statsOverviewRows(d) {
   const rows = (d.sessions || []).filter((r) => {
     if (!statsProvider) return true;
-    return (r.providers || []).some(
+    return statsRowParts(r).some(
       (p) => p.provider === statsProvider && (p.total || 0) > 0);
   });
   return rows.slice().sort((a, b) =>
@@ -33787,7 +35392,7 @@ function statsOverviewTable(d) {
     const value = statsRowTotal(r);
     const row = el("tr", "stats-row");
     row.dataset.session = r.session;
-    row.title = `open ${r.session}'s detail panel`;
+    row.title = sessionInfoTooltip(r.session, `open ${r.session}'s detail panel`);
 
     const name = el("td", "stats-session-cell");
     const link = el("a", null, r.session);
@@ -33869,6 +35474,148 @@ function statsOverviewTable(d) {
     table.appendChild(row);
   }
   return table;
+}
+
+/* ---- provider and model ------------------------------------------- */
+/* The window's tokens one provider's model at a time. The four parts stay
+   apart because they cost differently, and each row's estimate comes from
+   the same Settings → Model prices table the rail's rows read (the daemon
+   priced it per row; a model with no row is reported as unpriced, never as
+   costing 0). A session the ledger cannot speak for (an OAuth route) has no
+   model recorded: its tokens ride its declared provider under an empty model
+   and are never priced. */
+
+/* The rows the table draws: the picked provider's models, or every model. */
+function statsModelRows(d) {
+  return (d.models || []).filter(
+    (r) => !statsProvider || r.provider === statsProvider);
+}
+
+/* The shown rows' sums, so the columns match the filter in force: a cache
+   write column appears only when a shown row has cache writes. */
+function statsModelTotals(rows) {
+  const t = { input: 0, cache_read: 0, cache_write: 0, output: 0,
+              total: 0, requests: 0 };
+  for (const r of rows) {
+    for (const k of Object.keys(t)) t[k] += r[k] || 0;
+  }
+  return t;
+}
+
+function statsModelBar(r, peak) {
+  const td = el("td", "num stats-tokens-cell");
+  if (r.total) {
+    const bar = el("span", "stats-rowbar");
+    const fill = el("span", "stats-llm-rowbar-fill");
+    fill.style.width = ((r.total / peak) * 100).toFixed(2) + "%";
+    bar.appendChild(fill);
+    td.appendChild(bar);
+  }
+  td.appendChild(el("span", "stats-rowvalue", usageShort(r.total || 0)));
+  td.title = `read ${(r.input || 0).toLocaleString()}, cached read ` +
+    `${(r.cache_read || 0).toLocaleString()}, cache write ` +
+    `${(r.cache_write || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
+  return td;
+}
+
+/* A row's estimate at the Settings → Model prices table, computed by the
+   daemon from the model that answered it. "—" where the table has no row for
+   it; a partly priced row (some of its tokens on an unpriced model — a
+   provider-filtered table keeps none of that) says what it leaves out. */
+function statsModelCost(r, currency) {
+  const unpriced = r.unpriced_tokens || 0;
+  const priced = r.priced_tokens || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = r.model
+        ? "no price row in Settings → Model prices for this model"
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(r.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices: this model's four " +
+    "token kinds at its row's rates" +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
+function statsModelTable(d) {
+  const rows = statsModelRows(d);
+  const totals = statsModelTotals(rows);
+  const parts = statsLlmParts(totals);
+  const priced = rows.some((r) => r.priced_tokens);
+  const heads = ["provider", "model", "tokens", ...parts.map(([, label]) => label)];
+  if (priced) heads.push("est. cost");
+  heads.push("requests", "sessions");
+  const table = el("table", "stats-table stats-model-table");
+  const head = el("tr");
+  for (const h of heads) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  const peak = Math.max(1, ...rows.map((r) => r.total || 0));
+  const currency = d.currency || "$";
+  for (const r of rows) {
+    const row = el("tr", "stats-model-row");
+    row.appendChild(el("td", "stats-provider-cell", r.provider || ""));
+    const model = el("td", "stats-model-cell");
+    if (r.model) {
+      model.textContent = r.model;
+    } else {
+      const none = el("span", "stats-model-unpriced", "(model not recorded)");
+      none.title = "this session never reached the routing shim, so the " +
+        "ledger has no model for it; its tokens are filed under the " +
+        "provider its profile declares";
+      model.appendChild(none);
+    }
+    row.appendChild(model);
+    row.appendChild(statsModelBar(r, peak));
+    for (const [key] of parts) {
+      row.appendChild(el("td", "num stats-llm-part", usageShort(r[key] || 0)));
+    }
+    if (priced) row.appendChild(statsModelCost(r, currency));
+    row.appendChild(el("td", "num", (r.requests || 0).toLocaleString()));
+    row.appendChild(el("td", "num", (r.sessions || 0).toLocaleString()));
+    table.appendChild(row);
+  }
+  return table;
+}
+
+/* The shown rows' estimate, for the summary tile: the provider filter
+   applies the way it does to every other tile. Null when the daemon's
+   payload has no model split (one that predates it). */
+function statsModelEstimate(d) {
+  if (!Array.isArray(d.models)) return null;
+  const rows = statsModelRows(d);
+  const out = { cost: 0, priced_tokens: 0, unpriced_tokens: 0 };
+  for (const r of rows) {
+    out.cost += r.cost || 0;
+    out.priced_tokens += r.priced_tokens || 0;
+    out.unpriced_tokens += r.unpriced_tokens || 0;
+  }
+  return out;
+}
+
+function statsModelSection(d) {
+  if (!Array.isArray(d.models)) return null;
+  const rows = statsModelRows(d);
+  const body = el("div", "stats-models");
+  body.appendChild(el("p", "wf-note",
+    "Tokens split one provider's model at a time, from the metering ledger " +
+    "the page's figures come from. Est. cost applies the rates in " +
+    "Settings → Model prices to each row; a model with no row there shows — " +
+    "and its tokens count as unpriced, not as free."));
+  if (!rows.length) {
+    body.appendChild(el("p", "wf-note",
+      statsProvider ? `no ${statsProvider} model in this window`
+                    : "no model figure in this window"));
+    return statsSection("By provider and model", 0, body);
+  }
+  body.appendChild(statsScroll(statsModelTable(d)));
+  return statsSection("By provider and model", rows.length, body);
 }
 
 /* ---- the session detail panel -------------------------------------- */
@@ -34101,6 +35848,286 @@ const STATS_METHOD = [
     "the totals and are credited like the parent's.",
 ];
 
+/* ---- the daemon's own LLM calls ------------------------------------ */
+const STATS_LLM_FEATURES = {
+  briefing: "session briefing cards (and the Settings connection test)",
+  observer: "Observer passes over a session's records",
+  embedding: "search index and query embeddings",
+  rerank: "search result reranking",
+  jev: "Jev System One: QA nudge, megathread routing",
+};
+
+function setStatsLlmProvider(name) {
+  statsLlmProvider = name || "";
+  statsLlm = null;
+  renderStats();
+  refreshStatsLlm().then(() => { if (statsPageOpen) renderStats(); });
+}
+
+/* A row's token figure, or — when the provider reported no count for any of
+   its calls: "not reported" is not "spent nothing". */
+function statsLlmTokens(r) {
+  if (!r.total && r.unreported && r.unreported === r.calls) {
+    const dash = el("span", "stats-llm-unreported", "—");
+    dash.title = "the provider reported no token count for these calls";
+    return dash;
+  }
+  return el("span", "stats-rowvalue", usageShort(r.total || 0));
+}
+
+function statsLlmTable(heads, rows, cells) {
+  const table = el("table", "stats-table stats-llm-table");
+  const head = el("tr");
+  for (const h of heads) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  const peak = Math.max(1, ...rows.map((r) => r.total || 0));
+  for (const r of rows) {
+    const row = el("tr", "stats-llm-row");
+    for (const cell of cells(r, peak)) row.appendChild(cell);
+    table.appendChild(row);
+  }
+  return table;
+}
+
+function statsLlmBar(r, peak) {
+  const td = el("td", "num stats-tokens-cell");
+  if (r.total) {
+    const bar = el("span", "stats-rowbar stats-llm-rowbar");
+    const fill = el("span", "stats-llm-rowbar-fill");
+    fill.style.width = ((r.total / peak) * 100).toFixed(2) + "%";
+    bar.appendChild(fill);
+    td.appendChild(bar);
+  }
+  td.appendChild(statsLlmTokens(r));
+  td.title = `read ${(r.input || 0).toLocaleString()}, cached read ` +
+    `${(r.cache_read || 0).toLocaleString()}, cache write ` +
+    `${(r.cache_write || 0).toLocaleString()}, output ${(r.output || 0).toLocaleString()}`;
+  return td;
+}
+
+/* The token kinds a row splits its total into: read (fresh input), cached
+   read, output — and cache write only when the window holds any, so the
+   columns still add up to the total. */
+function statsLlmParts(t) {
+  const parts = [["input", "read"], ["cache_read", "cached read"]];
+  if (t.cache_write) parts.push(["cache_write", "cache write"]);
+  parts.push(["output", "output"]);
+  return parts;
+}
+
+/* A row's estimated cost at the Settings → Model prices table, computed per
+   call from the model that answered it (daemon/llm_usage.py). "—" where no
+   call in the row has a price row; a partial estimate says how many tokens
+   it leaves out. */
+function statsLlmCost(r, currency) {
+  const unpriced = r.unpriced_tokens || 0;
+  const priced = (r.priced_tokens || 0) || (r.cost || 0);
+  const td = el("td", "num stats-llm-cost" +
+    (priced && unpriced ? " stats-llm-cost-partial" : ""));
+  if (!priced) {
+    if (unpriced) {
+      td.appendChild(el("span", "stats-llm-unreported", "—"));
+      td.title = "no price row in Settings → Model prices for these calls' models";
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(r.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices, per call's model" +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens on models ` +
+      "with no price row are not in it" : "");
+  return td;
+}
+
+/* The figure columns every LLM table shares, after its own label columns. */
+function statsLlmFigureHeads(t) {
+  const heads = ["tokens", ...statsLlmParts(t).map(([, label]) => label)];
+  if (t.priced_tokens) heads.push("est. cost");
+  return [...heads, "calls"];
+}
+
+function statsLlmFigures(r, peak, t, currency) {
+  const cells = [statsLlmBar(r, peak)];
+  for (const [key] of statsLlmParts(t)) {
+    cells.push(el("td", "num stats-llm-part", usageShort(r[key] || 0)));
+  }
+  if (t.priced_tokens) cells.push(statsLlmCost(r, currency));
+  cells.push(statsLlmCalls(r));
+  return cells;
+}
+
+function statsLlmCalls(r) {
+  const td = el("td", "num", (r.calls || 0).toLocaleString());
+  if (r.errors) {
+    const err = el("span", "stats-badge stats-llm-errors", `${r.errors} failed`);
+    err.title = "calls that failed (HTTP error, transport error or an unusable answer)";
+    td.appendChild(err);
+  }
+  return td;
+}
+
+function statsLlmChips(list, key) {
+  const td = el("td", "stats-provider-cell");
+  for (const item of list || []) {
+    const name = typeof item === "string" ? item : item[key];
+    if (!name) continue;
+    const chip = el("span", "stats-chip", name);
+    if (typeof item !== "string") {
+      chip.title = `${name}: ${(item.calls || 0).toLocaleString()} calls, ` +
+        `${usageShort(item.total || 0)} tokens (read ${usageShort(item.input || 0)}, ` +
+        `cached read ${usageShort(item.cache_read || 0)}, output ` +
+        `${usageShort(item.output || 0)})`;
+    }
+    td.appendChild(chip);
+  }
+  return td;
+}
+
+function statsLlmProviderStrip(d) {
+  const box = el("div", "stats-providers stats-llm-providers");
+  const all = el("button", "stats-llm-provider" + (statsLlmProvider ? "" : " active"));
+  all.type = "button";
+  all.dataset.llmProvider = "";
+  const every = d.all_providers || [];
+  all.append(el("span", "stats-provider-name", "All providers"),
+             el("span", "stats-provider-total",
+               usageShort(every.reduce((n, p) => n + (p.total || 0), 0))),
+             el("span", "stats-provider-sessions",
+               `${every.reduce((n, p) => n + (p.calls || 0), 0)} calls`));
+  all.addEventListener("click", () => setStatsLlmProvider(""));
+  box.appendChild(all);
+  for (const p of every) {
+    const on = statsLlmProvider === p.provider;
+    const b = el("button", "stats-llm-provider" + (on ? " active" : ""));
+    b.type = "button";
+    b.dataset.llmProvider = p.provider;
+    b.append(el("span", "stats-provider-name", p.provider),
+             el("span", "stats-provider-total", usageShort(p.total || 0)),
+             el("span", "stats-provider-sessions", `${p.calls} calls`));
+    b.addEventListener("click", () => setStatsLlmProvider(on ? "" : p.provider));
+    box.appendChild(b);
+  }
+  return box;
+}
+
+/* Calls per day, one bar per day split by feature. */
+function statsLlmDays(d) {
+  const days = d.days || [];
+  const peak = Math.max(1, ...days.map((x) => x.total || 0));
+  const box = el("div", "stats-llm-days");
+  for (const day of days) {
+    const col = el("div", "stats-llm-day");
+    const bar = el("div", "stats-llm-daybar");
+    for (const f of Object.keys(STATS_LLM_FEATURES)) {
+      const v = (day.features || {})[f] || 0;
+      if (!v) continue;
+      const seg = el("span", `stats-llm-seg llm-${f}`);
+      seg.style.height = ((v / peak) * 100).toFixed(2) + "%";
+      seg.title = `${day.day} · ${f}: ${usageShort(v)} tokens`;
+      bar.appendChild(seg);
+    }
+    col.title = `${day.day}: ${(day.calls || 0).toLocaleString()} calls, ` +
+      `${usageShort(day.total || 0)} tokens`;
+    col.append(bar, el("span", "stats-llm-daylabel", String(day.day).slice(5)));
+    box.appendChild(col);
+  }
+  const legend = el("div", "stats-llm-legend");
+  for (const f of Object.keys(STATS_LLM_FEATURES)) {
+    const item = el("span", "stats-llm-legend-item");
+    item.append(el("span", `stats-llm-swatch llm-${f}`), el("span", null, f));
+    legend.appendChild(item);
+  }
+  const wrap = el("div");
+  wrap.append(box, legend);
+  return wrap;
+}
+
+function statsLlmSection() {
+  const body = el("div", "stats-llm");
+  if (statsLlmError) body.appendChild(el("p", "wf-warning", statsLlmError));
+  const d = statsLlm;
+  if (!d) {
+    if (!statsLlmError) body.appendChild(el("p", "wf-note", "loading…"));
+    return statsSection("Daemon LLM calls", null, body);
+  }
+  const t = d.totals || {};
+  body.appendChild(el("p", "wf-note",
+    "Calls the daemon makes itself — briefing, Observer, search embedding and " +
+    "rerank, Jev. They do not go through the routing shim, so they are not " +
+    "in the session figures above."));
+  body.appendChild(statsLlmProviderStrip(d));
+  const summary = el("div", "window-summary");
+  summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
+    `${(t.calls || 0).toLocaleString()} calls`));
+  summary.appendChild(statsCard("Read", usageShort(t.input || 0),
+    t.cache_write ? `cache write ${usageShort(t.cache_write)}` : "fresh input"));
+  summary.appendChild(statsCard("Cached read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0)));
+  summary.appendChild(statsCard("Output", usageShort(t.output || 0), ""));
+  const currency = d.currency || "$";
+  if (t.priced_tokens) {
+    summary.appendChild(statsCard("Est. cost", `≈ ${currency}${usageCost(t.cost || 0)}`,
+      t.unpriced_tokens
+        ? `${usageShort(t.unpriced_tokens)} tokens unpriced`
+        : "Settings → Model prices"));
+  } else if (t.total) {
+    summary.appendChild(statsCard("Est. cost", "—",
+      "no price row in Settings → Model prices"));
+  }
+  summary.appendChild(statsCard("Failed", (t.errors || 0).toLocaleString(),
+    `${(t.unreported || 0).toLocaleString()} without a token count`));
+  body.appendChild(summary);
+  if (d.ledger_since && d.ledger_since > ((d.days || [])[0] || {}).day) {
+    body.appendChild(el("p", "wf-note stats-partial",
+      `this ledger starts ${d.ledger_since}: earlier calls were not recorded`));
+  }
+  if (!t.calls) {
+    body.appendChild(el("p", "wf-note", "no daemon LLM call in this window"));
+    return statsSection("Daemon LLM calls", 0, body);
+  }
+  body.appendChild(statsLlmDays(d));
+
+  const features = d.features || [];
+  body.appendChild(el("h4", "stats-llm-sub", "By feature"));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["feature", "purpose", ...statsLlmFigureHeads(t)], features, (r, peak) => {
+      const name = el("td", "stats-session-cell", r.feature);
+      name.title = STATS_LLM_FEATURES[r.feature] || "";
+      return [name, statsLlmChips(r.purposes, "purpose"),
+              ...statsLlmFigures(r, peak, t, currency)];
+    })));
+
+  body.appendChild(el("h4", "stats-llm-sub", "By provider"));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["provider", "model", "feature", ...statsLlmFigureHeads(t)], d.providers || [],
+    (r, peak) => [el("td", "stats-session-cell", r.provider),
+                  statsLlmChips(r.models, "model"),
+                  statsLlmChips(r.features, "feature"),
+                  ...statsLlmFigures(r, peak, t, currency)])));
+
+  const sessions = d.sessions || [];
+  const today = (d.until || "").slice(0, 10);
+  body.appendChild(el("h4", "stats-llm-sub", `By session (${sessions.length})`));
+  body.appendChild(statsScroll(statsLlmTable(
+    ["session", "feature", "provider", ...statsLlmFigureHeads(t), "last call"], sessions,
+    (r, peak) => {
+      const name = el("td", "stats-session-cell");
+      if (r.session) {
+        const link = el("a", null, r.session);
+        link.href = `#/stats/${encodeURIComponent(r.session)}`;
+        name.appendChild(link);
+      } else {
+        const none = el("span", "stats-llm-unreported", "(no session)");
+        none.title = "calls about no one session: an index pass over issues " +
+          "nobody owns, a search query, a connection test, megathread routing";
+        name.appendChild(none);
+      }
+      return [name, statsLlmChips(r.features, "feature"),
+              statsLlmChips(r.providers), ...statsLlmFigures(r, peak, t, currency),
+              el("td", "stats-last-cell", statsStamp(r.last_at, today))];
+    })));
+  return statsSection("Daemon LLM calls", t.calls, body);
+}
+
 const STATS_WINDOW_METHOD = [
   "window figures: summed from the metering ledger, one line per API request " +
     "the routing shim forwarded. total = fresh input + cache read + cache " +
@@ -34114,6 +36141,18 @@ const STATS_WINDOW_METHOD = [
   "provider changes: read from the upstream that answered each request. A " +
     "reborrow onto another profile's credentials shows here; the daemon keeps " +
     "only the borrow in force now, not its history.",
+  "provider filter: a provider card narrows the summary and the table to that " +
+    "provider's part of the window. A transcript row is filed under the " +
+    "provider its profile declares; a row shown as — counts toward none.",
+  "daemon LLM calls: one count per request the daemon itself makes " +
+    "(daemon/llm_usage.py), with the provider's own token counts. An " +
+    "embedding request covering several sessions' documents is written as " +
+    "one ledger line per session, its tokens shared out by text length; the " +
+    "totals, feature and provider rows count that request once, while each " +
+    "session row counts every request it took part in, so the session rows " +
+    "can add up to more calls than the total (their tokens still add up). A " +
+    "call whose provider reported no count is counted as a call and shown " +
+    "as —, never as 0.",
 ];
 
 /* Compare mode (#/compare/<a,b,c>): several sessions side by side. One
@@ -34404,8 +36443,9 @@ function renderStatsOverview(main) {
     if (!statsOverviewError) main.appendChild(el("p", "wf-note", "loading…"));
     return;
   }
-  const totals = d.totals || {};
   const counts = d.counts || {};
+  const figures = statsSummaryFigures(d);
+  const totals = figures.totals;
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
@@ -34413,10 +36453,18 @@ function renderStatsOverview(main) {
     `cache read ${usageShort(totals.cache_read || 0)}`));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
     `cache write ${usageShort(totals.cache_write || 0)}`));
-  summary.appendChild(statsCard("Cache share", statsPct(d.cache_share),
+  summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
-  summary.appendChild(statsCard("Sessions", counts.sessions || 0,
-    `${counts.metered || 0} metered, ${counts.unmetered || 0} unmetered`));
+  const est = statsModelEstimate(d);
+  if (est && (est.priced_tokens || est.unpriced_tokens)) {
+    const currency = d.currency || "$";
+    summary.appendChild(statsCard("Est. cost",
+      est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
+      est.unpriced_tokens
+        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : "Settings → Model prices"));
+  }
+  summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
   if (!statsIncludeKilled) held.push(`${counts.killed_excluded || 0} killed`);
   if (!statsIncludeArchived) held.push(`${counts.archived_excluded || 0} archived`);
@@ -34426,6 +36474,11 @@ function renderStatsOverview(main) {
   main.appendChild(summary);
 
   main.appendChild(statsProviderStrip(d));
+  if (statsProvider) {
+    main.appendChild(el("p", "wf-note stats-provider-note",
+      `showing ${statsProvider} only: the figures above and the table below ` +
+      "are that provider's part of the window"));
+  }
 
   const note = el("p", "wf-note stats-window-note",
     `${statsStamp(d.since)} → ${statsStamp(d.until)} (local ${d.zone || ""}). ` +
@@ -34449,6 +36502,11 @@ function renderStatsOverview(main) {
   main.appendChild(statsSection(`Sessions by usage`, rows.length,
     rows.length ? statsScroll(statsOverviewTable(d))
       : el("p", "wf-note", "no session worked in this window")));
+
+  const models = statsModelSection(d);
+  if (models) main.appendChild(models);
+
+  main.appendChild(statsLlmSection());
 
   const notes = el("ul", "stats-method");
   for (const line of STATS_WINDOW_METHOD) notes.appendChild(el("li", null, line));
@@ -37219,7 +39277,7 @@ function llmDraftValues() {
   // the moment the operator typed in the name box.
   const presets = (saved.presets || []).map((p) => ({
     key: p.id, id: p.id, profile: p.profile || "", model: p.model || "",
-    endpoint: p.endpoint || "", api_key: "",
+    endpoint: p.endpoint || "", api_key: "", key_id: p.key_id || "",
     api_key_set: !!p.api_key_set, error: p.error || "",
     //: Whether the daemon already holds this row. "Add preset" starts one
     //: that it does not, and leaving it unsaved is what the card warns about.
@@ -37241,6 +39299,10 @@ function llmDraftValues() {
     model: chosen ? chosen.model : (saved.model || ""),
     endpoint: chosen ? chosen.endpoint : (saved.endpoint || ""),
     api_key: "",
+    //: The pinned pool key of whichever backend the fields belong to — the
+    //: preset's, or the block's own for "custom". "" means no pin: the call
+    //: uses whatever the profile's token file holds.
+    key_id: chosen ? (chosen.key_id || "") : (saved.key_id || ""),
     max_tokens: saved.max_tokens || 4096,
     //: The preset the operator has opened for editing, or null. Only one at a
     //: time (the contract this card was asked for), and the fields are
@@ -37274,10 +39336,14 @@ function llmPresetsBody(draft) {
     const id = editing ? (draft.name || "").trim() : p.id;
     const values = editing
       ? { profile: draft.profile, model: draft.model, endpoint: draft.endpoint,
-          api_key: draft.api_key, api_key_set: draft.api_key ? true : p.api_key_set }
+          api_key: draft.api_key, key_id: draft.key_id,
+          api_key_set: draft.api_key ? true : p.api_key_set }
       : p;
     const row = { id, profile: values.profile || "", model: values.model || "",
                   endpoint: values.endpoint || "" };
+    // The pin travels with the profile it names a key of; a row with no
+    // profile has no pool to pin in, and a blank pin clears the row's.
+    if (values.profile) row.key_id = values.key_id || "";
     // The name the row is filed under in the daemon. The Name box edits ``id``
     // in place, and a stored key stays under the name it was saved as — sending
     // the old name is what lets the daemon keep that key when the row is
@@ -37328,6 +39394,7 @@ function llmDraftLoadTarget(draft) {
   draft.profile = target ? target.profile : (llmSettings.profile || "");
   draft.model = target ? target.model : (llmSettings.model || "");
   draft.endpoint = target ? target.endpoint : (llmSettings.endpoint || "");
+  draft.key_id = target ? (target.key_id || "") : (llmSettings.key_id || "");
   // A stored secret is never sent back, so the box starts blank either way.
   draft.api_key = "";
 }
@@ -37418,6 +39485,10 @@ function llmDraftSaveBody(draft) {
     profile: draft.profile,
     model: draft.model,
   };
+  // The pin belongs to the profile; it is sent only with one (a blank pin
+  // there clears a stored one). Without a profile there is no pool to pin
+  // in, and the save leaves the field out entirely.
+  if (draft.profile) body.key_id = draft.key_id || "";
   // Same pairing rule as before: a profile owns the endpoint/key pair, so the
   // block's own two are removed rather than left describing a backend that
   // is no longer called.
@@ -37476,7 +39547,11 @@ async function llmSettingsSave(body) {
 function llmTestBody(draft) {
   const body = { preset: draft.preset || "", profile: draft.profile,
                  model: draft.model };
-  if (!draft.profile) {
+  if (draft.profile) {
+    // A pin is part of the backend being probed; blank means "no pin",
+    // because the picker's value is never a secret held back.
+    body.key_id = draft.key_id || "";
+  } else {
     body.endpoint = draft.endpoint;
     body.api_key = draft.api_key;
   }
@@ -37515,7 +39590,10 @@ function llmSettingsCard() {
     "fresh install is. Inside a preset or in custom, pick a profile to reuse " +
     "that profile's OpenAI-compatible endpoint, key and default model; the " +
     "endpoint and key typed in are then dropped, since that backend does not " +
-    "use them. Leave the profile empty to type them in."
+    "use them. When that profile holds a pool of keys, the Profile key " +
+    "picker chooses which one the call authenticates with — with no pick, " +
+    "the key the profile's token file holds is used. Leave the profile " +
+    "empty to type them in."
   ));
   if (llmSettingsError) card.appendChild(el("p", "error", llmSettingsError));
   if (!llmSettings) {
@@ -37819,11 +39897,55 @@ function llmSettingsCard() {
     // backend that has never heard of it.
     const picked = rows.find((r) => r.name === draft.profile);
     if (picked && picked.models.length) draft.model = picked.models[0];
+    // The pin names a key of the previous profile's pool; keeping it would
+    // pin a key this profile has never held.
+    draft.key_id = "";
     llmDraftTouch(draft);
     renderWorkspaces();
   });
   profileLabel.appendChild(profileSelect);
   form.appendChild(profileLabel);
+
+  // The key picker: only a profile with a key pool of two or more has
+  // anything to choose between. With none, the call uses whatever the
+  // profile's token file holds, exactly as before this picker existed.
+  const pickedRow = rows.find((r) => r.name === draft.profile);
+  const poolKeys = (pickedRow && pickedRow.keys) || [];
+  if (draft.profile && poolKeys.length >= 2) {
+    const keyPickLabel = el("label", null, "Profile key");
+    const keyPick = document.createElement("select");
+    keyPick.id = "llm-key";
+    const unpinned = document.createElement("option");
+    unpinned.value = "";
+    unpinned.textContent = "— default: the key the token file holds —";
+    keyPick.appendChild(unpinned);
+    for (const k of poolKeys) {
+      const opt = document.createElement("option");
+      opt.value = k.id;
+      opt.textContent = `${k.label || k.id} — ${k.masked}${k.current ? " (current)" : ""}`;
+      keyPick.appendChild(opt);
+    }
+    // A pin the pool no longer holds is still shown, or the form would
+    // quietly propose the default for a backend that errors at compose time.
+    if (draft.key_id && !poolKeys.some((k) => k.id === draft.key_id)) {
+      const stale = document.createElement("option");
+      stale.value = draft.key_id;
+      stale.textContent = `${draft.key_id} (not in the pool)`;
+      keyPick.appendChild(stale);
+    }
+    keyPick.value = draft.key_id || "";
+    keyPick.disabled = locked;
+    if (locked) keyPick.title = lockNote;
+    keyPick.title = keyPick.title ||
+      "which key of this profile's pool the briefing call authenticates with";
+    keyPick.addEventListener("change", () => {
+      if (locked) return;
+      draft.key_id = keyPick.value;
+      llmDraftTouch(draft);
+    });
+    keyPickLabel.appendChild(keyPick);
+    form.appendChild(keyPickLabel);
+  }
 
   const modelLabel = el("label", null, "Model");
   const model = document.createElement("input");
@@ -37997,27 +40119,30 @@ function llmSettingsCard() {
   return card;
 }
 
-/* The per-model price table the cost estimates read (the bucket line under
-   the context gauge and the detail panel's "last request" row). One row per
-   model id — the id the transcript records, not the shortened display form —
-   with a per-1M-token rate for each billed bucket; a rate left empty counts
-   as 0, a row whose every rate is empty is dropped on save. The draft lives
+/* The price table the cost estimates read (the bucket line under the
+   context gauge and the detail panel's "last request" row), two tiers deep:
+   provider, then model id — the id the transcript records, not the shortened
+   display form — with a per-1M-token rate for each billed bucket. A session
+   is priced under the provider its profile resolves to, and falls back to
+   the "*" provider's row for the same model. A rate left empty counts as 0,
+   a row whose every rate is empty is dropped on save. The draft lives
    outside the DOM like llmDraft: this page re-renders on every poll. */
 let modelPricesDraft = null;
 let modelPricesNotice = "";
 let modelPricesBusy = false;
 
+const MP_RATE_KEYS = ["input", "cache_read", "cache_write", "output"];
+
 function modelPricesDraftValues() {
   if (modelPricesDraft) return modelPricesDraft;
   const saved = modelPrices || {};
   const prices = {};
-  for (const [model, rates] of Object.entries(saved.prices || {})) {
-    prices[model] = {
-      input: rates.input ?? "",
-      cache_read: rates.cache_read ?? "",
-      cache_write: rates.cache_write ?? "",
-      output: rates.output ?? "",
-    };
+  for (const [provider, rows] of Object.entries(saved.prices || {})) {
+    prices[provider] = {};
+    for (const [model, rates] of Object.entries(rows || {})) {
+      prices[provider][model] = Object.fromEntries(
+        MP_RATE_KEYS.map((k) => [k, rates[k] ?? ""]));
+    }
   }
   modelPricesDraft = { currency: saved.currency || "$", prices };
   return modelPricesDraft;
@@ -38026,23 +40151,28 @@ function modelPricesDraftValues() {
 async function modelPricesSave() {
   const draft = modelPricesDraftValues();
   const prices = {};
-  for (const model of Object.keys(draft.prices)) {
-    const row = {};
-    for (const key of ["input", "cache_read", "cache_write", "output"]) {
-      const v = String(draft.prices[model][key] ?? "").trim();
-      if (v === "") continue;
-      const n = Number(v);
-      if (!Number.isFinite(n) || n < 0) {
-        modelPricesError = `${model}: ${key} must be a non-negative number`;
-        renderWorkspaces();
-        return;
+  for (const provider of Object.keys(draft.prices)) {
+    for (const model of Object.keys(draft.prices[provider])) {
+      const row = {};
+      for (const key of MP_RATE_KEYS) {
+        const v = String(draft.prices[provider][model][key] ?? "").trim();
+        if (v === "") continue;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) {
+          modelPricesError =
+            `${provider}/${model}: ${key} must be a non-negative number`;
+          renderWorkspaces();
+          return;
+        }
+        row[key] = n;
       }
-      row[key] = n;
+      // A row whose every rate was emptied is a dropped row, not a free one:
+      // an empty object would come back truthy from priceRateFor and render
+      // "≈ $0.0000" — the very misreading this card's note promises against.
+      if (Object.keys(row).length) {
+        (prices[provider] = prices[provider] || {})[model] = row;
+      }
     }
-    // A row whose every rate was emptied is a dropped row, not a free one:
-    // an empty object would come back truthy from priceRateFor and render
-    // "≈ $0.0000" — the very misreading this card's note promises against.
-    if (Object.keys(row).length) prices[model] = row;
   }
   modelPricesBusy = true;
   modelPricesNotice = "";
@@ -38067,16 +40197,33 @@ async function modelPricesSave() {
   renderWorkspaces();
 }
 
+/* The providers the add row offers: "*" first, then every provider a
+   profile resolves to (what a session would be priced under), then any
+   provider already in the table. */
+function modelPricesProviderOptions(draft) {
+  const any = priceAnyProvider();
+  const named = new Set([
+    ...Object.values((modelPrices && modelPrices.profiles) || {}),
+    ...Object.keys(draft.prices),
+  ]);
+  named.delete(any);
+  return [any, ...[...named].filter(Boolean).sort()];
+}
+
 function modelPricesCard() {
   const card = el("section", "ws-add model-prices");
   card.appendChild(el("h3", null, "Model prices"));
   card.appendChild(el(
     "p", "wf-note",
-    "Per-1M-token rates for a model id (the id the transcript records — " +
-    "the one in the gauge line's tooltip). Where a row exists, the session " +
-    "card under the context gauge and the detail panel's last-request row " +
+    "Per-1M-token rates by provider and model id (the id the transcript " +
+    "records — the one in the gauge line's tooltip). A session is priced " +
+    "under the provider its profile resolves to (Settings → Providers; a " +
+    "borrowing session under its lender's), and a model with no row there " +
+    "takes the \"*\" provider's row. Where a row applies, the session card " +
+    "under the context gauge and the detail panel's last-request row " +
     "estimate the cost of the latest request from these rates. A rate left " +
-    "empty counts as 0; emptying every rate drops the row."
+    "empty counts as 0, except cache write, which is optional: left empty " +
+    "it takes the read rate. Emptying every rate drops the row."
   ));
   if (modelPricesError) card.appendChild(el("p", "error", modelPricesError));
   if (modelPricesNotice) card.appendChild(el("p", "wf-note", modelPricesNotice));
@@ -38101,48 +40248,70 @@ function modelPricesCard() {
   curLabel.appendChild(cur);
   form.appendChild(curLabel);
 
+  const any = priceAnyProvider();
   const table = el("div", "mp-table");
   const head = el("div", "mp-row mp-head");
-  head.append(el("span", "mp-model-head", "model"),
-              ...["read", "cached read", "write", "output"].map(
+  head.append(el("span", "mp-provider-head", "provider"),
+              el("span", "mp-model-head", "model"),
+              ...["read", "cached read", "cache write", "output"].map(
                 (h) => el("span", "mp-rate-head", h)),
               el("span", "mp-rate-head", ""));
   table.appendChild(head);
-  for (const model of Object.keys(draft.prices).sort()) {
-    const rates = draft.prices[model];
-    const row = el("div", "mp-row");
-    const name = el("span", "mp-model", model);
-    name.title = model;
-    row.appendChild(name);
-    for (const key of ["input", "cache_read", "cache_write", "output"]) {
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.inputMode = "decimal";
-      inp.className = "mp-rate";
-      inp.value = rates[key];
-      inp.placeholder = "0";
-      inp.addEventListener("input", () => { rates[key] = inp.value; });
-      row.appendChild(inp);
+  // "*" first: it is the row every provider falls back to.
+  const providerOrder = Object.keys(draft.prices).sort(
+    (x, y) => (x === any ? -1 : y === any ? 1 : x.localeCompare(y)));
+  for (const provider of providerOrder) {
+    for (const model of Object.keys(draft.prices[provider]).sort()) {
+      const rates = draft.prices[provider][model];
+      const row = el("div", "mp-row");
+      const prov = el("span", "mp-provider", provider);
+      prov.title = provider === any
+        ? "any provider without its own row for this model" : provider;
+      const name = el("span", "mp-model", model);
+      name.title = model;
+      row.append(prov, name);
+      for (const key of MP_RATE_KEYS) {
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.inputMode = "decimal";
+        inp.className = "mp-rate";
+        inp.value = rates[key];
+        inp.placeholder = key === "cache_write" ? "= read" : "0";
+        if (key === "cache_write") inp.title = "optional: empty uses the read rate";
+        inp.addEventListener("input", () => { rates[key] = inp.value; });
+        row.appendChild(inp);
+      }
+      const drop = el("button", "wf-btn clear mp-drop", "✕");
+      drop.type = "button";
+      drop.title = "drop this row";
+      drop.addEventListener("click", () => {
+        delete draft.prices[provider][model];
+        if (!Object.keys(draft.prices[provider]).length) {
+          delete draft.prices[provider];
+        }
+        renderWorkspaces();
+      });
+      row.appendChild(drop);
+      table.appendChild(row);
     }
-    const drop = el("button", "wf-btn clear mp-drop", "✕");
-    drop.type = "button";
-    drop.title = "drop this row";
-    drop.addEventListener("click", () => {
-      delete draft.prices[model];
-      renderWorkspaces();
-    });
-    row.appendChild(drop);
-    table.appendChild(row);
   }
   form.appendChild(table);
 
-  // Adding a row: the id typed in, or one of the models the rail currently
-  // shows, offered by a datalist so a typo'd id does not silently estimate
-  // nothing.
+  // Adding a row: a provider (one a profile resolves to, or "*") and the
+  // model id typed in, or one of the models the rail currently shows,
+  // offered by a datalist so a typo'd id does not silently estimate nothing.
   const seen = [...new Set((sessionsCache || [])
     .map((s) => s && s.context && s.context.model)
     .filter(Boolean))].sort();
   const addRow = el("div", "mp-row mp-add");
+  const addProvider = document.createElement("select");
+  addProvider.id = "mp-add-provider";
+  for (const p of modelPricesProviderOptions(draft)) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p === any ? `${any} (any provider)` : p;
+    addProvider.appendChild(opt);
+  }
   const addName = document.createElement("input");
   addName.id = "mp-add-model";
   addName.type = "text";
@@ -38159,10 +40328,11 @@ function modelPricesCard() {
   addBtn.type = "button";
   const addModel = () => {
     const m = addName.value.trim();
+    const p = addProvider.value || any;
     if (!m) return;
-    if (!draft.prices[m]) {
-      draft.prices[m] = { input: "", cache_read: "", cache_write: "",
-                          output: "" };
+    const rows = draft.prices[p] = draft.prices[p] || {};
+    if (!rows[m]) {
+      rows[m] = { input: "", cache_read: "", cache_write: "", output: "" };
     }
     modelPricesDraft = draft;
     renderWorkspaces();
@@ -38171,7 +40341,7 @@ function modelPricesCard() {
   addName.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); addModel(); }
   });
-  addRow.append(addName, addList, addBtn);
+  addRow.append(addProvider, addName, addList, addBtn);
   form.appendChild(addRow);
 
   const submit = el("button", "wf-btn approve", "Save prices");
@@ -38970,7 +41140,8 @@ function webdebugSettingCard() {
    PUT shows the server's reason and re-GETs to restore stored state. */
 let modelTiers = {
   block: { version: 1, tiers: [], active: {} },
-  profiles: [], harnesses: {}, models: {}, presets: [], max_tiers: 5,
+  profiles: [], harnesses: {}, models: {}, models_by_harness: {},
+  presets: [], max_tiers: 5,
   loaded: false, error: "", busy: false,
 };
 let modelTiersTierDraft = "";
@@ -38984,6 +41155,7 @@ function takeModelTiers(data) {
     profiles: data.profiles || [],
     harnesses: data.harnesses || {},
     models: data.models || {},
+    models_by_harness: data.models_by_harness || {},
     presets: data.presets || [],
     max_tiers: data.max_tiers || 5,
     loaded: true, error: "",
@@ -39042,8 +41214,17 @@ function modelTierEntrySelect(current, choices, emptyLabel, onChange) {
   return select;
 }
 
-function modelTiersEntryModelChoices(profile) {
-  return [...new Set([...modelTiers.presets, ...(modelTiers.models[profile] || [])])];
+function modelTiersEntryModelChoices(profile, harness) {
+  // validate() reads the ENTRY's harness (the profile's effective harness only
+  // when the entry names none), so the list is per (profile, harness): a
+  // codex-default profile still offers claude's presets to a claude entry, and
+  // never offers codex-only names to it (claunch-61vj3 review). Presets are
+  // the fallback only when the server could not list the profile.
+  const perProfile = (modelTiers.models_by_harness || {})[profile] || {};
+  const listed = perProfile[harness || ""];
+  if (listed) return listed;
+  const fallback = modelTiers.models[profile] || [];
+  return fallback.length ? fallback : modelTiers.presets;
 }
 
 function modelTiersEntryHarnessChoices(profile) {
@@ -39135,7 +41316,8 @@ function modelTierSection(tier) {
     ));
     const model = el("label", "delegate-field", " Model ");
     model.appendChild(modelTierEntrySelect(
-      entry.model || "", modelTiersEntryModelChoices(entry.profile), "(default)",
+      entry.model || "",
+      modelTiersEntryModelChoices(entry.profile, entry.harness || ""), "(default)",
       (v) => modelTiersSetEntry(tier, index, "model", v)
     ));
     const remove = el("button", "wf-btn danger", "Delete");
@@ -40729,9 +42911,67 @@ function wsSyncSt(name) {
       loading: false, doc: null, error: "", busy: "", result: null, waiting: null,
       pushBranch: "", force: false, pullMachine: "", pullBranch: "",
       agentMode: "commands", agentParent: "",
+      // checked remotes (claunch-y3tuk): null until the first status read
+      remotes: null, basis: "", remoteNote: "", multi: null,
     });
   }
   return wsSyncState.get(name);
+}
+
+/* The checked remotes and the basis are a property of this browser, not of
+   the repository: two people may watch the same workspace and want different
+   targets. Kept per workspace; a private window simply forgets them. */
+const WS_SYNC_REMOTES_KEY = "claunch.wsSync.remotes.";
+const WS_SYNC_BASIS_KEY = "claunch.wsSync.basis.";
+
+function wsSyncSaved(name) {
+  try {
+    const raw = localStorage.getItem(WS_SYNC_REMOTES_KEY + name);
+    const got = raw ? JSON.parse(raw) : null;
+    return Array.isArray(got) ? got : null;
+  } catch {
+    return null;
+  }
+}
+
+function wsSyncSave(name, st) {
+  try {
+    localStorage.setItem(WS_SYNC_REMOTES_KEY + name, JSON.stringify(st.remotes || []));
+    localStorage.setItem(WS_SYNC_BASIS_KEY + name, st.basis || "");
+  } catch { /* private window: the selection lives for this page only */ }
+}
+
+function wsSyncSavedBasis(name) {
+  try { return localStorage.getItem(WS_SYNC_BASIS_KEY + name) || ""; } catch { return ""; }
+}
+
+function wsSyncRemoteNames(doc) {
+  return Object.values((doc && doc.remotes) || {});
+}
+
+function wsSyncPlanFor(doc, remote) {
+  return ((doc && doc.plans) || []).find((r) => r.remote === remote) || null;
+}
+
+/* Seed the checked set on the first read, or keep the one this page already
+   has. The remembered choice wins when it is still present; otherwise the
+   plan's remote, then the first remote. The basis follows a checked remote. */
+function wsSyncInitSelection(name, doc) {
+  const st = wsSyncSt(name);
+  const names = wsSyncRemoteNames(doc);
+  if (!names.length) return;
+  const saved = (wsSyncSaved(name) || []).filter((r) => names.includes(r));
+  const had = st.remotes || [];
+  const kept = had.filter((r) => names.includes(r));
+  st.remotes = kept.length ? kept
+    : (saved.length ? saved
+      : [(doc.plan && names.includes(doc.plan.remote)) ? doc.plan.remote : names[0]]);
+  if (!st.remotes.includes(st.basis)) {
+    const savedBasis = wsSyncSavedBasis(name);
+    st.basis = st.remotes.includes(savedBasis) ? savedBasis
+      : (doc.basis && st.remotes.includes(doc.basis) ? doc.basis
+        : (doc.plan && st.remotes.includes(doc.plan.remote) ? doc.plan.remote : st.remotes[0]));
+  }
 }
 
 function wsSyncToggle(w) {
@@ -40752,8 +42992,21 @@ async function wsSyncRefresh(name, fetchFirst) {
   st.loading = true;
   st.error = "";
   renderWorkspaces();
+  const sent = !!(st.remotes && st.remotes.length);
   try {
-    const q = fetchFirst ? "" : "?fetch=0";
+    // `remotes` narrows every fetch and comparison to the checked set: an
+    // unchecked remote is not fetched and is absent from plans and the
+    // comparison table (claunch-y3tuk).
+    const parts = [];
+    // Without a checked set the daemon would fetch every remote (Refresh all
+    // reaches here first, before a selection exists), so the read that only
+    // learns the names never fetches (claunch-y3tuk).
+    if (!fetchFirst || !sent) parts.push("fetch=0");
+    if (sent) {
+      parts.push("remotes=" + st.remotes.map((r) => encodeURIComponent(r)).join(","));
+      if (st.basis) parts.push("basis=" + encodeURIComponent(st.basis));
+    }
+    const q = parts.length ? `?${parts.join("&")}` : "";
     const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/status${q}`);
     const doc = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
@@ -40761,11 +43014,58 @@ async function wsSyncRefresh(name, fetchFirst) {
     if (!st.pushBranch || !(doc.branches || []).includes(st.pushBranch)) {
       st.pushBranch = (doc.branches || []).find((b) => !/^(master|main)$/.test(b)) || "";
     }
+    if (!sent && wsSyncRemoteNames(doc).length) {
+      // the first read has to name the remotes before one can be checked;
+      // read again with the seeded selection so the plans are drawn
+      wsSyncInitSelection(name, doc);
+      st.loading = false;
+      if (st.remotes && st.remotes.length) return wsSyncRefresh(name, fetchFirst);
+      return;
+    }
+    wsSyncInitSelection(name, doc);
+    // the daemon computed the basis from the graph; follow a correction it
+    // made unless the person picked another checked remote
+    if (st.remotes && st.remotes.length > 1 && doc.basis && st.remotes.includes(doc.basis)) {
+      const saved = wsSyncSavedBasis(name);
+      if (!saved || !st.remotes.includes(saved)) st.basis = doc.basis;
+    }
   } catch (err) {
     st.error = String(err.message || err);
   }
   st.loading = false;
   if (wsOpen) renderWorkspaces();
+}
+
+/* Check or uncheck one target remote. The last checked one stays checked:
+   a sync with no target has nothing to do, so the box springs back with a
+   note instead of letting the set go empty (claunch-y3tuk). */
+function wsSyncToggleRemote(name, remote, checked) {
+  const st = wsSyncSt(name);
+  const names = wsSyncRemoteNames(st.doc);
+  const next = checked
+    ? [...new Set([...st.remotes, remote])].filter((r) => names.includes(r))
+    : st.remotes.filter((r) => r !== remote);
+  if (!next.length) {
+    st.remoteNote = "At least one remote stays checked.";
+    renderWorkspaces();
+    return;
+  }
+  st.remoteNote = "";
+  st.remotes = next;
+  if (!st.remotes.includes(st.basis)) {
+    const doc = st.doc || {};
+    st.basis = doc.basis && st.remotes.includes(doc.basis) ? doc.basis : st.remotes[0];
+  }
+  wsSyncSave(name, st);
+  wsSyncRefresh(name, false);
+}
+
+function wsSyncToggleBasis(name, basis) {
+  const st = wsSyncSt(name);
+  if (!st.remotes.includes(basis)) return;
+  st.basis = basis;
+  wsSyncSave(name, st);
+  wsSyncRefresh(name, false);
 }
 
 /* Refresh all (claunch-87eqx): every present workspace's Sync status, with
@@ -40876,7 +43176,8 @@ async function wsSyncSend(name, kind, body) {
   st.busy = "";
   st.waiting = null;
   if (resp.status === 409 && doc.stale) {
-    if (st.doc) st.doc.plan = doc.plan;
+    if (st.doc && doc.plan) st.doc.plan = doc.plan;
+    if (st.doc && doc.plans) st.doc.plans = doc.plans;
     st.error = "The branch or the remote moved since this plan was shown. " +
       "Review the new plan below and press the button again.";
   } else if (!resp.ok) {
@@ -40888,6 +43189,88 @@ async function wsSyncSend(name, kind, body) {
   if (st.result) refreshWsGitSummary();
   if (st.result && kind !== "push") await wsSyncRefresh(name, false);
   else if (wsOpen) renderWorkspaces();
+}
+
+/* One request, but wait here for its approval card instead of scheduling the
+   read: the sequential multi-remote run needs the answer before it can move
+   to the next remote (claunch-y3tuk). Resolves true when the request ran. */
+async function wsSyncSendNow(name, kind, body) {
+  let request = "";
+  for (;;) {
+    const st = wsSyncSt(name);
+    st.busy = kind;
+    st.error = "";
+    st.result = null;
+    renderWorkspaces();
+    let resp, doc;
+    try {
+      resp = await api(
+        `/api/reposync/workspaces/${encodeURIComponent(name)}/${WS_SYNC_PATH[kind]}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request ? { ...body, request } : body),
+        });
+      doc = await resp.json().catch(() => ({}));
+    } catch (err) {
+      st.busy = "";
+      st.error = String(err.message || err);
+      if (wsOpen) renderWorkspaces();
+      return false;
+    }
+    if (resp.status === 202 && doc.request) {
+      st.waiting = { kind, body, request: doc.request, deadline: doc.deadline || "" };
+      if (typeof refreshReposyncGate === "function") refreshReposyncGate();
+      if (wsOpen) renderWorkspaces();
+      const rec = await wsSyncPoll(doc.request);
+      st.waiting = null;
+      if (!rec || rec.status !== "approved") {
+        st.busy = "";
+        if (rec) st.error = `The approval card was ${rec.status}; nothing was pushed.`;
+        if (wsOpen) renderWorkspaces();
+        return false;
+      }
+      request = doc.request;
+      continue;   // the daemon re-checks the tips and runs it
+    }
+    st.busy = "";
+    st.waiting = null;
+    if (resp.status === 409 && doc.stale) {
+      if (st.doc && doc.plan) st.doc.plan = doc.plan;
+      if (st.doc && doc.plans) st.doc.plans = doc.plans;
+      st.error = "The branch or the remote moved since this plan was shown. " +
+        "Review the new plan below and press the button again.";
+    } else if (!resp.ok) {
+      st.error = doc.error || `HTTP ${resp.status}`;
+      if (doc.agent && st.doc) st.doc.agent = doc.agent;
+    } else {
+      st.result = { kind, doc };
+    }
+    if (st.result) refreshWsGitSummary();
+    if (st.result && kind !== "push") await wsSyncRefresh(name, false);
+    else if (wsOpen) renderWorkspaces();
+    return !!st.result;
+  }
+}
+
+/* Read one approval request until a person answers it. */
+function wsSyncPoll(requestId) {
+  return new Promise((resolve) => {
+    const read = async () => {
+      let rec = null;
+      try {
+        const resp = await api(`/api/reposync/requests/${encodeURIComponent(requestId)}`);
+        if (resp.ok) rec = ((await resp.json()) || {}).request || null;
+      } catch {
+        rec = null;
+      }
+      if (!rec || rec.status === "pending") {
+        setTimeout(read, WS_SYNC_POLL_MS);
+        return;
+      }
+      resolve(rec);
+    };
+    read();
+  });
 }
 
 /* Read the waiting card until a person answers it. Approved: send the same
@@ -40919,42 +43302,159 @@ async function wsSyncWait(name) {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The tips the panel drew, for every checked remote that has a plan --
+   including one already up to date, whose tips the daemon still compares
+   (claunch-y3tuk). */
+function wsSyncPlanTips(doc) {
+  return ((doc && doc.plans) || []).filter((r) => r.plan)
+    .map((r) => ({ remote: r.remote, local: r.plan.local, upstream: r.plan.upstream }));
+}
+
+/* The plans the button would run, basis first. Falls back to the single
+   `plan` field an older daemon (or the CLI's status) returns. */
+function wsSyncPending(doc) {
+  const plans = (doc && doc.plans) || [];
+  if (plans.length) {
+    return plans.filter((r) => r.plan && !r.error && r.plan.action !== "up-to-date")
+      .map((r) => ({ remote: r.remote, plan: r.plan }));
+  }
+  const plan = doc && doc.plan;
+  return plan && plan.action !== "up-to-date"
+    ? [{ remote: plan.remote, plan }] : [];
+}
+
+function wsSyncOrdered(doc, pending) {
+  const order = (doc && doc.sync_order) || [];
+  if (!order.length) return pending;
+  const byRemote = new Map(pending.map((r) => [r.remote, r]));
+  const out = [];
+  for (const remote of order) {
+    const row = byRemote.get(remote);
+    if (row) out.push(row);
+  }
+  for (const row of pending) if (!out.includes(row)) out.push(row);
+  return out;
+}
+
 async function wsSyncRun(name) {
   const st = wsSyncSt(name);
-  const plan = st.doc && st.doc.plan;
-  if (!plan || plan.action === "up-to-date" || wsSyncAgentBlocked(st)) return;
+  const doc = st.doc || {};
+  if (wsSyncAgentBlocked(st)) return;
+  if ((doc.incompatible || []).length || doc.basis_error) return;
+  const pending = wsSyncOrdered(doc, wsSyncPending(doc));
+  if (!pending.length) return;
+  const multi = (doc.plans || []).filter((r) => r.plan).length > 1;
   // A fast-forward only moves the local branch and runs at once, so it asks
   // here; a push asks on the approval card instead.
-  if (st.agentMode !== "agent" && plan.action === "ff" && !confirm(
-    `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
-    `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
-  )) return;
-  await wsSyncSend(name, "sync", {
-    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
-    ...wsSyncAgentBody(st),
-  });
+  if (st.agentMode !== "agent" && pending.length === 1 && pending[0].plan.action === "ff") {
+    const plan = pending[0].plan;
+    if (!confirm(
+      `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
+      `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
+    )) return;
+  }
+  if (st.agentMode !== "commands") {
+    const first = pending[0].plan;
+    const body = {
+      kind: "sync", agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent",
+      remote: first.remote, branch: first.branch,
+      local: first.local, upstream: first.upstream,
+      ...wsSyncAgentBody(st),
+    };
+    if (multi) {
+      body.remotes = st.remotes;
+      body.basis = st.basis;
+      // every checked remote's tips, not only the pending ones: an
+      // up-to-date remote carries no row in `pending`, and the daemon reads
+      // the rows it is given as the tips the panel drew (claunch-y3tuk)
+      body.plans = wsSyncPlanTips(doc);
+    }
+    await wsSyncSend(name, "sync", body);
+    return;
+  }
+  if (pending.length === 1) {
+    const plan = pending[0].plan;
+    const body = { remote: pending[0].remote, branch: plan.branch,
+                   local: plan.local, upstream: plan.upstream };
+    if (multi) body.basis = st.basis;
+    await wsSyncSend(name, "sync", body);
+    return;
+  }
+  // Several remotes: one request per remote, basis first. Each push keeps its
+  // own approval card; the next plan is read from the updated tips.
+  st.multi = { order: pending.map((r) => r.remote), index: 0, done: [] };
+  await wsSyncStep(name);
+}
+
+async function wsSyncStep(name) {
+  const st = wsSyncSt(name);
+  const m = st.multi;
+  if (!m) return;
+  while (m.index < m.order.length) {
+    const remote = m.order[m.index];
+    m.index += 1;
+    const row = wsSyncPlanFor(st.doc, remote);
+    const plan = row && row.plan;
+    if (!plan || plan.action === "up-to-date") continue;
+    const ok = await wsSyncSendNow(name, "sync", {
+      remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+      basis: st.basis,
+    });
+    if (!ok) {
+      st.multi = null;
+      if (m.done.length && st.error) {
+        st.error += ` Updated before the failure: ${m.done.join(", ")}.`;
+      }
+      if (wsOpen) renderWorkspaces();
+      return;
+    }
+    m.done.push(remote);
+  }
+  st.multi = null;
+  st.busy = "";
+  await wsSyncRefresh(name, false);
 }
 
 async function wsSyncBranch(name, kind) {
   const st = wsSyncSt(name);
   if (kind === "push") {
     if (!st.pushBranch || wsSyncAgentBlocked(st)) return;
-    await wsSyncSend(name, "push", {
-      branch: st.pushBranch, force_with_lease: !!st.force,
-      remote: st.doc && st.doc.plan && st.doc.plan.remote,
-      ...wsSyncAgentBody(st),
-    });
+    const doc = st.doc || {};
+    const remotes = (st.remotes && st.remotes.length)
+      ? st.remotes
+      : [doc.plan && doc.plan.remote].filter(Boolean);
+    if (st.agentMode !== "commands") {
+      await wsSyncSend(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force,
+        remote: doc.plan && doc.plan.remote, remotes, basis: st.basis,
+        ...wsSyncAgentBody(st),
+      });
+      return;
+    }
+    if (remotes.length <= 1) {
+      await wsSyncSend(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force,
+        remote: remotes[0],
+      });
+      return;
+    }
+    for (const remote of remotes) {
+      const ok = await wsSyncSendNow(name, "push", {
+        branch: st.pushBranch, force_with_lease: !!st.force, remote,
+      });
+      if (!ok) return;
+    }
     return;
   }
   if (!st.pullMachine || !st.pullBranch) return;
-  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch));
+  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch, st.basis));
 }
 
 /* A pull names the remote the panel planned on: a workspace with two
    remotes otherwise refuses to guess which one carries the branch. */
-function wsSyncPullBody(doc, machine, branch) {
+function wsSyncPullBody(doc, machine, branch, basis) {
   const body = { machine, branch };
-  const remote = doc && doc.plan && doc.plan.remote;
+  const remote = basis || (doc && doc.plan && doc.plan.remote);
   if (remote) body.remote = remote;
   return body;
 }
@@ -40994,7 +43494,7 @@ function wsSyncShared(name, doc, st) {
     const go = el("button", "wf-btn", st.busy === "pull" ? "Pulling…" : "Pull");
     go.disabled = !!st.busy || r.state === "same" || r.state === "diverged";
     if (r.state === "diverged") go.title = `local ${r.ref} has commits ${remote}/${r.ref} does not; a pull would refuse`;
-    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch)));
+    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch, st.basis)));
     row.appendChild(go);
     return row;
   };
@@ -41285,11 +43785,16 @@ function wsSyncPromptText(title, prompt) {
 function wsSyncPromptBody(st, kind) {
   const doc = st.doc || {};
   const plan = doc.plan;
+  const remotes = (st.remotes || []).slice();
+  const plans = wsSyncPlanTips(doc);
+  const multi = plans.length > 1 ? { remotes, basis: st.basis, plans } : {};
   if (kind === "sync") return plan ? {
-    kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent",
+    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    ...multi,
   } : null;
   const branch = st.pushBranch || (doc.branches || [])[0];
-  return branch ? { kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", branch, remote: plan && plan.remote, force_with_lease: !!st.force } : null;
+  return branch ? { kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", branch, remote: plan && plan.remote, force_with_lease: !!st.force, ...multi } : null;
 }
 
 async function wsSyncPreviewPrompt(name, kind) {
@@ -41448,9 +43953,17 @@ function wsSyncWhyDisabled(st, kind) {
   const doc = st.doc || {};
   if (st.busy || st.loading) return "";
   if (kind === "sync") {
-    const plan = doc.plan;
-    if (plan && plan.action === "up-to-date") {
-      return `Nothing to sync: ${plan.branch} already equals ${plan.remote}/${plan.branch}.`;
+    if ((doc.incompatible || []).length) {
+      return "The checked remotes are not on one line; uncheck one to continue.";
+    }
+    if (doc.basis_error) return doc.basis_error;
+    const pending = wsSyncPending(doc);
+    if (!pending.length && (doc.plan || (doc.plans || []).length)) {
+      const plan = doc.plan;
+      if (plan) {
+        return `Nothing to sync: ${plan.branch} already equals ${plan.remote}/${plan.branch}.`;
+      }
+      return "Nothing to sync: every checked remote is already level.";
     }
   } else if (!(doc.branches || []).length) {
     return "No local branch to push.";
@@ -41469,6 +43982,73 @@ function wsSyncButtonRow(st, button, kind) {
   const why = wsSyncWhyDisabled(st, kind);
   if (why) row.appendChild(el("span", "wf-note ws-sync-why", why));
   return row;
+}
+
+/* The checked remotes, the basis, and the order the daemon computed
+   (claunch-y3tuk). The set is a multi-checkbox that cannot go empty; the
+   basis is the remote whose tip the local branch is brought onto first, and
+   the order shows what runs when (basis first, then pushes). */
+function wsSyncRemotePicker(st, name, doc) {
+  const names = wsSyncRemoteNames(doc);
+  const keys = {};
+  for (const [key, n] of Object.entries(doc.remotes || {})) keys[n] = key;
+  const box = el("section", "ws-sync-section ws-sync-targets");
+  box.setAttribute("aria-label", "Target remotes");
+  box.appendChild(el("h4", null, "Target remotes"));
+  box.appendChild(el("p", "wf-note",
+    "Fetches, comparisons and Sync run against the checked remotes only. " +
+    "At least one stays checked."));
+  if (!names.length) {
+    box.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
+    return box;
+  }
+  const list = el("div", "ws-sync-remotes");
+  for (const remote of names) {
+    const label = el("label", "wf-note ws-sync-remote");
+    const input = el("input", "ws-sync-remote-box");
+    input.type = "checkbox";
+    input.checked = (st.remotes || []).includes(remote);
+    input.addEventListener("change", () => wsSyncToggleRemote(name, remote, input.checked));
+    label.appendChild(input);
+    label.appendChild(el("span", "mono", remote));
+    if (keys[remote]) label.appendChild(el("span", "wf-note", keys[remote]));
+    if (doc.basis === remote && (st.remotes || []).length > 1) {
+      label.appendChild(el("span", "badge busy", "basis"));
+    }
+    list.appendChild(label);
+  }
+  box.appendChild(list);
+  if (st.remoteNote) box.appendChild(el("p", "wf-note wf-warning", st.remoteNote));
+  if ((st.remotes || []).length > 1) {
+    const row = el("div", "ws-sync-form");
+    const pick = el("select");
+    pick.setAttribute("aria-label", "Basis remote");
+    for (const remote of st.remotes) pick.appendChild(new Option(remote, remote));
+    pick.value = st.basis;
+    pick.addEventListener("change", () => wsSyncToggleBasis(name, pick.value));
+    row.appendChild(pick);
+    row.appendChild(el("span", "wf-note",
+      "Basis is fast-forwarded or rebased first; the others are pushed to."));
+    box.appendChild(row);
+  }
+  if (doc.basis_error) box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
+  if ((doc.incompatible || []).length) {
+    box.appendChild(el("p", "wf-note wf-warning",
+      "These remotes cannot be brought to one branch (their tips are not on one line): " +
+      doc.incompatible.map((p) => p.join(" / ")).join(", ")));
+  }
+  if ((doc.sync_order || []).length) {
+    const order = el("div", "ws-sync-order");
+    order.appendChild(el("h5", null, "Execution order"));
+    (doc.sync_order || []).forEach((remote, i) => {
+      const row = wsSyncPlanFor(doc, remote);
+      const action = row && row.plan ? row.plan.action : (row && row.error ? "error" : "?");
+      order.appendChild(el("div", "mono ws-sync-order-row",
+        `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
+    });
+    box.appendChild(order);
+  }
+  return box;
 }
 
 /* The Sync panel, top to bottom in the order it is used: how operations run,
@@ -41510,6 +44090,7 @@ function wsSyncPanel(w) {
     return panel;
   }
 
+  panel.appendChild(wsSyncRemotePicker(st, w.name, doc));
   panel.appendChild(wsSyncAgentControls(st, w.name));
 
   // master
@@ -41518,7 +44099,19 @@ function wsSyncPanel(w) {
   master.appendChild(el("h4", null, "Sync master"));
   master.appendChild(el("p", "wf-note",
     "Behind the remote: fast-forward. Ahead: push. Both: rebase the local commits and push."));
-  if (doc.plan) {
+  const planRows = (doc.plans || []).filter((r) => r.plan || r.error);
+  if (planRows.length) {
+    for (const row of planRows) {
+      if (row.error) {
+        master.appendChild(el("p", "wf-note wf-warning", `${row.remote}: ${row.error}`));
+        continue;
+      }
+      const line = el("div", "ws-sync-plan-row");
+      line.appendChild(el("strong", "mono", `${row.remote} · `));
+      line.appendChild(wsSyncPlanLine(row.plan));
+      master.appendChild(line);
+    }
+  } else if (doc.plan) {
     master.appendChild(wsSyncPlanLine(doc.plan));
     // the badge already says "up-to-date"; a longer summary is worth a line
     if (doc.plan.summary && doc.plan.summary !== doc.plan.action) {
@@ -41528,15 +44121,28 @@ function wsSyncPanel(w) {
       master.appendChild(el("p", "wf-note",
         `left on the old commits: ${doc.plan.affected.join(", ")}`));
     }
-    const go = el("button", "wf-btn",
-      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…")
-        : st.agentMode === "agent" ? "Delegate sync" : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
-    go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date" || wsSyncAgentBlocked(st);
-    go.addEventListener("click", () => wsSyncRun(w.name));
-    master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
-    master.appendChild(wsSyncButtonRow(st, go, "sync"));
   } else {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
+  }
+  if (doc.plan || planRows.length) {
+    const pending = wsSyncOrdered(doc, wsSyncPending(doc));
+    const multi = ((doc.plans || []).filter((r) => r.plan).length > 1);
+    const label = st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…")
+      : st.agentMode === "agent" ? "Delegate sync"
+        : pending.length > 1 ? `Sync ${pending.length} remotes`
+          : pending.length === 1 ? (WS_SYNC_LABEL[pending[0].plan.action] || "Sync")
+            : "Up to date";
+    const go = el("button", "wf-btn", label);
+    go.disabled = !!st.busy || st.loading || !pending.length ||
+      (doc.incompatible || []).length > 0 || !!doc.basis_error || wsSyncAgentBlocked(st);
+    go.addEventListener("click", () => wsSyncRun(w.name));
+    if (multi && st.remotes && st.remotes.length > 1) {
+      master.appendChild(el("p", "wf-note",
+        `Runs in order: ${pending.map((r) => r.remote).join(" → ")}. ` +
+        "Each push waits for its own approval card."));
+    }
+    master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
+    master.appendChild(wsSyncButtonRow(st, go, "sync"));
   }
   master.appendChild(wsSyncRemoteComparisons(doc));
   panel.appendChild(master);
@@ -41573,8 +44179,10 @@ function wsSyncPanel(w) {
   force.appendChild(box);
   force.appendChild(document.createTextNode(" force-with-lease"));
   pushRow.appendChild(force);
+  const pushTargets = (st.remotes || []).length;
   const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…")
-    : st.agentMode === "agent" ? "Delegate push" : `Push as ${doc.machine}/…`);
+    : st.agentMode === "agent" ? "Delegate push"
+      : pushTargets > 1 ? `Push to ${pushTargets} remotes` : `Push as ${doc.machine}/…`);
   push.disabled = !!st.busy || !(doc.branches || []).length || wsSyncAgentBlocked(st);
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushSection.appendChild(pushRow);
@@ -42990,11 +45598,15 @@ function cf2AskLegendItems(opts, isBrief) {
 }
 
 /* A limit card's presses as [label, meaning, body]: the body is what the
-   press adds to /api/cflow2/extend. A loop limit raises its max by 5 or 15
-   in one press (a long await loop at its max would otherwise want a press
-   per iteration); a visit limit raises by one. The engine's reset of a
-   loop's count stays on the API and CLI, not on the card (claunch-n6ms0). */
-function cf2LimitPresses(visitsKind) {
+   press adds to /api/cflow2/extend. A loop limit raises its max by a fifth
+   and three fifths of that max in one press (a loop at its max would
+   otherwise want a press per iteration): a 25-max loop gets 5 and 15, the
+   await-landing loop at max 5 gets 1 and 3 -- 15 there would open three
+   times the loop's own ceiling (claunch-gpgw1). Without a usable max the old
+   fixed pair stands, so a card drawn from an older payload still works. A
+   visit limit raises by one. The engine's reset of a loop's count stays on
+   the API and CLI, not on the card (claunch-n6ms0). */
+function cf2LimitPresses(visitsKind, max) {
   const stop = ["end it here: it finishes with outcome fail and the run follows that",
                 { stop: true }];
   if (visitsKind) {
@@ -43002,9 +45614,14 @@ function cf2LimitPresses(visitsKind) {
              { by: 1, visits: true }],
             ["Stop here", stop[0], { ...stop[1], visits: true }]];
   }
-  return [["Allow 5 more", "raise the loop's max by 5: it runs 5 more iterations", { by: 5 }],
-          ["Allow 15 more", "raise the loop's max by 15: it runs 15 more iterations",
-           { by: 15 }],
+  const n = Number(max);
+  const known = max != null && max !== "" && Number.isFinite(n) && n >= 1;
+  const small = known ? Math.max(1, Math.floor(n / 5)) : 5;
+  const big = known ? Math.max(small + 1, Math.floor(3 * n / 5)) : 15;
+  return [[`Allow ${small} more`, `raise the loop's max by ${small}: it runs ${small} more iterations`,
+           { by: small }],
+          [`Allow ${big} more`, `raise the loop's max by ${big}: it runs ${big} more iterations`,
+           { by: big }],
           ["Stop the loop", ...stop]];
 }
 
@@ -43299,6 +45916,47 @@ function cf2Card(kind, title, sub) {
 function cf2AskKind(a) {
   if (a && a.question) return "question";
   return a && a.kind === "decision" ? "decision" : "approval";
+}
+
+/* Why an ask card stands before you, drawn from the run's own record
+   (claunch-0rjnn): ``because`` is the choice the driver took to reach the
+   ask and the reason it gave; ``route`` is each responder group the question
+   passed through and why it moved on (nobody held the role, everyone
+   abstained, no answer in time). Without these the card showed only the
+   ask's static prompt and the cause was in the journal. Returns the nodes to
+   append, in order; nothing when the ask has neither. */
+const CF2_ROUTE_REASON_MAX = 240;
+function cf2AskWhy(a) {
+  const out = [];
+  const b = a && a.because;
+  if (b && b.option) {
+    const box = el("div", "cf2-ask-why");
+    box.appendChild(el("p", "cf2-ask-why-head",
+      `Why this is open: at ${b.choice || "a choice"}, ` +
+      `${b.by || "the driver"} chose '${b.option}'`));
+    const reason = String(b.reason || "").trim();
+    if (reason) box.appendChild(mdInto(el("div", "md cf2-body"), reason));
+    out.push(box);
+  }
+  const route = (a && a.route) || [];
+  if (route.length) {
+    const box = el("div", "cf2-ask-route");
+    box.appendChild(el("p", "cf2-ask-why-head", "Who was asked before you"));
+    const list = el("ol", "cf2-ask-route-list");
+    for (const step of route) {
+      const reason = String(step.reason || "").trim();
+      const short = reason.length > CF2_ROUTE_REASON_MAX
+        ? reason.slice(0, CF2_ROUTE_REASON_MAX) + "…" : reason;
+      const who = step.candidates || step.who || "?";
+      const li = el("li", null,
+        `${who}${step.who && step.candidates ? ` [${step.who}]` : ""}: ${short || "moved on"}`);
+      if (short !== reason) li.title = reason;
+      list.appendChild(li);
+    }
+    box.appendChild(list);
+    out.push(box);
+  }
+  return out;
 }
 
 /* The node pane: a clicked chart node in full, on the right edge of the
@@ -45364,6 +48022,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   for (const a of run.asks || []) {
     const q = a.question || null;
     const card = cf2Card(cf2AskKind(a), a.label || a.node, a.title || "");
+    for (const n of cf2AskWhy(a)) card.appendChild(n);
     if (q) {
       // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
       // question type, in its order -- no per-type code here
@@ -45414,7 +48073,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   }
   const limitCard = (lim, title, visitsKind) => {
     const card = cf2Card("limit", lim.label || lim.node, title);
-    const presses = cf2LimitPresses(visitsKind);
+    const presses = cf2LimitPresses(visitsKind, lim.max);
     const row = el("div", "cf2-press");
     for (const [label, , extra] of presses) {
       const b = el("button", extra.by ? "wf-btn sm approve" : "wf-btn sm", label);
@@ -47997,8 +50656,208 @@ function sessTask(s) {
       box.appendChild(more);
     }
   }
+  if (name) {
+    const attached = sessOpeningAttachments(s);
+    if (attached) box.appendChild(attached);
+  }
+  // Guarded with typeof: harnesses that slice this section alone do not
+  // carry the context items' binding.
+  if (name && typeof sessOpeningContexts === "function") {
+    box.appendChild(sessOpeningContexts(s));
+  }
   if (name) box.appendChild(sessOpeningActions(s));
   return box;
+}
+
+/* ---- the opening's context items, read-only (gds6-bfu7) ---------------
+
+   The items a session was created with beside its task, each its own file
+   in the session's state directory (daemon/opening_contexts.py). Listed
+   under the Opening task with title and size; a press shows one item's text
+   (GET /api/sessions/<name>/contexts/<n>). They never change after the
+   session starts, so a session's list is fetched once and kept; a failed
+   fetch is retried after a pause rather than on every 2s repaint. */
+const sessContexts = new Map();      // session name -> {items, error, retryAt, loading}
+const sessContextOpen = new Map();   // "<name>/<n>" -> {text, truncated, error, loading}
+
+function sessContextsLoad(name) {
+  const known = sessContexts.get(name);
+  if (known && (known.loading || known.items || Date.now() < (known.retryAt || 0))) return;
+  sessContexts.set(name, { loading: true });
+  (async () => {
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/contexts`);
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+      sessContexts.set(name, { items: Array.isArray(doc.items) ? doc.items : [] });
+    } catch (e) {
+      sessContexts.set(name, { error: e.message || String(e), retryAt: Date.now() + 30000 });
+    }
+    refreshSession();
+  })();
+}
+
+function sessContextToggle(name, n) {
+  const key = `${name}/${n}`;
+  if (sessContextOpen.has(key)) {
+    sessContextOpen.delete(key);
+    refreshSession();
+    return;
+  }
+  sessContextOpen.set(key, { loading: true });
+  refreshSession();
+  (async () => {
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/contexts/${n}`);
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+      if (sessContextOpen.has(key)) {
+        sessContextOpen.set(key, { text: String(doc.text || ""), truncated: !!doc.truncated,
+                                   total: doc.total_chars || 0 });
+      }
+    } catch (e) {
+      if (sessContextOpen.has(key)) sessContextOpen.set(key, { error: e.message || String(e) });
+    }
+    refreshSession();
+  })();
+}
+
+function sessOpeningContexts(s) {
+  const name = s.name || "";
+  const box = el("div", "sess-opening-contexts");
+  sessContextsLoad(name);
+  const known = sessContexts.get(name) || {};
+  const items = known.items || [];
+  if (known.error) {
+    box.appendChild(el("p", "wf-note", `context items could not be read: ${known.error}`));
+    return box;
+  }
+  if (!items.length) return box;
+  box.appendChild(el("h4", null, `Context items (${items.length})`));
+  const list = el("ol", "sess-opening-context-list");
+  for (const item of items) {
+    const li = el("li", "sess-opening-context");
+    const key = `${name}/${item.n}`;
+    const open = sessContextOpen.get(key);
+    const title = item.title || `context ${item.n}`;
+    const toggle = el("button", "wf-btn option sess-opening-context-toggle",
+                      open ? `Hide ${title}` : title);
+    toggle.type = "button";
+    toggle.title = item.missing
+      ? "its file is no longer on disk"
+      : `show it — ${humanSize(item.bytes)}, ${item.lines} lines, ${item.path}`;
+    toggle.disabled = !!item.missing;
+    toggle.addEventListener("click", () => sessContextToggle(name, item.n));
+    li.appendChild(toggle);
+    li.appendChild(el("span", "file-size",
+      item.missing ? "missing" : `${humanSize(item.bytes)} · ${item.lines} lines`));
+    if (open) {
+      if (open.loading) li.appendChild(el("p", "wf-note", "reading…"));
+      else if (open.error) li.appendChild(el("p", "wf-warning", open.error));
+      else {
+        li.appendChild(el("pre", "sess-task-text sess-opening-context-text", open.text));
+        if (open.truncated) {
+          li.appendChild(el("p", "wf-note",
+            `first ${open.text.length} of ${open.total} characters — the whole item is at ${item.path}`));
+        }
+      }
+    }
+    list.appendChild(li);
+  }
+  box.appendChild(list);
+  return box;
+}
+
+/* The images and files the opening carried (claunch-5lro4).
+
+   A create form can send images and uploaded files with the opening task
+   (daemon/opening_images.py, daemon/uploads.py); the session read them, and
+   until now the panel showed only the text, so "what was this session
+   given" had half its answer missing. They are listed under the text:
+   images as thumbnails that open full size, files as download links with
+   their size.
+
+   The list comes from GET /api/sessions/<name>/opening/attachments, once per
+   session: what an opening carried does not change after creation, and the
+   panel is rebuilt every 2s, so the answer is held in a map outside it. The
+   key is the name AND its creation time, because a name can be used again
+   for a new session with a different opening. A request that failed is
+   asked again after OPENING_ATTACH_RETRY_MS rather than held as "none". The
+   first draw asks and draws nothing; the answer redraws the panel. A
+   session with no attachments draws nothing either -- most sessions have
+   none, and an empty "attachments" line under every task would be noise. */
+const sessOpeningAttach = new Map();   // name + created_at -> {images, files, retryAt?} | "loading"
+const OPENING_ATTACH_RETRY_MS = 30000;
+
+function sessOpeningAttachments(s) {
+  const name = s.name || "";
+  const key = `${name}\n${s.created_at || ""}`;
+  const got = sessOpeningAttach.get(key);
+  if (got === undefined || (got.retryAt && Date.now() >= got.retryAt)) {
+    sessOpeningAttach.set(key, "loading");
+    api(`/api/sessions/${encodeURIComponent(name)}/opening/attachments`)
+      .then((resp) => (resp.ok ? resp.json() : null))
+      .catch(() => null)
+      .then((doc) => {
+        sessOpeningAttach.set(key, doc
+          ? { images: doc.images || [], files: doc.files || [] }
+          : { images: [], files: [], retryAt: Date.now() + OPENING_ATTACH_RETRY_MS });
+        refreshSession();
+      });
+    return null;
+  }
+  if (got === "loading") return null;
+  const images = got.images || [], files = got.files || [];
+  if (!images.length && !files.length) return null;
+  const base = `api/sessions/${encodeURIComponent(name)}/opening`;
+  const box = el("div", "sess-task-attach");
+  if (images.length) {
+    const row = el("div", "sess-task-images");
+    for (const img of images) {
+      const src = url(`${base}/images/${encodeURIComponent(img.name)}`);
+      const link = el("a", "sess-task-image");
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.title = "open the image the opening carried, full size";
+      const pic = el("img");
+      pic.src = src;
+      pic.alt = img.name;
+      pic.loading = "lazy";
+      link.appendChild(pic);
+      row.appendChild(link);
+    }
+    box.appendChild(row);
+  }
+  if (files.length) {
+    const list = el("ul", "sess-task-files");
+    for (const f of files) {
+      const item = el("li", "sess-task-file");
+      const size = ` (${uploadSize(f.bytes)})`;
+      if (f.missing) {
+        item.appendChild(el("span", "wf-note", `📎 ${f.name}${size} — no longer on disk`));
+      } else {
+        const link = el("a", null, `📎 ${f.name}`);
+        link.href = url(`${base}/files/${encodeURIComponent(f.id)}/${encodeURIComponent(f.name)}`);
+        link.download = f.name;
+        link.title = "download the file the opening carried";
+        item.append(link, el("span", "wf-note", size));
+      }
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+  }
+  return box;
+}
+
+/* A byte count for people (daemon/uploads.human_size). */
+function uploadSize(n) {
+  let size = Number(n) || 0;
+  for (const unit of ["B", "KiB", "MiB", "GiB"]) {
+    if (size < 1024 || unit === "GiB") return unit === "B" ? `${size} B` : `${size.toFixed(1)} ${unit}`;
+    size /= 1024;
+  }
+  return `${n} B`;
 }
 
 /* ---- handing the opening over again ----------------------------------
@@ -49735,17 +52594,26 @@ function requestSessionsRefresh() {
   }, 0);
 }
 
+/* The profile whose pool a session's launches read: its own, or under a
+   borrow the lender's, since the lender's token is what it authenticates with
+   (claunch-e48es, harness.key_pool_profile). A --null session reads none. */
+function keyPoolProfile(s) {
+  if (!s || !s.profile || s.null_token) return "";
+  return s.borrow || s.profile;
+}
+
 function railKeyChip(s) {
-  if (!s || !s.profile) return null;
-  const hit = keyPools.get(s.profile);
+  const poolProfile = keyPoolProfile(s);
+  if (!poolProfile) return null;
+  const hit = keyPools.get(poolProfile);
   if (!hit) {
-    fetchKeyPool(s.profile).then((data) => {
+    fetchKeyPool(poolProfile).then((data) => {
       if (data && data.pooled) requestSessionsRefresh();
     });
     return null;
   }
   if (Date.now() - hit.at > KEY_POOL_TTL_MS) {
-    fetchKeyPool(s.profile, { fresh: true }).then(() => requestSessionsRefresh());
+    fetchKeyPool(poolProfile, { fresh: true }).then(() => requestSessionsRefresh());
   }
   const pool = hit.data;
   if (!pool || !pool.pooled || !(pool.keys || []).length) return null;
@@ -49762,16 +52630,17 @@ function railKeyChip(s) {
   text.className = "sess-key-label";
   text.textContent = shown;
   btn.appendChild(text);
+  const borrowed = s.borrow ? ` (borrowed from ${s.borrow})` : "";
   btn.title = pinned
-    ? `pinned to key ${shown} — click to switch this session onto another key`
-    : `pool of ${pool.owner || s.profile}: next launch uses key ${shown} — `
+    ? `pinned to key ${shown}${borrowed} — click to switch this session onto another key`
+    : `pool of ${pool.owner || poolProfile}${borrowed}: next launch uses key ${shown} — `
       + "click to switch it";
   if (typeof btn.setAttribute === "function") {
     btn.setAttribute("aria-label", `session key: ${shown}`);
   }
   btn.addEventListener("click", (e) => {
     e.stopPropagation();   // the row itself attaches; this button does not
-    openKeyPicker(s.name, s.profile);
+    openKeyPicker(s.name, poolProfile);
   });
   return btn;
 }
@@ -49809,15 +52678,173 @@ function decorateKeyRow(li, s) {
     else actions.prepend(chip);
     return;
   }
-  const hit = s && s.profile ? keyPools.get(s.profile) : null;
-  if (existing && hit && (!hit.data || !hit.data.pooled)) existing.remove();
+  const poolProfile = keyPoolProfile(s);
+  const hit = poolProfile ? keyPools.get(poolProfile) : null;
+  if (existing && (!poolProfile || (hit && (!hit.data || !hit.data.pooled)))) {
+    existing.remove();
+  }
+}
+
+/* The usage selector for a session's pool: the profile asked with the
+   session's harness, the way the terminal overlay asks it
+   (termUsageSelectors), so a pool on an opencode or codex profile is read by
+   that harness's reader. A borrowed pool is the lender's accounts, so it is
+   asked under the lender's own name and read by the lender's reader. */
+function keyPickerSelector(profile, session) {
+  const harness = session && session.harness;
+  if (!profile || String(profile).includes(":") || !harness) return profile;
+  if (session.borrow && session.borrow === profile) return profile;
+  return `${profile}:${harness}`;
+}
+
+/* What each key of the pool reports (claunch-z881u): /api/usage/keys, the
+   create form's read (claunch-yx2bd), with refresh=auto so it answers from
+   the daemon's cache and reads only the accounts whose period ran out.
+   Resolves to the document, or to {error} — never rejects, because the
+   picker must still switch keys when usage cannot be read. */
+function keyPickerUsage(selector) {
+  if (!selector) return Promise.resolve({ error: "no profile" });
+  return api(`/api/usage/keys?profile=${encodeURIComponent(selector)}&refresh=auto`,
+    { noBatch: true })
+    .then(async (resp) => {
+      const doc = await resp.json().catch(() => null);
+      if (!resp.ok) return { error: (doc && doc.error) || `HTTP ${resp.status}` };
+      return doc || { error: "empty answer" };
+    })
+    .catch((e) => ({ error: `could not reach the daemon (${(e && e.message) || e})` }));
+}
+
+/* The usage line of each key option, written into the nodes the modal handed
+   back (showModal's `detail`). A key the answer does not name says so
+   instead of keeping "reading…" forever. */
+function keyPickerFillUsage(options, doc, nextId) {
+  const rows = new Map(((doc && doc.keys) || []).map((k) => [k.id, k.usage]));
+  for (const opt of options) {
+    if (opt.hintEl && opt.baseHint !== undefined) {
+      // The "next launch takes this" mark belongs to the row the pool will
+      // actually spend, and that is known only once the peek is back — so the
+      // hint is rewritten here rather than composed at open.
+      const mark = nextId && opt.value && opt.value.key_id === nextId
+        ? " · next launch takes this" : "";
+      opt.hintEl.textContent = opt.baseHint + mark;
+    }
+    if (!opt.detailEl || !opt.value || !opt.value.key_id) continue;
+    const reading = rows.get(opt.value.key_id);
+    let text;
+    if (!doc || doc.error) text = `unavailable: ${(doc && doc.error) || "no answer"}`;
+    else if (reading) text = newUsageKeySummary(reading, doc.unmeasurable);
+    else if (doc.unmeasurable) text = `cannot be read: ${doc.unmeasurable}`;
+    else text = "not reported for this key";
+    opt.detailEl.textContent = `usage: ${text}`;
+    const level = reading && !reading.error ? newUsageLevel(newUsagePeak(reading.windows)) : "";
+    opt.detailEl.className = `modal-choice-detail ${level}`.trim();
+  }
+}
+
+/* A write to one leaf of a profile's key pool (strategy, roll), answered the
+   way this modal needs it: never throws, and says why when it did not land.
+   The pool's own profile is the target — a session on a child profile reads
+   its ancestor's pool, and a write to the child's nonexistent one would
+   silently do nothing (the split ``h_profile_key_strategy`` documents). */
+async function keyPickerWrite(profileName, leaf, body) {
+  try {
+    const resp = await api(
+      `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}) });
+    const doc = await resp.json().catch(() => null);
+    if (!resp.ok) return { ok: false, error: (doc && doc.error) || `HTTP ${resp.status}` };
+    return { ok: true, doc: doc || {} };
+  } catch (e) {
+    return { ok: false, error: `could not reach the daemon (${(e && e.message) || e})` };
+  }
+}
+
+/* The pool's strategy, the key its next launch takes, and the roll — drawn
+   between the modal's question and its answers, because the answer below is
+   read against them (claunch-i985h).
+
+   The strategy is a profile setting, not this session's: it decides the next
+   key for every session whose launches are not pinned to one, and this
+   session's pin, when it has one, outranks it. That is why the two writes are
+   two controls — this row changes the pool, the button at the bottom pins this
+   session.
+
+   `paint` is called with whatever the next pick currently is (the pool's
+   stored pick at open, the peek when the usage read lands, a fresh draw after
+   a roll), so the line always names the key the next launch would spend. */
+function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
+  const box = el("div", "key-picker-controls");
+  const row = el("div", "key-picker-row");
+  const label = el("label", "key-picker-strategy");
+  label.textContent = "Strategy";
+  const select = document.createElement("select");
+  select.id = "key-picker-strategy";
+  for (const name of Object.keys(NEW_USAGE_STRATEGY_LABELS)) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = NEW_USAGE_STRATEGY_LABELS[name];
+    select.appendChild(option);
+  }
+  select.value = strategy;
+  label.appendChild(select);
+  const roll = el("button", "key-picker-roll", "roll");
+  roll.type = "button";
+  roll.title = "draw again — the new draw is the key the next launch takes";
+  row.append(label, roll);
+  const next = el("p", "key-picker-next");
+  const note = el("p", "key-picker-note muted");
+  box.append(row, next, note);
+
+  const nameOf = (id) => {
+    const hit = keys.find((k) => k.id === id);
+    return hit ? (hit.label || hit.masked) : id;
+  };
+  const paint = ({ nextPick = null, strategy: now = null, flash = "", pinned = false,
+                   unknown = "" } = {}) => {
+    if (now) {
+      strategy = now;
+      select.value = now;
+      roll.classList.toggle("hidden", now !== "random");
+    }
+    if (nextPick) {
+      const what = nextPick.exact === false
+        ? `${nameOf(nextPick.key_id)} (read again when the launch runs)`
+        : nameOf(nextPick.key_id);
+      next.textContent = `next launch takes ${what}`;
+    } else if (unknown) {
+      next.textContent = `next launch: ${unknown}`;
+    } else if (nextPick === null) {
+      next.textContent = "next launch: not known yet";
+    }
+    note.textContent = pinned
+      ? "This session is pinned: the pool's strategy does not move it. "
+        + "“No pin — let the pool's strategy pick” hands it back."
+      : "No pin on this session: the pool's strategy decides its next launch.";
+    if (flash) note.textContent = `${flash} — ${note.textContent}`;
+  };
+  select.addEventListener("change", () => onStrategy(select.value));
+  return { box, paint, roll, strategy: () => strategy };
 }
 
 /* The floating modal. `showModal` is the page's one dialog (Escape, backdrop
    and Cancel all answer null), and its radio group is exactly a key list —
    so the picker is that dialog with the pool as its choices, instead of a
-   second modal implementation with its own dismissal bugs. */
+   second modal implementation with its own dismissal bugs.
+
+   What it says about the session is three separate facts, and before this
+   they were one: the key this session's process was given (``launched_key``),
+   the pin the operator set (``key_id``), and the key the pool's next launch
+   will take (the peek). The old modal selected whichever key the token file
+   held, which for a rotation pool is whichever launch of *any* session of
+   that profile was last — accurate about the file, silent about the session. */
 async function openKeyPicker(name, profile) {
+  const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+    .find((x) => x.name === name);
+  // Asked beside the pool rather than after it: the usage answer is the
+  // slower of the two (an account read per key whose cached reading ran
+  // out), and the modal opens on the pool alone and fills usage in.
+  const usage = keyPickerUsage(keyPickerSelector(profile, session));
   const pool = await fetchKeyPool(profile, { fresh: true });
   if (!pool) {
     modalInfo(`Could not read the key pool`,
@@ -49833,37 +52860,125 @@ async function openKeyPicker(name, profile) {
       + "the profile has a pool.");
     return;
   }
-  const session = (typeof sessionsCache !== "undefined" && sessionsCache || [])
-    .find((x) => x.name === name);
+  const poolName = pool.owner || profile;   // where a pool write lands
+  const keys = pool.keys;
   const pinnedTo = session && session.key_id;
-  const options = pool.keys.map((k) => ({
-    label: k.label || k.masked,
-    hint: [
-      k.current ? "the key this profile's token file holds now" : "",
+  const launched = session && session.launched_key;
+  let strategy = pool.strategy || "rotation";
+  // What the next launch takes, as far as the pool alone can say: the stored
+  // draw for random and manual, nothing for the rest until the peek lands.
+  let nextPick = pool.pick ? { key_id: pool.pick, exact: true } : null;
+  const options = keys.map((k) => {
+    const hint = [
       k.id === pinnedTo ? "pinned to this session" : "",
+      k.id !== pinnedTo && k.id === launched ? "this session's last launch used this" : "",
+      k.current ? "the pool's token file now" : "",
       k.use_count ? `used ${k.use_count}×` : "never used",
-    ].filter(Boolean).join(" · "),
-    value: { key_id: k.id },
-  }));
+    ].filter(Boolean).join(" · ");
+    return { label: k.label || k.masked, hint, baseHint: hint,
+             detail: "usage: reading…", value: { key_id: k.id } };
+  });
   if (pinnedTo) {
     options.push({
       label: "No pin — let the pool's strategy pick",
-      hint: "the next launch takes the next key by the pool's strategy",
+      hint: "the next launch takes the key the strategy below picks",
       value: { key_id: null },
     });
   }
-  const picked = await showModal({
+  // The radio starts on the key this session is actually on: its pin, else
+  // the key its last launch was given, else what the pool would spend next —
+  // and only a session with none of those falls back to the token file's key.
+  const selectedId = pinnedTo || launched || pool.pick ||
+    (keys.find((k) => k.current) || {}).id || "";
+  let chosen = options.find((o) => o.value.key_id === selectedId) || options[0];
+
+  const controls = keyPickerControls({
+    profileName: poolName, keys, strategy,
+    onStrategy: (name) => writeStrategy(name),
+  });
+
+  /* Change the pool's strategy. Under manual the key the operator marked in
+     the list is the one it names, so "manual" and the press on a key are one
+     action rather than two (the same pairing the create form's usage block
+     makes). */
+  async function writeStrategy(name) {
+    const manualKey = chosen && chosen.value && chosen.value.key_id;
+    const body = name === "manual" && manualKey
+      ? { strategy: name, key_id: manualKey } : { strategy: name };
+    const res = await keyPickerWrite(poolName, "strategy", body);
+    if (!res.ok) {
+      controls.paint({ strategy, nextPick, pinned: !!pinnedTo, flash: `not saved: ${res.error}` });
+      return;
+    }
+    strategy = res.doc.strategy || name;
+    nextPick = res.doc.pick ? { key_id: res.doc.pick, exact: true } : null;
+    controls.paint({ strategy, nextPick, pinned: !!pinnedTo });
+    afterPoolWrite();
+  }
+
+  async function roll() {
+    const res = await keyPickerWrite(poolName, "roll", {});
+    if (!res.ok) {
+      controls.paint({ strategy, nextPick, pinned: !!pinnedTo, flash: `no draw: ${res.error}` });
+      return;
+    }
+    nextPick = { key_id: res.doc.pick || (res.doc.key && res.doc.key.id) || "", exact: true };
+    controls.paint({ strategy: res.doc.strategy || strategy, nextPick, pinned: !!pinnedTo });
+    afterPoolWrite();
+  }
+
+  /* The chips in the rail and the peek both read the pool: a strategy change
+     or a draw moves what the next launch takes, so the cached copy is dropped
+     and the usage line re-asked. */
+  function afterPoolWrite() {
+    // Both spellings: the rail caches the pool under the session's own profile
+    // (a child profile answers with its ancestor's pool), and this modal may
+    // have written under the ancestor's name.
+    keyPools.delete(profile);
+    keyPools.delete(poolName);
+    fetchKeyPool(profile);
+    keyPickerUsage(keyPickerSelector(profile, session)).then((doc) => {
+      keyPickerFillUsage(options, doc, doc && doc.next && doc.next.key_id);
+      controls.paint({ nextPick: (doc && doc.next) || nextPick,
+                       unknown: (doc && doc.next_unknown) || "",
+                       pinned: !!pinnedTo });
+    });
+  }
+
+  controls.roll.addEventListener("click", roll);
+  const asked = showModal({
     title: `Key for ${name}`,
-    body: `The pool of ${pool.owner || profile} (strategy: ${pool.strategy || "rotation"}).\n`
+    body: `The pool of ${poolName}`
+      + (session && session.borrow ? ` — borrowed: this session runs on ${session.borrow}'s token.\n`
+        : ".\n")
       + "Switching restarts this session: the same name, the same conversation, "
       + "the harness relaunched on the key you pick. Tokens are masked here — "
       + "the modal never sees a plaintext one.",
-    choices: { options },
+    controls: controls.box,
+    choices: {
+      options,
+      selected: (opt) => opt.value && opt.value.key_id === selectedId,
+      // Manual is "the key you pick": pressing a key while the strategy is
+      // manual names that key for the next launch instead of making the
+      // operator pick the strategy twice.
+      onPick: (opt) => {
+        chosen = opt;
+        if (strategy === "manual" && opt.value && opt.value.key_id) writeStrategy("manual");
+      },
+    },
     actions: [
       { label: "Cancel", value: null },
       { label: "Restart on this key", value: { go: true } },
     ],
   });
+  controls.paint({ strategy, nextPick, pinned: !!pinnedTo });
+  usage.then((doc) => {
+    const next = doc && doc.next;
+    keyPickerFillUsage(options, doc, next && next.key_id);
+    controls.paint({ nextPick: next || nextPick, strategy: (doc && doc.strategy) || strategy,
+                     pinned: !!pinnedTo });
+  });
+  const picked = await asked;
   if (!picked || !picked.go) return;
   let resp;
   let doc = {};
@@ -50913,7 +54028,14 @@ function sessQueued(data) {
     box.appendChild(flush);
     box.appendChild(status);
   }
-  for (const m of q.messages) box.appendChild(queuedMsgRow(m));
+  const delStatus = el("p", "wf-note", "");
+  box.appendChild(delStatus);
+  const redraw = (note) => {
+    delStatus.textContent = note;
+    delStatus.className = note ? "wf-warning" : "wf-note";
+    if (!note) refreshSession();
+  };
+  for (const m of q.messages) box.appendChild(queuedMsgRow(m, s.name, redraw));
   return box;
 }
 
@@ -51631,6 +54753,44 @@ function setNewFormDraftCheck(box, want) {
   return true;
 }
 
+/* The form as the page ships it, captured once before the draft is restored
+   onto it (claunch-130zs). A form opened for a spawn request starts from
+   these values, not from the browser's remembered ones: the person is
+   answering the agent's request, and a row the request did not name has to
+   read as its own default — the parent's profile, the project's directory,
+   the run's paired workflow — rather than as whatever the last New session
+   left behind. `null` until something captures it, so an opening that comes
+   first (a reload onto #/new) simply keeps the form's own value. */
+let newFormPristine = null;
+
+function captureNewFormPristine() {
+  const f = $("new-session");
+  if (!f || newFormPristine) return;
+  const snap = new Map();
+  for (const c of f.querySelectorAll("input, select, textarea")) {
+    if (!c.name) continue;
+    snap.set(c, c.type === "checkbox" || c.type === "radio" ? !!c.checked : c.value);
+  }
+  newFormPristine = snap;
+}
+
+/* Put the form back on those values, and drop the picks the restore parked
+   for a picker it could not fill yet — a parked answer is the draft's too,
+   and it would land after this reset. */
+function restoreNewFormPristine() {
+  const f = $("new-session");
+  if (!f || !newFormPristine) return;
+  for (const [c, value] of newFormPristine) {
+    if (!f.contains(c)) continue;
+    if (c.type === "checkbox" || c.type === "radio") c.checked = value;
+    else if (c.value !== value) c.value = value;
+  }
+  pendingNewMesh = "";
+  pendingWorktreeMode = "";
+  newWfPicked = false;
+  newSubroleTicks = new Set();
+}
+
 /* Once per page load, before the first route: the form is still the page's
    own, so whichever way it is opened next starts from these answers. Each
    row is set the way the operator would set it, with the work its own
@@ -51639,6 +54799,10 @@ async function restoreNewFormDraft() {
   if (newFormDraftRestored) return;
   newFormDraftRestored = true;
   const f = $("new-session");
+  // Before anything is written onto the form: this is what the page ships,
+  // and a form opened for a spawn REQUEST is the one opening that starts
+  // here rather than on the browser's last answers (claunch-130zs).
+  captureNewFormPristine();
   const d = readNewFormDraft();
   if (!f || !d || sessionFormView().mode !== "new") return;
   const fire = (target, type = "change") =>
@@ -52069,15 +55233,15 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "resume", "fork_session"] },
+        "resume", "fork_session", "key_id"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "note", "opening_images", "opening_files", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
@@ -52195,6 +55359,11 @@ function applySessionModalSeed(f, seed) {
   }
   if (seed.task !== undefined && !answered(f.task)) {
     f.task.value = seed.task || "";
+  }
+  // The request's context items travel with its task (gds6-bfu7); held
+  // outside the named rows, so they are put back whole.
+  if (Array.isArray(seed.opening_contexts) && typeof setOpeningContexts === "function") {
+    setOpeningContexts(seed.opening_contexts);
   }
   // The mesh before the role: the role list is the mesh's. Held the way a
   // #/new/<mesh> link is, for a picker the mesh poll has not filled yet
@@ -52674,9 +55843,12 @@ async function openSessionModal(opts = {}) {
   if (sessionModal) sessionModalClose({ route: false });
   const f = $("new-session");
   const tab = opts.tab || (opts.parent ? "spawn" : "new");
+  // A box that opens on New session but also offers Spawn child (a spawn
+  // request's Manual, claunch-oaxni) keeps the opener it names, so the
+  // Spawn child tab is pinned under it when the person switches.
   const parent = tab === "spawn"
     ? (opts.parent || (f.parent && f.parent.value) || "")
-    : "";
+    : (opts.modes || []).includes("spawn") ? (opts.parent || "") : "";
   const previousView = sessionFormView();
   const previousFields = Array.from(f.querySelectorAll("input[name], select[name], textarea[name]"))
     .map((control) => ({ control, value: control.value, checked: control.checked }));
@@ -52738,7 +55910,13 @@ async function openSessionModal(opts = {}) {
   // what a spawn request's Manual does — left every row the seed did not
   // name on whatever the page already held, so the request's own values
   // showed up as the browser's last ones.
-  applySessionModalRecall(f);
+  // An opening made FOR a request is the exception (claunch-130zs): the
+  // request is the whole subject of that form, so a row it did not name
+  // starts on the form's own default instead of on the browser's last
+  // answer. The draft is not consulted, and what the boot restore put on the
+  // rows is taken back off first.
+  if (opts.spawnRequest) restoreNewFormPristine();
+  else applySessionModalRecall(f);
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   refreshScoreGoalDefault(f);
   // The worktree list is not waited for. /api/git runs four git processes
@@ -56016,7 +59194,8 @@ function renderMesh(info, history, force, owed, historyPage) {
   view.appendChild(el(
     "p", "wf-desc",
     "messages are typed into recipients' terminals by the daemon — " +
-    "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\""
+    "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\"" +
+    " (a worker's '*' is refused: workers name the handles)"
   ));
 
   /* One filter decides what the graph, the wiring list and the roster below
@@ -58837,10 +62016,13 @@ function notify(title, sub, opts) {
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
-  // `dismissable: false` is for the alert that has to stay read (a leader
-  // the harness stopped, claunch-9djny): it has no ×, and a click opens the
-  // session without taking the card down. The poll that raised it is the
-  // only thing that puts it away, when the condition it reports is gone.
+  // `dismissable: false` is for a card that has to stay read even when it is
+  // pressed: it has no ×, and a click follows the card without taking it
+  // down. The poll that raised such a card is then the only thing that puts
+  // it away, when the condition it reports is gone. No caller uses it today —
+  // the leader-stopped card it was written for carries the × now
+  // (claunch-8vl1s) — and it stays as the one way to say that, for a card
+  // that needs it again.
   const dismissable = o.dismissable !== false;
   if (dismissable) {
     const close = el("button", "notice-close", "×");
@@ -58857,7 +62039,7 @@ function notify(title, sub, opts) {
   if (sub) node.appendChild(el("div", "notice-sub", sub));
   // A card about one session (a QA request) opens it: the reader's next
   // move is that session's pane, and the click puts the card away as well.
-  node.title = o.session ? `open ${o.session}`
+  node.title = o.session ? sessionInfoTooltip(o.session, `open ${o.session}`)
     : dismissable ? "click to dismiss" : "stays until the alert clears";
   node.addEventListener("click", () => {
     if (dismissable) {
@@ -58884,6 +62066,31 @@ function dismissNotice(key) {
   if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
 }
 
+/* What a session name's hover tooltip adds on top of the surface's own
+   wording ("open s6110", "open s6110's detail panel"): the opening task and
+   the briefing one-liner, so a session is told apart where its name is
+   seen — the ask of a reader who met "open s6110" on a gate card and could
+   not say which session that was (claunch-q4qn0).
+
+   Read off the session poll like briefingTabTooltip: hovering composes
+   nothing and calls nothing; a name the poll has no record for keeps the
+   plain title, and one composed before the record arrived gains the lines
+   on the next poll. `base` is the first line and is preserved untouched.
+   Long values are clipped, not dropped — a tooltip that fills the screen
+   answers less than one that stays readable. */
+function sessionInfoTooltip(name, base) {
+  const rec = sessionsCache.find((s) => s.name === name);
+  if (!rec) return base;
+  const clip = (text, max) =>
+    text.length > max ? text.slice(0, max - 1) + "…" : text;
+  const lines = [];
+  const task = String(rec.task || "").trim();
+  if (task) lines.push("task: " + clip(task.split("\n")[0].trim(), 200));
+  const one = rec.briefing && String(rec.briefing.one_line || "").trim();
+  if (one) lines.push("briefing: " + clip(one, 240));
+  return lines.length ? `${base}\n\n${lines.join("\n")}` : base;
+}
+
 /* A session named on a notification card, as a press that opens its
    terminal. A gate card names the two sessions the answer turns on — who is
    asking and whose run moves — and the reader's first move is usually to
@@ -58899,13 +62106,70 @@ function dismissNotice(key) {
 function gateSessionLink(name, onOpen) {
   if (!name) return el("span", null, "?");
   const node = el("span", "linkish gate-session", name);
-  node.title = `open ${name}`;
+  node.title = sessionInfoTooltip(name, `open ${name}`);
+  if (node.dataset) node.dataset.session = name;
+  gateSessionStateSet(node, gateSessionState(name));
   node.addEventListener("click", (ev) => {
     ev.stopPropagation();
     if (onOpen) onOpen();
     location.hash = "#/s/" + encodeURIComponent(name);
   });
   return node;
+}
+
+/* The session's state beside its name on a card (claunch-6vq2m): a card
+   about a session that has ended said nothing of it, and a gate of an
+   archived session looked as live as any other. The word is the rail's
+   own: the live status (busy, idle, starting) for a running session, the
+   lifecycle category (hold, delayed, failed, killed, paused, archived)
+   otherwise. Read from the session poll's record, and failing that from
+   the v2 rail row, which lists archived sessions the "current" poll leaves
+   out. "" when neither knows the name (a spawn target not yet created): no
+   word is drawn rather than a guessed one. */
+function gateSessionState(name) {
+  if (!name) return "";
+  const recs = (typeof sessionsCache === "object" && Array.isArray(sessionsCache))
+    ? sessionsCache : [];
+  const rec = recs.find((s) => s && s.name === name);
+  if (rec && typeof sessionCategory === "function") {
+    const category = sessionCategory(rec);
+    return category === "running" ? String(rec.status || category) : category;
+  }
+  const row = (typeof cflow2RailCache === "object" && cflow2RailCache)
+    ? cflow2RailCache[name] : null;
+  if (!row || !row.session_category) return "";
+  return row.session_category === "running"
+    ? String(row.session_status || "running") : String(row.session_category);
+}
+
+/* Writes `state` into a session link's state mark, adding the mark the
+   first time and touching nothing when the word is unchanged — the poll
+   calls this for every card each tick (notice-render-cost). */
+function gateSessionStateSet(node, state) {
+  if (!node) return;
+  let mark = node.querySelector ? node.querySelector(".gate-session-state") : null;
+  if (!state) {
+    if (mark) mark.remove();
+    return;
+  }
+  if (!mark) {
+    mark = el("span", "gate-session-state");
+    node.appendChild(mark);
+  }
+  const text = ` · ${state}`;
+  if (mark.textContent !== text) mark.textContent = text;
+  if (mark.dataset && mark.dataset.state !== state) mark.dataset.state = state;
+}
+
+/* Re-reads the state of every session named on a card or a history row,
+   after either poll that can move it. A card is drawn once and stays up
+   while its gate waits, so the word drawn with it would otherwise go stale
+   the moment the session exits or is archived. */
+function refreshGateSessionStates() {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;
+  for (const node of document.querySelectorAll(".gate-session[data-session]")) {
+    gateSessionStateSet(node, gateSessionState(node.dataset.session));
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -58949,6 +62213,11 @@ function gateSessionLink(name, onOpen) {
    taken from storage — every poll reads them from the daemon. */
 const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
 const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
+/* A request put aside until a chosen time comes back (claunch-6scxn). Its
+   own key, not NOTICE_HIDDEN_KEY: Hide means "I have dealt with this", a
+   reminder means "bring this back to me at 1h", and a set that mixes them
+   makes the panel's hidden line say the wrong thing about both. */
+const NOTICE_REMIND_KEY = "claunch.noticeRemind";
 const NOTICE_READ_KEY = "claunch.noticeRead";
 const NOTICE_SEEN_KEY = "claunch.noticeSeen";
 const NOTICE_FILTER_KEY = "claunch.noticeFilter";
@@ -58965,12 +62234,27 @@ const NOTICE_HISTORY_MAX = 100;
    waiting against the cap of 100, every feed re-recorded 33+ rows, each a
    whole-history localStorage write, a panel repaint and a card whose age
    restarted at 0s. The daemon's pending set bounds these rows; once settled
-   they are trimmed like any other. */
+   they are trimmed like any other.
+
+   The cap counts the rows that are not waiting requests, not the length of
+   the array (claunch-0z1ij.4). Pending rows stay in the array and are refused
+   here, so counting the length spent the whole budget on them: 133 waits plus
+   5 ordinary rows trimmed all 5 and left the History section empty, which is
+   the section a thread reply lands in. A pending row is a copy of the
+   daemon's pending set, whose size the daemon owns; an ordinary row is this
+   browser's own memory, which is what the cap was ever for. Marked rows are
+   counted and still refused below, so the cap gives way to them exactly as
+   it did when it counted the length. */
 function noticeTrim(rows) {
+  const waiting = (e) => !!(e.gate && e.status === "pending");
+  let general = rows.filter((e) => !waiting(e)).length;
   let i = rows.length - 1;
-  while (rows.length > NOTICE_HISTORY_MAX && i > 0) {
+  while (general > NOTICE_HISTORY_MAX && i > 0) {
     const e = rows[i];
-    if (!e.marked && !(e.gate && e.status === "pending")) rows.splice(i, 1);
+    if (!e.marked && !waiting(e)) {
+      rows.splice(i, 1);
+      general -= 1;
+    }
     i -= 1;
   }
 }
@@ -59048,9 +62332,10 @@ const NOTICE_SOURCES = [
     refresh: () => runGateSync(runGateLast.pending, runGateLast.settled), row: noticeRowAsk },
   { id: "nudge", label: "runs waiting on you (nudges)", gate: true,
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
-  { id: "fault", label: "leader faults (harness stopped)" },
+  { id: "fault", label: "leader faults (harness stopped) and usage-limit resets" },
   { id: "qa", label: "QA questions" },
   { id: "vm", label: "VM access requests" },
+  { id: "wrapup", label: "ended sessions with unconfirmed wrap-up drafts" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
   { id: "daemon", label: "daemon connection" },
@@ -59109,20 +62394,79 @@ function noticeEntryShown(entry) {
    head, so a rebuilt old card jumped above newer ones while its own bottom
    line still read "1h ago".
 
-   The panel's "Waiting on you" list is NOT ordered by this and does not
-   call it: that list is the queue of requests to answer, and
-   claunch-l9znm.1 orders it longest-waiting first so the request that has
-   stood longest is read first (noticeWaitOrder). */
+   The panel's "Waiting on you" list reads this rule too (claunch-x3feh):
+   the whole panel is newest first, so the request that just arrived is the
+   one at the top. claunch-l9znm.1 had it the other way — longest-waiting
+   first, so the most neglected request was read first — and the reader
+   asked for the reversal after seeing the panel: an old request sinking is
+   a cost they accept, and a second order for the same list is a rule to
+   drift against (the failure noticeWaitOrder was written beside it to
+   avoid). */
 function noticeNewerFirst(a, b) {
   return (b.at || 0) - (a.at || 0);
 }
 
-/* Which request the "Waiting on you" list puts first: the one that has
-   waited longest, on the same stamp the row shows as its age
-   (claunch-l9znm.1). Kept beside noticeNewerFirst so the two orders the
-   panel offers are both named here rather than one being implicit. */
-function noticeWaitOrder(a, b) {
-  return (a.at || 0) - (b.at || 0);
+/* What a notice asks of the reader, as keywords rather than a rank
+   (thread th-3b3470, 2026-10-30: the reader asked for a few consistent
+   criteria instead of one card being ordered against another). A surface
+   shows a notice because it carries a word, never because it scored above
+   another one; adding a word is how a new kind of "show this first" is
+   written, and the words come from what the notice already is:
+
+   `fatal`      the project is stopped (a leader's harness stopped, claunch-9djny)
+   `blocking`   a person's answer is what lets anything proceed (a gate kind)
+   `urgent`     the step said so (a workflow's `urgent: true`)
+   `expiring`   a deadline settles it on its own, and that deadline is near
+   `deferrable` the step said the question can wait (`ask.criteria`)
+
+   `fatal`, `blocking` and `expiring` are read off the notice; `urgent` and
+   `deferrable` are declared by the step. `deferrable` is the one
+   subtraction: a question that can wait is still `blocking` — the run
+   stands on it — but a folded list leaves it out, because nothing else is
+   waiting on that answer. */
+const NOTICE_CRITERIA = ["fatal", "blocking", "urgent", "expiring", "deferrable"];
+/* What a folded "Waiting on you" keeps: fatal ∪ urgent ∪ (blocking − deferrable). */
+const NOTICE_FOLD_KEEPS = ["fatal", "urgent", "blocking"];
+/* How near a deadline has to be to count as `expiring`. */
+const NOTICE_EXPIRING_MS = 30 * 60 * 1000;
+
+/* The criteria of one notice. `entry` is a waiting record with `gateType`
+   filled in (noticePanelPaint does that) or a history row, whose own fields
+   carry the same facts. Unknown words are kept: the set is a vocabulary,
+   and a surface that does not know a word simply does not act on it. */
+function noticeCriteriaOf(entry) {
+  const out = new Set();
+  if (!entry) return out;
+  const words = Array.isArray(entry.criteria) ? entry.criteria : [];
+  for (const w of words) if (typeof w === "string" && w) out.add(w);
+  if (entry.kind === "fatal") out.add("fatal");
+  const type = entry.gateType
+    || (entry.gate && entry.gate.type)
+    || (entry.source && NOTICE_SOURCE.has(entry.source) ? entry.source : "");
+  const gate = !!(entry.gate
+    || (type && NOTICE_SOURCE.has(type) && NOTICE_SOURCE.get(type).gate));
+  if (gate) out.add("blocking");
+  if (entry.urgent) out.add("urgent");
+  if (gate && entry.deadline) {
+    const dead = new Date(entry.deadline).getTime();
+    if (!isNaN(dead) && dead - Date.now() <= NOTICE_EXPIRING_MS) out.add("expiring");
+  }
+  return out;
+}
+
+/* Whether a folded list shows this notice: it carries one of the kept words
+   and none of the dropped ones. A notice with no criteria at all is not
+   shown — it is what the "외 N건" line stands for.
+
+   `deferrable` loses to the words that say otherwise: a step that marks a
+   question deferrable and also `urgent` (or a notice that is `fatal`) is
+   still shown, because those two are declarations that it cannot wait and
+   the fold must not overturn one declaration with another. */
+function noticeFoldedShows(criteria) {
+  if (criteria.has("deferrable") && !criteria.has("urgent") && !criteria.has("fatal")) {
+    return false;
+  }
+  return NOTICE_FOLD_KEEPS.some((w) => criteria.has(w));
 }
 
 /* Whether this reader asked the page not to animate. A person who set
@@ -59181,6 +62525,87 @@ function noticeFlipMove(tops) {
   }
 }
 
+/* A card or panel row taller than this folds by default (claunch-qf41a,
+   claunch-qf41a.1): a decision brief the length of a page pinned the corner
+   for as long as it waited, and what a folded card still answers — which
+   request, which presses — lives in its title and its actions row, not in
+   the body. The fold no longer hides the body outright: it stays up as a
+   five-line preview so the reader can tell what the notice is about
+   (thread th-e3d6db). */
+const NOTICE_FOLD_MAX_PX = 260;
+
+function noticeFoldSet(node, toggle, flip) {
+  const folded = flip ? !node.classList.contains("folded") : true;
+  node.classList.toggle("folded", folded);
+  if (!toggle) return;
+  toggle.textContent = folded ? "▸ more" : "▾ less";
+  toggle.title = folded
+    ? "show the rest of this notice"
+    : "fold this notice back to a five-line preview";
+}
+
+/* Classify a strip card or an open panel's row once, after it is laid out:
+   above the threshold the body moves into a .notice-fold box that the
+   `folded` class clamps to a five-line preview (claunch-qf41a.1), the
+   title/head, the answer buttons and the age line stay up, and a toggle is
+   added beside the buttons. The keep list names the chrome of both
+   surfaces: a corner card keeps its notice-title direct child, a panel row
+   keeps its notice-row-head. The classification is a single decision made
+   where the node's real height is known — one added while the strip is
+   hidden (the history panel open) measures 0 and stays unclassified until
+   the strip is visible again (noticeFoldScan on panel close); a panel row
+   is classified by noticePanelPaint while the panel is open. A world that
+   cannot lay a node out (the check-harness stubs) skips silently. */
+function noticeFoldClassify(node) {
+  if (!node || node.__noticeFoldClassified) return;
+  if (typeof node.getBoundingClientRect !== "function") return;
+  const height = node.getBoundingClientRect().height;
+  if (!height) return;             // hidden surface: measured again when shown
+  node.__noticeFoldClassified = true;
+  if (height <= NOTICE_FOLD_MAX_PX) return;
+  const keep = (child) =>
+    /(?:^|\s)(?:notice-title|notice-row-head|gate-actions|notice-when|notice-close)(?:\s|$)/
+      .test(child.className || "");
+  const fold = el("div", "notice-fold");
+  for (const child of [...node.children]) {
+    if (!keep(child)) fold.appendChild(child);
+  }
+  if (!fold.childNodes.length) return;   // nothing but chrome: nothing to fold
+  const actions = [...node.children].find((c) =>
+    /(?:^|\s)gate-actions(?:\s|$)/.test(c.className || ""));
+  node.insertBefore(fold, actions || null);
+  const toggle = el("button", "wf-btn notice-fold-toggle", "▸ more");
+  toggle.type = "button";
+  toggle.title = "show the rest of this card";
+  toggle.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    noticeFoldSet(node, toggle, true);
+  });
+  const aside = actions && [...actions.children].find((c) =>
+    /(?:^|\s)gate-aside(?:\s|$)/.test(c.className || ""));
+  // The toggle rides the actions row in a display:contents box — the row's
+  // own convention is that a direct `> button` child is an answer press
+  // (spawngate_browser pins that list), and the toggle answers nothing.
+  if (actions) {
+    const box = el("span", "notice-fold-toggle-box");
+    box.appendChild(toggle);
+    actions.insertBefore(box, aside || null);
+  } else {
+    node.insertBefore(toggle, fold);
+  }
+  node.classList.add("foldable");
+  noticeFoldSet(node, toggle, false);
+}
+
+/* Measures every strip card that is not classified yet. Called when the
+   strip becomes visible again — a card built while the history panel hid
+   the strip could not be measured at birth (claunch-qf41a). */
+function noticeFoldScan() {
+  const strip = $("notices");
+  if (!strip) return;
+  for (const node of strip.children) noticeFoldClassify(node);
+}
+
 /* New cards go into the corner strip in the feed's order (claunch-efpoi,
    and see noticeNewerFirst), and the cards that move to make room slide
    there (claunch-notice-card-order-animate-9znvg). Every card of the strip
@@ -59216,6 +62641,7 @@ function noticeCardAdd(host, node, at) {
   if (ref) host.insertBefore(node, ref);
   else host.appendChild(node);
   noticeFlipMove(tops);
+  noticeFoldClassify(node);
 }
 
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
@@ -59252,11 +62678,156 @@ const gateReadIds = new Set(
    still applies. */
 const NOTICE_FILTERS = ["all", "marked", "unread"];
 
+/* Reminders (claunch-6scxn, claunch-gnlui): a waiting request the reader does
+   not want to answer now, but does want back later. The reader picks ONE of
+   1h, 6h and 24h; the card goes down and comes back once, that long after
+   the press — counted from the press, not from when the request arrived (the
+   user's answer: 「누른시간으로부터 재줘」). A request that had already stood
+   for six hours therefore still comes back an hour after a 1h press.
+
+   The three are exclusive choices, not steps of one schedule (claunch-gnlui:
+   the first cut read "1h, 6h, 24h" as a ladder that one Remind press walked
+   in full). A second pick replaces the first, and a reminder that has fired
+   is gone: the card is back, and the reader picks again or does not.
+
+   Kept apart from NOTICE_HIDDEN_KEY on purpose: Hide says "I have dealt with
+   this", a reminder says "show me again at 6h", and the panel's hidden line
+   counts the first meaning. One set holding both would make that line lie
+   about whichever meaning it did not pick. */
+const NOTICE_REMIND_CHOICES = [
+  { label: "1h", after: 3600 * 1000 },
+  { label: "6h", after: 6 * 3600 * 1000 },
+  { label: "24h", after: 24 * 3600 * 1000 },
+];
+
+function noticeRemindChoice(after) {
+  return NOTICE_REMIND_CHOICES.find((c) => c.after === after) || null;
+}
+
+/* A record the staged first cut saved ({since, stage, due, down}) is read as
+   the one pick it was waiting on: still down, it comes back when it was
+   going to; already up, there is nothing left to wait for. */
+function gateRemindAdopt(v) {
+  if (!v || typeof v !== "object" || !Number.isFinite(v.due)) return null;
+  if (noticeRemindChoice(v.after)) return v;
+  if (v.down !== true || !Number.isFinite(v.stage)) return null;
+  const choice = NOTICE_REMIND_CHOICES[v.stage];
+  return choice ? { type: v.type, rid: v.rid, since: v.since, after: choice.after, due: v.due }
+                : null;
+}
+
+/* "<type>:<request id>" -> {type, rid, since, after, due}. `since` is the
+   press, `after` the chosen wait, `due` = since + after. While an entry
+   stands the card is down; the tick that finds it due deletes it. */
+const gateRemindIds = new Map(
+  (() => {
+    const saved = noticeLoad(NOTICE_REMIND_KEY, {});
+    if (!saved || typeof saved !== "object") return [];
+    return Object.entries(saved)
+      .map(([k, v]) => [k, gateRemindAdopt(v)])
+      .filter(([k, v]) => typeof k === "string" && v);
+  })()
+);
+
+function gateRemindSave() {
+  noticeSave(NOTICE_REMIND_KEY, Object.fromEntries(gateRemindIds));
+}
+
+function gateRemindOf(type, rid) {
+  return gateRemindIds.get(`${type}:${rid}`) || null;
+}
+
+/* The card is down because a reminder is still ahead of it. */
+function gateRemindDown(type, rid) {
+  return !!gateRemindOf(type, rid);
+}
+
+/* Which wait the reader picked for this request, as "1h"/"6h"/"24h", or null
+   when it has no reminder pending. The panel row prints it, so a request
+   that is not in the corner reads as one the reader put aside. */
+function gateRemindLabel(type, rid) {
+  const rec = gateRemindOf(type, rid);
+  const choice = rec && noticeRemindChoice(rec.after);
+  return choice ? choice.label : null;
+}
+
+function gateRemindChip(type, rid) {
+  const node = el("span", "notice-chip remind", `remind ${gateRemindLabel(type, rid)}`);
+  node.title =
+    "this card is put aside until the chosen time; the request stays " +
+    "open and still runs to its deadline";
+  return node;
+}
+
+/* Remind: the card goes now and comes back once, `after` ms from this
+   press. A press while a reminder stands (the panel row, another tab)
+   replaces it — the picks are exclusive, and the last one is what the reader
+   asked for. The request is untouched — it waits on the daemon exactly as
+   before. */
+function gateRemind(type, rid, after) {
+  const id = String(rid);
+  const choice = noticeRemindChoice(after) || NOTICE_REMIND_CHOICES[0];
+  const now = Date.now();
+  gateRemindIds.set(`${type}:${id}`, {
+    type, rid: id, since: now, after: choice.after, due: now + choice.after,
+  });
+  gateRemindSave();
+  noticeTabsPost({ t: "gate-remind", type, rid: id, after: choice.after });
+  noticeBellPaint();
+  noticePanelPaint();
+  noticeGateRefresh(type);
+}
+
+/* Takes the reminder off a request: the card stops being put aside. Pressing
+   Show card on a reminded row does this, and so does a reminder whose
+   request left the pending set. */
+function gateRemindClear(type, rid) {
+  if (!gateRemindIds.delete(`${type}:${rid}`)) return;
+  gateRemindSave();
+}
+
+/* The page's one-second tick over the reminders (claunch-6scxn). Nothing to
+   do is the common case and costs one `size` read: no timers of its own, no
+   DOM writes — the cost contract of claunch-qnq1c is about settled lists not
+   touching the page, and a reminder that is not due is a settled list. A
+   reminder that comes due is dropped and takes its card's kind through the
+   same refresh its poll uses, so the card comes back built the one way every
+   card is. */
+function noticeRemindPaint() {
+  if (!gateRemindIds.size) return;
+  const now = Date.now();
+  const fired = new Set();
+  for (const [key, rec] of [...gateRemindIds]) {
+    if (!Number.isFinite(rec.due) || rec.due > now) continue;
+    gateRemindIds.delete(key);
+    fired.add(rec.type);
+  }
+  if (!fired.size) return;
+  gateRemindSave();
+  for (const type of fired) noticeGateRefresh(type);
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
 function noticeFilterOf(value) {
   return NOTICE_FILTERS.includes(value) ? value : "all";
 }
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
+/* Whether the panel's "Waiting on you" list is folded (thread th-3b3470).
+   Folded keeps only the notices whose criteria say they cannot wait
+   (noticeFoldedShows) and puts everything else behind one "N more" line.
+   The choice is this browser's, like the history filter, and it defaults to
+   expanded: a list that hides requests by default is a list that hides the
+   one that mattered. */
+const NOTICE_WAITING_FOLDED_KEY = "claunch.noticeWaitingFolded";
+let noticeWaitingFolded = noticeLoad(NOTICE_WAITING_FOLDED_KEY, false) === true;
+
+function noticeWaitingFoldSet(folded) {
+  noticeWaitingFolded = !!folded;
+  noticeSave(NOTICE_WAITING_FOLDED_KEY, noticeWaitingFolded);
+  noticePanelPaint();
+}
 /* The pending requests of each gate as its last poll answered them. */
 const gatePending = Object.fromEntries(
   NOTICE_SOURCES.filter((s) => s.gate).map((s) => [s.id, []])
@@ -59545,7 +63116,28 @@ function noticeTabsApply(msg) {
         noticeGateRefresh(msg.type);
       }
     } else if (msg.t === "gate-unhide" && msg.type) {
-      if (gateIsHidden(msg.type, msg.rid)) gateUnhide(msg.type, String(msg.rid));
+      // "Show card" ends a reminder as well as a hide (gateUnhide), so a tab
+      // that has either state applies the same press.
+      if (gateIsHidden(msg.type, msg.rid) || gateRemindOf(msg.type, String(msg.rid))) {
+        gateUnhide(msg.type, String(msg.rid));
+      }
+    } else if (msg.t === "gate-remind" && msg.type) {
+      // Another tab put the card aside (claunch-6scxn). The due time is the
+      // presser's: a tab that pressed from its own clock would bring the
+      // card back at a different moment than the tab the reader used. So the
+      // record the presser saved is adopted verbatim.
+      const key = `${msg.type}:${String(msg.rid)}`;
+      const saved = noticeLoad(NOTICE_REMIND_KEY, {});
+      const rec = gateRemindAdopt(saved && typeof saved === "object" ? saved[key] : null);
+      if (rec) {
+        gateRemindIds.set(key, rec);
+        gateRemindSave();
+        noticeBellPaint();
+        noticePanelPaint();
+        noticeGateRefresh(msg.type);
+      } else if (!gateRemindDown(msg.type, String(msg.rid))) {
+        gateRemind(msg.type, String(msg.rid), msg.after);
+      }
     } else if (msg.t === "gate-read" && msg.type) {
       if (gateIsRead(msg.type, msg.rid) !== !!msg.read) {
         gateMarkRead(msg.type, String(msg.rid), !!msg.read);
@@ -59668,6 +63260,15 @@ function gateHistorySync(type, pending, all) {
     }
     if (ids.size !== before) noticeSave(key, [...ids]);
   }
+  // A reminder goes the same way (claunch-6scxn), and this one matters more:
+  // a reminder that outlived its request would fire (gateRemindPaint) and
+  // refresh a kind for a card that has nothing to draw, for as long as the
+  // entry survived.
+  let reminded = false;
+  for (const [id, rec] of [...gateRemindIds]) {
+    if (rec.type === type && !live.has(rec.rid)) { gateRemindIds.delete(id); reminded = true; }
+  }
+  if (reminded) gateRemindSave();
   noticeBellPaint();
   noticePanelPaint();
 }
@@ -59679,8 +63280,21 @@ function gateIsHidden(type, rid) {
   return gateHiddenIds.has(`${type}:${rid}`) || !noticeSourceShown(type);
 }
 
+/* Whether a card should be built at all: hidden by hand or by its kind, or
+   put aside by Remind until its next reminder comes (claunch-6scxn). The
+   gate refreshes ask this; the panel asks gateIsHidden for the "hidden"
+   chip, because a reminded request is not hidden — the reader asked for it
+   back, and the row says when. */
+function gateCardAside(type, rid) {
+  return gateIsHidden(type, rid) || gateRemindDown(type, rid);
+}
+
 function gateHide(type, rid) {
   gateHiddenIds.add(`${type}:${rid}`);
+  // Hide and a reminder are two answers to "what do I do with this card",
+  // not two states that stack: Hide means the reader is done with it, so a
+  // reminder still standing would bring it back over that decision.
+  gateRemindClear(type, String(rid));
   noticeTabsPost({ t: "gate-hide", type, rid: String(rid) });
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
@@ -59694,6 +63308,10 @@ function gateHide(type, rid) {
 
 function gateUnhide(type, rid) {
   gateHiddenIds.delete(`${type}:${rid}`);
+  // "Show card" also ends a reminder (claunch-6scxn): both presses mean "put
+  // this card back now", and a reminder left standing would take it down
+  // again at its next step, which is the opposite of what was asked.
+  gateRemindClear(type, String(rid));
   noticeTabsPost({ t: "gate-unhide", type, rid: String(rid) });
   if (noticePanelOpen()) gateShownInPanel.add(`${type}:${rid}`);
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
@@ -59739,6 +63357,42 @@ function gateHideButton(type, rid, key, title) {
     dismissNotice(key);
   });
   return btn;
+}
+
+/* The presses beside Hide that answer nothing either, but ask for the card
+   back later (claunch-6scxn, claunch-gnlui): one button per wait, 1h, 6h and
+   24h, each its own exclusive choice. Card and panel row draw the same group
+   through this, so the two surfaces cannot offer different waits. `onPick`
+   runs after the reminder is filed (the card uses it to dismiss itself). */
+function gateRemindChoices(type, rid, onPick) {
+  const box = el("span", "gate-remind");
+  box.appendChild(el("span", "gate-remind-label", "Remind"));
+  for (const choice of NOTICE_REMIND_CHOICES) {
+    const btn = el("button", "wf-btn gate-remind-choice", choice.label);
+    btn.type = "button";
+    btn.title =
+      `put this card aside and have it come back once, ${choice.label} from now — ` +
+      "nothing is answered, the request stays open and still runs to its deadline";
+    btn.addEventListener("click", (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      gateRemind(type, String(typeof rid === "function" ? rid() : rid), choice.after);
+      if (onPick) onPick();
+    });
+    box.appendChild(btn);
+  }
+  return box;
+}
+
+/* Every card-side press besides the answer, in the order they are drawn. A
+   gate's card builder calls this once instead of reaching for each button:
+   Hide and Remind are one decision ("what do I do with this card while I
+   think"), and a kind that got one without the other would be a gap nothing
+   catches. */
+function gateAsideActions(type, rid, key, hideTitle) {
+  const box = el("span", "gate-aside");
+  box.appendChild(gateHideButton(type, rid, key, hideTitle));
+  box.appendChild(gateRemindChoices(type, rid, () => dismissNotice(key)));
+  return box;
 }
 
 function noticeGateRefresh(type) {
@@ -59843,6 +63497,7 @@ function noticePanelToggle(force) {
   noticePanelPainted = null;
   noticeHideAll(open);
   if (open) noticePanelPaint();
+  else noticeFoldScan();
   noticeBellPaint();
   // The panel is a column of the layout (claunch-w8q00): opening or closing
   // it changes the session area's width without a window resize, so the
@@ -59873,7 +63528,10 @@ function hideAllCards(opening) {
     let hid = false;
     for (const rec of gatePending[type]) {
       const rid = String(rec.id);
-      if (gateIsHidden(type, rid) || gateShownInPanel.has(`${type}:${rid}`)) continue;
+      // A reminded request's card is already down and will come back on its
+      // own (claunch-6scxn): hiding it too would turn the reminder into a
+      // Hide the reader never pressed.
+      if (gateCardAside(type, rid) || gateShownInPanel.has(`${type}:${rid}`)) continue;
       gateHide(type, rid);
       hid = true;
     }
@@ -59925,6 +63583,20 @@ function noticePanelGateRow(type, rec) {
       () => gateUnhide(type, rid)
     ));
   }
+  // The reminder this request is waiting on, if any (claunch-6scxn): the row
+  // says which wait was picked, and Show card — the press a hidden row
+  // already carries — brings it back now and ends the reminder with it.
+  if (!hidden && gateRemindLabel(type, rid)) {
+    head.appendChild(gateRemindChip(type, rid));
+    actions.appendChild(noticePanelButton(
+      "Show card", "", "bring this card back now and drop the reminder",
+      () => gateUnhide(type, rid)
+    ));
+  }
+  // The corner card's Remind choices, in the row that answers for that card.
+  // A reminded row keeps them too: picking another wait replaces the one
+  // standing (claunch-gnlui).
+  if (!hidden) actions.appendChild(gateRemindChoices(type, rid));
   head.appendChild(noticePanelButton(
     read ? "Mark unread" : "Mark read", "notice-mark",
     read ? "count it in the waiting list and the bell again"
@@ -60111,11 +63783,25 @@ function noticeRowSpawn(row, head, actions, rec) {
   for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
 }
 
+/* A waiting gate's body. The ask prompt is markdown — headings, lists, the
+   plan's own line breaks — so a card that set it as one `textContent` string
+   showed a request as a single block of prose, with the option lines and the
+   file references run into the argument (claunch-ns4kd). `prompt_md` is that
+   prompt as written; `prompt` is the same text flattened for the terminal
+   strip, and it is what a daemon too old to send `prompt_md` still gives. The
+   `md` class turns `.gate-reason`'s pre-wrap off: the breaks are elements
+   now, not newlines. */
+function noticeAskBody(cls, rec) {
+  const md = typeof rec.prompt_md === "string" ? rec.prompt_md.trim() : "";
+  if (!md) return el("div", cls, rec.prompt);
+  return mdInto(el("div", cls + " md"), md);
+}
+
 function noticeRowAsk(row, head, actions, rec) {
   head.appendChild(gateSessionLink(rec.session));
   head.appendChild(el("span", "notice-title", ` ${runGateTitle(rec)}`));
   row.appendChild(head);
-  if (rec.prompt) row.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+  if (rec.prompt || rec.prompt_md) row.appendChild(noticeAskBody("notice-sub gate-reason", rec));
   const note = runGateNudgeNotes[rec.session];
   if (note) row.appendChild(el("div", "notice-sub gate-nudge", note));
   const short = runGateShortfall(rec);
@@ -60127,7 +63813,7 @@ function noticeRowAsk(row, head, actions, rec) {
   actions.appendChild(noticePanelButton(
     "Open", "", `open ${rec.session}, where its run's strip answers this; ` +
       "the panel stays open beside it",
-    () => runGateOpen(rec)
+    () => runGateWhere(rec)
   ));
 }
 
@@ -60378,8 +64064,15 @@ function noticePanelState() {
     noticeHistory,
     [...gateHiddenIds],
     [...gateReadIds],
+    // The reminders are part of what the panel draws (claunch-6scxn): a row
+    // says which step it is waiting on, and a reminder that fires changes
+    // that without any other field moving.
+    [...gateRemindIds],
     [...noticeSourcesHidden],
     noticeFilter,
+    // Folding "Waiting on you" changes what the open panel draws and nothing
+    // else in this list moves with it (thread th-3b3470), so it belongs here.
+    noticeWaitingFolded,
     runGateNudgeNotes,
     restartGateStale,
   ]);
@@ -60413,12 +64106,12 @@ function noticePanelPaint() {
   // Read waiting requests are listed too, apart from the ones not yet seen:
   // their rows keep the buttons and the countdown, and Mark unread puts them
   // back under the count (claunch-qqy2i).
-  // Every gate kind of NOTICE_SOURCES the reader shows, longest-waiting
-  // first (noticeWaitOrder): the request that has stood longest is the one
-  // to answer. The order is the same stamp the row shows as its age, so a
-  // row that says "1h ago" is above one that says "2m ago" — before
-  // claunch-l9znm.1 it was when this browser first saw them, which is the
-  // same order only when the page was open the whole time.
+  // Every gate kind of NOTICE_SOURCES the reader shows, newest first
+  // (noticeNewerFirst): the whole panel is one feed, so a request that just
+  // arrived is above one that has stood an hour (claunch-x3feh, which
+  // reverses claunch-l9znm.1's longest-waiting-first order). The order is
+  // the same stamp the row shows as its age, so the panel reads top to
+  // bottom as "newest first" the way the strip and History do.
   const waiting = [];
   for (const [type, recs] of Object.entries(gatePending)) {
     if (!noticeSourceShown(type)) continue;
@@ -60430,7 +64123,7 @@ function noticePanelPaint() {
     if (Number.isFinite(entry.opened)) return openedOnThisClock(entry.opened);
     return entry.at || 0;
   };
-  waiting.sort((a, b) => noticeWaitOrder({ at: openedAt(a) }, { at: openedAt(b) }));
+  waiting.sort((a, b) => noticeNewerFirst({ at: openedAt(a) }, { at: openedAt(b) }));
   // The rows this rebuild produces, in the order they go in. Each entry is
   // {key, build}; a kept node is reused as it is and only moved.
   const rows = [];
@@ -60439,23 +64132,55 @@ function noticePanelPaint() {
   if (shownHidden) keep(shownHidden.key, () => shownHidden.node);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
-  keep(`head:waiting:${unread.length}`,
-       () => el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
+  // Folded, the list shows only what its criteria say cannot wait and puts
+  // the rest behind one line (thread th-3b3470). The unfurled list is
+  // unchanged, and so is the order in both (noticeNewerFirst).
+  const criteriaOf = ([type, rec]) => noticeCriteriaOf(Object.assign(
+    { gateType: type }, rec
+  ));
+  const shownUnread = noticeWaitingFolded
+    ? unread.filter((one) => noticeFoldedShows(criteriaOf(one)))
+    : unread;
+  const keptBack = unread.length - shownUnread.length;
+  // Its own row class rather than notice-panel-section-row: the History head
+  // below carries the filter presses, and a second row of that class would
+  // make "the section head" name two nodes (tests/web/noticehistory_check.js
+  // reads the first one for its All/Kept/Not read presses).
+  const foldHead = el("div", "notice-waiting-head");
+  foldHead.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
+  foldHead.appendChild(noticePanelButton(
+    noticeWaitingFolded ? "Expand" : "Fold",
+    noticeWaitingFolded ? "fold-open" : "fold",
+    noticeWaitingFolded
+      ? `show all ${unread.length} waiting request(s) again`
+      : "show only the ones that cannot wait — the rest stay counted here",
+    () => noticeWaitingFoldSet(!noticeWaitingFolded)
+  ));
+  keep(`head:waiting:${unread.length}:${noticeWaitingFolded ? "folded" : "open"}`,
+       () => foldHead);
   if (!waiting.length) {
     keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
   } else if (!unread.length) {
     keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
   }
-  for (const [type, rec] of unread) {
-    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}`,
+  for (const [type, rec] of shownUnread) {
+    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
          () => noticePanelGateRow(type, rec));
+  }
+  if (keptBack > 0) {
+    // One line for what folding keeps back, so nothing is hidden silently and
+    // the count is still the count: the heading said how many there are.
+    keep(`note:folded:${keptBack}`, () => el(
+      "p", "wf-note notice-folded-note",
+      `${keptBack} more waiting — Expand shows them; each is answerable from here`
+    ));
   }
   if (read.length) {
     keep(`head:read:${read.length}`, () => el(
       "h3", "notice-panel-section", `Read, still open (${read.length})`
     ));
     for (const [type, rec] of read) {
-      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}`,
+      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
            () => noticePanelGateRow(type, rec));
     }
   }
@@ -60538,6 +64263,18 @@ function noticePanelPaint() {
          () => noticePanelHistoryRow(entry));
   }
   noticePanelPlace(body, rows);
+  // The panel's rows fold the way the corner cards do (claunch-qf41a.1): a
+  // row above the threshold keeps its head and shows a five-line preview of
+  // the rest, with the same toggle. A kept row was classified when it was
+  // built and keeps its fold state across rebuilds; a row this build made is
+  // a new node and is classified here, where the open panel gives it a real
+  // height. Rows under the threshold are classified once as such and left
+  // alone.
+  for (const node of body.children) {
+    if (/(?:^|\s)notice-row(?:\s|$)/.test(node.className || "")) {
+      noticeFoldClassify(node);
+    }
+  }
 }
 
 /* What a waiting request's row draws, as a short string: the fields its own
@@ -60556,6 +64293,14 @@ function noticeGateRowShape(rec) {
     rec.message, rec.target_session, rec.workflow, rec.profile, rec.model,
     rec.workspace, rec.role, rec.mesh, rec.handle, rec.machine,
   ]);
+}
+
+/* The reminder's half of a waiting row's key (claunch-6scxn): which wait the
+   row says was picked. A rebuild that changes it (a new pick, a reminder that
+   fired) must build a new row, or the kept node goes on naming the old one. */
+function noticeGateRemindShape(type, rid) {
+  const rec = gateRemindOf(type, String(rid));
+  return rec ? `${rec.after}:${rec.due}` : "";
 }
 
 /* What one history row draws, as a short string: the flags noticePanelHistoryRow
@@ -60794,6 +64539,50 @@ async function refreshVmRequests() {
     return;
   }
   vmRequestSync(Array.isArray(data && data.requests) ? data.requests : []);
+}
+
+/* ------------------------------------------------------------------ */
+/* ended sessions with wrap-up drafts waiting (claunch-ar8jn)          */
+/* ------------------------------------------------------------------ */
+/* A session that was killed (or ended any other way but a hold or pause)
+   while drafts it filed still wait on the user puts up one sticky card: the
+   entries would otherwise sit unconfirmed with nobody to remind the user.
+   Keyed by the session and its end, so a session resumed and ended again
+   announces again; the card goes down once its drafts are all settled. As
+   with QA, a browser's first poll announces nothing. */
+const WRAPUP_NOTICED_KEY = "claunch.wrapupNoticed";
+let wrapupNoticed = null;
+
+function wrapupNoticeOpen(session) {
+  try { setSessLayout(session, { split: true, pane: "wrapup" }); } catch { /* storage off */ }
+  location.hash = "#/s/" + encodeURIComponent(session);
+}
+
+function wrapupNoticeSync(rows) {
+  const saved = noticeLoad(WRAPUP_NOTICED_KEY, null);
+  const first = wrapupNoticed === null && !Array.isArray(saved);
+  const known = new Set(wrapupNoticed || []);
+  if (Array.isArray(saved)) for (const k of saved) known.add(k);
+  const live = new Set();
+  for (const [session, row] of Object.entries(rows || {})) {
+    if (!row || row.alive || !row.ended_at || !(row.unresolved > 0)) continue;
+    const key = `${session}@${row.ended_at}`;
+    live.add(key);
+    if (first || known.has(key)) continue;
+    const c = row.counts || {};
+    notify(`${session} ended with ${row.unresolved} unconfirmed wrap-up draft(s)`,
+      `glossary ${c.glossary || 0} · category ${c.category || 0} · knowledge ${c.knowledge || 0} · retrospection ${c.retrospection || 0} — confirm or delete them`,
+      {
+        source: "wrapup", key: `wrapup-${session}`, sticky: true, session,
+        sync: `wrapup:${key}`,
+        open: () => wrapupNoticeOpen(session),
+      });
+  }
+  for (const key of known) {
+    if (!live.has(key)) dismissNotice(`wrapup-${key.split("@")[0]}`);
+  }
+  wrapupNoticed = live;
+  noticeSave(WRAPUP_NOTICED_KEY, [...live]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -61054,7 +64843,7 @@ async function refreshRestartGate() {
     rec ? [Object.assign({}, rec, { id: rid })] : []
   );
   restartGateRid = rid;
-  if (!pending || gateIsHidden("restart", rid)) {
+  if (!pending || gateCardAside("restart", rid)) {
     dismissNotice(NOTICE_GATE);
     return;
   }
@@ -61124,7 +64913,7 @@ async function refreshRestartGate() {
     actions.appendChild(keepStale);
     actions.appendChild(extend);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("restart", () => restartGateRid, NOTICE_GATE,
+    actions.appendChild(gateAsideActions("restart", () => restartGateRid, NOTICE_GATE,
       "close this card only — nothing is answered, the request stays open " +
         "and still auto-approves at its deadline. The bell beside the rail's " +
         "title keeps it, with its buttons, in the notification history"));
@@ -61227,7 +65016,7 @@ async function refreshGotoGate() {
       `${rec.session || "?"} asks to move ${rec.target_session || "?"} — ` +
         `${rec.from || "?"} → ${rec.step || "?"}: ${rec.reason || "(no reason given)"}`
     );
-    if (gateIsHidden("goto", rec.id)) continue;   // closed by hand, still open
+    if (gateCardAside("goto", rec.id)) continue;   // closed by hand, still open
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -61282,7 +65071,7 @@ async function refreshGotoGate() {
       actions.appendChild(approve);
       actions.appendChild(deny);
       /* The third press answers nothing, and says so (gateHideButton). */
-      actions.appendChild(gateHideButton("goto", rec.id, key,
+      actions.appendChild(gateAsideActions("goto", rec.id, key,
         "close this card only — nothing is answered, the request stays open " +
         "and still auto-approves at its deadline; the bell keeps it in the " +
         "notification history"));
@@ -61347,7 +65136,7 @@ async function refreshReposyncGate() {
       (rec.session ? `${rec.session} asks: ` : "") +
         ((rec.plan || {}).summary || (rec.plan || {}).action || "?")
     );
-    if (gateIsHidden("reposync", rec.id)) continue;
+    if (gateCardAside("reposync", rec.id)) continue;
     seen.add(key);
     const plan = rec.plan || {};
     let card = notices.get(key);
@@ -61404,7 +65193,7 @@ async function refreshReposyncGate() {
       });
       actions.appendChild(approve);
       actions.appendChild(reject);
-      actions.appendChild(gateHideButton("reposync", rec.id, key,
+      actions.appendChild(gateAsideActions("reposync", rec.id, key,
         "close this card only — the request stays open and expires as a " +
         "refusal at its deadline; the bell keeps it in the notification " +
         "history"));
@@ -61506,7 +65295,7 @@ async function refreshResumeGate() {
         (rec.reason || "(no reason given)"),
       { session: rec.session }
     );
-    if (gateIsHidden("resume", rec.id)) continue;
+    if (gateCardAside("resume", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -61534,7 +65323,7 @@ async function refreshResumeGate() {
     });
     actions.appendChild(approve);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("resume", rec.id, key,
+    actions.appendChild(gateAsideActions("resume", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(title);
@@ -61661,6 +65450,9 @@ function spawnGateFacts(rec, spec) {
     const fact = facts[key] || { value: own, inherited: false };
     box.appendChild(el("span", "gate-fact-key", key));
     const val = el("span", "gate-fact-val", fact.value || "—");
+    if (fact.note) {
+      val.appendChild(el("span", "gate-fact-from", ` (${fact.note})`));
+    }
     if (fact.inherited) {
       val.appendChild(el("span", "gate-fact-from", ` (inherited from ${rec.session || "the asker"})`));
     }
@@ -61734,27 +65526,44 @@ async function spawnGatePost(rec, verb, btn, body) {
 /* Manual: the form, filled with the request's spec — every answer it
    carries, over what the browser remembers. A top-level request opens the
    New session tab; a child request opens the spawn child tab with the asker
-   as the parent. The person edits it from there and creates it. */
+   as the parent. The person edits it from there and creates it.
+
+   Both tabs are offered either way (claunch-oaxni): the scope the agent
+   asked for is where the form starts, not the person's only answer. A child
+   request can be made a top-level session from the New session tab, which
+   takes the asker's repository the way "Spawn same setup" does (a child
+   inherits the directory, a top-level session has to be told), and a
+   top-level request can be put under the asker from the Spawn child tab.
+   The create reports which one it made (spawnGateLink). */
 async function spawnGateManual(rec) {
   const spec = rec.spec || {};
   const seed = spawnRequestSeed(spec, rec);
+  // The request is the whole subject of this opening: context items the
+  // form still holds from an unsent draft are not its (the seed puts back
+  // the request's own).
+  if (typeof clearOpeningContexts === "function") clearOpeningContexts();
+  const modes = ["new", "spawn"];
   if (rec.scope === "child") {
+    const asker = (sessionsCache || []).find((s) => s.name === rec.session);
+    const cwd = spec.cwd || (asker && asker.cwd ? spawnSameRoot(asker.cwd) : "");
     await openSessionModal({
       tab: "spawn", parent: rec.session, seed, spawnRequest: rec.id,
+      modes, newSeed: cwd ? { cwd } : null,
     });
     return;
   }
   await openSessionModal({
-    tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
-    spawnRequest: rec.id,
+    tab: "new", parent: rec.session, seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
+    spawnRequest: rec.id, modes,
   });
 }
 
 /* The request's spec as a form seed: EVERY answer the spec carries, not the
    handful the first version spelled out (claunch-8x6v2). A row this leaves
-   empty is one the request did not answer, and openSessionModal fills those
-   from what the browser remembers — the request's own values would then be
-   missing exactly where the person was looking. */
+   empty is one the request did not answer, and a form opened for a request
+   starts those rows on the form's own defaults rather than on the browser's
+   last answers (claunch-130zs) — the request is the whole subject of that
+   opening, so nothing about it should read as a leftover. */
 function spawnRequestSeed(spec, rec) {
   const seed = {};
   const put = (key, value) => {
@@ -61766,6 +65575,9 @@ function spawnRequestSeed(spec, rec) {
   // last session's answer, which is what the form would otherwise carry.
   seed.name = spec.name || "";
   seed.task = spec.task || "";
+  if (Array.isArray(spec.opening_contexts) && spec.opening_contexts.length) {
+    seed.opening_contexts = spec.opening_contexts;
+  }
   if (spec.context !== undefined) seed.context = spec.context || "";
   put("issue", spec.issue);
   put("issue_text", spec.issue_text);
@@ -61807,13 +65619,15 @@ function spawnRequestSeed(spec, rec) {
   return seed;
 }
 
-/* The form's create, reported back to the request it was made for. */
-async function spawnGateLink(rid, name) {
+/* The form's create, reported back to the request it was made for, with
+   whether it was made top-level ("root") or under the asker ("child"). */
+async function spawnGateLink(rid, name, createdAs) {
   try {
     await api(`/api/spawn-requests/${rid}/created`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: name }),
+      body: JSON.stringify(createdAs ? { session: name, created_as: createdAs }
+        : { session: name }),
     });
   } catch {
     // The session stands; only the asker's note about it is lost.
@@ -61850,8 +65664,10 @@ function spawnGateButtons(rec, done) {
           + "and its clock stays paused until you create it or reject it"
         : rec.scope === "child"
           ? `open the spawn child form under ${rec.session} filled with this request, ` +
-            "edit it and create it yourself"
-          : "open the New session form filled with this request, edit it and create it yourself",
+            "edit it and create it yourself — the New session tab makes it a top-level " +
+            "session instead"
+          : "open the New session form filled with this request, edit it and create it " +
+            `yourself — the Spawn child tab puts it under ${rec.session} instead`,
       async (btn) => {
         const settled = await spawnGatePost(rec, "manual", btn);
         if (settled) {
@@ -61897,7 +65713,7 @@ async function refreshSpawnGate() {
       `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`,
       { session: rec.session }
     );
-    if (gateIsHidden("spawn", rec.id)) continue;
+    if (gateCardAside("spawn", rec.id)) continue;
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -61906,7 +65722,7 @@ async function refreshSpawnGate() {
       spawnGateBody(node, rec);
       const actions = el("div", "gate-actions");
       for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
-      actions.appendChild(gateHideButton("spawn", rec.id, key,
+      actions.appendChild(gateAsideActions("spawn", rec.id, key,
         rec.hold === "manual"
           ? "close this card only — the request stays open with its clock paused; " +
             "the bell keeps it in the notification history"
@@ -62040,7 +65856,7 @@ async function refreshKillGate() {
         (rec.reason || "(no reason given)"),
       { session: rec.session }
     );
-    if (gateIsHidden("kill", rec.id)) continue;
+    if (gateCardAside("kill", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -62068,7 +65884,7 @@ async function refreshKillGate() {
     });
     actions.appendChild(approve);
     actions.appendChild(reject);
-    actions.appendChild(gateHideButton("kill", rec.id, key,
+    actions.appendChild(gateAsideActions("kill", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(title);
@@ -62168,7 +65984,7 @@ async function refreshMeshJoinGate() {
   for (const rec of pending) {
     const key = MESH_JOIN_PREFIX + rec.id;
     gateHistoryOpen("meshjoin", rec.id, meshJoinTitle(rec), meshJoinSub(rec).textContent, {});
-    if (gateIsHidden("meshjoin", rec.id)) continue;
+    if (gateCardAside("meshjoin", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) continue;   // nothing on it changes
@@ -62187,7 +66003,7 @@ async function refreshMeshJoinGate() {
       });
       actions.appendChild(btn);
     }
-    actions.appendChild(gateHideButton("meshjoin", rec.id, key,
+    actions.appendChild(gateAsideActions("meshjoin", rec.id, key,
       "close this card only — the request stays open with no deadline; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
@@ -62236,11 +66052,16 @@ const RUN_GATE_WORDS = {
   move: "asks you to move its run", loop_limit: "reached a loop limit",
   visit_limit: "reached a visit limit", halt: "is halted",
   acceptance: "waits on its acceptance check",
+  // A run stopped until the user decides in its plan panel (claunch-rzepk).
+  "plan-wait": "waits on your plan decision",
   waiting_approval: "waits on your approval", waiting_selection: "waits on your pick",
   waiting_answer: "waits on your answer",
 };
 
 function runGateTitle(rec) {
+  // A plan wait names no step to answer: what it asks for is the plan's own
+  // decisions, and the card body carries the run's sentence about them.
+  if (rec.kind === "plan-wait") return RUN_GATE_WORDS["plan-wait"];
   return `${RUN_GATE_WORDS[rec.kind] || "waits on you"}: ${rec.label}`;
 }
 
@@ -62287,6 +66108,28 @@ function runGateOpen(rec) {
   location.hash = "#/s/" + encodeURIComponent(rec.session);
 }
 
+/* A plan wait's card opens the session with its plan pane up: the decisions
+   are taken there, and the run page has no press for them. The layout is
+   written for that session before the hash moves, so the pane comes up with
+   the session (syncLayout -> syncSplitPane) rather than being toggled at
+   whichever session happened to be attached. */
+function runGateOpenPlan(rec) {
+  try {
+    setSessLayout(rec.session, { split: true, pane: "plan" });
+  } catch { /* storage off */ }
+  runGateOpen(rec);
+}
+
+/* Where a record takes the reader: the plan pane for a plan wait (that is
+   where its decision is taken), the session itself for everything else. */
+function runGateWhere(rec) {
+  if (rec.kind === "plan-wait") {
+    runGateOpenPlan(rec);
+    return;
+  }
+  runGateOpen(rec);
+}
+
 /* The card's way into the session, under the nudge card's rule
    (claunch-yjm0v): the card goes exactly as its Hide press would put it away,
    and then the session opens. The gate is not answered by this -- it stays
@@ -62294,7 +66137,7 @@ function runGateOpen(rec) {
 function runGateGo(rec, key) {
   gateHide("ask", String(rec.id));
   dismissNotice(key);
-  runGateOpen(rec);
+  runGateWhere(rec);
 }
 
 function runGateButtons(rec, after) {
@@ -62316,6 +66159,9 @@ function runGateButtons(rec, after) {
 function runGateShortfall(rec) {
   const all = rec.presses || [];
   const here = runGatePresses(rec);
+  if (rec.kind === "plan-wait") {
+    return "decide it in the plan panel — clicking this card opens it";
+  }
   if (!all.length) return "this one has no press here — open the session to settle it";
   if (here.length < all.length) {
     return "an answer that needs a reason is not offered here — open the session for it";
@@ -62357,7 +66203,7 @@ function applyRunGate(pending, settled) {
         && notices.get(key)) {
       noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened));
     }
-    if (gateIsHidden("ask", rec.id)) continue;
+    if (gateCardAside("ask", rec.id)) continue;
     seen.add(key);
     const note = runGateNudgeNotes[rec.session] || "";
     const card = notices.get(key);
@@ -62376,7 +66222,7 @@ function applyRunGate(pending, settled) {
     title.appendChild(gateSessionLink(rec.session));
     title.appendChild(el("span", null, ` ${runGateTitle(rec)}`));
     node.appendChild(title);
-    if (rec.prompt) node.appendChild(el("div", "notice-sub gate-reason", rec.prompt));
+    if (rec.prompt || rec.prompt_md) node.appendChild(noticeAskBody("notice-sub gate-reason", rec));
     node.appendChild(el("div", "notice-sub gate-nudge" + (note ? "" : " hidden"), note));
     if (rec.workflow) {
       node.appendChild(el("div", "notice-sub",
@@ -62386,11 +66232,11 @@ function applyRunGate(pending, settled) {
     if (short) node.appendChild(el("div", "notice-sub", short));
     const actions = el("div", "gate-actions");
     for (const btn of runGateButtons(rec, () => dismissNotice(key))) actions.appendChild(btn);
-    actions.appendChild(gateHideButton("ask", rec.id, key,
+    actions.appendChild(gateAsideActions("ask", rec.id, key,
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
-    node.title = `open ${rec.session}`;
+    node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => runGateGo(rec, key));
     noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
     notices.set(key, { node, timer: null });
@@ -62409,13 +66255,18 @@ function applyRunGate(pending, settled) {
    (GET /api/leader-faults, daemon/leader_fault.py — claunch-9djny). The
    daemon decides who counts (leader role on a mesh; category running or
    hold; an active fault) and this poll only draws it: one fatal card per
-   session, sticky and without ×, because the point is that it cannot be
-   swiped away while the leader is still stopped. The card comes down when
-   the daemon stops listing the row — the fault cleared, or the session was
-   paused, killed or archived and the project is no longer waiting on it.
-   The card is re-raised only when what it says changed (kind, message,
-   until, category), so a two-second poll does not fill the history with
-   copies of one event. */
+   session, sticky — it never times out, so it is still there for a reader
+   who was away. It used to carry no × at all, so that it could not be
+   swiped away while the leader was still stopped (claunch-9djny); the
+   operator asked for the × the other cards carry (claunch-8vl1s) after a
+   card stayed on screen once the session was no longer stopped. The poll
+   is what ends it: the card comes down when the daemon stops listing the
+   row — the fault cleared, or the session was paused, killed or archived
+   and the project is no longer waiting on it. The card is re-raised only
+   when what it says changed (kind, message, until, category), so a
+   two-second poll does not fill the history with copies of one event — and
+   a card the reader put away with × stays away until what it says changes
+   too. */
 const LEADER_FAULT_PREFIX = "leader-fault-";
 const leaderFaultRaised = new Map();   // card key -> the signature raised
 
@@ -62469,15 +66320,117 @@ async function refreshLeaderFaults() {
     // reason is retried the same way.
     if (noticePanelOpen()) continue;
     const drawn = notify(`leader stopped: ${a.handle || session}`, leaderFaultSub(a), {
-      source: "fault", key, kind: "fatal", sticky: true, dismissable: false,
+      source: "fault", key, kind: "fatal", sticky: true,
       session,
     });
     if (!drawn) continue;
     leaderFaultRaised.set(key, sig);
   }
+  // Two records name a leader-fault card that is up: the signature this poll
+  // recorded, and the card `notify` actually drew (its entry in `notices`).
+  // The sweep reads both, so a card whose signature was lost — a draw that
+  // raced a page-level reset, or a key some other path took down — still comes
+  // down on the next poll instead of standing there with nothing left to
+  // remove it (claunch-8vl1s). A card the reader put away with × is already
+  // gone from `notices`; its signature stays, so nothing is drawn again until
+  // what the alert says changes.
   for (const key of [...leaderFaultRaised.keys()]) {
     if (live.has(key)) continue;
     leaderFaultRaised.delete(key);
+    dismissNotice(key);
+  }
+  for (const key of [...notices.keys()]) {
+    if (!key.startsWith(LEADER_FAULT_PREFIX) || live.has(key)) continue;
+    dismissNotice(key);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* fault resets: a session paused on a usage limit                     */
+/* ------------------------------------------------------------------ */
+/* The daemon pauses a session the harness stopped on a usage limit and does
+   not resume it: spending the new plan is the person's decision
+   (GET /api/fault-resets, daemon/fault_pause.py — claunch-ijot0). The route
+   answers the sessions still waiting for their stated reset as well
+   (claunch-9djny.1): before that, a session the daemon had stopped read
+   exactly like one that had died, for the days until the reset.
+   So this poll draws one card per session from the moment the pause is
+   recorded, sticky with ×, and only its wording changes when the reset
+   passes ("reset passed — decide") — the key is the session and the
+   signature is session + until, so the transition replaces the card rather
+   than adding a second one. A click opens the session, where Resume is. The
+   card comes down when the row goes — resumed, killed or archived. */
+const FAULT_RESET_PREFIX = "fault-reset-";
+const faultResetDrawn = new Map();   // card key -> `${until}|due` last drawn
+
+function faultResetSub(r) {
+  const f = r.fault || {};
+  const lines = [];
+  const facts = [f.label || f.kind || "usage limit", f.harness].filter(Boolean).join(" / ");
+  if (facts) lines.push(facts);
+  if (f.until) {
+    const at = new Date(f.until);
+    if (!isNaN(at)) lines.push(`reset ${at.toLocaleString()}`);
+  }
+  lines.push(r.due
+    ? "reset passed — decide whether to resume it"
+    : "paused by the daemon — it will not resume itself; resume it if you want it back");
+  return lines.join(" · ");
+}
+
+async function refreshFaultResets() {
+  let body;
+  try {
+    const resp = await api("/api/fault-resets");
+    if (!resp.ok) return;
+    body = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = [];
+  for (const key of ["resets", "pending"]) {
+    const list = body && Array.isArray(body[key]) ? body[key] : [];
+    for (const r of list) {
+      if (!r) continue;
+      rows.push({ ...r, due: typeof r.due === "boolean" ? r.due : key === "resets" });
+    }
+  }
+  const live = new Set();
+  for (const r of rows) {
+    const session = String((r && r.session) || "");
+    if (!session) continue;
+    const key = FAULT_RESET_PREFIX + session;
+    live.add(key);
+    if (!noticeSourceShown("fault")) continue;
+    const sig = String((r.fault || {}).until || "");
+    // The signature a person's "put away" is remembered by stays session +
+    // until; `state` adds the phase so a card that went up while the reset
+    // was still coming is redrawn (same key, one card) when it passes.
+    const state = `${sig}|${r.due ? "due" : "pending"}`;
+    if (faultResetDrawn.get(key) === state) continue;
+    // Put away in another browser (or before a reload): settled, and not
+    // offered to notify, which would add a history row on every poll.
+    const sync = `fault-reset:${session}:${sig}`;
+    const remote = noticeSync.remote.get(sync);
+    if (remote && remote.dismissed) {
+      faultResetDrawn.set(key, state);
+      continue;
+    }
+    // As for the leader card: record the signature only for a card that went
+    // up, so an open history panel does not swallow it.
+    if (noticePanelOpen()) continue;
+    const title = r.due
+      ? `usage limit reset: ${session}`
+      : `usage limit pause: ${session}`;
+    const drawn = notify(title, faultResetSub(r), {
+      source: "fault", key, sticky: true, session, sync,
+    });
+    if (!drawn) continue;
+    faultResetDrawn.set(key, state);
+  }
+  for (const key of [...faultResetDrawn.keys()]) {
+    if (live.has(key)) continue;
+    faultResetDrawn.delete(key);
     dismissNotice(key);
   }
 }
@@ -62546,7 +66499,7 @@ async function refreshNudgeGate() {
       `${rec.session} needs you: ${nudgeWhat(rec)}`,
       rec.message || "", { session: rec.session }
     );
-    if (gateIsHidden("nudge", rec.id)) continue;
+    if (gateCardAside("nudge", rec.id)) continue;
     seen.add(key);
     const card = notices.get(key);
     if (card && card.node.isConnected) {
@@ -62575,11 +66528,11 @@ async function refreshNudgeGate() {
       nudgeGo(rec, key);
     });
     actions.appendChild(open);
-    actions.appendChild(gateHideButton("nudge", rec.id, key,
+    actions.appendChild(gateAsideActions("nudge", rec.id, key,
       "close this card only — nothing is answered, the run keeps waiting; the " +
       "bell keeps it in the notification history"));
     node.appendChild(actions);
-    node.title = `open ${rec.session}`;
+    node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => nudgeGo(rec, key));
     noticeCardAdd(host, node, gateSeenAt("nudge", rec.id));
     notices.set(key, { node, timer: null });
@@ -62729,6 +66682,8 @@ async function boot() {
     refreshSessionSims(),
     refreshQaRail(),
     refreshVmRequests(),
+    refreshWrapupRail(),
+    refreshPlanRail(),
     refreshThreadsRail(),
     refreshModelPrices(),
   ]);
@@ -62750,6 +66705,8 @@ async function boot() {
 
 const DASHBOARD_POLL_MS = 5000;
 let polling = false;
+let pollSince = 0;      // when the tick now in flight started
+let pollToken = 0;      // which tick that is, so a late one cannot clear it
 
 /* A tab nobody is looking at asks a third as often. The nine requests below
    are answered by the same event loop that pumps every terminal, and a
@@ -62767,12 +66724,32 @@ async function pollTick() {
   const hidden = typeof document !== "undefined" && document.hidden === true;
   if (hidden && Date.now() - hiddenPolledAt < HIDDEN_POLL_MS) return;
   // A tick that is still waiting on a dead host must not have another stacked
-  // on top of it every two seconds: connect attempts to a machine that has
-  // gone away hang for a good while, and that is exactly when this runs.
-  if (polling) return;
+  // on top of it every interval: connect attempts to a machine that has gone
+  // away hang for a good while, and that is exactly when this runs.
+  //
+  // ...but a tick that never finishes must not stop the poll for good either.
+  // The reads it runs carry their own deadline now (API_TIMEOUT_MS), and this
+  // is the second half of the same guard: if one of them still has not
+  // settled after POLL_STUCK_MS, the next tick runs anyway. Without that,
+  // `polling` never came back down and the whole tick -- every card's
+  // removal included -- was dead until a reload; the card that stayed on
+  // screen while the daemon listed nothing is how that was found
+  // (claunch-8vl1s.1). This is the same escape `visiblePoll` keeps for page
+  // polls (POLL_STUCK_MS, claunch-02w8s), which the dashboard tick never had.
+  // The re-arm is written to the link log: if the symptom is reported again,
+  // whether the poll stalled is read there instead of guessed.
+  if (polling && Date.now() - pollSince < POLL_STUCK_MS) return;
+  if (polling) {
+    if (typeof linkLog === "function") linkLog("poll.stuck", { ms: Date.now() - pollSince });
+  }
+  // A tick that outlived its escape is still in flight and will finish
+  // eventually; it must not clear the flag the newer tick is holding. The
+  // token is `visiblePoll`'s `pending === mine` in another shape.
+  const mine = (pollToken += 1);
   polling = true;
+  pollSince = Date.now();
   if (hidden) hiddenPolledAt = Date.now();
-  try { await pollOnce(); } finally { polling = false; }
+  try { await pollOnce(); } finally { if (pollToken === mine) polling = false; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -63407,6 +67384,8 @@ async function pollOnce() {
     refreshSessionSims(),
     refreshQaRail(),
     refreshVmRequests(),
+    refreshWrapupRail(),
+    refreshPlanRail(),
     refreshThreadsRail(),
     refreshTermQueued(),
     refreshTermWindow(),
@@ -63415,6 +67394,9 @@ async function pollOnce() {
     // A stopped leader is the one fault the operator cannot wait to read off
     // the rail; the daemon decides which rows count (claunch-9djny).
     refreshLeaderFaults(),
+    // A usage-limit pause whose reset has passed: resuming is the person's
+    // call, and this says it is due (claunch-ijot0).
+    refreshFaultResets(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
@@ -63451,7 +67433,7 @@ noticeSyncTick();
 // fetch nothing — a second's worth of subtraction over the few nodes
 // currently on screen — and the rows that need it are exactly the sticky
 // ones that can sit for an hour.
-setInterval(() => { noticeAgesPaint(); noticeClocksPaint(); }, 1000);
+setInterval(() => { noticeAgesPaint(); noticeClocksPaint(); noticeRemindPaint(); }, 1000);
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and

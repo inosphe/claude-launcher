@@ -11,7 +11,10 @@
    bucket is unchanged; and no project pick means no additions. The line
    upward is kept the same way: the project pick and a mesh tab add the
    direct ancestors of their rows (not the ancestors' other children), and
-   the search keeps the descendants and ancestors of what it matches. */
+   the search keeps the descendants and ancestors of what it matches. Rows
+   the project pick adds are placed by their lineage root's position in the
+   server order, so an added row never outranks the family it belongs to
+   (claunch-20j1s.1). */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -97,13 +100,13 @@ check("a base with no children adds nothing",
 
 ctx.pick("main");
 check("the picked project keeps its rows and gains their descendants only",
-  names(railSessions(FLEET)), ["lead", "solo", "kid", "grandkid"]);
+  names(railSessions(FLEET)), ["lead", "kid", "grandkid", "solo"]);
 check("a pulled-in descendant is marked, a picked-project row is not",
   [sessionShownForLineage(FLEET[1]), sessionShownForLineage(FLEET[0])],
   [true, false]);
 ctx.pick("side");
-check("the other project: its own rows, with the ancestor above them",
-  names(railSessions(FLEET)), ["kid", "grandkid", "stranger", "lead"]);
+check("the other project: its own rows, with the ancestor at its root's place",
+  names(railSessions(FLEET)), ["lead", "kid", "grandkid", "stranger"]);
 check("...the ancestor is marked as shown for its lineage",
   [sessionShownForLineage(FLEET[0]), sessionShownForLineage(FLEET[1])],
   [true, false]);
@@ -126,6 +129,27 @@ check("a mesh tab draws its rows' descendants from other meshes, marked",
 check("an ungrouped rail adds nothing and marks nothing",
   shape(sessionGroupRows(byLineage(FLEET), [])),
   ["lead", "  kid", "    grandkid", "solo", "stranger"]);
+
+/* ---- the root's place -------------------------------------------------- */
+/* The reported case (claunch-20j1s.1): two picked-project rows sit under
+   parents filed in the default project, so both parents are pulled in and
+   both children were drawn right under them — after the newest row. Ordering
+   by the root session's place in the server order keeps every family where
+   its oldest row stands, so the rail reads in creation order. */
+const FIVE = [
+  { name: "s430", project: "default" },
+  { name: "s533", parent: "s430", project: "claunch" },
+  { name: "s1524", project: "default" },
+  { name: "s5837", parent: "s1524", project: "claunch" },
+  { name: "s6345", project: "claunch" },
+];
+ctx.pick("claunch");
+check("a family stands where its root stands, in server order",
+  names(railSessions(FIVE)), ["s430", "s533", "s1524", "s5837", "s6345"]);
+check("...and the rail draws it that way, each child under its parent",
+  shape(sessionGroupRows(byLineage(railSessions(FIVE)), [])),
+  ["s430", "  s533", "s1524", "  s5837", "s6345"]);
+ctx.pick("");
 
 /* ---- the ancestors ---------------------------------------------------- */
 const TREE = [

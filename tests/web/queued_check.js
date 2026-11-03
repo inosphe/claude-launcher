@@ -96,8 +96,11 @@ async function api(url, opts) {
   posted.push([url, (opts || {}).method || "GET"]);
   return { ok: true, json: async () => flushReply };
 }
-function refreshTermQueued() {}
-function refreshSession() {}
+let refreshed = 0;
+function refreshTermQueued() { refreshed++; }
+function refreshSession() { refreshed++; }
+let confirmAnswer = true;
+function confirm() { return confirmAnswer; }
 `;
 
 const ctx = {};
@@ -105,7 +108,7 @@ new Function(
   "exports", "$", "el",
   stubs
   + slice("fmtAge") + slice("localTyping") + slice("queuedReason")
-  + slice("flushQueued")
+  + slice("flushQueued") + slice("discardQueued")
   + slice("queuedMsgRow") + slice("renderTermQueued") + slice("sessQueued") + `
 Object.assign(exports, {
   renderTermQueued, sessQueued,
@@ -116,6 +119,8 @@ Object.assign(exports, {
   posted: () => posted,
   note: () => tqNote,
   setFlushReply: (r) => { flushReply = r; },
+  setConfirm: (v) => { confirmAnswer = v; },
+  refreshed: () => refreshed,
 });`
 )(ctx, $, el);
 
@@ -280,6 +285,36 @@ check("a busy hold is a note, not a warning",
   check("and posts to that session, not the attached one",
         ctx.posted().some(([u, m]) =>
           u === "/api/sessions/other/queued/flush" && m === "POST"),
+        ctx.posted());
+
+  /* ---- per-row delete (claunch-2onys) ----
+     Each open row carries its own delete, which asks first and then sends
+     DELETE for exactly that row's id, mesh and handle. */
+  ctx.renderTermQueued(Q("exited", [MSG]));
+  if (!byClass(banner, "tq-msg")) await byClass(banner, "tq-head").fire("click");
+  const del = byClass(banner, "tq-msg-del");
+  check("an open row offers a delete", !!del && del.tag === "button");
+  ctx.setConfirm(false);
+  const n0 = ctx.posted().length;
+  await del.fire("click");
+  check("declining the confirm sends nothing", ctx.posted().length === n0);
+  ctx.setConfirm(true);
+  const r0 = ctx.refreshed();
+  await del.fire("click");
+  check("confirming deletes that row's message from that session",
+        ctx.posted().some(([u, m]) =>
+          u === "/api/sessions/s16/queued/msg-1?mesh=team&handle=worker" &&
+          m === "DELETE"),
+        ctx.posted());
+  check("...and redraws the strip", ctx.refreshed() > r0);
+
+  const dbox = ctx.sessQueued({
+    session: { name: "other" }, queued: Q("busy", [MSG]),
+  });
+  await byClass(dbox, "tq-msg-del").fire("click");
+  check("the panel's delete goes to the session it names",
+        ctx.posted().some(([u, m]) =>
+          u.startsWith("/api/sessions/other/queued/msg-1") && m === "DELETE"),
         ctx.posted());
 
   if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }

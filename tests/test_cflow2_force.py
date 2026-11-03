@@ -408,6 +408,12 @@ def test_the_packaged_worker_moves_between_its_marked_nodes(tmp_path):
     assert [t["label"] for t in st["tasks"]] == ["intake"]
     kw = {"cwd": cwd, "scope": scope, "now": T0}
     st = runtime.force_move("item", "redo the work", **kw)
+    # The item route writes the plan before work when no gate stands
+    # (claunch-rzepk): plan-seed, the plan wait, then work.
+    assert [t["label"] for t in st["tasks"]] == ["plan-seed"]
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {"plan_waiting": 0}, **kw)
+    assert "plan-wait" in st["waits"][0]["node"]
+    st = runtime.wait_tick(T0, lambda cmd, cwd: (0, ""), cwd=cwd, scope=scope)
     assert [t["label"] for t in st["tasks"]] == ["work"]
     st = runtime.force_move("wrapup", **kw)
     assert [t["label"] for t in st["tasks"]] == ["wrapup"]

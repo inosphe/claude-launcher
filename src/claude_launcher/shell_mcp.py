@@ -35,7 +35,9 @@ _TOOLS = [
         "name": "shell_status",
         "description": (
             "Your session's shell: running or exited, its size, the output "
-            "cursor (offset) and how many input proposals wait for the user."
+            "cursor (offset), where your last read ended (last_read) with the "
+            "unread_bytes after it, and how many input proposals wait for the "
+            "user."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -43,12 +45,13 @@ _TOOLS = [
         "name": "shell_read",
         "description": (
             "Read your session's shell output without typing anything. "
-            "Without offset you get the tail; pass the previous response's "
-            "'offset' to continue. 'dropped' says how many bytes fell out of "
-            "the ring before you asked; 'pid' changes when the shell "
-            "restarts, and 'reset' says your cursor was beyond the new "
-            "incarnation's output (its numbering began again at 0); 'exited' "
-            "says the shell is gone."
+            "Without offset you get what arrived since your session last read "
+            "(the daemon keeps that cursor, so it survives your context); pass "
+            "the previous response's 'offset' to continue from another point. "
+            "'dropped' says how many bytes fell out of the ring before you "
+            "asked; 'pid' changes when the shell restarts, and 'reset' says "
+            "your cursor was beyond the new incarnation's output (its "
+            "numbering began again at 0); 'exited' says the shell is gone."
         ),
         "inputSchema": {
             "type": "object",

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from claude_launcher.cflow2 import executors, layers, runtime
-from claude_launcher.daemon import api as api_mod, cflow2_approve, cflow2_web
+from claude_launcher.daemon import api as api_mod, cflow2_approve, cflow2_web, gate_registry
 from claude_launcher.daemon.manager import SessionManager
 
 PICK = """\
@@ -88,12 +88,58 @@ nodes:
 body: [frame, pose]
 """
 
+#: An ask whose prompt is markdown (claunch-ns4kd): the card renders it, so
+#: the rail must carry it unjoined.
+ASKMD = """\
+cflow: 2
+name: askmd
+description: an ask whose prompt is markdown
+nodes:
+  a:
+    title: Step A
+    prompt: do a
+    ask:
+      prompt: |
+        ## 일감
+
+        - `app.js:63882` 를 고친다
+        - 목록은 목록으로 보인다
+  b: {title: Step B, prompt: do b}
+body:
+  try: [a, b]
+  catch:
+    declined: b
+"""
+
 BRIEF = {
     "problem": "how wide?",
     "options": [{"name": "narrow", "summary": "keep it small"},
                 {"name": "full", "summary": "cover everything"}],
     "rec": "NARROW",
 }
+
+
+#: A round that stops until the plan's decisions are taken (claunch-rzepk):
+#: the wait's probe is the ``plan-waiting`` gate, which is what the rail
+#: matches on. No runner is given in a test, so the probe answers "could not
+#: tell" and the wait stays open, which is the state under test.
+PLANWAIT = """\
+cflow: 2
+name: planwait
+description: a round that stops until the plan owes the user nothing
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  seq:
+    - a
+    - id: plan-wait-before-gate
+      wait:
+        probe: [claunch, gate, plan-waiting]
+        poll: 30
+        describe: plan 미결정이 해소되기를 기다린다
+      on:
+        undecidable: []
+"""
 
 
 @pytest.fixture
@@ -104,6 +150,8 @@ def proj(home, tmp_path, monkeypatch):
     (v2 / "pick.yaml").write_text(PICK, encoding="utf-8")
     (v2 / "askme.yaml").write_text(ASKME, encoding="utf-8")
     (v2 / "askbrief.yaml").write_text(ASKBRIEF, encoding="utf-8")
+    (v2 / "askmd.yaml").write_text(ASKMD, encoding="utf-8")
+    (v2 / "planwait.yaml").write_text(PLANWAIT, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -184,6 +232,34 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert any(o.startswith("loop_limit: ") for o in r["owed"])
 
 
+def test_rail_entry_flags_a_run_stopped_on_the_plan_gate(proj):
+    """A wait on the plan-waiting gate is owed to a person (claunch-rzepk).
+
+    The round is stopped until the user decides in the plan panel, and no
+    route on the run page releases it. Without the entry the rail shows the
+    session as ungated and the dashboard raises no card, so the person never
+    learns that a round is waiting on a panel they have not opened."""
+    cwd = str(proj)
+    runtime.start(layers.load("planwait", cwd), cwd=cwd, scope="s1", caps={})
+    # Step A completes; the sequence then enters the wait.
+    task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s1")
+
+    r = _rail(cwd, "s1")["s1"]
+    assert r["gated"] is True
+    assert "plan: plan-wait-before-gate" in r["owed"]
+    [answer] = r["answers"]
+    assert answer["kind"] == "plan-wait"
+    assert answer["instance"] and answer["label"] == "plan"
+    assert answer["prompt"] == "plan 미결정이 해소되기를 기다린다"
+
+    # The gate passes: the same wait node is no longer a plan wait, so it is
+    # not owed. Matched on the probe, not the id.
+    assert cflow2_web._is_plan_wait({"probe": ["claunch", "gate", "landed-check"]}) is False
+    assert cflow2_web._is_plan_wait(
+        {"probe": "claunch gate plan-waiting --json"}) is True
+
+
 def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
     """``started``/``updated``/``entered_at`` (claunch-c2emv): the Chart page
     reads them to tell a run that is still moving from one that has sat in
@@ -234,6 +310,113 @@ def test_rail_entry_carries_the_run_clocks(proj, monkeypatch):
     err = cflow2_web.rail_entry(cwd, "s1")
     assert err["status"] == "error"
     assert err["started"] is None and err["updated"] is None and err["entered_at"] is None
+
+
+LOOPY = """\
+cflow: 2
+name: loopy
+description: one task repeated by a while loop the run drives itself
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a, rounds: true}
+"""
+
+#: The same shape without the declaration (claunch-oxmso.1). A loop is not a
+#: round because of where it sits in the tree; only ``rounds: true`` says so.
+PLAIN_LOOPY = """\
+cflow: 2
+name: plain-loopy
+description: a while loop the definition did not mark as rounds
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a}
+"""
+
+RECURRING = """\
+cflow: 2
+name: recurring
+description: a workflow that ends its run each round
+recur: true
+nodes:
+  a: {title: Step A, prompt: do a}
+body: a
+"""
+
+
+def test_rail_entry_shows_the_round_the_run_is_in(proj):
+    """``round_now`` (claunch-oxmso): a workflow that does not recur runs its
+    rounds as iterations of a loop inside the same run, so ``state["round"]``
+    stays 1 and the rail used to name round 1 for a run on its third.
+
+    The display value is the loop iteration while the loop is live, the run
+    round for a recurring workflow, and absent -- not invented -- when there
+    is no loop to read (the run has left it). ``round`` keeps its meaning.
+    The loop has to be the one the definition declared ``rounds: true``
+    (claunch-oxmso.1): test_rail_entry_does_not_count_a_loop_it_did_not_mark
+    covers the other direction.
+    """
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "loopy.yaml").write_text(LOOPY, encoding="utf-8")
+    (v2 / "recurring.yaml").write_text(RECURRING, encoding="utf-8")
+
+    runtime.start(layers.load("loopy", cwd), cwd=cwd, scope="s1", caps={})
+    r = _rail(cwd, "s1")["s1"]
+    assert (r["round"], r["round_now"]) == (1, 1)
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    assert r["round"] == 1 and r["round_now"] == 3
+    # The same value on the payload the driver and the run page read.
+    assert runtime.status(cwd=cwd, scope="s1")["round_now"] == 3
+
+    # The third report satisfies the guard, so the loop (and the run) ends.
+    # Nothing is live to read a round from: the rail says null and the driver
+    # payload leaves the key out rather than showing a number that would be
+    # wrong.
+    task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    assert r["status"] == "done" and r["round_now"] is None
+    assert "round_now" not in runtime.status(cwd=cwd, scope="s1")
+
+    # A recurring workflow counts its round per run; the display value is
+    # that same number, so nothing about recur changes.
+    runtime.start(layers.load("recurring", cwd), cwd=cwd, scope="s2", caps={})
+    r = _rail(cwd, "s2")["s2"]
+    assert (r["round"], r["round_now"]) == (1, 1)
+    assert runtime.status(cwd=cwd, scope="s2")["round_now"] == 1
+
+
+def test_rail_entry_does_not_count_a_loop_it_did_not_mark(proj):
+    """The other direction of ``round_now`` (claunch-oxmso.1): a live while
+    loop is not a round just because it is the outermost loop.
+
+    The first rule here was "the outermost live while/until loop", so
+    ``operator-v2``'s ``service`` loop -- which only polls ``claunch operators
+    watch`` -- made a session's rail report its polling passes as rounds.
+    A loop counts only when the definition marks it ``rounds: true``; an
+    unmarked one leaves the display on the slot's ``round``.
+    """
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "plain-loopy.yaml").write_text(PLAIN_LOOPY, encoding="utf-8")
+
+    runtime.start(layers.load("plain-loopy", cwd), cwd=cwd, scope="s3", caps={})
+    r = _rail(cwd, "s3")["s3"]
+    assert r["status"] == "running" and r["round"] == 1
+    assert r["round_now"] is None
+    assert "round_now" not in runtime.status(cwd=cwd, scope="s3")
+    # ...and it stays absent as the loop turns: this is not "absent until the
+    # second iteration" but "never a round".
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s3")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s3")
+    r = _rail(cwd, "s3")["s3"]
+    assert r["status"] == "running" and (r["round"], r["round_now"]) == (1, None)
 
 
 def test_rail_answers_carry_when_each_gate_opened(proj):
@@ -291,6 +474,60 @@ def test_rail_ask_carries_the_stamp_the_run_opened_it_with(proj):
         cflow2_web._RAIL.clear()      # the row is cached per run file
         (a2,) = _rail(cwd, "s1")["s1"]["answers"]
         assert "opened_at" not in a2
+    finally:
+        executors.register(None)
+
+
+CRITERIA_ASK = """\
+cflow: 2
+name: critask
+description: an ask that declares the criteria of its own notice
+nodes:
+  a:
+    title: Step A
+    prompt: do a
+    ask: {prompt: "may I a?", criteria: [deferrable], otherwise: human}
+  b: {title: Step B, prompt: do b}
+body:
+  try: [a, b]
+  catch:
+    declined: b
+"""
+
+
+def test_ask_criteria_reaches_the_status_the_rail_and_the_nudge(proj):
+    """A step's ``ask.criteria`` (thread th-3b3470) is carried on three hops,
+    and each one is asserted here because a dashboard that loses any of them
+    folds the wrong requests and nothing else fails: the run's ask record and
+    the status payload built from it (``_open_ask``/``_describe_ask``), the
+    rail's answer row (``cflow2_web._rail_answers``), and the gate row the
+    dashboard draws (``flow_nudge.v2_gates``).
+
+    s1389-rev's review of fc2aeb22 deleted each hop in turn and the 104-module
+    sweep stayed green -- the declaration was tested, the transport was not."""
+    from claude_launcher.daemon import flow_nudge
+
+    executors.register(None)
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "critask.yaml").write_text(CRITERIA_ASK, encoding="utf-8")
+    try:
+        runtime.start(layers.load("critask", cwd), cwd=cwd, scope="s1", caps={})
+
+        # Hop 1: the record _open_ask wrote, and what _describe_ask makes of it.
+        state = runtime.RunStore(cwd, "s1").load_state()
+        (rec,) = state["asks"].values()
+        assert rec["criteria"] == ["deferrable"]
+        (ask,) = runtime.status(cwd=cwd, scope="s1")["asks"]
+        assert ask["criteria"] == ["deferrable"]
+
+        # Hop 2: the rail's answer row.
+        (ans,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert ans["kind"] == "ask" and ans["criteria"] == ["deferrable"]
+
+        # Hop 3: the gate row the dashboard draws it from.
+        (gate,) = flow_nudge.v2_gates(_rail(cwd, "s1")["s1"])
+        assert gate["kind"] == "ask" and gate["criteria"] == ["deferrable"]
     finally:
         executors.register(None)
 
@@ -448,6 +685,100 @@ def test_rail_prompt_is_one_bounded_line():
     assert len(long) == cflow2_web.RAIL_PROMPT_MAX and long.endswith("…")
 
 
+def test_rail_prompt_takes_markdown_markers_off():
+    """The terminal strip and the operator gate draw `prompt` as plain text,
+    so the markdown a card renders has to reach them as prose
+    (claunch-ns4kd.1, claunch-edhbu). Every marker below is one the v2 ask
+    prompts use."""
+    text = "\n".join([
+        "## 일감",
+        "",
+        "- `app.js:63882` 를 고친다",
+        "- **굵게** 와 *기울임*",
+        "1. 순서 있는 목록",
+        "> 인용",
+        "```",
+        "const x = 1;",
+        "```",
+        "---",
+        "[문서](https://example.test/x) 와 ![그림](https://example.test/i.png)",
+        "***굵게기울임***",
+        "| 왼쪽 | 오른쪽 |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+        "~~지운 글~~ 와 H~2~O",
+    ])
+    flat = cflow2_web._rail_prompt(text)
+    for marker in ("##", "**", "```", "> ", "[", "](", "![", "~~", "|", "~"):
+        assert marker not in flat, (marker, flat)
+    assert flat.startswith("일감 app.js:63882")
+    assert "const x = 1;" in flat
+    assert "문서 와 그림" in flat
+    assert "굵게기울임" in flat
+    assert "왼쪽 오른쪽 1 2" in flat
+    assert "지운 글 와 H2O" in flat
+    assert "\n" not in flat
+    # Exactly — the paired-marker rule alone would leave "*굵게기울임*", which
+    # the marker loop above cannot see (no "**" survives in the flattened line).
+    assert cflow2_web._rail_prompt("***굵게기울임***") == "굵게기울임"
+    assert cflow2_web._rail_prompt("___굵게기울임___") == "굵게기울임"
+    assert cflow2_web._rail_prompt("~~지운 글~~") == "지운 글"
+    assert cflow2_web._rail_prompt("H~2~O") == "H2O"
+    # A one-column table's delimiter row has a single cell (claunch-edhbu.1).
+    # The two-cell form above would pass even if only the multi-cell
+    # delimiter matched, so each shape is asserted exactly.
+    assert cflow2_web._rail_prompt("| a |\n|---|\n| 1 |") == "a 1"
+    assert cflow2_web._rail_prompt("| a |\n| :---: |\n| 1 |") == "a 1"
+    assert cflow2_web._rail_prompt("| a | b |\n|---|---|\n| 1 | 2 |") == "a b 1 2"
+
+
+def test_rail_prompt_leaves_text_that_only_looks_like_markdown():
+    """A file name, a date, arithmetic, a path and a stray pipe are not
+    markers: only what a line can be recognised by is matched, and only at
+    its start (claunch-ns4kd.1, claunch-edhbu)."""
+    text = "a_b_c 2*3 2026-11-02 x #12"
+    assert cflow2_web._rail_prompt(text) == text
+    assert cflow2_web._rail_prompt("2026. 11. 2. 회의") == "2026. 11. 2. 회의"
+    assert cflow2_web._rail_prompt("~/.config/claunch 경로") == "~/.config/claunch 경로"
+    assert cflow2_web._rail_prompt("10~20개 범위") == "10~20개 범위"
+    assert cflow2_web._rail_prompt("a | b 중 하나") == "a | b 중 하나"
+
+
+def test_rail_markdown_keeps_the_line_structure_and_is_bounded():
+    """``prompt_md`` (claunch-ns4kd) is the same question with its lines
+    kept: the dashboard's ask card renders it as markdown, so joining its
+    lines — what ``_rail_prompt`` does for the one-line strip — would hand
+    the card a paragraph where the ask wrote a heading and a list."""
+    assert (cflow2_web._rail_markdown("## 계획\n\n- 하나  \n- 둘\n")
+            == "## 계획\n\n- 하나\n- 둘")
+    assert cflow2_web._rail_markdown("\r\n하나\r\n둘\r\n") == "하나\n둘"
+    long = cflow2_web._rail_markdown("x" * 5000)
+    assert len(long) == cflow2_web.RAIL_PROMPT_MD_MAX and long.endswith("…")
+    assert cflow2_web.RAIL_PROMPT_MD_MAX > cflow2_web.RAIL_PROMPT_MAX
+
+
+def test_rail_ask_carries_the_prompt_as_the_ask_wrote_it(proj):
+    """The ask answer carries the markdown beside the one-line prompt: the
+    card draws ``prompt_md`` (unchanged lines), the terminal strip keeps
+    reading ``prompt`` (one line, bounded, markers off) — claunch-ns4kd,
+    claunch-ns4kd.1."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askmd", cwd), cwd=cwd, scope="s1", caps={})
+        (a,) = _rail(cwd, "s1")["s1"]["answers"]
+        assert a["kind"] == "ask"
+        assert a["prompt_md"] == ("## 일감\n\n- `app.js:63882` 를 고친다\n"
+                                  "- 목록은 목록으로 보인다")
+        assert "\n" not in a["prompt"]
+        for marker in ("##", "`"):
+            assert marker not in a["prompt"], a["prompt"]
+        assert a["prompt"] == "일감 app.js:63882 를 고친다 목록은 목록으로 보인다"
+        assert len(a["prompt"]) <= cflow2_web.RAIL_PROMPT_MAX
+    finally:
+        executors.register(None)
+
+
 def test_rail_entry_is_recomputed_only_when_the_run_files_change(proj, monkeypatch):
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
@@ -473,13 +804,18 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
 
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
-    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c), **markers)
+    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c),
+                                status=lambda: "idle", **markers)
                 for n, c in (("s1", cwd), ("s2", cwd), ("s3", ""))]
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
         monkeypatch.setattr(mgr, "list", lambda *a, **k: sessions)
         app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
+        # The gates already open when the registry came in are recorded once
+        # at daemon start (claunch-6vq2m.1): an ended session is read only
+        # while it holds one.
+        gate_registry.backfill(app["gates"], sessions)
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -492,6 +828,16 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
 
     unauth, status, body = asyncio.run(run())
     assert unauth == 401 and status == 200
+    if markers.get("archived_at"):
+        # An archived session's line still shows -- "Spawn same setup" seeds
+        # the workflow from it -- but its run raises no card: its gates closed
+        # with the record (here, the backfill never recorded them), and
+        # reading it does not open them again.
+        assert set(body["rows"]) == {"s1"}
+        assert body["rows"]["s1"]["workflow"] == "pick"
+        assert body["rows"]["s1"]["answers"] == []
+        assert body["rows"]["s1"]["session_category"] == "archived"
+        return
     assert set(body["rows"]) == {"s1"}
     assert body["rows"]["s1"]["workflow"] == "pick"
     assert body["rows"]["s1"]["gated"] is True
@@ -501,6 +847,16 @@ def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, mar
     # file; this must not be.
     assert isinstance(body["now"], (int, float)) and body["now"] > 0
     assert isinstance(body["rows"]["s1"]["answers"][0]["opened_at"], float)
+    # Every row says what its session is now (claunch-6vq2m): a killed,
+    # held or paused session's waiting run keeps its row while the registry
+    # holds its gate, and the dashboard shows the word beside the name.
+    assert isinstance(body["rows"]["s1"]["answers"][0]["gate_id"], int)
+    category = {(False, None): "running", (True, "held_at"): "hold",
+                (True, "paused_at"): "paused", (True, None): "killed"}[
+        (markers["exited"], next((k for k in markers if k != "exited"), None))]
+    assert body["rows"]["s1"]["session_category"] == category
+    assert body["rows"]["s1"]["session_status"] == (
+        "exited" if markers["exited"] else "idle")
 
 
 def _live(name, cwd, exited=False):
@@ -553,12 +909,43 @@ def test_operator_gates_carry_a_v2_user_choice_and_a_loop_limit(proj):
         runtime.report(task, cwd=cwd, scope="s1")
     (g,) = api_mod._operator_gates([_live("s1", cwd)])
     assert g["kind"] == "loop_limit" and g["prompt"] == "loop reached its max (1/1)"
-    assert [p["label"] for p in g["presses"]] == ["Allow 5 more", "Allow 15 more",
+    # the raises scale with the loop's max (claunch-gpgw1): a 1-max loop gets
+    # 1 and 2, a 25-max loop keeps 5 and 15, the await-landing loop at 5 gets
+    # 1 and 3 -- see test_a_loop_limit_raises_scale_with_the_loops_max
+    assert [p["label"] for p in g["presses"]] == ["Allow 1 more", "Allow 2 more",
                                                   "Stop the loop"]
     assert all(p["path"] == "/api/cflow2/extend" for p in g["presses"])
     stop = g["presses"][-1]["body"]
     runtime.extend_loop(stop["node"], 0, stop=stop["stop"], cwd=cwd, scope="s1")
     assert api_mod._operator_gates([_live("s1", cwd)]) == []
+
+
+def test_a_loop_limit_raises_scale_with_the_loops_max():
+    """The two raise presses are a fifth and three fifths of the loop's max
+    (claunch-gpgw1): the 25-max loops keep the 5 / 15 the card has offered
+    since claunch-n6ms0, and the await-landing loop, cut to 5, offers 1 / 3
+    -- letting a person add 15 to a 5-max loop would open three times the
+    ceiling the cut set. Never zero, never the same twice; a payload without
+    a max keeps the old pair."""
+    from claude_launcher.daemon import flow_nudge
+
+    assert flow_nudge.loop_raise_steps(25) == (5, 15)
+    assert flow_nudge.loop_raise_steps(5) == (1, 3)
+    assert flow_nudge.loop_raise_steps(1) == (1, 2)
+    assert flow_nudge.loop_raise_steps(10) == (2, 6)
+    for bad in (None, "", "x", 0, -3):
+        assert flow_nudge.loop_raise_steps(bad) == flow_nudge.LOOP_RAISE_FALLBACK
+
+    def labels(max_n, **extra):
+        row = {"cwd": "/w", "scope": "s1", "gated": True, "answers": [
+            {"kind": "loop_limit", "instance": "i1", "label": "await", "max": max_n,
+             **extra}]}
+        (gate,) = flow_nudge.v2_gates(row)
+        return [(p["label"], p["body"].get("by")) for p in gate["presses"]]
+
+    assert labels(25) == [("Allow 5 more", 5), ("Allow 15 more", 15), ("Stop the loop", None)]
+    assert labels(5) == [("Allow 1 more", 1), ("Allow 3 more", 3), ("Stop the loop", None)]
+    assert labels(None) == [("Allow 5 more", 5), ("Allow 15 more", 15), ("Stop the loop", None)]
 
 
 def test_v2_presses_for_a_move_request_and_a_halt():

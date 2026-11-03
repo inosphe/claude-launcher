@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -713,6 +714,24 @@ def test_runner_env_drops_the_daemons_manifest_bookkeeping(repo, tmp_path, monke
     assert env[test_window.WINDOW_REQUESTED_BY_ENV] == "leader"
 
 
+def test_runner_env_drops_the_daemons_interpreter_settings(repo, tmp_path, monkeypatch):
+    # The free-threading daemon runs with PYTHON_GIL=0; the job's venv python is a
+    # GIL build and dies in preinit if it inherits it (claunch-t9xko, claunch-jakfg).
+    q = mod.Queue()
+    enqueue(q, repo, "a")
+    for name in im.INTERPRETER_ONLY_ENV:
+        monkeypatch.setenv(name, "0")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    assert im.INTERPRETER_ONLY_ENV and seen
+    for name in im.INTERPRETER_ONLY_ENV:
+        assert name not in seen[0]["env"]
+
+
 def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
@@ -721,8 +740,38 @@ def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tm
     assert mod.Queue(q.database).claim() is None
     with q.connect() as db:
         db.execute("UPDATE jobs SET pid=0,available=0 WHERE id=?", (job["id"],))
+    # The dead runner is a failed attempt: counted and backed off like a reported retry.
+    assert mod.Queue(q.database).claim() is None
+    row = q.get(job["id"])
+    assert (row["status"], row["failures"], row["detail"]) == ("retry", 1, "runner interrupted")
+    assert row["available"] > time.time()
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
     assert mod.Queue(q.database).claim()["id"] == job["id"]
     assert q.get(job["id"])["attempts"] == 2
+
+
+def test_a_runner_that_never_starts_parks_the_job_as_stuck(repo, tmp_path):
+    # claunch-jakfg: the daemon's PYTHON_GIL=0 killed every runner in preinit. The
+    # reset did not count, so the job was claimed 2239 times and never reached a
+    # verdict its watching session could end on.
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    for attempt in range(1, mod.RETRY_LIMIT + 1):
+        assert q.claim()["id"] == job["id"]
+        q.spawned(job["id"], 0)
+        with q.connect() as db:
+            db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
+        assert q.claim() is None
+        row = q.get(job["id"])
+        if attempt < mod.RETRY_LIMIT:
+            assert (row["status"], row["failures"]) == ("retry", attempt)
+            with q.connect() as db:
+                db.execute("UPDATE jobs SET available=0 WHERE id=?", (job["id"],))
+    assert row["status"] == "stuck" and row["failures"] == mod.RETRY_LIMIT
+    assert f"after {mod.RETRY_LIMIT} attempts" in row["detail"] and "runner interrupted" in row["detail"]
+    assert row["notified"] == 0
+    assert q.claim() is None
 
 
 def test_a_repair_can_join_the_window_while_a_background_runner_is_alive(repo, tmp_path, monkeypatch):
@@ -1277,6 +1326,7 @@ def test_a_requeued_job_gets_a_watcher_without_a_daemon_restart(repo, tmp_path, 
         return SimpleNamespace(pid=os.getpid(), returncode=None)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
     clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())  # claims the tip; its watcher starts once it runs (claunch-1rsgm)
     asyncio.run(clock.tick())
     assert len(calls) == 1 and len(delivered) == 1
     asyncio.run(clock.tick())
@@ -1334,6 +1384,7 @@ def test_the_requeue_then_retry_watcher_route_the_refusal_names_works(repo, tmp_
     clock = Clock(SimpleNamespace(get=manager), q, batch=True, spawn=spawn, policy=(5, 3600))
 
     # A final refusal is recorded while the tip is still watchable.
+    asyncio.run(clock.tick())  # claims the tip; its watcher starts once it runs (claunch-1rsgm)
     asyncio.run(clock.tick())
     assert len(calls) == 1 and clock.spawn_permanent, "the refusal was not remembered"
 
@@ -1354,6 +1405,8 @@ def test_the_requeue_then_retry_watcher_route_the_refusal_names_works(repo, tmp_
 
     # Second command: the one the refusal names.
     assert q.retry_watcher(tip) == 1
+    q.claim(batch=(5, 3600))  # the watcher starts when the requeued sweep runs
+    assert q.get(tip)["status"] == "running"
     clock.spawn_tried.clear()
     asyncio.run(clock.attend(q, (5, 3600)))
     assert len(calls) == 2, "the pair the refusal prints did not produce a watcher"
@@ -1484,6 +1537,7 @@ def test_a_transient_refusal_is_still_retried_and_not_reported(repo, tmp_path, m
         return SimpleNamespace(pid=os.getpid(), returncode=None)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
     clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.tick())  # claims the tip; its watcher starts once it runs (claunch-1rsgm)
     asyncio.run(clock.tick())
     # Backed off within SPAWN_BACKOFF, as before: one attempt so far.
     assert len(calls) == 1
@@ -1513,7 +1567,7 @@ def test_a_failed_spawn_is_retried_later_and_does_not_stop_the_sweep(repo, tmp_p
 def test_an_exited_watcher_is_replaced(repo, tmp_path, monkeypatch):
     q = queue(tmp_path)
     jobs = merges(q, repo, list("abcde"))
-    q.dispatch(5, 0)
+    q.claim(batch=(5, 0))
     q.attach_child(jobs[-1]["id"], "gone")
     calls, spawn = spawner(["w2"])
     async def launch(*args, **kwargs):
@@ -1529,3 +1583,50 @@ def test_batching_follows_the_daemon_settings(monkeypatch):
     assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 0}) is None
     assert daemon_sweep.batch_policy({"delayed_sweep_batch_size": 3,
                                       "delayed_sweep_batch_settle": 60}) == (3, 60.0)
+
+
+def test_a_watcher_starts_when_the_sweep_runs_and_is_not_replaced_when_it_ends(repo, tmp_path, monkeypatch):
+    """claunch-1rsgm: a job waiting for the window holds no watching session, and
+    a watcher that ended at its wait cap does not come back for the same job."""
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = jobs[-1]["id"]
+    q.dispatch(5, 0)
+    assert q.get(tip)["status"] == "queued"
+    calls, spawn = spawner(["w1", "w2"])
+    alive = {"w1": True}
+    manager = SimpleNamespace(get=lambda name: SimpleNamespace(exited=alive.get(name, True) is False))
+    clock = Clock(manager, q, batch=True, spawn=spawn, policy=(5, 3600))
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert calls == [] and q.get(tip)["child"] == "", "a queued job was given a session"
+
+    q.claim(batch=(5, 3600))
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 1 and q.get(tip)["child"] == "w1"
+
+    # The watcher ends at its cap with no verdict: the job is not watched again.
+    alive["w1"] = False
+    clock.spawn_tried.clear()
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 1 and q.get(tip)["child"] == ""
+
+    # retry-watcher asks for another one.
+    q.retry_watcher(tip)
+    asyncio.run(clock.attend(q, (5, 3600)))
+    assert len(calls) == 2 and q.get(tip)["child"] == "w2"
+
+
+def test_the_result_notice_of_a_failed_tip_names_unbatch(repo, tmp_path, monkeypatch):
+    """The watcher can be gone by the time a tip fails; the notice carries the step."""
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = jobs[-1]["id"]
+    q.claim(batch=(5, 3600))
+    q.finish(tip, "failed", "receipt")
+    delivered = []
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawner([])[1], policy=(5, 3600))
+    asyncio.run(clock.tick())
+    assert any(f"unbatch --job {tip}" in text and "delayed-sweep: result" in text for text in delivered)

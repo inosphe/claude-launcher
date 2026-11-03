@@ -172,16 +172,30 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
     sch = layers.load("improv-worker-v2").meta["inputs"]
     assert {n: d["group"] for n, d in sch.items() if d["group"]} == {
         "require_coding_approval": "코딩 승인",
+        # claunch-boxug: the merge approval switch is a concern of its own —
+        # it gates the landing request, not the coding start.
+        "require_merge_approval": "착지 승인",
         "reviewer_profile": "리뷰어", "reviewer_harness": "리뷰어",
         "session_routing": "라우팅", "delegate_profile": "라우팅", "delegate_model": "라우팅",
         "parallel_fork": "병렬 작업",
         "force_pr": "PR", "force_no_pr": "PR",
+        # claunch-ijkge: the auto-merge switch belongs with the two PR
+        # switches it qualifies — it only applies to the PR landing.
+        "auto_merge": "PR",
         # claunch-269q1: the knowledge recall/record switches share a block.
-        "knowledge_recall": "지식 기록", "knowledge_record": "지식 기록"}
-    # A block of one: it does not share a grid with the inputs declared around
-    # it, so the switch no longer pairs with the round limit above it.
+        "knowledge_recall": "지식 기록", "knowledge_record": "지식 기록",
+        # claunch-ar8jn: the glossary draft switch sits with them.
+        "glossary_draft": "지식 기록",
+        # claunch-lmnlv: the retrospective auto record switch sits with them.
+        "retrospection_auto_record": "지식 기록"}
+    # A block of its own concern: it does not share a grid with the inputs
+    # declared around it, so the switches no longer pair with the round limit
+    # above them.
     assert [n for n, d in sch.items() if d["group"] == "코딩 승인"] == [
         "require_coding_approval"]
+    # claunch-boxug: the merge approval switch stands in its own block too.
+    assert [n for n, d in sch.items() if d["group"] == "착지 승인"] == [
+        "require_merge_approval"]
     # claunch-dm09i: the parallel fork switch is a decision of its own too
     assert [n for n, d in sch.items() if d["group"] == "병렬 작업"] == ["parallel_fork"]
     assert [n for n, d in sch.items() if d["wide"]] == ["session_routing"]

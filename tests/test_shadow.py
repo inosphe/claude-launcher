@@ -16,6 +16,8 @@ B. mesh scope (two daemons, in-process peer transport)
    B2 the host admits a shadow call only with the link token and only for a
       member of that mesh
    B3 a viewer cannot route to a session that is in no shared mesh
+   B4 shadow targets sort session names with digit runs as numbers
+      (s9 before s10), the order the rail draws them in
 
 C. through HTTP (two apps, raw request/response bytes like the relay's)
    C1 /api/shadows lists the remote member with its card; local ones absent
@@ -44,6 +46,7 @@ from claude_launcher import store
 from claude_launcher.daemon import peer_client, session_input, shadow, status_checks
 from claude_launcher.daemon import relay_uplink
 from claude_launcher.daemon.api import build_app
+from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.mesh import MeshError, MeshManager, PeerUnreachable
 
 from test_mesh_ops import _linked_pair, _manager, _register_py_harness
@@ -410,6 +413,34 @@ def test_targets_are_the_other_daemons_members(home, tmp_path):
         mesh_b = mm_b.get("m@pcA")
         assert mm_b.host_machine(mesh_b, mesh_b.members["alice"]) == "pcA"
         assert mm_b.host_machine(mesh_b, mesh_b.members["bob"]) == ""
+        await mm_a.shutdown()
+        await mm_b.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_targets_sort_session_names_naturally(home, tmp_path):
+    """B4: shadow rows read digit runs as numbers, so s9 precedes s10.
+
+    The rail draws the shadows in the order this list hands them over
+    (shadowLineage keeps the order); a string sort files s100 between
+    s10 and s11 (claunch-20j1s).
+    """
+    _register_py_harness()
+    calls = []
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path, calls)
+        code = mm_a.invite("m")["code"]
+        for name in ("s100", "s11", "s9", "s2"):
+            cwd = tmp_path / f"cwd_{name}"
+            cwd.mkdir()
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(cwd), rows=80))
+            await mm_b.join("m@pcA", name, handle=name, code=code)
+        order = [t["session"] for t in mm_a.shadow_targets()]
+        assert order == ["s2", "s9", "s11", "s100", "sb"]
         await mm_a.shutdown()
         await mm_b.shutdown()
         await mgr.shutdown_all()
