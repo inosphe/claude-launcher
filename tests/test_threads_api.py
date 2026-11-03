@@ -951,6 +951,53 @@ def test_a_resent_message_follows_its_mentions(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_a_resent_message_keeps_the_paths_of_its_images_and_files(tmp_path):
+    """claunch-sp0ut: a resend/revert rebuilds the block from the stored
+    message, and what ``record_delivery`` returns is the message itself --
+    ``call``'s attach pass only reaches a ``{"message": ...}`` envelope. So
+    the rebuilt block read ``img["path"]`` off a stored record that has none
+    (a 500 on every resend of an image message) while ``_file_lines``
+    silently dropped the attachment lines of a message with files."""
+
+    def stage_file(name="capture.utrace", body=b"a pretend trace"):
+        from claude_launcher.daemon import uploads
+
+        writer = uploads.stage_writer(name)
+        writer.write(body)
+        return writer.finish().id
+
+    async def scenario(req, mgr):
+        from claude_launcher.daemon import thread_images, uploads
+
+        image, file_id = _stage(), stage_file()
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "Perf", "text": "look",
+                                                 "images": [image], "files": [file_id]})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        kept = str(thread_images.folder() / image)
+        file_path = str(uploads.thread_dir() / file_id / "capture.utrace")
+        first = mgr.sessions["s1"].delivered[-1]
+        assert kept in first and file_path in first
+
+        # The resend answers 200 (500 before the fix) and the block carries
+        # both the image's path and the attachment line.
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "attached 1 image(s)" in block and f"  - {kept}" in block
+        assert f"[claunch attachment] capture.utrace (15 B) {file_path}" in block
+        # The answer says where the files are, the way a post's answer does.
+        assert again["message"]["images"][0]["path"] == kept
+        assert again["message"]["files"][0]["path"] == file_path
+
+        # A revert is the same rebuilt block, with its note.
+        back = await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "disregard the earlier copy" in block
+        assert f"  - {kept}" in block and file_path in block
+        assert back["message"]["data"]["reverted_at"]
+
+    run(tmp_path, scenario)
+
+
 def test_a_resend_to_an_exited_session_queues_its_own_notice(home, tmp_path):
     """claunch-tpbqz (review): the notice journal dedupes on a record with the
     id existing at all -- a settled one included -- so a resend rides its own

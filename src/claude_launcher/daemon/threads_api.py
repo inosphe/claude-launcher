@@ -1045,6 +1045,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if err:
             return err
         await asyncio.to_thread(link, [t], t["session"])
+        # ``call`` attaches paths only to a ``{"message": ...}`` envelope, and
+        # ``record_delivery`` returns the message itself -- so the block
+        # rebuilt below read images with no ``path`` (a 500 on every resend of
+        # an image message) and ``_file_lines`` dropped the attachment lines
+        # without a word (claunch-sp0ut).
+        await asyncio.to_thread(thread_images.attach, updated)
+        await asyncio.to_thread(uploads.attach, updated)
         out = {"message": updated}
         # This attempt gets its own notice id: a resend to an exited session
         # must land in the durable queue even when the original notice (or a
