@@ -2936,8 +2936,11 @@ def split_gate(repo, tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path / "scratch"))
     seen = {}
 
-    def stub(files, *, basetemp=None, deselect=(), **_):
+    def stub(files, *, basetemp=None, deselect=(), with_tail=False, **_):
         seen["deselect"] = tuple(deselect)
+        seen.setdefault("calls", []).append(
+            {"files": list(files), "with_tail": with_tail}
+        )
         return [sys.executable, "-c", _SPLIT_STUB, str(tally), str(repo), *deselect]
 
     monkeypatch.setattr(changed_tests, "build_command", stub)
@@ -3031,6 +3034,41 @@ def test_the_base_run_is_paid_once_per_base_and_selection(repo, split_gate):
 
     assert split_gate.runs() == "hbh"
     assert split_gate.receipt()["base_cached"] is True
+
+
+def test_with_tail_runs_the_base_with_the_tail_too(repo, split_gate):
+    """claunch-yydhs.1.1: the base side used to drop the tail every time.
+
+    ``--with-tail`` means the head run and the base run measure the same set.
+    Leaving ``-m "not slow_tail"`` on the base side while the head ran the
+    tail makes every tail failure look new -- the session then has to stand a
+    detached worktree at the base commit up by hand to split the failures.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _write(repo, "fails.txt", "tests/test_mesh.py::test_old\n")
+
+    assert split_gate("--with-tail") == 0
+
+    calls = split_gate.command["calls"]
+    assert calls, "the gate built no command at all"
+    assert all(c["with_tail"] for c in calls), (
+        "every command the gate builds -- the branch run, the all-tail "
+        "collect check and the base comparison -- carries the tail"
+    )
+    assert split_gate.receipt()["base_with_tail"] is True
+
+
+def test_without_with_tail_the_base_stays_core_only(repo, split_gate):
+    """The default is unchanged: the tail is still left to the full sweep."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _write(repo, "fails.txt", "tests/test_mesh.py::test_old\n")
+
+    assert split_gate() == 0
+
+    calls = split_gate.command["calls"]
+    assert calls
+    assert not any(c["with_tail"] for c in calls)
+    assert split_gate.receipt()["base_with_tail"] is False
 
 
 def test_no_compare_base_keeps_the_old_red(repo, split_gate):
