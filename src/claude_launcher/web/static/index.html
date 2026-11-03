@@ -1160,6 +1160,16 @@
                 title="draw another key for random — the draw is what the next launch takes">roll</button>
             </div>
             <p id="new-usage-note" class="wf-note hidden"></p>
+            <!-- Automatic key switch (claunch-d2t79), shown only when the pool
+                 holds more than one key: on a usage limit the daemon restarts
+                 the session on the usable key with the lowest usage and types
+                 continue. Off unless ticked — a restart is a visible thing to
+                 do to a session. The retry cap is a machine setting
+                 (Settings ▸ Automatic key switch). -->
+            <label id="new-auto-key-row" class="check new-usage-auto hidden">
+              <input id="new-auto-key-switch" name="auto_key_switch" type="checkbox">
+              switch this session onto another key when it hits a usage limit
+            </label>
           </div>
         </fieldset>
 

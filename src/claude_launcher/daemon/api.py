@@ -1061,6 +1061,10 @@ def build_app(
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
     r.add_get("/api/sweep-batch-setting", h_sweep_batch_setting_get)
     r.add_put("/api/sweep-batch-setting", h_sweep_batch_setting_set)
+    # How many key switches one session may spend per usage-limit fault
+    # (daemon/key_switch.py). A machine default, read live by the pause clock.
+    r.add_get("/api/key-switch-setting", h_key_switch_setting_get)
+    r.add_put("/api/key-switch-setting", h_key_switch_setting_set)
     r.add_get("/api/model-tiers", h_model_tiers_get)
     r.add_put("/api/model-tiers", h_model_tiers_put)
     r.add_get("/api/provider-affinity", h_provider_affinity_get)
@@ -1431,6 +1435,10 @@ def build_app(
     # (claunch-wllke.1). `.../keys` above is keystrokes into the pty; this
     # one is a launcher key.
     r.add_post("/api/sessions/{name}/key", h_session_key)
+    # Whether the daemon may switch this session onto another pool key when
+    # its harness paints a usage limit (claunch-d2t79). A definition edit,
+    # not a restart: the answer is about the next fault, not this process.
+    r.add_post("/api/sessions/{name}/auto-key-switch", h_session_auto_key_switch)
     r.add_post(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
@@ -5535,6 +5543,49 @@ async def h_sweep_batch_setting_set(request: web.Request) -> web.Response:
         for key, value in writes.items():
             store.set_daemon_field(key, value)
         return json_response(_sweep_batch_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _key_switch_setting_state() -> dict:
+    cfg = store.daemon_config()
+    return {
+        "retries": cfg["fault_key_switch_retries"],
+        "defaults": {
+            "retries": store.DAEMON_DEFAULTS["fault_key_switch_retries"],
+        },
+    }
+
+
+async def h_key_switch_setting_get(request: web.Request) -> web.Response:
+    """``daemon.fault_key_switch_retries``: how many keys one session may be
+    switched onto for the same usage limit, with the built-in default."""
+    try:
+        return json_response(_key_switch_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_key_switch_setting_set(request: web.Request) -> web.Response:
+    """Set the retry cap (``{"retries": int}``); ``null`` restores the default.
+
+    ``0`` switches the feature off fleet-wide without touching each session's
+    own answer; ``1`` (the default) means one switch per fault, and a session
+    that hits the limit again after it falls back to the pause.
+    """
+    body = await _json_body(request)
+    value = body.get("retries")
+    if value is not None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return json_error(400, "'retries' must be a whole number or null")
+        if value != int(value):
+            return json_error(400, "'retries' must be a whole number")
+        if not 0 <= value <= 10:
+            return json_error(400, "'retries' must be between 0 and 10")
+        value = int(value)
+    try:
+        store.set_daemon_field("fault_key_switch_retries", value)
+        return json_response(_key_switch_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -11489,6 +11540,11 @@ RAIL_FIELDS = {
     # The pool key this session is pinned to, or absent. The rail draws the
     # key chip from it and the modal preselects it (claunch-wllke.1).
     "key_id",
+    # Whether the daemon may switch this session onto another pool key when a
+    # usage limit stops it (claunch-d2t79). The rail draws the auto badge off
+    # this poll, so leaving it out would keep the badge off every live card
+    # while the detail panel still showed it on.
+    "auto_key_switch",
     "reminder_note",
     "status",
     "score_goal", "user_reward", "user_penalty",
@@ -15422,6 +15478,28 @@ async def h_session_key(request: web.Request) -> web.Response:
         )
     except ManagerError as exc:
         return json_error(400, str(exc))
+    return json_response(session.info())
+
+
+async def h_session_auto_key_switch(request: web.Request) -> web.Response:
+    """Allow (or stop) the automatic key switch for one session.
+
+    Body: ``{"enabled": true|false}``. The answer is the session's own, kept
+    in its definition (:meth:`SessionManager.set_auto_key_switch`), so it
+    survives a daemon restart like the rest of it. Nothing is restarted here:
+    the switch clock reads the answer off the live session on its next pass,
+    and only then -- when a usage limit actually appears -- is the session
+    relaunched onto another key (``daemon/key_switch.py``).
+
+    Operator-only, like reborrow and the key pin: whether a session may be
+    moved under the person's feet is the operator's arrangement.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return json_error(400, "pass 'enabled': true or false")
+    session = manager.set_auto_key_switch(request.match_info["name"], enabled)
     return json_response(session.info())
 
 

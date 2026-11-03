@@ -1127,3 +1127,84 @@ def summary(profile: Profile) -> dict:
     if pool.strategy in PINNED_STRATEGIES:
         data["pick"] = pool.pick
     return data
+
+
+@dataclass(frozen=True)
+class SwitchCandidate:
+    """The key an automatic switch would move a session onto, and why.
+
+    ``key_id`` is ``None`` when nothing usable is left, and ``reason`` then
+    says which of the three ways the pool came up empty: no pool, every key
+    spent, or every usable key already in use. The reason is the sentence a
+    board comment or a log line quotes, so it is written once here instead of
+    at each caller.
+    """
+
+    key_id: Optional[str]
+    profile: Optional[str]
+    reason: str
+    #: One line per key that was considered, for the record:
+    #: ``"<id>: peak 42.0"`` or ``"<id>: blocked by seven_day"``.
+    readings: Tuple[str, ...] = ()
+    #: The key whose reading was taken as the one in use.
+    current: Optional[str] = None
+
+
+def switch_candidate(
+    profile: Profile, *, current_key_id: Optional[str] = None
+) -> SwitchCandidate:
+    """The usable key a session on ``current_key_id`` should move onto.
+
+    The rule the operator fixed for automatic switching (claunch-d2t79): the
+    *usage min* key among those that can still be spent. Two filters before
+    the ordering, and they are the whole difference from a plain
+    ``usage-min`` launch pick:
+
+    1. a key any of whose windows is spent is not a candidate -- moving onto
+       it walks straight back into the stop the switch is leaving;
+    2. the key the session is already on is not a candidate either, or the
+       "switch" would restart the session onto the plan that just refused it.
+
+    What is left is ordered by peak utilization and then by the shorter
+    window (``usage.tie_break_key``). A key whose usage cannot be read is
+    skipped: the rule is "usage min", and an unread key has no minimum to
+    compare -- guessing here would spend a restart on a coin flip.
+    """
+    from . import usage
+
+    source = owner(profile)
+    if source is None:
+        return SwitchCandidate(None, None, "the profile holds no key pool")
+    pool = load(source)
+    if pool is None or not pool.keys:
+        return SwitchCandidate(None, source.name, "the key pool is empty")
+    current = str(current_key_id or "")
+    current_token = credentials.stored_token(source)
+    scored = []
+    readings: List[str] = []
+    for position, key in enumerate(pool.keys):
+        in_use = key.id == current or (not current and key.token == current_token)
+        health = usage.health_for_token(source, key.token)
+        if health is None:
+            readings.append(f"{key.id}: unreadable")
+            continue
+        if not health.usable:
+            readings.append(f"{key.id}: blocked by {health.blocked}")
+            continue
+        readings.append(f"{key.id}: peak {health.peak:g}")
+        if in_use:
+            continue
+        scored.append((usage.tie_break_key(health), position))
+    if not scored:
+        why = (
+            "every usable key is already the one this session runs on"
+            if any(": peak" in row for row in readings)
+            else "no key's usage could be read"
+        )
+        return SwitchCandidate(
+            None, source.name, why, tuple(readings), current or None
+        )
+    best = min(scored)[1]
+    return SwitchCandidate(
+        pool.keys[best].id, source.name, "", tuple(readings), current or None
+    )

@@ -11,6 +11,11 @@ leader in that state keeps the dashboard's "leader stopped" card up
 was stopped on purpose, and :data:`leader_fault.ALERT_CATEGORIES` leaves it
 out.
 
+A multi-key profile gets one chance to avoid the pause: :mod:`key_switch`
+runs first in each pass and, for a session that asked for it, relaunches it
+on another usable key. What this module pauses is what that switch could not
+rescue.
+
 Who is paused, measured on the live object every pass:
 
 * ``fault_auto_pause`` is on in the daemon config;
@@ -379,10 +384,27 @@ class FaultPauseClock:
             return []
         return sweep(self.manager, self.paused)
 
+    async def async_pass_once(self) -> List[str]:
+        """One pass: switch keys first, then pause what is left.
+
+        The switch (:mod:`key_switch`) runs inside this pass rather than in a
+        clock of its own so the two cannot race: a session that was just
+        relaunched onto another key reads no fault any more, so :func:`sweep`
+        below skips it without needing to know the switch happened. A separate
+        clock would leave a window where the pass paused the very session the
+        switch was about to restart.
+        """
+        if not enabled(self.config()):
+            return []
+        from . import key_switch
+
+        await key_switch.sweep(self.manager, self.config())
+        return sweep(self.manager, self.paused)
+
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.interval)
             try:
-                self.pass_once()
+                await self.async_pass_once()
             except Exception:  # noqa: BLE001 -- the clock outlives a bad pass
                 log.exception("fault pause pass failed")
