@@ -498,6 +498,9 @@ def node_view(node: ir.Node, prompts: bool = False) -> dict:
     if node.get(ir.FORCE_TARGET):
         # the run page offers "move here" on it (docs 2.11)
         out["force_target"] = True
+    if node.get("layout"):
+        # the step's layout reference (docs 2.12, cflow2/layouts.py)
+        out["layout"] = node.get("layout")
     t = node.type
     if t == ir.T_LOOP:
         for key in ("mode", "max", "guard", "items", "parallel"):
@@ -1613,6 +1616,43 @@ def session_timers(cwd: str, session: str) -> List[dict]:
         _TIMERS[key] = (stamp, timers)
         out.extend(timers)
     return [dict(t) for t in out]
+
+
+def layout_view(cwd: str, scope: str) -> Optional[dict]:
+    """``GET /api/cflow2/layout``: one run's layout as a view model -- the
+    gds6-df2s contract B payload ``{layout, api, title, blocks}``, built from
+    the layout the run's chart snapshot carries (cflow2/layouts.py). The
+    step-level reference wins while its node is live. ``None`` when there is
+    no such run.
+
+    The payload names no daemon credential and reads nothing outside the
+    snapshot: the browser gets this JSON through the daemon's authenticated
+    route, so the token never travels in it."""
+    from ..cflow2 import layouts
+
+    st = store2.RunStore(cwd, scope)
+    if not st.exists():
+        return None
+    chart = st.load_chart()
+    state = st.load_state()
+    node = layouts.active_node(chart, state)
+    return layouts.view_model(chart, node)
+
+
+def layouts_view(cwd: Optional[str] = None) -> dict:
+    """``GET /api/cflow2/layouts``: the registry -- every layout file the
+    layers offer, with the ``api`` version and the component types each
+    allows -- and the references a workflow may name."""
+    from ..cflow2 import layouts
+
+    entries = layouts.registry(cwd)
+    return {
+        "api": layouts.SUPPORTED_API,
+        "layers": [{"layer": layer, "dir": str(base / layouts.LAYOUT_DIR)}
+                   for layer, base in layers.search_dirs(cwd)],
+        "layouts": entries,
+        "refs": [e["ref"] for e in entries if e.get("ref")],
+    }
 
 
 def definition_view(name: str, cwd: str) -> dict:

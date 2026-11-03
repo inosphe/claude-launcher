@@ -2216,6 +2216,61 @@ IR의 병렬 진행은 별도의 LLM 대화나 작업 디렉터리를 만들지 
 직렬화하고 자식은 별도 워크트리를 사용한다. `unbounded-visits`는 세션 수명의 총
 노드 방문 수를 제한하지 않기 때문이며, 각 반복과 멤버 수에는 위의 상한이 있다.
 
+### 2.14 레이아웃 메타데이터 (claunch-yklgu.1)
+
+레이아웃은 워크플로 정의의 일부가 아니다. 정의는 참조만 갖고, 레이아웃 자체는
+워크플로 옆 **별도 파일**에 둔다. 정의 파일이 비대해지지 않게 하려는 것이고,
+정의의 의미·게이트·스키마는 이 절로 바뀌지 않는다.
+
+```yaml
+# 워크플로 (선택)
+layout: df2s.review@1
+
+nodes:
+  seed:
+    prompt: 씨앗을 옮긴다
+    layout: df2s.seed@1      # task에만 붙는다; 그 노드가 살아 있는 동안 이 참조가 이긴다
+```
+
+`layout:`은 최상위와 task에만 붙는다(조합자 매핑에는 붙지 않는다).
+
+참조는 `<id>@<version>`, 곧 이름이다(경로는 거절한다 — 정의와 같은 규칙). 파일은
+각 레이어 디렉터리(`layers.search_dirs`) 아래 `layouts/<id>.yaml`에 둔다.
+
+```yaml
+layout: df2s.review
+version: 1
+api: 1
+title: 검토 화면
+components: [declaration_table, batch_review]   # 허용 컴포넌트 type 목록
+blocks:
+  - type: declaration_table
+    title: 선언
+  - type: batch_review
+    title: 검토
+```
+
+- `components`를 생략하면 그 파일이 선언한 블록 type들이 허용 목록이 된다.
+- 레지스트리는 이 파일들의 색인이다: `id` · `version` · `api` · `components`.
+  `GET /api/cflow2/layouts?cwd=`가 그것을 내고, `GET /api/cflow2/layout?cwd=&scope=`가
+  한 런의 view model을 낸다.
+- 컴파일은 참조를 **한 번** 풀어 결과를 `chart.meta`(`layout` · `node_layouts` ·
+  `layouts`)에 넣는다. 그래서 런의 `chart.json` 스냅숏이 시작 시점의 레이아웃을
+  들고 있고, 나중에 파일을 고쳐도 진행 중인 런은 움직이지 않는다.
+- 런을 서빙하는 것은 그 스냅숏 위의 view model이다:
+
+  ```json
+  {"layout": "df2s.review@1", "api": 1, "title": "검토 화면",
+   "blocks": [{"type": "declaration_table", "title": "선언"}]}
+  ```
+
+- 레이아웃 문제는 **런을 멈추지 않는다**. 허용 목록에 없는 블록 type은
+  `{"type": "unknown", "layout": ..., "unknown_type": ..., "note": ...}` 자리 표시로
+  내려가고 나머지는 그대로 그려진다. 참조가 풀리지 않거나 파일이 `api` 1이 아닌
+  계약을 요구하면 컴파일 경고 + 자리 표시 블록이지, 컴파일 오류가 아니다.
+- 데몬 토큰은 서버에 남는다. 두 라우트는 데몬의 인증을 그대로 지나고, 응답 본문에
+  자격 증명을 싣지 않는다.
+
 ## 3. IR
 
 IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)으로 표시한다.

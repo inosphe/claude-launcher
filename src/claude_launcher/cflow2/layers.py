@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from .. import config
 from . import ir
+from . import layouts
 
 LAYER_PROJECT = "project"
 LAYER_GLOBAL = "global"
@@ -87,16 +88,29 @@ def package_dir() -> Path:
 
 def _digests(base: Path) -> Dict[str, str]:
     out: Dict[str, str] = {}
-    try:
-        paths = sorted(base.glob("*.yaml"))
-    except OSError:
-        return out
-    for path in paths:
+    for source, name in _layer_files(base):
         try:
-            out[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            out[name] = hashlib.sha256(source.read_bytes()).hexdigest()
         except OSError:
             continue
     return out
+
+
+def _layer_files(base: Path):
+    """``(path, name)`` for a layer directory: its definitions and, under the
+    ``layouts/`` name prefix, its layout files."""
+    try:
+        paths = sorted(base.glob("*.yaml"))
+    except OSError:
+        paths = []
+    for path in paths:
+        yield path, path.name
+    try:
+        paths = sorted((Path(base) / layouts.LAYOUT_DIR).glob("*.yaml"))
+    except OSError:
+        paths = []
+    for path in paths:
+        yield path, f"{layouts.LAYOUT_DIR}/{path.name}"
 
 
 def pin_package(dest: Union[str, Path]) -> Path:
@@ -112,6 +126,14 @@ def pin_package(dest: Union[str, Path]) -> Path:
     tmp.mkdir(parents=True)
     for path in sorted(src.glob("*.yaml")):
         shutil.copy2(path, tmp / path.name)
+    # Layout files are pinned with the definitions they belong to: a chart
+    # compiled against the pinned layer embeds them (cflow2/layouts.py).
+    layout_src = src / layouts.LAYOUT_DIR
+    if layout_src.is_dir():
+        layout_dest = tmp / layouts.LAYOUT_DIR
+        layout_dest.mkdir()
+        for path in sorted(layout_src.glob("*.yaml")):
+            shutil.copy2(path, layout_dest / path.name)
     shutil.rmtree(dest, ignore_errors=True)
     os.replace(tmp, dest)
     _PINNED = (dest, _digests(dest), time.time())
@@ -122,12 +144,15 @@ def _live_digests() -> Dict[str, str]:
     global _LIVE
     base = live_package_dir()
     stamp = []
-    try:
-        for path in sorted(base.glob("*.yaml")):
-            st = os.stat(path)
-            stamp.append((path.name, st.st_mtime_ns, st.st_size))
-    except OSError:
-        pass
+    # The stamp has to move with everything ``_digests`` folds -- the layout
+    # files under ``layouts/`` included -- or a layer whose only change is a
+    # new or edited layout keeps answering from the previous cache entry.
+    for source, name in _layer_files(base):
+        try:
+            st = os.stat(source)
+        except OSError:
+            continue
+        stamp.append((name, st.st_mtime_ns, st.st_size))
     key = tuple(stamp)
     if _LIVE is None or _LIVE[0] != key:
         _LIVE = (key, _digests(base))
@@ -242,21 +267,24 @@ def resolver(cwd: Optional[str] = None):
 
 def layer_stamp(cwd: Optional[str] = None) -> tuple:
     """``(path, mtime_ns, size)`` of every ``*.yaml`` in the layers visible
-    from ``cwd``. A missing directory adds nothing, so two directories with
-    no project layer share one stamp."""
+    from ``cwd``, and of every layout file under each layer's ``layouts/``
+    (a compiled chart embeds the layouts it referenced, so a layout edit has
+    to change the cache key too). A missing directory adds nothing, so two
+    directories with no project layer share one stamp."""
     out = []
     for _layer, base in search_dirs(cwd):
-        try:
-            names = sorted(n for n in os.listdir(base) if n.endswith(".yaml"))
-        except OSError:
-            continue
-        for name in names:
-            path = os.path.join(str(base), name)
+        for directory in (base, Path(base) / layouts.LAYOUT_DIR):
             try:
-                st = os.stat(path)
+                names = sorted(n for n in os.listdir(directory) if n.endswith(".yaml"))
             except OSError:
                 continue
-            out.append((path, st.st_mtime_ns, st.st_size))
+            for name in names:
+                path = os.path.join(str(directory), name)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                out.append((path, st.st_mtime_ns, st.st_size))
     return tuple(out)
 
 
@@ -270,13 +298,14 @@ def _recording(cwd: Optional[str], seen: set):
 
 
 def _compile(path: Path, cwd: Optional[str]) -> ir.Chart:
-    from . import frontend
+    from . import frontend, layouts
 
     seen: set = set()
     try:
         st = os.stat(path)
     except OSError:
-        chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen))
+        chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen),
+                                      resolve_layout=layouts.resolver(cwd))
         _DEPS[str(path)] = frozenset(seen)
         return chart
     key = (str(path), st.st_mtime_ns, st.st_size, layer_stamp(cwd))
@@ -285,7 +314,8 @@ def _compile(path: Path, cwd: Optional[str]) -> ir.Chart:
         if hit is not None:
             _COMPILED.move_to_end(key)
             return hit
-    chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen))
+    chart = frontend.compile_file(path, resolve_include=_recording(cwd, seen),
+                                  resolve_layout=layouts.resolver(cwd))
     with _COMPILED_LOCK:
         _DEPS[str(path)] = frozenset(seen)
         _COMPILED[key] = chart

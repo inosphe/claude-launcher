@@ -1123,6 +1123,8 @@ def build_app(
     # of a run (a chooser: user choice, a loop at its max) and a read-only
     # definition view. Same token as the v1 approve/select endpoints.
     r.add_get("/api/cflow2/run", h_cflow2_run)
+    r.add_get("/api/cflow2/layout", h_cflow2_layout)
+    r.add_get("/api/cflow2/layouts", h_cflow2_layouts)
     r.add_get("/api/cflow2/node", h_cflow2_node)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
     r.add_get("/api/cflow2/rail", h_cflow2_rail)
@@ -7257,6 +7259,26 @@ async def h_cflow2_run(request: web.Request) -> web.Response:
     data["trigger_events"] = [
         e for e in data.get("journal") or [] if str(e.get("event") or "") in CFLOW2_TRIGGER_EVENTS
     ][-CFLOW2_TRIGGER_TAIL:]
+    return json_response(data)
+
+
+async def h_cflow2_layout(request: web.Request) -> web.Response:
+    """A v2 run's layout as a view model (``?cwd=&scope=``): the contract B
+    payload ``{layout, api, title, blocks}``, built from the layout the run's
+    chart snapshot carries. A block whose type the layout does not allow comes
+    back as a placeholder, not as a failure (cflow2/layouts.py)."""
+    cwd, scope = _cflow2_slot(request)
+    data = await asyncio.to_thread(cflow2_web.layout_view, cwd, scope)
+    if data is None:
+        return json_error(404, f"no cflow2 run in {scope!r}")
+    return json_response(data)
+
+
+async def h_cflow2_layouts(request: web.Request) -> web.Response:
+    """The layout registry the layers offer (``?cwd=``): each layout's id,
+    version, ``api`` and allowed component types."""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
+    data = await asyncio.to_thread(cflow2_web.layouts_view, cwd)
     return json_response(data)
 
 
