@@ -263,6 +263,15 @@ PTYHOST_OWNER = f"pytest-{os.getpid()}-{os.urandom(4).hex()}"
 os.environ["CLAUNCH_PTYHOST_OWNER"] = PTYHOST_OWNER
 
 
+
+@pytest.fixture
+def vm_on(home):
+    """The VM feature switched on (``daemon.vm_enabled``; off by default) in
+    this test's throwaway config, for tests that drive the VM routes."""
+    from claude_launcher import store
+    store.set_daemon_field("vm_enabled", True)
+
+
 def _owned_host_pids(root: Path) -> list:
     """Live PTY hosts under ``root`` (by their pid files) that this test
     process owns -- found by the owner mark in their environment, so a host a

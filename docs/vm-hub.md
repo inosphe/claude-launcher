@@ -4,6 +4,25 @@ The daemon runs Tart VMs, keeps one control channel to each, lets the user watch
 and drive them from `/vm`, and lets chosen sessions look at or drive a VM through
 the `vm_*` tools. Design and decisions: issue `vm-setup-8s6`.
 
+## Off by default (`daemon.vm_enabled`)
+
+Tart needs an Apple Silicon Mac with `tart` installed, and most hosts that run
+the daemon are not one. So the feature is off until the user turns it on:
+
+- While it is off, every VM route answers `vm_disabled` (409), a session's
+  `vm_*` tools get the same refusal, `GET /api/vm-requests` answers
+  `{"enabled": false, "requests": []}` (the dashboard then hides the session's
+  🖥 vm pane button), and the hub's background work (recovery after a restart,
+  hand-back, settle) does not run.
+- The VM tab shows a card with a **VM 기능 켜기** button, and a note on whether
+  this host is an Apple Silicon Mac with tart. The button posts
+  `POST /api/vm-enabled {"enabled": true}` (user only). The same switch is
+  `claunch daemon config vm_enabled true`, which an agent session may not set.
+  Either way the hub starts on the next VM request, without a daemon restart.
+- **VM 기능 끄기** in the tab's header turns it back off. That is refused
+  (`vm_busy_state`) while any VM is not stopped, suspended or in fault, since
+  the hub that would stop it is what turns off.
+
 ## Network: softnet with the private ranges blocked
 
 `tart run` gets `--net-softnet --net-softnet-block=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`

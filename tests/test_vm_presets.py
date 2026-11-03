@@ -19,6 +19,9 @@ from test_vm_channel import World
 from test_vm_frames import Capture
 from test_vm_tart import Fake
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 AGENT = {actors.HEADER: "agent:s1"}
 
 

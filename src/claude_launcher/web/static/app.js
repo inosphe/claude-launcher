@@ -64538,6 +64538,10 @@ async function refreshVmRequests() {
   } catch {
     return;
   }
+  // The VM feature is off until the user turns it on in the VM tab
+  // (daemon.vm_enabled): the session's 🖥 vm pane has nothing to show then.
+  const vmBtn = $("term-vmbtn");
+  if (vmBtn) vmBtn.classList.toggle("hidden", !!data && data.enabled === false);
   vmRequestSync(Array.isArray(data && data.requests) ? data.requests : []);
 }
 

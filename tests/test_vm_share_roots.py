@@ -12,6 +12,9 @@ from claude_launcher.daemon.vmhub import Registry
 
 from test_vm_share import AGENT, Fake, Host, api_for, code_of, run  # noqa: F401
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 
 @pytest.fixture
 def host(tmp_path):
@@ -145,7 +148,7 @@ def test_the_pending_requests_are_listed_for_the_dashboard_and_only_to_the_user(
 
     async def go():
         async with api_for(tmp_path, host) as api:
-            assert await (await api.get("/api/vm-requests")).json() == {"requests": []}
+            assert await (await api.get("/api/vm-requests")).json() == {"enabled": True, "requests": []}
             body = req(share=("out", str(host.root / "other"), "rw"))
             assert (await api.post("/api/vm/a/request", json=body, headers=S2)).status == 200
             for hdr in (AGENT, S2, {actors.HEADER: "cflow:wf"}):
@@ -156,6 +159,6 @@ def test_the_pending_requests_are_listed_for_the_dashboard_and_only_to_the_user(
             assert got[0]["id"] and got[0]["scopes"] == ["view", "files"] and got[0]["shares"][0]["mode"] == "rw"
             deny = await api.post("/api/vm/a/deny", json={"session": "s2", "id": got[0]["id"]})
             assert deny.status == 200
-            assert await (await api.get("/api/vm-requests")).json() == {"requests": []}
+            assert await (await api.get("/api/vm-requests")).json() == {"enabled": True, "requests": []}
 
     run(go())

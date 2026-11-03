@@ -145,3 +145,9 @@ body.session-mode #vm-side, body.session-mode #vm-requests-box, body.session-mod
 body.session-mode #vm-onlymode, body.session-mode #vm-sharing, body.session-mode #vm-empty { display: none; }
 body.session-mode #vm-detail > :not(#vm-grants-block):not(#vm-shares-block) { display: none; }
 body.session-mode #vm-grant-add { display: none; }
+/* The feature switched off (vm.html #vm-off): one card in place of the page. */
+#vm-off { max-width: 640px; margin: 32px auto; padding: 16px 20px; border: 1px solid var(--vm-line);
+  border-radius: 6px; background: var(--vm-bar); }
+#vm-off h1 { font-size: 16px; margin: 0 0 10px; }
+#vm-off p { margin: 0 0 10px; }
+#vm-off #vm-enable { margin: 4px 0 12px; border-color: var(--vm-accent); color: var(--vm-accent); }

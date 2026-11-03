@@ -14,6 +14,9 @@ from claude_launcher.daemon.vmhub import Registry, VmError
 from test_vm_presets import api_for, build, clones
 from test_vm_tart import Fake
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 HOST = ["192.168.1.89", "127.0.0.1"]
 AGENT = {actors.HEADER: "agent:s1"}
 

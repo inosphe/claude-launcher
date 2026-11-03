@@ -13,6 +13,10 @@ from claude_launcher.daemon.vmhub import Registry
 
 from test_vm_channel import World
 from test_vm_tart import Fake
+import pytest
+
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
 
 JPEG = b"\xff\xd8\xff\xe0JFIF-fake-frame"
 AGENT = {actors.HEADER: "agent:s1"}

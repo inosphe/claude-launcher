@@ -10,6 +10,10 @@ from claude_launcher.daemon import vm_api
 from claude_launcher.daemon.vmhub import Registry
 
 from test_vm_frames import AGENT, Capture, _api
+import pytest
+
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
 
 STATIC = Path(vm_api.__file__).resolve().parent.parent / "web" / "static"
 

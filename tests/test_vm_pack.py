@@ -11,6 +11,9 @@ from claude_launcher.daemon import session_packs, session_reminder, vm_pack
 from test_vm_share import Host, api_for, run  # noqa: F401  (fixtures are plain helpers)
 import pytest
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 
 @pytest.fixture
 def host(tmp_path):
