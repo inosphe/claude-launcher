@@ -15,6 +15,12 @@ sends calls concurrently and moves one that passes 120 s into the background,
 so a loop that answered one line at a time made a ``wait 600`` hold every later
 call of the session behind it (claunch-368ef). A ``notifications/cancelled``
 sets the call's :func:`cancel_event`; a call that has not started is dropped.
+
+Every tool call that ends in an exception is written to the session's
+``mcp-server.log`` (:func:`record`, claunch-f7osr): a refusal (one of
+``errors``) as one line, and a crash (anything else) with its traceback just
+before the process exits. The host keeps none of this -- its MCP log says
+only ``Connection closed`` -- and the traceback on stderr went nowhere.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -34,7 +42,109 @@ PROTOCOL_VERSION = "2024-11-05"
 #: for a free worker.
 MAX_CALL_WORKERS = 32
 
+#: The per-session log of failed tool calls, next to the session's
+#: ``output.log`` (``daemon/sessions/<session>/``).
+LOG_NAME = "mcp-server.log"
+#: When a write would take the log past this size, the log is moved to
+#: ``<name>.1`` (replacing the previous one) and a new one is started, so a
+#: session holds at most about twice this much.
+LOG_MAX_BYTES = 1 << 20
+#: The arguments are logged as their JSON text cut to this many characters:
+#: enough to tell which call it was, not a copy of a message body.
+LOG_ARGS_CHARS = 400
+#: A traceback longer than this keeps its last part (where the raise is).
+LOG_TRACEBACK_CHARS = 32_000
+
 _current = threading.local()
+_log_lock = threading.Lock()
+
+
+def log_path() -> Optional[Path]:
+    """Where this process records failed tool calls, or ``None``.
+
+    ``None`` when the process serves no claunch session (``CLAUNCH_SESSION``
+    unset, e.g. an ``mcp`` started by hand). There is no fallback location:
+    a fixed name under ``/tmp`` is shared by every session on the machine
+    (AGENTS.md).
+    """
+    session = os.environ.get("CLAUNCH_SESSION", "").strip()
+    if not session:
+        return None
+    from .daemon import paths
+
+    return paths.session_dir(session) / LOG_NAME
+
+
+def _cut(text: str, limit: int, *, keep_tail: bool = False) -> str:
+    if len(text) <= limit:
+        return text
+    dropped = len(text) - limit
+    if keep_tail:
+        return f"...({dropped} chars cut)\n" + text[-limit:]
+    return text[:limit] + f"...({dropped} chars cut)"
+
+
+def record(kind: str, *, server: str, method: object, tool: Optional[str] = None,
+           args: object = None, message: str = "",
+           trace: Optional[str] = None) -> Optional[Path]:
+    """Append one failed call to :func:`log_path`; return the file written.
+
+    ``kind`` is ``refused`` (an exception in the server's ``errors``: the
+    agent got an error result) or ``crash`` (anything else: the process is
+    about to exit). This never raises -- it runs on the way to ``os._exit``,
+    and a logging problem must not change how the call ends -- and returns
+    ``None`` when nothing was written.
+    """
+    try:
+        path = log_path()
+        if path is None:
+            return None
+        entry = {
+            "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "session": os.environ.get("CLAUNCH_SESSION", ""),
+            "pid": os.getpid(),
+            "server": server,
+            "kind": kind,
+            "method": method,
+            "tool": tool,
+            "args": _cut(json.dumps(args, ensure_ascii=False, default=str), LOG_ARGS_CHARS),
+            "message": message,
+        }
+        if trace:
+            entry["traceback"] = _cut(trace, LOG_TRACEBACK_CHARS, keep_tail=True)
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        with _log_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if size and size + len(line.encode("utf-8")) > LOG_MAX_BYTES:
+                os.replace(path, path.with_name(path.name + ".1"))
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        return path
+    except Exception:
+        return None
+
+
+def _call_gist(msg: object) -> Tuple[object, Optional[str], object]:
+    """``(method, tool name, arguments)`` of a request, for :func:`record`."""
+    if not isinstance(msg, dict):
+        return None, None, None
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    tool = params.get("name") if msg.get("method") == "tools/call" else None
+    return msg.get("method"), (str(tool) if tool is not None else None), params.get("arguments")
+
+
+def _record_crash(server: str, msg: object) -> None:
+    """Log the exception being handled as a crash, and say where on stderr."""
+    exc = sys.exc_info()[1]
+    method, tool, args = _call_gist(msg)
+    path = record("crash", server=server, method=method, tool=tool, args=args,
+                  message=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc())
+    if path is not None:
+        print(f"claunch mcp: crash recorded in {path}", file=sys.stderr)
 
 
 def cancel_event() -> threading.Event:
@@ -131,6 +241,8 @@ class Server:
                     {"content": [{"type": "text", "text": text}], "isError": False},
                 )
             except self.errors as exc:
+                record("refused", server=self.name, method=method, tool=name,
+                       args=args, message=str(exc))
                 return _result(
                     msg_id,
                     {
@@ -174,7 +286,9 @@ class Server:
                 response = self.handle(msg)
             except BaseException:
                 # An exception outside ``errors`` is a bug and kills the
-                # process, as it did when calls ran on the main thread.
+                # process, as it did when calls ran on the main thread. The
+                # log is written first: stderr is not kept by the host.
+                _record_crash(self.name, msg)
                 traceback.print_exc()
                 sys.stderr.flush()
                 os._exit(1)
@@ -215,7 +329,13 @@ class Server:
                     if cancel is not None:
                         cancel.set()
                     continue
-                response = self.handle(msg)
+                try:
+                    response = self.handle(msg)
+                except BaseException:
+                    # Answered inline (initialize, notifications/initialized,
+                    # ping): the exception ends serve and the process.
+                    _record_crash(self.name, msg)
+                    raise
                 if response is not None:
                     write(response)
             # stdin closed: the host is gone, so nothing in flight is wanted.
