@@ -10,6 +10,9 @@ from claude_launcher.daemon import actors
 
 from test_vm_presets import AGENT, api_for, deletes, run  # noqa: F401
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 
 def two_vms(api):
     api.reg.add("other")

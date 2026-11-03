@@ -32,6 +32,15 @@ Session:       POST /api/vm/{id}/{acquire,release}  (body ``session`` must be
                the declared actor), POST /api/vm/{id}/files/{put,get,ls,rm}
                (``files`` grant), POST /api/vm/{id}/request (a session asks
                for scopes and shared folders; the user approves)
+
+The feature is off until the user turns it on (``daemon.vm_enabled``, default
+false): tart VMs need an Apple Silicon Mac with tart installed, which most
+hosts are not. While it is off every route above answers ``vm_disabled``
+(409), ``GET /api/vm-requests`` answers ``enabled: false`` with no requests,
+and the hub's background work does not run. ``GET|POST /api/vm-enabled`` (user
+only for the write) reads and sets the switch; turning it on starts the
+background work at once, and turning it off is refused while a VM is not
+stopped, suspended or in fault.
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ _STATUS = {
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
     "vm_share_limit": 400, "vm_preset_copy": 409, "vm_destroy_granted": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
+    "vm_disabled": 409,
 }
 
 #: cua tools that only look, from the 62 the guest's cua-driver 0.38.0 lists
@@ -278,9 +288,14 @@ async def h_requests(request: web.Request) -> web.Response:
     lock, so the dashboard can poll it."""
     if (refused := _user_only(request)) is not None:
         return refused
+    if not enabled():
+        # The dashboard polls this: an off feature has nothing to announce,
+        # and the flag tells it to hide the session's VM pane button.
+        return web.json_response({"enabled": False, "requests": []})
+    await _ensure_hub(request.app)
     reg, _ = _hub(request)
     rows = [{"vm": vm.id, **r} for vm in reg.list() for r in reg.view(vm.id).get("requests") or []]
-    return web.json_response({"requests": rows})
+    return web.json_response({"enabled": True, "requests": rows})
 
 
 async def h_get(request: web.Request) -> web.Response:
@@ -1298,7 +1313,64 @@ async def _bring_up(app: web.Application, vm_id: str, tries: int = 3) -> bool:
 RECONCILE_TRIES = 8
 
 
-async def _background(app: web.Application):
+def enabled() -> bool:
+    """``daemon.vm_enabled``, read fresh: the CLI and the VM tab both write it."""
+    return bool(store.daemon_config().get("vm_enabled", False))
+
+
+def host_support() -> dict:
+    """What this host offers tart: an Apple Silicon Mac and the tart binary.
+    Shown next to the switch; the switch does not depend on it, so a host
+    that gains tart later needs no other change."""
+    import platform
+    import shutil
+    mac = platform.system() == "Darwin"
+    arm = platform.machine() in ("arm64", "aarch64")
+    tart = shutil.which(vm_tart.TART) is not None
+    return {"macos": mac, "apple_silicon": mac and arm, "tart": tart, "ok": mac and arm and tart}
+
+
+def _disabled() -> web.Response:
+    return _err(VmError("vm_disabled", "vm_disabled: the VM feature is off; the user turns it on "
+                                       "in the dashboard's VM tab"))
+
+
+def _gated(handler):
+    """``handler`` behind the switch: refused while the feature is off, and
+    the hub's background work started on the first request after it is on."""
+    async def gated(request: web.Request) -> web.StreamResponse:
+        if not enabled():
+            return _disabled()
+        await _ensure_hub(request.app)
+        return await handler(request)
+    gated.__name__ = getattr(handler, "__name__", "gated")
+    return gated
+
+
+async def _ensure_hub(app: web.Application) -> None:
+    hub = app["vm_hub"]
+    if hub["tasks"] is not None:
+        return
+    async with hub["lock"]:
+        if hub["tasks"] is None:
+            hub["tasks"] = await _start_hub(app)
+
+
+async def _stop_hub(app: web.Application) -> None:
+    hub = app["vm_hub"]
+    async with hub["lock"]:
+        tasks, hub["tasks"] = hub["tasks"], None
+        if tasks is None:
+            return
+        for t in (*tasks, *app.get("vm_tasks", ())):
+            if t is not None:
+                t.cancel()
+        await app["vm_frames"].stop_all()
+        await app["vm_channels"].drop_all()
+
+
+async def _start_hub(app: web.Application) -> list:
+    """Load the registry and start the hub's background work; returns its tasks."""
     reg: Registry = app["vm_registry"]
     mgr: vm_tart.Manager = app["vm_manager"]
 
@@ -1354,14 +1426,48 @@ async def _background(app: web.Application):
                 if vm.state == "running" and vm.ssh_ready:
                     app["vm_channels"].ensure(vm_id)
 
-    task = asyncio.create_task(hand_back())
-    settling = asyncio.create_task(settle())
+    return [asyncio.create_task(hand_back()), asyncio.create_task(settle()), recovery]
+
+
+async def _background(app: web.Application):
+    if enabled():
+        await _ensure_hub(app)
     yield
-    for t in (task, settling, recovery, *app.get("vm_tasks", ())):
-        if t is not None:
-            t.cancel()
-    await app["vm_frames"].stop_all()
-    await app["vm_channels"].drop_all()
+    await _stop_hub(app)
+
+
+#: VM states in which nothing of the guest is running.
+_AT_REST = ("stopped", "suspended", "fault")
+
+
+async def h_enabled(request: web.Request) -> web.Response:
+    """``GET``: the switch and what this host offers. ``POST {"enabled": bool}``
+    (user only): set it. Turning it off is refused while a VM is running,
+    starting or stopping -- the hub that would stop it is what turns off."""
+    if request.method == "POST":
+        if (refused := _user_only(request)) is not None:
+            return refused
+        try:
+            body = await _body(request)
+            want = body.get("enabled")
+            if not isinstance(want, bool):
+                raise VmError("vm_bad_request", "give 'enabled': true or false")
+            if not want and enabled():
+                await _ensure_hub(request.app)
+                busy = [vm.id for vm in request.app["vm_registry"].list() if vm.state not in _AT_REST]
+                if busy:
+                    raise VmError("vm_busy_state", "stop these VMs before turning the VM feature off: "
+                                                   + ", ".join(busy))
+            store.set_daemon_field("vm_enabled", want)
+        except VmError as exc:
+            return _err(exc)
+        except store.StoreError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        if want:
+            await _ensure_hub(request.app)
+        else:
+            await _stop_hub(request.app)
+    return web.json_response({"enabled": enabled(), "host": host_support()})
 
 
 def exit_hook(app: web.Application):
@@ -1373,6 +1479,23 @@ def exit_hook(app: web.Application):
         if name:
             app["vm_registry"].session_exited(name)
     return hook
+
+
+class _GatedRouter:
+    """``app.router`` whose routes are behind :func:`_gated` unless
+    ``gate=False`` says the route works while the feature is off."""
+
+    def __init__(self, router) -> None:
+        self._router = router
+
+    def add_get(self, path, handler, *, gate: bool = True):
+        return self._router.add_get(path, _gated(handler) if gate else handler)
+
+    def add_post(self, path, handler, *, gate: bool = True):
+        return self._router.add_post(path, _gated(handler) if gate else handler)
+
+    def add_delete(self, path, handler, *, gate: bool = True):
+        return self._router.add_delete(path, _gated(handler) if gate else handler)
 
 
 def install(app: web.Application, registry: Optional[Registry] = None,
@@ -1402,8 +1525,11 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     app["vm_channels"] = channels or vm_channel.Hub(
         reg, log_dir=paths.daemon_dir() / "vm")
     app["vm_frames"] = frames or vm_frames.Frames(reg)
+    # Mutable holder, set before the app freezes: the hub starts when the
+    # feature is turned on, which may be long after startup.
+    app["vm_hub"] = {"tasks": None, "lock": asyncio.Lock()}
     app.cleanup_ctx.append(_background)
-    r = app.router
+    r = _GatedRouter(app.router)
     r.add_get("/api/vm", h_list)
     r.add_post("/api/vm", h_register)
     r.add_get("/api/vm/{id}", h_get)
@@ -1424,7 +1550,9 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm-only", h_only)
     r.add_get("/api/vm/{id}/destroy", h_destroy)
     r.add_post("/api/vm/{id}/destroy", h_destroy)
-    r.add_get("/api/vm-requests", h_requests)
+    r.add_get("/api/vm-requests", h_requests, gate=False)
+    r.add_get("/api/vm-enabled", h_enabled, gate=False)
+    r.add_post("/api/vm-enabled", h_enabled, gate=False)
     r.add_get("/api/vm-share-roots", h_share_roots)
     r.add_post("/api/vm-share-roots", h_share_roots)
     r.add_get("/api/vm-share-catalog", h_share_catalog)
@@ -1448,4 +1576,4 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/files/{op:put|get|ls|rm}", h_files)
     r.add_get("/api/vm/{id}/tools", h_tools)
     r.add_get("/api/vm/{id}/frame", h_frame)
-    r.add_get("/vm", h_page)
+    r.add_get("/vm", h_page, gate=False)

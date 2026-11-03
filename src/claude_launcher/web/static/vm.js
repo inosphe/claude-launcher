@@ -1395,12 +1395,49 @@ async function startFrames() {
   }
 }
 
-if (SESSION) {
-  refresh().then(loadSessPresets);
-  setInterval(loadSessPresets, 10000);
-} else {
-  refresh().then(() => { loadSessions(); startFrames(); });
-  setInterval(loadSessions, 10000);
+/* ---- the feature switch (daemon.vm_enabled, off by default) ---- */
+function start() {
+  if (SESSION) {
+    refresh().then(loadSessPresets);
+    setInterval(loadSessPresets, 10000);
+  } else {
+    refresh().then(() => { loadSessions(); startFrames(); });
+    setInterval(loadSessions, 10000);
+  }
+  setInterval(refresh, 2000);
 }
-setInterval(refresh, 2000);
+function showOff(host) {
+  $("vm-main").hidden = true;
+  $("vm-reconcile").hidden = true;
+  $("vm-off").hidden = false;
+  const lacks = [];
+  if (!host.macos) lacks.push("macOS가 아닙니다");
+  else if (!host.apple_silicon) lacks.push("Apple Silicon Mac이 아닙니다");
+  if (!host.tart) lacks.push("tart가 설치되어 있지 않습니다");
+  $("vm-off-host").textContent = host.ok
+    ? "이 호스트는 Apple Silicon macOS이고 tart가 있어 VM을 실행할 수 있습니다."
+    : `이 호스트에서는 VM을 실행할 수 없습니다(${lacks.join(", ")}). 기능을 켤 수는 있지만 VM 시작은 실패합니다.`;
+}
+async function setEnabled(on, label) {
+  try {
+    await post("api/vm-enabled", { enabled: on });
+    location.reload();
+  } catch (e) {
+    say(`${label} 실패: ${e.message}`, true);
+  }
+}
+$("vm-enable").addEventListener("click", () => setEnabled(true, "VM 기능 켜기"));
+$("vm-disable").addEventListener("click", () => {
+  if (!confirm("VM 기능을 끕니다. 정지되지 않은 VM이 있으면 거절됩니다. 계속할까요?")) return;
+  setEnabled(false, "VM 기능 끄기");
+});
+async function boot() {
+  let state = null;
+  // A daemon without the switch (an older one) has no route for it: the page runs as before.
+  try { state = await api("api/vm-enabled"); } catch (_) { /* no switch */ }
+  if (state && state.enabled === false) { showOff(state.host || {}); return; }
+  $("vm-disable").hidden = !state || !!SESSION;
+  start();
+}
+boot();
 })();

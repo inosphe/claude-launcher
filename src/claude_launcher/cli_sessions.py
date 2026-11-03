@@ -2900,6 +2900,8 @@ _CONFIG_KEYS = tuple(store.DAEMON_DEFAULTS)
 #: reminder, stall-ping and event clocks read them every tick), so an edit
 #: needs no restart.
 _LIVE_KEYS = (
+    # read by daemon/vm_api.py on every VM request
+    "vm_enabled",
     "cflow_reminder", "cflow_reminder_interval",
     "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
     # read by /api/model-prices on every dashboard poll (claunch-efihh)
@@ -2938,8 +2940,9 @@ _LIVE_KEYS = (
 #: vm_softnet, vm_softnet_block: they decide what a guest can reach on the
 #: host's network; an agent that could turn them off would lift the isolation
 #: its own VM runs under (vm-setup-8s6).
+#: vm_enabled: whether the daemon runs VMs at all is the person's choice.
 _PERSON_ONLY_KEYS = ("reposync_push", "reposync_pause_precard_s", "delegate_profile", "delegate_model",
-                     "vm_softnet", "vm_softnet_block")
+                     "vm_softnet", "vm_softnet_block", "vm_enabled")
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:

@@ -17,6 +17,9 @@ from claude_launcher.daemon import actors, harness, paths, vm_guard
 
 from test_vm_share import AGENT, Host, api_for, run  # noqa: F401
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 
 @pytest.fixture
 def host(tmp_path):

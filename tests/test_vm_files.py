@@ -29,6 +29,9 @@ from test_vm_channel import World
 from test_vm_frames import Capture
 from test_vm_tart import Fake
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 AGENT = {actors.HEADER: "agent:s1"}
 needs_guest = pytest.mark.skipif(sys.platform != "darwin", reason="the guest scripts use BSD find/stat/mktemp")
 
