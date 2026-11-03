@@ -63,10 +63,11 @@ import json
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
+
+from .. import sqlite_shared
 
 USER = "user"
 UNRESOLVED = ("open", "stale")
@@ -278,6 +279,7 @@ class QaStore:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite_shared.SharedConnection(self.path, row_factory=sqlite3.Row)
         with self._connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -289,30 +291,18 @@ class QaStore:
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
-        try:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=NORMAL")
-            db.execute("PRAGMA busy_timeout=30000")
-            yield db
-        finally:
-            db.close()
+    def _connect(self):
+        """The store's one connection, held by this thread for the block
+        (claude_launcher/sqlite_shared.py says why it is never reopened)."""
+        return self._db.use()
 
-    @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
+    def _write(self):
         """One write transaction, taken before the first read so the
         revision a caller is compared against cannot move under it."""
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                yield db
-            except BaseException:
-                db.execute("ROLLBACK")
-                raise
-            db.execute("COMMIT")
+        return self._db.write()
+
+    def close_connection(self) -> None:
+        self._db.close()
 
     # -- helpers -----------------------------------------------------------
 
