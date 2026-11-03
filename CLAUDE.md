@@ -215,7 +215,7 @@
 - `tests/web/*_browser.cjs` 64개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
   `test_browser_harness`가 `node -e "require.resolve('playwright')"`로 게이트를 열 때만
   실행된다. 이 저장소에는 `package.json`도 `node_modules`도 없으므로 기본 실행에서 그
-  62건은 전부 `pytest.skip`이고, 그 실행의 초록에는 62건의 결과가 들어 있지 않다.
+  64건은 전부 `pytest.skip`이고, 그 실행의 초록에는 64건의 결과가 들어 있지 않다.
 - 켜는 방법은 환경변수 하나다. playwright가 설치된 `node_modules`를 `NODE_PATH`에 두고
   같은 선별을 돌린다. `_run_node`는 `subprocess.run(argv, **kwargs)`로 호출되어
   `env=`를 넘기지 않으므로, 셸의 값이 게이트 검사와 하네스 양쪽에 그대로 상속된다.
