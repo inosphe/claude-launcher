@@ -202,6 +202,8 @@ def test_targets_lists_each_profile_once_with_its_provider_and_reader(home):
             "next_at": None,
             "period_s": profile_usage.PERIOD_SECONDS,
         },
+        # No pool file: the page asks /api/usage/keys for nothing (claunch-feb3f).
+        "pooled": False,
     }
     assert (rows["codex"]["harness"], rows["codex"]["reader"]) == (
         "codex",
@@ -214,6 +216,38 @@ def test_targets_lists_each_profile_once_with_its_provider_and_reader(home):
     assert rows["other"]["supported"] is False
     assert rows["other"]["provider"] == "elsewhere"
     assert "Anthropic service provider" in rows["other"]["reason"]
+
+
+def test_targets_says_when_a_profile_holds_a_key_pool(home):
+    """The page reads a profile's keys only when the daemon says it has a
+    pool (claunch-feb3f): deciding that here costs one file read per profile,
+    where asking /api/usage/keys would cost one request per profile."""
+    work = profile.create("work")
+    plain = profile.create("plain")
+    profile_keys.add(work, "sk-first", label="first")
+    profile_keys.add(work, "sk-second")
+
+    rows = {row["profile"]: row for row in profile_usage.targets()}
+
+    assert rows["work"]["pooled"] is True
+    assert rows["plain"]["pooled"] is False
+    # The row's own key still names the account slot, not a pool key.
+    assert rows["work"]["key"] == "work/default/anthropic"
+    assert rows[plain.name]["supported"] is True
+
+
+def test_targets_survives_an_unreadable_pool_file(home):
+    """A corrupt pool is the keys endpoint's 409 to report, not a reason to
+    drop the profile's usage row: the card keeps its reading and shows no
+    keys (claunch-feb3f)."""
+    work = profile.create("work")
+    profile_keys.add(work, "sk-first")
+    profile_keys.path(work).write_text("{not json", encoding="utf-8")
+
+    rows = {row["profile"]: row for row in profile_usage.targets()}
+
+    assert rows["work"]["supported"] is True
+    assert rows["work"]["pooled"] is False
 
 
 def test_reader_names_the_fetch_path_without_reaching_an_account(home):
