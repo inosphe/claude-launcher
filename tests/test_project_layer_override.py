@@ -198,12 +198,6 @@ GATES = {
     # A path into this checkout is the only form that does not depend on what
     # is installed. tests/test_gates_run_this_checkout.py holds all six to it.
     ("improv-worker", "wrapup"): "tools/report_check.py",
-    # Two git calls, no suite: "is there a merge commit on another branch with
-    # my frozen tip as a parent?". Asked that way on purpose -- "does any
-    # branch contain my tip" answers yes for a child stacked on it, which in a
-    # nested formation is the normal shape, so containment reads as landed
-    # when nothing landed.
-    ("improv-worker", "landed"): "tools/landed_check.py",
     # The measurement the leader's rejection used to be. A worker files a
     # landing request, waits out a 300s batch window plus a sweep, and the
     # target moves while it sits there; the leader then measures the
@@ -292,6 +286,48 @@ def test_the_waiting_probe_is_the_gate_the_worker_already_passed():
         "without it the daemon's signal shows the command, which is true and "
         "does not say what the waiting was about"
     )
+
+
+def test_the_landed_gate_asks_the_packaged_gate_not_this_checkout():
+    """The worker's landed gate names ``claunch gate landed-check``.
+
+    It used to name ``uv run --no-sync python tools/landed_check.py``, and
+    that was right for this repository and wrong for every other one: the
+    definition ships to repositories that have no ``tools/landed_check.py``,
+    where python exits 2 on the missing file and 2 is also the gate's own
+    "cannot tell" -- so a round in one of them asked a person again, every
+    round (claunch-eyajw, claunch-weo4k). ``claunch gate`` runs this
+    checkout's script when it stands in one and the installed package's copy
+    anywhere else (``cli_gate.checkout_script``), so the packaged form keeps
+    the answer portable without giving up "the gate runs the tree it checks".
+
+    Two git calls, no suite: "is there a merge commit on another branch with
+    my frozen tip as a parent?". Asked that way on purpose -- "does any
+    branch contain my tip" answers yes for a child stacked on it, which in a
+    nested formation is the normal shape, so containment reads as landed
+    when nothing landed.
+    """
+    # The packaged copies are what ships; the project copies are this
+    # repository's, and they graft their own checklist back (see
+    # ``GRAFT_FIELDS``). Both halves are asserted so neither can be
+    # "fixed" by editing the other.
+    bundled = Path(__file__).resolve().parents[1] / "src" / "claude_launcher" / "workflows"
+    wf = model.load(bundled / "improv-worker.yaml")
+    merged = wf.steps["landed"].checklist.item("merged")
+    assert merged is not None
+    assert merged.check == "claunch gate landed-check"
+    remote = state_mod.load_bundled("improv-worker-remote")
+    remote_merged = remote.steps["landed"].checklist.item("merged")
+    assert remote_merged is not None
+    assert remote_merged.check.startswith("claunch gate landed-check --fetch")
+    assert "tools/landed_check.py" not in remote_merged.check
+
+    # This repository's own layer keeps the checkout's script: a gate here
+    # runs the tree being checked (tests/test_gates_run_this_checkout.py).
+    local = model.load(OVERRIDES / "improv-worker.yaml")
+    local_merged = local.steps["landed"].checklist.item("merged")
+    assert local_merged is not None
+    assert local_merged.check == "uv run --no-sync python tools/landed_check.py"
 
 
 @pytest.mark.parametrize("key, script", sorted(GATES.items()))

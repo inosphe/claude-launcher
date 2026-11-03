@@ -432,13 +432,25 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
         # containment. A child branch stacked on this tip contains it and has
         # integrated nothing, which in a nested formation is the normal shape
         # -- so containment reads as landed when nothing landed. The question
-        # now lives in the item's own words and in the script it names, and
-        # tools/landed_check.py is where it is actually asked.
+        # now lives in the item's own words and in the gate it names.
         assert "머지 커밋" in merged.describe and "부모" in merged.describe, (
             f"{label}: the merged item must state the merge-parent question, "
             f"not a containment one -- got {merged.describe!r}"
         )
-        assert "landed_check.py" in merged.check
+        # Which gate depends on which copy. The packaged one ships to every
+        # repository, so it names `claunch gate landed-check` -- a relative
+        # tools/ path there is a missing file, and python exits 2, which the
+        # gate reads as "cannot tell" (claunch-weo4k). This repository's
+        # project copy grafts its own script back, because a gate here runs
+        # the tree being checked.
+        expected = (
+            "uv run --no-sync python tools/landed_check.py"
+            if label == "project"
+            else "claunch gate landed-check"
+        )
+        assert expected in merged.check, (
+            f"{label}: the merged item must ask {expected!r} -- got {merged.check!r}"
+        )
         assert "master를 직접 머지하지 않는다" in landed.instructions, (
             f"{label}: landed must forbid turning its own gate green by "
             "merging master, which is the one way to 'pass' it dishonestly"

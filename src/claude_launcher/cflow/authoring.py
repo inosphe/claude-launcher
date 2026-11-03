@@ -298,7 +298,7 @@ landed:
     items:
       - id: merged
         describe: a merge commit on the target lists my tip as a parent
-        check: 'python tools/landed_check.py'
+        check: 'claunch gate landed-check'
       - id: frozen
         describe: the working tree is clean
         check: 'git diff --quiet && git diff --cached --quiet'

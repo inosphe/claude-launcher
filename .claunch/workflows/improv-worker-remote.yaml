@@ -16,13 +16,13 @@
 #     않는다 — 이 변형은 spawn의 workflow: 또는 위저드 행으로 명시해 고른다)
 # 나머지 — intake의 beads 규칙, 표적 테스트, 착지 결정의 두 문, rebase 게이트,
 # 배치·큐·정산·종료 — 는 정본 그대로 돈다. 정렬 게이트(merge_ready.py)와
-# 착지 게이트(landed_check.py)는 정본과 같은 스크립트다: 둘 다 브랜치의 git
+# 착지 게이트(claunch gate landed-check)는 정본과 같은 판정이다: 둘 다 브랜치의 git
 # upstream을 통합 대상으로 읽으므로 remote-setup이 upstream을
 # `<remote>/<base>`로 두는 것으로 같은 게이트가 원격 base를 향해 서고, 원격이
-# 움직인 것을 이 저장소가 보려면 fetch가 필요하므로 두 스크립트에 `--fetch`
+# 움직인 것을 이 저장소가 보려면 fetch가 필요하므로 두 게이트에 `--fetch`
 # 옵션이 있다(대상이 추적하는 원격을 재기 전에 fetch한다 — 게이트 명령은
-# `uv run --no-sync python tools/...` 한 줄이어야 한다는 저장소 규칙 때문에
-# 셸의 `git fetch && ...`가 아니라 스크립트의 옵션이다).
+# 한 줄이어야 하고 셸의 `git fetch && ...`는 종료 코드가 fetch에 묻히므로,
+# 스크립트의 옵션이다).
 #
 # 왜 gh CLI인가 — GitHub Enterprise(사설 호스트)의 PR을 만들고 읽고 머지하는
 # 표준 클라이언트이고, 호스트별 인증(`gh auth login --hostname <host>`,
@@ -116,8 +116,8 @@ steps:
       ── 4. fetch · upstream · 기준선 ──
       `git fetch <remote>` 뒤 `git branch --set-upstream-to=<remote>/<base>`.
       이 한 줄이 통합 대상을 기계가 읽는 사실로 만든다: 정렬 게이트
-      (tools/merge_ready.py)와 착지 게이트(tools/landed_check.py --target
-      @{upstream})는 upstream을 대상으로 읽고, 정본 rebase 스텝의 「대상은 이
+      (tools/merge_ready.py)와 착지 게이트(`claunch gate landed-check
+      --target @{upstream}`)는 upstream을 대상으로 읽고, 정본 rebase 스텝의 「대상은 이
       브랜치의 git upstream」 문장이 그대로 이 브랜치에 성립한다.
       그다음 원격 base가 최신인지 잰다 — `git rev-list --count
       <remote>/<base>..master`(로컬 master가 없는 워크트리면 리더의 통합

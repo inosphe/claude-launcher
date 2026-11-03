@@ -4925,7 +4925,7 @@ with a `stack` sub run beside it).
   default `master`), checks `gh auth status --hostname <host>` — a private
   GitHub Enterprise host is just a hostname to `gh` — and points the branch's
   upstream at `<remote>/<base>`, which is how the unchanged
-  `merge_ready.py` / `landed_check.py --target @{upstream}` gates come to
+  `merge_ready.py` / `claunch gate landed-check --target @{upstream}` gates come to
   measure against the remote. After peer review a `pr-open` step pushes the
   reviewed tip with an explicit refspec (a bare `git push` is forbidden for
   the round) and opens the PR with `gh pr create -R <host>/<owner>/<repo>`;
