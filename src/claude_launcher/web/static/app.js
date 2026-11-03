@@ -1845,8 +1845,19 @@ function syncBulkActions(sessions, filter = "current") {
    safe answer and the destructive one side by side, one click apart. The
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
-function showModal({ title, body, actions, checkbox = null, choices = null, controls = null }) {
-  if (typeof sessionModal !== "undefined" && sessionModal) {
+function showModal({ title, body, actions, checkbox = null, choices = null,
+                     controls = null, overForm = false }) {
+  // The session form lives inside this same dialog's body, so a question
+  // asked FROM that form (the skip-permissions confirm) cannot simply take
+  // the body: the form would be deleted out of the page. `overForm` parks
+  // the form in #new-view for the length of the question and puts it back
+  // untouched after the answer, which is what makes "Back to the form" a
+  // place that still exists (claunch-9mwba). Every other caller keeps the
+  // older arrangement: the session modal is closed first, because a dialog
+  // raised over a form it is not about would otherwise draw on top of one.
+  const parked = overForm && typeof sessionModal !== "undefined" && sessionModal
+    ? parkSessionForm() : null;
+  if (!parked && typeof sessionModal !== "undefined" && sessionModal) {
     sessionModalClose();
     if (sessionModal) return Promise.resolve(null);
   }
@@ -1860,6 +1871,7 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const done = (value) => {
       overlay.classList.add("hidden");
       document.removeEventListener("keydown", onKey);
+      if (parked) restoreSessionForm(parked);
       resolve(value);
     };
     const onKey = (e) => { if (e.key === "Escape") done(null); };
@@ -1964,6 +1976,54 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const first = row.querySelector("button");
     if (first) first.focus();
   });
+}
+
+/* Parking for a question asked on top of the session form (showModal's
+   `overForm`), and putting it back.
+
+   The form is a node inside #modal-body, so the question's body would clear
+   it away. The node is moved home to #new-view for the length of the
+   question and returned as it stands: nothing here reads or writes a field,
+   which is the difference from sessionModalClose -- that one restores every
+   row to what it held when the box opened, and the operator is still typing
+   in that box. The session modal's own answers are taken out for the same
+   length (Escape, a backdrop press), so the answer given belongs to the
+   question. */
+function parkSessionForm() {
+  const form = $("new-session");
+  const home = $("new-view");
+  const overlay = $("modal-overlay");
+  if (!form || !home || !overlay) return null;
+  const focused = document.activeElement;
+  home.appendChild(form);
+  $("modal-body").innerText = "";
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", sessionModalKey);
+  overlay.onclick = null;
+  return { focused };
+}
+
+function restoreSessionForm(parked) {
+  if (typeof sessionModal === "undefined" || !sessionModal) return;
+  const overlay = $("modal-overlay");
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild($("new-session"));
+  // The question's own answers go with the question. Left in the bar they
+  // would stand over a form that never asks them again, and a press on one
+  // settles a promise that settled already — the button would only blink.
+  // openSessionModal leaves this bar empty and puts the form's Cancel inside
+  // the form, so empty is what the form's own state looks like.
+  $("modal-actions").innerHTML = "";
+  // The form's own ways out, put back exactly as openSessionModal set them.
+  overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
+  document.addEventListener("keydown", sessionModalKey);
+  // The title and the submit wording are the question's right now.
+  syncSessionModalChrome();
+  overlay.classList.remove("hidden");
+  refitSoon(60);
+  const back = parked && parked.focused;
+  if (back && back.focus && document.contains(back)) back.focus();
 }
 
 const modalInfo = (title, body) =>
@@ -18343,6 +18403,10 @@ async function confirmStartWithoutSkipPermissions(f, parent) {
       { label: "Back to the form", value: null },
       { label: "Start without skip permissions", value: true },
     ],
+    // The form this submit came from is still open behind the question, and
+    // "Back to the form" means that one -- not a fresh box with the rows
+    // reset to what they held when it opened (claunch-9mwba).
+    overForm: true,
   });
   return answer === true;
 }
@@ -24519,6 +24583,14 @@ function renderTermCflow() {
    the rule reaches every session created before it existed, and why a new one
    shows it until a person presses ignore once.
 
+   A session already running on skip permissions shows nothing at all: the
+   advice has been taken and the classifier is not called, and the strip
+   would be offering only "ignore" -- a permanent record pressed in the one
+   state where it buys nothing, and the one press that could keep the warning
+   away from a session that later runs without the flag. Turning the flag off
+   is a restart, and the strip paints again on the next poll from the row
+   (claunch-9mwba.1).
+
    The provider pair rides the session row (``provider``/``provider_service``,
    published by the daemon): a browser cannot open the config that decides it,
    and a provider's name alone does not say whether it is Anthropic's (the
@@ -24537,8 +24609,16 @@ function termProviderWarnView() {
   const skipping = (typeof argvHasGroup === "function" && group.length)
     ? argvHasGroup((s.args || []).map(String), group)
     : false;
-  return { name: s.name, provider: s.provider || "", skipping,
-           canYolo: group.length > 0 };
+  // A session already on skip permissions is the advice taken: the
+  // permission classifier this strip warns about does not run. So the strip
+  // is not drawn at all -- and it offers no "ignore" press in that state,
+  // because that record is permanent and pressing it there would be the only
+  // way to lose the warning for a session that later runs without the flag.
+  // Nothing is recorded here, so the restart that turns the flag off (a
+  // fresh PTY under the same name) paints the strip again on the next poll
+  // (claunch-9mwba.1).
+  if (skipping) return null;
+  return { name: s.name, provider: s.provider || "", canYolo: group.length > 0 };
 }
 
 function renderTermProviderWarn() {
@@ -24546,7 +24626,7 @@ function renderTermProviderWarn() {
   if (!box) return;
   const view = termProviderWarnView();
   const sig = view
-    ? JSON.stringify([view.name, view.provider, view.skipping])
+    ? JSON.stringify([view.name, view.provider])
     : "hidden";
   // Rebuilt only when what it draws changes: the two-second poll answers the
   // same thing on almost every tick, and replacing a button under the pointer
@@ -24570,17 +24650,13 @@ function renderTermProviderWarn() {
   const btns = el("span", "tpw-buttons");
   // A harness that declares no skip-permissions args has nothing to restart
   // into: offering the press there would be a button that cannot do what it
-  // says. The warning and "ignore" still stand.
+  // says. The warning and "ignore" still stand. A session already ON skip
+  // permissions never reaches this painter -- the view above answers null
+  // for it (claunch-9mwba.1).
   if (view.canYolo) {
-    const yolo = el(
-      "button", "tpw-btn tpw-yolo",
-      view.skipping ? "already on yolo mode" : "restart with yolo mode"
-    );
+    const yolo = el("button", "tpw-btn tpw-yolo", "restart with yolo mode");
     yolo.type = "button";
-    yolo.disabled = !!view.skipping;
-    yolo.title = view.skipping
-      ? "this session already runs with skip permissions"
-      : "restart it with skip permissions — same name, same conversation";
+    yolo.title = "restart it with skip permissions — same name, same conversation";
     yolo.addEventListener("click", () => restartSessionYolo(view.name, yolo));
     btns.appendChild(yolo);
   }

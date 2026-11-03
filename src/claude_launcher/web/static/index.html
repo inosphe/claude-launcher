@@ -766,7 +766,11 @@
          recorded on the session's definition, so it survives a reload, a
          daemon restart and a respawn. Every session without that record shows
          the strip, which is how the rule reaches the sessions that existed
-         before it. Rendered by renderTermProviderWarn(). -->
+         before it. A session already ON skip permissions shows nothing: the
+         classifier is not called, and the strip would offer only the
+         permanent "ignore" press; the strip returns by itself when the flag
+         is turned off (claunch-9mwba.1). Rendered by
+         renderTermProviderWarn(). -->
     <div id="term-provider-warn" class="hidden" role="region"
          aria-label="provider warning"></div>
     <!-- The briefing card the top toggle folds open: the strip that belongs to

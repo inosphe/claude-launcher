@@ -767,6 +767,7 @@ BROWSER_CHECKS = [
         "noticewrap_browser.cjs",
         "noticefold_browser.cjs",
         "sessiontooltip_browser.cjs",
+        "skipconfirm_browser.cjs",
 ]
 
 
