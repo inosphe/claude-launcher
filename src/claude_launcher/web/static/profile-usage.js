@@ -786,7 +786,7 @@
     _test: {
       readUsage, readFacts, readKeyPool, resetText, shownWindows, countdownText, sizeText, chartSeries,
       dollarSeries, chartPlan, niceMax, viewX, chart, windowLine, keyLine, keyRows, tick,
-      keyWindowText, keyUsageLine, keyPoolRows,
+      keyWindowText, keyUsageLine, keyPoolRows, card,
       state,
     },
   };

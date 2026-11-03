@@ -3892,6 +3892,13 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
             "cached": cached,
             "updated_at": updated_at,
             "next_at": updated_at + profile_usage.PERIOD_SECONDS,
+            # The account's month split by API key and the daemon's reason
+            # for an empty one: the profile usage card draws both under the
+            # total (:func:`keyRows`), so a body rebuilt without them makes a
+            # Fireworks account claim it did not break its spend down
+            # (claunch-feb3f review). They are already in the fetch answer.
+            "api_keys": body.get("api_keys") or [],
+            "api_keys_note": body.get("api_keys_note"),
         }
     except (usage.UsageError, credentials.CredentialsError) as exc:
         usage_error = str(exc)

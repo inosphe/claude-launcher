@@ -207,6 +207,40 @@ def test_usage_keys_reads_a_single_token_profile(monkeypatch):
     assert asked == [[]]
 
 
+def test_usage_keys_preview_keeps_the_accounts_api_key_split(monkeypatch):
+    """The preview's rebuilt body carries the spend split (claunch-feb3f).
+
+    The profile usage card draws ``api_keys``/``api_keys_note`` under the
+    account total, and for a pooled profile that total is this preview's
+    ``usage`` body. Rebuilding the body without them made a Fireworks account
+    say it did not break its spend down by API key, which it does.
+    """
+    prof = SimpleNamespace(name="work")
+    body = dict(
+        _body(),
+        api_keys=[{"key_id": "key_a", "label": "ds4", "used_dollars": 5.97}],
+        api_keys_note="One key of this account has spent this month.",
+    )
+    monkeypatch.setattr(api.profile_keys, "view", lambda _p: _view())
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (body, True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": None,
+            "keys": {},
+            "unmeasurable": None,
+        },
+    )
+
+    doc = api._credential_preview(prof, "work", False)
+
+    assert doc["usage"]["api_keys"] == body["api_keys"]
+    assert doc["usage"]["api_keys_note"] == body["api_keys_note"]
+
+
 def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypatch):
     prof = SimpleNamespace(name="work")
     keys = [

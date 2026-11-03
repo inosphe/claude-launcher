@@ -307,6 +307,27 @@ const body = {
     .children[0].textContent.includes('cannot be read: the usage reader belongs to the login'));
   assert.ok(T.keyPoolRows(poolOf([]), false).children[0].textContent.includes('no keys in its pool'));
 
+  // The card() wiring: a pooled row draws the pool under its reading, and a
+  // Fireworks reading keeps the account's month split by API key. The daemon
+  // used to rebuild the preview body without api_keys/api_keys_note, so the
+  // card told a Fireworks account it had not broken its spend down
+  // (claunch-feb3f review).
+  const cardRow = { key: 'fw/fireworks-billing', profile: 'fw',
+    provider: 'fireworks', harness: 'claude', pooled: true };
+  T.state.values.set(cardRow.key, { data: {
+    source: 'fireworks-billing',
+    windows: [{ name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }],
+    api_keys: [{ key_id: 'key_a', label: 'ds4', used_dollars: 5.97 }],
+  }, cached: false, updatedAt: 1792650200, error: '' });
+  T.state.keyPools.set(cardRow.key, poolOf([
+    { id: 'k-1', label: 'main', masked: 'fw_…AB12', current: true,
+      usage: { windows: [{ name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }] } }]));
+  const texts = (el) => [el.textContent].concat(...el.children.map(texts));
+  const shown = texts(T.card(cardRow)).join('\n');
+  assert.ok(shown.includes('This month by API key'), 'the card keeps the API-key split');
+  assert.ok(!shown.includes('did not break its spend down'), 'the card does not deny the split');
+  assert.ok(shown.includes("All 1 key in this profile's pool"), 'the card draws the pool rows');
+
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],
     ['512 B', '2.0 KB', '3.0 MB']);
