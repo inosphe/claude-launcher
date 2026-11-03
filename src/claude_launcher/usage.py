@@ -19,6 +19,11 @@ a Claude-compatible Kimi provider can call it with that profile's API key.
 A Fireworks provider has no plan limit; its reading is the account's spend
 (claunch-f5w4x.5): the month to date from the ``monthly-spend-usd`` quota,
 and, when the configuration records a credit balance, what is left of it.
+The account's quota is one number however many keys spend it, so the reading
+also rates each API key separately (``usageCosts:query`` grouped by
+``API_KEY``) and names each key: the local profile whose launcher token is
+that key when the launcher can tell, else the console's own key name
+(claunch-uqnek).
 An OpenCode Go provider (``opencode.ai/zen/go``) reports its plan windows --
 the rolling 5 hours, the week and the month, each a percentage and a reset
 time -- at ``/zen/go/v1/usage``, read with the profile's API key.
@@ -43,11 +48,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import config, credentials, harnesses, lineage, metering, providers, runner, store
+from . import profile as profile_mod
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -59,6 +65,8 @@ _FIREWORKS_HOSTS = {"api.fireworks.ai", "api.fireworks.ai:443"}
 _FIREWORKS_API = "https://api.fireworks.ai/v1"
 #: The quota value an account without a spend limit reports.
 _FIREWORKS_NO_LIMIT = 9_999_999
+#: The ``usageCosts:query`` grouping that rates each API key separately.
+_FIREWORKS_KEY_GROUP = "API_KEY"
 _OPENCODE_GO_HOSTS = {"opencode.ai", "opencode.ai:443"}
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 #: OpenCode Go's window names, and the names a reading gives them.
@@ -95,10 +103,28 @@ class UsageWindow:
 
 
 @dataclass(frozen=True)
+class UsageKeyAmount:
+    """One API key's rated cost inside an account several keys share.
+
+    A Fireworks account reports one monthly spend whoever spends it, so two
+    profiles that hold different keys of that account print the same number
+    until the reading names the keys (:func:`_fetch_fireworks`). ``label``
+    is the local profile that holds the key when the launcher can tell,
+    else the console's own name for the key, else ``key_id``.
+    """
+
+    key_id: str
+    label: str
+    used_dollars: float
+
+
+@dataclass(frozen=True)
 class UsageReport:
     windows: List[UsageWindow]
     raw: dict
     source: str = "oauth-usage"
+    #: The account's spend split by API key, when its API rates keys apart.
+    api_keys: List[UsageKeyAmount] = field(default_factory=list)
 
 
 def _headers(token: str) -> dict:
@@ -769,12 +795,17 @@ def credit_setting(profile: Profile) -> Optional[tuple[float, date]]:
     return balance, as_of
 
 
-def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
-    url = f"{_FIREWORKS_API}/{path}"
-    if query:
-        url += "?" + urllib.parse.urlencode(query)
+def _fireworks_request(url: str, token: str, body: Optional[dict] = None) -> dict:
+    """One Fireworks API call: ``GET``, or ``POST`` when ``body`` is given."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        url,
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -797,6 +828,13 @@ def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
     return payload
 
 
+def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
+    url = f"{_FIREWORKS_API}/{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    return _fireworks_request(url, token)
+
+
 def _money(value) -> float:
     """A ``google.type.Money`` value (``units`` string, ``nanos``) in units."""
     if not isinstance(value, dict):
@@ -816,6 +854,154 @@ def _fireworks_spent_since(account: str, token: str, since: date, today: date) -
         },
     )
     return sum(_money(item.get("totalCost")) for item in summary.get("lineItems") or [])
+
+
+def _fireworks_stamp(moment: datetime) -> str:
+    """``moment`` as the RFC 3339 stamp ``usageCosts:query`` takes."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _stored_tokens() -> List[tuple]:
+    """``(profile name, launcher token)`` for every profile that holds one.
+
+    The profile's *own* token file, not the token it inherits: a profile with
+    no token of its own launches with its ancestor's, and naming it here
+    would repeat one key under every descendant that borrows it.
+    """
+    pairs: List[tuple] = []
+    try:
+        profiles = profile_mod.list_all()
+    except (OSError, profile_mod.ProfileError):
+        return pairs
+    for candidate in profiles:
+        try:
+            token = credentials.stored_token(candidate)
+        except (OSError, credentials.CredentialsError, profile_mod.ProfileError):
+            token = None
+        token = str(token or "").strip()
+        if token:
+            pairs.append((candidate.name, token))
+    return pairs
+
+
+def _fireworks_key_owners(keys: List[dict]) -> Dict[str, List[str]]:
+    """The local profiles that hold each of ``keys``, keyed by ``keyId``.
+
+    The console names a key whatever the person typed there (``default``,
+    ``rni-kimdaejin``), which answers "which key" but not "which of my
+    profiles". The launcher knows that: a Fireworks key here *is* the
+    launcher token of the profile that holds it, and the console reports
+    each key's leading characters as ``prefix``. So a profile whose stored
+    token starts with the prefix holds that key, and two profiles on one
+    account come out named instead of numbered.
+
+    Every profile is asked, not only the Fireworks ones: the prefix already
+    identifies the holder, and resolving each profile's provider would read
+    the configuration once per profile for a filter that cannot change the
+    answer.
+    """
+    pairs = _stored_tokens()
+    owners: Dict[str, List[str]] = {}
+    if not pairs:
+        return owners
+    for item in keys:
+        key_id = str(item.get("keyId") or "").strip()
+        prefix = str(item.get("prefix") or "").strip()
+        if not key_id or not prefix:
+            continue
+        names = [name for name, token in pairs if token.startswith(prefix)]
+        if names:
+            owners[key_id] = names
+    return owners
+
+
+def _fireworks_api_keys(account: str, token: str) -> List[dict]:
+    """The account's API keys, as ``keyId``/``displayName``/``prefix``."""
+    users = _fireworks_get(f"{account}/users", token).get("users") or []
+    user = ""
+    if users and isinstance(users[0], dict):
+        user = str(users[0].get("name") or "").rsplit("/", 1)[-1].strip()
+    if not user:
+        return []
+    reply = _fireworks_get(f"{account}/users/{user}/apiKeys", token)
+    return [item for item in reply.get("apiKeys") or [] if isinstance(item, dict)]
+
+
+def _fireworks_key_amounts(
+    account: str, token: str, now: datetime
+) -> List[UsageKeyAmount]:
+    """Month-to-date rated cost per API key of ``account``.
+
+    The account-wide quota this reader already shows cannot tell two keys
+    apart, which is why two profiles on one account print the same spend.
+    ``usageCosts:query`` rates each key separately, and the account's own
+    total is the same answer's top-level subtotal.
+
+    The key list is asked separately because a key with no usage this month
+    has no cost row to carry its name; a failure there costs the labels, not
+    the amounts.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    month_start = now.astimezone(timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    reply = _fireworks_request(
+        f"{_FIREWORKS_API}/{account}/usageCosts:query",
+        token,
+        {
+            "startTime": _fireworks_stamp(month_start),
+            "endTime": _fireworks_stamp(now),
+            "scope": "ACCOUNT",
+            "groupBy": [_FIREWORKS_KEY_GROUP],
+        },
+    )
+    totals: Dict[str, float] = {}
+    for row in reply.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        dimensions = row.get("dimensions")
+        if not isinstance(dimensions, dict):
+            continue
+        key_id = str(dimensions.get("apiKeyId") or "").strip()
+        if not key_id:
+            # A row whose usage could not be attributed to a key. It still
+            # counts in the account total, which is the window above.
+            continue
+        totals[key_id] = totals.get(key_id, 0.0) + _money(row.get("subtotal"))
+    if not totals:
+        return []
+    labels: Dict[str, str] = {}
+    try:
+        keys = _fireworks_api_keys(account, token)
+        owners = _fireworks_key_owners(keys)
+        for item in keys:
+            key_id = str(item.get("keyId") or "").strip()
+            if not key_id:
+                continue
+            names = owners.get(key_id)
+            if names:
+                labels[key_id] = ", ".join(names)
+            elif item.get("displayName"):
+                labels[key_id] = str(item["displayName"])
+            else:
+                labels[key_id] = key_id
+    except (UsageError, credentials.CredentialsError, OSError):
+        # The amounts are still worth showing: an unnamed key is named by its
+        # id rather than dropping the breakdown over a label.
+        labels = {}
+    amounts = [
+        UsageKeyAmount(
+            key_id=key_id,
+            label=labels.get(key_id, key_id),
+            used_dollars=round(amount, 6),
+        )
+        for key_id, amount in totals.items()
+    ]
+    amounts.sort(key=lambda item: (-item.used_dollars, item.key_id))
+    return amounts
 
 
 def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = None) -> UsageReport:
@@ -863,7 +1049,19 @@ def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = Non
             )
         )
         raw["credit"] = {"balance_usd": balance, "as_of": as_of.isoformat(), "spent": used}
-    return UsageReport(windows=windows, raw=raw, source="fireworks-billing")
+    # The account total above cannot tell two keys of one account apart, so
+    # this profile's card would print the same spend as its siblings'. The
+    # per-key breakdown is what separates them; when the account's API will
+    # not rate keys (or the key list cannot be read) the card keeps the
+    # total alone rather than failing a reading that already has a number.
+    api_keys: List[UsageKeyAmount] = []
+    try:
+        api_keys = _fireworks_key_amounts(account, token, now)
+    except (UsageError, credentials.CredentialsError, OSError) as exc:
+        raw["api_keys_error"] = str(exc)
+    return UsageReport(
+        windows=windows, raw=raw, source="fireworks-billing", api_keys=api_keys
+    )
 
 
 def _codex_window_name(minutes) -> str:

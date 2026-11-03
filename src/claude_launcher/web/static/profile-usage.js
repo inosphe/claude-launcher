@@ -447,6 +447,47 @@
     return line;
   }
 
+  /* One API key's share of the account's spend. A Fireworks account several
+     keys share reports one total whichever key is asked, so without this
+     line two profiles holding different keys of it print the same number
+     (claunch-uqnek). The label is the local profile that holds the key when
+     the daemon can tell, the console's own name next, the key id last. */
+  function keyLine(item, total) {
+    const line = node("div", "profile-usage-window profile-usage-key");
+    const amount = dollars(item.used_dollars);
+    line.append(
+      node("strong", "", item.label || item.key_id),
+      node("span", "profile-usage-pct", money(item.used_dollars)),
+    );
+    const share = Number.isFinite(total) && total > 0 && Number.isFinite(amount)
+      ? Math.max(0, Math.min(100, amount / total * 100)) : NaN;
+    if (Number.isFinite(share)) {
+      line.append(node("small", "", `${share.toFixed(0)}% of the account's month`));
+    }
+    const bar = node("div", "profile-usage-bar low");
+    const fill = node("span");
+    fill.style.width = `${Number.isFinite(share) ? share : 0}%`;
+    bar.append(fill);
+    line.append(bar);
+    return line;
+  }
+
+  /* The account's month split by API key, under the total it splits. */
+  function keyRows(reading) {
+    const items = Array.isArray(reading.data.api_keys) ? reading.data.api_keys : [];
+    const box = node("div", "profile-usage-keys");
+    if (!items.length) {
+      box.append(node("p", "wf-note",
+        "This account did not break its spend down by API key; only the account total is shown."));
+      return box;
+    }
+    const month = (reading.data.windows || []).find((w) => w.name === "monthly_spend");
+    const total = month ? dollars(month.used_dollars) : NaN;
+    box.append(node("p", "wf-note profile-usage-keys-head", "This month by API key"));
+    for (const item of items) box.append(keyLine(item, total));
+    return box;
+  }
+
   function card(row) {
     const busy = state.busy.has(row.key);
     const section = node("section", "window-section stats-section profile-usage-card");
@@ -486,6 +527,9 @@
       const windows = reading.data.windows || [];
       if (!windows.length) section.append(node("p", "wf-note", "No usage windows reported."));
       for (const window of shownWindows(windows)) section.append(windowLine(window));
+      // A source that reports the account's spend (Fireworks) is split by API
+      // key when the account's API rates keys apart.
+      if (reading.data.source === "fireworks-billing") section.append(keyRows(reading));
       // The Fireworks API reports no prepaid balance (claunch-f5w4x.5).
       if (reading.data.source === "fireworks-billing" && !windows.some((w) => w.name === "credit")) {
         section.append(node("p", "wf-note", "To show credit left, copy the balance from the Fireworks console into ~/.claude-launcher/.claunch.yaml as credit: {balance_usd: <amount>, as_of: <YYYY-MM-DD>} on this provider or profile."));
@@ -594,7 +638,8 @@
     open, stop,
     _test: {
       readUsage, readFacts, resetText, shownWindows, countdownText, sizeText, chartSeries,
-      dollarSeries, chartPlan, niceMax, viewX, chart, windowLine, tick, state,
+      dollarSeries, chartPlan, niceMax, viewX, chart, windowLine, keyLine, keyRows, tick,
+      state,
     },
   };
 })();

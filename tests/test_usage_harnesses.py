@@ -471,29 +471,48 @@ def test_opencode_endpoint_other_than_go_has_no_reader(home):
         usage.reader(usage.resolve_target(p))
 
 
-def _fireworks_profile(name="fw", credit=None):
+def _fireworks_profile(name="fw", credit=None, token="fw-secret"):
     p = profile.create(name)
     entry = {"env": {"ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference"}}
     if credit is not None:
         entry["credit"] = credit
     store.update(lambda doc: doc.update({"providers": {"fireworks": entry}}))
     providers.set_profile_selection(p, "fireworks")
-    credentials.save_token(p, "fw-secret")
+    credentials.save_token(p, token)
     return p
 
 
-def _fireworks_api(monkeypatch, *, spend="247.84", limit="9999999", line_items=()):
+def _fireworks_api(
+    monkeypatch, *, spend="247.84", limit="9999999", line_items=(),
+    api_keys=(), key_costs=(), missing=(),
+):
+    """The Fireworks endpoints this reader asks, answered from the arguments.
+
+    ``key_costs`` is ``(apiKeyId, google.type.Money)`` pairs for
+    ``usageCosts:query``; ``api_keys`` is the account's key list; a path in
+    ``missing`` answers 404 the way an account without that surface does.
+    """
     reached = []
     replies = {
         "/v1/accounts": {"accounts": [{"name": "accounts/acme"}]},
         "/v1/accounts/acme/quotas/monthly-spend-usd": {"usage": float(spend), "value": limit},
         "/v1/accounts/acme/billing/summary": {"lineItems": list(line_items)},
+        "/v1/accounts/acme/users": {"users": [{"name": "accounts/acme/users/me"}]},
+        "/v1/accounts/acme/users/me/apiKeys": {"apiKeys": list(api_keys)},
+        "/v1/accounts/acme/usageCosts:query": {"rows": [
+            {"dimensions": {"apiKeyId": key_id}, "subtotal": cost}
+            for key_id, cost in key_costs
+        ]},
     }
 
     def fake_urlopen(req, timeout):
         parts = usage.urllib.parse.urlsplit(req.full_url)
         reached.append((parts.path, dict(usage.urllib.parse.parse_qsl(parts.query))))
         assert req.get_header("Authorization") == "Bearer fw-secret"
+        if parts.path in missing:
+            raise usage.urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {},
+                io.BytesIO(b'{"code": 5, "message": "Not Found"}'))
         return _FakeResponse(json.dumps(replies[parts.path]).encode())
 
     monkeypatch.setattr(usage.urllib.request, "urlopen", fake_urlopen)
@@ -513,9 +532,12 @@ def test_fireworks_provider_reads_the_month_spend_and_no_limit(home, monkeypatch
     assert (month.name, month.used_dollars, month.limit_dollars, month.remaining_dollars) == (
         "monthly_spend", 247.84, None, None)
     assert month.utilization == 0.0 and month.resets_at.endswith("-01T00:00:00Z")
-    # No credit recorded: the billing summary is not asked.
+    # No keys rated and no credit recorded: the key breakdown asks the cost
+    # endpoint, and the billing summary is not asked.
+    assert report.api_keys == []
     assert [path for path, _ in reached] == [
-        "/v1/accounts", "/v1/accounts/acme/quotas/monthly-spend-usd"]
+        "/v1/accounts", "/v1/accounts/acme/quotas/monthly-spend-usd",
+        "/v1/accounts/acme/usageCosts:query"]
 
 
 def test_fireworks_credit_left_is_the_balance_less_the_spend_since_its_day(home, monkeypatch):
@@ -536,8 +558,8 @@ def test_fireworks_credit_left_is_the_balance_less_the_spend_since_its_day(home,
     assert (credit.used_dollars, credit.limit_dollars) == (247.0, 500.0)
     assert credit.remaining_dollars == 253.0 and credit.utilization == 247.0 / 500 * 100
     # The summary covers the balance's day through today (its end is exclusive).
-    assert reached[-1] == ("/v1/accounts/acme/billing/summary", {
-        "startTime": "2026-10-01T00:00:00Z", "endTime": "2026-10-23T00:00:00Z"})
+    assert ("/v1/accounts/acme/billing/summary", {
+        "startTime": "2026-10-01T00:00:00Z", "endTime": "2026-10-23T00:00:00Z"}) in reached
 
 
 def test_a_profile_credit_entry_wins_over_the_providers(home, monkeypatch):
@@ -564,3 +586,95 @@ def test_cli_prints_fireworks_dollars(home, monkeypatch, capsys):
     assert "(via Fireworks billing API)" in out
     assert "$247.84" in out
     assert "$100.00 of $500.00, $400.00 left" in out
+
+
+def test_fireworks_reading_names_each_key_by_the_profile_that_holds_it(home, monkeypatch):
+    """claunch-uqnek: one account, two keys, two profiles.
+
+    The account's quota is one number whichever key asks, so ds4 and ds4-kdj
+    print the same spend until the reading rates the keys apart. The console
+    names a key ``default`` or ``rni-kimdaejin``; the launcher knows which
+    profile holds each, because a key here is that profile's launcher token
+    and the console reports the token's leading characters as ``prefix``.
+    """
+    _fireworks_profile("fw", token="fw-secret")
+    _fireworks_profile("fw2", token="fw-second")
+    # A profile that only inherits its parent's token is not a second holder
+    # of that key: it launches with the same one, and naming it would repeat
+    # the key under every descendant that borrows it.
+    child = profile.create("fw-child")
+    store.update(lambda doc: doc["profiles"][child.name].update({"parent": "fw"}))
+    _fireworks_api(
+        monkeypatch,
+        api_keys=[
+            {"keyId": "key_a", "displayName": "default", "prefix": "fw-secr"},
+            {"keyId": "key_b", "displayName": "rni-kimdaejin", "prefix": "fw-seco"},
+        ],
+        key_costs=[
+            ("key_a", {"currencyCode": "USD", "units": "2", "nanos": 524285992}),
+            ("key_b", {"currencyCode": "USD", "units": "3", "nanos": 442441560}),
+        ],
+    )
+
+    report = usage.fetch(usage.resolve_target(profile.require_selector("fw")))
+
+    assert [(k.label, round(k.used_dollars, 6)) for k in report.api_keys] == [
+        ("fw2", 3.442442), ("fw", 2.524286)]
+    assert [k.key_id for k in report.api_keys] == ["key_b", "key_a"]
+
+
+def test_fireworks_names_a_key_no_local_profile_holds_by_its_console_name(home, monkeypatch):
+    _fireworks_profile("fw", token="fw-secret")
+    _fireworks_api(
+        monkeypatch,
+        api_keys=[{"keyId": "key_a", "displayName": "ci-runner", "prefix": "fw_other"}],
+        key_costs=[("key_a", {"currencyCode": "USD", "units": "1", "nanos": 0})],
+    )
+
+    report = usage.fetch(usage.resolve_target(profile.require_selector("fw")))
+
+    [key] = report.api_keys
+    assert (key.key_id, key.label, key.used_dollars) == ("key_a", "ci-runner", 1.0)
+
+
+def test_fireworks_falls_back_to_the_account_total_when_keys_cannot_be_rated(
+    home, monkeypatch,
+):
+    """An account whose API will not rate keys still has a spend to show."""
+    p = _fireworks_profile()
+    _fireworks_api(monkeypatch, missing={"/v1/accounts/acme/usageCosts:query"})
+
+    report = usage.fetch(usage.resolve_target(p))
+
+    assert report.api_keys == []
+    [month] = report.windows
+    assert month.used_dollars == 247.84
+    assert "404" in report.raw["api_keys_error"]
+
+
+def test_fireworks_key_amounts_cover_the_month_to_date(home, monkeypatch):
+    p = _fireworks_profile()
+    bodies = []
+    reached = _fireworks_api(
+        monkeypatch,
+        key_costs=[("key_a", {"currencyCode": "USD", "units": "1", "nanos": 0})],
+    )
+    now = usage.datetime(2026, 10, 22, 21, 0, tzinfo=usage.timezone.utc)
+    original = usage._fireworks_request
+
+    def recording(url, token, body=None):
+        if body is not None:
+            bodies.append(body)
+        return original(url, token, body)
+
+    monkeypatch.setattr(usage, "_fireworks_request", recording)
+
+    usage._fetch_fireworks(usage.resolve_target(p), "fw-secret", now=now)
+
+    assert bodies == [{
+        "startTime": "2026-10-01T00:00:00Z",
+        "endTime": "2026-10-22T21:00:00Z",
+        "scope": "ACCOUNT",
+        "groupBy": ["API_KEY"],
+    }]
+    assert "/v1/accounts/acme/usageCosts:query" in [path for path, _ in reached]

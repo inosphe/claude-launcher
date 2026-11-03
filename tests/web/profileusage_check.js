@@ -21,7 +21,10 @@
                      Fireworks account, claunch-f5w4x.5) chart in dollars:
                      credit left and month spend, unclamped; a dollar window
                      is shown even at 0%; the axis tops out at a 1-2-5 step.
-     disk         -- sizes read as B / KB / MB. */
+     disk         -- sizes read as B / KB / MB.
+     api keys     -- an account's month split by API key (claunch-uqnek):
+                     each key's label and share of the account total, and a
+                     note when the account does not break spend down. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -196,6 +199,28 @@ const body = {
   assert.ok(Math.abs(hover(W - R - 0.5) - (W - R)) < 1e-6, 'right end: last sample');
   const quarter = L + (W - L - R) / 4;
   assert.ok(Math.abs(hover(quarter) - quarter) < 1e-6, 'a quarter in: the sample at 2h');
+
+  // API keys of one account (claunch-uqnek): a Fireworks account several
+  // keys share reports one total whichever key asks, so the card splits it.
+  // The label is the local profile that holds the key when the daemon can
+  // tell, the console's own name next, the key id last; the share is against
+  // the account's month, and an answer with no breakdown says so instead of
+  // drawing nothing.
+  const split = T.keyRows({ data: { source: 'fireworks-billing', windows: [
+    { name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }],
+    api_keys: [
+      { key_id: 'key_b', label: 'ds4-kdj', used_dollars: 3.44 },
+      { key_id: 'key_a', label: 'ds4', used_dollars: 2.53 },
+      { key_id: 'key_c', used_dollars: 0 }] } });
+  const rows = split.children.slice(1);
+  same(rows.map((el) => el.children[0].textContent), ['ds4-kdj', 'ds4', 'key_c']);
+  same(rows.map((el) => el.children.find((c) => c.tag === 'small').textContent),
+    ["58% of the account's month", "42% of the account's month",
+     "0% of the account's month"]);
+  assert.strictEqual(rows[2].children[1].textContent, '$0.00');
+  const bare = T.keyRows({ data: { windows: [], api_keys: [] } });
+  assert.strictEqual(bare.children.length, 1);
+  assert.ok(bare.children[0].textContent.includes('did not break its spend down by API key'));
 
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],
