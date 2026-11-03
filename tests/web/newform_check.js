@@ -418,6 +418,24 @@ check("the create form provides an announced pending status",
       /id="create-status"/.test(html) && /role="status"/.test(html) &&
         /aria-live="polite"/.test(html), true);
 
+/* ---- the tick has to reach the request ----
+   `renderSessionForm` disables every control whose name is not in the mode's
+   `editable`, and `sessionFormPayload` keeps only the names in its `payload`.
+   A row named in neither is drawn, can be read by the submit handler, and
+   still arrives as nothing — which is how the automatic key switch shipped on
+   this form once (claunch-d2t79 review). Both tabs ask it: a created session
+   and a spawned child each keep their own answer. */
+const formConfig = new Function(
+  `${sliceFrom("function sessionFormConfig(")}; return sessionFormConfig;`)();
+const formPayload = new Function("sessionFormConfig",
+  `${sliceFrom("function sessionFormPayload(")}; return sessionFormPayload;`)(formConfig);
+check("the automatic key switch is editable on both tabs",
+      ["new", "spawn"].map((m) => formConfig(m).editable.includes("auto_key_switch")),
+      [true, true]);
+check("...and its tick survives the payload filter on both tabs",
+      ["new", "spawn"].map((m) => formPayload(m, { auto_key_switch: true }).auto_key_switch),
+      [true, true]);
+
 /* The board's own rule, read out of the submit handler: "new" is the absence
    of both keys. A request that says nothing gets an issue minted from its
    task, which is what every client written before this row still sends — so

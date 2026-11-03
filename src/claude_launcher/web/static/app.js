@@ -55462,7 +55462,11 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "note", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
+    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt",
+    // Asked on the face of the form on both tabs (claunch-d2t79). Without
+    // the name here renderSessionForm greys the box and sessionFormPayload
+    // drops the tick, so the answer would read as taken and never travel.
+    "auto_key_switch"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
@@ -55470,7 +55474,7 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "resume", "fork_session", "key_id"] },
+        "resume", "fork_session", "key_id", "auto_key_switch"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
@@ -55478,7 +55482,7 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "fork", "connect", "over_limit", "auto_compact"] },
+        "fork", "connect", "over_limit", "auto_compact", "auto_key_switch"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
         "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge",

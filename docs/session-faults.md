@@ -276,6 +276,14 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   pause 전에 다른 키로 갈아탄다(`daemon/key_switch.py`). 같은 pass에서 이 전환이
   먼저 돌고, 살아난 세션은 fault 판독이 새 화면이라 pause 대상에서 빠진다 —
   clock을 둘로 나누면 전환이 재시작하려는 세션을 pause가 먼저 잡는 창이 생긴다.
+  - 켜는 자리는 셋이다. (1) 키 모달 — 세션 카드의 키 칩이나 detail panel의
+    Restart settings에서 연 「Change key…」 모달 안의 체크박스이고, 값을 쓰는
+    라우트는 `POST /api/sessions/<name>/auto-key-switch`다. Restart settings 줄은
+    지금 키와 이 값의 상태를 함께 보여 준다. (2) new session 폼과 spawn child
+    폼의 체크박스 — 체크되었을 때만 `auto_key_switch: true`를 바디에 싣고,
+    생성 라우트와 `spawn.check()`가 각각 정의에 옮긴다. 요청에 값이 없으면
+    자식은 꺼짐으로 시작한다(상속하지 않는다). (3) Settings 페이지의
+    `fault_key_switch_retries` — 세션별 스위치가 아니라 재시도 횟수다.
   - 고르는 키는 `usage min` 하나로 고정한다(`profile_keys.switch_candidate`).
     후보는 풀의 키 가운데 (1) 어느 윈도도 한도에 닿지 않았고 (2) 지금 이 세션이
     쓰는 키가 아닌 것이다. 순서는 윈도별 사용률의 **최댓값**이 작은 순이고,

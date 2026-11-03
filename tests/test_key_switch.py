@@ -453,6 +453,78 @@ def test_the_answer_round_trips_and_says_nothing_when_off():
 
 
 # --------------------------------------------------------------------------- #
+# the answer travels — a spawned child, and the create route (d2t79 review)
+# --------------------------------------------------------------------------- #
+def test_a_spawned_child_carries_the_answer(home):
+    """`spawn.check` hands back the subset a child is built from; without this
+    the form's tick reached the route and was dropped there."""
+    from claude_launcher import spawn
+
+    profile_mod.create("p1")
+    parent = {"name": "lead", "harness": "claude", "profile": "p1",
+              "cwd": "/tmp/p", "args": [], "env": {}, "effort": None}
+
+    child = spawn.check(spawn.SpawnPolicy.load(), {"auto_key_switch": True},
+                        parent=parent, depth=0, children=0)
+
+    assert child["auto_key_switch"] is True
+    # The field is a session's own answer, not an inherited one: a request
+    # that says nothing leaves the child at its default rather than copying
+    # the parent's setting.
+    plain = spawn.check(spawn.SpawnPolicy.load(), {}, parent=parent,
+                        depth=0, children=0)
+    assert "auto_key_switch" not in plain
+
+
+def test_the_create_route_stores_the_answer(home, tmp_path, monkeypatch):
+    """POST /api/sessions carries the tick into the definition it stages."""
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon import api
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        profile_mod.create("p1")
+        monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+        async def onboard(request, session, body, **_kwargs):
+            return {"test_onboarding": True}
+
+        monkeypatch.setattr(api, "_onboard_and_launch", onboard)
+        manager = SessionManager(idle_threshold=0.5, scrollback=50,
+                                 restore_default=True)
+        app = api.build_app(manager, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                headers={"Authorization": "Bearer sekrit"},
+                json={"name": "s1", "profile": "p1", "cwd": str(tmp_path),
+                      "beads": False, "auto_key_switch": True},
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert manager.get("s1").sdef.auto_key_switch is True
+            # Column: the same request without the field keeps the default.
+            resp = await client.post(
+                "/api/sessions",
+                headers={"Authorization": "Bearer sekrit"},
+                json={"name": "s2", "profile": "p1", "cwd": str(tmp_path),
+                      "beads": False},
+            )
+            assert resp.status == 201, await resp.json()
+            assert manager.get("s2").sdef.auto_key_switch is False
+        finally:
+            await manager.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
 # the two routes: the session's answer, and the machine's retry cap
 # --------------------------------------------------------------------------- #
 class _Req:
