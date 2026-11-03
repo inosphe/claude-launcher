@@ -221,6 +221,17 @@ const body = {
   const bare = T.keyRows({ data: { windows: [], api_keys: [] } });
   assert.strictEqual(bare.children.length, 1);
   assert.ok(bare.children[0].textContent.includes('did not break its spend down by API key'));
+  // The daemon words the reason when it has one (claunch-uqnek.1): an empty
+  // month, unreadable keys and an account that does not rate keys are three
+  // answers, and the card shows the daemon's sentence rather than one of its
+  // own. The sentence above is the fallback for an older daemon.
+  const emptyMonth = T.keyRows({ data: { source: 'fireworks-billing', windows: [], api_keys: [],
+    api_keys_note: 'No spend this month yet, so there is nothing to break down by API key.' } });
+  assert.strictEqual(emptyMonth.children[0].textContent,
+    'No spend this month yet, so there is nothing to break down by API key.');
+  const unread = T.keyRows({ data: { source: 'fireworks-billing', windows: [], api_keys: [],
+    api_keys_note: "The account's key-by-key spend could not be read; only the account total is shown." } });
+  assert.ok(unread.children[0].textContent.includes('could not be read'));
 
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],

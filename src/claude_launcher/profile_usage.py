@@ -305,6 +305,10 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
                     }
                     for item in report.api_keys
                 ],
+                # Why that list is empty, already worded for the page: nothing
+                # spent yet, the keys could not be read, or the account does
+                # not rate keys (claunch-uqnek.1).
+                "api_keys_note": report.api_keys_note,
             }
         except _ERRORS as exc:
             with _guard:
