@@ -55,7 +55,7 @@ function planNode(tag, text, cls) {
 function planResultText(n) {
   const r = n.result;
   if (!r) return n.kind === "followup" && n.status === "done" ? "세션이 처리함" : null;
-  if (n.kind === "decision") return `선택: ${r.choice}`;
+  if (n.kind === "decision") return `선택: ${r.choice}` + (r.by === "agent" ? " (자동 선택됨 · 다른 안을 고르면 세션에 전달됩니다)" : "");
   if (n.kind === "verify") return `확인: ${PLAN_VERDICT[r.verdict] || r.verdict}`;
   if (!r.action) return null;
   return `처분: ${PLAN_ACTION_LABEL[r.action] || r.action}` + (n.status === "done" ? " · 처리됨" : "");
@@ -234,47 +234,64 @@ function makePlanPane({root, session, request, onChange, nested}) {
     return l;
   }
 
-  function optionBranch(n, o) {
+  // An option the session ruled out shows struck through with its reason
+  // and cannot be picked; the nodes that sit `under` an option hang below
+  // it, faded while it is not the path taken (claunch-vmcg7).
+  function optionBranch(n, o, inactive) {
     const decided = !!(n.result && n.result.choice);
     const chosen = decided && n.result.choice === o.label;
+    const auto = chosen && n.result.by === "agent";
     const li = node("li", null, "ptree-node ptree-option" + (chosen ? " ptree-chosen" : decided ? " ptree-unchosen" : "")
-      + (o.recommended ? " ptree-recommended" : ""));
+      + (o.recommended ? " ptree-recommended" : "") + (o.rejected ? " ptree-rejected" : ""));
     const card = node("div", null, "ptree-opt");
     const head = node("div", null, "plan-option-head");
     head.append(node("strong", o.label));
+    if (o.rejected) head.append(node("span", "배제", "plan-chip plan-chip-rejected"));
     if (o.recommended) head.append(node("span", "권장", "plan-chip"));
-    if (chosen) head.append(node("span", "선택됨", "plan-chip"));
+    if (chosen) head.append(node("span", auto ? "자동 선택됨" : "선택됨", "plan-chip" + (auto ? " plan-chip-auto" : "")));
     card.append(head,
       node("p", "기대 효과: " + o.effect, "plan-effect"),
       node("p", "리스크: " + o.risk, "plan-risk"));
-    if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`), null, `opt:${n.id}:${o.label}`));
+    if (o.rejected) card.append(node("p", "배제 이유: " + o.rejected, "plan-rejected"));
+    else if (!chosen && !inactive) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`), null, `opt:${n.id}:${o.label}`));
     li.append(card);
+    const sub = (n.children || []).filter(c => c.under === o.label);
+    if (sub.length) {
+      const tree = stepTree(sub, inactive || !chosen);
+      if (!chosen) tree.append(node("li", decided ? "선택되지 않은 안의 하위 항목 (집계하지 않음)" : "이 안을 고르면 열리는 하위 항목", "ptree-branch-note"));
+      li.append(tree);
+    }
     return li;
   }
 
-  function stepBranch(n) {
+  function stepBranch(n, inactive) {
     const isDecision = n.kind === "decision";
+    const auto = isDecision && n.result && n.result.by === "agent";
     const state = isDecision ? (n.result ? "ptree-decided" : "ptree-undecided") : `ptree-st-${n.status || "todo"}`;
-    const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}`);
+    const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}` + (inactive ? " ptree-inactive" : ""));
     li.append(isDecision
-      ? label("◆", n.result ? "결정됨" : "결정 필요", n.title, n.id)
+      ? label("◆", n.result ? (auto ? "자동 선택됨" : "결정됨") : inactive ? "대기 (상위 안 미선택)" : "결정 필요", n.title, n.id)
       : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title, n.id));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     if (isDecision) {
       const opts = node("ul", null, "ptree plan-options-tree");
-      for (const o of n.options || []) opts.append(optionBranch(n, o));
-      const box = node("div", null, "plan-decision-box");
-      box.append(noteBox(n, "선택에 붙일 메모 (선택 사항)"));
-      tail(n, box);
-      li.append(opts, box);
+      for (const o of n.options || []) opts.append(optionBranch(n, o, inactive));
+      li.append(opts);
+      if (!inactive) {
+        const box = node("div", null, "plan-decision-box");
+        box.append(noteBox(n, "선택에 붙일 메모 (선택 사항)"));
+        tail(n, box);
+        li.append(box);
+      }
     }
-    if ((n.children || []).length) li.append(stepTree(n.children));
+    const common = (n.children || []).filter(c => !(isDecision && c.under));
+    if (common.length) li.append(stepTree(common, inactive));
     return li;
   }
 
-  function stepTree(nodes) {
+  function stepTree(nodes, inactive) {
     const ul = node("ul", null, "ptree ptree-steps");
-    for (const n of nodes) ul.append(stepBranch(n));
+    for (const n of nodes) ul.append(stepBranch(n, inactive));
     return ul;
   }
 

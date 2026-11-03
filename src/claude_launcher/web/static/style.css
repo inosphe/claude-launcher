@@ -10763,6 +10763,16 @@ a.category-ref:hover { text-decoration: underline; }
 .ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
 .ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
 .ptree-unchosen > .ptree-opt { opacity: 0.5; }
+/* claunch-vmcg7: an option the session ruled out, a decision it answered
+   with its default, and the nodes under an option that is not the path taken. */
+.ptree-rejected > .ptree-opt { opacity: 0.6; border-style: dashed; }
+.ptree-rejected > .ptree-opt .plan-option-head strong, .ptree-rejected > .ptree-opt .plan-effect,
+.ptree-rejected > .ptree-opt .plan-risk { text-decoration: line-through; }
+.plan-rejected { color: var(--plan-muted); }
+.plan-chip.plan-chip-rejected { color: #ff7b72; border-color: #da3633; }
+.plan-chip.plan-chip-auto, .ptree-decided > .ptree-label .plan-chip.plan-chip-auto { color: #79b8ff; border-color: #427fdf; }
+.ptree-inactive > .ptree-label, .ptree-inactive > .plan-detail { opacity: 0.5; }
+.ptree-branch-note { color: var(--plan-muted); font-size: 11px; list-style: none; }
 /* Each project is the root of its tree (claunch-7jzp8.5.2). */
 .ptree-root + .ptree-root { margin-top: 14px; }
 .ptree-project > .ptree-label { background: var(--plan-panel); border-color: var(--plan-border); font-size: 14px; padding: 3px 10px; }
