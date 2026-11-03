@@ -75,11 +75,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import yaml
 
 from . import collections as _collections
+from . import layouts as _layouts
 from . import question as _question
 from . import ir
 from . import store as _store
 
 ResolveInclude = Callable[[str], Optional[Path]]
+ResolveLayout = _layouts.ResolveLayout
 
 
 class FrontendError(Exception):
@@ -189,6 +191,9 @@ TOP_KEYS = (
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
     "inputs", "input_constraints", "collections", "collection_types", "question_types",
     "sides", "recur",
+    # ad-hoc layout metadata (cflow2/layouts.py): a reference to a separate
+    # layout file, never the layout itself -- the workflow stays readable
+    "layout",
 )
 #: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
 LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
@@ -197,6 +202,9 @@ TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
     "do", "triggers", "restart", "force_target", "session_workflow", "calls", "sims",
+    # a step's own layout reference (cflow2/layouts.py); overrides the
+    # workflow's while that node is live
+    "layout",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -296,6 +304,11 @@ class _Scope:
 class _Ctx:
     file: str
     resolve_include: Optional[ResolveInclude]
+    #: how a layout reference finds its file (``None`` = the v2 layers of the
+    #: process cwd, like includes); probes never reach the network or a shell
+    resolve_layout: Optional[ResolveLayout] = None
+    #: node id -> the layout reference that node declares (cflow2/layouts.py)
+    node_layouts: Dict[str, str] = field(default_factory=dict)
     fragments: Dict[str, Tuple[str, str, int]] = field(default_factory=dict)  # name -> (text, file, line)
     rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     rule_src: Dict[str, str] = field(default_factory=dict)
@@ -829,6 +842,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     raw = _need_map(ctx, tfile, raw, f"task {name!r}", line)
     tline = _line(raw, line)
     _check_keys(ctx, tfile, raw, TASK_KEYS, f"task {name!r}")
+    node_layout = _layout_ref(ctx, tfile, raw.get("layout"), _key_line(raw, "layout", tline))
     title = raw.get("title") or name
     prompt = raw.get("prompt") or ""
     if not isinstance(title, str) or not isinstance(prompt, str):
@@ -888,6 +902,11 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     )
     if session_workflow:
         node.props["session_workflow"] = session_workflow
+    if node_layout:
+        # Kept on the node (a task is reused, so the reference travels with
+        # the position) and in the chart's map, which serving reads.
+        node.props["layout"] = node_layout
+        ctx.node_layouts[nid] = node_layout
     calls = _calls(ctx, tfile, name, raw, tline)
     if calls:
         node.props["calls"] = calls
@@ -2312,13 +2331,31 @@ def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dic
     raise ctx.err(file, line, "recur must be true or false, or a mapping {auto, min_gap}")
 
 
+def _layout_ref(ctx: _Ctx, file: str, raw: Any, line: int) -> Optional[str]:
+    """A ``layout:`` value -> its ``<id>@<version>`` reference.
+
+    The reference is checked here (a typo is an authoring error) but it is
+    *not* resolved here: :func:`compile_text` resolves each reference once and
+    keeps the result in ``chart.meta`` (cflow2/layouts.py)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ctx.err(file, line, "layout must be a '<id>@<version>' string")
+    try:
+        _layouts.parse_reference(raw)
+    except ValueError as exc:
+        raise ctx.err(file, line, f"layout: {exc}") from None
+    return raw.strip()
+
+
 def compile_text(text: str, *, source: str = "",
-                 resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
+                 resolve_include: Optional[ResolveInclude] = None,
+                 resolve_layout: Optional[ResolveLayout] = None) -> ir.Chart:
     """Compile one v2 document. ``source`` is its path (for ``src`` and errors)."""
     file = Path(source).name if source else "<string>"
     if resolve_include is None:
         resolve_include = _default_resolver(Path(source).parent if source else None)
-    ctx = _Ctx(file=file, resolve_include=resolve_include)
+    ctx = _Ctx(file=file, resolve_include=resolve_include, resolve_layout=resolve_layout)
     if source:
         ctx.included.add(str(Path(source).resolve()))
         ctx.including.append(str(Path(source).resolve()))
@@ -2393,6 +2430,19 @@ def compile_text(text: str, *, source: str = "",
                     procs=(name,) if kind == ir.KIND_PROCEDURE else ())
         root = _compile_tree(ctx, sc, doc["body"], None, "body", _key_line(doc, "body", 1))
 
+    layout_ref = _layout_ref(ctx, file, doc.get("layout"), _key_line(doc, "layout", 1))
+    # Each reference is resolved once, here, and the result is kept in the
+    # chart: the run's chart.json snapshot then carries the layout it started
+    # with, and editing the file later does not move a live run. A reference
+    # that does not resolve is a warning + a placeholder block when served --
+    # never a compile error (a layout problem must not stop a run).
+    resolved_layouts = _layouts.resolve_all(
+        [r for r in ([layout_ref] + list(ctx.node_layouts.values())) if r],
+        resolve_layout=ctx.resolve_layout)
+    for ref, entry in resolved_layouts.items():
+        if entry.get("error"):
+            ctx.warnings.append(f"layout {ref}: {entry.get('why') or entry['error']}")
+
     chart = ir.Chart(
         name=name,
         nodes=ctx.nodes,
@@ -2418,6 +2468,12 @@ def compile_text(text: str, *, source: str = "",
                if ctx.question_types else {}),
             # recur: {"auto": bool} when declared (docs 2.1, recur)
             **({"recur": recur} if recur is not None else {}),
+            # layout metadata (cflow2/layouts.py): the workflow's reference,
+            # the per-node references, and the resolved files themselves --
+            # everything a view model needs, snapshotted with the chart
+            **({"layout": layout_ref} if layout_ref else {}),
+            **({"node_layouts": dict(ctx.node_layouts)} if ctx.node_layouts else {}),
+            **({"layouts": resolved_layouts} if resolved_layouts else {}),
         },
         params=_workflow_params(ctx, file, doc),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))
@@ -2436,10 +2492,12 @@ def compile_text(text: str, *, source: str = "",
     return chart
 
 
-def compile_file(path: Path, *, resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
+def compile_file(path: Path, *, resolve_include: Optional[ResolveInclude] = None,
+                 resolve_layout: Optional[ResolveLayout] = None) -> ir.Chart:
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise FrontendError(f"{path}: cannot read: {exc}") from None
-    return compile_text(text, source=str(path), resolve_include=resolve_include)
+    return compile_text(text, source=str(path), resolve_include=resolve_include,
+                        resolve_layout=resolve_layout)
