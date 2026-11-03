@@ -67,7 +67,7 @@ PYTHON_GIL=0 .venv-ft/bin/python -m claude_launcher.daemon
 ```
 
 To install the CLI and daemon as a separate `claunch-nogil` command instead,
-run `tools/install_freethreaded.sh` (Linux, WSL) or
+run `tools/install_freethreaded.sh` (Linux, WSL, macOS) or
 `tools\install_freethreaded.ps1` (Windows). The script builds a `zvec` wheel
 from source once and caches it, installs this checkout editable on `3.14t` with
 `uv tool install` with `--editable ".[p2p]"`, `--reinstall` and `--overrides` pointing at the wheel, and
@@ -77,7 +77,8 @@ Windows), so the regular `claunch` tool is not replaced. `pyproject.toml` is not
 changed: its `zvec>=0.7,<0.8` cap conflicts with the `0.8.x` source build, which
 the override replaces. `aiortc` has no `cp314t` wheels, so the optional `p2p`
 extra needs the `libsrtp2` headers and compiles them from source: on Linux
-`libsrtp2-dev` and `pkg-config`, on Windows `vcpkg install
+`libsrtp2-dev` and `pkg-config`, on macOS `brew install srtp pkg-config`
+(plus the Xcode Command Line Tools for the `zvec` build), on Windows `vcpkg install
 libsrtp2:x64-windows`. The script checks for them before the `zvec` build and,
 when they are missing, prints the install commands and asks whether to finish
 without that feature or stop. A non-interactive run stops (exit code 1) unless
