@@ -650,6 +650,66 @@ def test_fireworks_falls_back_to_the_account_total_when_keys_cannot_be_rated(
     [month] = report.windows
     assert month.used_dollars == 247.84
     assert "404" in report.raw["api_keys_error"]
+    # The card says the keys could not be read, which is a different answer
+    # from "this account does not rate keys" (claunch-uqnek.1).
+    assert report.api_keys_note == usage.API_KEYS_UNREAD
+
+
+def test_fireworks_names_a_key_by_its_id_when_the_key_list_cannot_be_read(
+    home, monkeypatch,
+):
+    """A failed key list costs the labels, not the amounts.
+
+    ``apiKeys`` is a second request; an account that rates keys but will not
+    list them still has each key's month spend, so the card shows the key id
+    where a name would be (claunch-uqnek.1).
+    """
+    p = _fireworks_profile()
+    _fireworks_api(
+        monkeypatch,
+        key_costs=[("key_a", {"currencyCode": "USD", "units": "2", "nanos": 0})],
+        missing={"/v1/accounts/acme/users/me/apiKeys"},
+    )
+
+    report = usage.fetch(usage.resolve_target(p))
+
+    [key] = report.api_keys
+    assert (key.key_id, key.label, key.used_dollars) == ("key_a", "key_a", 2.0)
+    assert "api_keys_error" not in report.raw
+    # A listed key is its own answer; nothing to explain.
+    assert report.api_keys_note == ""
+
+
+def test_fireworks_says_the_month_is_empty_rather_than_no_breakdown(
+    home, monkeypatch,
+):
+    """Nothing spent yet is not a gap in the account's billing.
+
+    The month has no key rows because nothing ran, and the card says that
+    instead of claiming the account does not break spend down
+    (claunch-uqnek.1).
+    """
+    p = _fireworks_profile()
+    _fireworks_api(monkeypatch, spend="0", key_costs=())
+
+    report = usage.fetch(usage.resolve_target(p))
+
+    assert report.api_keys == []
+    assert report.windows[0].used_dollars == 0
+    assert report.api_keys_note == usage.API_KEYS_NO_SPEND
+
+
+def test_fireworks_says_the_account_does_not_rate_keys_when_no_row_has_one(
+    home, monkeypatch,
+):
+    """Spend exists, but no row carries a key: the account bills as one pot."""
+    p = _fireworks_profile()
+    _fireworks_api(monkeypatch, spend="12.5", key_costs=())
+
+    report = usage.fetch(usage.resolve_target(p))
+
+    assert report.api_keys == []
+    assert report.api_keys_note == usage.API_KEYS_NO_BREAKDOWN
 
 
 def test_fireworks_key_amounts_cover_the_month_to_date(home, monkeypatch):

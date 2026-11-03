@@ -66,6 +66,9 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
         # An account's spend split by API key; empty when the reader cannot
         # (or need not) rate keys apart (claunch-uqnek).
         "api_keys": [],
+        # ...and why it is empty, worded by the reader for the page
+        # (claunch-uqnek.1). A reader that does not split spend leaves "".
+        "api_keys_note": "",
     }
 
 

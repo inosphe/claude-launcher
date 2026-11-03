@@ -67,6 +67,19 @@ _FIREWORKS_API = "https://api.fireworks.ai/v1"
 _FIREWORKS_NO_LIMIT = 9_999_999
 #: The ``usageCosts:query`` grouping that rates each API key separately.
 _FIREWORKS_KEY_GROUP = "API_KEY"
+#: What the page says when an account has no key-by-key rows. The three are
+#: different answers and the page shows the one that holds (claunch-uqnek.1):
+#: nothing has been spent yet, the API would not rate the keys, or the account
+#: does not rate keys at all.
+API_KEYS_NO_SPEND = (
+    "No spend this month yet, so there is nothing to break down by API key."
+)
+API_KEYS_UNREAD = (
+    "The account's key-by-key spend could not be read; only the account total is shown."
+)
+API_KEYS_NO_BREAKDOWN = (
+    "This account did not break its spend down by API key; only the account total is shown."
+)
 _OPENCODE_GO_HOSTS = {"opencode.ai", "opencode.ai:443"}
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 #: OpenCode Go's window names, and the names a reading gives them.
@@ -125,6 +138,10 @@ class UsageReport:
     source: str = "oauth-usage"
     #: The account's spend split by API key, when its API rates keys apart.
     api_keys: List[UsageKeyAmount] = field(default_factory=list)
+    #: Why ``api_keys`` is empty, worded for the page; empty when the list
+    #: has rows or the reader has nothing to explain (:data:`API_KEYS_NO_SPEND`
+    #: and its two siblings). A reader that does not split spend leaves it "".
+    api_keys_note: str = ""
 
 
 def _headers(token: str) -> dict:
@@ -1055,12 +1072,24 @@ def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = Non
     # not rate keys (or the key list cannot be read) the card keeps the
     # total alone rather than failing a reading that already has a number.
     api_keys: List[UsageKeyAmount] = []
+    note = ""
     try:
         api_keys = _fireworks_key_amounts(account, token, now)
     except (UsageError, credentials.CredentialsError, OSError) as exc:
         raw["api_keys_error"] = str(exc)
+        note = API_KEYS_UNREAD
+    if not api_keys:
+        # An empty list is three different answers, and the card saying one
+        # sentence for all of them hid which one it was (claunch-uqnek.1).
+        # Nothing spent yet is not a failure and not a gap in the account's
+        # billing: it is the month before anything ran.
+        note = API_KEYS_NO_SPEND if spent <= 0 else note or API_KEYS_NO_BREAKDOWN
     return UsageReport(
-        windows=windows, raw=raw, source="fireworks-billing", api_keys=api_keys
+        windows=windows,
+        raw=raw,
+        source="fireworks-billing",
+        api_keys=api_keys,
+        api_keys_note="" if api_keys else note,
     )
 
 

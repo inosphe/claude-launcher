@@ -472,13 +472,17 @@
     return line;
   }
 
-  /* The account's month split by API key, under the total it splits. */
+  /* The account's month split by API key, under the total it splits.
+     An empty breakdown has three reasons and the daemon words them
+     (nothing spent yet, the keys could not be read, the account does not
+     rate keys) in api_keys_note; the sentence below is only the fallback
+     for a daemon that predates that field (claunch-uqnek.1). */
   function keyRows(reading) {
     const items = Array.isArray(reading.data.api_keys) ? reading.data.api_keys : [];
     const box = node("div", "profile-usage-keys");
     if (!items.length) {
-      box.append(node("p", "wf-note",
-        "This account did not break its spend down by API key; only the account total is shown."));
+      box.append(node("p", "wf-note", reading.data.api_keys_note
+        || "This account did not break its spend down by API key; only the account total is shown."));
       return box;
     }
     const month = (reading.data.windows || []).find((w) => w.name === "monthly_spend");
