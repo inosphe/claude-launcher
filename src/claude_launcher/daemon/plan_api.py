@@ -8,7 +8,7 @@ plan pane, and the decisions the user takes there.
   GET  /api/plan/aggregators             each project's aggregation session
   POST /api/plan/aggregators/{project}/start  start it {profile, model?, effort?, name?}         (the user)
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
-  POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?}
+  POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?, reopen?}
   POST /api/plan/clear                   clear     {session, revision}
   POST /api/plan/node/{id}/decide        decide    {session, rev, choice?|verdict?|action?, note?}  (the user)
   POST /api/plan/feedback                feedback  {session, text, node?}                       (the user)
@@ -86,9 +86,16 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
     elif kind == "verify":
         head = f"{PREFIX} The user checked your plan's verify item {node['id']}: {res.get('verdict')}."
         body = _what(node)
-        then = ("Nothing to do but keep going." if res.get("verdict") == "passed" else
-                "It failed by hand. Fix what the note says, then reword the item with plan_node so the user "
-                "checks it again (a changed item asks again).")
+        then = {
+            "passed": "Nothing to do but keep going. Rewording the item later keeps this result; if what was "
+                      "checked changes, ask again with plan_node reopen=<what changed>.",
+            "deferred": "It cannot be checked yet (보류). It no longer waits on the user or keeps the session "
+                        "open: hand it over -- file it as a beads issue (claunch beads create ... --parent "
+                        "<your issue>) that says what to check and how -- and name the issue id in the item's "
+                        "detail with plan_node (the result stays).",
+        }.get(res.get("verdict"),
+              "It failed by hand. Fix what the note says, then reword the item with plan_node so the user "
+              "checks it again (a changed item asks again).")
     else:
         action = res.get("action")
         head = f"{PREFIX} The user disposed of your plan's followup {node['id']}: {action}."
@@ -459,7 +466,8 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
     async def h_patch(request):
         body = await body_of(request)
         fields = {k: body.get(k) for k in ("title", "detail", "status", "options")}
-        res, err = await call(plans.patch, actor_of(body), session_of(body), request.match_info["id"], **fields)
+        res, err = await call(plans.patch, actor_of(body), session_of(body), request.match_info["id"],
+                              reopen=body.get("reopen"), **fields)
         return err or web.json_response(res)
 
     async def h_clear(request):

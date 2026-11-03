@@ -9,10 +9,17 @@ plan here is the same intent cut down to what that person decides on:
             ``decision`` is a branch point whose options each state an
             expected effect and a risk, and the user picks one.
   closure   what keeps the session open (th-0b38dc): ``verify`` items a
-            person has to check by hand (passed / failed, with a note) and
+            person has to check by hand (passed / failed / deferred -- 보류,
+            cannot be checked yet -- with a note) and
             ``followup`` candidates the user disposes of (continue here,
             hand over as an issue, drop). The session marks a followup
-            done once it has acted on "here" or "issue".
+            done once it has acted on "here" or "issue" -- or on its own,
+            when where it goes is plain (it is this round's work, or it was
+            filed as an issue): a followup the session wrote ``done`` waits
+            on nobody (th-62379d). A ``note`` is for the record only (a
+            further recommendation, a measurement aside): it never waits and
+            never keeps the session open; the user reads the notes once, at
+            the end.
 
 The plan is one JSON document per session, written whole by the session
 (``set``) or one node at a time (``patch``). Two writers share it:
@@ -62,17 +69,36 @@ MAX_OPTIONS = 8
 MAX_OPTION_TEXT = 1_000
 
 STEP_KINDS = ("step", "decision")
-CLOSURE_KINDS = ("verify", "followup")
+CLOSURE_KINDS = ("verify", "followup", "note")
 STEP_STATUS = ("todo", "doing", "done", "skipped", "blocked")
 FOLLOWUP_STATUS = ("open", "done")
-VERDICTS = ("passed", "failed")
+VERDICTS = ("passed", "failed", "deferred")
 ACTIONS = ("here", "issue", "drop")
 FINISHED = ("done", "skipped")
 
 #: What the user decides on, per kind: a change to any of these moves the
-#: node's ``rev`` and takes its result away.
+#: node's ``rev`` and takes its result away -- except on a closure node whose
+#: result :func:`_kept` holds (claunch-jw1v2).
 CONTENT = {"step": ("title", "detail"), "decision": ("title", "detail", "options"),
-           "verify": ("title", "detail"), "followup": ("title", "detail")}
+           "verify": ("title", "detail"), "followup": ("title", "detail"), "note": ("title", "detail")}
+
+
+def _kept(node: Optional[dict]) -> bool:
+    """A closure result that survives the session rewording its node.
+
+    A passed or deferred check and a disposed followup stay settled when the
+    session only edits the words: across rounds a session writes progress
+    into a verify item's detail ("checked last round", an issue id) and that
+    edit used to put a check the user had already passed back in front of
+    them (s6451, th-2a4fcd). A failed check is the exception: the session is
+    told to fix it and reword it so the user checks again. Asking again on
+    purpose is ``patch(..., reopen=<reason>)``."""
+    if not node or node.get("kind") not in CLOSURE_KINDS:
+        return False
+    res = node.get("result") or {}
+    if node["kind"] == "verify":
+        return res.get("verdict") in ("passed", "deferred")
+    return bool(res.get("action"))
 
 
 class PlanError(Exception):
@@ -202,6 +228,7 @@ class _Builder:
         self.old = old_nodes
         self.ids: set = set()
         self.count = 0
+        self.reworded: list = []
 
     def node(self, raw, kinds: tuple, depth: int) -> dict:
         if not isinstance(raw, dict):
@@ -239,29 +266,35 @@ class _Builder:
             raise PlanError("children must be a list of nodes")
         if children and depth >= MAX_DEPTH:
             raise PlanError(f"the step tree is at most {MAX_DEPTH} levels deep")
-        self.carry(node, self.old.get(nid))
+        if self.carry(node, self.old.get(nid)):
+            self.reworded.append(nid)
         if kind in STEP_KINDS:
             node["children"] = [self.node(c, STEP_KINDS, depth + 1) for c in children]
         return node
 
     @staticmethod
-    def carry(node: dict, old: Optional[dict]) -> None:
-        """The user's result survives only on the content it was given for."""
+    def carry(node: dict, old: Optional[dict]) -> bool:
+        """The user's result survives only on the content it was given for,
+        or on a settled closure node (:func:`_kept`) whatever its words.
+        True when the words changed under a result that was kept."""
         if old is None or old["kind"] != node["kind"]:
             node["rev"] = 1
             node["result"] = None
-            return
-        if _content(old) == _content(node):
+            return False
+        same = _content(old) == _content(node)
+        if same or _kept(old):
             node["rev"] = old["rev"]
             node["result"] = old.get("result")
-            if old.get("previous"):
-                node["previous"] = old["previous"]
-            return
+            for key in ("previous", "reopened"):
+                if old.get(key):
+                    node[key] = old[key]
+            return not same
         node["rev"] = old["rev"] + 1
         node["result"] = None
         gone = old.get("result") or old.get("previous")
         if gone:
             node["previous"] = gone
+        return False
 
 
 def walk(nodes: list) -> Iterator[dict]:
@@ -280,7 +313,13 @@ def summarize(doc: dict) -> dict:
     """Counts, what waits on the user, and whether the session may close.
 
     ``waiting`` is what the user can act on now (an unchosen decision, an
-    unchecked or failed verify item, an undisposed followup). ``closable``
+    unchecked verify item, an undisposed followup). ``waiting_decisions``
+    is the part of it a session must have before it starts work: the
+    unchosen decisions alone. A start gate reads that one, because a verify
+    item left from the round before checks work that already landed and is
+    the settle gate's to wait on (claunch-jw1v2). A deferred verify item
+    ("보류": cannot be checked yet) waits on nobody and keeps nothing open;
+    the session hands it over and ``deferred`` counts them. ``closable``
     holds when nothing waits, every step is done or skipped and every
     followup the user kept ("here", "issue") is done; ``blockers`` lists
     each node that keeps it from holding, with the reason."""
@@ -306,11 +345,16 @@ def summarize(doc: dict) -> dict:
         if n["kind"] == "verify":
             if not res:
                 block(n, "not checked yet", "user")
+            elif res.get("verdict") == "deferred":
+                pass
             elif res.get("verdict") == "failed":
                 block(n, "check failed", "session")
+        elif n["kind"] == "note":
+            continue
         else:
             if not res:
-                block(n, "not disposed of", "user")
+                if n.get("status") != "done":   # done by the session: it disposed of it itself
+                    block(n, "not disposed of", "user")
             elif res.get("action") != "drop" and n.get("status") != "done":
                 block(n, f"followup kept ({res.get('action')}) and not done", "session")
     waiting = [b for b in blockers if b["who"] == "user"]
@@ -319,7 +363,11 @@ def summarize(doc: dict) -> dict:
         "decisions": sum(1 for n in steps if n["kind"] == "decision"),
         "verify": sum(1 for n in closure if n["kind"] == "verify"),
         "followups": sum(1 for n in closure if n["kind"] == "followup"),
+        "notes": sum(1 for n in closure if n["kind"] == "note"),
         "waiting": len(waiting),
+        "waiting_decisions": sum(1 for b in waiting if b["kind"] == "decision"),
+        "deferred": sum(1 for n in closure if n["kind"] == "verify"
+                        and (n.get("result") or {}).get("verdict") == "deferred"),
         "blocked": sum(1 for n in steps if n["kind"] == "step" and n.get("status") == "blocked"),
         "closable": not blockers,
         "blockers": blockers,
@@ -473,21 +521,32 @@ class PlanStore:
                    "steps": [build.node(n, STEP_KINDS, 1) for n in steps or []],
                    "closure": [build.node(n, CLOSURE_KINDS, 1) for n in closure or []]}
             after = self._store(db, session, before, doc)
-            self._event(db, session, actor, "set", after["revision"], data={"nodes": build.count})
+            data = {"nodes": build.count}
+            if build.reworded:
+                data["reworded_kept"] = build.reworded
+            self._event(db, session, actor, "set", after["revision"], data=data)
         return after
 
-    def patch(self, actor: str, session: str, node_id: str, **fields) -> dict:
+    def patch(self, actor: str, session: str, node_id: str, *, reopen=None, **fields) -> dict:
         """Change one node's title, detail, status or options. No revision:
         a step's status is the session's alone, and a change to what the
         user decides on moves the node's ``rev`` (which the user's click
-        names), so it cannot land on a decision taken against other text."""
+        names), so it cannot land on a decision taken against other text.
+
+        ``reopen`` (a reason) asks the user again about a settled closure
+        node -- the one way to do that now that rewording keeps the result
+        (:func:`_kept`). The old result moves to ``previous`` and the reason
+        is kept on the node for the pane to show."""
         self._owner(session, actor)
         fields = {k: v for k, v in fields.items() if v is not None}
         unknown = set(fields) - {"title", "detail", "status", "options"}
         if unknown:
             raise PlanError(f"a node patch takes title, detail, status and options, not {', '.join(sorted(unknown))}")
-        if not fields:
-            raise PlanError("nothing to change: give title, detail, status or options")
+        reason = _text(reopen, "reopen", MAX_NOTE) if reopen is not None else ""
+        if reopen is not None and not reason:
+            raise PlanError("reopen takes a reason: what changed in what the user checked")
+        if not fields and not reason:
+            raise PlanError("nothing to change: give title, detail, status, options or reopen")
         with self._write() as db:
             before = self._load(db, session)
             if before is None:
@@ -499,15 +558,31 @@ class PlanStore:
                                                                  "closure")}))
             target = _index(doc)[node_id]
             raw = {**{k: target.get(k) for k in ("id", "kind", "title", "detail", "status", "options")}, **fields}
-            fresh = _Builder({node_id: old}).node({**raw, "children": []}, (target["kind"],), 1)
+            build = _Builder({node_id: old})
+            fresh = build.node({**raw, "children": []}, (target["kind"],), 1)
             fresh.pop("children", None)
+            if reason:
+                if not old.get("result") or old["kind"] not in CLOSURE_KINDS:
+                    raise PlanError(f"node {node_id} has no settled result to reopen (only a checked verify item "
+                                    "or a disposed followup reopens)")
+                fresh["previous"] = old["result"]
+                fresh["result"] = None
+                fresh["rev"] = old["rev"] + 1
+                fresh["reopened"] = {"reason": reason, "at": _now()}
+                if fresh["kind"] == "followup":
+                    fresh["status"] = "open"
             keep = target.get("children")
             target.clear()
             target.update(fresh)
             if keep is not None:
                 target["children"] = keep
             after = self._store(db, session, before, doc)
-            self._event(db, session, actor, "patch", after["revision"], node_id, {"fields": sorted(fields)})
+            data = {"fields": sorted(fields)}
+            if build.reworded:
+                data["reworded_kept"] = True
+            if reason:
+                data["reopen"] = reason
+            self._event(db, session, actor, "patch", after["revision"], node_id, data)
         return {"plan": after, "node": _index(after)[node_id]}
 
     def clear(self, actor: str, session: str, revision) -> dict:
@@ -529,7 +604,7 @@ class PlanStore:
     def decide(self, actor: str, session: str, node_id: str, rev, *, choice=None, verdict=None, action=None,
                note=None) -> dict:
         """The user's result on one node: a decision's ``choice`` (an option
-        label), a verify item's ``verdict`` (passed / failed) or a followup's
+        label), a verify item's ``verdict`` (passed / failed / deferred) or a followup's
         ``action`` (here / issue / drop). ``rev`` is the node's as the user
         saw it. Returns ``{"plan", "node", "previous"}``."""
         if actor != USER:
@@ -577,6 +652,7 @@ class PlanStore:
             if previous:
                 node["previous"] = previous
             node["result"] = result
+            node.pop("reopened", None)   # answered: the reason was for this ask
             after = self._store(db, session, before, doc)
             self._event(db, session, USER, "decide", after["revision"], node_id, {"result": result})
         return {"plan": after, "node": _index(after)[node_id], "previous": previous}

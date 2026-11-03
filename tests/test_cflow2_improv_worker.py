@@ -422,7 +422,8 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
 def test_the_plan_wait_is_declared_on_both_paths():
     """One wait beside the gate, one on the path that skips ``coding-plan``.
 
-    Both probe ``claunch gate plan-waiting`` (0 clear, 1 still owed, 2 could
+    Both probe ``claunch gate plan-waiting --scope start`` -- the unchosen
+    decisions only, claunch-jw1v2 -- (0 clear, 1 still owed, 2 could
     not tell), poll, and cap undecided reads -- but carry no ``seconds``:
     the confirmed rule has no upper bound on "stop until the user decides",
     and a failed read goes to a person instead of releasing the run
@@ -431,7 +432,7 @@ def test_the_plan_wait_is_declared_on_both_paths():
     # settle's closure gate probes the same command (claunch-5sryb); it is
     # tested on its own below
     waits = [n for n in chart.nodes.values() if n.type == "wait"
-             and n.get("probe") == ["claunch", "gate", "plan-waiting"]
+             and n.get("probe") == ["claunch", "gate", "plan-waiting", "--scope", "start", "--notify"]
              and "closure-wait" not in n.id]
     assert len(waits) == 2, [n.id for n in waits]
     for n in waits:
@@ -1272,7 +1273,7 @@ def test_settle_waits_for_plan_closure_without_a_deadline_when_required(tmp_path
                             {"require_plan_closure": True})
     [w] = st["waits"]
     assert w["node"].endswith("closure-wait") and w["seconds"] is None
-    assert w["probe"] == ["claunch", "gate", "plan-waiting"]
+    assert w["probe"] == ["claunch", "gate", "plan-waiting", "--notify"]
     # a day of "still owed" does not release it
     st = runtime.wait_tick(86_400.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
     assert [x["node"] for x in st["waits"]] == [w["node"]]

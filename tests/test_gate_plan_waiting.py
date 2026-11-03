@@ -84,7 +84,7 @@ def test_the_gate_reads_what_the_store_computes_for_an_unchosen_decision():
     summary, why = gate.read_summary(gate.db_path(), "s1")
     assert why == "" and summary["waiting"] == 1
     assert gate.verdict(summary) == gate.WAITING
-    assert gate._what_waits(summary) == ["어느 쪽으로 갈까"]
+    assert gate._what_waits(summary) == ["c1 어느 쪽으로 갈까"]
 
 
 def test_a_plan_of_steps_alone_is_clear():
@@ -140,7 +140,7 @@ def test_the_one_line_names_the_decisions_that_wait():
                      {"label": "나", "effect": "b", "risk": "r"}]},
     ])
     summary, _ = gate.read_summary(gate.db_path(), "s1")
-    assert gate._render(summary, gate.WAITING) == "plan waiting: 1: 어느 쪽으로 갈까"
+    assert gate._render(summary, gate.WAITING) == "plan waiting: 1: c1 어느 쪽으로 갈까"
 
 
 def test_main_reads_the_session_it_is_given_and_exits_with_the_verdict(capsys):
