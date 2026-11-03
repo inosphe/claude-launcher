@@ -138,6 +138,9 @@ TOOLS = [
          "run": {"type": "string", "description": "the cflow run id"},
          "round": {"type": "integer", "description": "the round number in that run"},
          "issue": {"type": "string", "description": "the round's beads issue"},
+         "leftover": {"type": "string", "enum": ["carry", "require_disposed"],
+                      "description": "what the user still owes in the old round's closure: carry it over "
+                                     "(default), or require_disposed -- refuse while anything is owed"},
      }, "required": ["run", "round"]}},
     {"name": "plan_rounds",
      "description": "List a session's sealed plan rounds (yours by default), oldest first, with each one's "
@@ -196,7 +199,7 @@ def call_tool(name: str, args: dict) -> dict:
         who = str(args.get("session") or me)
         return c.get("/api/plan/rounds?" + urllib.parse.urlencode({"session": who}))
     if name == "plan_new_round":
-        body = {k: args[k] for k in ("run", "round", "issue") if k in args}
+        body = {k: args[k] for k in ("run", "round", "issue", "leftover") if k in args}
         return c.post("/api/plan/round", {**body, "session": me, "by": me})
     if name == "plan_overview":
         query = {k: v for k, v in (("project", args.get("project")), ("all", "1" if args.get("all") else None))

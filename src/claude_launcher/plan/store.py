@@ -442,6 +442,9 @@ def _index(doc: Optional[dict]) -> dict:
     return {n["id"]: n for n in [*walk(doc.get("steps") or []), *(doc.get("closure") or [])]}
 
 
+LEFTOVER = ("carry", "require_disposed")
+
+
 def _owed(node: dict) -> bool:
     """A closure node the user (or the session, on the user's word) still
     owes: a verify not checked or failed, a followup not disposed of or kept
@@ -789,7 +792,7 @@ class PlanStore:
     # -- rounds ------------------------------------------------------------
 
     def new_round(self, actor: str, session: str, *, run, round, title=None, goal=None, issue=None,
-                  context: Optional[dict] = None) -> dict:
+                  context: Optional[dict] = None, leftover: Optional[str] = None) -> dict:
         """Seal the current plan and open the plan of (``run``, ``round``).
 
         Returns ``{"plan", "opened", "sealed", "carried", "why"}``. ``opened``
@@ -797,8 +800,17 @@ class PlanStore:
         round's, or when that round was sealed before and a later plan stands
         (a late or repeated call must not overwrite the round that followed
         it). After ``clear`` there is no plan to overwrite, so the round opens
-        again; its earlier copy stays sealed beside it."""
+        again; its earlier copy stays sealed beside it.
+
+        ``leftover`` says what happens to the closure nodes the user still
+        owes (an unchecked or failed verify, an undisposed followup):
+        ``carry`` (the default) moves them into the new round marked with
+        their round; ``require_disposed`` refuses with :class:`Conflict`
+        naming them, and nothing is sealed or opened."""
         self._owner(session, actor)
+        leftover = leftover or "carry"
+        if leftover not in LEFTOVER:
+            raise PlanError(f"leftover must be one of {', '.join(LEFTOVER)}")
         run = _text(run, "run", MAX_RUN, required=True)
         rnd = _round_value(round)
         title = _text(title, "title", MAX_TITLE)
@@ -814,6 +826,11 @@ class PlanStore:
                     (session, run, rnd)).fetchone():
                 return {"plan": before, "opened": False, "sealed": None, "carried": [],
                         "why": f"round {round_key(run, rnd)} was sealed already"}
+            owed = [n["id"] for n in (before or {}).get("closure") or [] if _owed(n)]
+            if owed and leftover == "require_disposed":
+                raise Conflict(f"round {round_key(before.get('run'), before.get('round'))} still owes the "
+                               f"user: {', '.join(owed)} (dispose of them, or open the round with "
+                               f"leftover=carry)", current=before)
             sealed = None
             carried: list = []
             if before is not None:

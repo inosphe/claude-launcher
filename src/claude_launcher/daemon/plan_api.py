@@ -12,7 +12,7 @@ plan pane, and the decisions the user takes there.
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
   POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?, reopen?}
   POST /api/plan/clear                   clear     {session, revision}  (the plan is sealed first)
-  POST /api/plan/round                   new_round {session, run, round, title?, goal?, issue?}
+  POST /api/plan/round                   new_round {session, run, round, title?, goal?, issue?, leftover?}
   POST /api/plan/node/{id}/decide        decide    {session, rev, choice?|verdict?|action?, note?}  (the user)
   POST /api/plan/feedback                feedback  {session, text, node?}                       (the user)
   POST /api/plan/node/{id}/deliver       deliver the waiting notification now {session}        (the user)
@@ -538,7 +538,8 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         session = session_of(body)
         res, err = await call(plans.new_round, actor_of(body), session, run=body.get("run"),
                               round=body.get("round"), title=body.get("title"), goal=body.get("goal"),
-                              issue=body.get("issue"), context=context_of(session))
+                              issue=body.get("issue"), context=context_of(session),
+                              leftover=body.get("leftover"))
         return err or web.json_response(res)
 
     async def h_decide(request):

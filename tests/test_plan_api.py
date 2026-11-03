@@ -160,6 +160,12 @@ def test_rounds_open_seal_list_and_read(tmp_path):
         await req("POST", "/api/plan", {**PLAN, "revision": opened["plan"]["revision"]})
         again = await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 1})
         assert again["opened"] is False
+        # v1 and f1 are still owed: require_disposed refuses and seals nothing
+        await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2,
+                                              "leftover": "require_disposed"}, status=409)
+        await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2,
+                                              "leftover": "bogus"}, status=400)
+        assert (await req("GET", "/api/plan/rounds?session=s1"))["rounds"] == []
         nxt = await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2})
         assert nxt["sealed"]["key"] == "r1/1" and set(nxt["carried"]) == {"v1", "f1"}
         listed = await req("GET", "/api/plan/rounds?session=s1")

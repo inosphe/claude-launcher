@@ -62,6 +62,8 @@ def test_round_tools_call_the_round_routes(monkeypatch):
     plan_mcp.call_tool("plan_new_round", {"run": "r1", "round": 2, "issue": "c-1"})
     assert client.calls[-1] == ("POST", "/api/plan/round", {"run": "r1", "round": 2, "issue": "c-1",
                                                             "session": "s7", "by": "s7"})
+    plan_mcp.call_tool("plan_new_round", {"run": "r1", "round": 3, "leftover": "require_disposed"})
+    assert client.calls[-1][2]["leftover"] == "require_disposed"
     plan_mcp.call_tool("plan_rounds", {})
     assert client.calls[-1] == ("GET", "/api/plan/rounds?session=s7")
     plan_mcp.call_tool("plan_get", {"round": "r1/1", "session": "s9"})

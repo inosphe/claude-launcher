@@ -1,7 +1,8 @@
 """Plan rounds (plan/store.py, claunch-r3j1o.1): ``new_round`` seals the
 current plan and opens the round's own, idempotent on (run, round); a sealed
 round's decisions never answer the next round; what the user still owes is
-carried over with its round; ``clear`` seals too."""
+carried over with its round, or refused with ``leftover=require_disposed``;
+``clear`` seals too."""
 
 import pytest
 
@@ -108,6 +109,36 @@ def test_what_the_user_still_owes_is_carried_with_its_round(store):
     assert closure["v-fail"]["result"]["verdict"] == "failed"
     # the unchecked verify and the undisposed followup wait on the user in round 2
     assert res["plan"]["summary"]["waiting"] == 2
+
+
+def test_require_disposed_refuses_while_the_user_still_owes(store):
+    """leftover=require_disposed: a round with owed closure nodes is not
+    sealed and the next one does not open; once they are disposed of, it
+    opens and carries nothing."""
+    store.new_round("s1", "s1", run="r1", round=1)
+    write(store, closure=[{"id": "v1", "kind": "verify", "title": "check A"},
+                          {"id": "f1", "kind": "followup", "title": "later B"}])
+    before = store.get("s1")
+    with pytest.raises(P.Conflict, match="round r1/1 still owes the user: v1, f1") as exc:
+        store.new_round("s1", "s1", run="r1", round=2, leftover="require_disposed")
+    assert exc.value.current["round"] == 1
+    assert store.get("s1") == before and store.rounds("s1")["rounds"] == []
+
+    store.decide(P.USER, "s1", "v1", 1, verdict="passed")
+    store.decide(P.USER, "s1", "f1", 1, action="drop")
+    res = store.new_round("s1", "s1", run="r1", round=2, leftover="require_disposed")
+    assert res["opened"] is True and res["carried"] == [] and res["plan"]["closure"] == []
+    assert [r["key"] for r in store.rounds("s1")["rounds"]] == ["r1/1"]
+
+
+def test_require_disposed_opens_the_first_round_and_rejects_unknown_values(store):
+    assert store.new_round("s1", "s1", run="r1", round=1, leftover="require_disposed")["opened"] is True
+    with pytest.raises(P.PlanError, match="leftover must be one of carry, require_disposed"):
+        store.new_round("s1", "s1", run="r1", round=2, leftover="keep")
+    # the same round again is still a no-op, whatever is owed
+    write(store, closure=[{"id": "f1", "kind": "followup", "title": "later"}])
+    again = store.new_round("s1", "s1", run="r1", round=1, leftover="require_disposed")
+    assert again["opened"] is False
 
 
 def test_a_plain_write_keeps_a_carried_node_until_it_is_settled(store):
