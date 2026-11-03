@@ -811,7 +811,11 @@ def node_detail(cwd: str, scope: str, node_id: str) -> Optional[dict]:
         fields.pop(k, None)
     if fields.get("rules"):
         # a rule is named on the node and written once on the chart
-        fields["rules"] = [{"id": rid, "text": (chart.rules.get(rid) or {}).get("text")}
+        # a conditional rule (docs 2.5 when) carries its condition, so the
+        # definition view says when it applies (claunch-cetzf.1)
+        fields["rules"] = [{"id": rid, "text": (chart.rules.get(rid) or {}).get("text"),
+                            **({"when": chart.rules[rid]["when"]}
+                               if (chart.rules.get(rid) or {}).get("when") is not None else {})}
                            for rid in fields["rules"]]
     kids = []
     for cid, role in _child_roles(chart, node):

@@ -187,7 +187,10 @@ def test_worker_v2_groups_the_approval_reviewer_routing_and_pr_inputs():
         # claunch-ar8jn: the glossary draft switch sits with them.
         "glossary_draft": "지식 기록",
         # claunch-lmnlv: the retrospective auto record switch sits with them.
-        "retrospection_auto_record": "지식 기록"}
+        "retrospection_auto_record": "지식 기록",
+        # claunch-cetzf.2 / claunch-5sryb: the work location and the
+        # pre-settle closure wait are concerns of their own.
+        "allow_work_on_main": "작업 위치", "require_plan_closure": "종료 정산"}
     # A block of its own concern: it does not share a grid with the inputs
     # declared around it, so the switches no longer pair with the round limit
     # above them.

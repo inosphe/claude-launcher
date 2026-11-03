@@ -826,6 +826,28 @@ rules:
 - 규칙의 `text`는 `deliver`에 적힌 작업의 프롬프트 끝에 붙는다. `why`는 기본
   페이로드에 싣지 않고 `rule` 조회로 읽는다.
 - 규칙의 `effect`는 정적 명세 검사에 들어간다(8절).
+- 규칙에 `when: <식>`을 주면 조건부 규칙이다(claunch-cetzf.1). 식은 컴파일 때
+  문법을 검사한다. 조건부 규칙의 `text`는 컴파일 때 프롬프트에 붙이지 않고,
+  노드의 `rules` 목록에만 남는다. 런타임이 프롬프트를 읽을 때마다(`flow_status`의
+  작업, 위임 brief, ask의 `task_prompt`, 리마인더) 그 런의 환경으로 식을
+  평가해 참이면 규칙 머리글 아래에 덧붙인다. 그래서 사람이 시작 입력을 바꾸면
+  다음 읽기부터 바뀐 규칙이 보인다. 식을 평가할 수 없으면 규칙을 붙인다.
+  `flow_status`의 작업 `rules` 항목에는 조건부 규칙마다 `when`과 `active`가
+  실린다. 위임 brief의 `rules`에는 지금 참인 규칙만 실린다.
+  조건부 규칙의 `effect`가 어떤 작업의 선언된 효과와 겹치면 검사는 오류 대신
+  경고 `never-effect-when`을 낸다(조건이 거짓인 런에서는 허용되는 효과다).
+
+  ```yaml
+  rules:
+    branch-on-main:
+      when: "$data.inputs.allow_work_on_main == true"
+      text: 새 브랜치를 만들지 않고 master에서 작업한다.
+      deliver: [branch-setup]
+    no-master-commit:
+      when: "$result['branch-setup'].value.mode != 'main'"
+      text: master 체크아웃에서 커밋하지 않는다.
+      deliver: [commit]
+  ```
 - `include`는 정의 이름만 받는다(1절).
 - `include`는 포함한 파일의 `collections`와 `sides`도 가져온다. 그 파일의
   프로시저가 자기 컬렉션에 쓰거나 side 런을 읽기 때문이다(예: `improv-worker-v2`의
@@ -972,6 +994,16 @@ inputs:
   `user`에는 해당하지 않는다.
 - `user`의 빈 값: 빈 값은 그 입력을 비운다(type의 빈 값 — `null`, 빈 목록; `bool`의
   빈 표기는 `false`). `required: true`인 입력은 비울 수 없다.
+- 변경의 영향(claunch-cetzf.1): `inputs.dependencies(chart)`가 입력마다 그 값을
+  읽는 규칙(`text`·`when`)과 노드(프롬프트·`done_when`·식 등 노드의 모든 문자열
+  속성에서 `data.inputs.<이름>`·`$inputs.<이름>`을 찾는다)를 모은다.
+  `claunch cflow2 validate`가 이 표를 출력하고, `set_by`를 선언했는데 아무 노드·
+  규칙도 읽지 않는 입력에는 검사 경고 `set-by-unread`를 낸다. `set_input`은 쓰기
+  전후의 데이터로 조건부 규칙(2.5 `when`)을 평가해 켜지거나 꺼진 규칙과, 그 입력을
+  읽는 열린 작업을 `input_impact`로 저널에 남기고 반환 페이로드에 싣는다. 사람의
+  변경 뒤 드라이버에 타이핑되는 한 줄에는 이 영향이 「입력 변경의 영향」 블록으로
+  붙는다(`inputs.format_impact`; 켜진 규칙은 본문까지). 이후의 `flow_status`·위임
+  brief·리마인더는 새 값으로 프롬프트와 조건부 규칙을 다시 렌더한다.
 - 값 검사는 시작 입력과 같다(`inputs.settle`이 `inputs.normalize`와 같은 형식
   변환과 `enum` 검사를 쓴다). `agent`는 빈 값을 쓰지 않는다. 그 입력을 읽는
   `input_constraints`는 새 값을 넣은 전체 입력으로 다시 평가해 어기면 거절한다.
@@ -1467,6 +1499,8 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 | `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
 | `unbounded-visits` (경고) | `max_visits: 0` |
 | `set-by-default` (경고) | `set_by: [agent]`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
+| `set-by-unread` (경고) | `set_by`를 선언한 입력을 아무 노드·규칙도 읽지 않는다. 시작 뒤에 바꿔도 아무것도 바뀌지 않는다(2.6, claunch-cetzf.1) |
+| `never-effect-when` (경고) | 조건부 규칙(2.5 `when`)의 `effect.deny`가 작업의 선언된 효과와 겹친다. 조건이 참인 런에서만 금지된다 |
 | `set-by-required` (경고) | `set_by: [agent]`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 에이전트가 시작 뒤에 쓸 수 없다(2.6). `user`에는 해당하지 않는다 |
 
 **v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
@@ -3360,6 +3394,41 @@ PR은 닫고 브랜치는 지웠다.
   회차(`start_at=landing`, 회차 종류 `land-only`)에서도 마찬가지다 — 두 회차
   종류 모두 `sim-gate`의 조건(`mode == 'full'`)에 들지 않는다.
 - 결과 해석과 원천 규칙은 `docs/simulation.md`의 해당 절에 있다.
+
+## 10e. master 직접 작업과 종료 전 closure 대기 (improv-worker-v2, claunch-cetzf.2·claunch-5sryb)
+
+시작 입력 `allow_work_on_main`(bool, 기본 false, `set_by: [user]`)은 이 세션의 작업
+위치를 master로 지정한다. 다른 세션(독립 자식, 스택 자식)에는 적용되지 않는다.
+
+- 규칙 `no-master-merge`(머지·push 금지, `effect`와 `spec.invariants`)는 그대로다.
+  그 규칙에 있던 「master 체크아웃에서 커밋 금지」는 조건부 규칙
+  `no-master-commit`(`when: $result['branch-setup'].value.mode != 'main'`)으로 분리했다.
+- 입력은 branch-setup만 읽는다. 켜져 있으면 조건부 규칙 `branch-on-main`이
+  branch-setup에 전달되고, branch-setup은 통합 대상 거부와 공유·메인 체크아웃
+  판정을 둘 다 건너뛰고 `mode: main`을 보고한다(꺼져 있으면 `new` 또는 `reuse`).
+- branch-setup 뒤의 노드는 입력 대신 그 회차의 `mode`를 읽는다. mode가 main이면
+  조건부 규칙 `work-on-main`이 delegate-work·commit·main-landed·wrapup에 전달되고,
+  아니면 `no-master-commit`이 commit부터 wrapup까지에 전달된다. commit·stack-round·
+  delegate-work의 본문도 이 `mode`를 읽는다. 위임 fork 자식은 부모와 같은
+  디렉터리에서 일한다.
+- `land` 절차의 첫 문장 `main-gate`는 `mode == 'main'`인 회차에서 `main-landed`
+  (master 커밋 해시 확인) 뒤 `landed`를 반환한다. rebase·리뷰·착지 요청·PR·push는
+  돌지 않고, wrapup은 그 해시로 이슈를 닫는다. `land(mode=stack-only)`는 이
+  갈래에 들지 않는다. stack-only 회차는 branch-setup을 돌지 않아 `mode`가 앞
+  회차 값으로 남고, 그 회차가 할 일은 자식 스택의 착지(stack-landing)이기
+  때문이다(리뷰 CHANGES REQUESTED @ ea06fa49).
+- 회차 도중 사람이 입력을 바꿔도 그 회차의 착지 경로와 규칙 문구는 바뀌지 않는다.
+  바뀐 값은 다음 회차의 branch-setup부터 적용된다. 착지 시점에 입력을 읽으면
+  피처 브랜치를 판 뒤 입력을 켠 회차가 착지 요청 없이 이슈를 닫는다(리뷰
+  CHANGES REQUESTED @ 347ff9c8).
+
+시작 입력 `require_plan_closure`(bool, 기본 false, `set_by: [user]`)는 `settle`
+앞의 `closure-gate`가 읽는다. 두 갈래 모두 probe는 `claunch gate plan-waiting`이다.
+
+| 값 | 대기 | 만료·판정 불가 |
+|---|---|---|
+| true | `closure-wait`, `seconds` 없음 | 판정 불가 세 번이면 `plan-wait-unclear`(사람이 계속 기다림·진행을 고른다) |
+| false | `closure-wait-timed`, `seconds: 180` | `timeout`·`undecidable` 모두 정산으로 진행한다(저널에 wait 결과가 남는다) |
 
 ## 11. 단계
 
