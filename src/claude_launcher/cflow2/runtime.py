@@ -99,6 +99,7 @@ except ImportError:  # pragma: no cover
 from . import expr as expr_mod
 from . import collections as col_mod
 from . import question as q_mod
+from .inputs import RULES_HEADER
 
 ST_RUNNING = "running"
 ST_WAITING = "waiting_approval"
@@ -2031,14 +2032,19 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
             continue
         tasks.append({
             "node": n.id, "label": n.label or None, "title": n.get("title"),
-            "prompt": render(n.get("prompt"), env), "done_when": n.get("done_when"),
+            "prompt": node_prompt(r, n, env), "done_when": n.get("done_when"),
             "verify": n.get("verify"), "returns": returns_of(n),
             "effects": n.get("effects") or [],
         })
         for rid in n.get("rules") or []:
             if rid not in rule_ids:
                 rule_ids.append(rid)
-    rules = [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")} for rid in rule_ids]
+    rules = []
+    for rid in rule_ids:
+        body = r.chart.rules.get(rid) or {}
+        if not rule_active(body, env):
+            continue
+        rules.append({"id": rid, "text": body.get("text")})
     receipt = str(r.store.receipt_path(did))
     out = {
         "delegation": did, "node": node.id, "label": shown_label(r.chart, node),
@@ -4028,13 +4034,26 @@ def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_
         except inputs_mod.InputsError as exc:
             raise FlowError(f"input not written: {exc}") from None
         was = current.get(name)
+        before = copy.deepcopy(data)
         current[name] = got
         data["inputs"] = current
         by = CALLER_USER if person else (session or "unmanaged")
         r.emit("input_set", name=name, value=got, by=by)
         r.events[-1]["was"] = was  # kept when empty: what the write replaced
+        # what the change turns on or off and which open tasks read it
+        # (claunch-cetzf.1); the nudge carries it as a block
+        open_tasks = [(iid, inst["node"]) for iid, inst in r.inst.items()
+                      if inst.get("await") == AW_TASK]
+        found = inputs_mod.impact(r.chart, name, before, data, open_tasks)
+        impact_box.append(found)
+        if found["rules"] or found["tasks"]:
+            r.emit("input_impact", name=name, rules=found["rules"], tasks=found["tasks"])
+    impact_box: List[Dict[str, Any]] = []
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    out = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if impact_box:
+        out["input_impact"] = impact_box[-1]
+    return out
 
 
 def mesh_of(state: Dict[str, Any]) -> str:
@@ -5542,8 +5561,11 @@ def rule(name: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
     if name not in rules:
         raise FlowError(f"no rule {name!r} (rules: {', '.join(rules) or 'none'})")
     body = dict(rules[name] or {})
-    return {"rule": name, "text": body.get("text"), "why": body.get("why"),
-            "deliver": body.get("deliver"), "effect": body.get("effect")}
+    out = {"rule": name, "text": body.get("text"), "why": body.get("why"),
+           "deliver": body.get("deliver"), "effect": body.get("effect")}
+    if body.get("when") is not None:
+        out["when"] = body["when"]
+    return out
 
 
 def _instance_depth(inst: Dict[str, Any], iid: str) -> int:
@@ -5706,8 +5728,7 @@ def describe(r: Run) -> Dict[str, Any]:
                 "title": node.get("title"), "prompt": _task_prompt(r, iid, node, env),
                 "done_when": node.get("done_when"), "verify": node.get("verify"),
                 "returns": returns_of(node), "effects": node.get("effects") or [],
-                "rules": [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")}
-                          for rid in node.get("rules") or []],
+                "rules": rules_view(r, node, env),
                 "ask": node.get("ask"),
                 "item": env.get("item"),
             })
@@ -6220,10 +6241,60 @@ def _ask_reframe(r: Run, iid: str, node: ir.Node, error: str) -> bool:
     return True
 
 
-def _task_prompt(r: Run, iid: str, node: ir.Node, env: Dict[str, Any]) -> str:
-    """The task's rendered prompt, plus the engine's note when this visit is
-    a re-ask (:func:`_ask_reframe`)."""
+
+
+def rule_active(rule: Dict[str, Any], env: Dict[str, Any]) -> bool:
+    """Whether a rule applies under ``env`` (docs 2.5 ``when``). A rule
+    without ``when`` always applies; one whose expression cannot be
+    evaluated applies too (a rule fails toward being shown)."""
+    cond = (rule or {}).get("when")
+    if cond is None:
+        return True
+    try:
+        return expr_mod.truthy(expr_mod.evaluate(cond, env))
+    except (expr_mod.ExprError, TypeError, ValueError, RecursionError, OverflowError):
+        return True
+
+
+def rules_view(r: Run, node: ir.Node, env: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The node's rules for a status payload: id, text and, for a
+    conditional rule, its ``when`` and whether it holds now."""
+    out = []
+    for rid in node.get("rules") or []:
+        body = (r.chart.rules or {}).get(rid) or {}
+        entry: Dict[str, Any] = {"id": rid, "text": body.get("text")}
+        if body.get("when") is not None:
+            entry["when"] = body["when"]
+            entry["active"] = rule_active(body, env)
+        out.append(entry)
+    return out
+
+
+def node_prompt(r: Run, node: ir.Node, env: Dict[str, Any]) -> str:
+    """The task's rendered prompt with the conditional rules that hold under
+    ``env`` appended under the rules header. Unconditional rules were baked
+    in at compile time (frontend); conditional ones are decided here, on
+    every read, so a changed input shows up in the next status, brief and
+    reminder (claunch-cetzf.1)."""
     text = render(node.get("prompt"), env)
+    extra = []
+    for rid in node.get("rules") or []:
+        body = (r.chart.rules or {}).get(rid) or {}
+        if body.get("when") is not None and rule_active(body, env):
+            extra.append(str(body.get("text") or "").strip())
+    extra = [t for t in extra if t]
+    if not extra:
+        return text
+    if RULES_HEADER in text:
+        return text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
+    return (text.rstrip("\n") + ("\n\n" if text.strip() else "") + RULES_HEADER + "\n"
+            + "\n".join(extra) + "\n")
+
+
+def _task_prompt(r: Run, iid: str, node: ir.Node, env: Dict[str, Any]) -> str:
+    """The task's rendered prompt (:func:`node_prompt`), plus the engine's
+    note when this visit is a re-ask (:func:`_ask_reframe`)."""
+    text = node_prompt(r, node, env)
     retry = (r.inst.get(iid) or {}).get("frame", {}).get("ask_retry")
     return text + "\n\n" + _retry_note(retry) if retry else text
 
@@ -6629,7 +6700,7 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
     return {
         "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "title": node.get("title"), "ask": rec["id"], "kind": rec.get("kind"),
-        "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
+        "prompt": rec.get("prompt"), "task_prompt": node_prompt(r, node, env),
         "options": [{"name": o["name"], "description": o.get("description") or ""}
                     for o in _ask_choices(rec)],
         "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),

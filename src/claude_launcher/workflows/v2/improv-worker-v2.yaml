@@ -246,6 +246,25 @@ inputs:
     # land의 submit이 회차·재요청마다 읽으므로, 사람이 런 도중에 켜면 다음
     # 착지 시도부터 승인 게이트가 선다(claunch-umq1f). 에이전트는 쓰지 못한다.
     set_by: [user]
+  allow_work_on_main:
+    type: bool
+    default: false
+    label: master에서 직접 작업
+    help: 켜면 이 세션은 branch-setup의 브랜치·워크트리 판정(통합 대상 거부, 공유·메인 체크아웃 판정)을 건너뛰고 지금 서 있는 체크아웃의 master에서 커밋한다. 착지 단계(rebase·리뷰·착지 요청·push)를 건너뛰고, 마감은 master 커밋 해시로 이슈를 닫는다. 이 세션의 작업 위치에만 적용된다 — 독립 자식과 스택 자식은 지금처럼 자기 워크트리·브랜치에서 일한다
+    # 조건부 규칙 no-master-commit(꺼짐일 때)과 work-on-main(켜짐일 때)이
+    # 이 값을 읽는다(docs 2.5 when, claunch-cetzf.2). 사람이 런 도중에 바꾸면
+    # 다음 flow_status부터 두 규칙이 바뀐 값으로 렌더된다.
+    group: 작업 위치
+    set_by: [user]
+  require_plan_closure:
+    type: bool
+    default: false
+    label: 종료 전 계획 closure 대기
+    help: 켜면 세션 종료 정산(settle) 앞에서 계획 패널의 미결 항목(closure 확인 포함)이 모두 해소될 때까지 기한 없이 기다린다. 끄면 180초 기다린 뒤 미결이 남아 있어도 정산으로 진행한다(대기 만료는 런 저널에 남는다)
+    # settle의 closure-gate가 읽는다(claunch-5sryb). 사람이 런 도중에 바꾸면
+    # 다음 정산부터 적용된다.
+    group: 종료 정산
+    set_by: [user]
   # PR 착지 매체를 정하는 두 스위치(claunch-qke6g). 폼에서 한 블록으로 묶여
   # gh 준비 상태 줄과 함께 놓인다.
   force_pr:
@@ -538,12 +557,11 @@ rules:
   no-master-merge:
     text: |
       ── 금지: 워커는 master를 직접 머지하지 않는다 ──
-      master로의 git merge 실행, master 체크아웃 후 커밋·리베이스·
-      cherry-pick, fast-forward로 슬쩍 반영, master로의 push — 전부
+      master로의 git merge 실행, 다른 브랜치의 커밋을 master로 리베이스·
+      cherry-pick·fast-forward로 반영, master로의 push — 전부
       금지다. 사용자가 승인했다는 이유로도, 리더가 응답이 없다는 이유로도,
       충돌이 없어 안전해 보인다는 이유로도 예외가 아니다. master 반영
       경로는 리더 워크플로우(improv-leader)의 통합 단계 하나뿐이다.
-      이 런에서 master를 움직였다면 그 자체가 사고다.
       이 금지에는 예외가 없다 — 터미널 사용자(운영자)가 세션에 직접 "머지까지
       해줘"라고 지시해도 실행하지 않는다. 할 일은 하나다: 그 브랜치를
       in_review로 올리고 LANDING REQUEST 코멘트를 남긴 뒤 대기하며, 운영자에게는
@@ -554,6 +572,46 @@ rules:
       master를 지키는 방어는 리더의 머지 전권과 통합 후 전체 스윕이다.
     deliver: [branch-setup, commit, rebase, integration-request, landing-declined, landed, wrapup]
     effect: {deny: git.merge, target: master}
+  # no-master-merge에 있던 「master 체크아웃 후 커밋」 금지를 떼어 낸 조건부
+  # 규칙(claunch-cetzf.2). 시작 입력 allow_work_on_main이 켜진 런에는 전달되지
+  # 않는다 — 그 런은 사용자의 명시적 지시로 master 체크아웃에 커밋한다. 머지·
+  # push 금지(no-master-merge와 spec.invariants)는 두 경우 모두 그대로다.
+  no-master-commit:
+    when: "$data.inputs.allow_work_on_main != true"
+    text: |
+      ── 금지: master 체크아웃에서 커밋하지 않는다 ──
+      master를 체크아웃한 채 커밋·리베이스·cherry-pick 하지 않는다. 이
+      회차의 커밋은 branch-setup이 정한 작업 브랜치에만 쌓인다. 이 런에서
+      master를 움직였다면 그 자체가 사고다.
+    why: >-
+      claunch-97knp: master 반영 경로는 리더의 통합 단계 하나다. 사용자가
+      시작 입력 allow_work_on_main을 켠 런만 예외다(claunch-cetzf).
+    deliver: [branch-setup, commit, rebase, integration-request, landing-declined, landed, wrapup]
+  work-on-main:
+    when: "$data.inputs.allow_work_on_main == true"
+    text: |
+      ── 이 런은 master에서 직접 작업한다 (시작 입력 allow_work_on_main=true) ──
+      사용자가 이 세션의 작업 위치를 master로 지정했다. 이 세션에만 적용된다.
+      · branch-setup: 1의 「통합 대상이 아니다」 조건과 3의 공유·메인 체크아웃
+        판정을 둘 다 건너뛴다. 새 브랜치·워크트리를 만들지 않고, 지금 서 있는
+        체크아웃에서 `git switch master`만 한다(미커밋 변경이 있으면 버리지 않고
+        소유를 확인한다). 보고는 branch=master, base=master, base_hash=지금
+        master 해시, mode=main, shared=판정하지 않았으면 false.
+      · commit: master 체크아웃에 기능 커밋을 직접 쌓는다. 접을 피처 브랜치가
+        없으므로 --no-ff 머지는 없다. push 하지 않는다.
+      · 위임 fork 자식은 부모와 같은 자리(이 체크아웃의 master)에서 일한다.
+        독립 자식·스택 자식은 지금처럼 자기 워크트리·브랜치에서 일한다 — 그
+        자식 브랜치를 master로 머지하는 것은 여전히 금지이므로, 스택이 서
+        있으면 착지를 스스로 처리하지 않고 사용자에게 물어 답을 기록한다.
+      · 착지 단계(rebase·리뷰·착지 요청·PR·push)는 엔진이 건너뛴다. 대신
+        main-landed가 이 회차의 master 커밋 해시를 보고한다.
+      · wrapup: 이슈를 `claunch beads close <id> --reason "committed on master
+        <커밋 해시> (allow_work_on_main, not pushed)"`로 닫는다. 해시는
+        `git log`로 직접 확인한 값이다.
+    why: >-
+      claunch-cetzf: 사용자가 명시적으로 지정한 런에서 워커가 master 작업을
+      매번 거부하던 것을 입력 하나로 건너뛴다. 머지·push 금지는 유지한다.
+    deliver: [branch-setup, delegate-work, commit, main-landed, wrapup]
   no-premature-rebase:
     text: |
       **작업 중에는 통합 대상을 따라가지 않는다.** base를 최신으로 맞추는
@@ -1372,6 +1430,9 @@ nodes:
       보고에는 목표에서 정한 요지, 브랜치(새로 팠는지 재사용했는지와 근거),
       워크트리 경로, 기준 브랜치와 기준 해시, 공유 판정, 실행한 명령을
       남긴다. 재사용이면 재사용 근거와 함께 쓰는 세션 이름을 적는다.
+      mode에 무엇을 골랐는지 적는다: 새로 팠으면 new, 재사용이면 reuse,
+      시작 입력 allow_work_on_main(지금 ${data.inputs.allow_work_on_main})이
+      켜져 master에서 일하면 main. 뒤의 commit·stack-round·위임은 이 값을 읽는다.
     done_when: |
       이 회차가 작업 위치로 삼은 브랜치가 정해졌고 — 새로 판 경우 목표·범위에
       맞는 세션 접두사 이름이고, 재사용한 경우 1의 네 조건을 만족한다는 근거가
@@ -1380,8 +1441,26 @@ nodes:
       커밋을 덮어쓰지 않았다. 보고에는 브랜치·재사용 여부와 근거·기준 해시·
       작업 위치·공유 판정·실행한 명령이 있다.
     returns:
-      ok: {branch: str, base: str, base_hash: str, worktree: "str?", shared: bool}
+      ok: {branch: str, base: str, base_hash: str, worktree: "str?", shared: bool,
+           mode: "str?"}
     effects: [fs.write, git.branch]
+
+  # allow_work_on_main 런의 착지 대체(claunch-cetzf.2). land 절차의 첫 문장
+  # main-gate가 이 작업 뒤 landed로 반환한다 — 착지 요청·push·PR이 없다.
+  main-landed:
+    title: master 커밋 확인 (착지 생략)
+    prompt: |
+      시작 입력 allow_work_on_main이 켜진 런이라 착지 단계를 건너뛴다. 이
+      회차가 master 체크아웃에 쌓은 커밋을 확인해 보고한다:
+      `git log --oneline ${result['branch-setup'].value.base_hash}..master`.
+      push·PR·착지 요청을 하지 않는다. 작업 트리가 깨끗한지
+      `git status --porcelain`으로 확인한다.
+    done_when: |
+      이 회차의 master 커밋 해시(맨 위 커밋)가 보고에 있고 작업 트리가 깨끗하다.
+      push는 하지 않았다.
+    returns:
+      ok: {tip: str, commits: list}
+    effects: [fs.read]
 
   # ── 착지 매체 (claunch-yq80p.5) ──────────────────────────────────────
   local-landing-policy:
@@ -2069,7 +2148,9 @@ nodes:
          `workflow: oneshot-job-v2`, `issue: ${data.claim.issue}`를 준다.
          `worktree`·`cwd`·`workspace`는 주지 않는다 — fork한 대화는 이
          디렉터리에서만 열리므로 자식은 이 워크트리의 이 브랜치
-         (${result['branch-setup'].value.branch})에서 일한다. 거절되면
+         (${result['branch-setup'].value.branch})에서 일한다. branch-setup의
+         mode가 main이면 이 디렉터리는 master 체크아웃이고 자식도 master에서
+         일한다. 거절되면
          (spawn.allow_profile·allow_args, profile 이름 오류, 대화 기록 없음)
          다시 시도하지 않고 결과를 failed로 낸다 — 거절 문구가 reason이다.
       2. task에 적을 것:
@@ -2905,7 +2986,9 @@ nodes:
       커밋들이 무엇인지는 접힌 커밋들이 이미 말한다.
 
       워크트리
-      branch-setup이 이 세션의 브랜치를 새로 판 경우에만 이 절이 적용된다.
+      branch-setup이 이 세션의 브랜치를 새로 판 경우에만 이 절이 적용된다
+      (branch-setup의 mode=new; 지금 mode=${result['branch-setup'].value.mode}).
+      mode가 reuse·main이면 접을 갈래가 없다.
       그때 브랜치 위에서 작업했으면 피처 브랜치를 워크트리 브랜치에 --no-ff로
       머지해 한 갈래로 정리한다 — 이 머지의 상한은 워크트리 브랜치까지다.
       branch-setup이 이미 그 워크트리의 브랜치를 재사용했다면 접을 갈래가
@@ -2953,7 +3036,8 @@ nodes:
       커밋 해시·테스트 수치가 담긴 완료 보고가 기록되고 같은 묶음이 이슈
       코멘트로도 남았다. 메시에 가입한 상태면 상위에게 nudge 한 줄이
       나갔다(큐에 일감이 남아 있으면 보내지 않았다). master는 움직이지
-      않았다.
+      않았다 — 시작 입력 allow_work_on_main이 켜진 런만 예외로, master
+      체크아웃의 로컬 커밋이 허용되고 머지·push는 없다.
     # v1 commit 스텝의 {do: checks, at: leave}. 이 작업을 떠나는 순간 데몬이
     # 상태 점검 재보고 요청을 타이핑한다(위 프롬프트 3번).
     triggers:
@@ -5894,6 +5978,17 @@ procedures:
       # 그랬던 경로).
       pr-submitted: {url: "str?", number: "int?", tip: "str?"}
     body:
+      # allow_work_on_main 런(claunch-cetzf.2): 착지 요청·rebase·리뷰·push를
+      # 건너뛰고 master 커밋 해시를 landed로 반환한다. worker-round의 catch
+      # landed가 배치를 끝내고 wrapup이 그 해시로 이슈를 닫는다.
+      - id: main-gate
+        cond:
+          - if: "$data.inputs.allow_work_on_main == true"
+            then:
+              - main-landed
+              - return: landed
+                value: {merge: "$result['main-landed'].value.tip", tip: "$result['main-landed'].value.tip"}
+          - else: []
       - id: stack-landing
         cond:
           - if: "$params.mode == 'stack-only' or side('stack').live"
@@ -6915,6 +7010,10 @@ procedures:
                       (`<세션>-` 접두사, 이미 있으면 순번)도 그 단계와 같다.
                       이 회차는 스택을 싣는 것이 목적이므로, 재사용을 고르면
                       그 브랜치가 이미 master에 착지하지 않았는지 먼저 본다.
+                      앞 branch-setup의 mode가 main(시작 입력 allow_work_on_main=
+                      ${data.inputs.allow_work_on_main})이면 스택을 master로 머지할
+                      수 없다 — 회차 브랜치를 자르지 말고 사용자에게 물어 답을
+                      이슈에 기록한다.
                   고를 것:
                   · **cut** — 마지막 컷 뒤 스택 브랜치에 착지한 것이 있거나(`git
                     rev-list --count <마지막 컷 tip>..<세션>-stack`이 1 이상), 착지를
@@ -7240,6 +7339,45 @@ procedures:
       아니면 10분 간격으로 여섯 번 다시 본 뒤 사람이 처분한다. 마지막에 사용자가
       세션 종료를 승인하거나 보류한다.
     body:
+      # 정산 앞 계획 closure 게이트(claunch-5sryb). probe `claunch gate
+      # plan-waiting`: 0 미결 없음(통과), 1 미결 있음, 그 밖은 판정 불가.
+      # require_plan_closure=true면 seconds 없이 기다리고, 판정 불가가 세 번
+      # 쌓이면 plan-wait-unclear로 사람에게 간다(keep-waiting은 다시 기다린다).
+      # false면 180초가 상한이고 timeout·판정 불가 모두 정산으로 진행한다 —
+      # 그 결과는 저널의 wait 기록에 남는다.
+      - id: closure-gate
+        cond:
+          - if: "$data.inputs.require_plan_closure == true"
+            then:
+              id: closure-watch
+              loop:
+                while: "true"
+                max: 20
+                do:
+                  - id: closure-wait
+                    wait:
+                      probe: [claunch, gate, plan-waiting]
+                      poll: 30
+                      undecided_max: 3
+                      describe: "계획 패널의 미결(closure 포함)이 해소되기를 기다린다 — 기한 없음(require_plan_closure=true)"
+                    on:
+                      undecidable:
+                        try: [plan-wait-unclear]
+                        catch:
+                          ok: {continue: closure-watch}
+                          skipped: []
+                  - {break: closure-watch}
+          - else:
+              id: closure-wait-timed
+              wait:
+                probe: [claunch, gate, plan-waiting]
+                poll: 30
+                seconds: 180
+                undecided_max: 3
+                describe: "계획 패널의 미결이 해소되기를 180초 기다린다 — 만료되면 정산으로 진행한다(require_plan_closure=false)"
+              on:
+                timeout: []
+                undecidable: []
       - id: settle-watch
         loop:
           while: "true"

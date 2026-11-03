@@ -682,8 +682,16 @@ def _input_checks(chart: ir.Chart) -> List[Finding]:
     from . import inputs as inputs_mod
 
     out: List[Finding] = []
+    deps = inputs_mod.dependencies(chart)
     for name, decl in ((chart.meta or {}).get("inputs") or {}).items():
         agent = inputs_mod.SETTER_AGENT in (decl.get("set_by") or [])
+        entry = deps.get(name) or {}
+        if decl.get("set_by") and not entry.get("nodes") and not entry.get("rules"):
+            # a mid-run change of an input nothing reads changes nothing
+            # (claunch-cetzf.1)
+            out.append(Finding(WARNING, "set-by-unread",
+                               f"input {name!r} declares set_by but no node or rule reads "
+                               f"data.inputs.{name}: changing it after start has no effect"))
         if agent and not inputs_mod._is_empty(decl.get("default")):
             out.append(Finding(WARNING, "set-by-default",
                                f"input {name!r} declares set_by agent but has the default "
@@ -708,19 +716,26 @@ def check(chart: ir.Chart) -> List[Finding]:
             if isinstance(mx, bool) or not isinstance(mx, int) or mx < 1:
                 out.append(Finding(ERROR, "unbounded-loop", f"loop {n.id} has no positive max", n.id))
 
-    denials: List[Tuple[str, str, Optional[str]]] = []
+    denials: List[Tuple[str, str, Optional[str], Optional[str]]] = []
     for name, inv in ((chart.spec or {}).get("invariants") or {}).items():
         if inv.get("never_effect"):
-            denials.append((f"invariant {name}", inv["never_effect"], inv.get("target")))
+            denials.append((f"invariant {name}", inv["never_effect"], inv.get("target"), None))
     for rid, rule in (chart.rules or {}).items():
         eff = (rule or {}).get("effect") or {}
         if eff.get("deny"):
-            denials.append((f"rule {rid}", eff["deny"], eff.get("target")))
-    for source, deny, target in denials:
+            denials.append((f"rule {rid}", eff["deny"], eff.get("target"), (rule or {}).get("when")))
+    for source, deny, target, when in denials:
         for t in tasks:
             for e in t.get("effects") or []:
                 if _effect_hits(e, deny, target):
                     tgt = f" on {target}" if target else ""
+                    if when is not None:
+                        # a conditional rule (docs 2.5 when): the declared
+                        # effect is forbidden only while the condition holds
+                        out.append(Finding(WARNING, "never-effect-when",
+                                           f"task {t.id} declares effect {e!r}; {source} forbids "
+                                           f"{deny}{tgt} while {when}", t.id))
+                        continue
                     out.append(Finding(ERROR, "never-effect",
                                        f"task {t.id} declares effect {e!r}; {source} forbids {deny}{tgt}", t.id))
 

@@ -185,6 +185,21 @@ def _caps_for(profile: Optional[str], harness: Optional[str]):
     return caps
 
 
+def _print_input_deps(chart: Any) -> None:
+    """validate's table of which rules and nodes read each start input
+    (claunch-cetzf.1, ``inputs.dependencies``)."""
+    from .cflow2 import inputs as inputs_mod
+
+    deps = inputs_mod.dependencies(chart)
+    if not deps:
+        return
+    print("input dependencies:")
+    for name, entry in deps.items():
+        cond = entry["conditional"]
+        print(f"  {name}: {len(entry['nodes'])} node(s), {len(entry['rules'])} rule(s)"
+              + (f", conditional rule(s) {', '.join(cond)}" if cond else ""))
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     from .cflow2 import caps as caps_mod, check, executors
 
@@ -201,6 +216,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(str(f))
     if not findings:
         print("checks: no findings")
+    _print_input_deps(chart)
     caps = _caps_for(args.profile, args.harness)
     for w in getattr(caps, "warnings", []) or []:
         print(f"caps warning: {w}")
@@ -800,7 +816,10 @@ def _cmd_input(args: argparse.Namespace) -> int:
     got = json.dumps((payload.get("inputs") or {}).get(args.name), ensure_ascii=False)
     print(f"input {args.name} = {got}")
     if args.user:
-        _nudge_driver(args.scope, NUDGE_INPUT_SET.format(name=args.name, value=got))
+        from .cflow2 import inputs as inputs_mod
+
+        _nudge_driver(args.scope, NUDGE_INPUT_SET.format(name=args.name, value=got)
+                      + inputs_mod.format_impact(payload.get("input_impact")))
     return 0
 
 

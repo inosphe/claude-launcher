@@ -80,7 +80,7 @@ from . import cflow2_approve, cflow2_web
 from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
-from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
+from ..cflow2 import inputs as cflow2_inputs, ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, model_tiers, onboard,
@@ -7584,7 +7584,8 @@ async def h_cflow2_input(request: web.Request) -> web.Response:
     got = json.dumps((payload.get("inputs") or {}).get(name), ensure_ascii=False)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
-        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got),
+        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got)
+        + cflow2_inputs.format_impact(payload.get("input_impact")),
     )
     return json_response(payload)
 

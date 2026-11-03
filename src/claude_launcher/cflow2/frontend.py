@@ -234,7 +234,7 @@ PARAM_KEYS = ("type", "required", "default", "description")
 PARAM_BLOCK = "block"
 #: The tree mapping head that places a block param.
 SPLICE = "splice"
-RULE_KEYS = ("text", "why", "deliver", "effect")
+RULE_KEYS = ("text", "why", "deliver", "effect", "when")
 SPEC_KEYS = ("invariants", "paths", "ensures", "monitors")
 MONITOR_KEYS = ("always", "probe", "every", "on_violation", "when", "within", "expect")
 ON_VIOLATION = ("halt", "notify", "record")
@@ -581,6 +581,10 @@ def _absorb(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
                 effect = _plain(effect)
             entry = {"text": raw["text"], "why": raw.get("why"), "deliver": deliver_v,
                      "effect": effect}
+            if raw.get("when") is not None:
+                # A conditional rule (docs 2.5): not baked into prompts; the
+                # runtime appends its text while the expression holds.
+                entry["when"] = _expr_text(ctx, file, raw["when"], f"rule {rid!r} when", rline)
             _merge_named(ctx, ctx.rules, ctx.rule_src, str(rid), entry, _where(file, rline), "rule")
 
     ctypes = doc.get("collection_types")
@@ -844,7 +848,8 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
         deliver = rule.get("deliver")
         if (deliver == "all" or (isinstance(deliver, list) and name in deliver)) and rid not in rule_ids:
             rule_ids.append(rid)
-    texts = [ctx.rules[r]["text"].strip() for r in rule_ids if r in ctx.rules]
+    texts = [ctx.rules[r]["text"].strip() for r in rule_ids
+             if r in ctx.rules and ctx.rules[r].get("when") is None]
     if texts:
         prompt = prompt.rstrip("\n") + ("\n\n" if prompt.strip() else "") + _RULES_HEADER + "\n" + "\n".join(texts) + "\n"
 

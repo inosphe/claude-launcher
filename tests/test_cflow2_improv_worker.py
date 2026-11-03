@@ -428,8 +428,11 @@ def test_the_plan_wait_is_declared_on_both_paths():
     and a failed read goes to a person instead of releasing the run
     (docs/plan-coding-approval.md 규칙 1)."""
     chart = _chart()
+    # settle's closure gate probes the same command (claunch-5sryb); it is
+    # tested on its own below
     waits = [n for n in chart.nodes.values() if n.type == "wait"
-             and n.get("probe") == ["claunch", "gate", "plan-waiting"]]
+             and n.get("probe") == ["claunch", "gate", "plan-waiting"]
+             and "closure-wait" not in n.id]
     assert len(waits) == 2, [n.id for n in waits]
     for n in waits:
         assert "plan-wait" in n.id
@@ -1103,6 +1106,118 @@ def test_rules_and_master_merge_invariant():
     assert chart.spec["invariants"]["no-master-merge"] == {"never_effect": "git.merge",
                                                            "target": "master"}
     assert chart.spec["paths"]["settle-before-end"]["must_pass"] == ["settle"]
+
+
+# -- allow_work_on_main (claunch-cetzf.2) / require_plan_closure (claunch-5sryb)
+
+def _procedure_run(tmp_path, monkeypatch, body, values):
+    """A run of the real definition with ``body`` replaced and ``values``
+    applied as start inputs."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["body"] = body
+    doc.pop("spec", None)
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    chart = inputs.apply(chart, values)
+    kw = {"cwd": str(tmp_path), "scope": "p", "now": 1.0}
+    return runtime.start(chart, caps={}, **kw), kw
+
+
+def test_allow_work_on_main_is_a_user_input_read_by_two_conditional_rules():
+    from claude_launcher.cflow2 import inputs
+
+    chart = _chart()
+    decl = chart.meta["inputs"]["allow_work_on_main"]
+    assert decl["type"] == "bool" and decl["default"] is False
+    assert decl["set_by"] == ["user"]
+    assert chart.rules["no-master-commit"]["when"] == "$data.inputs.allow_work_on_main != true"
+    assert chart.rules["work-on-main"]["when"] == "$data.inputs.allow_work_on_main == true"
+    # the merge ban stays unconditional, effect and invariant included
+    assert "when" not in chart.rules["no-master-merge"]
+    assert chart.rules["no-master-merge"]["effect"] == {"deny": "git.merge", "target": "master"}
+    assert "master 체크아웃 후 커밋" not in chart.rules["no-master-merge"]["text"]
+    deps = inputs.dependencies(chart)["allow_work_on_main"]
+    assert deps["conditional"] == ["no-master-commit", "work-on-main"]
+    setup = next(n for n in chart.nodes.values() if n.label == "branch-setup")
+    assert {"no-master-commit", "work-on-main"} <= set(setup.get("rules"))
+    assert "no-master-commit" in setup.get("rules")
+    # neither conditional text is baked into the compiled prompt
+    assert "이 런은 master에서 직접 작업한다" not in setup.get("prompt")
+    assert "master 체크아웃에서 커밋하지 않는다" not in setup.get("prompt")
+    assert setup.get("returns")["ok"]["mode"] == "str?"
+
+
+def test_branch_setup_reads_the_rule_matching_the_input():
+    from claude_launcher.cflow2 import runtime
+
+    chart = _chart()
+    setup = next(n for n in chart.nodes.values() if n.label == "branch-setup")
+
+    class _R:
+        pass
+
+    r = _R()
+    r.chart = chart
+    on = runtime.node_prompt(r, setup, {"data": {"inputs": {"allow_work_on_main": True}}})
+    off = runtime.node_prompt(r, setup, {"data": {"inputs": {"allow_work_on_main": False}}})
+    assert "이 런은 master에서 직접 작업한다" in on
+    assert "master 체크아웃에서 커밋하지 않는다" not in on
+    assert "master 체크아웃에서 커밋하지 않는다" in off
+    assert "이 런은 master에서 직접 작업한다" not in off
+
+
+def test_land_skips_to_landed_with_the_master_commit_when_working_on_main(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    body = [{"try": [{"call": "land"}], "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {"allow_work_on_main": True})
+    [task] = st["tasks"]
+    assert task["label"] == "main-landed"
+    st = runtime.report(task["instance"], "ok", {"tip": "abc123", "commits": ["abc123"]}, **kw)
+    # landed reached the caller: wrapup is next, no landing choice stood
+    assert [t["label"] for t in st["tasks"]] == ["wrapup"]
+    assert not st.get("choices")
+
+
+def test_land_is_unchanged_when_the_input_is_off(tmp_path, monkeypatch):
+    body = [{"try": [{"call": "land"}], "catch": {"landed": ["wrapup"]}}]
+    st, _ = _procedure_run(tmp_path, monkeypatch, body, {})
+    assert not st["tasks"]
+    assert [c["label"] for c in st["choices"]] == ["landing"]
+
+
+def test_settle_waits_for_plan_closure_without_a_deadline_when_required(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}],
+                            {"require_plan_closure": True})
+    [w] = st["waits"]
+    assert w["node"].endswith("closure-wait") and w["seconds"] is None
+    assert w["probe"] == ["claunch", "gate", "plan-waiting"]
+    # a day of "still owed" does not release it
+    st = runtime.wait_tick(86_400.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert [x["node"] for x in st["waits"]] == [w["node"]]
+    st = runtime.wait_tick(86_500.0, lambda cmd, cwd: (0, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not any("closure" in x["node"] for x in st.get("waits") or [])
+    assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
+
+
+def test_settle_goes_on_after_three_minutes_when_closure_is_not_required(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}], {})
+    [w] = st["waits"]
+    assert w["node"].endswith("closure-wait-timed") and w["seconds"] == 180
+    st = runtime.wait_tick(100.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert [x["node"] for x in st["waits"]] == [w["node"]]
+    st = runtime.wait_tick(200.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not any("closure" in x["node"] for x in st.get("waits") or [])
+    assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
 
 
 def test_moved_rule_prose_is_not_repeated_in_prompts():
