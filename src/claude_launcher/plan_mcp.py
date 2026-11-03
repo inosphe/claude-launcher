@@ -125,6 +125,25 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "session": {"type": "string", "description": "whose plan; default this session"},
          "joint": {"type": "boolean", "description": "the joint tree holding that session"},
+         "round": {"type": "string", "description": "a sealed round instead of the current plan: "
+                                                    "'<run>/<round>' as plan_rounds lists it"},
+     }}},
+    {"name": "plan_new_round",
+     "description": "Start the plan of a new workflow round: the current plan is sealed (kept, readable with "
+                    "plan_rounds) and an empty one opens, so no decision of the old round answers the new one. "
+                    "Checks and followups the user still owes are carried over, marked with their round. Same "
+                    "(run, round) again changes nothing. Then write the round's plan with plan_set. run and "
+                    "round: flow_status's run and round_now.",
+     "inputSchema": {"type": "object", "properties": {
+         "run": {"type": "string", "description": "the cflow run id"},
+         "round": {"type": "integer", "description": "the round number in that run"},
+         "issue": {"type": "string", "description": "the round's beads issue"},
+     }, "required": ["run", "round"]}},
+    {"name": "plan_rounds",
+     "description": "List a session's sealed plan rounds (yours by default), oldest first, with each one's "
+                    "summary and the round the current plan is in.",
+     "inputSchema": {"type": "object", "properties": {
+         "session": {"type": "string", "description": "whose rounds; default this session"},
      }}},
     {"name": "plan_overview",
      "description": "Every running session's progress stage on one read: user (a person owes it a choice), "
@@ -136,7 +155,9 @@ TOOLS = [
          "all": {"type": "boolean", "description": "also the ended (unarchived) sessions"},
      }}},
     {"name": "plan_clear",
-     "description": "Remove your plan (written by mistake, or the session's work changed altogether).",
+     "description": "Remove your plan (written by mistake, or the session's work changed altogether). It is "
+                    "sealed first, so plan_rounds still lists it. For the next workflow round use "
+                    "plan_new_round instead.",
      "inputSchema": {"type": "object", "properties": {"revision": {"type": "integer"}},
                      "required": ["revision"]}},
 ]
@@ -167,8 +188,16 @@ def call_tool(name: str, args: dict) -> dict:
     c = _client()
     if name == "plan_get":
         who = str(args.get("session") or me)
+        if args.get("round") and not args.get("joint"):
+            return c.get("/api/plan?" + urllib.parse.urlencode({"session": who, "round": str(args["round"])}))
         route = "/api/plan/joint?" if args.get("joint") else "/api/plan?"
         return c.get(route + urllib.parse.urlencode({"session": who}))
+    if name == "plan_rounds":
+        who = str(args.get("session") or me)
+        return c.get("/api/plan/rounds?" + urllib.parse.urlencode({"session": who}))
+    if name == "plan_new_round":
+        body = {k: args[k] for k in ("run", "round", "issue") if k in args}
+        return c.post("/api/plan/round", {**body, "session": me, "by": me})
     if name == "plan_overview":
         query = {k: v for k, v in (("project", args.get("project")), ("all", "1" if args.get("all") else None))
                  if v}

@@ -2,6 +2,8 @@
 plan pane, and the decisions the user takes there.
 
   GET  /api/plan?session=<name>          one session's plan ({"plan": null} without one)
+  GET  /api/plan?session=&round=<run>/<n>  one sealed round of it (claunch-r3j1o.1; <run>/unknown too)
+  GET  /api/plan/rounds?session=<name>   its sealed rounds, oldest first, and the current plan's round
   GET  /api/plan/rail                    per session with a plan: title, context, summary
   GET  /api/plan/joint?session=<name>    the joint tree holding it (plan/joint.py); no session: every tree
   GET  /api/plan/overview[?all=1&project=]  every running session's stage, run and plan progress (plan/overview.py)
@@ -9,7 +11,8 @@ plan pane, and the decisions the user takes there.
   POST /api/plan/aggregators/{project}/start  start it {profile, model?, effort?, name?}         (the user)
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
   POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?, reopen?}
-  POST /api/plan/clear                   clear     {session, revision}
+  POST /api/plan/clear                   clear     {session, revision}  (the plan is sealed first)
+  POST /api/plan/round                   new_round {session, run, round, title?, goal?, issue?}
   POST /api/plan/node/{id}/decide        decide    {session, rev, choice?|verdict?|action?, note?}  (the user)
   POST /api/plan/feedback                feedback  {session, text, node?}                       (the user)
   POST /api/plan/node/{id}/deliver       deliver the waiting notification now {session}        (the user)
@@ -358,8 +361,19 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         session = request.query.get("session") or ""
         if not session:
             return web.json_response({"error": "session is required"}, status=400)
+        key = request.query.get("round") or ""
+        if key:
+            res, err = await call(plans.get_round, session, key)
+            return err or web.json_response({"session": session, "round": key, "plan": res})
         res, err = await call(plans.get, session)
         return err or web.json_response({"session": session, "plan": with_delivery(res)})
+
+    async def h_rounds(request):
+        session = request.query.get("session") or ""
+        if not session:
+            return web.json_response({"error": "session is required"}, status=400)
+        res, err = await call(plans.rounds, session)
+        return err or web.json_response(res)
 
     async def h_rail(_request):
         res, err = await call(plans.rail)
@@ -519,6 +533,14 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         res, err = await call(plans.clear, actor_of(body), session_of(body), body.get("revision"))
         return err or web.json_response(res)
 
+    async def h_round(request):
+        body = await body_of(request)
+        session = session_of(body)
+        res, err = await call(plans.new_round, actor_of(body), session, run=body.get("run"),
+                              round=body.get("round"), title=body.get("title"), goal=body.get("goal"),
+                              issue=body.get("issue"), context=context_of(session))
+        return err or web.json_response(res)
+
     async def h_decide(request):
         body = await body_of(request)
         session = session_of(body)
@@ -559,12 +581,14 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
 
     app.router.add_get("/api/plan", h_get)
     app.router.add_get("/api/plan/rail", h_rail)
+    app.router.add_get("/api/plan/rounds", h_rounds)
     app.router.add_get("/api/plan/joint", h_joint)
     app.router.add_get("/api/plan/overview", h_overview)
     app.router.add_get("/api/plan/aggregators", h_aggregators)
     app.router.add_post("/api/plan/aggregators/{project}/start", h_aggregator_start)
     app.router.add_post("/api/plan", h_set)
     app.router.add_post("/api/plan/clear", h_clear)
+    app.router.add_post("/api/plan/round", h_round)
     app.router.add_post("/api/plan/feedback", h_feedback)
     app.router.add_post("/api/plan/node/{id}", h_patch)
     app.router.add_post("/api/plan/node/{id}/decide", h_decide)

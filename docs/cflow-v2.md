@@ -1326,6 +1326,7 @@ nodes:
 | `checks` | 드라이버 세션에 상태 점검 재보고 요청을 전달 | 켜진 상태 점검 없음, 전달 실패, 드라이버 세션 없음 |
 | `push` | 다른 세션 런의 컬렉션에 레코드 추가(주체 `child`). 대상은 `parent:<이름>` 또는 `leader:<이름>` | 부모 세션 없음, 그 컬렉션을 가진 부모 런(`leader:`면 조상의 메인 런)이 없음 또는 둘 이상(`landing`은 아래 「착지 요청의 대상」), 접근 거절, `each`가 빈 목록, 형식 오류 |
 | `enqueue-landing` | 아래 `push`의 축약형: `to: parent:landing`, `each: $facts.in_review`, `item: {issue: $each, tip: $facts.head, branch: $facts.branch, requested_by: $facts.session}` | `push`와 같음. in_review 이슈 없음 |
+| `plan-round` | 드라이버 세션의 plan을 봉인하고 이 런·회차의 plan을 연다(`plan/store.new_round(run, round)`, claunch-r3j1o.1). 회차 번호는 기록 시점의 `current_round`(없으면 `state.round`)이고 기록의 `round`에 실린다. 같은 (run, round)는 아무것도 바꾸지 않으므로 두 번 실행되어도 된다 | 드라이버 세션 없음, 기록에 회차 없음, plan 저장소 오류 |
 
 - 실행 시점: 엔진은 노드 인스턴스에 들어가거나 떠나는 변경 안에서 요청을
   `state.triggers`에 기록하고(`trigger_queued`) 바로 다음으로 진행한다. 반복으로 같은
@@ -1339,7 +1340,8 @@ nodes:
   넣을 자리의 레코드(`queue`는 같은 key의 레코드, `log`는 모든 레코드)가 같은 `_tid`를
   가지면 아무것도 바꾸지 않고 `trigger_done`(detail에 `replay`)으로 끝난다. 그래서 리더가
   이미 옮긴 상태가 되돌아가지 않는다. `_tid`가 다른 push는 2.7대로 `initial`로 되돌린다.
-  `briefing`과 `checks`는 두 번 실행될 수 있다.
+  `briefing`과 `checks`는 두 번 실행될 수 있다. `plan-round`는 같은 (run, round)에 대해 멱등이다.
+- 모든 trigger 기록은 기록 시점의 회차를 `round`로 싣는다(회차가 없는 런은 `state.round`).
 - trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
 - `push`는 `each`의 레코드를 모두 시도한다. 하나라도 거절되면 `trigger_skipped`(거절 수와 사유)이고,
   이미 들어간 레코드는 남는다.

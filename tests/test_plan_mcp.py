@@ -52,3 +52,17 @@ def test_writing_tools_ask_for_korean_text():
     for name in ("plan_set", "plan_node"):
         assert plan_mcp.LANGUAGE in by_name[name]["description"]
     assert "Korean" in plan_mcp.LANGUAGE
+
+
+def test_round_tools_call_the_round_routes(monkeypatch):
+    """claunch-r3j1o.1: opening a round, listing the sealed ones, reading one."""
+    client = Client()
+    monkeypatch.setattr(plan_mcp, "_client", lambda: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    plan_mcp.call_tool("plan_new_round", {"run": "r1", "round": 2, "issue": "c-1"})
+    assert client.calls[-1] == ("POST", "/api/plan/round", {"run": "r1", "round": 2, "issue": "c-1",
+                                                            "session": "s7", "by": "s7"})
+    plan_mcp.call_tool("plan_rounds", {})
+    assert client.calls[-1] == ("GET", "/api/plan/rounds?session=s7")
+    plan_mcp.call_tool("plan_get", {"round": "r1/1", "session": "s9"})
+    assert client.calls[-1] == ("GET", "/api/plan?session=s9&round=r1%2F1")

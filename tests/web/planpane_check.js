@@ -9,7 +9,8 @@
    steps under it, the closure items as branches of their heading. The 5 s
    poll (claunch-nerp0): a field being typed in is not redrawn, a control
    the user was on gets the focus back by its data-plan-key, and the pane's
-   scroll position comes back. */
+   scroll position comes back. Rounds (claunch-r3j1o.1): the round row,
+   a sealed round drawn read-only, the carried item's round chip. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -73,10 +74,28 @@ const plan2 = {
                          blockers: [{id: 'd9', title: 'cache?', why: 'decision not taken', who: 'user'}]},
 };
 let changes = 0;
+let roundsDoc = null;
+const sealedPlan = {
+  session: 's1', revision: 7, title: 'Round one', goal: '', issue: 'claunch-x', run: 'r1', round: 1, sealed: true,
+  closed_at: '2026-11-03T00:00:00+00:00', key: 'r1/1',
+  steps: [{id: 'd1', kind: 'decision', title: 'storage', detail: '', options: OPTS, rev: 1,
+           result: {choice: 'B', note: '', at: 'x'}, children: []}],
+  closure: [{id: 'v1', kind: 'verify', title: 'old check', detail: '', rev: 1, result: null}],
+  summary: {steps: 0, done: 0, current: null, closable: false, waiting: 1,
+            blockers: [{id: 'v1', title: 'old check', why: 'not checked yet', who: 'user'}]},
+};
 
 async function request(raw, method = 'GET', body) {
   calls.push({path: raw, method, body});
   const url = new URL(raw, 'http://test');
+  if (url.pathname === '/api/plan/rounds') {
+    if (!roundsDoc) throw Object.assign(Error('no rounds'), {status: 404});
+    return roundsDoc;
+  }
+  if (url.pathname === '/api/plan' && url.searchParams.get('round')) {
+    return {session: 's1', round: url.searchParams.get('round'),
+            plan: url.searchParams.get('round') === 'r1/1' ? sealedPlan : null};
+  }
   if (url.pathname === '/api/plan') {
     const who = url.searchParams.get('session');
     return {session: who, plan: who === 's2' ? plan2 : plan};
@@ -333,6 +352,30 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};
   ctx.PlanPane._view().open(); await settle();
   assert(text(host).includes('닫아도 됨'));
+  // Rounds: no row while nothing is sealed; then a row, a carried chip, and a
+  // sealed round drawn without any control.
+  assert.strictEqual(buttons(host, '1회차').length, 0);
+  roundsDoc = {session: 's1', current: {run: 'r1', round: 2, key: 'r1/2'},
+               rounds: [{run: 'r1', round: 1, key: 'r1/1', title: 'Round one'}]};
+  plan.closure = [...plan.closure, {id: 'v0', kind: 'verify', title: 'carried check', detail: '', rev: 1,
+                                    result: null, from: {run: 'r1', round: 1}}];
+  ctx.PlanPane._view().open(); await settle();
+  assert.strictEqual(buttons(host, '현재 (2회차)').length, 1);
+  assert(text(host).includes('1회차에서 넘어옴'));
+  const postsBefore = posts().length;
+  buttons(host, '1회차')[0].onclick(); await settle();
+  const sealedText = text(host);
+  assert(sealedText.includes('Round one') && sealedText.includes('읽기 전용') && sealedText.includes('선택: B'),
+         'the sealed round is drawn');
+  for (const label of ['이 안 선택', '통과', '실패', '의견 보내기'])
+    assert.strictEqual(buttons(host, label).length, 0, `a sealed round has no ${label} button`);
+  assert.strictEqual(input(host, '계획에 대한 의견').length, 0);
+  assert(calls.some(c => c.path.includes('round=r1%2F1')), 'the pane read the sealed round');
+  assert.strictEqual(posts().length, postsBefore);
+  buttons(host, '현재 (2회차)')[0].onclick(); await settle();
+  assert(!text(host).includes('읽기 전용') && buttons(host, '통과').length > 0, 'back on the current plan');
+  roundsDoc = null;
+
   plan = null;
   ctx.PlanPane._view().open(); await settle();
   assert(text(host).includes('아직 계획을 쓰지 않았습니다'));

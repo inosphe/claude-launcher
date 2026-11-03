@@ -221,7 +221,7 @@ MOMENT_ENTER = "enter"
 MOMENT_LEAVE = "leave"
 MOMENTS = (MOMENT_ENTER, MOMENT_LEAVE)
 #: ``triggers:`` actions (2.8). ``push`` is spelled as a ``push:`` key.
-TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing")
+TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing", "plan-round")
 TRIGGER_PUSH = "push"
 COMBINATORS = (
     "seq", "waterfall", "cond", "choose", "foreach", "loop", "par", "retry",
