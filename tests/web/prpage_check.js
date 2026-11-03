@@ -8,10 +8,22 @@ const vm = require('vm');
 
 const staticDir = path.join(__dirname, '../../src/claude_launcher/web/static');
 const src = fs.readFileSync(path.join(staticDir, 'pr-page.js'), 'utf8');
+
+// The page runs under two base paths -- "/" served directly and "/t/<name>/"
+// through a relay tunnel (app.js: BASE + url()). The stub below is the tunnel,
+// so a request that skips url() still records a path and fails the assertion
+// after it, instead of vanishing into a 404 at runtime (claunch-ijkge.3).
+const BASE = '/t/shared-main/';
+const fetched = [];
 const ctx = vm.createContext({
   globalThis: {}, Date,
   setInterval: () => 0, clearInterval: () => {},
   document: { getElementById: () => null, createElement: () => ({}) },
+  url: (p) => BASE + String(p).replace(/^\/+/, ''),
+  fetch: (u) => {
+    fetched.push(u);
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ prs: [], projects: [] }) });
+  },
 });
 ctx.globalThis = ctx;
 vm.runInContext(src, ctx);
@@ -86,3 +98,60 @@ assert.deepStrictEqual(plain(P.buildModel({ prs: 'nope' }, {})), { projects: [],
 // a session with no project is shown under the daemon's own word for it
 assert.strictEqual(plain(P.buildModel({ prs: [{ url: 'u', number: 1 }] }, {})).projects[0].project,
   'default');
+
+// -- the path one PR lives at, and the four segments the daemon routes -----
+// `<host>/<owner>/<name>` is a slug in the record and four segments in the
+// route: aiohttp routes on the decoded path, so an encoded slash would be a
+// separator by the time the match ran.
+assert.deepStrictEqual(plain(P.splitRepo('github.ncsoft.com/RnIAgentDev/claunch')),
+  { host: 'github.ncsoft.com', owner: 'RnIAgentDev', name: 'claunch' });
+assert.strictEqual(P.splitRepo('only-two/parts'), null);
+assert.strictEqual(P.splitRepo('a/b/c/d'), null);
+assert.strictEqual(P.splitRepo('h/o/n ame'), null, 'a space is not a path segment');
+assert.strictEqual(P.splitRepo(''), null);
+assert.strictEqual(P.splitRepo(null), null);
+
+assert.strictEqual(P.endpoint('github.ncsoft.com/RnIAgentDev/claunch', 805),
+  '/api/prs/github.ncsoft.com/RnIAgentDev/claunch/805');
+assert.strictEqual(P.endpoint('github.ncsoft.com/RnIAgentDev/claunch', 805, 'merge'),
+  '/api/prs/github.ncsoft.com/RnIAgentDev/claunch/805/merge');
+assert.strictEqual(P.endpoint('github.ncsoft.com/RnIAgentDev/claunch', 805, 'rebase-request'),
+  '/api/prs/github.ncsoft.com/RnIAgentDev/claunch/805/rebase-request');
+assert.strictEqual(P.endpoint('bad', 805), '', 'an unparseable repo makes no path');
+assert.strictEqual(P.endpoint('h/o/n', 0), '', 'a PR with no number makes no path');
+assert.strictEqual(P.endpoint('h/o/n', -3), '');
+
+// -- the merge button's one input -----------------------------------------
+assert.strictEqual(P.canMerge({ verdict: { can_merge: true } }), true);
+assert.strictEqual(P.canMerge({ verdict: { can_merge: false } }), false);
+assert.strictEqual(P.canMerge({}), false);
+assert.strictEqual(P.canMerge(null), false);
+
+// -- no request escapes the page's base path (the claunch-ijkge.3 defect) --
+assert.ok(!/fetch\(\s*["']\//.test(src),
+  'a fetch with an absolute path leaves the relay tunnel; wrap it in url()');
+
+// -- and the two reads actually go through it ------------------------------
+(async () => {
+  fetched.length = 0;
+  await P.load();
+  assert.deepStrictEqual(fetched, ['/t/shared-main/api/prs'],
+    'the list request keeps the tunnel prefix');
+
+  fetched.length = 0;
+  P.openDetail({ repo: 'github.ncsoft.com/RnIAgentDev/claunch', number: 805, url: 'u' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepStrictEqual(fetched, ['/t/shared-main/api/prs/github.ncsoft.com/RnIAgentDev/claunch/805'],
+    'the detail request keeps the tunnel prefix');
+
+  // a record with no repo cannot ask the daemon anything -- it must not send
+  // a request built from a half-parsed path
+  fetched.length = 0;
+  P.openDetail({ repo: '', number: 7, url: 'u' });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepStrictEqual(fetched, [], 'no repo, no request');
+  P.closeDetail();
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
