@@ -198,11 +198,12 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     if env:
         full_env.update({str(k): str(v) for k, v in env.items()})
     cmd = runtime.expand_argv(probe, full_env) if isinstance(probe, list) else str(probe)
+    cmd, shell = runtime.shell_command(cmd)
     kwargs: Dict[str, Any] = {}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
-        proc = subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=cwd, env=full_env,
+        proc = subprocess.Popen(cmd, shell=shell, cwd=cwd, env=full_env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, text=True, **kwargs)
     except OSError as exc:
