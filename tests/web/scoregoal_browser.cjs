@@ -59,8 +59,21 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     const option = page.locator('[name=score_goal]');
     assert.equal(await option.isChecked(), false);
     await option.check();
-    await page.evaluate(() => $('new-session').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
-    await page.waitForFunction(() => requests.some(r => r.url === '/api/sessions'));
+    // claunch-1ztit.1.1: a create whose claude runtime row is open and
+    // unticked is asked about once more before it sends. This form has the
+    // row open, so the submit stands on that question until it is answered —
+    // answer it the way an operator does, then the request goes out.
+    const submitAndAnswer = async (sent) => {
+      await page.evaluate(() => $('new-session').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      const startAnyway = page.getByRole('button', { name: 'Start without skip permissions', exact: true });
+      const asked = await Promise.race([
+        startAnyway.waitFor({ timeout: 3000 }).then(() => true, () => false),
+        page.waitForFunction(sent, null, { timeout: 3000 }).then(() => false, () => false),
+      ]);
+      if (asked) await startAnyway.click();
+      await page.waitForFunction(sent);
+    };
+    await submitAndAnswer(() => requests.some(r => r.url === '/api/sessions'));
     assert.equal(await page.evaluate(() => requests.find(r => r.url === '/api/sessions').body.score_goal), true);
     await page.evaluate(() => { $('ws-view').appendChild(scoreGoalSettingsCard()); showView('settings'); });
     await page.locator('.score-goal-settings input').check();
@@ -69,8 +82,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await page.waitForFunction(() => $('new-session').score_goal.checked);
     await openFold();
     await option.uncheck();
-    await page.evaluate(() => $('new-session').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
-    await page.waitForFunction(() => requests.some(r => r.url.includes('/children')));
+    await submitAndAnswer(() => requests.some(r => r.url.includes('/children')));
     assert.equal(await page.evaluate(() => requests.find(r => r.url.includes('/children')).body.score_goal), false);
     await page.evaluate(() => {
       sessionModalClose({ route: false });
