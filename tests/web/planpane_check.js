@@ -132,13 +132,14 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   // the tree: the steps hang from the plan, the decision forks into its options, then its own steps
   assert.strictEqual(d1.className, 'ptree-node ptree-decision ptree-undecided plan-item plan-decision');
   assert.strictEqual(d1.parent.className, 'ptree ptree-steps');
-  assert.deepStrictEqual(d1.children[0].children.map(c => c.textContent), ['◆', 'storage', '결정 필요']);
+  // every item names its node id (th-437508), between the mark and the title
+  assert.deepStrictEqual(d1.children[0].children.map(c => c.textContent), ['◆', 'd1', 'storage', '결정 필요']);
   const optionClasses = () => all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'))
     .children.find(c => c.className === 'ptree plan-options-tree').children.map(c => c.className);
   assert.deepStrictEqual(optionClasses(), ['ptree-node ptree-option ptree-recommended', 'ptree-node ptree-option']);
   const sub = d1.children.find(c => c.className === 'ptree ptree-steps');
   assert.strictEqual(sub.children[0].className, 'ptree-node ptree-step ptree-st-doing plan-item plan-step');
-  assert.deepStrictEqual(sub.children[0].children[0].children.map(c => c.textContent), ['◐', 'write store', '진행 중']);
+  assert.deepStrictEqual(sub.children[0].children[0].children.map(c => c.textContent), ['◐', 's2', 'write store', '진행 중']);
   const closures = all(host).find(n => n.className === 'ptree ptree-closures');
   assert.deepStrictEqual(closures.children.map(c => c.className),
     ['ptree-node ptree-closure ptree-st-todo plan-item plan-verify', 'ptree-node ptree-closure ptree-st-todo plan-item plan-followup']);
@@ -248,6 +249,43 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   plan = {...plan, revision: 3};
   ctx.PlanPane._view().open(); await settle();
   assert.strictEqual(host.scrollTop, 240, 'the scroll position is put back');
+
+  // A poll with the same plan leaves the DOM alone (th-437508): a text
+  // selection being dragged spans these very nodes.
+  const kept = buttons(host, '이 안 선택')[0];
+  ctx.PlanPane._view().open(); await settle();
+  assert.strictEqual(buttons(host, '이 안 선택')[0], kept, 'an unchanged poll does not redraw');
+  // ...and a changed one waits while the user holds a selection in the pane.
+  doc.getSelection = () => ({isCollapsed: false, rangeCount: 1, anchorNode: kept});
+  plan = {...plan, title: 'Ship X, while selecting'};
+  ctx.PlanPane._view().open(); await settle();
+  assert(!text(host).includes('Ship X, while selecting'), 'a selection holds the redraw back');
+  doc.getSelection = () => ({isCollapsed: true, rangeCount: 0, anchorNode: null});
+  timers.length = 0;
+  kept.dispatch('mouseup'); runTimers();
+  assert(text(host).includes('Ship X, while selecting'), 'letting the selection go draws it');
+  delete doc.getSelection;
+
+  // 보류 (claunch-jw1v2 D), a reopened check, a followup the session closed
+  // itself and a note (th-62379d).
+  plan = {...plan, revision: 9, closure: [
+    {id: 'v2', kind: 'verify', title: 'live run', detail: '', rev: 3, result: null,
+     previous: {verdict: 'passed'}, reopened: {reason: 'the pane code changed'}},
+    {id: 'f2', kind: 'followup', title: 'filed as claunch-y', detail: '', status: 'done', rev: 1, result: null},
+    {id: 'n1', kind: 'note', title: 'could also cache X', detail: 'later', rev: 1, result: null},
+  ]};
+  ctx.PlanPane._view().open(); await settle();
+  let ct = text(host);
+  assert(ct.includes('세션이 다시 확인을 요청했습니다: the pane code changed'));
+  assert(ct.includes('세션이 처리함'));
+  assert(ct.includes('참고 (최종 확인용 · 게이트 없음)') && ct.includes('could also cache X'));
+  assert.strictEqual(buttons(host, '여기서 진행').length, 0, 'a followup the session closed has nothing to decide');
+  const notes = all(host).find(n => n.className === 'ptree ptree-notes');
+  assert.strictEqual(notes.children.length, 1);
+  assert.strictEqual(all(notes).filter(n => n.tag === 'button').length, 0, 'a note has no controls');
+  buttons(host, '보류')[0].onclick(); await settle();
+  assert.deepStrictEqual(posts().slice(-1)[0].body, {session: 's1', note: '', rev: 3, verdict: 'deferred'});
+  assert(text(host).includes('확인: 보류'));
 
   // Closable, and a session without a plan.
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};

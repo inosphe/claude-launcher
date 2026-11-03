@@ -10661,6 +10661,7 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-item-head { display: flex; gap: 8px; align-items: baseline; }
 .plan-title { overflow-wrap: anywhere; }
 .plan-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--plan-border); border-radius: 10px; color: var(--plan-muted); white-space: nowrap; }
+.plan-id { font-size: 11px; color: var(--plan-muted); font-family: var(--mono, monospace); white-space: nowrap; user-select: all; }
 .plan-detail { margin: 2px 0 0 4px; color: var(--plan-muted); white-space: pre-wrap; font-size: 12px; }
 .plan-option-head { display: flex; gap: 6px; align-items: baseline; }
 .plan-effect { color: #9fd8a8; }

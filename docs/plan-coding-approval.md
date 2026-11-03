@@ -133,3 +133,21 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 (`src/claude_launcher/cli_gate.py`의 `GATES`), 판정 불가가 세 번 쌓이면
 `plan-wait-unclear`가 계속 기다릴지 진행할지 사람에게 묻는다(규칙 1의
 「모르는 값은 멈춤」).
+
+## 7. 작업 시작 대기와 closure의 분리 (`claunch-jw1v2`)
+
+2회차 구현에서 두 작업 시작 대기(`plan-wait-before-gate`, `plan-wait-after-seed`)는
+`summary.waiting` 전체를 읽었다. 이 값에는 앞 회차가 남긴 closure verify·followup이
+들어 있어, 이미 착지한 작업의 확인 항목이 다음 회차의 `work`를 막았다. 규칙 1의
+「plan 미결정」은 지금 계획의 고르지 않은 decision을 뜻하도록 좁혔다.
+
+| 항목 | 내용 | 위치 |
+|---|---|---|
+| 작업 시작용 집계 | `summary.waiting_decisions`는 고르지 않은 decision 수다. `summary.waiting`은 지금처럼 decision·미확인 verify·미처분 followup을 합한다 | `src/claude_launcher/plan/store.py` (`summarize`) |
+| probe의 범위 | `claunch gate plan-waiting --scope start`는 `waiting_decisions`를 읽는다. 값이 없는 데몬이면 `blockers`의 decision 줄을 센다. 기본 `--scope settle`은 `waiting`을 읽는다 | `src/claude_launcher/gates/plan_waiting.py` |
+| 워크플로 | 작업 시작 대기 두 곳은 `--scope start`, settle의 `closure-wait`·`closure-wait-timed`는 기본 범위다. 네 곳 모두 `--notify`를 준다 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml` |
+| 멈춤 알림 | `--notify`는 멈춘 항목 집합마다 세션 스레드 「plan 게이트 대기」에 한 번 쓴다. 같은 집합이면 다시 쓰지 않고, 통과하면 기록을 지운다. 기록은 세션 scratch의 `plan-gate-notice.json`이다 | `plan_waiting.notify_stall` |
+| 보류 판정 | verify의 `deferred`(보류)는 waiting·closable을 막지 않는다. 세션은 그 확인을 보드 이슈로 옮기고 detail에 이슈 id를 적는다 | `store.VERDICTS`, `plan_api.decided_text` |
+| 결과 유지 | passed·deferred verify와 처리된 followup은 title·detail만 바뀌면 결과와 rev를 유지하고 `set` 이벤트의 `reworded_kept`에 남는다. 다시 물으려면 `plan_node`에 `reopen=<이유>`를 준다. failed verify는 문구가 바뀌면 다시 묻는다 | `store._kept`, `store.patch` |
+| 세션이 처리한 followup | 세션이 `status=done`으로 쓴 followup은 사용자 결정 없이 waiting에서 빠진다 | `store.summarize` |
+| 참고(note) | closure 종류 `note`는 결정을 받지 않고 waiting·closable을 막지 않는다. 패널의 「참고」 절과 end-decision 브리프에 목록으로 나온다 | `store.CLOSURE_KINDS`, `plan-pane.js` |

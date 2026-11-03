@@ -44,6 +44,7 @@ function makePlanPage({root, request}) {
   let everyone = false, by = "tree", project = "", only = "";
   let profiles = null, profile = "", starting = false, startError = "", agg = null;
   let deferred = false;                         // a poll held back while a field is focused
+  let drawn = null;                             // what the last draw was made from (claunch-jw1v2)
   const folded = new Set();                     // sessions whose steps are hidden in the tree
 
   // Focus across a redraw (claunch-nerp0.1). The page is redrawn whole every
@@ -97,7 +98,11 @@ function makePlanPage({root, request}) {
       data = o; joint = j; error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
     if (mine === seq) {
-      if (isField(focusedEl(root()))) deferred = true;
+      // The same answer draws nothing, and a change waits while the user
+      // holds a text selection here (th-437508: a redraw dropped the drag).
+      const el = root();
+      if (fetched() === drawn) deferred = false;
+      else if (isField(focusedEl(el)) || selecting(el)) deferred = true;
       else { deferred = false; render(); }
       clearTimeout(timer); timer = setTimeout(load, 10000);
     }
@@ -110,11 +115,21 @@ function makePlanPage({root, request}) {
   function settle() {
     if (!deferred || typeof setTimeout !== "function") return;
     setTimeout(() => {
-      if (!isField(focusedEl(root()))) { deferred = false; render(); }
+      const el = root();
+      if (!isField(focusedEl(el)) && !selecting(el)) { deferred = false; render(); }
     }, 0);
   }
   const onFocusOut = () => settle();
-  { const el = root(); if (el && el.addEventListener) el.addEventListener("focusout", onFocusOut); }
+  { const el = root();
+    if (el && el.addEventListener) { el.addEventListener("focusout", onFocusOut); el.addEventListener("mouseup", onFocusOut); } }
+  function fetched() { return JSON.stringify([data, joint, error]); }
+  /* A non-empty text selection inside the page (plan-pane.js planSelecting). */
+  function selecting(el) {
+    if (!el || typeof document === "undefined" || !document.getSelection) return false;
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    return !!(sel.anchorNode && el.contains && el.contains(sel.anchorNode));
+  }
 
   function button(label, fn, pressed, key) {
     const b = node("button", label, "wf-btn" + (pressed ? " plan-page-on" : ""));
@@ -396,6 +411,7 @@ function makePlanPage({root, request}) {
     const state = {scrollTop: el.scrollTop || 0, key: keyOf(active)};
     el.replaceChildren();
     draw(el);
+    drawn = fetched();
     if (state.scrollTop) el.scrollTop = state.scrollTop;
     const target = state.key ? byKey(el, state.key) : null;
     if (target && target.focus) target.focus();

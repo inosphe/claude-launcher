@@ -18,6 +18,16 @@
    data-plan-key after a redraw, so buttons and toggles keep the focus. The
    pane's own scroll position comes back the same way.
 
+   A poll that brings the same plan draws nothing (claunch-jw1v2, th-437508):
+   the pane keeps a fingerprint of what it last drew and a poll whose
+   fingerprint matches leaves the DOM alone, so a text selection the user is
+   dragging survives the 5 s tick. A poll that brings a change while the user
+   holds a selection in the pane waits like a focused field does, and draws
+   when the selection is let go (mouseup) or the next poll finds none.
+
+   Every item shows its node id (j-d2, v1): the session names nodes by id in
+   threads and terminal text, and the user matches them here.
+
    Joint view (claunch-7jzp8.1): when the session's joint tree
    (/api/plan/joint, plan/joint.py) holds another planned session, a toggle
    lists the tree -- spawn children, sessions on the same issue or a
@@ -25,7 +35,7 @@
    nested pane of its own, where the user decides on that session's plan. */
 
 const PLAN_STEP_STATUS = {todo: "예정", doing: "진행 중", done: "완료", skipped: "건너뜀", blocked: "막힘"};
-const PLAN_VERDICT = {passed: "통과", failed: "실패"};
+const PLAN_VERDICT = {passed: "통과", failed: "실패", deferred: "보류"};
 const PLAN_ACTIONS = [
   {id: "here", label: "여기서 진행"},
   {id: "issue", label: "이슈로 넘김"},
@@ -44,9 +54,10 @@ function planNode(tag, text, cls) {
 /* One line saying what the user decided on a node, or null. */
 function planResultText(n) {
   const r = n.result;
-  if (!r) return null;
+  if (!r) return n.kind === "followup" && n.status === "done" ? "세션이 처리함" : null;
   if (n.kind === "decision") return `선택: ${r.choice}`;
   if (n.kind === "verify") return `확인: ${PLAN_VERDICT[r.verdict] || r.verdict}`;
+  if (!r.action) return null;
   return `처분: ${PLAN_ACTION_LABEL[r.action] || r.action}` + (n.status === "done" ? " · 처리됨" : "");
 }
 
@@ -88,12 +99,21 @@ function planIsField(el) {
   const tag = String(el.tagName || el.tag || "").toLowerCase();
   return tag === "textarea" || tag === "input";
 }
+/* The user holds a non-empty text selection inside the pane: a redraw would
+   replace the nodes it spans and drop it. */
+function planSelecting(root) {
+  if (!root || typeof document === "undefined" || !document.getSelection) return false;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  const anchor = sel.anchorNode;
+  return !!(anchor && root.contains && root.contains(anchor));
+}
 
 function makePlanPane({root, session, request, onChange, nested}) {
   const node = planNode;
   const base = "/api/plan";
   let data = null, error = "", busy = false, seq = 0, timer = null, feedback = "";
-  let joint = null, jointOpen = false, deferred = false;
+  let joint = null, jointOpen = false, deferred = false, drawn = null;
   const members = {};    // session -> {el, view} of an opened joint member
   const notes = {};      // node id -> the note being typed
   const told = {};       // node id -> the last write's message
@@ -112,7 +132,9 @@ function makePlanPane({root, session, request, onChange, nested}) {
       } catch (_exc) { if (mine === seq) joint = null; }
     }
     if (mine === seq) {
-      if (planIsField(planFocused(root()))) deferred = true;
+      const el = root();
+      if (fingerprint() === drawn) deferred = false;   // same plan: leave the DOM alone
+      else if (planIsField(planFocused(el)) || planSelecting(el)) deferred = true;
       else { deferred = false; render(); }
       schedule();
     }
@@ -126,10 +148,17 @@ function makePlanPane({root, session, request, onChange, nested}) {
   function settle() {
     if (!deferred || typeof setTimeout !== "function") return;
     setTimeout(() => {
-      if (!planIsField(planFocused(root()))) { deferred = false; render(); }
+      const el = root();
+      if (!planIsField(planFocused(el)) && !planSelecting(el)) { deferred = false; render(); }
     }, 0);
   }
-  { const el = root(); if (el && el.addEventListener) el.addEventListener("focusout", settle); }
+  { const el = root();
+    if (el && el.addEventListener) { el.addEventListener("focusout", settle); el.addEventListener("mouseup", settle); } }
+
+  /* What a draw depends on. Equal fingerprints draw the same DOM. */
+  function fingerprint() {
+    return JSON.stringify([data, joint, error, busy, jointOpen, told, Object.keys(members).sort()]);
+  }
 
   /* What the redraw must put back: the focus and its control, and how far
      down the pane was scrolled. */
@@ -184,7 +213,8 @@ function makePlanPane({root, session, request, onChange, nested}) {
   }
   function tail(n, box) {
     const res = planResultText(n);
-    if (res) box.append(node("p", res + (n.result.note ? ` — ${n.result.note}` : ""), "plan-result"));
+    if (res) box.append(node("p", res + (n.result && n.result.note ? ` — ${n.result.note}` : ""), "plan-result"));
+    else if (n.reopened) box.append(node("p", `세션이 다시 확인을 요청했습니다: ${n.reopened.reason}`, "plan-stale"));
     else if (n.previous) box.append(node("p", "세션이 내용을 고쳐 이전 결정이 보류되었습니다. 다시 결정하세요.", "plan-stale"));
     if (told[n.id]) box.append(node("p", told[n.id], "plan-told"));
   }
@@ -196,9 +226,11 @@ function makePlanPane({root, session, request, onChange, nested}) {
   // Here the branches also carry the pane's controls.
   const STEP_MARK = {todo: "○", doing: "◐", done: "●", skipped: "–", blocked: "✕"};
 
-  function label(mark, chip, title) {
+  function label(mark, chip, title, id) {
     const l = node("div", null, "ptree-label");
-    l.append(node("span", mark, "ptree-mark"), node("span", title, "plan-title"), node("span", chip, "plan-chip"));
+    l.append(node("span", mark, "ptree-mark"));
+    if (id) l.append(node("code", id, "plan-id"));
+    l.append(node("span", title, "plan-title"), node("span", chip, "plan-chip"));
     return l;
   }
 
@@ -225,8 +257,8 @@ function makePlanPane({root, session, request, onChange, nested}) {
     const state = isDecision ? (n.result ? "ptree-decided" : "ptree-undecided") : `ptree-st-${n.status || "todo"}`;
     const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}`);
     li.append(isDecision
-      ? label("◆", n.result ? "결정됨" : "결정 필요", n.title)
-      : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title));
+      ? label("◆", n.result ? "결정됨" : "결정 필요", n.title, n.id)
+      : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title, n.id));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     if (isDecision) {
       const opts = node("ul", null, "ptree plan-options-tree");
@@ -248,20 +280,32 @@ function makePlanPane({root, session, request, onChange, nested}) {
 
   function closureItem(n) {
     const verify = n.kind === "verify";
-    const res = n.result ? (verify ? `ptree-st-${n.result.verdict === "passed" ? "done" : "blocked"}` : "ptree-st-done") : "ptree-st-todo";
+    const VERIFY_ST = {passed: "done", deferred: "skipped"};
+    const res = n.result ? (verify ? `ptree-st-${VERIFY_ST[n.result.verdict] || "blocked"}` : "ptree-st-done") : "ptree-st-todo";
     const li = node("li", null, `ptree-node ptree-closure ${res} plan-item plan-${n.kind}`);
-    li.append(label(n.result ? "●" : "○", verify ? "사람 확인" : "후속 후보", n.title));
+    li.append(label(n.result ? (verify && n.result.verdict === "deferred" ? "–" : "●") : "○", verify ? "사람 확인" : "후속 후보", n.title, n.id));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     const row = node("div", null, "plan-actions");
     if (verify) {
       row.append(button("통과", () => act(n.id, {rev: n.rev, verdict: "passed"}, "통과로 전달했습니다"), null, `verdict:${n.id}:passed`),
-                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다"), null, `verdict:${n.id}:failed`));
-      li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지)"), row);
+                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다"), null, `verdict:${n.id}:failed`),
+                 button("보류", () => act(n.id, {rev: n.rev, verdict: "deferred"}, "보류로 전달했습니다 — 세션이 이슈로 넘깁니다"), null, `verdict:${n.id}:deferred`));
+      li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지 · 보류는 지금 확인할 수 없는 항목)"), row);
+    } else if (!n.result && n.status === "done") {
+      // the session disposed of it itself (th-62379d): nothing to decide
     } else {
       for (const a of PLAN_ACTIONS) row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`), null, `act:${n.id}:${a.id}`));
       li.append(noteBox(n, "메모 (선택 사항)"), row);
     }
     tail(n, li);
+    return li;
+  }
+
+  /* A note (th-62379d): for the record, read once at the end; no controls. */
+  function noteItem(n) {
+    const li = node("li", null, "ptree-node ptree-closure ptree-st-skipped plan-item plan-note-item");
+    li.append(label("·", "참고", n.title, n.id));
+    if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     return li;
   }
 
@@ -309,6 +353,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     const state = viewState();
     el.replaceChildren();
     draw(el);
+    drawn = fingerprint();
     restoreView(state);
   }
 
@@ -344,18 +389,26 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if ((p.steps || []).length) shell.append(stepTree(p.steps));
     else shell.append(node("p", "단계가 없습니다.", "plan-muted"));
 
+    const gated = (p.closure || []).filter(n => n.kind !== "note");
+    const notes = (p.closure || []).filter(n => n.kind === "note");
     shell.append(node("h4", "종료 조건", "plan-section"));
-    if ((p.closure || []).length) {
+    if (gated.length) {
       const ul = node("ul", null, "ptree ptree-closures");
-      for (const n of p.closure) ul.append(closureItem(n));
+      for (const n of gated) ul.append(closureItem(n));
       shell.append(ul);
     } else shell.append(node("p", "사람 확인 항목·후속 후보가 없습니다.", "plan-muted"));
+    if (notes.length) {
+      shell.append(node("h4", "참고 (최종 확인용 · 게이트 없음)", "plan-section"));
+      const ul = node("ul", null, "ptree ptree-notes");
+      for (const n of notes) ul.append(noteItem(n));
+      shell.append(ul);
+    }
 
     if (!s.closable && s.blockers.length) {
       const det = node("details", null, "plan-blockers");
       det.append(node("summary", `닫을 수 없는 이유 ${s.blockers.length}건`));
       const ul = node("ul");
-      for (const b of s.blockers) ul.append(node("li", `${b.who === "user" ? "[내 차례]" : "[세션]"} ${b.title} — ${b.why}`));
+      for (const b of s.blockers) ul.append(node("li", `${b.who === "user" ? "[내 차례]" : "[세션]"} ${b.id ? b.id + " " : ""}${b.title} — ${b.why}`));
       det.append(ul);
       shell.append(det);
     }
