@@ -1862,9 +1862,15 @@ def base_receipt_path(
     files: List[str],
     override: Optional[Path] = None,
     deselect: tuple = (),
+    with_tail: bool = False,
 ) -> Path:
+    # The tail changes which tests ran, so it is part of the key: a
+    # ``--with-tail`` round must not read a receipt a core-only run left
+    # behind (claunch-yydhs.1.1).
+    tail = "-tail" if with_tail else ""
     return receipts_dir(repo, override) / (
-        f"base-{commit}-{selection_key(files, deselect)}-{interpreter_tag()}.json"
+        f"base-{commit}-{selection_key(files, deselect)}"
+        f"{tail}-{interpreter_tag()}.json"
     )
 
 
@@ -1899,10 +1905,15 @@ def base_failures(
     override: Optional[Path] = None,
     environment: Optional[dict] = None,
     avoid: Optional[str] = None,
+    with_tail: bool = False,
 ) -> Optional[dict]:
     """Run ``files`` at ``commit`` and return what failed there, or None.
 
-    Cached by (commit, selection, interpreter): a fix loop re-runs the gate after every
+    ``with_tail`` must match the run this is compared against: leaving the
+    tail out here while the head run included it makes every tail failure
+    look new (claunch-yydhs.1.1).
+
+    Cached by (commit, selection, interpreter, tail): a fix loop re-runs the gate after every
     edit, the base does not move under it, and paying a second run each time
     would double the cost of exactly the rounds that are already red.
     Modules that do not exist at ``commit`` are left out -- they are this
@@ -1913,7 +1924,7 @@ def base_failures(
     every failure as new: the conservative reading, and the one this gate
     gave before the comparison existed.
     """
-    cached = base_receipt_path(repo, commit, files, override, deselect)
+    cached = base_receipt_path(repo, commit, files, override, deselect, with_tail)
     if cached.is_file():
         try:
             return json.loads(cached.read_text(encoding="utf-8"))
@@ -1934,6 +1945,7 @@ def base_failures(
         "ran": present,
         "deselected": sorted(set(deselect)),
         "interpreter": interpreter_tag(),
+        "with_tail": with_tail,
         "failed": [],
         "exit_code": 0,
     }
@@ -1963,7 +1975,10 @@ def base_failures(
                 basetemp += "b"
             pytest_basetemp.ensure(basetemp_root())
             cmd = _at_base(
-                build_command(present, basetemp=basetemp, deselect=deselect),
+                build_command(
+                    present, basetemp=basetemp, deselect=deselect,
+                    with_tail=with_tail,
+                ),
                 repo,
             )
             print(f"$ (at base {commit[:12]}) {' '.join(cmd)}", flush=True)
@@ -2169,6 +2184,7 @@ def run_and_record(
     known_failures: Optional[str] = None,
     compare_at: Optional[str] = None,
     reuse: Optional[dict] = None,
+    with_tail: bool = False,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -2237,7 +2253,7 @@ def run_and_record(
         comparison = compare_with_base(
             repo, compare_at, files, failing,
             deselect=deselect, override=override, environment=environment,
-            avoid=basetemp,
+            avoid=basetemp, with_tail=with_tail,
         )
 
     if tree is None:
@@ -2326,6 +2342,7 @@ def compare_with_base(
     override: Optional[Path] = None,
     environment: Optional[dict] = None,
     avoid: Optional[str] = None,
+    with_tail: bool = False,
 ) -> Optional[dict]:
     """Split ``failing`` into preexisting and new by a run at ``commit``.
 
@@ -2340,11 +2357,13 @@ def compare_with_base(
     ``base_seconds``, and ``base_cached`` says when it was read from an
     earlier run instead.
     """
-    cached = base_receipt_path(repo, commit, files, override, deselect).is_file()
+    cached = base_receipt_path(
+        repo, commit, files, override, deselect, with_tail
+    ).is_file()
     base = base_failures(
         repo, commit, files,
         deselect=deselect, override=override, environment=environment,
-        avoid=avoid,
+        avoid=avoid, with_tail=with_tail,
     )
     if base is None:
         print(
@@ -2358,6 +2377,7 @@ def compare_with_base(
     print(
         f"base comparison at {commit[:12]} ({len(base.get('ran') or [])} of "
         f"{len(files)} module(s) exist there"
+        f"{', slow tail included' if with_tail else ''}"
         f"{', cached' if cached else ''}): "
         f"{len(preexisting)} preexisting, {len(new)} new."
     )
@@ -2380,7 +2400,10 @@ def compare_with_base(
         "new_failures": new,
         "base_seconds": base.get("seconds"),
         "base_cached": cached,
-        "base_receipt": str(base_receipt_path(repo, commit, files, override, deselect)),
+        "base_with_tail": with_tail,
+        "base_receipt": str(base_receipt_path(
+            repo, commit, files, override, deselect, with_tail
+        )),
     }
 
 
@@ -2855,6 +2878,7 @@ def main(argv: Optional[list] = None) -> int:
             ),
             compare_at=compare_at,
             reuse=key_now,
+            with_tail=args.with_tail,
         )
     finally:
         grant.release()
