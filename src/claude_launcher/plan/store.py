@@ -322,8 +322,12 @@ class _Builder:
             raise PlanError(f"the step tree is at most {MAX_DEPTH} levels deep")
         if self.carry(node, self.old.get(nid)):
             self.reworded.append(nid)
-        if kind == "decision" and not node["result"] and _default_of(node):
-            # the session's own pick: taken now, waits on nobody, the user may change it
+        prior = (self.old.get(nid) or {}).get("result")
+        if kind == "decision" and not node["result"] and _default_of(node) and \
+                (not prior or prior.get("by") == "agent"):
+            # the session's own pick: taken now, waits on nobody, the user may change it.
+            # Never over a choice the user made: when rewording set that aside, the
+            # decision goes back to the user instead (s6452-rev3, claunch-vmcg7)
             node["result"] = {"choice": _default_of(node), "by": "agent", "note": "", "at": _now()}
         if kind in STEP_KINDS:
             node["children"] = [self.node(c, STEP_KINDS, depth + 1, node) for c in children]

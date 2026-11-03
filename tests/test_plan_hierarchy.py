@@ -173,3 +173,27 @@ def test_a_first_choice_is_no_change(store):
     res = store.decide(P.USER, "s1", "d1", 1, choice="B")
     assert res["previous"] is None
     assert "CHANGED" not in plan_api.decided_text("s1", res["node"], res["previous"])
+
+
+def test_rewording_never_turns_the_users_choice_into_the_default(store):
+    """s6452-rev3 @ 8bbf738d: a reworded decision dropped the user's B and the
+    default A came back as the agent's answer, with nobody asked again."""
+    opts = [{**A, "default": True}, B]
+    _write(store, 0, [{"id": "d1", "kind": "decision", "title": "x", "options": opts}])
+    res = store.decide(P.USER, "s1", "d1", 1, choice="B")
+    p = _write(store, res["plan"]["revision"],
+               [{"id": "d1", "kind": "decision", "title": "x", "options": opts}])
+    assert p["steps"][0]["result"]["choice"] == "B"            # same words: kept
+    p = _write(store, p["revision"], [{"id": "d1", "kind": "decision", "title": "x", "detail": "reworded",
+                                       "options": opts}])
+    d1 = p["steps"][0]
+    assert d1["result"] is None                                 # asked again, never the default
+    assert p["summary"]["waiting_decisions"] == 1 and p["summary"]["auto"] == 0
+
+
+def test_rewording_an_agent_default_takes_the_default_again(store):
+    opts = [{**A, "default": True}, B]
+    p = _write(store, 0, [{"id": "d1", "kind": "decision", "title": "x", "options": opts}])
+    p = _write(store, p["revision"], [{"id": "d1", "kind": "decision", "title": "x", "detail": "reworded",
+                                       "options": opts}])
+    assert p["steps"][0]["result"]["by"] == "agent" and p["summary"]["waiting_decisions"] == 0

@@ -158,7 +158,7 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 |---|---|---|
 | 계층 | 단계·결정의 children은 최대 5단계다. 결정의 자식 가운데 한 선택지에만 의존하는 항목은 `under: <선택지 label>`을 가진다. `under`가 없는 자식은 결정 전체에 속한다. 부모가 결정이 아니거나, 없는 label이거나, 배제된 선택지를 가리키는 `under`는 거절된다 | `store._Builder.node` |
 | 활성 경로 | `walk_active`는 고르지 않은 선택지 아래 항목을 건너뛴다. `summary.waiting`·`waiting_decisions`·`blockers`는 활성 경로만 세고, 건너뛴 id는 `summary.inactive`에 남는다. 활성 경로 밖의 결정에 `decide`를 보내면 거절된다 | `store.walk_active`, `store.summarize`, `store.decide` |
-| 자동 선택 | 선택지의 `default: true`는 권장안을 겸한다(결정마다 최대 하나). 쓰는 시점에 결과가 `{choice, by: "agent"}`로 채워져 사용자를 기다리지 않고, `summary.auto`에 그 수가 남는다. 패널은 「자동 선택됨」으로 표시하고 다른 선택지의 「이 안 선택」 버튼을 유지한다 | `store._options`, `store._Builder.node`, `plan-pane.js` |
+| 자동 선택 | 선택지의 `default: true`는 권장안을 겸한다(결정마다 최대 하나). 쓰는 시점에 결과가 `{choice, by: "agent"}`로 채워져 사용자를 기다리지 않고(이전 결과가 사용자의 것이면 문구가 바뀌어도 default로 채우지 않고 사용자에게 다시 묻는다), `summary.auto`에 그 수가 남는다. 패널은 「자동 선택됨」으로 표시하고 다른 선택지의 「이 안 선택」 버튼을 유지한다 | `store._options`, `store._Builder.node`, `plan-pane.js` |
 | 배제 선택지 | 선택지의 `rejected: <이유>`는 고를 수 없는 선택지다. 권장·default를 겸할 수 없고, 고를 수 있는 선택지가 2개(default가 있으면 1개) 이상이어야 한다. 패널은 취소선과 「배제 이유」를 표시한다 | `store._options`, `store.decide`, `plan-pane.js`, `plan-page.js` |
 | 변경 전달 | 이미 답한 결정(자동 선택 포함)을 다른 선택지로 바꾸면 `[claunch plan]` 블록이 `CHANGED`로 시작하고 변경 전·후 선택지와 각 효과·리스크, 이전 안으로 한 작업을 다시 보라는 지시를 싣는다. 같은 선택지를 다시 고르면 확인 문장만 싣는다 | `plan_api.decided_text` |
 | 선택지 삭제 | `plan_node`로 options를 바꿀 때 `under` 자식이 가리키는 선택지를 지우거나 배제하면 거절된다 | `store.patch` |
