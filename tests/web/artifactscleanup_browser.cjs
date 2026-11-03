@@ -16,7 +16,11 @@
      5. an apply refused because the window is busy answers `scheduled`, and
         the page reports it as a result instead of an error;
      6. a refused plan (400) is shown as an error and nothing is submitted;
-     7. no page errors. */
+     7. a refused apply (400) is reported and the plan is dropped;
+     8. a two-hundred `cleanup_pending` (window refused, retry record could
+        not be written) is reported as "not started" with its reason, the
+        plan stays on screen and 적용 stays enabled -- it is not a deletion;
+     9. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -221,6 +225,25 @@ const INVENTORY = {
       /적용 실패: unknown, expired or foreign plan; request a new plan/);
     assert.equal(await card("s4").locator(".ar-plan-row").count(), 0);
     assert.equal(await card("s4").locator("button:text-is('정리')").isEnabled(), true);
+
+    // 8. Two hundred with `cleanup_pending` is not a deletion: the daemon
+    //    refused the window and could not even write its retry record, so
+    //    apply() never ran. The page must say that and keep the plan (the
+    //    daemon still holds it) instead of reporting "정리 완료 · 삭제 0개".
+    planReply = (session) => ({ doc: plans.find((p) => p.session === session) });
+    applyReply = (session) => ({ doc: { status: "cleanup_pending", plan_id: "tok1",
+      session, reason: "measurement window unavailable (could not schedule: disk full)" } });
+    await card("s1").locator("button:text-is('정리')").click();
+    await card("s1").locator("button:text-is('적용')").click();
+    await page.waitForFunction(() => {
+      const n = document.querySelector("#artifacts-view .wt-notice");
+      return n && n.textContent.includes("시작하지 못했다");
+    }, null, { timeout: 15000 });
+    assert.match(await notice().textContent(),
+      /s1: 정리를 시작하지 못했다 — measurement window unavailable \(could not schedule: disk full\)/);
+    assert.doesNotMatch(await notice().textContent(), /정리 완료/);
+    assert.equal(await card("s1").locator(".ar-plan-row").count(), 2, "the unapplied plan stays on screen");
+    assert.equal(await card("s1").locator("button:text-is('적용')").isEnabled(), true);
 
     assert.deepEqual(errors, [], `page errors: ${errors.join("; ")}`);
     console.log("Artifacts cleanup flow: plan, apply, scheduled and refused paths passed");

@@ -274,8 +274,10 @@ globalThis.ArtifactsPage = (() => {
   /* Submit the plan the reader is looking at. The plan_id is what makes this
      an apply: the daemon re-judges ownership and every fingerprint first, so
      an artifact that changed since the plan is kept with a reason instead of
-     being deleted. A busy measurement window schedules the run and answers
-     `scheduled`; that is a result, not a failure. */
+     being deleted. Two answers are not deletions and must not be read as
+     one: `scheduled` (the window was busy and a run is now waiting) and
+     `cleanup_pending` (two hundred, but the window was refused and even the
+     schedule could not be written -- apply() never ran). */
   async function applyPlan(session, token) {
     const current = cleanupState(session) || {};
     setCleanup(session, { plan: current.plan || null, busy: "apply", error: "" });
@@ -289,12 +291,24 @@ globalThis.ArtifactsPage = (() => {
       if (body.status === "scheduled") {
         notice = `${session}: 측정 창이 바쁘다 — 정리를 예약했다` +
           (body.reason ? ` (${body.reason})` : "");
-      } else {
-        const removed = Number(body.removed) || 0;
-        const pending = Number(body.cleanup_pending) || 0;
-        notice = `${session}: 정리 완료 · 삭제 ${removed}개` +
-          (pending ? ` · 보류 ${pending}개` : "");
+        cleanups.delete(session);
+        load();
+        return;
       }
+      if (body.status === "cleanup_pending") {
+        // Nothing was deleted and nothing was scheduled: the daemon refused
+        // the window and its own record of the retry could not be written.
+        // apply() never ran, so it still holds this plan until it expires;
+        // keep it on screen so the reader can submit it again (or cancel).
+        notice = `${session}: 정리를 시작하지 못했다 — ${body.reason || "사유 없음"}`;
+        setCleanup(session, { plan: current.plan || null, busy: "", error: "" });
+        render();
+        return;
+      }
+      const removed = Number(body.removed) || 0;
+      const pending = Number(body.cleanup_pending) || 0;
+      notice = `${session}: 정리 완료 · 삭제 ${removed}개` +
+        (pending ? ` · 보류 ${pending}개` : "");
       cleanups.delete(session);
       load();
     } catch (exc) {
