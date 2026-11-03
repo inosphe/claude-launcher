@@ -57,7 +57,8 @@ const CARDS = [
   "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard", "ptyHostSettingCard",
   "testOutputDirCard",
-  "delegateSettingCard", "sweepBatchSettingCard", "webdebugSettingCard", "modelTiersCard",
+  "delegateSettingCard", "sweepBatchSettingCard", "keySwitchSettingCard",
+  "webdebugSettingCard", "modelTiersCard",
   "providerAffinityCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
@@ -162,6 +163,7 @@ const REFRESHERS = [
   "refreshRoleWorkflowSettings", "refreshWslRegStub", "refreshPtyHostSetting",
   "refreshTestOutputDir",
   "refreshDelegateSetting", "refreshSweepBatchSetting", "refreshWebdebugSetting",
+  "refreshKeySwitchSetting",
   "refreshProviderAffinity", "refreshModelTiers",
 ];
 const octx = {
@@ -203,5 +205,7 @@ assert.equal(called.includes("refreshPtyHostSetting"), true,
              "General fetches the PTY host card's data (claunch-xnnct.5)");
 assert.equal(called.includes("refreshTestOutputDir"), true,
              "General fetches the test output dir card's data (claunch-pyv3d.1)");
+assert.equal(called.includes("refreshKeySwitchSetting"), true,
+             "General fetches the automatic key switch card's retry cap (claunch-d2t79)");
 
 console.log("settingsworkspaces_check ok");

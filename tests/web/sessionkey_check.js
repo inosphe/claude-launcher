@@ -76,7 +76,16 @@ function el(tag) {
   };
   return node;
 }
-const document = { createElement: el };
+const document = {
+  createElement: el,
+  // The picker's auto row writes its label as a text node beside the box,
+  // the way the page's other inline checkboxes do (claunch-d2t79).
+  createTextNode: (text) => {
+    const node = el("#text");
+    node.textContent = String(text);
+    return node;
+  },
+};
 
 const failures = [];
 function check(name, cond, detail) {
@@ -283,6 +292,9 @@ const pickEnv = {
                   { name: "s2", harness: "opencode" }],
   currentName: "other",
   refreshSessions: () => { pickEnv.refreshed = true; },
+  // The auto row's write asks for a redraw through the collapser rather than
+  // a whole pass (claunch-d2t79), the same way the rail's chip does.
+  requestSessionsRefresh: () => { pickEnv.refreshRequested = true; },
   detach: () => {},
   attach: () => {},
   encodeURIComponent,
@@ -473,6 +485,45 @@ const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(
   check("a pick sends the key id", posted && posted.body.key_id === "k-aaaaaa");
   check("the pool cache is dropped after a switch", !keyPools.has("work:claude"));
   check("the rail is refreshed", pickEnv.refreshed === true);
+
+  /* ---- the automatic key switch's answer (claunch-d2t79) ----
+     It is the SESSION's answer, not the pool's: the modal writes it to the
+     session route, costs no restart, and leaves the key list and the strategy
+     exactly where they were. */
+  pickEnv.sessionsCache[0].auto_key_switch = true;
+  pickEnv.answer = null;
+  pickEnv.writeAnswer = { auto_key_switch: false };
+  poolAnswer = two;
+  usageAnswer = { keys: [], next: { key_id: "k-aaaaaa", exact: true } };
+  await openKeyPicker("s1", "work:claude");
+  await settle();
+  const abox = dialog.controls;
+  const autoRow = abox && abox.children[3];
+  const autoNote = abox && abox.children[4];
+  const autoBox = autoRow && autoRow.children[0] && autoRow.children[0].children[0];
+  check("the modal offers the automatic switch", !!autoBox);
+  check("...checked because this session already asked for it",
+    autoBox && autoBox.checked === true);
+  check("...and the note names the rule the key is chosen by",
+    autoNote && /lowest usage/.test(autoNote.textContent),
+    autoNote && autoNote.textContent);
+  posted = null;
+  pickEnv.refreshRequested = false;
+  autoBox.checked = false;
+  autoBox.listeners.change();
+  await settle();
+  check("unticking writes the SESSION, not the pool",
+    posted && posted.path === "/api/sessions/s1/auto-key-switch",
+    posted && posted.path);
+  check("...with the new answer", posted && posted.body.enabled === false,
+    posted && JSON.stringify(posted.body));
+  check("...keeps the cached row on what the daemon stored",
+    pickEnv.sessionsCache[0].auto_key_switch === false,
+    String(pickEnv.sessionsCache[0].auto_key_switch));
+  check("...and asks the rail to redraw the card's badge",
+    pickEnv.refreshRequested === true);
+  delete pickEnv.sessionsCache[0].auto_key_switch;
+  pickEnv.writeAnswer = { key_id: "x" };
 
   /* ---- the stylesheet holds the chip to a pill ---- */
   check("the chip has a rule", /#session-list \.sess-key \{/.test(css));

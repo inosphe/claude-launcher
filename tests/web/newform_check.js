@@ -136,8 +136,12 @@ check("the form's controls read in the new order", named(form.text), [
   "project", "cwd",
   // who it is, and the operator's own note on it (claunch-zy9yk)
   "parent", "fork_parent", "over_limit", "name", "note",
-  // whose credentials it holds — promoted out of the fold
-  "profile", "harness", "model", "effort",
+  // whose credentials it holds — promoted out of the fold. The automatic key
+  // switch (claunch-d2t79) is asked here too, under the usage readout of the
+  // same pool: it is an answer about what happens to THIS session when the
+  // credential it was given runs out, so it belongs beside the row that
+  // decides whose credential that is.
+  "profile", "harness", "model", "effort", "auto_key_switch",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded. The score goal is a session setting the daemon
@@ -169,7 +173,7 @@ check("the profile is asked above the fold, not inside it",
        named(fold.text).includes("profile")],
       [true, false]);
 check("Profile, Harness, Model and effort are separate runtime choices",
-      named(runsOn.text), ["profile", "harness", "model", "effort"]);
+      named(runsOn.text), ["profile", "harness", "model", "effort", "auto_key_switch"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
 /* The recommendation those four rows make by themselves (a Claude-harness
@@ -349,9 +353,19 @@ check("...and everything promoted is genuinely inherited",
    what qualifies it) to "Runs as", the directory to "Where it works" at the
    top of the form. Between them they must account for the whole list, or a
    name was added to RUNTIME_PROMOTED without the markup moving. */
+/* The runs-as fence carries one answer that no child inherits: the automatic
+   key switch (claunch-d2t79). It is the operator's answer about this
+   session's own faults, and the spawn policy neither hands it back nor takes
+   it away — so it is named here rather than left to a loose filter, the way
+   FOLD_SETTINGS names the score goal, and it is subtracted below before the
+   two fences are compared with RUNTIME_PROMOTED. */
+const RUNTIME_SETTINGS = ["auto_key_switch"];
+check("the runs-as fence's only non-inherited row is the key switch",
+      named(runsOn.text).filter((k) => !INHERITS.includes(k)), RUNTIME_SETTINGS);
 check("the promoted rows are the ones the markup hoisted",
       PROMOTED.slice().sort(),
-      [...named(runsOn.text), ...named(where.text)].sort());
+      [...named(runsOn.text), ...named(where.text)]
+        .filter((k) => INHERITS.includes(k)).sort());
 
 /* ---- every field Create reads is still on the form ---- */
 function sliceFrom(marker) {

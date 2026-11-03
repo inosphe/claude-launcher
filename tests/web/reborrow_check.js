@@ -82,16 +82,28 @@ function detach() {}
 async function refreshSessions() {}
 function attach() {}
 `;
+/* The key half of the same panel (claunch-d2t79): the pool the session spends
+   and a button into the picker. The answer is pooled, so the section stays on
+   the panel rather than removing itself the way it does for a single token. */
+const poolOf = {
+  pooled: true, owner: "work",
+  keys: [
+    { id: "k1", label: "first", masked: "sk-A…1111", current: true },
+    { id: "k2", label: "second", masked: "sk-B…2222", current: false },
+  ],
+};
+const fetchKeyPool = () => Promise.resolve(poolOf);
+const openKeyPicker = (name, profile) => { openKeyPicker.asked = [name, profile]; };
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api",
+  "exports", "document", "el", "api", "fetchKeyPool", "openKeyPicker",
   stubs + slice("baseProfileName") + slice("readBorrowOptions")
-  + slice("sessReborrow") + `
+  + slice("keyPoolProfile") + slice("sessKeySection") + slice("sessReborrow") + `
 Object.assign(exports, {
   render: sessReborrow,
   drop: () => { sessReborrowBox = null; },
 });`
-)(ctx, document, el, api);
+)(ctx, document, el, api, fetchKeyPool, openKeyPicker);
 
 let failures = 0;
 function check(label, condition, extra) {
@@ -145,12 +157,31 @@ async function main() {
 
   ctx.drop();
   const claude = ctx.render({
-    session: { name: "c", profile: "work:claude", harness: "claude" },
+    session: { name: "c", profile: "work:claude", harness: "claude",
+               auto_key_switch: true },
     harness: { auth: "claude", borrowable: true, borrow_mode: "provider-token" },
   });
   await settle();
   check("Claude retains the explicit no-token choice",
     tags(tags(claude, "select")[0], "option").some((o) => o.value === "null"));
+
+  /* The pool is not a borrow: it is drawn ahead of the borrowability gate, so
+     a harness with no shared-token route still gets its key row. */
+  const keySection = walk(claude).find((n) => n.classes.has("sess-key-section"));
+  check("Restart settings offers the key of a multi-key pool", !!keySection);
+  check("...naming the key it spends and the pool's size",
+    text(keySection).includes("Key: first of 2 in work's pool"),
+    text(keySection));
+  check("...and saying the session switches itself on a limit",
+    text(keySection).includes("switched automatically on a usage limit"),
+    text(keySection));
+  const keyButton = walk(keySection).find((n) => n.tag === "button");
+  check("...with a button into the picker",
+    !!keyButton && keyButton.text === "Change key…", keyButton && keyButton.text);
+  await keyButton.fire("click");
+  check("...aimed at this session and its pool",
+    JSON.stringify(openKeyPicker.asked) === '["c","work:claude"]',
+    JSON.stringify(openKeyPicker.asked));
 
   console.log("reborrow_check: " + (failures ? `${failures} failing` : "ok"));
   process.exitCode = failures ? 1 : 0;

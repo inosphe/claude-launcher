@@ -104,6 +104,7 @@ const IDS = [
   "new-usage", "new-usage-who", "new-usage-when", "new-usage-refresh",
   "new-usage-windows", "new-usage-keys", "new-strategy-row",
   "new-key-strategy", "new-key-roll", "new-usage-note",
+  "new-auto-key-row", "new-auto-key-switch",
 ];
 const nodes = {};
 for (const id of IDS) nodes[id] = makeNode("div");
@@ -169,6 +170,10 @@ const roll = nodes["new-key-roll"];
 const strategyRow = nodes["new-strategy-row"];
 const note = nodes["new-usage-note"];
 const who = nodes["new-usage-who"];
+/* The automatic key switch (claunch-d2t79): the session's answer, asked where
+   the pool it applies to is drawn. */
+const autoRow = nodes["new-auto-key-row"];
+const autoBox = nodes["new-auto-key-switch"];
 
 function windowLine(name, utilization) {
   return { name, utilization, resets_at: null, status: "ok" };
@@ -232,6 +237,8 @@ async function main() {
   check("the note names how to get a pool", /one token/.test(note.textContent), true);
   check("the note stays visible", note.classList.contains("hidden"), false);
   check("no window error is shown", note.textContent.includes("usage unavailable"), false);
+  check("a single token cannot switch keys on a limit",
+    autoRow.classList.contains("hidden"), true);
 
   /* ---- a pool: every key, and the next launch's key marked ---- */
   selectorNow = "work:claude";
@@ -276,6 +283,19 @@ async function main() {
     ["rotation", "usage-min", "usage-max", "random", "manual"]);
   check("the strategy select shows the pool's answer", select.value, "rotation");
   check("a pool with two keys may set the strategy", select.disabled, false);
+  check("...and may ask to switch keys on a limit",
+    autoRow.classList.contains("hidden"), false);
+
+  /* A pool that shrinks under the tick leaves a hidden box ticked. A hidden
+     answer must not ride the submit as if it were chosen, so the render
+     clears it. */
+  autoBox.checked = true;
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, { body: doc() });
+  await flush();
+  check("a pool that shrinks hides the answer and clears the tick",
+    [autoRow.classList.contains("hidden"), autoBox.checked], [true, false]);
 
   /* ---- a usage strategy names its pick, marked as this read's answer ---- */
   selectorNow = "work:claude";
