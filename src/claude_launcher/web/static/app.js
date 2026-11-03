@@ -18562,6 +18562,12 @@ $("new-session").addEventListener("submit", async (e) => {
     return;
   }
   const parent = spawnParent();
+  // Read here, not at the report below: the skip-permissions confirm further
+  // down is a showModal, and showing one closes the session modal. A create
+  // made for an agent's spawn request still has to report back to it
+  // (claunch-oaxni), and that answer cannot depend on a box the question
+  // took away.
+  const spawnRid = sessionModal && sessionModal.spawnRequest;
   if (sessionFormView().mode === "spawn" && !parent) {
     $("create-error").textContent = "Choose a parent session.";
     $("create-error").classList.remove("hidden");
@@ -18891,7 +18897,6 @@ $("new-session").addEventListener("submit", async (e) => {
     // the request learns which session the person made from it, top-level
     // or child — the tab it was created from, which need not be the scope
     // the agent asked for (claunch-oaxni).
-    const spawnRid = sessionModal && sessionModal.spawnRequest;
     if (spawnRid && made.name) spawnGateLink(spawnRid, made.name, parent ? "child" : "root");
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed

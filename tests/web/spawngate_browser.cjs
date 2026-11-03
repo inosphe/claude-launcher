@@ -360,6 +360,12 @@ const factRows = card => card.locator('.gate-facts').evaluate(box => {
       await page.click(`#new-tab-${tab}`);
       const linked = bodies.length;
       await page.evaluate(() => $('new-session').requestSubmit());
+      // A create that would go out with permission skipping off is asked about
+      // once more before it is sent, and nothing goes out before that answer
+      // (claunch-1ztit.1.1). This form leaves the box unticked, so answer it
+      // the way an operator does; without this the request never happens.
+      const startAnyway = page.getByRole('button', { name: 'Start without skip permissions', exact: true });
+      if (await startAnyway.waitFor({ timeout: 1500 }).then(() => true, () => false)) await startAnyway.click();
       for (let i = 0; i < 50 && bodies.length === linked; i++) await page.waitForTimeout(50);
       assert.equal(await page.evaluate(() => $('create-error').classList.contains('hidden')
         ? '' : $('create-error').textContent), '', 'the create went out');

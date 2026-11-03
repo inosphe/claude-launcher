@@ -155,7 +155,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
       "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
       "term-zoom", "term-view", "term-life",
-      "term-chartbtn", "term-categorybtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
       "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
       "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
       "term-tps", "term-note", "term-handle", "term-status",
