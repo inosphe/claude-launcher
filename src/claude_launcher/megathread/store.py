@@ -31,10 +31,11 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
+
+from .. import sqlite_shared
 
 SCHEMA_VERSION = 2
 
@@ -137,6 +138,8 @@ class MegaThreadStore:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite_shared.SharedConnection(self.path, row_factory=sqlite3.Row,
+                                                    pragmas=(*sqlite_shared.WAL_PRAGMAS, "PRAGMA foreign_keys=ON"))
         with self._connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -157,29 +160,16 @@ class MegaThreadStore:
                             raise
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
-        try:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=NORMAL")
-            db.execute("PRAGMA busy_timeout=30000")
-            db.execute("PRAGMA foreign_keys=ON")
-            yield db
-        finally:
-            db.close()
+    def _connect(self):
+        """The store's one connection, held by this thread for the block
+        (claude_launcher/sqlite_shared.py says why it is never reopened)."""
+        return self._db.use()
 
-    @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                yield db
-            except BaseException:
-                db.execute("ROLLBACK")
-                raise
-            db.execute("COMMIT")
+    def _write(self):
+        return self._db.write()
+
+    def close_connection(self) -> None:
+        self._db.close()
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
