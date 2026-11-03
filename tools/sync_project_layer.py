@@ -22,23 +22,12 @@ where the reasons for the command live — and write that as the project
 copy. Nothing else from the project copy survives, on purpose: anything
 else there is drift.
 
-The grafted fields are ``verify:``, ``awaits:`` and ``checklist:`` (see
-``GRAFT_RE``), and they are chosen by name rather than by shape. All three
-answer "what does *this* repository check, and with which tool" — a question
-the packaged copy cannot answer because it ships to every repository — and
-``awaits`` and ``checklist`` run to several lines where ``verify`` is usually
-one, so a block is the field's line plus everything indented under it.
-
-``checklist`` joined them with claunch-weo4k: the packaged worker's landed
-gate used to name ``tools/landed_check.py``, a file only a claude-launcher
-checkout has, so every other repository's round read python's "no such file"
-(exit 2) as the gate's own "cannot tell" and asked a person again. The
-packaged copy now names ``claunch gate landed-check``, which reaches this
-repository's script when it stands in one (``cli_gate.checkout_script``) and
-the installed package's copy elsewhere. This repository still keeps the
-``tools/`` form in its own layer, because a gate here must run the tree
-under test (``tests/test_gates_run_this_checkout.py``), and that is exactly
-the kind of repository-specific command this tool grafts.
+The grafted fields are ``verify:`` and ``awaits:`` (see ``GRAFT_RE``), and
+they are chosen by name rather than by shape. Both answer "what does *this*
+repository check, and with which tool" — a question the packaged copy cannot
+answer because it ships to every repository — and ``awaits`` may run to
+several lines where ``verify`` is usually one, so a block is the field's line
+plus everything indented under it.
 
     uv run --no-sync python tools/sync_project_layer.py            # rewrite
     uv run --no-sync python tools/sync_project_layer.py --check    # exit 1 on drift
@@ -76,7 +65,7 @@ STEP_RE = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
 #: to write. ``awaits`` is here for the same reason ``verify`` is: what a step
 #: waits for is this repository's business, and the packaged copy that ships
 #: everywhere cannot name a tool that only exists here.
-GRAFT_FIELDS = ("verify", "awaits", "checklist")
+GRAFT_FIELDS = ("verify", "awaits")
 GRAFT_RE = re.compile(r"^    (?:" + "|".join(GRAFT_FIELDS) + r"):")
 COMMENT_RE = re.compile(r"^    #")
 #: A grafted field's own line, capturing its name.

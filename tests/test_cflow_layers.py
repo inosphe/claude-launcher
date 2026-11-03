@@ -437,17 +437,13 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
             f"{label}: the merged item must state the merge-parent question, "
             f"not a containment one -- got {merged.describe!r}"
         )
-        # Which gate depends on which copy. The packaged one ships to every
-        # repository, so it names `claunch gate landed-check` -- a relative
-        # tools/ path there is a missing file, and python exits 2, which the
-        # gate reads as "cannot tell" (claunch-weo4k). This repository's
-        # project copy grafts its own script back, because a gate here runs
-        # the tree being checked.
-        expected = (
-            "uv run --no-sync python tools/landed_check.py"
-            if label == "project"
-            else "claunch gate landed-check"
-        )
+        # Both copies name the packaged gate. A relative tools/ path is a
+        # missing file in every other repository, and python exits 2, which
+        # the gate reads as "cannot tell" (claunch-weo4k). Inside this
+        # checkout the same command runs this checkout's script
+        # (``cli_gate.checkout_script``), so the project layer needs no
+        # spelling of its own.
+        expected = "claunch gate landed-check"
         assert expected in merged.check, (
             f"{label}: the merged item must ask {expected!r} -- got {merged.check!r}"
         )

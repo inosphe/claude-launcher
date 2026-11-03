@@ -240,7 +240,7 @@ steps:
       items:
         - id: merged
           describe: fetch한 원격 base(@{upstream})가 동결된 내 tip을 포함한다 — PR이 merge commit으로 착지했다
-          check: 'uv run --no-sync python tools/landed_check.py --fetch --target @{upstream}'
+          check: 'claunch gate landed-check --fetch --target @{upstream}'
         - id: frozen
           describe: 추적 파일에 미커밋 변경이 없다(브랜치가 동결된 상태다)
           check: 'git diff --quiet && git diff --cached --quiet'

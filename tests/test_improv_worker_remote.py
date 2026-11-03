@@ -221,15 +221,13 @@ def test_the_project_copy_is_the_packaged_layer_plus_its_grafted_fields():
     strip the grafted fields and the project copy is the packaged file."""
     packaged = _bundled_doc(NAME)
     project = model.read_doc((PROJECT / f"{NAME}.yaml").read_text(encoding="utf-8"))
-    # Dropped from both sides: a grafted field is this repository's version of
-    # whatever the packaged copy carries there (``landed.checklist`` is the
-    # first field that exists on both sides), and the drift this test is
-    # about is everything else.
-    for doc in (packaged, project):
-        for step in doc["steps"].values():
-            if isinstance(step, dict):
-                for field in _graft_fields():
-                    step.pop(field, None)
+    # Only the project copy loses its grafted fields: they are this
+    # repository's version of a field the packaged copy either omits or
+    # spells generically, and the drift this test is about is everything else.
+    for step in project["steps"].values():
+        if isinstance(step, dict):
+            for field in _graft_fields():
+                step.pop(field, None)
     assert project == packaged
 
 

@@ -33,13 +33,16 @@ now live (``tests/test_sweep.py``, ``tests/test_changed_tests.py``).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
+from claude_launcher import cli_gate
 from claude_launcher.cflow import model, state as state_mod
 
-OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+OVERRIDES = ROOT / ".claunch" / "workflows"
 SYNC = Path(__file__).resolve().parents[1] / "tools" / "sync_project_layer.py"
 
 
@@ -148,6 +151,32 @@ _OUTSIDE_TOOLS = ("git",)
 def _runs_project_code(command: str) -> bool:
     head = command.strip().split()
     return not (head and head[0] in _OUTSIDE_TOOLS)
+
+
+#: ``claunch gate <name>``: a PATH binary, but a dispatcher rather than a
+#: copy. In a claude-launcher checkout it runs that checkout's
+#: ``tools/<module>.py`` (``cli_gate.checkout_script``), which is what this
+#: rule asks for; it falls back to the installed package only somewhere no
+#: checkout exists.
+_GATE_RE = re.compile(r"^claunch gate (\S+)")
+
+
+def _packaged_gate_runs_this_checkout(command: str) -> bool:
+    """Whether ``claunch gate <name>`` provably reaches this tree.
+
+    Asked of the in-tree ``cli_gate`` rather than taken on the command's
+    word: the exemption holds only while ``checkout_script`` resolves a file
+    under this worktree. Move the command out of a checkout and this returns
+    False, so the offender is reported instead of silently excused.
+    """
+    m = _GATE_RE.match(command)
+    if not m:
+        return False
+    module = cli_gate.GATES.get(m.group(1))
+    if module is None:
+        return False
+    script = cli_gate.checkout_script(module, str(ROOT))
+    return script is not None and ROOT in script.parents
 
 
 def gate_commands(step) -> list:
@@ -322,12 +351,15 @@ def test_the_landed_gate_asks_the_packaged_gate_not_this_checkout():
     assert remote_merged.check.startswith("claunch gate landed-check --fetch")
     assert "tools/landed_check.py" not in remote_merged.check
 
-    # This repository's own layer keeps the checkout's script: a gate here
-    # runs the tree being checked (tests/test_gates_run_this_checkout.py).
+    # This repository's own layer carries the packaged command too. It does
+    # not need its own spelling: `claunch gate` resolves to this checkout's
+    # `tools/landed_check.py` when it runs in one (``checkout_script``), which
+    # is the property a gate here must keep, and spelling the path twice would
+    # be one more copy to forget (claunch-weo4k review).
     local = model.load(OVERRIDES / "improv-worker.yaml")
     local_merged = local.steps["landed"].checklist.item("merged")
     assert local_merged is not None
-    assert local_merged.check == "uv run --no-sync python tools/landed_check.py"
+    assert local_merged.check == "claunch gate landed-check"
 
 
 @pytest.mark.parametrize("key, script", sorted(GATES.items()))
@@ -436,6 +468,13 @@ def test_no_gate_calls_a_binary_off_PATH():
     remembered to list there. This walks the files instead, so a gate added to
     the layer without touching either table is still held to the rule.
 
+    One command is excused, and only after being checked: ``claunch gate
+    <name>`` (``_packaged_gate_runs_this_checkout``). It is the packaged
+    spelling the shipped workflows carry, and inside a checkout it runs that
+    checkout's script -- the property this rule is about. The excuse is
+    conditional, so it does not cover a ``claunch`` subcommand with no
+    checkout-resolving module behind it, which is the shape that failed.
+
     A prefix is all this checks, and a prefix turned out not to be enough:
     ``uv run --no-sync python -m claude_launcher.cli ...`` starts with the
     right words and still resolves out of site-packages, and so does an
@@ -460,6 +499,8 @@ def test_no_gate_calls_a_binary_off_PATH():
                     # alternative is writing `uv run --no-sync python -c
                     # "subprocess.run(['git', ...])"` to satisfy a check about
                     # something else entirely.
+                    continue
+                if _packaged_gate_runs_this_checkout(command):
                     continue
                 if not command.startswith(NO_SYNC):
                     offenders.append(f"{path.name}:{step_id} -> {command}")
