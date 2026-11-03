@@ -2176,8 +2176,15 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   }
   #rail-nav-pin:hover { opacity: 0.9; background: #22262d; }
   #rail-nav-pin[aria-pressed="true"] { opacity: 1; filter: none; }
-  #rail-nav-dock.pinned { height: auto; }
-  #rail-nav-dock.pinned #rail-nav { position: static; max-height: none; box-shadow: none; }
+  /* The page list keeps growing (26 links at claunch-ijkge, 27 now), and
+     past a certain count the pinned rows no longer fit under the rail's
+     header: the dock used to grow past the window's bottom edge with no way
+     to reach the rows below it. So the pinned dock gives up room like the
+     list does and the nav scrolls inside it; the pin is the dock's child,
+     not the scroller's, so it stays where it can always be pressed. */
+  #rail-nav-dock.pinned { height: auto; flex: 0 1 auto; min-height: 0; }
+  #rail-nav-dock.pinned #rail-nav { position: static; height: 100%; max-height: none;
+    box-shadow: none; overflow-y: auto; }
 }
 @media (min-width: 821px) and (hover: hover) and (prefers-reduced-motion: reduce) {
   #rail-nav { transition: none; }
