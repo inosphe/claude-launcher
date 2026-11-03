@@ -106,16 +106,45 @@ squashMergeAllowed, rebaseMergeAllowed`)을 읽어 merge → squash → rebase �
 
 ## 4. 안전 경계 — 머지는 사람만
 
-- 머지 엔드포인트는 **대시보드 쿠키로 인증된 요청만** 받는다. bearer 토큰(셸·
-  에이전트 세션·CLI)으로 온 요청은 gh를 실행하기 전에 403으로 거절한다
-  (`daemon/api.py`, `h_pr_merge`). AGENTS.md의 「워커는 master를 머지하지
-  않는다」가 이 경계다.
-- **MCP 도구로 노출하지 않는다.** 어떤 에이전트 도구도 이 경로를 부르지 않는다.
-- 화면은 **2단계 확인**이다 — 「머지…」를 누르면 방식 선택과 「정말 머지」가
-  나타나고, 그때 `confirm: true`가 실려 나간다.
+이 경계가 무엇을 막고 무엇을 막지 못하는지 그대로 적는다. AGENTS.md의 데몬
+재기동 절과 같은 구조다: 「열려 있다는 사실이 권한이 있다는 뜻은 아니지만,
+열려 있지 않다고 주장해서도 안 된다」.
+
+**막는 것**
+
+- **CLI·MCP 경로.** 머지 엔드포인트는 **대시보드 쿠키로 인증된 요청만** 받고,
+  bearer 토큰으로 온 요청은 gh를 실행하기 전에 403으로 거절한다
+  (`daemon/api.py`, `h_pr_merge`). 어떤 MCP 도구도 이 경로를 부르지 않는다.
+  에이전트가 평소에 쓰는 길(CLI·MCP·`daemon_client`)은 전부 토큰 인증이다.
+- **한 번의 실수.** 화면은 2단계 확인이다 — 「머지…」를 누르면 방식 선택과
+  「정말 머지」가 나타나고, 그때 `confirm: true`가 실려 나간다.
+
+**막지 못하는 것 (실측으로 확인한 우회 경로)**
+
+`POST /api/auth/session`은 본문의 토큰이 맞으면 쿠키 세션을 새로 발급한다
+(`api.py:h_auth_session`). 이 라우트는 인증 미들웨어의 예외 목록에 있고
+(`api.py:475`), 발급 과정에서 `_foreign_origin`도 보지 않는다. 그리고
+`_foreign_origin`은 `Sec-Fetch-Site`도 `Origin`도 없는 요청을 통과시킨다.
+토큰은 이 호스트의 셸과 에이전트 세션이 읽을 수 있는 값이다. 그러므로
+
+```sh
+curl -c jar -d '{"token":"<token>"}' http://127.0.0.1:<port>/api/auth/session
+curl -b jar -X POST -d '{"confirm":true}' \
+     http://127.0.0.1:<port>/api/prs/<host>/<owner>/<name>/<number>/merge
+```
+
+는 403에 걸리지 않는다. 이는 쿠키를 쓰는 **모든 쓰기 라우트**가 공유하는
+성질이지 이 라우트만의 구멍은 아니다.
+
+그래서 에이전트에게는 **규칙으로** 금지한다: 워커는 master에 머지하지 않는다
+(AGENTS.md). 규칙을 어길 마음이 있는 세션을 코드가 막지는 못한다.
+헤더(`Sec-Fetch-Site`)를 요구하는 보강안이 검토됐고, 위협 모델을 정하는 일이라
+사용자 결정으로 남겨 두었다.
+
 - 릴레이로 들어온 요청도 대시보드의 쿠키로 인증된다(`daemon/relay_uplink.py`:
-  "the daemon's own Bearer/cookie auth still applies"). 터널이 인증 방식을
-  바꾸지 않는다는 것이 이 경계의 전제이고, 착지 뒤 실환경에서 확인할 항목이다.
+  "the daemon's own Bearer/cookie auth still applies"; `_foreign_origin`의
+  docstring도 릴레이가 `Sec-Fetch-Site`를 바꾸지 않는다고 적는다). 착지 뒤
+  실환경에서 확인할 항목이다.
 
 ## 5. 테스트
 

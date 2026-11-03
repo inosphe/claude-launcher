@@ -1338,7 +1338,9 @@ def build_app(
     # behind a relay tunnel cannot reach github.ncsoft.com at all.
     r.add_get("/api/prs/{host}/{owner}/{name}/{number}", h_pr_detail)
     # The merge is the user's, from the dashboard: a cookie request and only
-    # that (see h_pr_merge), never an MCP tool and never a bearer token.
+    # that (see h_pr_merge), never an MCP tool and never a bearer token. The
+    # documented residue -- a token traded for a cookie -- is in that
+    # handler's docstring and docs/pr-tab.md section 4.
     r.add_post("/api/prs/{host}/{owner}/{name}/{number}/merge", h_pr_merge)
     r.add_post("/api/prs/{host}/{owner}/{name}/{number}/rebase-request",
                h_pr_rebase_request)
@@ -11212,6 +11214,16 @@ async def h_pr_merge(request: web.Request) -> web.Response:
       (``daemon/actors.py``), not on who it claims to be.
     - **``confirm: true``.** The page asks once more before it sends this;
       a lone POST does not merge.
+
+    What this closes is the path an agent normally takes -- CLI, MCP, the
+    daemon client all authenticate with the token. What it does NOT close is
+    a session that deliberately trades that token for a cookie at
+    ``/api/auth/session`` (a route the middleware exempts) and then posts
+    here with no ``Origin``/``Sec-Fetch-Site``: ``_foreign_origin`` lets such
+    a request through, as it does for every other cookie write on this
+    daemon. That residue is the same one AGENTS.md describes for the restart
+    gate, and it is why the rule is written down rather than claimed to be
+    enforced -- see ``docs/pr-tab.md`` section 4.
 
     A refusal is HTTP 409 with ``error.kind`` (or 403/502 where that is the
     truer code), never a silent no."""
