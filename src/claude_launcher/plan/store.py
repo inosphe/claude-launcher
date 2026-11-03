@@ -7,7 +7,13 @@ plan here is the same intent cut down to what that person decides on:
   steps     a tree of one-to-few-line steps. A ``step`` carries a status
             the session moves (todo, doing, done, skipped, blocked); a
             ``decision`` is a branch point whose options each state an
-            expected effect and a risk, and the user picks one.
+            expected effect and a risk, and the user picks one. A plain
+            decision the session takes itself as a ``default`` option
+            (answered ``by: agent``, waits on nobody, the user may change
+            it); an option the session ruled out stays listed as
+            ``rejected`` with the reason. A decision's child nodes may sit
+            ``under`` one option -- only where they depend on that choice --
+            and count only while it is the path taken (claunch-vmcg7).
   closure   what keeps the session open (th-0b38dc): ``verify`` items a
             person has to check by hand (passed / failed / deferred -- 보류,
             cannot be checked yet -- with a note) and
@@ -79,7 +85,7 @@ FINISHED = ("done", "skipped")
 #: What the user decides on, per kind: a change to any of these moves the
 #: node's ``rev`` and takes its result away -- except on a closure node whose
 #: result :func:`_kept` holds (claunch-jw1v2).
-CONTENT = {"step": ("title", "detail"), "decision": ("title", "detail", "options"),
+CONTENT = {"step": ("title", "detail", "under"), "decision": ("title", "detail", "options", "under"),
            "verify": ("title", "detail"), "followup": ("title", "detail"), "note": ("title", "detail")}
 
 
@@ -174,14 +180,23 @@ def _revision(value, name: str = "revision", *, floor: int = 1) -> int:
 
 
 def _options(value) -> list[dict]:
+    """A decision's branches (claunch-vmcg7).
+
+    ``recommended`` marks the session's pick. ``default`` (at most one, and
+    it is the recommended one) has the session take that pick at once: the
+    decision is answered ``by: agent`` and waits on nobody, and the user may
+    still pick another option later. ``rejected`` is the reason the session
+    set an option aside: the pane shows it struck out with the reason so the
+    user sees what was ruled out, and nobody can pick it. A decision keeps
+    two options the user can pick -- one when the session took a default."""
     if not isinstance(value, list) or len(value) < 2:
         raise PlanError("a decision needs options: a list of at least two {label, effect, risk}")
     if len(value) > MAX_OPTIONS:
         raise PlanError(f"a decision has at most {MAX_OPTIONS} options")
-    out, seen, recommended = [], set(), 0
+    out, seen, recommended, default = [], set(), 0, 0
     for item in value:
         if not isinstance(item, dict):
-            raise PlanError("each option is {label, effect, risk, recommended?}")
+            raise PlanError("each option is {label, effect, risk, recommended?, default?, rejected?}")
         label = _text(item.get("label"), "option label", MAX_TITLE, required=True)
         if label in seen:
             raise PlanError(f"option {label!r} is listed twice")
@@ -191,13 +206,38 @@ def _options(value) -> list[dict]:
             "effect": _text(item.get("effect"), f"option {label!r} effect", MAX_OPTION_TEXT, required=True),
             "risk": _text(item.get("risk"), f"option {label!r} risk", MAX_OPTION_TEXT, required=True),
         }
-        if item.get("recommended"):
+        rejected = item.get("rejected")
+        if rejected not in (None, "", False):
+            if rejected is True:
+                raise PlanError(f"option {label!r}: rejected takes the reason it was ruled out, not true")
+            opt["rejected"] = _text(rejected, f"option {label!r} rejected", MAX_OPTION_TEXT, required=True)
+        if item.get("default"):
+            if "rejected" in opt:
+                raise PlanError(f"option {label!r} is rejected and cannot be the default")
+            opt["default"] = True
             opt["recommended"] = True
+            default += 1
+        if item.get("recommended"):
+            if "rejected" in opt:
+                raise PlanError(f"option {label!r} is rejected and cannot be recommended")
+            opt["recommended"] = True
+        if opt.get("recommended"):
             recommended += 1
         out.append(opt)
+    if default > 1:
+        raise PlanError("at most one option is the default")
     if recommended > 1:
-        raise PlanError("at most one option is recommended")
+        raise PlanError("at most one option is recommended" + (" (the default is the recommended one)"
+                                                               if default else ""))
+    open_ = sum(1 for o in out if "rejected" not in o)
+    if open_ < (1 if default else 2):
+        raise PlanError("a decision needs two options the user can pick (rejected ones do not count); "
+                        "one is enough when you take it as the default")
     return out
+
+
+def _default_of(node: dict) -> Optional[str]:
+    return next((o["label"] for o in node.get("options") or [] if o.get("default")), None)
 
 
 def _status(kind: str, value, default: str) -> str:
@@ -230,7 +270,7 @@ class _Builder:
         self.count = 0
         self.reworded: list = []
 
-    def node(self, raw, kinds: tuple, depth: int) -> dict:
+    def node(self, raw, kinds: tuple, depth: int, parent: Optional[dict] = None) -> dict:
         if not isinstance(raw, dict):
             raise PlanError("each node is an object {kind, title, ...}")
         self.count += 1
@@ -256,6 +296,20 @@ class _Builder:
             node["options"] = _options(raw.get("options"))
         elif raw.get("options") not in (None, []):
             raise PlanError(f"only a decision has options (node {nid!r} is a {kind})")
+        under = raw.get("under")
+        if under not in (None, ""):
+            under = _text(under, f"node {nid!r} under", MAX_TITLE, required=True)
+            if parent is None or parent.get("kind") != "decision":
+                raise PlanError(f"node {nid!r}: under names an option of the decision it sits in; "
+                                "put it among that decision's children")
+            opt = next((o for o in parent["options"] if o["label"] == under), None)
+            if opt is None:
+                raise PlanError(f"node {nid!r}: under {under!r} is not an option of {parent['id']}: one of "
+                                + ", ".join(o["label"] for o in parent["options"]))
+            if opt.get("rejected"):
+                raise PlanError(f"node {nid!r}: option {under!r} of {parent['id']} is rejected; nothing "
+                                "sits under it")
+            node["under"] = under
         status = _status(kind, raw.get("status"), "todo" if kind == "step" else "open")
         if status:
             node["status"] = status
@@ -268,8 +322,15 @@ class _Builder:
             raise PlanError(f"the step tree is at most {MAX_DEPTH} levels deep")
         if self.carry(node, self.old.get(nid)):
             self.reworded.append(nid)
+        prior = (self.old.get(nid) or {}).get("result")
+        if kind == "decision" and not node["result"] and _default_of(node) and \
+                (not prior or prior.get("by") == "agent"):
+            # the session's own pick: taken now, waits on nobody, the user may change it.
+            # Never over a choice the user made: when rewording set that aside, the
+            # decision goes back to the user instead (s6452-rev3, claunch-vmcg7)
+            node["result"] = {"choice": _default_of(node), "by": "agent", "note": "", "at": _now()}
         if kind in STEP_KINDS:
-            node["children"] = [self.node(c, STEP_KINDS, depth + 1) for c in children]
+            node["children"] = [self.node(c, STEP_KINDS, depth + 1, node) for c in children]
         return node
 
     @staticmethod
@@ -303,6 +364,37 @@ def walk(nodes: list) -> Iterator[dict]:
         yield from walk(n.get("children") or [])
 
 
+def branch_open(node: dict, parent: Optional[dict]) -> bool:
+    """Whether a node under a decision's option is on the path taken: a node
+    without ``under`` belongs to the whole decision; one with ``under`` waits
+    until that option is the decision's choice, and drops out when another
+    option is picked (claunch-vmcg7)."""
+    under = node.get("under")
+    if not under or parent is None:
+        return True
+    return (parent.get("result") or {}).get("choice") == under
+
+
+def walk_active(nodes: list, parent: Optional[dict] = None) -> Iterator[dict]:
+    """:func:`walk` without the branches of options not taken."""
+    for n in nodes:
+        if not branch_open(n, parent):
+            continue
+        yield n
+        yield from walk_active(n.get("children") or [], n)
+
+
+def _parents(doc: Optional[dict]) -> dict:
+    out: dict = {}
+
+    def go(nodes, parent):
+        for n in nodes:
+            out[n["id"]] = parent
+            go(n.get("children") or [], n)
+    go((doc or {}).get("steps") or [], None)
+    return out
+
+
 def _index(doc: Optional[dict]) -> dict:
     if not doc:
         return {}
@@ -322,8 +414,16 @@ def summarize(doc: dict) -> dict:
     the session hands it over and ``deferred`` counts them. ``closable``
     holds when nothing waits, every step is done or skipped and every
     followup the user kept ("here", "issue") is done; ``blockers`` lists
-    each node that keeps it from holding, with the reason."""
-    steps = [n for n in walk(doc.get("steps") or [])]
+    each node that keeps it from holding, with the reason.
+
+    Only the path taken counts (claunch-vmcg7): a node sitting ``under`` an
+    option that is not the decision's choice -- not picked yet, or another
+    one picked -- neither waits nor blocks, and its ids are listed in
+    ``inactive``. A decision the session answered with its default
+    (``by: agent``) waits on nobody; ``auto`` counts them."""
+    every = list(walk(doc.get("steps") or []))
+    steps = list(walk_active(doc.get("steps") or []))
+    live = {n["id"] for n in steps}
     closure = doc.get("closure") or []
     blockers = []
 
@@ -361,6 +461,8 @@ def summarize(doc: dict) -> dict:
     return {
         "steps": s_total, "done": s_done,
         "decisions": sum(1 for n in steps if n["kind"] == "decision"),
+        "auto": sum(1 for n in steps if n["kind"] == "decision" and (n.get("result") or {}).get("by") == "agent"),
+        "inactive": [n["id"] for n in every if n["id"] not in live],
         "verify": sum(1 for n in closure if n["kind"] == "verify"),
         "followups": sum(1 for n in closure if n["kind"] == "followup"),
         "notes": sum(1 for n in closure if n["kind"] == "note"),
@@ -557,10 +659,17 @@ class PlanStore:
             doc = json.loads(json.dumps({k: before[k] for k in ("title", "goal", "issue", "context", "steps",
                                                                  "closure")}))
             target = _index(doc)[node_id]
-            raw = {**{k: target.get(k) for k in ("id", "kind", "title", "detail", "status", "options")}, **fields}
+            raw = {**{k: target.get(k) for k in ("id", "kind", "title", "detail", "status", "options", "under")},
+                   **fields}
             build = _Builder({node_id: old})
-            fresh = build.node({**raw, "children": []}, (target["kind"],), 1)
+            fresh = build.node({**raw, "children": []}, (target["kind"],), 1, _parents(doc).get(node_id))
             fresh.pop("children", None)
+            if fresh["kind"] == "decision":
+                for child in target.get("children") or []:
+                    opt = next((o for o in fresh["options"] if o["label"] == child.get("under")), None)
+                    if child.get("under") and (opt is None or opt.get("rejected")):
+                        raise PlanError(f"node {child['id']} sits under option {child['under']!r}, which these "
+                                        f"options drop or reject; move it with plan_set first")
             if reason:
                 if not old.get("result") or old["kind"] not in CLOSURE_KINDS:
                     raise PlanError(f"node {node_id} has no settled result to reopen (only a checked verify item "
@@ -634,7 +743,14 @@ class PlanStore:
                 labels = [o["label"] for o in node["options"]]
                 if choice not in labels:
                     raise PlanError(f"{choice!r} is not an option of {node_id}: one of {', '.join(labels)}")
-                result = {"choice": choice}
+                picked = next(o for o in node["options"] if o["label"] == choice)
+                if picked.get("rejected"):
+                    raise PlanError(f"{choice!r} was ruled out by the session ({picked['rejected']}); pick "
+                                    "another option, or comment on the plan to argue for it")
+                if node_id not in {n["id"] for n in walk_active(doc.get("steps") or [])}:
+                    raise PlanError(f"{node_id} sits under an option that is not the path taken; decide on "
+                                    "the decision above it first")
+                result = {"choice": choice, "by": USER}
             elif kind == "verify":
                 if verdict not in VERDICTS:
                     raise PlanError(f"a verdict is one of {', '.join(VERDICTS)}")

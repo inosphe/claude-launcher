@@ -287,6 +287,41 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   assert.deepStrictEqual(posts().slice(-1)[0].body, {session: 's1', note: '', rev: 3, verdict: 'deferred'});
   assert(text(host).includes('확인: 보류'));
 
+  // claunch-vmcg7: the session's default pick, a ruled-out option, and the
+  // nodes under an option (the chosen one open, the other faded).
+  plan = {...plan, revision: 10, closure: [], steps: [
+    {id: 'h1', kind: 'decision', title: 'layout', detail: '', rev: 1,
+     options: [{label: 'A', effect: 'fast', risk: 'untested', recommended: true, default: true},
+               {label: 'B', effect: 'safe', risk: 'slow'},
+               {label: 'C', effect: 'cheap', risk: 'brittle', rejected: 'no backup path'}],
+     result: {choice: 'A', by: 'agent', note: ''},
+     children: [
+       {id: 'h2', kind: 'decision', title: 'index on A', under: 'A', detail: '', rev: 1, result: null,
+        options: OPTS, children: []},
+       {id: 'h3', kind: 'decision', title: 'migrate on B', under: 'B', detail: '', rev: 1, result: null,
+        options: OPTS, children: []},
+       {id: 'h4', kind: 'step', title: 'write it', status: 'todo', detail: '', rev: 1, children: []},
+     ]}]};
+  ctx.PlanPane._view().open(); await settle();
+  const h1 = all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'));
+  assert.deepStrictEqual(h1.children[0].children.map(c => c.textContent), ['◆', 'h1', 'layout', '자동 선택됨']);
+  const hopts = h1.children.find(c => c.className === 'ptree plan-options-tree').children;
+  assert.deepStrictEqual(hopts.map(c => c.className), ['ptree-node ptree-option ptree-chosen ptree-recommended',
+    'ptree-node ptree-option ptree-unchosen', 'ptree-node ptree-option ptree-unchosen ptree-rejected']);
+  assert(text(hopts[2]).includes('배제 이유: no backup path') && text(hopts[2]).includes('배제'));
+  assert.strictEqual(buttons(hopts[2], '이 안 선택').length, 0, 'a ruled-out option cannot be picked');
+  assert.strictEqual(buttons(hopts[1], '이 안 선택').length, 1, 'the user may still change the default');
+  assert(text(hopts[0]).includes('index on A') && !text(hopts[0]).includes('migrate on B'));
+  assert(text(hopts[1]).includes('migrate on B') && text(hopts[1]).includes('선택되지 않은 안의 하위 항목'));
+  const h3 = all(hopts[1]).find(n => n.tag === 'li' && n.className.includes('plan-decision'));
+  assert(h3.className.includes('ptree-inactive'));
+  assert(text(h3).includes('대기 (상위 안 미선택)'));
+  assert.strictEqual(buttons(h3, '이 안 선택').length, 0, 'an inactive branch takes no choice yet');
+  assert.strictEqual(input(h3, '선택에 붙일 메모 (선택 사항)').length, 0);
+  // the common child hangs from the decision itself, outside every option
+  assert(!hopts.some(o => text(o).includes('write it')) && text(h1).includes('write it'));
+  assert(text(host).includes('자동 선택됨 · 다른 안을 고르면 세션에 전달됩니다'));
+
   // Closable, and a session without a plan.
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};
   ctx.PlanPane._view().open(); await settle();

@@ -78,11 +78,37 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
     res = node.get("result") or {}
     kind = node["kind"]
     if kind == "decision":
-        opt = next((o for o in node.get("options") or [] if o["label"] == res.get("choice")), {})
-        head = f"{PREFIX} The user chose \"{res.get('choice')}\" on your plan's decision {node['id']}:"
-        body = _what(node) + [f"  expected effect: {opt.get('effect', '')}", f"  risk: {opt.get('risk', '')}"]
-        then = ("Follow that branch: rewrite the steps under it with plan_set (or patch them with plan_node) "
-                "so the plan shows the path you now take.")
+        opts = {o["label"]: o for o in node.get("options") or []}
+        opt = opts.get(res.get("choice"), {})
+        was = (previous or {}).get("choice")
+        changed = bool(was) and was != res.get("choice")
+        if changed:
+            whose = "your default" if previous.get("by") == "agent" else "their earlier choice"
+            head = (f"{PREFIX} The user CHANGED your plan's decision {node['id']}: \"{was}\" -> "
+                    f"\"{res.get('choice')}\" (replacing {whose}):")
+            old = opts.get(was, {})
+            body = _what(node) + [
+                f"  before: \"{was}\"",
+                f"    expected effect: {old.get('effect', '(the option is no longer listed)')}",
+                f"    risk: {old.get('risk', '')}",
+                f"  after: \"{res.get('choice')}\"",
+                f"    expected effect: {opt.get('effect', '')}",
+                f"    risk: {opt.get('risk', '')}",
+            ]
+            then = (f"Steer to the new branch now. Re-check what you did on \"{was}\": steps you finished or "
+                    f"started for it, code and commits it shaped, and the nodes under \"{was}\" (they no "
+                    f"longer count). Undo or redo what the new choice changes, and rewrite the plan with "
+                    f"plan_set so the nodes under \"{res.get('choice')}\" show the path you now take. If "
+                    f"switching costs more than the note suggests the user expects, say so in a thread "
+                    f"before you undo work.")
+        else:
+            head = f"{PREFIX} The user chose \"{res.get('choice')}\" on your plan's decision {node['id']}:"
+            body = _what(node) + [f"  expected effect: {opt.get('effect', '')}", f"  risk: {opt.get('risk', '')}"]
+            then = ("Follow that branch: rewrite the steps under it with plan_set (or patch them with plan_node) "
+                    "so the plan shows the path you now take.")
+            if was:
+                then = ("They confirmed " + ("your default" if previous.get("by") == "agent" else
+                                             "their earlier choice") + "; nothing changes. " + then)
     elif kind == "verify":
         head = f"{PREFIX} The user checked your plan's verify item {node['id']}: {res.get('verdict')}."
         body = _what(node)
@@ -110,8 +136,9 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
     lines = [head, *body]
     if res.get("note"):
         lines += ["their note:", _quote(res["note"])]
-    if previous:
-        lines.append(f"(this replaces an earlier result: {previous})")
+    if previous and kind != "decision":
+        before = previous.get("verdict") or previous.get("action") or previous
+        lines.append(f"(this replaces an earlier result: {before})")
     lines.append(then)
     return "\n".join(lines)
 
@@ -327,13 +354,17 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
 
     def step_tree(nodes: list) -> list:
         """A plan's steps as the plan page draws them (claunch-7jzp8.5):
-        what each node says and how far it got, without revs or history."""
+        what each node says and how far it got, without revs or history.
+        ``auto`` marks a decision the session answered with its default;
+        ``under`` keeps a child's option branch (claunch-vmcg7)."""
         out = []
         for n in nodes:
-            item = {k: n[k] for k in ("id", "kind", "title", "detail", "status", "options") if n.get(k)}
-            choice = (n.get("result") or {}).get("choice")
-            if choice:
-                item["choice"] = choice
+            item = {k: n[k] for k in ("id", "kind", "title", "detail", "status", "options", "under") if n.get(k)}
+            res = n.get("result") or {}
+            if res.get("choice"):
+                item["choice"] = res["choice"]
+                if res.get("by") == "agent":
+                    item["auto"] = True
             item["children"] = step_tree(n.get("children") or [])
             out.append(item)
         return out

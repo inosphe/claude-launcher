@@ -36,6 +36,16 @@ _OPTION = {"type": "object", "properties": {
     "effect": {"type": "string", "description": "what the user gets by picking it"},
     "risk": {"type": "string", "description": "what can go wrong; irreversible effects, cost, other sessions hit"},
     "recommended": {"type": "boolean", "description": "your recommendation (at most one)"},
+    "default": {"type": "boolean",
+                "description": "take this option yourself now (it is also your recommendation): the decision is "
+                               "answered by you, waits on nobody, and the pane shows it as 자동 선택됨 -- the user "
+                               "may still pick another option, which reaches you as a [claunch plan] change. Use "
+                               "it for a plain call you want the user to see with its alternatives; a call with "
+                               "no real alternative needs no decision at all"},
+    "rejected": {"type": "string",
+                 "description": "you weighed this option and ruled it out: why, in a line. The pane shows it "
+                                "struck out with the reason; nobody can pick it. Keep the options you set aside "
+                                "here instead of dropping them, so the user sees what was ruled out"},
 }, "required": ["label", "effect", "risk"]}
 _STEP = {"type": "object", "properties": {
     **_NODE_COMMON,
@@ -43,7 +53,15 @@ _STEP = {"type": "object", "properties": {
     "status": {"type": "string", "enum": ["todo", "doing", "done", "skipped", "blocked"],
                "description": "a step's status (default todo)"},
     "options": {"type": "array", "items": _OPTION, "description": "a decision's branches (2-8)"},
-    "children": {"type": "array", "items": {"type": "object"}, "description": "sub-steps, same shape"},
+    "children": {"type": "array", "items": {"type": "object"},
+                 "description": "sub-steps, same shape, up to 5 levels deep. Under a decision, a child that "
+                                "depends on one option names it in 'under'; the others belong to the whole "
+                                "decision"},
+    "under": {"type": "string",
+              "description": "only on a child of a decision, and only when it depends on one of its options: "
+                             "that option's label. It counts (waits, blocks) only while that option is the "
+                             "decision's choice. Do not hang a sub-decision under every option -- only where the "
+                             "choice actually opens it"},
 }, "required": ["title"]}
 _CLOSURE = {"type": "object", "properties": {
     **_NODE_COMMON,
@@ -51,7 +69,9 @@ _CLOSURE = {"type": "object", "properties": {
              "description": "verify: a check a person must make by hand (say what and how in detail); "
                             "followup: related work whose fate the user has to decide (scope, priority) -- "
                             "keep here, hand over as an issue, or drop; when where it goes is plain, do it "
-                            "(add the steps, or file the issue) and write it done; "
+                            "(add the steps, or file the issue) and write it done -- an open followup puts 'here / issue / "
+                            "drop' buttons in front of the user, so leave one open only when its scope or "
+                            "priority is theirs, and never make that same disposition a decision's options; "
                             "note: for the record only (a further recommendation, an aside) -- it never "
                             "waits on the user or keeps the session open, the user reads notes once at the end"},
     "status": {"type": "string", "enum": ["open", "done"],
