@@ -525,7 +525,62 @@ const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(
   delete pickEnv.sessionsCache[0].auto_key_switch;
   pickEnv.writeAnswer = { key_id: "x" };
 
+  /* ---- the rail card's AUTO badge (claunch-d2t79) ----
+     Drawn from the session's own field on the poll, not from the pool cache:
+     the answer is what the daemon will do on a usage limit even before (or
+     without) that row's pool ever being read. */
+  function actionBar() {
+    const bar = el("div");
+    bar.children = [];
+    bar.querySelector = (sel) =>
+      bar.children.find((c) =>
+        String(c.className).split(/\s+/).includes(sel.replace(".", ""))) || null;
+    const own = (child) => {
+      child.remove = () => {
+        const at = bar.children.indexOf(child);
+        if (at >= 0) bar.children.splice(at, 1);
+      };
+      child.replaceWith = (next) => {
+        own(next);
+        const at = bar.children.indexOf(child);
+        if (at >= 0) bar.children.splice(at, 1, next);
+      };
+      return child;
+    };
+    bar.appendChild = (child) => { bar.children.push(own(child)); return child; };
+    return bar;
+  }
+  const badgeEnv = { asked: null };
+  const decorate = new Function("document", "keyPoolProfile", "openKeyPicker",
+    slice("decorateAutoKeyBadge") + "; return decorateAutoKeyBadge;")(
+    document,
+    new Function(slice("keyPoolProfile") + "; return keyPoolProfile;")(),
+    (n, p) => { badgeEnv.asked = [n, p]; });
+
+  const bar = actionBar();
+  decorate(bar, { name: "s1", profile: "work:claude" });
+  check("a session that did not ask for the switch has no badge",
+    bar.children.length === 0);
+  decorate(bar, { name: "s1", profile: "work:claude", auto_key_switch: true });
+  const badge = bar.children[0];
+  check("...and the one that did says AUTO",
+    !!badge && badge.textContent === "AUTO", badge && badge.textContent);
+  check("...as its own button, not the row",
+    badge && badge.type === "button" && badge.dataset.name === "s1");
+  decorate(bar, { name: "s1", profile: "work:claude", auto_key_switch: true });
+  check("...drawn once however often the poll comes round",
+    bar.children.length === 1);
+  badge.listeners.click({ stopPropagation() {} });
+  check("...opening this session's pool",
+    JSON.stringify(badgeEnv.asked) === '["s1","work:claude"]',
+    JSON.stringify(badgeEnv.asked));
+  decorate(bar, { name: "s1", profile: "work:claude" });
+  check("...and taken away when the answer is turned off",
+    bar.children.length === 0);
+
   /* ---- the stylesheet holds the chip to a pill ---- */
+  check("the AUTO badge has a rule of its own",
+    /#session-list \.sess-auto-key \{/.test(css));
   check("the chip has a rule", /#session-list \.sess-key \{/.test(css));
   const rule = (css.match(/#session-list \.sess-key \{[^}]*\}/) || [""])[0];
   check("the chip is capped", /max-width: \d+px/.test(rule), rule);
