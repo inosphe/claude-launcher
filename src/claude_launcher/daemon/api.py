@@ -11196,7 +11196,11 @@ async def h_pr_detail(request: web.Request) -> web.Response:
         view["conflicts"] = await asyncio.to_thread(
             pr_actions.conflict_files, host, owner, name,
             str(pr.get("base") or ""), str(pr.get("head") or ""))
-    view["recorded"] = _recorded_pr(request.app["manager"], host, owner, name, number)
+    # Off the loop: the answer is cached for PRS_CACHE_SECONDS, and the read
+    # that fills it walks every session's run state. On a cold cache that is
+    # a filesystem walk per session, and this handler is polled per open card.
+    view["recorded"] = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
     view["repo"] = pr_actions.slug(host, owner, name)
     view["number"] = number
     return json_response(view)
@@ -11261,17 +11265,32 @@ async def h_pr_rebase_request(request: web.Request) -> web.Response:
     """Ask the session that opened this PR to rebase it.
 
     The request goes over the mesh as the operator (``external``, no sender
-    handle) to the session recorded with the PR. When that session is in no
-    mesh this daemon knows -- it exited, or it belongs to another machine --
-    the answer says so and carries the text, so the user can still pass it
-    on; a request that was not delivered is never reported as sent."""
+    handle) to the session recorded with the PR, and it is *also* written to
+    the issue the record names -- a mesh message is delivered once and only
+    to a live member, so a session that exited, or belongs to another
+    machine, would otherwise leave no trace of the ask anywhere. The board
+    line is what the next session to pick the issue up reads.
+
+    Cookie-only, like the merge: ``external`` means "the operator typed
+    this", and a token is not a secret from a session on this host. Without
+    the gate, a session could put words in the operator's mouth into any
+    member's terminal. ``docs/pr-tab.md`` section 4 describes the residue
+    this shares with every cookie write on the daemon.
+
+    A request that was not delivered over the mesh is never reported as
+    sent; ``text`` is returned either way so the user can still pass it on."""
     target = _pr_target(request)
     if target is None:
         return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    if request.get(actors.AUTH_VIA_KEY) != actors.AUTH_COOKIE:
+        return json_error(
+            403, "rebase 요청은 대시보드에서만 보냅니다. 토큰으로 인증한 요청(셸·에이전트 세션)은 "
+                 "운영자 이름으로 다른 세션에 메시지를 넣을 수 없습니다.")
     host, owner, name, number = target
     body = await _json_body(request)
     body = body if isinstance(body, dict) else {}
-    recorded = _recorded_pr(request.app["manager"], host, owner, name, number)
+    recorded = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
     session = str(recorded.get("session") or body.get("session") or "").strip()
     note = str(body.get("note") or "").strip()
     text = note or (
@@ -11281,11 +11300,65 @@ async def h_pr_rebase_request(request: web.Request) -> web.Response:
         return json_response({
             "delivered": False, "session": "", "text": text,
             "why": "이 PR을 기록한 세션을 찾지 못했습니다.",
+            "noted": [], "noted_why": "기록된 세션이 없어 이슈도 알 수 없습니다.",
         }, status=200)
     delivered, why = await _ask_session(request, session, text)
+    noted, noted_why = await _note_rebase_request(
+        request, recorded, host, owner, name, number, text, delivered, why)
     return json_response({
         "delivered": delivered, "session": session, "text": text, "why": why,
+        "noted": noted, "noted_why": noted_why,
     })
+
+
+async def _note_rebase_request(
+    request: web.Request, recorded: dict, host: str, owner: str, name: str,
+    number: int, text: str, delivered: bool, why: str,
+) -> tuple:
+    """Write the ask to the board the PR's session works on; ``(ids, why)``.
+
+    The record names the issues the PR was opened for (``issues`` in the
+    row). One comment per issue, so the ask survives the mesh message: a
+    member that is offline never reads a message, but the next session to
+    claim the issue reads the board. Delivery is stated in the line -- a
+    request that reached only the board must not read as one that reached
+    the session."""
+    issues = [str(i).strip() for i in (recorded.get("issues") or []) if str(i).strip()]
+    if not issues:
+        return [], "이 PR을 기록한 행이 이슈를 이름으로 남기지 않았습니다."
+    session = str(recorded.get("session") or "").strip()
+    manager = request.app.get("manager")
+    # ``list`` rather than ``get``: the row was produced by the same listing,
+    # and it keeps answering for a session that has exited -- which is
+    # exactly the case where the mesh message went nowhere.
+    live = None
+    for candidate in (manager.list() if manager is not None else []):
+        if getattr(getattr(candidate, "sdef", None), "name", "") == session:
+            live = candidate
+            break
+    if live is None:
+        return [], f"기록한 세션 '{session}'이 이 데몬에 없어 그 보드를 알 수 없습니다."
+    board = request.app.get("beads")
+    if board is None:
+        return [], "이 데몬에 보드 하위 시스템이 없습니다."
+    try:
+        root = await board.root_for(_session_cwd(live))
+    except Exception as exc:  # noqa: BLE001 -- the note is best effort
+        return [], f"보드 루트를 찾지 못했습니다: {str(exc)[:200]}"
+    if root is None:
+        return [], f"세션 '{session}'의 디렉터리에 이슈 보드가 없습니다."
+    line = f"REBASE REQUEST @ {pr_actions.slug(host, owner, name)}#{number}: {text}"
+    line += " (메시로도 전달됨)" if delivered else (
+        f" (메시 전달 실패 — {why})" if why else " (메시 미전달)")
+    noted, failed = [], []
+    for issue in issues:
+        try:
+            await board.br(root, ["comments", "add", issue, line])
+            noted.append(issue)
+        except Exception as exc:  # noqa: BLE001 -- one issue must not sink the rest
+            failed.append(f"{issue}: {str(exc)[:120]}")
+    why = "" if not failed else "일부 이슈에 남기지 못했습니다 — " + "; ".join(failed)
+    return noted, why
 
 
 async def _ask_session(request: web.Request, session: str, text: str) -> tuple:

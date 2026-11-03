@@ -457,6 +457,15 @@ globalThis.PrPage = (() => {
       if (!mergeResult.rebase.delivered && mergeResult.rebase.text) {
         box.appendChild(codeBlock(mergeResult.rebase.text));
       }
+      /* The mesh message is not the only record: the daemon also writes the
+         ask onto the issues the PR was opened for. Saying so matters most
+         when the message did not get through. */
+      const noted = mergeResult.rebase.noted || [];
+      if (noted.length) {
+        box.appendChild(checkLine("보드 기록", noted.join(", ")));
+      } else if (mergeResult.rebase.noted_why) {
+        box.appendChild(checkLine("보드 기록", `없음 — ${mergeResult.rebase.noted_why}`));
+      }
     }
     if (mergeError) {
       const fail = el("div", "pr-error");

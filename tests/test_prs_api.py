@@ -519,6 +519,150 @@ def test_the_rebase_request_says_when_it_was_not_delivered(monkeypatch, home, tm
     assert "메시" in body["why"]
 
 
+def test_the_rebase_request_refuses_a_token_request(home, tmp_path, fresh_cache):
+    """``external`` means "the operator typed this" -- so it is cookie-only.
+
+    Without the gate a session holding the daemon token could put words in
+    the operator's mouth into any member's terminal (review, s6357-rev2)."""
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805}])
+    resp = asyncio.run(api.h_pr_rebase_request(_Req(
+        {}, auth="bearer", manager=_manager([_session("s1", "claunch", str(a))]))))
+    assert resp.status == 403
+
+
+class _Board:
+    """A beads service double: one root, every comment it was asked to write."""
+
+    def __init__(self, root=None, fail=()):
+        self.root = root
+        self.fail = set(fail)
+        self.comments = []
+
+    async def root_for(self, cwd):
+        return self.root
+
+    async def br(self, root, args):
+        if args[2] in self.fail:
+            raise RuntimeError("br said no")
+        self.comments.append(list(args))
+        return {}
+
+
+def test_the_rebase_request_leaves_a_line_on_the_issue(monkeypatch, home, tmp_path,
+                                                       fresh_cache):
+    """A mesh message reaches only a live member; the board is what survives.
+
+    The row names the issues the PR was opened for, so the ask is written
+    there too -- and the line says the message did not go through, because a
+    request that reached only the board must not read as one that reached
+    the session."""
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805, "issues": ["claunch-x1"]}])
+    board = _Board(root=a)
+    monkeypatch.setattr(api, "_mesh_mgr", lambda request: SimpleNamespace(
+        list=lambda: []))
+    request = _Req({}, manager=_manager([_session("s1", "claunch", str(a))]))
+    request.app["beads"] = board
+    body = _body_of(asyncio.run(api.h_pr_rebase_request(request)))
+    assert body["delivered"] is False
+    assert body["noted"] == ["claunch-x1"]
+    argv = board.comments[0]
+    assert argv[:3] == ["comments", "add", "claunch-x1"]
+    assert argv[3].startswith("REBASE REQUEST @ github.ncsoft.com/RnIAgentDev/claunch#805:")
+    assert "메시 전달 실패" in argv[3]
+
+
+def test_the_board_line_says_when_the_message_did_go_through(monkeypatch, home,
+                                                            tmp_path, fresh_cache):
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805, "issues": ["claunch-x1"]}])
+    board = _Board(root=a)
+
+    class _Mesh:
+        name = "claunch"
+        members = {"s1": SimpleNamespace(session="s1")}
+
+    async def send(*a, **k):
+        return {"id": "m1"}
+
+    monkeypatch.setattr(api, "_mesh_mgr", lambda request: SimpleNamespace(
+        list=lambda: [_Mesh()], send=send))
+    request = _Req({}, manager=_manager([_session("s1", "claunch", str(a))]))
+    request.app["beads"] = board
+    body = _body_of(asyncio.run(api.h_pr_rebase_request(request)))
+    assert body["delivered"] is True and body["noted"] == ["claunch-x1"]
+    assert "메시로도 전달됨" in board.comments[0][3]
+
+
+def test_one_issue_that_refuses_does_not_sink_the_others(monkeypatch, home, tmp_path,
+                                                         fresh_cache):
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805, "issues": ["claunch-x1", "claunch-x2"]}])
+    board = _Board(root=a, fail={"claunch-x1"})
+    monkeypatch.setattr(api, "_mesh_mgr", lambda request: SimpleNamespace(
+        list=lambda: []))
+    request = _Req({}, manager=_manager([_session("s1", "claunch", str(a))]))
+    request.app["beads"] = board
+    body = _body_of(asyncio.run(api.h_pr_rebase_request(request)))
+    assert body["noted"] == ["claunch-x2"]
+    assert "claunch-x1" in body["noted_why"]
+
+
+def test_a_record_with_no_issues_says_why_nothing_was_written(monkeypatch, home,
+                                                              tmp_path, fresh_cache):
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805}])
+    board = _Board(root=a)
+    monkeypatch.setattr(api, "_mesh_mgr", lambda request: SimpleNamespace(
+        list=lambda: []))
+    request = _Req({}, manager=_manager([_session("s1", "claunch", str(a))]))
+    request.app["beads"] = board
+    body = _body_of(asyncio.run(api.h_pr_rebase_request(request)))
+    assert body["noted"] == [] and "이슈" in body["noted_why"]
+    assert board.comments == []
+
+
+def test_the_routes_read_the_record_off_the_event_loop(monkeypatch, home, tmp_path,
+                                                       fresh_cache):
+    """A cold ``_recorded_prs`` walks every session's run state. On the loop
+    that is a stall per open card (review, s6357-rev2)."""
+    import threading
+
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://github.ncsoft.com/RnIAgentDev/claunch/pull/805",
+                    "number": 805}])
+    manager = _manager([_session("s1", "claunch", str(a))])
+    seen = []
+    real = api._recorded_pr
+
+    def spy(*args):
+        seen.append(threading.current_thread())
+        return real(*args)
+
+    monkeypatch.setattr(api, "_recorded_pr", spy)
+    monkeypatch.setattr(pr_actions, "detail", lambda *a, **k: {
+        "ok": False, "pr": {}, "verdict": {}, "conflicts": None,
+        "error": {"kind": "other", "message": "x", "raw": ""}})
+    monkeypatch.setattr(api, "_mesh_mgr", lambda request: SimpleNamespace(list=lambda: []))
+    main = threading.current_thread()
+    asyncio.run(api.h_pr_detail(_Req(manager=manager)))
+    asyncio.run(api.h_pr_rebase_request(_Req({}, manager=manager)))
+    assert len(seen) == 2
+    assert all(t is not main for t in seen), "both routes must await to_thread"
+
+
 def test_the_rebase_request_reaches_the_session_over_its_mesh(monkeypatch, home,
                                                               tmp_path, fresh_cache):
     a = tmp_path / "a"
