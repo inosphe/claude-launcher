@@ -64,7 +64,7 @@ def window(monkeypatch):
 
 
 def test_the_plugin_is_registered_as_a_pytest11_entry_point():
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["entry-points"]["pytest11"] == {
         "claunch_window": "claude_launcher.pytest_window_plugin"
     }

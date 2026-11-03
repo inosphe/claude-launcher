@@ -54,7 +54,8 @@ def test_pool_file_is_owner_only_and_lists_masked_keys(home):
 
     file = profile_keys.path(p)
     assert file.is_file()
-    assert oct(file.stat().st_mode & 0o777) == oct(0o600)
+    if os.name != "nt":  # Windows reports 0o666 for every writable file; chmod is a no-op there
+        assert oct(file.stat().st_mode & 0o777) == oct(0o600)
 
     data = profile_keys.summary(p)
     assert data["pooled"] is True

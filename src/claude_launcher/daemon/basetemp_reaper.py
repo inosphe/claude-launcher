@@ -1075,6 +1075,38 @@ def window_grants(window) -> Callable[[], set]:
     return view
 
 
+async def _in_daemon_thread(func: Callable[[], List[dict]]) -> List[dict]:
+    """Run ``func`` on a daemon thread and await its result.
+
+    The pass walks every directory under the basetemp root, which can take
+    minutes where that root holds hundreds of thousands of files. On a
+    pool thread (``pools.background``) the interpreter joins that thread at
+    exit, so a daemon asked to shut down stays alive until the walk ends --
+    ``test_real_daemon_process_runs_under_its_manifest`` timed out on it
+    (claunch-weo4k.1). A daemon thread is dropped at exit instead; a pass cut
+    short leaves directories the next pass takes.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+
+    def deliver(setter, value) -> None:
+        if not future.done():
+            setter(value)
+
+    def work() -> None:
+        try:
+            result = func()
+        except BaseException as exc:  # noqa: BLE001 - handed to the awaiting task
+            with contextlib.suppress(RuntimeError):  # loop already closed at exit
+                loop.call_soon_threadsafe(deliver, future.set_exception, exc)
+        else:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(deliver, future.set_result, result)
+
+    threading.Thread(target=work, name="basetemp-reap", daemon=True).start()
+    return await future
+
+
 class BasetempClock:
     """Runs :meth:`BasetempReaper.reap_live` every :data:`TICK` seconds.
 
@@ -1108,7 +1140,7 @@ class BasetempClock:
     async def _run(self) -> None:
         while True:
             try:
-                self.last = await pools.background(self.reaper.reap_live)
+                self.last = await _in_daemon_thread(self.reaper.reap_live)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one bad pass must not stop the clock
