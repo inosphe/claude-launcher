@@ -11843,7 +11843,11 @@ async def _sessions_list(request: web.Request) -> web.Response:
     provider_service_of: Dict[str, str] = {}
     try:
         facts = request.app["profile_facts"].facts()
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError, store.StoreError):
+        # ``StoreError`` is what a config that cannot be parsed raises out of
+        # the facts' first build. ``store.load`` serves a repeat read inside
+        # its 100ms window without opening the file, so this only surfaced
+        # when a slow poll arrived after the window (a loaded sweep).
         facts = None
     if facts is not None:
         # Per profile rather than one all-or-nothing try: a single profile
