@@ -138,17 +138,44 @@ class FakeBr:
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
         if cmd == "search":
-            # Substring over id, title and description, closed included —
-            # what the board page's text-search fallback asks for
-            # (claunch-w3wrk).
-            needle = rest[0].lower()
-            rows = [
+            # Substring over id, title and description — with the real
+            # ``br``'s defaults, which are the whole point of this branch
+            # (claunch-w3wrk.1): closed issues are HIDDEN unless ``--all``
+            # is given (and ``hidden_closed_count`` says how many), and the
+            # window is 50 rows unless ``--limit`` says otherwise (``0``
+            # means unlimited). An earlier version of this fake answered
+            # "everything, always", so the daemon's text-search fallback
+            # shipped without ``--all`` and stayed green.
+            opts = _opts(rest[1:])
+            needle = (rest[0] if rest else "").lower()
+            matched = [
                 r for r in self.issues.values()
                 if needle in (r.get("id") or "").lower()
                 or needle in (r.get("title") or "").lower()
                 or needle in (r.get("description") or "").lower()
             ]
-            return 0, json.dumps({"issues": rows}), ""
+            wanted = _opts_all(rest, "--status")
+            hidden = 0
+            if wanted:
+                rows = [r for r in matched if r.get("status") in wanted]
+            elif "--all" in rest:
+                rows = matched
+            else:
+                rows = [r for r in matched if r.get("status") != "closed"]
+                hidden = len(matched) - len(rows)
+            limit = int(opts.get("--limit", 50))
+            offset = int(opts.get("--offset", 0))
+            total = len(rows)
+            rows = rows[offset:]
+            if limit:
+                rows = rows[:limit]
+            return 0, json.dumps({
+                "issues": rows,
+                "hidden_closed_count": hidden,
+                "limit": limit,
+                "offset": offset,
+                "has_more": offset + len(rows) < total,
+            }), ""
         if cmd == "dep":
             if rest[0] == "list":
                 return 0, json.dumps(self.deps.get(rest[1], [])), ""
@@ -231,7 +258,14 @@ class FakeBr:
 #: that begins with ``-``, so a fake that read only the first would stop
 #: seeing every description the daemon composes with front matter on it.
 def _opt_pairs(args):
-    """``(flag, value)`` for each long option in ``args``, in order."""
+    """``(flag, value)`` for each long option in ``args``, in order.
+
+    A token that is itself an option is never taken as the previous option's
+    value: ``--all --limit 5`` is a bare flag followed by a valued one, and
+    reading it as ``{"--all": "--limit"}`` swallowed the limit entirely —
+    which is how the fake came to answer every search with the whole board
+    (claunch-w3wrk.1).
+    """
     pairs = []
     i = 0
     while i < len(args):
@@ -239,7 +273,11 @@ def _opt_pairs(args):
         if token.startswith("--") and "=" in token:
             flag, value = token.split("=", 1)
             pairs.append((flag, value))
-        elif token.startswith("--") and i + 1 < len(args):
+        elif (
+            token.startswith("--")
+            and i + 1 < len(args)
+            and not args[i + 1].startswith("--")
+        ):
             pairs.append((token, args[i + 1]))
             i += 1
         i += 1
