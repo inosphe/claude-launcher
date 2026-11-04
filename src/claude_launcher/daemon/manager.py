@@ -3242,8 +3242,11 @@ class SessionManager:
         reads (``profile_keys.owner`` — a child holding no token of its own
         pins a key of its nearest ancestor's pool). For a borrowing session
         that is the lender's pool, since the lender's token is what it
-        authenticates with (claunch-e48es). ``None`` unpins, and the pool's
-        strategy picks from the next launch on.
+        authenticates with (claunch-e48es). ``None`` unpins and runs the pool's
+        strategy now: this relaunch is a restore, which keeps the key already
+        in the token file, so the strategy has to pick before it — otherwise
+        "No pin — let the pool's strategy pick" would restart the session on
+        the key it was pinned to (claunch-hego3).
 
         Refused while nothing has been stopped: a session with no profile, a
         ``--null`` session (no token is injected, so there is no key to
@@ -3285,6 +3288,20 @@ class SessionManager:
                 if key_id
                 else f"session {name!r} is not pinned to a key — nothing to clear"
             )
+        if key_id is None:
+            # Clearing the pin is a launch decision, not a restore: the
+            # relaunch below goes through the restore path, which deliberately
+            # keeps the key the session was already using, so without this the
+            # "No pin — let the pool's strategy pick" choice would hand the
+            # session straight back to the token file's key — the key it was
+            # pinned to, which may be the one that just hit its usage limit
+            # (claunch-hego3). Run the strategy now; the restore keeps what it
+            # writes. A failure here stops nothing: the old process is still
+            # running and the pin is untouched.
+            try:
+                profile_keys.select_for_launch(prof)
+            except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+                raise ManagerError(str(exc)) from exc
         relaunched = await self.redefine(name, key_id=key_id)
         self.events.record(
             relaunched, "key", "세션 키 전환",

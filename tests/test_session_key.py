@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from claude_launcher import credentials, profile as profile_mod, profile_keys
+from claude_launcher import credentials, profile as profile_mod, profile_keys, usage
 from claude_launcher.daemon import harness as harness_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -323,6 +323,70 @@ def test_set_key_none_unpins(home, tmp_path, monkeypatch):
         )
         relaunched = await mgr.set_key("s1", None)
         assert relaunched.sdef.key_id is None
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_set_key_none_restarts_on_the_key_the_strategy_picks(home, tmp_path, monkeypatch):
+    """claunch-hego3: "No pin" is a launch, not a restore.
+
+    The relaunch a pin change costs goes through the restore path, which keeps
+    the key already in the token file — the pinned key, which may be the one
+    that just hit its usage limit. Clearing the pin has to run the strategy
+    before that, so the session comes back on the key the pick chose.
+    """
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    monkeypatch.setattr(harness_mod, "build_command", _fake_build_command)
+    profile_keys.set_strategy(prof, "usage-min")
+    health_by_token = {
+        # The key the session is pinned to is the spent one; the other key
+        # still has a window left.
+        TOKENS[0]: usage.KeyHealth(peak=10.0, blocked="seven_day"),
+        TOKENS[1]: usage.KeyHealth(peak=30.0),
+    }
+    monkeypatch.setattr(
+        usage, "health_for_token", lambda prof, token: health_by_token[token]
+    )
+    # What a pinned launch leaves in the shared token file: the pinned key.
+    credentials.save_token(prof, TOKENS[0])
+    assert credentials.stored_token(prof) == TOKENS[0]
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(
+                name="s1", harness="py", profile=prof.selector, cwd=str(tmp_path),
+                key_id=ids[0],
+            )
+        )
+        relaunched = await mgr.set_key("s1", None)
+
+        assert relaunched.sdef.key_id is None
+        assert credentials.stored_token(prof) == TOKENS[1]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_pinning_a_key_does_not_consume_a_strategy_pick(home, tmp_path, monkeypatch):
+    prof, ids = _pooled_profile()
+    _register_py_harness()
+    monkeypatch.setattr(harness_mod, "build_command", _fake_build_command)
+    monkeypatch.setattr(
+        profile_keys, "select_for_launch",
+        lambda *a, **k: pytest.fail("pinning a key must not run the pool strategy"),
+    )
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(name="s1", harness="py", profile=prof.selector, cwd=str(tmp_path))
+        )
+        relaunched = await mgr.set_key("s1", ids[0])
+
+        assert relaunched.sdef.key_id == ids[0]
         await mgr.shutdown_all()
 
     asyncio.run(run())

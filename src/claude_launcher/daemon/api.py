@@ -3931,19 +3931,19 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     # the same number ``usage.utilization_for_token`` returns at launch
     # (max over the reading's windows). ``None`` means "this key cannot be
     # compared", which the usage strategies skip rather than score as zero.
+    # A key any of whose windows is spent is ``None`` here too: the launch
+    # leaves that key out of its pick (``usage.health_for_report``), so naming
+    # it as "next launch takes" would point at a key the launch cannot take
+    # (claunch-hego3).
     peaks: Dict[str, Optional[float]] = {}
     for key in keys:
         reading = readings.get("keys", {}).get(key["id"])
         if reading is None and key.get("current") and body is not None:
             reading = {"windows": body["windows"]}
-        windows = (reading or {}).get("windows") or []
-        values = [
-            window.get("utilization")
-            for window in windows
-            if isinstance(window.get("utilization"), (int, float))
-            and not isinstance(window.get("utilization"), bool)
-        ]
-        peaks[key["id"]] = float(max(values)) if values else None
+        health = usage.health_for_rows((reading or {}).get("windows") or [])
+        peaks[key["id"]] = (
+            health.peak if health is not None and health.usable else None
+        )
 
     next_key = None
     next_unknown = None
