@@ -50,7 +50,8 @@ async def _details(app, ws, items):
     paused, killed, archived) and ``status`` is what a live screen reads
     (busy, idle, starting). The page shows ``running · busy`` for the live
     ones and ``killed``/``archived`` for records that are done -- the page's
-    "running only" mode and the two finished-partition boxes read ``life``.
+    filter bar carries one box per partition, so every value here is a box
+    a person can turn on or off.
     """
     from .session import session_category  # local: session imports late
 

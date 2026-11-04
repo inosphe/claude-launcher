@@ -30,6 +30,32 @@ option, optgroup {
 option:disabled { color: #6b7280; }
 .error { color: #ff7b72; font-size: 12px; margin-top: 6px; }
 
+/* ---- One palette for a session's life and an issue's status ----
+   Four surfaces draw these states and each picked its own shades: `delayed`
+   was amber on the category page and purple in the hive, `paused` purple
+   there and blue here, `in_ready` green on a beads badge and cyan on a hive
+   chip. A word that means one thing reads as one colour, so the pairs live
+   here and every surface reads them. `delayed` keeps a pair of its own: it is
+   a hold whose relaunch is already scheduled, and the rail learned that a
+   person reads hold's amber as "failed to come back" on a record that will
+   start by itself. `killed`/`archived` share "done" — the chip still
+   separates them by shape and opacity. Colour never carries the state alone;
+   every surface that uses these also prints the word. */
+:root {
+  --life-running: #3fb950;  --life-running-rim: #238636;
+  --life-hold: #d29922;     --life-hold-rim: #9e6a03;
+  --life-delayed: #39c5cf;  --life-delayed-rim: #1b6f78;
+  --life-paused: #58a6ff;   --life-paused-rim: #1f6feb;
+  --life-failed: #ff7b72;   --life-failed-rim: #da3633;
+  --life-done: #8b949e;     --life-done-rim: #30363d;
+  --issue-open: #79c0ff;    --issue-open-bg: #1c2a3a;
+  --issue-ready: #39c5cf;   --issue-ready-bg: #123236;
+  --issue-busy: #e3b341;    --issue-busy-bg: #3a2f0b;
+  --issue-review: #d2a8ff;  --issue-review-bg: #2b1d4d;
+  --issue-blocked: #ff7b72; --issue-blocked-bg: #4a1d1d;
+  --issue-closed: #8b949e;  --issue-closed-bg: #21262d;
+}
+
 #layout { display: flex; height: 100vh; position: relative; }
 
 /* The width is a preference, not a constant: the drag bar beside it writes
@@ -1034,25 +1060,25 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 .dot.idle { background: #3fb950; }
 .dot.busy { background: #d29922; }
 .dot.starting { background: #58a6ff; }
-.dot.exited { background: #6e7681; }
+.dot.exited { background: var(--life-done); }
 /* A paused record: exited underneath, but the operator's temporary stop —
    drawn in the reminder-pause blue rather than the grey of a kill, so the
    rail tells the two apart at the dot. */
-.dot.exited.paused { background: #58a6ff; }
+.dot.exited.paused { background: var(--life-paused); }
 /* A held record (claunch-5l35i): asleep, wakes when opened. */
-.dot.exited.hold { background: #8b7fd6; }
+.dot.exited.hold { background: var(--life-hold); }
 /* A delayed record (claunch-0j6gb.2, claunch-v4uyt): waiting in the boot's
    restore queue. Its own colour and a slow pulse, apart from hold's violet,
    because it starts by itself — a person read the violet as "failed to come
    back". */
 .dot.exited.delayed {
-  background: transparent; box-shadow: inset 0 0 0 2px #39c5cf;
+  background: transparent; box-shadow: inset 0 0 0 2px var(--life-delayed);
   animation: restore-queue-pulse 2s ease-in-out infinite;
 }
 @keyframes restore-queue-pulse { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .dot.exited.delayed { animation: none; } }
 /* A failed record (claunch-0j6gb.1): ended by itself with an error. */
-.dot.exited.failed { background: #f85149; }
+.dot.exited.failed { background: var(--life-failed); }
 /* The dot's grade (dotGrade in app.js). Busy steps up from a dim amber — a
    turn parked on a tool call — to a bright orange with a halo for a screen
    moving hundreds of rows a minute. Idle fades as the quiet ages: full
@@ -3134,22 +3160,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
-.badge.exited { background: #30363d; color: #8b949e; }
+.badge.exited { background: var(--life-done-rim); color: var(--life-done); }
 /* The attached session's last tokens/s, next to its status. */
 .badge.tps {
   background: #2b2308; color: #e3b341;
   font-family: SFMono-Regular, Consolas, monospace;
 }
 .badge.tps.stale { background: #1c1f24; color: #7d8590; }
-.badge.exited.paused { background: #172947; color: #58a6ff; }
-.badge.exited.hold { background: #231f3d; color: #a99cf0; }
-.badge.exited.delayed { background: #0d2a2e; color: #56d4dd; }
+.badge.exited.paused { background: #172947; color: var(--life-paused); }
+.badge.exited.hold { background: #3a2f0b; color: var(--life-hold); }
+.badge.exited.delayed { background: #0d2a2e; color: var(--life-delayed); }
+.badge.exited.failed { background: #4a1d1d; color: var(--life-failed); }
 .restore-queue-banner {
   margin: 4px 0; padding: 4px 8px; border-radius: 6px;
   background: #0d2a2e; color: #56d4dd; border: 1px solid #1b4b52;
   font-size: 12px; font-variant-numeric: tabular-nums;
 }
-.badge.exited.failed { background: #3d1d20; color: #ff7b72; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined
    like its neighbours because it is only ever up when something is wrong —
@@ -4926,7 +4952,7 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 }
 .beads-sess.idle { background: #1f4428; color: #3fb950; }
 .beads-sess.busy { background: #4d3800; color: #d29922; }
-.beads-sess.exited { background: #30363d; color: #8b949e; }
+.beads-sess.exited { background: var(--life-done-rim); color: var(--life-done); }
 /* The third state a kept session can be in, and the fourth word for it: a
    paused record's process is gone exactly like a killed one, so its status
    reads `exited` and this is what says otherwise. The blue is the terminal
@@ -4935,13 +4961,20 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
    sessionChip in search-anything.js), which is why the state word gets a
    rule here: the chip says its state in colour and in text, and the text is
    what a reader without the colour still gets. */
-.beads-sess.paused { background: #172947; color: #58a6ff; }
+.beads-sess.paused { background: #172947; color: var(--life-paused); }
 .beads-sess-state { margin-left: 5px; opacity: .75; }
 .badge.beads-status { white-space: nowrap; }
-.badge.beads-status.open { background: #1c2a3a; color: #79c0ff; }
-.badge.beads-status.ready { background: #173b2b; color: #56d364; }
-.badge.beads-status.review { background: #2b1d4d; color: #d2a8ff; }
-.badge.beads-status.blocked { background: #4a1d1d; color: #ff7b72; }
+/* One pair per issue status, from the palette at the top of this file. The
+   class names are the badge's (`beadsStatusBadge` maps in_progress -> busy,
+   closed -> exited); `busy`/`exited` used to fall through to the generic
+   session badge, which is why an in_progress issue and a busy session shared
+   a colour that meant two different things. */
+.badge.beads-status.open { background: var(--issue-open-bg); color: var(--issue-open); }
+.badge.beads-status.ready { background: var(--issue-ready-bg); color: var(--issue-ready); }
+.badge.beads-status.busy { background: var(--issue-busy-bg); color: var(--issue-busy); }
+.badge.beads-status.review { background: var(--issue-review-bg); color: var(--issue-review); }
+.badge.beads-status.blocked { background: var(--issue-blocked-bg); color: var(--issue-blocked); }
+.badge.beads-status.exited { background: var(--issue-closed-bg); color: var(--issue-closed); }
 .beads-detail {
   padding: 12px 16px; background: #1b1e24; border: 1px solid #2a2e36;
   border-radius: 8px; min-width: 0; align-self: start; position: sticky; top: 0;
@@ -10740,15 +10773,22 @@ body.split-max #term-wf { flex: 1 1 0; }
 a.category-ref { text-decoration: none; }
 a.category-ref:hover { text-decoration: underline; }
 .category-chip { font-size: 11px; border: 1px solid var(--cat-border); border-radius: 4px; padding: 0 5px; color: #c9d1d9; }
-.category-status-running { color: #3fb950; border-color: #238636; }
-.category-status-gone, .category-status-exited { color: #6e7681; }
-.category-status-hold, .category-status-delayed { color: #d29922; border-color: #9e6a03; }
-.category-status-paused { color: #bc8cff; border-color: #8957e5; }
-.category-status-failed { color: #ff7b72; border-color: #da3633; }
-.category-status-killed, .category-status-archived { color: #6e7681; border-color: #30363d; }
+.category-status-running { color: var(--life-running); border-color: var(--life-running-rim); }
+.category-status-gone, .category-status-exited { color: var(--life-done); }
+.category-status-hold { color: var(--life-hold); border-color: var(--life-hold-rim); }
+.category-status-delayed { color: var(--life-delayed); border-color: var(--life-delayed-rim); }
+.category-status-paused { color: var(--life-paused); border-color: var(--life-paused-rim); }
+.category-status-failed { color: var(--life-failed); border-color: var(--life-failed-rim); }
+.category-status-killed, .category-status-archived { color: var(--life-done); border-color: var(--life-done-rim); }
 .category-filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
 .category-filter { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--cat-muted); cursor: pointer; }
 .category-filter input { margin: 0; }
+/* The "running only" preset beside the partition boxes: a button, not a box,
+   because it sets several of them at once. Pressed state is derived from the
+   set, so it never contradicts the boxes next to it. */
+.category-preset { font: inherit; font-size: 12px; color: var(--cat-muted); background: none;
+  border: 1px solid var(--cat-border); border-radius: 10px; padding: 1px 9px; cursor: pointer; }
+.category-preset[aria-pressed="true"] { color: var(--cat-text, inherit); border-color: currentColor; }
 .category-proposal-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--cat-muted); margin-top: 6px; cursor: pointer; }
 .category-proposal-opt input { margin: 0; }
 .category-loose { margin-top: 14px; }
@@ -11359,15 +11399,15 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-issue.hive-ref .hive-core { color: #c9d1d9; }
 
 /* session states */
-.hive-chip.s-busy { --core: #3fb950; --rim: #2e6b3a; }
+.hive-chip.s-busy { --core: var(--life-running); --rim: #2e6b3a; }
 .hive-chip.s-idle { --core: #2f7d40; --rim: #284a31; }
 .hive-chip.s-starting { --core: #58a6ff; --rim: #24456e; }
-.hive-chip.s-hold { --core: #d29922; --rim: #5a4517; }
-.hive-chip.s-delayed { --core: #bc8cff; --rim: #4b3a6a; }
-.hive-chip.s-paused { --core: #58a6ff; --rim: #2b4766; }
-.hive-chip.s-failed { --core: #f85149; --rim: #6e2b2a; }
-.hive-chip.s-killed { --core: #6e7681; --rim: #30363d; opacity: 0.7; }
-.hive-chip.s-archived { --core: #484f58; --rim: #30363d; opacity: 0.55; border-style: dashed; }
+.hive-chip.s-hold { --core: var(--life-hold); --rim: #5a4517; }
+.hive-chip.s-delayed { --core: var(--life-delayed); --rim: #1b4b52; }
+.hive-chip.s-paused { --core: var(--life-paused); --rim: #2b4766; }
+.hive-chip.s-failed { --core: var(--life-failed); --rim: #6e2b2a; }
+.hive-chip.s-killed { --core: var(--life-done); --rim: var(--life-done-rim); opacity: 0.7; }
+.hive-chip.s-archived { --core: #484f58; --rim: var(--life-done-rim); opacity: 0.55; border-style: dashed; }
 .hive-chip.s-killed .hive-name, .hive-chip.s-archived .hive-name { text-decoration: line-through; text-decoration-color: #6e7681; }
 .hive-chip.ghost { opacity: 0.45; border-style: dashed; }
 .hive-chip.s-busy .hive-core { animation: hive-pulse 1.6s ease-in-out infinite; }
@@ -11385,11 +11425,11 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-issue.p-2 { --core: #d29922; }
 .hive-issue.p-3 { --core: #8b949e; }
 .hive-issue.p-4 { --core: #6e7681; }
-.hive-issue.st-in_progress { --rim: #2e6b3a; border-left: 3px solid #3fb950; }
-.hive-issue.st-in_review { --rim: #4b3a6a; border-left: 3px solid #bc8cff; }
-.hive-issue.st-blocked { --rim: #6e2b2a; border-left: 3px solid #f85149; }
-.hive-issue.st-in_ready { --rim: #1f4f5c; border-left: 3px solid #39c5cf; }
-.hive-issue.st-open { --rim: #30363d; }
+.hive-issue.st-in_progress { --rim: #2e6b3a; border-left: 3px solid var(--issue-busy); }
+.hive-issue.st-in_review { --rim: #4b3a6a; border-left: 3px solid var(--issue-review); }
+.hive-issue.st-blocked { --rim: #6e2b2a; border-left: 3px solid var(--issue-blocked); }
+.hive-issue.st-in_ready { --rim: #1f4f5c; border-left: 3px solid var(--issue-ready); }
+.hive-issue.st-open { --rim: #30363d; border-left: 3px solid var(--issue-open); }
 
 /* -- trees: chip on top, its issues beside it, its children below one size
    smaller, joined by a rail on the left. */
@@ -11427,17 +11467,18 @@ a.category-ref:hover { text-decoration: underline; }
 
 /* count dots: the same colours as the cores */
 .hive-dot { display: inline-flex; align-items: center; padding: 0 0.45em; border-radius: 0.7em; font-size: 0.72em; line-height: 1.5; background: #30363d; color: #c9d1d9; white-space: nowrap; }
-.hive-dot.s-busy { background: #3fb950; color: #0d1117; }
+.hive-dot.s-busy { background: var(--life-running); color: #0d1117; }
 .hive-dot.s-idle { background: #2f7d40; color: #e6edf3; }
-.hive-dot.s-starting, .hive-dot.s-paused { background: #1f6feb; color: #fff; }
-.hive-dot.s-hold { background: #d29922; color: #0d1117; }
-.hive-dot.s-delayed { background: #8957e5; color: #fff; }
-.hive-dot.s-failed { background: #da3633; color: #fff; }
+.hive-dot.s-starting { background: var(--life-paused-rim); color: #fff; }
+.hive-dot.s-paused { background: var(--life-paused-rim); color: #fff; }
+.hive-dot.s-hold { background: var(--life-hold); color: #0d1117; }
+.hive-dot.s-delayed { background: var(--life-delayed); color: #0d1117; }
+.hive-dot.s-failed { background: var(--life-failed-rim); color: #fff; }
 .hive-dot.s-killed, .hive-dot.s-archived { background: #484f58; color: #e6edf3; }
-.hive-dot.st-in_progress { background: #3fb950; color: #0d1117; }
-.hive-dot.st-in_review { background: #8957e5; color: #fff; }
-.hive-dot.st-blocked { background: #da3633; color: #fff; }
-.hive-dot.st-in_ready { background: #1b7c83; color: #fff; }
+.hive-dot.st-in_progress { background: var(--issue-busy); color: #0d1117; }
+.hive-dot.st-in_review { background: var(--issue-review); color: #0d1117; }
+.hive-dot.st-blocked { background: var(--issue-blocked); color: #0d1117; }
+.hive-dot.st-in_ready { background: var(--issue-ready); color: #0d1117; }
 .hive-dot.st-open { background: #484f58; color: #e6edf3; }
 
 /* -- semantic zoom: far out the chips keep their cores and the cells their
