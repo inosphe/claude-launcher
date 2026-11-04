@@ -415,6 +415,8 @@ def _node_failure(script, proc, started):
 CHECKS = [
         "layout_check.js",
         "bootreads_check.js",
+        "vmnotice_check.js",
+        "vmlineage_check.js",
         "batchpoll_check.js",
         "controlsocket_check.js",
         "p2p_check.js",
@@ -747,6 +749,9 @@ BROWSER_CHECKS = [
         "tabdragscroll_browser.cjs",
         "theme_browser.cjs",
         "railnav_browser.cjs",
+        "vmtab_browser.cjs",
+        "vmsession_browser.cjs",
+        "vmoff_browser.cjs",
         "terminputlayout_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",

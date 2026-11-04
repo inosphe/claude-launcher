@@ -39,6 +39,7 @@ from . import (
     cli_spec,
     cli_sync,
     cli_transcript,
+    cli_vm,
     cli_window,
     cli_nudge,
     cli_worktree,
@@ -1943,6 +1944,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_window.register(sub)
     cli_nudge.register(sub)
     cli_worktree.register(sub)
+    cli_vm.register(sub)
     cli_connections.register(sub)
     cli_loops.register(sub)
     cli_operators.register(sub)

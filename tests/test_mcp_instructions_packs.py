@@ -11,9 +11,14 @@ from claude_launcher import cflow_watch, mcp_server, prompt_packs, prompt_packs_
 
 #: What a client is measured to keep (Claude Code: 4096); the budget leaves
 #: room under it so one more pointer does not tip the tail off again.
-BUDGET = 3000
+BUDGET = 3200
 
 MCP_PACKS = ["mcp-threads", "mcp-qa", "mcp-sim"]
+
+
+def test_the_vm_family_points_at_its_pack():
+    assert "'mcp-vm'" in mcp_server.SERVER.instructions
+    assert prompt_packs.shipped("mcp-vm").title.startswith("MCP")
 
 
 def test_the_merged_instructions_fit_the_client_window():

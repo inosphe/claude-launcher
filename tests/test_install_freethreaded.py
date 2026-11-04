@@ -9,7 +9,9 @@ or continues -- never a silent downgrade.
 These cases run the real script against a stub ``uv`` that records what the
 script asked for, so the decision is what is measured. A stub ``uv`` makes the
 build a no-op and a stub tool python answers the post-install zvec check. The
-Windows counterpart (``install_freethreaded.ps1``) is run the same way when a
+macOS branch of the same script is selected through a stub ``uname`` (every
+other case pins ``Linux``, so the host's OS does not change what they measure).
+The Windows counterpart (``install_freethreaded.ps1``) is run the same way when a
 ``pwsh`` is on PATH -- skipped otherwise; see the last two cases and
 claunch-fsn9f.1.
 """
@@ -37,6 +39,9 @@ PS1 = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.ps1"
 # exit.
 STUB_UV = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_UV_LOG"
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  printf 'CPPFLAGS=%s LDFLAGS=%s\\n' "${CPPFLAGS:-}" "${LDFLAGS:-}" >> "$STUB_UV_LOG.env"
+fi
 if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then echo "$STUB_TOOL_DIR"; exit 0; fi
 if [ "$1" = "tool" ] && [ "$2" = "run" ]; then
   args=("$@")
@@ -84,15 +89,36 @@ exit 0
 # real home -- which is how this defect was first reached by hand, and running
 # the install there for real is how it did damage (claunch-a0ero).
 STUB_GETENT = """#!/usr/bin/env bash
+[ -n "${STUB_GETENT_EMPTY:-}" ] && exit 2
 printf '%s:x:1000:1000::%s:/bin/bash\\n' "sandbox" "$STUB_HOME_ANSWER"
 """
 
 # Answers `--exists libsrtp2` with {exit_code} and `--exists libcrypto` with
-# {crypto_code}: 0 means the development files are present.
+# {crypto_code}: 0 means the development files are present. The flag queries
+# answer the way a Homebrew pkg-config does on Apple Silicon.
 STUB_PKG_CONFIG = """#!/usr/bin/env bash
 [ "$1" = "--exists" ] && [ "$2" = "libsrtp2" ] && exit {exit_code}
 [ "$1" = "--exists" ] && [ "$2" = "libcrypto" ] && exit {crypto_code}
+[ "$1" = "--cflags" ] && { echo "-I/opt/homebrew/include"; exit 0; }
+[ "$1" = "--libs-only-L" ] && { echo "-L/opt/homebrew/lib"; exit 0; }
 exit 1
+"""
+
+# `uname -s` answers $STUB_UNAME, so each case picks the Linux or macOS branch.
+STUB_UNAME = """#!/usr/bin/env bash
+echo "${STUB_UNAME:-Linux}"
+"""
+
+# `xcode-select -p` succeeds unless STUB_NO_XCODE is set.
+STUB_XCODE_SELECT = """#!/usr/bin/env bash
+[ -n "${STUB_NO_XCODE:-}" ] && exit 2
+echo /Library/Developer/CommandLineTools
+"""
+
+# `dscl . -read /Users/<name> NFSHomeDirectory`, answered with the sandbox
+# home for the same reason getent is stubbed (claunch-a0ero).
+STUB_DSCL = """#!/usr/bin/env bash
+printf 'NFSHomeDirectory: %s\\n' "$STUB_HOME_ANSWER"
 """
 
 
@@ -158,7 +184,9 @@ def sandbox(tmp_path: Path):
     # Stubbing both keeps the ordering case independent of the host toolchain.
     # `getent` is stubbed so the $HOME fallback answers with a sandbox path
     # instead of the developer's real home (claunch-a0ero).
-    for name, body in (("git", STUB_GIT), ("c++", STUB_CXX), ("getent", STUB_GETENT)):
+    for name, body in (("git", STUB_GIT), ("c++", STUB_CXX), ("getent", STUB_GETENT),
+                       ("uname", STUB_UNAME), ("xcode-select", STUB_XCODE_SELECT),
+                       ("dscl", STUB_DSCL)):
         stub = bin_dir / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o755)
@@ -188,7 +216,8 @@ def sandbox(tmp_path: Path):
 
     def run(*args: str, stdin: str = "", pkg: int | None = 1, crypto: int | None = None,
             fail_install: bool = False, wheel_path: str | None = "__default__",
-            home: str | None = "__default__", no_overrides: bool = False):
+            home: str | None = "__default__", no_overrides: bool = False,
+            os_name: str = "Linux", extra_env: dict[str, str] | None = None):
         """Run the script. ``pkg=None`` leaves pkg-config unreachable.
 
         ``crypto`` answers ``pkg-config --exists libcrypto``; ``None`` answers
@@ -246,6 +275,10 @@ def sandbox(tmp_path: Path):
             env["STUB_FAIL_INSTALL"] = "1"
         else:
             env.pop("STUB_FAIL_INSTALL", None)
+        env["STUB_UNAME"] = os_name
+        for name in ("STUB_NO_XCODE", "STUB_GETENT_EMPTY", "CPPFLAGS", "LDFLAGS"):
+            env.pop(name, None)
+        env.update(extra_env or {})
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
             input=stdin,
@@ -267,6 +300,11 @@ def sandbox(tmp_path: Path):
         """The `tool install` calls the script actually issued, target kept."""
         return [line for line in calls() if line.startswith("tool install")]
 
+    def install_env() -> list[str]:
+        """CPPFLAGS/LDFLAGS as each `tool install` saw them."""
+        env_log = Path(str(log) + ".env")
+        return env_log.read_text(encoding="utf-8").splitlines() if env_log.exists() else []
+
     def overrides() -> list[str]:
         """The --overrides lines every `tool install` was handed, in order."""
         path = Path(str(log) + ".overrides")
@@ -275,7 +313,7 @@ def sandbox(tmp_path: Path):
         return path.read_text(encoding="utf-8").splitlines()
 
     return {"run": run, "installs": installs, "calls": calls, "overrides": overrides,
-            "wheels": tmp_path / "wheels"}
+            "install_env": install_env, "wheels": tmp_path / "wheels"}
 
 
 def _out(proc: subprocess.CompletedProcess) -> str:
@@ -510,6 +548,61 @@ def test_no_p2p_does_not_build_or_override_pylibsrtp(sandbox):
     assert proc.returncode == 0, _out(proc)
     assert not [line for line in sandbox["calls"]() if line.startswith("tool run")], sandbox["calls"]()
     assert not [line for line in sandbox["overrides"]() if line.startswith("pylibsrtp")], sandbox["overrides"]()
+
+
+# --------------------------------------------------------------------------
+# The macOS branch of the .sh script
+# --------------------------------------------------------------------------
+
+
+def test_macos_guide_names_homebrew_instead_of_apt(sandbox):
+    proc = sandbox["run"]("--require-p2p", pkg=1, os_name="Darwin")
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "brew install srtp openssl pkg-config" in out, out
+    assert "apt install" not in out, out
+    assert sandbox["installs"]() == []
+
+
+def test_macos_summary_without_the_feature_names_homebrew(sandbox):
+    proc = sandbox["run"]("--no-p2p", pkg=None, os_name="Darwin")
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    assert "이 기능을 추가하려면: brew install srtp openssl pkg-config" in out, out
+    assert "apt install" not in out, out
+
+
+def test_macos_p2p_install_gets_the_homebrew_paths(sandbox):
+    """clang does not search /opt/homebrew, so pylibsrtp needs them passed."""
+    proc = sandbox["run"](pkg=0, os_name="Darwin")
+    assert proc.returncode == 0, _out(proc)
+    assert _targets(sandbox) == [".[p2p]"]
+    assert sandbox["install_env"]() == ["CPPFLAGS=-I/opt/homebrew/include LDFLAGS=-L/opt/homebrew/lib"]
+
+
+def test_linux_p2p_install_leaves_the_compiler_flags_alone(sandbox):
+    proc = sandbox["run"](pkg=0)
+    assert proc.returncode == 0, _out(proc)
+    assert sandbox["install_env"]() == ["CPPFLAGS= LDFLAGS="]
+
+
+def test_macos_without_command_line_tools_stops_before_the_build(sandbox):
+    """/usr/bin/c++ exists on a Mac without a toolchain; xcode-select decides."""
+    proc = sandbox["run"]("--no-p2p", pkg=None, os_name="Darwin", wheel_path=None,
+                          extra_env={"STUB_NO_XCODE": "1"})
+    out = _out(proc)
+    assert proc.returncode == 1, out
+    assert "missing: C++ compiler (xcode-select --install)" in out, out
+    assert not [line for line in sandbox["calls"]() if line.startswith("build")]
+
+
+def test_macos_HOME_unset_falls_back_to_directory_services(sandbox, tmp_path):
+    """macOS has no getent; the passwd entry comes from dscl."""
+    proc = sandbox["run"]("--no-p2p", pkg=1, home=None, no_overrides=True, os_name="Darwin",
+                          extra_env={"STUB_GETENT_EMPTY": "1"})
+    out = _out(proc)
+    assert proc.returncode == 0, out
+    assert (tmp_path / "fallback-home" / ".local" / "bin" / "claunch-nogil").is_file(), out
 
 
 # --------------------------------------------------------------------------

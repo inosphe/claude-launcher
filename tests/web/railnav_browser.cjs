@@ -73,7 +73,9 @@ async function settle(page) {
   const base = `http://127.0.0.1:${server.address().port}/`;
   const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+    // 860 tall: with the pin every link is listed, and the VM tab made the
+    // list one row longer than an 800 px viewport holds.
+    const context = await browser.newContext({ viewport: { width: 1200, height: 860 } });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));

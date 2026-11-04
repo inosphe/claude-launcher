@@ -25296,6 +25296,14 @@ const SPLIT_PANES = {
     on: "close this session's shell pane — the terminal takes the column back",
     off: "this session's own shell under the terminal — type in it, and run or dismiss what the session's agent proposes",
   },
+  // The VMs connected to this session (vm-session-pane.js): the VM page in
+  // its session mode, so the grants, shared folders and the one-click new VM
+  // are the page's own user-only actions, not a second implementation.
+  vm: {
+    btn: "term-vmbtn", title: "🖥 vm",
+    on: "close this session's VM pane — the terminal takes the column back",
+    off: "the VMs connected to this session — connect, disconnect, edit scopes and shared folders, or make a new one",
+  },
   // The glossary, category and knowledge entries this session filed as
   // drafts (wrapup-pane.js, daemon/wrapup_api.py, claunch-ar8jn): they reach
   // the workspace stores only when the user confirms them here.
@@ -25324,7 +25332,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27977,6 +27985,7 @@ function mobileTitle() {
     case "stats": return "session statistics";
     case "chart": return "session chart";
     case "hive": return "hive";
+    case "vm": return "vm";
     case "settings": return "settings";
     case "workspaces": return "workspaces";
     case "beads": return beadsSection === "reports" ? "reports"
@@ -28151,6 +28160,7 @@ const VIEWS = {
   stats: "stats-view",
   chart: "chart-view",
   hive: "hive-view",
+  vm: "vm-view",
   pr: "pr-view",
   "profile-usage": "profile-usage-view",
   sysperf: "sysperf-view",
@@ -28327,7 +28337,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "wrapup", "plan", "qa", "threads" or "both" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -28399,6 +28409,8 @@ function openSplit(name, kind = "run") {
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
+  // And the session's VMs (vm-session-pane.js): the VM page in a frame.
+  if (kind === "vm") { globalThis.VmSessionPane?.mount(splitBody, name); return; }
   // And the session's wrap-up drafts (wrapup-pane.js). A write there moves
   // the header's light at once rather than at the next dashboard poll.
   if (kind === "wrapup") { globalThis.WrapupPane?.mount(splitBody, name); return; }
@@ -28436,6 +28448,7 @@ function closeSplit() {
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
+  if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
   if (splitKind === "plan") globalThis.PlanPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
@@ -28534,6 +28547,7 @@ $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
 $("term-clibtn").addEventListener("click", () => toggleSplitPane("cli"));
+$("term-vmbtn").addEventListener("click", () => toggleSplitPane("vm"));
 $("term-wrapupbtn").addEventListener("click", () => toggleSplitPane("wrapup"));
 $("term-planbtn").addEventListener("click", () => toggleSplitPane("plan"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
@@ -28961,6 +28975,7 @@ function parseHash(h) {
   if (parts[0] === "window") return { page: "window" };
   if (parts[0] === "chart") return { page: "chart" };
   if (parts[0] === "hive") return { page: "hive" };
+  if (parts[0] === "vm") return { page: "vm" };
   if (parts[0] === "profile-usage") return { page: "profile-usage" };
   if (parts[0] === "sysperf") return { page: "sysperf" };
   // #/stats opens on a default session; #/stats/<name> names one.
@@ -29068,6 +29083,7 @@ function route() {
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "chart") globalThis.ChartPage?.stop();
   if (r.page !== "hive") globalThis.HivePage?.stop();
+  if (r.page !== "vm") globalThis.VmPage?.stop();
   if (r.page !== "pr") globalThis.PrPage?.stop();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
@@ -29159,6 +29175,7 @@ function route() {
     case "stats": openStatsPage(r.name, r.compare); break;
     case "chart": showView("chart"); globalThis.ChartPage.open(); break;
     case "hive": showView("hive"); globalThis.HivePage.open(); break;
+    case "vm": showView("vm"); globalThis.VmPage.open(); break;
     case "pr": showView("pr"); globalThis.PrPage.open(); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
@@ -62655,6 +62672,7 @@ const NOTICE_SOURCES = [
     refresh: () => refreshNudgeGate(), row: noticeRowNudge },
   { id: "fault", label: "leader faults (harness stopped) and usage-limit resets" },
   { id: "qa", label: "QA questions" },
+  { id: "vm", label: "VM access requests" },
   { id: "wrapup", label: "ended sessions with unconfirmed wrap-up drafts" },
   { id: "thread", label: "thread replies" },
   { id: "chat", label: "mesh chat messages" },
@@ -64785,6 +64803,84 @@ function qaNoticeSync(rows) {
   }
   qaNoticed = live;
   noticeSave(QA_NOTICED_KEY, [...live]);
+}
+
+/* ------------------------------------------------------------------ */
+/* VM access requests as notices (vm-setup-8s6)                        */
+/* ------------------------------------------------------------------ */
+/* A session asks for VM scopes and shared folders with vm_request; the
+   user answers on the VM page (#/vm). The dashboard polls the light
+   GET /api/vm-requests (not GET /api/vm, which asks the host about its
+   screen lock) and, like a QA request, puts up one sticky card per request
+   id and lists it in the notification history. The card names the session
+   and what it asks for, with long paths cut to their last two folders, and
+   opens the VM page. When the request is approved, denied or withdrawn the
+   card comes down (the history row stays). The nav item counts what waits.
+   Announced keys are kept in localStorage like the QA ones; the first poll
+   of a browser announces what is pending too, since a request waiting is
+   something to answer. */
+const VM_NOTICED_KEY = "claunch.vmNoticed";
+let vmNoticed = null;     // keys announced, as of the last sync
+
+function vmRequestKey(r) { return `${r.vm}:${r.session}:${r.id}`; }
+
+function vmShortPath(p) {
+  const parts = String(p || "").split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : String(p || "");
+}
+
+function vmRequestSummary(r) {
+  const bits = [];
+  if ((r.scopes || []).length) bits.push(`scopes: ${r.scopes.join("+")}`);
+  for (const s of (r.shares || []).slice(0, 3)) {
+    bits.push(`share ${String(s.name).slice(0, 32)} (${s.mode}${s.mode === "rw" ? ", WRITE" : ""}) ${vmShortPath(s.host_path)}`);
+  }
+  if ((r.shares || []).length > 3) bits.push(`+${r.shares.length - 3} more`);
+  return `VM ${r.vm}: ${bits.join("; ") || "no scopes"}`;
+}
+
+function vmNavBadge(count) {
+  const badge = $("vm-nav-badge");
+  if (!badge) return;
+  badge.textContent = count ? String(count) : "";
+  badge.hidden = !count;
+}
+
+function vmRequestSync(rows) {
+  const saved = noticeLoad(VM_NOTICED_KEY, null);
+  const known = new Set(vmNoticed || []);
+  if (Array.isArray(saved)) for (const k of saved) known.add(k);
+  const live = new Set();
+  for (const r of rows) {
+    const key = vmRequestKey(r);
+    live.add(key);
+    if (known.has(key)) continue;
+    notify(`${r.session} asks for a VM`, vmRequestSummary(r), {
+      source: "vm", key: `vm-${key}`, sticky: true, kind: "warn", sync: `vm:${key}`,
+      open: () => { location.hash = "#/vm"; },
+    });
+  }
+  // A request no longer pending (answered, withdrawn, session ended) takes its card down.
+  for (const key of known) if (!live.has(key)) dismissNotice(`vm-${key}`);
+  vmNoticed = live;
+  noticeSave(VM_NOTICED_KEY, [...live]);
+  vmNavBadge(rows.length);
+}
+
+async function refreshVmRequests() {
+  let data;
+  try {
+    const resp = await api("/api/vm-requests");
+    if (!resp.ok) return;     // no VM hub in this daemon: nothing to announce
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  // The VM feature is off until the user turns it on in the VM tab
+  // (daemon.vm_enabled): the session's 🖥 vm pane has nothing to show then.
+  const vmBtn = $("term-vmbtn");
+  if (vmBtn) vmBtn.classList.toggle("hidden", !!data && data.enabled === false);
+  vmRequestSync(Array.isArray(data && data.requests) ? data.requests : []);
 }
 
 /* ------------------------------------------------------------------ */
@@ -66927,6 +67023,7 @@ async function boot() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshVmRequests(),
     refreshWrapupRail(),
     refreshPlanRail(),
     refreshThreadsRail(),
@@ -67628,6 +67725,7 @@ async function pollOnce() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshVmRequests(),
     refreshWrapupRail(),
     refreshPlanRail(),
     refreshThreadsRail(),

@@ -26,7 +26,7 @@ import os
 
 from . import (
     category_mcp, glossary_mcp, knowledge_mcp, observer_mcp, plan_mcp, qa_mcp, sim_mcp, operator_v2_mcp, mcp_rpc, mesh_mcp, reposync_mcp, search_mcp, status_checks_mcp, wait_mcp,
-    window_mcp, artifact_cleanup_mcp, threads_mcp, prompt_packs_mcp, webdebug_mcp, session_env,
+    window_mcp, artifact_cleanup_mcp, threads_mcp, prompt_packs_mcp, webdebug_mcp, vm_mcp, session_env,
     cflow_watch_mcp, shell_mcp, timer_mcp, session_fault_mcp, contexts_mcp, emergency_nudge_mcp, wrapup_mcp,
 )
 from .cflow import mcp as cflow_mcp
@@ -87,6 +87,7 @@ SERVERS = (
     shell_mcp.SERVER,
     prompt_packs_mcp.SERVER,
     webdebug_mcp.SERVER,
+    vm_mcp.SERVER,
     timer_mcp.SERVER,
     session_fault_mcp.SERVER,
     contexts_mcp.SERVER,

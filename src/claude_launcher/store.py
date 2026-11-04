@@ -835,6 +835,41 @@ DAEMON_DEFAULTS = {
     "webdebug_max_windows": 1,
     "webdebug_no_sandbox": False,
     "webdebug_insecure_tls": False,
+    # The VM registry (daemon/vmhub.py, vm-setup-8s6). Read when the daemon
+    # starts, except vm_human_idle, which is read each time the user is
+    # checked for having let go, and vm_enabled, which is read on every VM
+    # request.
+    #   vm_enabled -- the VM feature is on. Off by default: tart VMs need an
+    #     Apple Silicon Mac with tart installed, which most hosts are not. While
+    #     it is off the VM routes answer vm_disabled and the hub's background
+    #     work (recovery, hand-back, settle) does not run. The user turns it on
+    #     in the dashboard's VM tab (POST /api/vm-enabled) or with
+    #     `claunch daemon config vm_enabled true`; no restart is needed.
+    #   vm_slot_limit -- macOS VMs that may run at once (Apple's limit is 2).
+    #   vm_stop_wait -- seconds a guest shutdown may take before the VM is
+    #     left "stopping" for the user to decide on a forced stop.
+    #   vm_human_idle -- seconds without input before the screen goes back to
+    #     the session that was driving.
+    #   vm_graphics -- keep the tart run window (the user drives through it
+    #     until the browser screen takes input).
+    #   vm_softnet -- start guests with tart's softnet network (a random
+    #     private /29 per boot) and block the private ranges in
+    #     vm_softnet_block, so that the guest cannot reach the host's own ports
+    #     or the LAN (d-005). With the block on, the guest's DNS must be a
+    #     public one (docs/vm-hub.md); the control channel is tart exec.
+    #   vm_share_roots -- host folders a VM may share into its guest
+    #     (``tart run --dir``; daemon/vm_share.py). A list of absolute paths,
+    #     read at each share and each start. Empty: nothing can be shared. A
+    #     share must lie in or under one of them, and never touches ~/.ssh,
+    #     ~/Library, the daemon's state and the other places that file lists.
+    "vm_enabled": False,
+    "vm_slot_limit": 2,
+    "vm_stop_wait": 120,
+    "vm_human_idle": 15,
+    "vm_graphics": True,
+    "vm_softnet": True,
+    "vm_softnet_block": "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    "vm_share_roots": [],
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.

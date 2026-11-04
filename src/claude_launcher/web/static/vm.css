@@ -1,0 +1,153 @@
+/* The VM page (vm.html). Dark like the rest of the app; theme.js derives the light theme. */
+:root {
+  --vm-bg: #121417; --vm-bar: #1b1e23; --vm-line: #2c3038; --vm-text: #d7dbe0;
+  --vm-muted: #8b929c; --vm-accent: #e8590c; --vm-ok: #3fb950; --vm-bad: #f85149;
+  --vm-warn: #d29922; --vm-btn: #262a31; --vm-btn-hover: #31363f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; background: var(--vm-bg); color: var(--vm-text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+[hidden] { display: none !important; }
+button, select { font: inherit; color: inherit; height: 26px; padding: 0 10px; border: 1px solid var(--vm-line);
+  border-radius: 4px; background: var(--vm-btn); cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: var(--vm-btn-hover); }
+button:disabled { opacity: .5; cursor: default; }
+button[aria-pressed="true"] { border-color: var(--vm-accent); color: var(--vm-accent); }
+.vm-danger { border-color: var(--vm-bad); color: var(--vm-bad); }
+#vm-bar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px;
+  background: var(--vm-bar); border-bottom: 1px solid var(--vm-line); flex: none; }
+.vm-brand { font-weight: 600; color: var(--vm-accent); }
+.vm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vm-bad); }
+.vm-dot.up { background: var(--vm-ok); }
+.vm-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vm-muted); }
+.vm-activity.error { color: var(--vm-bad); }
+/* Absolutely positioned .sr-only labels count toward the document height unless a
+   positioned ancestor clips them, so each scroll container is positioned and #vm-main clips. */
+#vm-main { display: flex; flex: 1; min-height: 0; position: relative; overflow: hidden; }
+#vm-side { flex: none; width: 240px; display: flex; flex-direction: column; min-height: 0; position: relative;
+  border-right: 1px solid var(--vm-line); background: var(--vm-bar); }
+#vm-list { flex: 1; min-height: 0; overflow: auto; }
+#vm-register { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); }
+#vm-register summary { cursor: pointer; font-weight: 600; }
+#vm-register select, #vm-register input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px;
+  font: inherit; color: inherit; background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
+#vm-register button { margin-top: 6px; }
+#vm-presets { flex: none; padding: 8px 12px; border-top: 1px solid var(--vm-line); max-height: 45vh; overflow: auto; position: relative; }
+#vm-presets summary { cursor: pointer; font-weight: 600; }
+#vm-presets input[type="text"] { display: block; width: 100%; margin-top: 6px; height: 26px; font: inherit; color: inherit;
+  background: var(--vm-btn); border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; }
+#vm-presets button { margin-top: 6px; }
+#vm-preset-list { list-style: none; margin: 8px 0 0; padding: 0; }
+#vm-preset-list li { padding: 6px 0; border-bottom: 1px solid var(--vm-line); }
+#vm-preset-list .sub { display: block; color: var(--vm-muted); font-size: 11px; }
+#vm-preset-list button { margin-right: 6px; }
+.embed .vm-brand { display: none; }
+.vm-card { display: block; width: 100%; height: auto; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--vm-line);
+  border-radius: 0; background: none; text-align: left; }
+.vm-card[aria-current="true"] { background: var(--vm-btn); border-left: 3px solid var(--vm-accent); padding-left: 9px; }
+.vm-card .sub { display: block; color: var(--vm-muted); font-size: 11px; }
+#vm-content { flex: 1; min-width: 0; overflow: auto; position: relative; }
+#vm-detail, #vm-sharing { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+#vm-sharing { border-top: 1px solid var(--vm-line); }
+.vm-scroll { overflow-x: auto; }
+#vm-matrix td.state-applied { color: var(--vm-ok, inherit); }
+#vm-matrix td.state-left_out { color: var(--vm-warn); }
+#vm-head { display: flex; align-items: center; gap: 10px; }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 13px; margin: 8px 0 0; }
+.vm-chip { padding: 1px 8px; border: 1px solid var(--vm-line); border-radius: 10px; font-size: 11px; }
+.vm-chip.ok { border-color: var(--vm-ok); color: var(--vm-ok); }
+.vm-chip.warn { border-color: var(--vm-warn); color: var(--vm-warn); }
+.vm-chip.bad { border-color: var(--vm-bad); color: var(--vm-bad); }
+.vm-muted { color: var(--vm-muted); }
+.vm-problem { padding: 6px 10px; border: 1px solid var(--vm-bad); border-radius: 4px; color: var(--vm-bad); }
+#vm-actions, #vm-control { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#vm-control > div { display: flex; align-items: center; gap: 8px; margin-right: 24px; }
+#vm-screen-wrap { position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 200px; max-height: 60vh; background: #0b0d0f; border: 1px solid var(--vm-line); overflow: hidden; }
+#vm-screen { max-width: 100%; max-height: 60vh; object-fit: contain; }
+#vm-screen-note { padding: 24px; }
+table { border-collapse: collapse; }
+th, td { padding: 4px 14px 4px 0; text-align: left; border-bottom: 1px solid var(--vm-line); }
+th { color: var(--vm-muted); font-weight: 500; }
+#vm-grant-add { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+code { font: 12px ui-monospace, monospace; }
+
+.vm-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vm-row input[type="text"] { height: 26px; font: inherit; color: inherit; background: var(--vm-btn);
+  border: 1px solid var(--vm-line); border-radius: 4px; padding: 0 6px; min-width: 150px; }
+.vm-warn-text { margin: 0; padding: 6px 10px; border: 1px solid var(--vm-warn); border-radius: 4px; color: var(--vm-warn); }
+#vm-net-pending { border-color: var(--vm-warn); color: var(--vm-warn); }
+
+#vm-files-host { overflow-wrap: anywhere; }
+#vm-files-dir { min-width: 22em; max-width: 100%; }
+#vm-files-log td { overflow-wrap: anywhere; }
+
+#vm-requests-box { margin: 0 0 12px; padding: 10px 14px; border: 2px solid var(--vm-warn); border-radius: 6px; background: var(--vm-bar); }
+#vm-requests-box h2 { margin: 0 0 6px; color: var(--vm-warn); }
+.vm-request { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--vm-line); border-radius: 4px; background: var(--vm-bg); }
+.vm-request h3 { margin: 0 0 4px; font-size: 14px; }
+.vm-request p { margin: 2px 0; overflow-wrap: anywhere; }
+.vm-request .vm-warn-text { margin: 4px 0; }
+.vm-request .vm-row { margin-top: 6px; }
+
+button.vm-working { border-color: var(--vm-warn); color: var(--vm-warn); }
+button.vm-working::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: vm-spin 0.9s linear infinite; }
+@keyframes vm-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { button.vm-working::before { animation: none; } }
+
+.vm-tree, .vm-tree ul { list-style: none; margin: 0; padding-left: 18px; }
+#vm-lineage-tree { padding-left: 0; }
+.vm-tree li { position: relative; margin: 3px 0; padding-left: 12px; border-left: 1px solid var(--vm-line); overflow-wrap: anywhere; }
+.vm-tree li::before { content: "└"; position: absolute; left: -1px; top: 0; color: var(--vm-muted); }
+#vm-lineage-tree > li { border-left: 0; padding-left: 0; }
+#vm-lineage-tree > li::before { content: ""; }
+.vm-tree-preset > span { color: var(--vm-accent); }
+.vm-tree-gone-vm > span, .vm-tree-gone-preset > span { color: var(--vm-muted); font-style: italic; }
+
+.vm-chip.vm-template { border-color: #a371f7; color: #a371f7; font-weight: 600; }
+.vm-card.vm-template-card { border-left: 3px solid #a371f7; }
+.vm-card.vm-template-card .sub { color: #a371f7; }
+
+.vm-danger-zone { margin-top: 18px; padding: 10px 14px; border: 2px solid var(--vm-bad); border-radius: 6px; }
+.vm-danger-zone h2 { margin-top: 0; color: var(--vm-bad); }
+.vm-danger-zone ul { margin: 6px 0; padding-left: 20px; }
+button.vm-danger-solid { background: var(--vm-bad); border-color: var(--vm-bad); color: #fff; font-weight: 600; }
+button.vm-danger-solid:hover:not(:disabled) { background: #da3633; }
+button.vm-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.vm-lineage-line { margin: 4px 0 8px; color: #a371f7; overflow-wrap: anywhere; }
+#vm-lineage-all > summary { cursor: pointer; margin: 6px 0; }
+#vm-lineage-tree { max-height: 360px; overflow: auto; }
+.vm-tree li.vm-tree-selected > span { background: rgba(232, 89, 12, 0.22); border-left: 3px solid var(--vm-accent); padding: 1px 6px; font-weight: 700; color: var(--vm-text); }
+.vm-tree li.vm-tree-ancestor > span { text-decoration: underline dotted; }
+.vm-tree-here { color: var(--vm-accent); }
+
+.vm-preset-manage { margin-left: 6px; }
+.vm-preset-manage-box { margin-top: 8px; padding: 8px; border: 1px solid var(--vm-bad); border-radius: 4px; }
+.vm-preset-manage-box input { margin-top: 0; }
+
+#vm-grants-block, #vm-shares-block { display: flex; flex-direction: column; gap: 10px; }
+#vm-sess { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--vm-line); }
+#vm-sess-list { list-style: none; margin: 0; padding: 0; }
+#vm-sess-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--vm-line); }
+#vm-sess-list li[aria-current="true"] { border-left: 3px solid var(--vm-accent); padding-left: 8px; }
+#vm-sess-list .vm-sess-pick { font-weight: 600; }
+/* Session mode (vm?session=<name>): the connected VMs, then that VM's session
+   permissions and shared folders. Everything else on the page is hidden. */
+body.session-mode #vm-side, body.session-mode #vm-requests-box, body.session-mode #vm-lineage,
+body.session-mode #vm-onlymode, body.session-mode #vm-sharing, body.session-mode #vm-empty { display: none; }
+body.session-mode #vm-detail > :not(#vm-grants-block):not(#vm-shares-block) { display: none; }
+body.session-mode #vm-grant-add { display: none; }
+/* The feature switched off (vm.html #vm-off): one card in place of the page. */
+#vm-off { max-width: 640px; margin: 32px auto; padding: 16px 20px; border: 1px solid var(--vm-line);
+  border-radius: 6px; background: var(--vm-bar); }
+#vm-off h1 { font-size: 16px; margin: 0 0 10px; }
+#vm-off p { margin: 0 0 10px; }
+#vm-off #vm-enable { margin: 4px 0 12px; border-color: var(--vm-accent); color: var(--vm-accent); }

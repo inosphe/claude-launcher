@@ -196,7 +196,7 @@ function frameModule() {
   }
 
   /* --- buttons -------------------------------------------------------------- */
-  const toggles = ["term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-wrapupbtn", "term-planbtn"];
+  const toggles = ["term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-vmbtn", "term-wrapupbtn", "term-planbtn"];
   for (const id of toggles) {
     assert.match(html, new RegExp(`<button id="${id}" class="term-btn split-btn[ "]`), `${id} carries .split-btn`);
     assert.ok(app.includes(`$("${id}").addEventListener("click", () => toggleSplitPane(`), `${id} toggles the pane`);

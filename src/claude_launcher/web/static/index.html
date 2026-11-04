@@ -330,6 +330,7 @@
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/chart" data-page="chart"><span>☰</span>Chart</a>
       <a href="#/hive" data-page="hive"><span>⬢</span>Hive</a>
+      <a href="#/vm" data-page="vm"><span>▭</span>VM<span id="vm-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/pr" data-page="pr"><span>⇄</span>PR</a>
       <a href="#/plan" data-page="plan"><span>☷</span>Plan</a>
       <a href="#/knowledge" data-page="knowledge"><span>◆</span>Knowledge</a>
@@ -712,6 +713,10 @@
            and opened by itself when the session changes a question. This
            and 🗪 threads open one conversation pane (talk-pane.js) whose
            tabs show threads, QA, or both side by side. -->
+      <!-- The same pane, showing the VMs connected to this session: the VM
+           page's session mode in a frame (vm-session-pane.js, vm.js). -->
+      <button id="term-vmbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="the VMs connected to this session">🖥 vm</button>
       <button id="term-qabtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="questions this session put to you">? qa</button>
       <!-- The same pane, holding this session's sub-topic threads
@@ -1725,6 +1730,10 @@
          pan-and-zoom canvas of hexagon-cored chips; drawn by hive-page.js
          from the rail's caches and /api/beads/queues. -->
     <div id="hive-view" class="hidden"></div>
+    <!-- The daemon's VM panel (vm.html) in a frame, built on entering the tab
+         and removed on leaving it (vm-page.js). -->
+    <div id="vm-view" class="hidden"></div>
+
     <!-- Pull requests the sessions recorded, per project and on a date
          timeline, each row naming the session that opened it; drawn by
          pr-page.js from /api/prs (recorded rows only, no gh call). -->
@@ -1871,6 +1880,8 @@
 <script src="static/commit-page.js"></script>
 <script src="static/chart-page.js"></script>
 <script src="static/hive-page.js"></script>
+<script src="static/vm-page.js"></script>
+<script src="static/vm-session-pane.js"></script>
 <script src="static/pr-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/plan-page.js"></script>

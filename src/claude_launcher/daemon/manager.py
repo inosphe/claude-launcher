@@ -43,7 +43,7 @@ from .. import codex_mode
 from ..cflow2 import relocate as slot_relocate
 from . import actors, briefing, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
-from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events
+from . import line_sync, paths, pty_backend, search_records, session_events, session_input, spawn_events, vm_guard
 from . import session_seq
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
@@ -1056,6 +1056,14 @@ class SessionManager:
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
+        # VM-only mode can be switched on only for a process that carries the hook.
+        try:
+            vm_guard.mark_hooked(
+                session.sdef.name,
+                session.sdef.harness == harness_mod.CLAUDE_HARNESS and harness_mod.REBRIEF_HOOK_SETTINGS_JSON in argv,
+            )
+        except OSError:
+            log.warning("could not record the VM-only hook for %r", session.sdef.name, exc_info=True)
         # Which key the child is about to run on, from the token it was given
         # (claunch-i985h). Recorded here, where the answer exists, because the
         # profile's token file stops being able to answer it the moment another

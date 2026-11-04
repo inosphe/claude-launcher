@@ -76,6 +76,9 @@ _DAEMON_ONLY_ENV = (
 #: needs to find its session, and a command that never varies survives every
 #: shell claude may run hooks under. The composition itself is the daemon's
 #: (see :mod:`rebrief`); this is only the trigger.
+#: See :mod:`vm_guard` (kept literal here: harness is imported before it).
+VM_GUARD_COMMAND = 'if [ -e "$CLAUNCH_SCRATCH/../vm-only.json" ]; then exec claunch vm guard; fi'
+
 REBRIEF_HOOK_SETTINGS = {
     "hooks": {
         "SessionStart": [
@@ -83,9 +86,21 @@ REBRIEF_HOOK_SETTINGS = {
                 "matcher": "compact|clear",
                 "hooks": [{"type": "command", "command": "claunch rebrief"}],
             }
-        ]
+        ],
+        # VM-only mode (daemon/vm_guard.py): the command starts claunch only when the
+        # session's switch file exists, so a session that never turns it on pays one
+        # shell test per Bash call. A hook that fails allows the call.
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": VM_GUARD_COMMAND}],
+            }
+        ],
     }
 }
+
+#: The ``--settings`` value every claude spawn carries.
+REBRIEF_HOOK_SETTINGS_JSON = json.dumps(REBRIEF_HOOK_SETTINGS)
 
 # Claude Code's ``--tools`` option takes the complete built-in tool allowlist.
 # This snapshot is the documented built-in set (Claude Code tools reference,
@@ -1218,7 +1233,7 @@ def build_command(
         # steers settings itself — two --settings on one command line leaves
         # claude to pick, and the caller's must win.
         if "--settings" not in sdef.args:
-            argv.extend(["--settings", json.dumps(REBRIEF_HOOK_SETTINGS)])
+            argv.extend(["--settings", REBRIEF_HOOK_SETTINGS_JSON])
         if not steers_conversation(sdef.args):
             if restoring:
                 if not sdef.conversation_id:

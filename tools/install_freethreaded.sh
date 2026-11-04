@@ -9,6 +9,12 @@
 # upstream git repository once, caches it, and installs the project with
 # `--overrides` pointing zvec at that wheel. pyproject.toml stays unchanged.
 #
+# Linux (and WSL) and macOS are both handled; `uname -s` picks the branch. On
+# macOS the system packages come from Homebrew (`brew install srtp openssl
+# pkg-config`), the C++ compiler from the Xcode Command Line Tools
+# (`xcode-select --install`), and the p2p build is given the Homebrew include
+# and library paths that clang does not search on its own.
+#
 # Usage (from any directory):
 #   tools/install_freethreaded.sh [--rebuild] [--no-p2p | --require-p2p]
 #
@@ -59,9 +65,18 @@ set -euo pipefail
 # install_freethreaded.ps1). A spawned shell with no login state reaches that.
 # The passwd entry answers where `$HOME` does not; a temp directory is the last
 # resort, so the decision still runs and still asks.
+case "$(uname -s 2>/dev/null || true)" in
+    Darwin) os_kind="macos" ;;
+    *) os_kind="linux" ;;
+esac
+
 home_dir="${HOME:-}"
 if [ -z "$home_dir" ] && command -v getent >/dev/null 2>&1; then
     home_dir="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+fi
+# macOS has no getent; Directory Services holds the same passwd entry.
+if [ -z "$home_dir" ] && [ "$os_kind" = "macos" ] && command -v dscl >/dev/null 2>&1; then
+    home_dir="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)"
 fi
 if [ -z "$home_dir" ]; then
     home_dir="${TMPDIR:-/tmp}"
@@ -99,6 +114,14 @@ if [ "$saw_require_p2p" = 1 ]; then p2p_choice="require"; fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 [ -f pyproject.toml ] || { echo "pyproject.toml not found in $repo_root" >&2; exit 1; }
+
+if [ "$os_kind" = "macos" ]; then
+    p2p_install_cmd="brew install srtp openssl pkg-config"
+    cxx_hint="xcode-select --install"
+else
+    p2p_install_cmd="sudo apt install -y libsrtp2-dev libssl-dev pkg-config"
+    cxx_hint="apt install build-essential"
+fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)" >&2; exit 1; }; }
 need uv "https://docs.astral.sh/uv/"
@@ -146,7 +169,7 @@ $p2p_reason
   거치는 느린 경로로 동작합니다. (이 기능의 이름은 p2p입니다.)
 
 고치려면 아래 두 줄을 그대로 실행한 뒤 이 스크립트를 다시 실행하세요:
-    sudo apt install -y libsrtp2-dev libssl-dev pkg-config
+    $p2p_install_cmd
     tools/install_freethreaded.sh --rebuild
 
 지금 어떻게 할까요?
@@ -176,6 +199,16 @@ elif [ "$p2p_choice" = "no" ]; then
     p2p_installed=0
 fi
 
+# pylibsrtp (under aiortc) compiles against libsrtp2 with the compiler's default
+# search paths. Homebrew puts headers and libraries under its own prefix
+# (/opt/homebrew on Apple Silicon), which clang does not search, so the build
+# would fail after pkg-config found the library. OpenSSL (libcrypto, which
+# pylibsrtp also links) sits under a prefix of its own. pkg-config knows both.
+if [ "$os_kind" = "macos" ] && [ "$extras" = ".[p2p]" ]; then
+    export CPPFLAGS="${CPPFLAGS:+$CPPFLAGS }$(pkg-config --cflags libsrtp2 libcrypto)"
+    export LDFLAGS="${LDFLAGS:+$LDFLAGS }$(pkg-config --libs-only-L libsrtp2 libcrypto)"
+fi
+
 mkdir -p "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" "$SHIM_DIR"
 uv python install "$PYTHON_SPEC"
 
@@ -183,8 +216,16 @@ wheel="${CLAUNCH_FT_ZVEC_WHEEL:-}"
 if [ -z "$wheel" ]; then
     # zvec builds with scikit-build-core; cmake and ninja come from the build
     # requirements. Only a C++ compiler has to exist on the machine.
-    command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1 || command -v clang++ >/dev/null 2>&1 \
-        || { echo "missing: C++ compiler (apt install build-essential)" >&2; exit 1; }
+    if [ "$os_kind" = "macos" ]; then
+        # /usr/bin/c++ exists on every Mac, also without a toolchain behind it
+        # (it then opens the install dialog and fails), so `command -v` says
+        # nothing there. xcode-select -p answers whether a toolchain is set up.
+        xcode-select -p >/dev/null 2>&1 \
+            || { echo "missing: C++ compiler ($cxx_hint)" >&2; exit 1; }
+    else
+        command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1 || command -v clang++ >/dev/null 2>&1 \
+            || { echo "missing: C++ compiler ($cxx_hint)" >&2; exit 1; }
+    fi
     outdir="$CACHE_ROOT/${ZVEC_REF:0:12}"
     if [ "$rebuild" = 1 ]; then rm -rf "$outdir"; fi
     wheel="$(ls "$outdir"/zvec-*-cp314t-*.whl 2>/dev/null | head -n 1 || true)"
@@ -257,7 +298,7 @@ if [ "$p2p_installed" = 1 ]; then
     p2p_line="빠른 직접 연결 기능: 포함됨 (브라우저와 데몬이 중계 서버를 거치지 않고 연결될 수 있습니다)"
 else
     p2p_line="빠른 직접 연결 기능: 포함되지 않음. 이 설치는 중계 서버를 거치는 느린 경로로 동작합니다.
-  이 기능을 추가하려면: sudo apt install -y libsrtp2-dev libssl-dev pkg-config && tools/install_freethreaded.sh --rebuild"
+  이 기능을 추가하려면: $p2p_install_cmd && tools/install_freethreaded.sh --rebuild"
 fi
 
 cat <<MSG
