@@ -146,6 +146,15 @@ globalThis.ArtifactsPage = (() => {
   // walk ran, which made reading impossible and hid a failing tree behind a
   // loop (the reader reported both).
   let measuring = false;
+  // A press that has not reached the daemon's job feed yet: the POST is in
+  // flight, or it answered and the first listing has not shown those rows as
+  // running. Without this the button drops back to 측정 for one poll, which is
+  // the "did my press land?" flicker the reader reported.
+  const pendingMeasure = new Set();
+  let requestInflight = false;
+  // Lookups rebuilt from every listing, so a poll can repaint one row's state
+  // in place without rebuilding the list under the reader's cursor.
+  let sessionsByName = new Map(), rowsByPath = new Map();
   // A cleanup plan the reader asked for, and the apply it may submit next.
   // Kept outside `data` on purpose: refreshing the listing (or a measure poll)
   // must not throw away a plan the reader is still reading.
@@ -178,6 +187,149 @@ globalThis.ArtifactsPage = (() => {
     return { total, done, started: !!job.started, finished: !!job.finished };
   }
 
+  /* Every listing is indexed once: the session cards ask "is this session
+     being walked now", and the poll repaints rows by path. */
+  function indexData(source) {
+    sessionsByName = new Map();
+    rowsByPath = new Map();
+    for (const session of (source && source.sessions) || []) {
+      sessionsByName.set(session.name, session);
+      for (const row of [session.scratch, ...(session.items || [])]) {
+        if (row && row.path) rowsByPath.set(row.path, row);
+      }
+    }
+    for (const row of (source && source.orphans) || []) {
+      if (row && row.path) rowsByPath.set(row.path, row);
+    }
+  }
+
+  /* What one path's row says about its measurement. These are four different
+     answers, and the page used to say three of them in the same grey text:
+     not walked yet, being walked now, walked (here is the size), and the walk
+     failed (here is why). */
+  const STATUS = {
+    running: { key: "running", label: "측정 중", cls: "ar-status-running" },
+    failed: { key: "failed", label: "실패", cls: "ar-status-failed" },
+    done: { key: "done", label: "완료", cls: "ar-status-done" },
+    missing: { key: "missing", label: "없음", cls: "ar-status-missing" },
+    unmeasured: { key: "unmeasured", label: "미측정", cls: "ar-status-unmeasured" },
+  };
+
+  function rowStatus(row) {
+    if (!row) return STATUS.unmeasured;
+    if (row.running) return STATUS.running;
+    if (row.error) return STATUS.failed;
+    if (Number.isFinite(row.bytes)) return STATUS.done;
+    if (row.exists === false) return STATUS.missing;
+    return STATUS.unmeasured;
+  }
+
+  function statusTitle(row) {
+    const status = rowStatus(row);
+    if (status.key === "running") return "지금 이 경로를 재는 중이다";
+    if (status.key === "failed") return row.error || "측정 실패";
+    if (status.key === "done") {
+      const when = age(row.at);
+      return when ? `측정 시각 ${row.at} (${when})` : "측정 완료";
+    }
+    if (status.key === "missing") return "경로가 없다 — 지울 것도 잴 것도 없다";
+    return "아직 재지 않았다 — 측정을 누르면 잰다";
+  }
+
+  function statusChip(row) {
+    const status = rowStatus(row);
+    const chip = node("span", `wt-chip ar-status ${status.cls}`, status.label);
+    chip.title = statusTitle(row);
+    return chip;
+  }
+
+  /* The card's own tally: how many of its paths are being walked right now
+     and how many failed. The head line kept these out of sight during a walk,
+     so a reader could not tell a session that was measuring from one that was
+     not. */
+  function sessionCounts(session) {
+    const rows = [session && session.scratch, ...((session && session.items) || [])].filter(Boolean);
+    const counts = { total: rows.length, running: 0, done: 0, failed: 0,
+      missing: 0, unmeasured: 0 };
+    for (const row of rows) counts[rowStatus(row).key] += 1;
+    return counts;
+  }
+
+  /* Is this session's walk running now, or did the reader just ask for one?
+     The daemon reports it per path (`row.running`); `pendingMeasure` covers
+     the window between the press and the first listing that reflects it. */
+  function sessionBusy(name) {
+    if (pendingMeasure.has(name)) return true;
+    const session = sessionsByName.get(name);
+    if (!session) return false;
+    return [session.scratch, ...(session.items || [])].some(row => row && row.running);
+  }
+
+  /* "측정 중 2/3" counts the paths the walk can report on: a path that is not
+     there has no size to watch, and counting it would read as a walk that is
+     stuck. */
+  function measureStateText(session) {
+    const counts = sessionCounts(session);
+    const walked = counts.total - counts.missing;
+    const parts = [];
+    if (counts.running) parts.push(`측정 중 ${counts.running}/${walked}`);
+    if (counts.failed) parts.push(`실패 ${counts.failed}`);
+    return parts.join(" · ");
+  }
+
+  /* Repaint only what a poll can change: each card's measure button and its
+     running/failed tally, the 전체 측정 button, and every row's status chip
+     and size. The list itself is not rebuilt -- that is the flicker the
+     reader reported. */
+  function syncMeasure() {
+    const root = view();
+    if (!root || !data) return;
+    for (const card of root.querySelectorAll(".ar-session[data-session]")) {
+      const name = card.dataset.session;
+      const session = sessionsByName.get(name);
+      const busy = sessionBusy(name);
+      const button = card.querySelector(".ar-measure");
+      if (button) {
+        button.disabled = busy || loading || measuring;
+        button.textContent = busy ? "측정 중…" : "측정";
+        button.classList.toggle("is-busy", busy);
+        button.title = busy ? "이 세션의 측정이 진행 중이다"
+          : measuring ? "측정이 진행 중이다 — 끝나면 다시 누를 수 있다"
+            : "이 세션의 스크래치와 basetemp를 다시 잰다";
+      }
+      const state = card.querySelector(".ar-measure-state");
+      if (state && session) {
+        const text = measureStateText(session);
+        state.textContent = text;
+        state.classList.toggle("hidden", !text);
+      }
+    }
+    const all = root.querySelector(".ar-measure-all");
+    if (all) {
+      const busy = measuring || requestInflight;
+      all.disabled = loading || busy;
+      all.textContent = busy ? "측정 중…" : (loading ? "읽는 중…" : "전체 측정");
+      all.classList.toggle("is-busy", busy);
+    }
+    for (const line of root.querySelectorAll(".ar-row[data-path]")) {
+      const row = rowsByPath.get(line.dataset.path);
+      if (!row) continue;
+      const chip = line.querySelector(".ar-status");
+      if (chip) {
+        const status = rowStatus(row);
+        chip.textContent = status.label;
+        chip.className = `wt-chip ar-status ${status.cls}`;
+        chip.title = statusTitle(row);
+      }
+      const size = line.querySelector(".ar-size");
+      if (size) {
+        size.textContent = sizeText(row);
+        if (row.error) size.title = row.error; else size.removeAttribute("title");
+      }
+      line.classList.toggle("is-running", !!row.running);
+    }
+  }
+
   async function load() {
     if (view() && view().classList.contains("hidden")) return;
     const seq = ++sequence;
@@ -188,6 +340,7 @@ globalThis.ArtifactsPage = (() => {
       if (seq !== sequence) return;
       if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
       data = body; error = "";
+      indexData(body);
     } catch (exc) {
       if (seq !== sequence) return;
       error = String(exc.message || exc);
@@ -208,25 +361,39 @@ globalThis.ArtifactsPage = (() => {
       if (seq !== sequence || !measuring) return;
       if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
       data = body; error = "";
+      indexData(body);
       const state = progress(body);
       const running = (body.running || []).length;
       if (state.finished || (!running && state.done >= state.total)) {
         measuring = false;
+        pendingMeasure.clear();
         notice = `측정 완료 · ${state.done}개 경로`;
         render();
         return;
       }
       updateProgress();
+      syncMeasure();
       schedulePoll(700);
     } catch (exc) {
       if (seq !== sequence) return;
       measuring = false;
+      pendingMeasure.clear();
       error = String(exc.message || exc);
       render();
     }
   }
 
+  /* Ask for a walk. The press is shown immediately (`pendingMeasure` plus the
+     button's own disabled state) because the daemon's answer is a job id and
+     its first listing arrives a poll later; a press with no visible effect is
+     the thing the reader reported. A second press while one POST is in flight
+     is dropped -- two jobs for one button is not what the reader asked for. */
   async function requestMeasure(body) {
+    if (requestInflight || measuring) return;
+    requestInflight = true;
+    const session = (body && body.session) || "";
+    if (session) pendingMeasure.add(session);
+    render();
     try {
       const response = await api("/api/artifacts/measure", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -234,15 +401,22 @@ globalThis.ArtifactsPage = (() => {
       });
       const answer = await response.json();
       if (!response.ok) throw Error(answer.error || `HTTP ${response.status}`);
-      if (!answer.paths) { notice = "측정할 경로가 없다"; render(); return; }
+      if (!answer.paths) {
+        if (session) pendingMeasure.delete(session);
+        notice = "측정할 경로가 없다"; render(); return;
+      }
       notice = `측정 시작 · ${answer.paths}개 경로`;
       measuring = true;
       render();
       schedulePoll(500);
     } catch (exc) {
+      if (session) pendingMeasure.delete(session);
       notice = `측정 실패: ${exc.message || exc}`;
       measuring = false;
       render();
+    } finally {
+      requestInflight = false;
+      syncMeasure();
     }
   }
 
@@ -331,6 +505,8 @@ globalThis.ArtifactsPage = (() => {
 
   function itemRow(row) {
     const line = node("div", `ar-row ${row.area} ${row.kind}`);
+    if (row.path) line.dataset.path = row.path;
+    if (row.running) line.classList.add("is-running");
     line.appendChild(node("span", "wt-chip ar-area", AREA_LABEL[row.area] || row.area));
     const kind = node("span", "wt-chip ar-kind", KIND_LABEL[row.kind] || row.kind);
     kind.title = KIND_TITLE[row.kind] || "";
@@ -338,6 +514,7 @@ globalThis.ArtifactsPage = (() => {
     const path = node("code", "ar-path", row.path);
     path.title = row.path;
     line.appendChild(path);
+    line.appendChild(statusChip(row));
     const size = node("span", "ar-size", sizeText(row));
     if (row.error) size.title = row.error;
     line.appendChild(size);
@@ -466,6 +643,7 @@ globalThis.ArtifactsPage = (() => {
 
   function sessionCard(session) {
     const card = node("section", `ar-session${session.live ? " live" : ""}`);
+    card.dataset.session = session.name;
     const head = node("div", "ar-session-head");
     const link = node("a", "ar-name", session.name);
     link.href = `#/s/${encodeURIComponent(session.name)}`;
@@ -480,12 +658,28 @@ globalThis.ArtifactsPage = (() => {
     head.appendChild(node("span", "ar-size",
       `${formatBytes(totals.bytes)} · 정리 후보 ${(session.items || []).length}개` +
       (totals.unmeasured ? ` · 미측정 ${totals.unmeasured}` : "")));
+    // What is happening to this session's paths right now (walking, failed).
+    // A number the reader can see change is the difference between "my press
+    // landed" and "nothing happened".
+    const stateText = measureStateText(session);
+    const stateChip = node("span", "wt-chip ar-measure-state", stateText);
+    stateChip.title = "이 세션 경로의 측정 상태 — 지금 재는 항목과 실패한 항목";
+    if (!stateText) stateChip.classList.add("hidden");
+    head.appendChild(stateChip);
     const items = session.items || [];
     const state = cleanupState(session.name);
     const actions = node("div", "ar-actions");
-    const measure = node("button", "wf-btn", "측정");
+    const busy = sessionBusy(session.name);
+    const measure = node("button", `wf-btn ar-measure${busy ? " is-busy" : ""}`,
+      busy ? "측정 중…" : "측정");
     measure.type = "button";
-    measure.title = "이 세션의 스크래치와 basetemp를 다시 잰다";
+    // The daemon walks one job at a time -- a second request replaces the
+    // progress counter the page is drawing -- so one walk disables every
+    // session's button, not only the session being walked.
+    measure.disabled = busy || loading || measuring;
+    measure.title = busy ? "이 세션의 측정이 진행 중이다"
+      : measuring ? "측정이 진행 중이다 — 끝나면 다시 누를 수 있다"
+        : "이 세션의 스크래치와 basetemp를 다시 잰다";
     measure.onclick = () => requestMeasure({ session: session.name, force: true });
     actions.appendChild(measure);
     const cleanup = node("button", "wf-btn", "정리");
@@ -551,10 +745,15 @@ globalThis.ArtifactsPage = (() => {
     root.innerHTML = "";
     const head = node("div", "wf-head");
     head.appendChild(node("h2", null, "Artifacts"));
-    const measureAll = node("button", "wf-btn", loading ? "읽는 중…" : "전체 측정");
+    const measureAllBusy = measuring || requestInflight;
+    const measureAll = node("button", "wf-btn ar-measure-all",
+      measureAllBusy ? "측정 중…" : (loading ? "읽는 중…" : "전체 측정"));
     measureAll.type = "button";
-    measureAll.disabled = loading;
-    measureAll.title = "표시된 모든 경로를 다시 잰다 (백그라운드)";
+    measureAll.disabled = loading || measureAllBusy;
+    measureAll.classList.toggle("is-busy", measureAllBusy);
+    measureAll.title = measureAllBusy
+      ? "측정이 진행 중이다 — 끝나면 다시 누를 수 있다"
+      : "표시된 모든 경로를 다시 잰다 (백그라운드)";
     measureAll.onclick = () => requestMeasure({ force: true });
     head.appendChild(measureAll);
     const refresh = node("button", "wf-btn", "새로 고침");
@@ -680,6 +879,8 @@ globalThis.ArtifactsPage = (() => {
     // may have changed.
     notice = "";
     cleanups.clear();
+    pendingMeasure.clear();
+    requestInflight = false;
     render();
     load();
   }
@@ -688,9 +889,12 @@ globalThis.ArtifactsPage = (() => {
     sequence++;
     loading = false;
     measuring = false;
+    pendingMeasure.clear();
+    requestInflight = false;
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
   return { open, stop, formatBytes, age, sortedSessions, visibleSessions,
-    hiddenByCategory, progress, unmeasured, measurable, hasContent, planSummary };
+    hiddenByCategory, progress, unmeasured, measurable, hasContent, planSummary,
+    rowStatus, sessionCounts, measureStateText };
 })();

@@ -709,6 +709,7 @@ CHECKS = [
 BROWSER_CHECKS = [
     "chart_browser.cjs",
     "artifactscleanup_browser.cjs",
+    "artifactsmeasure_browser.cjs",
     "hive_browser.cjs",
     "megathread_browser.cjs",
     "resendactions_browser.cjs",
