@@ -269,7 +269,12 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   (`daemon/fault_pause.py`, 30초 주기, `ended_by`는 `daemon`/`usage-limit`).
   pause된 세션은 입력을 받지 않고, 리더면 아래 카드도 내려간다. 바쁜 세션은
   pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
-  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
+  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 그 기억은 세션 디렉터리의
+  `fault-pause.json`에 `pause_key`(판독의 `until`, 하네스가 리셋 시각을 적지
+  않았으면 빈 문자열)로 함께 남아 데몬 재기동을 넘긴다 — 메모리 맵만 있던 동안은
+  재기동 뒤 첫 pass가 사람이 되돌린 결정을 다시 pause로 덮었다(claunch-ijot0.1).
+  기록이 `until`을 추정해 채운 경우 그 값은 신원이 아니므로, 옛 기록은 하네스가
+  시각을 적었을 때만 `until`로 맞춘다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
 - 자동 키 전환 (claunch-d2t79): 키 풀을 가진 프로필의 세션이 `usage_limit`을
   맞으면, 그 세션이 스스로 켜 둔 경우(`SessionDef.auto_key_switch`, 기본 꺼짐)
@@ -293,9 +298,9 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
     입력을 받을 수 있게 되면 `continue`를 한 줄 넣는다(`key_switch.CONTINUE`).
   - 한 fault당 시도 횟수는 설정 키 `daemon.fault_key_switch_retries`(기본 1, 0이면
     전 기능 끔)로 제한한다. 시도 횟수는 세션 디렉터리의 `key-switch.json`에
-    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다(메모리에만 두던
-    `FaultPauseClock.paused`가 재기동 뒤 같은 한도로 다시 pause하던 문제
-    claunch-ijot0.1과 같은 자리다). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
+    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다 — pause 쪽의
+    같은 문제(claunch-ijot0.1)도 이제 `fault-pause.json`의 `pause_key`로 같은
+    방식으로 넘긴다(위 「자동 pause」 절). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
     pause한다. 갈 곳이 없다는 판정은 10분간 유지해, 며칠짜리 한도 동안 30초마다
     provider에 키마다 묻지 않는다(`key_switch.RECONSULT`).
 - pause는 beads 이슈를 open으로 돌리지 않는다. hold와 같이 in_progress로
