@@ -146,6 +146,11 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     // The order itself, pinned here and not read from toolbar.js, so a
     // reordered MINIMIZE_ORDER fails until this list is changed with it.
+    // A control added to the row is a control this list has not met yet, and
+    // the first assert below names it: the VM button shipped in the header
+    // (index.html's `term-vmbtn`) without landing here, so the harness failed
+    // on clean master until `term-vmbtn` was put where MINIMIZE_ORDER keeps
+    // it, between `term-clibtn` and `term-splitbtn` (claunch-u0wyo.1).
     // Every width must be one position on it: the controls that are glyphs
     // or in the menu are a prefix of it (controls that never iconify, their
     // glyph being no narrower than their label, left out), and the controls
@@ -155,7 +160,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
       "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
       "term-zoom", "term-view", "term-life",
-      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
       "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
       "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
       "term-tps", "term-note", "term-handle", "term-status",
