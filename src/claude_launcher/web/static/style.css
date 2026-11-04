@@ -9204,6 +9204,31 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
   .chart-divider { display: none; }
   .chart-detail { padding: 12px 0 18px; border-top: 1px solid #30363d; overflow: visible; }
 }
+/* The rail's Chart view (#session-chart, chart-page.js openRail): the page's
+   timeline in the session rail's width. The box scrolls down as a whole and
+   the timeline scrolls sideways inside .chart-main. Three columns -- name,
+   bar, lifetime: the window tokens and the cflow line are on the row's hover
+   card (rowTip), and a rail of 260px has no room for their 300px of sticky
+   columns, which would cover the bars. */
+#session-chart {
+  --chart-main-min: 0px;
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  padding: 2px 6px 8px; font-size: 12px;
+}
+#session-chart .chart-toolbar { gap: 6px 10px; margin: 4px 0 8px; }
+#session-chart .chart-seg-btn { padding: 2px 6px; font-size: 11px; }
+#session-chart .chart-summary { gap: 4px; margin-bottom: 8px; }
+#session-chart .chart-stat { min-width: 0; padding: 3px 6px; }
+#session-chart .chart-stat-value { font-size: 14px; }
+#session-chart .chart-usage { padding: 6px 8px; margin-bottom: 8px; }
+#session-chart .chart-split { display: block; }
+#session-chart .chart-main { overflow-x: auto; overflow-y: visible; padding-bottom: 8px; }
+#session-chart .chart-grid { min-width: 0; }
+#session-chart .chart-row { grid-template-columns: minmax(64px, 110px) minmax(80px, 1fr) 44px; gap: 6px; }
+#session-chart .chart-tokens, #session-chart .chart-flow { display: none; }
+#session-chart .chart-life { right: 0; }
+#session-chart .chart-role { display: none; }
+.session-filters.view-hidden { display: none; }
 #spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 .spec-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .spec-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }

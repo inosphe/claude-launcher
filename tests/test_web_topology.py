@@ -710,6 +710,7 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "railchart_browser.cjs",
     "artifactscleanup_browser.cjs",
     "artifactsmeasure_browser.cjs",
     "hive_browser.cjs",

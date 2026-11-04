@@ -627,7 +627,7 @@ check("the stylesheet lets a revealed rail render every row for real",
         .test(css));
 check("the reveal is what lays the rail out, and only in the list view",
       /function layRailOut\(\)/.test(src)
-      && /const laidOut = sessionView === "grid" \? null : layRailOut\(\);/.test(src));
+      && /const laidOut = sessionView === "list" \? layRailOut\(\) : null;/.test(src));
 
 /* The press and the ancestor band above the list (railancestors_check.js owns
    the band itself): a jump has to show the landed card's chain, and the band
