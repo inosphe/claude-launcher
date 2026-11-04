@@ -192,6 +192,10 @@ def paused_before(name: str, key: str) -> bool:
     A record written before :data:`KEY_FIELD` existed has no key; its
     ``until`` stands in only when the harness stated it, because a guessed
     one is the pause's own invention and never equals a live ``until``.
+
+    A name reused by a later session can still find an older record; it has
+    to name the same deadline to match, and the cost of a false match is one
+    pause not made, not a wrong stop.
     """
     record = read_record(name)
     if not record:
