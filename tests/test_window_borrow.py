@@ -197,9 +197,16 @@ def test_portable_args_drop_machine_paths_and_relativise_repo_paths(tmp_path):
 
 
 def test_pytest_args_of_and_requested_width():
-    assert test_window.pytest_args_of(
-        'uv run --no-sync pytest tests -q -n 8 --basetemp="/x/y w"') == [
-        "tests", "-q", "-n", "8", "--basetemp=/x/y w"]
+    if os.name == "nt":
+        # pytest_args_of splits in non-POSIX mode on Windows so that backslash
+        # paths survive; a quoted value is therefore not unquoted there.
+        assert test_window.pytest_args_of(
+            r"uv run --no-sync pytest tests -q -n 8 --basetemp=C:\x\y") == [
+            "tests", "-q", "-n", "8", r"--basetemp=C:\x\y"]
+    else:
+        assert test_window.pytest_args_of(
+            'uv run --no-sync pytest tests -q -n 8 --basetemp="/x/y w"') == [
+            "tests", "-q", "-n", "8", "--basetemp=/x/y w"]
     assert test_window.pytest_args_of("/v/bin/python -m pytest tests -x") == ["tests", "-x"]
     assert test_window.pytest_args_of("make test") is None
     assert test_window.requested_width_of(["tests", "-n", "6"]) == 6
@@ -468,7 +475,9 @@ def test_borrowed_merge_runs_on_the_borrower_and_the_waiter_gets_its_result(
             assert remote["junit"] and "testsuite" in remote["junit"]
             await _until(lambda: runner.runs()[0]["status"] == "passed")
             # The checkout is gone and the borrower's window is free.
-            assert not (tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists()
+            # The status is set before the work directory is removed.
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
             assert own.status()["holders"] == []
             assert "token" not in runner.runs()[0]
             assert borrower.exists()
@@ -510,7 +519,9 @@ def test_borrower_stops_and_cleans_up_when_the_lender_revokes(
             assert lender.cancel(gid)
             await _until(lambda: runner.runs()[0]["status"] == "aborted", 30)
             assert "unknown" in runner.runs()[0]["error"]
-            assert not (tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists()
+            # The status is set before the work directory is removed.
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
             assert own.status()["holders"] == []
         finally:
             await runner.close()

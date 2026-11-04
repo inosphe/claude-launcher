@@ -72,9 +72,9 @@ const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
                          "static");
-const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
-const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
-const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
+const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8").replace(/\r\n/g, "\n"); // CRLF on a Windows checkout
+const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8").replace(/\r\n/g, "\n");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8").replace(/\r\n/g, "\n");
 
 function slice(from, to) {
   const a = src.indexOf(from);

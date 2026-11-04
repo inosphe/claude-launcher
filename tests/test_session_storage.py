@@ -98,13 +98,22 @@ def test_scan_totals_and_top_level_entries(tree):
     assert doc["entries"][1] == {"path": "a.txt", "bytes": 10, "files": 1}
 
 
+def _symlink(target, link):
+    """A symlink, or a skip on a host that may not create one (Windows without
+    Developer Mode or the symlink privilege answers WinError 1314)."""
+    try:
+        os.symlink(target, link)
+    except OSError as exc:
+        pytest.skip(f"cannot create a symlink on this host: {exc}")
+
+
 def test_scan_does_not_follow_links(tree, tmp_path):
     outside = tmp_path / "elsewhere"
     write(outside / "huge.bin", 5000)
     scratch = tree / "s1" / "scratch"
     write(scratch / "inside.bin", 3)
-    os.symlink(outside, scratch / "linked-dir")
-    os.symlink(outside / "huge.bin", scratch / "linked-file")
+    _symlink(outside, scratch / "linked-dir")
+    _symlink(outside / "huge.bin", scratch / "linked-file")
 
     doc = storage_mod.scan("s1")
 
@@ -126,7 +135,7 @@ def test_scan_of_a_linked_scratch_is_refused(tree, tmp_path):
     real = tmp_path / "not-mine"
     write(real / "data.bin", 100)
     (tree / "s1").mkdir(parents=True)
-    os.symlink(real, tree / "s1" / "scratch")
+    _symlink(real, tree / "s1" / "scratch")
 
     doc = storage_mod.scan("s1")
 

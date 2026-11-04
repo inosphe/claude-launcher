@@ -333,7 +333,8 @@ def test_auto_with_no_readable_settings_refuses_instead_of_guessing(monkeypatch)
     assert len(run.calls) == 1, "no merge is attempted without a method"
 
 
-def test_a_refused_merge_is_classified():
+def test_a_refused_merge_is_classified(monkeypatch):
+    monkeypatch.setattr(pr_actions, "_gh_path", lambda: "/usr/bin/gh")
     result = pr_actions.merge(*REPO, 805, "merge", run=_runner(
         (1, "", "X Pull request #805 is not mergeable: the merge commit cannot be created.")))
     assert result["ok"] is False and result["merged"] is False

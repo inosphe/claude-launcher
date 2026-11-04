@@ -34,7 +34,7 @@ CAPTURE_TIMEOUT = 15.0
 #: (Not a dot-file name: screencapture refuses to write one, measured on t03.)
 #: Files an earlier capture left (its tart exec was killed on a timeout) are
 #: removed first: one poller runs per VM, so none of them is in use.
-CAPTURE = ('/bin/rm -f /tmp/claunch-frame-*.jpg; f=/tmp/claunch-frame-$$.jpg; '
+CAPTURE = ('/bin/rm -f /tmp/claunch-frame-*.jpg; f=/tmp/claunch-frame-$$.jpg; '  # tmp-paths: guest
            '/usr/sbin/screencapture -x -t jpg "$f" && /bin/cat "$f"; rc=$?; /bin/rm -f "$f"; exit $rc')
 
 BytesResult = Tuple[int, bytes, str]

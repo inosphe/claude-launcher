@@ -361,6 +361,7 @@ def test_the_boot_wait_gives_up_and_reconciles_anyway(owner, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot delete the state directory while the shim holds its log open")
 def test_a_shim_a_test_started_is_reaped_even_when_its_record_is_gone(owner, spawned_shims):
     import shutil
 

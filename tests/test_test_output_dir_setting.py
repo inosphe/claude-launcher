@@ -49,15 +49,16 @@ def test_get_answers_the_default_when_unset(home):
     _with_client(body)
 
 
-def test_get_answers_a_set_absolute_value(home):
-    store.set_daemon_field("test_output_dir", "/tmp/claunch-test-output-dir")
+def test_get_answers_a_set_absolute_value(home, tmp_path):
+    value = str(tmp_path / "claunch-test-output-dir")  # absolute on every host
+    store.set_daemon_field("test_output_dir", value)
 
     async def body(client):
         resp = await client.get("/api/test-output-dir", headers=BEARER)
         assert resp.status == 200
         data = await resp.json()
-        assert data["configured"] == "/tmp/claunch-test-output-dir"
-        assert data["resolved"] == "/tmp/claunch-test-output-dir"
+        assert data["configured"] == value
+        assert data["resolved"] == value
 
     _with_client(body)
 

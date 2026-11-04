@@ -203,6 +203,7 @@ def test_plan_batches_by_state_and_never_touches_a_live_tree(tmp_path):
     assert "s1c1021200000" not in names
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod 0200 does not make a tree unreadable on Windows")
 def test_an_unreadable_tree_goes_to_repair_and_not_to_a_delete_batch(tmp_path):
     """mode 0200 cannot be listed, so nothing else can remove it (claunch-zbu54)."""
     root = tmp_path / "basetemp"
@@ -235,6 +236,7 @@ def test_an_unreadable_live_or_ambiguous_tree_stays_out_of_every_batch(tmp_path)
     os.chmod(ambiguous, 0o755)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod 0200 does not make a tree unreadable on Windows")
 def test_an_unreadable_orphan_is_repaired_first_then_removed(tmp_path):
     """Repair is the precondition of removal, not a removal batch of its own."""
     root = tmp_path / "basetemp"
@@ -316,7 +318,7 @@ def test_only_worktrees_under_the_launcher_home_are_indexed(repo_with_worktrees)
     repo, home, inside, outside = repo_with_worktrees
     states = {"s9": index.ENDED}
     rows = index.worktree_rows(repo, states, home, index.reachable_commits(repo))
-    assert [r["path"] for r in rows] == [str(inside)]
+    assert [Path(r["path"]) for r in rows] == [inside]
     assert rows[0]["session"] == "s9" and rows[0]["removable"] is True
 
 
