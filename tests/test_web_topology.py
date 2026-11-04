@@ -535,6 +535,7 @@ CHECKS = [
         "briefmodel_check.js",
         "model_settings_check.js",
         "modeltiers_check.js",
+        "modeltierscard_check.js",
         "modelprice_check.js",
         "faqsettings_check.js",
         "briefrow_check.js",

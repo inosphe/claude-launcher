@@ -6616,6 +6616,75 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .provider-affinity-name input[type="checkbox"] { margin: 0; }
 .provider-affinity-note { color: #7d8590; font-size: 12px; }
 .provider-affinity-note.error { color: #f85149; }
+/* Settings > Model tiers (claunch-61vj3.1): a tier is a panel with its own
+   head and one grid row per entry, the field names drawn once in a column
+   header instead of before every select. The card therefore reads top-down
+   (what the tier is, what its entries are, how to add one) and two entries
+   are compared by reading down one column. The card keeps one primary
+   action, Add tier, at its foot; adding an entry and deleting one are
+   secondary and sit beside the row they act on. Every control here was
+   unstyled before this rule set: the selects took the browser's own face and
+   the labels repeated on every row, so the rows wrapped and no two selects
+   lined up. */
+.model-tiers-settings { padding: 14px 18px 18px; }
+.model-tier-card-head { display: flex; align-items: baseline; gap: 10px; }
+.model-tiers-settings .model-tier-card-head h3 { margin: 0; }
+.model-tier-card-meta { color: #7d8590; font-size: 12px; }
+.model-tier-help { margin: 8px 0 2px; max-width: 640px; }
+.model-tier-source { margin-bottom: 4px; color: #6e7681; font-size: 12px; }
+.model-tier {
+  margin: 12px 0; padding: 12px 14px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+}
+.model-tier-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.model-tier-name { color: #e6edf3; font-size: 13px; font-weight: 600; }
+.model-tier-meta { color: #7d8590; font-size: 12px; }
+.model-tier-empty { margin: 0; }
+.model-tier-row {
+  display: grid; align-items: center; gap: 8px; padding: 5px 0;
+  grid-template-columns:
+    56px minmax(110px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
+}
+.model-tier-row-head { padding: 0 0 5px; margin-bottom: 2px; border-bottom: 1px solid #2a2e36; }
+.model-tier-row-head .model-tier-col { font-size: 11px; color: #7d8590;
+  text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+.model-tier-row-head .model-tier-col:first-child { text-align: center; }
+.model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: 1px solid #21262d; }
+.model-tier-row select, .model-tier-add-field select, .model-tier-add-tier input {
+  width: 100%; min-width: 0; padding: 4px 6px; font-size: 12px;
+  color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.model-tier-row select:disabled, .model-tier-add-field select:disabled,
+.model-tier-add-tier input:disabled { color: #7d8590; background: #161b22; }
+.model-tier-radio { margin: 0; justify-self: center; }
+.model-tier-del { margin: 0; justify-self: end; }
+.model-tier-add {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid #21262d;
+}
+.model-tier-add-field { display: flex; align-items: center; gap: 6px;
+  flex: 0 1 260px; min-width: 0; }
+.model-tier-add-label, .model-tier-add-tier-label {
+  color: #7d8590; font-size: 12px; white-space: nowrap;
+}
+.model-tier-add-btn { margin: 0; padding: 4px 12px; font-size: 12px; }
+.model-tier-add-tier {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid #30363d;
+}
+.model-tier-add-tier-field { display: flex; align-items: center; gap: 6px;
+  flex: 0 1 380px; min-width: 0; }
+.model-tier-add-tier .wf-btn { margin: 0; }
+@media (max-width: 720px) {
+  .model-tier-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .model-tier-row-head { display: none; }
+  .model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: none; }
+  .model-tier-row select { flex: 1 1 130px; width: auto; }
+  .model-tier-del { margin-left: auto; }
+  .model-tier-add-field { flex: 1 1 180px; }
+  .model-tier-add-tier-field { flex: 1 1 200px; }
+}
 /* Settings > Providers (#/settings/providers): the installed list on top, the
    install form under it. One field per row -- label column, control, note --
    so a long list of schema keys stays scannable, and the note sits under the

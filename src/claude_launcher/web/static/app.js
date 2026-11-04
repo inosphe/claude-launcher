@@ -41657,53 +41657,77 @@ function modelTiersAddTier() {
   saveModelTiers();
 }
 
+/* One tier is a panel: its name and entry count in the head, a column header
+   over the entry rows, and its own "Add entry" control at the foot. The three
+   field names are drawn once in that header rather than beside every select,
+   so the selects stand in columns and two entries are compared by reading
+   down one of them. The column labels are the selects' accessible names
+   (aria-label), since the visible copy of each lives in the header row and is
+   not adjacent to the control (claunch-61vj3.1). */
 function modelTierSection(tier) {
   const wrap = el("div", "model-tier");
-  wrap.appendChild(el("h4", null, tier.id));
-  if (!tier.entries.length) wrap.appendChild(el("p", "wf-note", "No entries -- add one below."));
+  const head = el("div", "model-tier-head");
+  head.appendChild(el("h4", "model-tier-name", tier.id));
+  head.appendChild(el("span", "model-tier-meta",
+    tier.entries.length === 1 ? "1 entry" : `${tier.entries.length} entries`));
+  wrap.appendChild(head);
+  if (!tier.entries.length) {
+    wrap.appendChild(el("p", "wf-note model-tier-empty", "No entries yet -- add one below."));
+  }
   const active = modelTiers.block.active[tier.id] || 0;
+  if (tier.entries.length) {
+    const columns = el("div", "model-tier-row model-tier-row-head");
+    for (const label of ["Active", "Profile", "Harness", "Model", ""]) {
+      columns.appendChild(el("span", "model-tier-col", label));
+    }
+    wrap.appendChild(columns);
+  }
   tier.entries.forEach((entry, index) => {
-    const row = el("div", "model-tier-entry");
+    const row = el("div", "model-tier-row");
     const radio = document.createElement("input");
     radio.type = "radio";
+    radio.className = "model-tier-radio";
     radio.name = `model-tier-active-${tier.id}`;
     radio.checked = index === active;
     radio.disabled = modelTiers.busy;
     radio.title = "Active entry for this tier";
+    radio.setAttribute("aria-label", `Entry ${index + 1} of tier ${tier.id} is the active one`);
     radio.addEventListener("change", () => modelTiersSetActive(tier.id, index));
-    row.appendChild(radio);
-    const profile = el("label", "delegate-field", " Profile ");
-    profile.appendChild(modelTierEntrySelect(
+    const profile = modelTierEntrySelect(
       entry.profile, modelTiers.profiles, "(profile)",
       (v) => { if (v) modelTiersSetEntry(tier, index, "profile", v); }
-    ));
-    const harness = el("label", "delegate-field", " Harness ");
-    harness.appendChild(modelTierEntrySelect(
+    );
+    profile.setAttribute("aria-label", "Profile");
+    const harness = modelTierEntrySelect(
       entry.harness || "", modelTiersEntryHarnessChoices(entry.profile), "(profile default)",
       (v) => modelTiersSetEntry(tier, index, "harness", v)
-    ));
-    const model = el("label", "delegate-field", " Model ");
-    model.appendChild(modelTierEntrySelect(
+    );
+    harness.setAttribute("aria-label", "Harness");
+    const model = modelTierEntrySelect(
       entry.model || "",
       modelTiersEntryModelChoices(entry.profile, entry.harness || ""), "(default)",
       (v) => modelTiersSetEntry(tier, index, "model", v)
-    ));
-    const remove = el("button", "wf-btn danger", "Delete");
+    );
+    model.setAttribute("aria-label", "Model");
+    const remove = el("button", "wf-btn clear model-tier-del", "Delete");
     remove.type = "button";
     remove.disabled = modelTiers.busy;
     remove.addEventListener("click", () => modelTiersRemoveEntry(tier, index));
-    row.append(profile, harness, model, remove);
+    row.append(radio, profile, harness, model, remove);
     wrap.appendChild(row);
   });
   const addRow = el("div", "model-tier-add");
+  const addField = el("label", "model-tier-add-field");
+  addField.appendChild(el("span", "model-tier-add-label", "New entry"));
   const addProfile = document.createElement("select");
   addProfile.disabled = modelTiers.busy || !modelTiers.profiles.length;
   for (const p of modelTiers.profiles) addProfile.appendChild(new Option(p, p));
-  const add = el("button", "wf-btn approve", "Add entry");
+  addField.appendChild(addProfile);
+  const add = el("button", "wf-btn model-tier-add-btn", "Add entry");
   add.type = "button";
   add.disabled = modelTiers.busy || !modelTiers.profiles.length;
   add.addEventListener("click", () => modelTiersAddEntry(tier, addProfile.value));
-  addRow.append(addProfile, add);
+  addRow.append(addField, add);
   wrap.appendChild(addRow);
   return wrap;
 }
@@ -41711,12 +41735,17 @@ function modelTierSection(tier) {
 function modelTiersCard() {
   const st = modelTiers;
   const card = el("section", "ws-add model-tiers-settings");
-  card.appendChild(el("h3", null, "Model tiers"));
-  card.appendChild(el("p", "wf-note",
-    "Named routing slots of ordered (profile, model, harness) entries; the " +
-    "marked entry is what the tier resolves to. An empty harness/model means " +
-    "the profile default / the default role model. Edits save immediately. " +
-    "Same settings as the model_tiers: block of ~/.claude-launcher/.claunch.yaml."));
+  const head = el("div", "model-tier-card-head");
+  head.appendChild(el("h3", null, "Model tiers"));
+  head.appendChild(el("span", "model-tier-card-meta",
+    st.loaded ? `${st.block.tiers.length} of ${st.max_tiers} tiers` : ""));
+  card.appendChild(head);
+  card.appendChild(el("p", "wf-note model-tier-help",
+    "Named routing slots of ordered entries. The marked entry is what the " +
+    "tier resolves to; an empty harness or model takes the profile default. " +
+    "Edits save immediately."));
+  card.appendChild(el("p", "wf-note model-tier-source",
+    "Stored as the model_tiers: block of ~/.claude-launcher/.claunch.yaml."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -41725,14 +41754,17 @@ function modelTiersCard() {
   if (!st.block.tiers.length) card.appendChild(el("p", "wf-note", "No tiers defined."));
   for (const tier of st.block.tiers) card.appendChild(modelTierSection(tier));
   const form = el("form", "model-tier-add-tier");
+  const idField = el("label", "model-tier-add-tier-field");
+  idField.appendChild(el("span", "model-tier-add-tier-label", "New tier"));
   const idInput = document.createElement("input");
   idInput.placeholder = "Tier id, for example: economy";
   idInput.value = modelTiersTierDraft;
   idInput.disabled = st.busy;
   idInput.addEventListener("input", () => { modelTiersTierDraft = idInput.value; });
+  idField.appendChild(idInput);
   const addTier = el("button", "wf-btn approve", "Add tier");
   addTier.disabled = st.busy;
-  form.append(idInput, addTier);
+  form.append(idField, addTier);
   form.addEventListener("submit", (e) => { e.preventDefault(); modelTiersAddTier(); });
   card.appendChild(form);
   if (modelTiersAddError) card.appendChild(el("p", "error", modelTiersAddError));
