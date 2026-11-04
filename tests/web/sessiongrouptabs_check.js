@@ -142,7 +142,8 @@ function load(seed, project = "") {
     "function enableTabDragScroll() {}\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
-     slice("scrollSessionListTop"), slice("selectSessionGroupTab"),
+     slice("scrollSessionListTop"), slice("railPressMark"),
+     slice("selectSessionGroupTab"),
      slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader"),
      slice("filterSessionOrigin"), slice("setSessionOriginFilter"),
      slice("sessionGroupRowVisible"), slice("sessionCategory"), slice("sessionMatchesFilter"),

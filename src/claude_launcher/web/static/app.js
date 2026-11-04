@@ -4496,14 +4496,51 @@ let sessionGroupTabScrollReset = false;
    for no rebuild and a rebuild writes no position. The mark is a deadline, not
    a bare flag -- a browser that fires no `scrollend` (or an animation the
    reader interrupts with the wheel) must not leave the rail without its
-   scroll-triggered rebuilds for more than this. */
+   scroll-triggered rebuilds for more than this. The `⇱ card` reveal moves the
+   reader the same way and marks the rail the same way (railPressMark). */
 const RAIL_SCROLL_TOP_ANIM_MS = 3000;
 
-/* Whether a scroll-to-top press's animation is still running on `list`. */
+/* Whether a press's smooth scroll is still running on `list`. */
 function railScrollTopMarked(list) {
   const until = list && typeof list._railScrollTopUntil === "number"
     ? list._railScrollTopUntil : 0;
   return until > Date.now();
+}
+
+/* Mark the rail as owned by a smooth scroll the page started, and take the
+   mark off when the animation settles (claunch-7vd4v, claunch-7vd4v.1).
+
+   Two presses move the reader this way -- the open tab's scroll to the top
+   and the `⇱ card` reveal of one row -- and both are stopped the same way: a
+   pass that runs mid-animation writes the position with an instant
+   `scrollTop`, and an instant write aborts a smooth scroll (CSSOM View). The
+   rail froze where that pass found it, partway up, and the next press
+   advanced it only as far as the pass after that -- or, for the reveal,
+   reached the row because nothing ran in between.
+
+   The mark is what tells the two guards to stand down while the animation
+   runs: `railWireWindowScroll` asks for no rebuild, and `refreshSessions`
+   neither tears the rows down nor writes their position. It is a deadline,
+   not a bare flag -- a browser that fires no `scrollend` must not leave the
+   rail without its scroll-triggered rebuilds for more than this.
+
+   The release does the work the guards skipped: it clears the mark and runs
+   the covering check, so the slice around where the scroll ended is drawn
+   (the slice on the list covers where it started). */
+function railPressMark(list) {
+  if (!list || typeof list !== "object") return;
+  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
+  if (typeof list.addEventListener !== "function") return;
+  list.addEventListener("scrollend", () => {
+    list._railScrollTopUntil = 0;
+    const box = typeof $ === "function" ? $("session-list") : null;
+    if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
+    if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+    if (typeof railSliceCovers === "function" && railSliceCovers(box)) return;
+    if (typeof refreshSessions !== "function") return;
+    refreshSessions._forceRebuild = true;
+    refreshSessions({ cached: true });
+  }, { once: true });
 }
 
 /* The rail back to its top: smoothly where the browser can. */
@@ -4514,22 +4551,7 @@ function scrollSessionListTop() {
     list.scrollTop = 0;
     return;
   }
-  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
-  if (typeof list.addEventListener === "function") {
-    /* The animation settled: take the mark off and run the covering check the
-       scroll handler skipped while it stood, so the slice around the top is
-       drawn (the window covered where the animation started, not where it
-       ended). */
-    list.addEventListener("scrollend", () => {
-      list._railScrollTopUntil = 0;
-      const box = typeof $ === "function" ? $("session-list") : null;
-      if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
-      if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
-      if (railSliceCovers(box)) return;
-      refreshSessions._forceRebuild = true;
-      refreshSessions({ cached: true });
-    }, { once: true });
-  }
+  railPressMark(list);
   list.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -5624,10 +5646,10 @@ function railWireWindowScroll(list) {
       const box = typeof $ === "function" ? $("session-list") : null;
       if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
       if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
-      /* A scroll-to-top press owns the position until its animation settles;
-         a rebuild here would restore the mid-animation position and abort the
-         smooth scroll. Reaching the top ends the wait -- no `scrollend` a
-         listener could miss is needed for that. */
+      /* A press moving the reader owns the position until its animation
+         settles; a rebuild here would restore the mid-animation position and
+         abort the smooth scroll. Reaching the top ends the wait -- no
+         `scrollend` a listener could miss is needed for that. */
       if (railScrollTopMarked(box)) {
         if ((box.scrollTop || 0) > 0) return;
         box._railScrollTopUntil = 0;
@@ -6110,7 +6132,18 @@ async function refreshSessions(options) {
   const windowForced = refreshSessions._forceRebuild === true;
   refreshSessions._forceRebuild = false;
   const changed = windowForced || signature !== list._sessionsSignature;
-  const rebuild = changed && !railHeld();
+  // A press that is moving the reader owns the rows as well as the position
+  // while its smooth scroll runs (railPressMark): a teardown here would take
+  // the row the animation is travelling to out of the page, and emptying the
+  // list clamps scrollTop to 0 with it -- the restore below is skipped while
+  // the mark stands, so the rail would land at the top instead of at the
+  // card. The pass after the mark draws what this one left behind: a forced
+  // rebuild is re-armed below, and a changed signature still differs because
+  // the signature is written only where the draw loop ends. Inlined for the
+  // harnesses that slice this function, like the position guard below.
+  const pressScrolling = typeof list._railScrollTopUntil === "number"
+    && list._railScrollTopUntil > Date.now();
+  const rebuild = changed && !railHeld() && !pressScrolling;
   // A forced rebuild a press held off is still owed (claunch-thuwx.1): the pass
   // the release triggers sees the same signature, reads as "nothing changed",
   // and the slice the scroll asked for is never drawn.
@@ -28108,9 +28141,20 @@ function revealSessionCard(name) {
   // target it measured once. Guarded like the other optional
   // painters: the isolated rail harnesses slice this function without it.
   if (typeof pinRailAncestors === "function") pinRailAncestors(name, GOTO_FLASH_MS);
+  // The scroll below runs smoothly and owns the rail until it lands
+  // (claunch-7vd4v.1): a pass that ran mid-animation wrote the position and
+  // the animation stopped where the reader could see it -- pressing again,
+  // from closer, reached the row. The mark is the one the scroll-to-top press
+  // uses; only the list view scrolls the rail (a grid cell moves the page), so
+  // only it is marked. Guarded like pinRailAncestors: the isolated rail
+  // harnesses slice this function without it.
+  const scrolling = typeof card.scrollIntoView === "function";
+  if (scrolling && laidOut && typeof railPressMark === "function") {
+    railPressMark(laidOut);
+  }
   // Centred, not merely "into view": a row brought to the very edge of the
   // rail is on screen and still reads as not found.
-  if (card.scrollIntoView) card.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (scrolling) card.scrollIntoView({ block: "center", behavior: "smooth" });
   gotoFlashName = name;
   if (gotoFlashTimer) clearTimeout(gotoFlashTimer);
   gotoFlashTimer = setTimeout(() => {

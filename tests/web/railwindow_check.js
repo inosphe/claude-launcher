@@ -338,13 +338,30 @@ const fleet = (n) => Array.from({ length: n }, (_, i) => session(`s${i}`));
   const marked = slice("railScrollTopMarked");
   assert.ok(/until > Date\.now\(\)/.test(marked),
     "the mark is a deadline, not a bare flag");
-  const top = slice("scrollSessionListTop");
-  assert.ok(/_railScrollTopUntil = Date\.now\(\) \+ RAIL_SCROLL_TOP_ANIM_MS/.test(top),
+  // Both presses that move the reader -- the scroll to the top and the
+  // `⇱ card` reveal -- take the same mark, so it lives in one place
+  // (railPressMark, claunch-7vd4v.1).
+  const pressMark = slice("railPressMark");
+  assert.ok(/_railScrollTopUntil = Date\.now\(\) \+ RAIL_SCROLL_TOP_ANIM_MS/.test(pressMark),
     "the press marks the list for the animation's run");
-  assert.ok(/scrollend/.test(top),
+  assert.ok(/scrollend/.test(pressMark),
     "the mark comes off when the animation settles");
+  assert.ok(/railSliceCovers/.test(pressMark),
+    "and the release runs the covering check the guards skipped");
+  const top = slice("scrollSessionListTop");
+  assert.ok(/railPressMark\(list\)/.test(top),
+    "the scroll to the top marks through it");
+  const revealCard = slice("revealSessionCard");
+  assert.ok(/railPressMark\(laidOut\)/.test(revealCard),
+    "the card reveal marks through it too");
+  assert.ok(revealCard.indexOf("railPressMark(laidOut)")
+            < revealCard.indexOf('card.scrollIntoView({ block: "center"'),
+    "...before the smooth scroll it has to outlive");
   assert.ok(/!scrollTopAnim/.test(body),
     "a rebuild writes no position while the mark stands");
+  assert.ok(/!pressScrolling/.test(body)
+    && /const pressScrolling = typeof list\._railScrollTopUntil === "number"/.test(body),
+    "and a rebuild tears nothing down while the mark stands");
 
   // The flag is what turns the rebuild on, and it is spent once.
   assert.ok(/const changed = windowForced \|\| signature !== list\._sessionsSignature;/
