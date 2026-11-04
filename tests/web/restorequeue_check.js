@@ -65,8 +65,19 @@ check("the delayed dot is its own class, without hold",
 check("the hold dot is unchanged", ctx.dotClassOf(held), "dot exited hold");
 check("the dot title says it starts by itself",
       ctx.dotTitle(delayed).includes("starts by itself"), true);
-check("the delayed dot has a colour apart from hold's violet",
-      /\.dot\.exited\.delayed\s*\{[^}]*#39c5cf/.test(css) && !/\.dot\.exited\.hold\.delayed/.test(css), true);
+// The dot's ring reads the palette (style.css `:root --life-delayed`), and the
+// palette keeps that pair apart from hold's -- the whole reason the rail gave
+// a delayed record its own colour.
+const lifeToken = (name) => {
+  const match = css.match(new RegExp(`--life-${name}:\\s*(#[0-9a-fA-F]{6})`));
+  return match ? match[1].toLowerCase() : null;
+};
+check("the delayed dot draws its ring from the palette",
+      /\.dot\.exited\.delayed\s*\{[^}]*var\(--life-delayed\)/.test(css),
+      true);
+check("the delayed dot has a colour apart from hold's",
+      !!lifeToken("delayed") && !!lifeToken("hold") && lifeToken("delayed") !== lifeToken("hold")
+        && !/\.dot\.exited\.hold\.delayed/.test(css), true);
 
 ctx.renderRestoreQueueBanner({ total: 84, done: 36, remaining: 48, next: "s498", eta_seconds: 400 });
 check("the banner shows progress while sessions wait",

@@ -52,10 +52,12 @@ def rule(selector: str) -> str:
 
 def test_the_palette_names_every_life_and_issue_status() -> None:
     tokens = palette()
-    # Five life pairs: delayed is a hold with a relaunch scheduled and
-    # killed/archived are both "done" -- the surfaces separate those by shape,
-    # not by a sixth colour.
-    for name in ("running", "hold", "paused", "failed", "done"):
+    # Six life pairs. `delayed` keeps one of its own rather than sharing
+    # hold's: it is a hold whose relaunch is already scheduled, and the rail
+    # learned that hold's amber reads as "failed to come back" on a record
+    # that will start by itself. killed/archived share "done" -- the chip
+    # separates those by shape.
+    for name in ("running", "hold", "delayed", "paused", "failed", "done"):
         assert f"--life-{name}" in tokens, name
         assert f"--life-{name}-rim" in tokens, name
     for name in ISSUE_TOKENS:
@@ -77,18 +79,24 @@ def test_every_life_the_page_filters_by_has_a_chip_colour() -> None:
     assert set(re.findall(r'"([a-z]+)"', lives.group(1))) == set(LIVES)
 
 
-def test_the_three_surfaces_read_the_palette_instead_of_their_own_hex() -> None:
+def test_the_four_surfaces_read_the_palette_instead_of_their_own_hex() -> None:
     """The property that carries the state is a token, on every surface.
 
     Each surface hands the colour to a different property -- a chip says it in
-    `color`, a hive chip keeps it in `--core`, a badge paints `background`
+    `color`, a hive chip keeps it in `--core`, a rail dot paints `background`
     with it -- and shading a rim darker than its core is a depth decision, not
     a second opinion about the state. So this pins the state-bearing property
     rather than banning hex from the block.
+
+    The rail is the surface a review caught first: the issue named "the left
+    session rail" and the commit had touched only the terminal header's badge,
+    so the dot kept its own violet for hold and its own red for failed while
+    the badges beside it moved. The dot rules are checked here for that reason.
     """
     for selector, prop in (
         (".category-status-running", "color"),
-        (".category-status-hold, .category-status-delayed", "color"),
+        (".category-status-hold", "color"),
+        (".category-status-delayed", "color"),
         (".category-status-paused", "color"),
         (".category-status-failed", "color"),
         (".category-status-killed, .category-status-archived", "color"),
@@ -97,16 +105,53 @@ def test_the_three_surfaces_read_the_palette_instead_of_their_own_hex() -> None:
         (".hive-chip.s-delayed", "--core"),
         (".hive-chip.s-paused", "--core"),
         (".hive-chip.s-failed", "--core"),
+        # The rail's dot -- what the left session list draws.
+        (".dot.exited", "background"),
+        (".dot.exited.paused", "background"),
+        (".dot.exited.hold", "background"),
+        (".dot.exited.failed", "background"),
+        # ...and the delayed dot, whose ring is its state rather than its fill.
+        (".dot.exited.delayed", "box-shadow"),
+        # The session badge in the terminal header.
+        (".badge.exited.paused", "color"),
+        (".badge.exited.hold", "color"),
+        (".badge.exited.delayed", "color"),
+        (".badge.exited.failed", "color"),
     ):
         body = rule(selector)
         match = re.search(rf"{re.escape(prop)}:\s*([^;]+);", body)
         assert match, f"{selector} has no {prop}"
-        assert match.group(1).strip().startswith("var(--life-"), f"{selector} writes its own {prop}"
+        assert "var(--life-" in match.group(1), f"{selector} writes its own {prop}"
     for status, token in (("open", "open"), ("ready", "ready"), ("busy", "busy"),
                           ("review", "review"), ("blocked", "blocked"), ("exited", "closed")):
         body = rule(f".badge.beads-status.{status}")
         assert f"color: var(--issue-{token})" in body, status
         assert f"background: var(--issue-{token}-bg)" in body, status
+
+
+def test_a_later_rule_does_not_override_a_palette_one() -> None:
+    """A state rule declared twice with the same specificity means the second
+    wins, and a hardcoded second silently undoes the palette.
+
+    `.badge.exited.failed` was written twice: the palette rule early in the
+    file and a hand-picked pair much later. The later one won and the badge
+    kept a red the palette never chose.
+    """
+    css_text = css()
+    for selector, _ in (
+        (".badge.exited.failed", "color"),
+        (".badge.exited.hold", "color"),
+        (".badge.exited.paused", "color"),
+        (".badge.exited.delayed", "color"),
+        (".dot.exited", "background"),
+        (".dot.exited.hold", "background"),
+        (".dot.exited.failed", "background"),
+        (".category-status-running", "color"),
+        (".category-status-hold", "color"),
+        (".category-status-delayed", "color"),
+    ):
+        count = len(re.findall(rf"(?m)^{re.escape(selector)}\s*\{{", css_text))
+        assert count == 1, f"{selector} is declared {count} times"
 
 
 def test_a_state_is_never_colour_alone() -> None:
