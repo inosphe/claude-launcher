@@ -14,6 +14,7 @@ The answers are cached for the listing caches' TTL so a typing burst forks
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -67,6 +68,61 @@ def test_substring_search_over_id_title_description(tmp_path, repo):
             assert doc["issues"][0]["title"] == "pagination is slow"
         finally:
             await client.close()
+
+    _run(run)
+
+
+def test_search_asks_br_for_closed_issues_too(tmp_path, repo):
+    """The fallback's population is the listing's — ``--all`` goes to br.
+
+    Without it ``br search`` hides closed issues, and the page would show a
+    narrower board than the listing it renders its results beside.
+    """
+    fake = FakeBr()
+    _seed(fake)
+    board = _board(fake, repo)
+
+    async def run():
+        await board.text_search(repo, "pagination")
+        searches = [c for c in fake.calls if "search" in c]
+        assert len(searches) == 1, searches
+        assert "--all" in searches[0], searches[0]
+
+    _run(run)
+
+
+def test_limit_reaches_br_instead_of_its_own_default_window(tmp_path, repo):
+    """The route accepts 100; br caps at 50 unless told otherwise."""
+    fake = FakeBr()
+    for i in range(60):
+        fake.add(id=f"cl-{i:03d}", title=f"pagination {i}", status="open")
+    board = _board(fake, repo)
+
+    async def run():
+        rows = await board.text_search(repo, "pagination", limit=100)
+        assert len(rows) == 60
+
+    _run(run)
+
+
+def test_the_fake_hides_closed_like_br_does(repo):
+    """The fake's defaults are what let this bug ship green (claunch-w3wrk.1)."""
+    fake = FakeBr()
+    _seed(fake)
+
+    async def run():
+        # ``argv[0]`` is the program name, as it is on a real ``br`` call.
+        code, out, _ = await fake(
+            ["br", "search", "pagination", "--json"], repo,
+        )
+        assert code == 0
+        hidden = json.loads(out)
+        assert [r["id"] for r in hidden["issues"]] == ["cl-1"]
+        assert hidden["hidden_closed_count"] == 1
+        code, out, _ = await fake(
+            ["br", "search", "pagination", "--all", "--json"], repo,
+        )
+        assert [r["id"] for r in json.loads(out)["issues"]] == ["cl-1", "cl-3"]
 
     _run(run)
 

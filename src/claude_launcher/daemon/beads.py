@@ -1997,6 +1997,18 @@ class Board:
         answer something in that state, not just refuse (claunch-w3wrk).
         Answers are the full issue rows, so the page renders them with the
         same row it draws the RAG results on.
+
+        Two flags are passed for contracts ``br``'s defaults break
+        (claunch-w3wrk.1):
+
+        * ``--all`` — ``br search`` hides closed issues unless told
+          otherwise, while the engine this stands in for does not: the rag
+          index is built from :meth:`issues` (``list --all``), and the page
+          draws both result sets with the same row, so a search that
+          dropped closed issues would disagree with the listing above it.
+        * ``--limit`` — the route accepts up to 100 but ``br``'s own default
+          window is 50, so without this the last 50 answers were silently
+          unreachable.
         """
         query = (query or "").strip()
         if not query:
@@ -2007,7 +2019,9 @@ class Board:
         hit = self._text_searches.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
-        data = await self.br(root, ["search", query])
+        data = await self.br(
+            root, ["search", query, "--all", "--limit", str(limit)],
+        )
         rows = data.get("issues") if isinstance(data, dict) else data
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         self._text_searches[key] = (now, rows)

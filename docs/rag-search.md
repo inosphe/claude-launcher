@@ -381,6 +381,26 @@ write-up matches on any part.
 400 when the block is not configured or `q` is empty, 404 for a directory
 with no board, 502 when the endpoint fails.
 
+### The text-search fallback (`GET /api/beads/text-search`)
+
+When the `rag:` block is absent or its embeddings are unreachable, the Beads
+page's search box answers from `br search` instead of refusing
+(claunch-w3wrk). It runs over the same board as the ranked path, so it has to
+report the same population — the flags below exist for the places where
+`br`'s defaults say otherwise (claunch-w3wrk.1):
+
+| flag the daemon passes | why |
+|---|---|
+| `--all` | `br search` hides closed issues unless told otherwise, while the rag index is built from `list --all` and the page draws both result sets with one row renderer. Without it the fallback would show a narrower board than the listing beside it |
+| `--limit <n>` | the route accepts `limit` 1..100, but `br`'s own window defaults to 50, so without this nothing past the 50th answer was reachable |
+| `--status all` | not used. `br search --help` documents it, but the binary answers `error: unknown status 'all'` (valid values are the policy's statuses); `--all` is the flag that works |
+
+`tests/test_beads_text_search.py` pins the population (closed issues
+included), the `--all` reaching `br`, and the limit reaching `br`.
+`tests/test_beads_daemon.py`'s `FakeBr` models `br`'s own defaults — closed
+hidden with `hidden_closed_count`, and a 50-row window — so the contract is
+not asserted against a fake that answers more than the real tool does.
+
 ## CLI
 
 ```
