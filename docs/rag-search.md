@@ -393,7 +393,7 @@ report the same population — the flags below exist for the places where
 |---|---|
 | `--all` | `br search` hides closed issues unless told otherwise, while the rag index is built from `list --all` and the page draws both result sets with one row renderer. Without it the fallback would show a narrower board than the listing beside it |
 | `--limit <n>` | the route accepts `limit` 1..100, but `br`'s own window defaults to 50, so without this nothing past the 50th answer was reachable |
-| `--status all` | not used. `br search --help` documents it, but the binary answers `error: unknown status 'all'` (valid values are the policy's statuses); `--all` is the flag that works |
+| `--status all` | not used, though it is accepted. `br search --help` documents it, and on `br 0.7.1` it exits 0 and returns the same population as `--all` (`hidden_closed_count` 0, the same 50-row window). One flag that widens the population is enough, so the daemon sends `--all` alone. An earlier version of this table said the binary answers `error: unknown status 'all'`; re-measuring on `br 0.7.1` did not reproduce that and the cause of the difference is unknown (claunch-w3wrk.1.1) |
 
 `tests/test_beads_text_search.py` pins the population (closed issues
 included), the `--all` reaching `br`, and the limit reaching `br`.
