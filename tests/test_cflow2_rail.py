@@ -142,6 +142,37 @@ body:
 """
 
 
+#: A stop button nobody has to press (claunch-hbmhk): the user choice races
+#: the task loop under ``settle: race``, so the engine cancels the door the
+#: moment the loop finishes. Every surface that drew it like a gate the run
+#: was stopped on made the reader think a round was waiting on them.
+RACEOPT = """\
+cflow: 2
+name: raceopt
+description: an optional stop button racing a task loop
+nodes:
+  work: {title: Work, prompt: do work}
+  skipped: {title: Skipped, prompt: record the skip}
+body:
+  par:
+    settle: race
+    branches:
+      tests:
+        id: tests
+        loop:
+          while: "true"
+          max: 3
+          do: work
+      gate:
+        id: stop-gate
+        choose:
+          chooser: user
+          prompt: stop the tests?
+          options:
+            skip: {then: skipped}
+"""
+
+
 @pytest.fixture
 def proj(home, tmp_path, monkeypatch):
     d = tmp_path / "proj"
@@ -152,6 +183,7 @@ def proj(home, tmp_path, monkeypatch):
     (v2 / "askbrief.yaml").write_text(ASKBRIEF, encoding="utf-8")
     (v2 / "askmd.yaml").write_text(ASKMD, encoding="utf-8")
     (v2 / "planwait.yaml").write_text(PLANWAIT, encoding="utf-8")
+    (v2 / "raceopt.yaml").write_text(RACEOPT, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -216,6 +248,9 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert r["scope"] == "s1@main" and r["cwd"] == str(runtime.RunStore(cwd, "s1").cwd)
     assert r["gated"] is True and len(r["owed"]) == 1
     assert r["owed"][0].startswith("choose: ")
+    # A choice the run is stopped on is the blocking half, and nothing else
+    # is optional here (claunch-hbmhk).
+    assert r["blocking"] is True and r["optional"] == []
 
     runtime.select(None, "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
     r = _rail(cwd, "s1")["s1"]
@@ -230,6 +265,46 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert r["status"] == "waiting_approval"
     assert r["gated"] is True
     assert any(o.startswith("loop_limit: ") for o in r["owed"])
+
+
+def test_rail_entry_keeps_an_optional_choice_out_of_what_blocks_the_run(proj):
+    """A choice the run is not stopped on is still the person's, and is not
+    ``owed`` (claunch-hbmhk).
+
+    ``test-skip-gate`` races the targeted-test loop under ``settle: race``:
+    the engine cancels the door when the loop finishes, so leaving it alone
+    costs nothing. The rail used to carry it in ``owed``, which made the row
+    amber and the card say "waits on your pick" -- true of no moment of that
+    run. It stays answerable (``gated``, and its ``answers`` entry with the
+    press), it just does not read as a stop."""
+    cwd = str(proj)
+    runtime.start(layers.load("raceopt", cwd), cwd=cwd, scope="s1", caps={})
+
+    r = _rail(cwd, "s1")["s1"]
+    assert r["status"] == "running"
+    assert r["gated"] is True        # the person can still answer it
+    assert r["blocking"] is False    # ... and the run is not held on it
+    assert r["owed"] == []
+    assert r["optional"] == ["optional: stop-gate"]
+    [answer] = r["answers"]
+    assert answer["kind"] == "choose" and answer["instance"]
+    assert answer["optional"] is True
+    assert [o["name"] for o in answer["options"]] == ["skip"]
+
+    # Taking the door does what the engine always did with it: the skip
+    # branch runs and, once it finishes, the racing loop is cancelled.
+    runtime.select(None, "skip", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
+    r = _rail(cwd, "s1")["s1"]
+    assert r["gated"] is False and r["blocking"] is False
+    assert r["owed"] == [] and r["optional"] == []
+    skip = [t for t in runtime.status(cwd=cwd, scope="s1")["tasks"]
+            if t["label"] == "skipped"]
+    runtime.report(skip[0]["instance"], cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    # The skip branch settled the race, so the loop -- still running its
+    # task -- was cancelled: the run is over, and no work task is left.
+    assert r["current"] == []
+    assert r["status"] == "done"
 
 
 def test_rail_entry_flags_a_run_stopped_on_the_plan_gate(proj):

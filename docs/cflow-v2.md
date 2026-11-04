@@ -385,6 +385,21 @@ ask:
   다시 시작한다. 데몬과의 연결이 끊겼다 돌아오면 그 값을 버리고 다음 응답에서
   다시 읽는다. `flow_status`의 `asks`·`choices`·`loop_limits`·`visit_limits` 항목도
   같은 `opened_at`을 싣는다.
+- 런을 세우지 않는 게이트(claunch-hbmhk): `settle: race`·`any` par의 갈래에 서 있는
+  `choose`는 형제 갈래가 끝나면 엔진이 그 갈래를 취소하므로(`_par_child_done`이
+  `_cancel_children`을 부른다) 고르지 않아도 런이 진행된다. 레일은 그런 선택을
+  `owed`에 넣지 않고 행의 `optional` 목록(`optional: <라벨>`)에 싣고, 행의
+  `blocking`이 `owed`가 비었는지를 말한다(`gated`는 둘 중 하나가 있으면 참).
+  `answers[]`의 `choose` 항목과 `flow_status`의 `choices` 항목도 `optional`을 싣는다.
+  판정은 워크플로 선언이 아니라 구조다 — `runtime.optional_choice`가 인스턴스의 부모
+  사슬에서 가장 가까운 `par`을 찾아 settle로 답한다(`race`/`any`는 갈래가 둘 이상일
+  때, `quorum:K`는 K가 갈래 수보다 작을 때 optional이고, `all`·`allSettled`와
+  판독할 수 없는 구조는 막는 게이트로 남는다). 화면은 이 값을 나눠 쓴다: 세션 레일
+  칩은 `○`와 평범한 색으로 그리고 호버에 「런은 이 선택 없이 계속된다」를 덧붙이며
+  (막는 게이트는 지금까지대로 `⚑`와 호박색), 알림 카드의 제목은
+  「has an optional gate open: <라벨>」이고 나이는 기다린 시간(`5m ago`)이 아니라
+  열려 있던 시간(`open 5m`)이다. `blocking`이 없는 응답(이 필드가 생기기 전의
+  데몬)은 막는 게이트로 읽는다.
 - 질문 본문의 markdown(claunch-ns4kd): `/api/cflow2/rail`의 `answers[]` 항목은
   `prompt`(한 줄로 접고 400자에서 자른 값 — 터미널 스트립과 상태 줄이 읽는다)와
   `prompt_md`(ask가 쓴 그대로의 줄바꿈을 보존하고 1600자에서 자른 값)를 함께 싣는다.

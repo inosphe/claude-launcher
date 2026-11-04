@@ -213,6 +213,9 @@ def v2_gates(entry: dict) -> list:
             "kind": kind, "instance": a.get("instance"), "ask_id": a.get("ask"),
             "request": a.get("request"), "label": a.get("label") or a.get("instance") or kind,
             "prompt": prompt, "urgent": bool(a.get("urgent")),
+            # A choice the run is not stopped on (claunch-hbmhk): carried so
+            # a reader of these gates can tell a door from a stop.
+            "optional": bool(a.get("optional")),
             "criteria": [str(c) for c in (a.get("criteria") or [])],
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in a.get("options") or [] if isinstance(o, dict)],
@@ -234,7 +237,13 @@ def _owed_v2(cwd: str, scope: str) -> Optional[dict]:
         raise NudgeRefused(f"the v2 run in {cwd} ({scope}) cannot be read: "
                            f"{entry.get('error')}", status=409)
     return {"version": 2, "run": entry.get("run"), "workflow": entry.get("workflow"),
-            "items": list(entry.get("owed") or [])}
+            # A nudge names what the person can still do about this run, and
+            # an optional door counts: it is open now and closes by itself,
+            # which is exactly what asking them to look at it is about. What
+            # is NOT optional is a stop, and ``owed`` holds those alone
+            # (claunch-hbmhk).
+            "items": (list(entry.get("owed") or [])
+                      + list(entry.get("optional") or []))}
 
 
 def _owed_v1(cwd: str, scope: str) -> Optional[dict]:

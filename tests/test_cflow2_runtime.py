@@ -466,6 +466,70 @@ def test_par_quorum_unreachable(tmp_path):
     assert d.st["status"] == "failed"
 
 
+GATE = TASKS + """
+body:
+  par:
+    settle: {settle}
+    branches:
+      work: {loop: {while: "true", max: 2, do: a}}
+      gate:
+        id: door
+        choose:
+          chooser: user
+          options:
+            open: {then: b}
+"""
+
+
+def _optional_of(d):
+    return {c["label"] or c["node"]: c["optional"] for c in d.st["choices"]}
+
+
+def test_optional_choice_is_the_settle_of_the_region_around_it(tmp_path):
+    """``optional`` on a choice (claunch-hbmhk): the region around it settles
+    without its branch, so the run carries on and the engine cancels the
+    door. Only the settle modes that decide on fewer than every branch can
+    promise that, and a structure that does not prove it answers False -- a
+    gate that really stops the run must never be drawn as a choice."""
+    sub = tmp_path
+
+    def opt(name, settle):
+        (sub / name).mkdir()
+        return _optional_of(Drv(sub / name, GATE.replace("{settle}", settle)))
+
+    assert opt("race", "race") == {"door": True}
+    assert opt("any", "any") == {"door": True}
+    # Every branch of an ``all``/``allSettled`` region is required.
+    assert opt("all", "all") == {"door": False}
+    assert opt("settled", "allSettled") == {"door": False}
+    # A quorum needs K branches, so the door is skippable while K is below
+    # the number of branches.
+    assert opt("q1", "quorum:1") == {"door": True}
+    assert opt("q2", "quorum:2") == {"door": False}
+
+    # One branch alone: race and any behave like all, and a choice outside
+    # any par is the plain stop it always was.
+    (sub / "solo").mkdir()
+    assert _optional_of(Drv(sub / "solo", TASKS + """
+        body:
+          par:
+            settle: race
+            branches:
+              gate:
+                id: door
+                choose:
+                  chooser: user
+                  options: {open: {then: b}}
+    """)) == {"door": False}
+    (sub / "plain").mkdir()
+    assert _optional_of(Drv(sub / "plain", TASKS + """
+        body:
+          choose:
+            chooser: user
+            options: {open: {then: b}}
+    """)) == {"body": False}
+
+
 def test_timeout_goes_to_else(tmp_path):
     d = Drv(tmp_path, TASKS + """
         body:
