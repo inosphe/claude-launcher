@@ -8,6 +8,9 @@ import pytest
 from claude_launcher.daemon.vmhub import Registry, VmError
 from test_vm_api import AGENT, OTHER, _up, scenario
 
+# The VM routes answer vm_disabled until the feature is switched on.
+pytestmark = pytest.mark.usefixtures("vm_on")
+
 
 def _grant(api, session, scopes, **extra):
     return api.post("/api/vm/a/grant", json={"session": session, "scopes": scopes, **extra})
