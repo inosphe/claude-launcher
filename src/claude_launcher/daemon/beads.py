@@ -205,6 +205,17 @@ DEPS_SCAN_LIMIT = 200
 #: that makes a 200-issue scan seconds instead of a minute.
 DEPS_CONCURRENCY = 16
 
+#: How far one issue's family is walked when the detail pane asks for it:
+#: up the parent chain and down the subtree. The caps exist so a malformed or
+#: very deep family costs a bounded number of ``br`` forks on a click rather
+#: than following the graph wherever it goes. An ordinary issue is one or two
+#: levels either way.
+HIERARCHY_DEPTH = 8
+
+#: The most descendants one family read will place. Past it the pane draws the
+#: subtree it has, which is the same shape a shorter one draws.
+HIERARCHY_NODES = 120
+
 #: How much of an issue's description a LISTING carries.
 #:
 #: The dashboard draws an excerpt of a listed issue and nothing more -- six
@@ -1438,6 +1449,12 @@ class Board:
         #: full-list cache above: the first 48 issues are not the dependency
         #: graph for every later page.
         self._page_deps: Dict[tuple, Tuple[float, List[dict]]] = {}
+        #: One issue's family (its ancestors and its subtree), keyed by
+        #: ``<root>\n<id>``. Read from that issue's own edges rather than
+        #: from a listing, so it does not belong with the edge caches above --
+        #: but it is dropped with them, because the edges it was read from
+        #: are the same ones a write can change.
+        self._families: Dict[str, Tuple[float, dict]] = {}
         self._text_searches: Dict[tuple, Tuple[float, List[dict]]] = {}
         #: Sessions mid wind-down, by name: what was typed and when.
         self.winddowns: Dict[str, dict] = {}
@@ -1771,6 +1788,10 @@ class Board:
             if page[0] != key
         }
         self._deps.pop(key, None)
+        self._families = {
+            read: cached for read, cached in self._families.items()
+            if not read.startswith(key + "\n")
+        }
 
     async def issues(self, root: Path) -> List[dict]:
         """Every issue on ``root``'s board, closed ones included — cached
@@ -1978,6 +1999,143 @@ class Board:
         out = [edge for part in parts for edge in part]
         cache[key] = (now, out)
         return out
+
+    #: One issue's family, keyed by ``<root>\n<id>`` and dropped with the
+    #: listing it was read beside (:meth:`invalidate`).
+    _families: Dict[str, Tuple[float, dict]]
+
+    @staticmethod
+    def _family_row(issue_id: str, row: dict) -> dict:
+        """One node of a family, in the shape the detail pane draws."""
+        return {
+            "id": issue_id,
+            "title": row.get("title") or "",
+            "status": row.get("status") or "",
+            "priority": row.get("priority"),
+        }
+
+    async def _family_edges(self, root: Path, issue_id: str, direction: str) -> List[tuple]:
+        """``parent-child`` edges of one issue in one direction, as
+        ``(the other end's id, the row that names it)``.
+
+        ``br dep list`` answers with the other end and the other end's own
+        title/status/priority when it resolved the target, so one fork gives
+        both the edge and the row the pane prints. A failed read answers no
+        edges: the pane loses its family box, and the issue itself is already
+        on its way back from :meth:`show`.
+        """
+        try:
+            data = await self.br(
+                root, ["dep", "list", issue_id, "--direction", direction,
+                       "--type", "parent-child"],
+            )
+        except cli_beads.BeadsError as exc:
+            log.debug("beads: no %s family edges for %r: %s", direction, issue_id, exc)
+            return []
+        if isinstance(data, dict):
+            data = data.get("dependencies") or data.get("edges") or []
+        out: List[tuple] = []
+        for row in data or []:
+            if not isinstance(row, dict):
+                continue
+            # The row is the stored edge, so which end is "the other one"
+            # depends on the direction asked for: down answers the issue's
+            # dependencies (the other end is ``depends_on_id``), up answers
+            # its dependents (the other end is ``issue_id``). Some br versions
+            # resolve the target and put it under ``id`` instead, so take
+            # whichever end is not the issue asked about.
+            other = next(
+                (end for end in (row.get("issue_id"), row.get("depends_on_id"),
+                                 row.get("id"))
+                 if end and end != issue_id),
+                None,
+            )
+            if not other:
+                continue
+            kind = row.get("type") or row.get("dependency_type") or ""
+            if kind and kind != "parent-child":
+                continue
+            out.append((other, row))
+        return out
+
+    async def family(
+        self, root: Path, issue_id: str, *,
+        depth: int = HIERARCHY_DEPTH, limit: int = HIERARCHY_NODES,
+    ) -> dict:
+        """One issue's family — ``{"ancestors": [...], "children": [...]}``.
+
+        ``ancestors`` runs from the top of the chain down to the issue's own
+        parent; ``children`` is the issue's subtree, each node carrying its
+        own ``children``. Both come from ``parent-child`` edges alone, read
+        from the issue outward rather than from a board listing: a listing is
+        paged (:data:`BEADS_PAGE_SIZE` in the page), so the rows the detail
+        pane would need to draw a family are usually not the ones loaded
+        (claunch-3hubh).
+
+        A cycle cannot be drawn and is not drawn: the ``seen`` set drops an
+        edge back into a node already placed, which is also what keeps a
+        malformed two-parent row from appearing twice. ``depth`` and ``limit``
+        bound the walk so a pathological family cannot hold the click open.
+
+        Every read is cached for :data:`DEPS_TTL`, because the detail pane is
+        refreshed on the board's poll and the family changes far more slowly
+        than the issue's own text.
+        """
+        key = f"{root}\n{issue_id}"
+        now = self._clock()
+        hit = self._families.get(key)
+        if hit and now - hit[0] < DEPS_TTL:
+            return hit[1]
+
+        seen = {issue_id}
+        ancestors: List[dict] = []
+        at = issue_id
+        for _ in range(max(0, depth)):
+            parents = [e for e in await self._family_edges(root, at, "down")
+                       if e[0] not in seen]
+            if not parents:
+                break
+            other, row = parents[0]
+            seen.add(other)
+            ancestors.append(self._family_row(other, row))
+            at = other
+        ancestors.reverse()
+
+        budget = max(0, limit)
+
+        async def kids_of(parent_id: str, level: int) -> List[dict]:
+            nonlocal budget
+            if level > depth or budget <= 0:
+                return []
+            fresh = []
+            for other, row in await self._family_edges(root, parent_id, "up"):
+                if other in seen:
+                    continue
+                seen.add(other)
+                fresh.append((other, row))
+            fresh = fresh[:budget]
+            budget -= len(fresh)
+            if not fresh:
+                return []
+            if level >= depth:
+                leaves = []
+                for other, row in fresh:
+                    node = self._family_row(other, row)
+                    node["children"] = []
+                    leaves.append(node)
+                return leaves
+            nested = await asyncio.gather(
+                *(kids_of(other, level + 1) for other, _ in fresh))
+            out: List[dict] = []
+            for (other, row), kids in zip(fresh, nested):
+                node = self._family_row(other, row)
+                node["children"] = kids
+                out.append(node)
+            return out
+
+        family = {"ancestors": ancestors, "children": await kids_of(issue_id, 1)}
+        self._families[key] = (now, family)
+        return family
 
     #: Short-lived substring-search answers, keyed by (root, query, limit).
     #: The dashboard's search-as-you-type sends one request per keystroke

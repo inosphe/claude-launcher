@@ -33112,15 +33112,76 @@ function beadsBoardSection(board) {
   return sec;
 }
 
-/* The opened issue's place in the family, built from the board listing's own
-   edges rather than from the issue payload. `br show` resolves what an issue
-   depends on, so the parent is in there — but nothing on that side names the
-   children, and the children are half of what a reader opens a parent to see.
-   The listing has both directions, so both come from there or neither does.
+/* The opened issue's place in the family.
 
-   Returns null when there is no family to draw, so the pane spends no room
-   saying an issue is unrelated to everything — which is most of them. */
+   The daemon reads it from the issue's own parent-child edges and sends it
+   with /api/beads/<id> (`hierarchy`), because the listing this page holds is
+   paged and filtered: the parent and the children are usually on another page,
+   so a family drawn from those rows was drawn almost never (claunch-3hubh).
+
+   The listing is still the answer for a daemon that does not send one — its
+   edges cover whatever it did load, which is better than nothing. A family
+   that is empty either way draws no box: most issues are unrelated to
+   everything, and the pane does not spend room saying so. */
 function beadsRelationBlock(id) {
+  const fromDaemon = beadsDetail && beadsDetail.hierarchy;
+  if (fromDaemon) return beadsHierarchyBlock(fromDaemon, id);
+  return beadsListingFamily(id);
+}
+
+/* The daemon's family: ancestors top-down, the issue itself, then its subtree.
+   Depth is a class rather than an inline style so the indentation lives with
+   the rest of the pane's rules (`beads-rel-d1` … in style.css). */
+function beadsHierarchyBlock(family, id) {
+  const up = (family && family.ancestors) || [];
+  const kids = (family && family.children) || [];
+  if (!up.length && !kids.length) return null;
+  const box = el("div", "beads-detail-rel");
+  const depthClass = (n) => "beads-rel-d" + Math.min(6, n);
+  const line = (issue, depth, label) => {
+    const row = el("div", "beads-rel-row " + depthClass(depth));
+    row.appendChild(el("span", "beads-rel-label", label || ""));
+    row.appendChild(beadsStatusBadge(issue.status));
+    const a = el("a", "beads-rel-link", issue.id);
+    a.href = "#/beads/" + encodeURIComponent(issue.id);
+    row.appendChild(a);
+    row.appendChild(el("span", "beads-rel-title", issue.title || "(untitled)"));
+    return row;
+  };
+  up.forEach((a, n) => box.appendChild(
+    line(a, n, n === up.length - 1 ? "parent" : "")));
+  const self = el("div", "beads-rel-row beads-rel-self " + depthClass(up.length));
+  self.appendChild(el("span", "beads-rel-label", "this issue"));
+  self.appendChild(el("span", "beads-rel-link", id || beadsFocus || ""));
+  box.appendChild(self);
+  let seen = 0;
+  const walk = (nodes, depth) => {
+    for (const k of nodes) {
+      // The subtree's count goes on the first row only: it is the block's,
+      // not a row's, and it is every descendant rather than one level.
+      box.appendChild(line(k, depth, seen++ ? ""
+        : `descendants (${countFamily(kids)})`));
+      walk(k.children || [], depth + 1);
+    }
+  };
+  walk(kids, up.length + 1);
+  return box;
+}
+
+/* How many issues hang off `nodes`, the count the block's first child row
+   carries. Counted rather than taken from a length, because the subtree is
+   what the reader is being told is there. */
+function countFamily(nodes) {
+  let n = 0;
+  for (const k of nodes || []) n += 1 + countFamily(k.children);
+  return n;
+}
+
+/* The older answer: the family the loaded board rows happen to contain, read
+   from the listing's own edges. `br show` resolves what an issue depends on,
+   so the parent is in the payload — but nothing on that side names the
+   children, and the children are half of what a reader opens a parent to see. */
+function beadsListingFamily(id) {
   const board = ((beadsCache && beadsCache.boards) || []).find(
     (b) => (b.issues || []).some((i) => i.id === id));
   if (!board) return null;

@@ -17933,12 +17933,23 @@ async def h_beads_issue(request: web.Request) -> web.Response:
             linked.append({
                 "name": sdef.name, "status": session.status(), "via": matches[0]["via"],
             })
+    try:
+        family = await board.family(root, issue.get("id") or issue_id)
+    except Exception:  # a family is drawn beside an issue that already answered
+        log.exception("beads: family read failed for %s", issue_id)
+        family = {"ancestors": [], "children": []}
     return json_response({
         # The board this issue is on, by name as well as by root: an issue id
         # is unique on its own board and nowhere else, so the panel says which
         # one rather than leaving it to the tab the reader arrived through.
         **board.board_head(root),
         "issue": issue,
+        # Where the issue sits in its family, read from its own parent-child
+        # edges. It cannot come from the listing the page holds: that listing
+        # is paged, so a parent and a child are usually on different pages or
+        # filtered out, and the pane would say nothing about a family that is
+        # there (claunch-3hubh).
+        "hierarchy": family,
         "sessions": linked,
         "reports": reports_mod.for_issue(issue_id),
         # Derived here rather than re-parsed in the page: the front matter's

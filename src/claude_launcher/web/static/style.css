@@ -5134,6 +5134,20 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .beads-rel-link { color: #58a6ff; text-decoration: none; font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
 .beads-rel-link:hover { text-decoration: underline; }
 .beads-rel-title { color: #c6cdd5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* The depth of one row in the opened issue's family: ancestors step in as they
+   come down to the issue, and the subtree steps in under it. Classes rather
+   than inline padding so the indentation stays with the pane's other rules;
+   deeper than six levels share six's indent, which the daemon's own read cap
+   keeps rare. */
+.beads-rel-d1 { padding-left: 14px; }
+.beads-rel-d2 { padding-left: 28px; }
+.beads-rel-d3 { padding-left: 42px; }
+.beads-rel-d4 { padding-left: 56px; }
+.beads-rel-d5 { padding-left: 70px; }
+.beads-rel-d6 { padding-left: 84px; }
+/* The issue the pane is about, between its ancestors and its subtree. It is a
+   position in the family, not a link: the reader is already there. */
+.beads-rel-self .beads-rel-link { color: #e6edf3; }
 .sess-wf-run { display: flex; align-items: center; gap: 8px; }
 .sess-wf-name { font-size: 14px; color: #e6edf3; }
 .sess-wf-run .meta { color: #7d8590; font-size: 11px; }

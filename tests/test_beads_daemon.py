@@ -68,6 +68,37 @@ class FakeBr:
         self.issues[parent]["dependent_count"] = (
             self.issues[parent].get("dependent_count", 0) + 1)
 
+    def dep_list(self, issue_id: str, opts: dict) -> list:
+        """``br dep list <id> --direction … --type …``.
+
+        The real command answers in one shape for both directions: each row
+        names the depending issue (``issue_id``) and what it depends on
+        (``depends_on_id``) plus the *other* end's title, status and
+        priority -- which is what the detail pane prints, and why the daemon
+        can draw a family without a second ``show`` per node.
+        """
+        direction = opts.get("--direction", "down")
+        kind = opts.get("--type")
+        found = []
+        if direction in ("down", "both"):
+            found.extend(self.deps.get(issue_id, []))
+        if direction in ("up", "both"):
+            for edges in self.deps.values():
+                found.extend(e for e in edges if e.get("depends_on_id") == issue_id)
+        out = []
+        for edge in found:
+            if kind and (edge.get("type") or "") != kind:
+                continue
+            other = (edge.get("depends_on_id") if edge.get("issue_id") == issue_id
+                     else edge.get("issue_id"))
+            target = self.issues.get(other) or {}
+            row = dict(edge)
+            row.update({"title": target.get("title", ""),
+                        "status": target.get("status", ""),
+                        "priority": target.get("priority")})
+            out.append(row)
+        return out
+
     def add(self, **kw) -> dict:
         iid = kw.pop("id", None)
         if iid is None:
@@ -151,7 +182,7 @@ class FakeBr:
             return 0, json.dumps({"issues": rows}), ""
         if cmd == "dep":
             if rest[0] == "list":
-                return 0, json.dumps(self.deps.get(rest[1], [])), ""
+                return 0, json.dumps(self.dep_list(rest[1], _opts(rest[2:]))), ""
             if rest[0] == "add":
                 kind = _opts(rest[3:]).get("--type", "blocks")
                 self.link(rest[1], rest[2], kind)
@@ -1509,6 +1540,97 @@ def test_edges_are_read_through_br_and_never_out_of_the_database_file(repo, monk
     asyncio.run(run())
 
 
+def test_the_family_walks_the_parent_chain_and_the_whole_subtree(repo):
+    """The detail pane draws an issue's family beside it, and the listing that
+    pane holds is one page: the parent and the children are usually somewhere
+    else, so the family is read from the issue's own edges instead
+    (claunch-3hubh). Up the chain to the top, down the whole subtree."""
+    br = FakeBr()
+    br.add(id="root", title="the root", status="open")
+    br.add(id="mid", title="the middle", status="in_progress")
+    br.add(id="kid", title="the child", status="blocked")
+    br.add(id="a", title="A")
+    br.add(id="a1", title="A1", status="closed")
+    br.add(id="b", title="B")
+    br.link("mid", "root")
+    br.link("kid", "mid")
+    br.link("a", "kid")
+    br.link("a1", "a")
+    br.link("b", "kid")
+    board = _board(br, repo)
+
+    async def run():
+        fam = await board.family(repo, "kid")
+        assert [n["id"] for n in fam["ancestors"]] == ["root", "mid"]
+        assert fam["ancestors"][0] == {
+            "id": "root", "title": "the root", "status": "open", "priority": 2,
+        }
+        assert [(n["id"], [k["id"] for k in n["children"]])
+                for n in fam["children"]] == [("a", ["a1"]), ("b", [])]
+        assert fam["children"][0]["children"][0]["status"] == "closed"
+
+    asyncio.run(run())
+
+
+def test_only_parent_child_edges_make_a_family(repo):
+    """``blocks`` and ``related`` wire two issues together without making one
+    the other's parent, and the pane only draws a hierarchy."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.add(id="other")
+    br.link("kid", "epic", kind="blocks")
+    br.link("kid", "other", kind="related")
+    board = _board(br, repo)
+
+    async def run():
+        fam = await board.family(repo, "kid")
+        assert fam == {"ancestors": [], "children": []}
+
+    asyncio.run(run())
+
+
+def test_a_cycle_in_the_edges_is_drawn_once(repo):
+    """A malformed board can point two issues at each other. The walk keeps a
+    set of what it has placed, so the cycle costs its edges and stops."""
+    br = FakeBr()
+    br.add(id="a")
+    br.add(id="b")
+    br.link("a", "b")
+    br.link("b", "a")
+    board = _board(br, repo)
+
+    async def run():
+        fam = await board.family(repo, "a")
+        placed = [n["id"] for n in fam["ancestors"]]
+        placed += [n["id"] for n in fam["children"]]
+        assert sorted(placed) == ["b"]
+
+    asyncio.run(run())
+
+
+def test_the_family_is_cached_and_a_write_drops_it(repo):
+    """The pane reads it on the board's poll; the edges change on a write, and
+    the cache goes with the listing's."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    board = _board(br, repo)
+
+    async def run():
+        await board.family(repo, "kid")
+        reads = len([c for c in br.calls if "dep" in c])
+        assert reads == 3   # up to the parent, past it, and the children
+        await board.family(repo, "kid")
+        assert len([c for c in br.calls if "dep" in c]) == reads
+        board.invalidate(repo)
+        await board.family(repo, "kid")
+        assert len([c for c in br.calls if "dep" in c]) == reads * 2
+
+    asyncio.run(run())
+
+
 def test_a_title_is_enough_to_file_an_issue_from_the_board(repo):
     """The form's smallest answer: a title. Everything else has a default,
     and the description is the workflows' four sections so the assignee's
@@ -1761,6 +1883,38 @@ def test_an_issue_of_another_board_opens_on_the_board_it_is_on(home, tmp_path, r
             # The workspace with no database was not read, so not created.
             assert [c for c, _ in runner.calls if c == str(empty)] == []
             assert not (empty / ".beads" / "beads.db").exists()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_detail_route_carries_the_issue_family(home, tmp_path, repo):
+    """``/api/beads/<id>`` answers the family beside the issue, so the pane can
+    draw a parent and children that are not on the page it is showing."""
+    br = FakeBr()
+    br.add(id="epic", title="the epic")
+    br.add(id="kid", title="the child")
+    br.link("kid", "epic")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.get(f"/api/beads/epic?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["hierarchy"]["ancestors"] == []
+            assert [(k["id"], k["title"], k["children"])
+                    for k in doc["hierarchy"]["children"]] == [("kid", "the child", [])]
+
+            resp = await client.get(f"/api/beads/kid?cwd={repo}", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert [n["id"] for n in doc["hierarchy"]["ancestors"]] == ["epic"]
+            assert doc["hierarchy"]["children"] == []
         finally:
             await client.close()
 
