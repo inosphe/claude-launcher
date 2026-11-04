@@ -630,11 +630,31 @@ class OperatorsV2:
     def watched(self, rec):
         return [s for s in self.members(rec) if session_category(s) in LIVE]
 
+    def claimants(self, name):
+        """Every record naming ``name`` as its session, in id order.
+
+        ``bind`` leaves exactly one; a second comes only from a record
+        written around it (a hand-made or legacy record, claunch-786zn).
+        Sorting by id is what makes the answer the same on every read:
+        ``records()`` iterates in load order, which for a record created in
+        this process is creation order rather than id order.
+        """
+        if not name:
+            return []
+        return sorted((rec for rec in self.records().values() if rec.get("session") == name),
+                      key=lambda rec: rec["id"])
+
     def bound(self, name):
-        """The operator whose bound session is ``name``, or 403."""
-        for rec in self.records().values():
-            if rec.get("session") == name and name:
-                return rec
+        """The operator whose bound session is ``name``, or 403.
+
+        ``bind`` keeps one claim per session, so the first claimant is
+        normally the only one. Records written outside ``bind`` can add a
+        second claim, and the smallest id then decides
+        (``test_two_hand_made_claims_read_in_id_order`` pins that).
+        """
+        claims = self.claimants(name)
+        if claims:
+            return claims[0]
         raise web.HTTPForbidden(text=f"{name} is not the session of any operator v2")
 
     def member(self, rec, target):
@@ -752,6 +772,28 @@ class OperatorsV2:
         return self.summary(rec)
 
     def bind(self, rec, name):
+        """Give session ``name`` to ``rec``, taking it from any other record.
+
+        The session under ``name`` was just created for ``rec``, so a claim
+        another record still holds on that name is stale: it names a session
+        that ended, or a record written by hand. Releasing it here is what
+        keeps ``bound`` and ``operator_of_session`` answering with exactly
+        one operator: two records claiming one session made those reads pick
+        by id order, and whoever lost the race silently served the other's
+        inbox and posts (claunch-786zn.1).
+
+        The claim is released rather than refused because the start route
+        creates the session first and binds it afterwards: refusing here
+        would leave a running session that belongs to no operator.
+        """
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("a session name is required")
+        for other in list(self.records().values()):
+            if other["id"] != rec["id"] and other.get("session") == name:
+                other["session"] = None
+                self.save(other)
+                self.system(other, f"Operator 세션 {name}이 다른 운영자에게 넘어갔습니다.")
         rec["session"] = name
         self.save(rec)
         self.system(rec, f"Operator 세션 {name}이 시작되었습니다.")
@@ -762,15 +804,13 @@ class OperatorsV2:
         The daemon reads this to keep a bound session to the operator's
         surface (``daemon/qa_api.py`` refuses session QA there): the session's
         conversation is the Operator view, not the session's threads or QA
-        panes.
+        panes. ``bind`` leaves one claim per session; a second claim comes
+        only from a record written outside it, and the smallest id then
+        decides (see ``claimants``).
         """
         name = str(name or "").strip()
-        if not name:
-            return None
-        for rec in self.records().values():
-            if rec.get("session") == name:
-                return rec
-        return None
+        claims = self.claimants(name)
+        return claims[0] if claims else None
 
     def qa_allowed(self, name):
         """Whether the operator bound to ``name`` keeps session QA on — as of
