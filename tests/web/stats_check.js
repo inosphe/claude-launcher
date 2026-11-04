@@ -168,6 +168,7 @@ new Function(
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
      "setStatsProvider", "statsProviderStrip",
      "statsRowParts", "statsRowTotal", "statsRowRequests",
+     "statsRowBarParts", "statsRowBar", "statsRowBarLegend",
      "statsSummaryFigures", "statsOverviewRows",
      "statsModelRows", "statsModelTotals", "statsModelBar", "statsModelCost",
      "statsModelTable", "statsModelEstimate", "statsModelSection",
@@ -446,6 +447,37 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-rowbar-fill")[0].style.width === "100.00%" &&
         withClass("stats-rowbar-fill")[1].style.width === "10.00%",
         withClass("stats-rowbar-fill").map((b) => b.style.width));
+
+  // claunch-qs2ev.1: the bar is a stack of the four usage parts, in
+  // USAGE_PARTS order and the detail panel chart's colours, so a row that
+  // spent 900 of its 1,000 tokens on cache reads shows that as the wide band.
+  const partSegments = (r) => r.all().filter(
+    (n) => classesOf(n).has("stats-rowbar-part"));
+  const partClass = (n) => ["usage-in", "usage-cr", "usage-cw", "usage-out"]
+    .find((c) => classesOf(n).has(c)) || "";
+  const s1seg = partSegments(rows[0]);
+  check("a session's bar is split into its parts, fresh input first",
+        s1seg.length === 2 &&
+        s1seg.map(partClass).join() === "usage-in,usage-cr" &&
+        s1seg.map((n) => n.style.width).join() === "10.00%,90.00%",
+        s1seg.map((n) => [partClass(n), n.style.width]));
+  check("a part that is zero draws no segment",
+        s1seg.every((n) => partClass(n) !== "usage-cw" &&
+                            partClass(n) !== "usage-out"),
+        s1seg.map(partClass));
+  check("a segment names its part and the tokens it holds",
+        s1seg[1].title === "cache read: 900 of 1,000 tokens",
+        s1seg.map((n) => n.title));
+  check("the legend names the four parts above the table",
+        (() => {
+          const legend = withClass("stats-rowbar-legend")[0];
+          if (!legend) return false;
+          const swatches = legend.all().filter(
+            (n) => classesOf(n).has("usage-swatch")).map(partClass);
+          return swatches.join() === "usage-in,usage-cr,usage-cw,usage-out" &&
+            legend.words().includes("cache write");
+        })(),
+        withClass("stats-rowbar-legend").map((n) => n.words()));
   check("a session the ledger cannot speak for shows a dash, never a zero",
         rows[2].words().includes("—") &&
         withClass("stats-unmetered").length === 1, rows[2].words());
@@ -472,6 +504,24 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-method").length === 1 &&
         view.words().includes("metering ledger"),
         withClass("stats-method").length);
+
+  // A payload that carries a total but no breakdown (an older daemon) keeps
+  // one unnamed segment, so the bar's length survives the missing parts.
+  ctx.setAnswer(byUrl({
+    sessions: [sessionRow({ session: "noparts", providers: [], model: "",
+                            input: 0, cache_read: 0, cache_write: 0,
+                            output: 0, switches: [] })],
+  }));
+  ctx.refresh();
+  await tick();
+  check("a row with no part breakdown keeps one unnamed segment",
+        withClass("stats-rowbar-unknown").length === 1 &&
+        withClass("stats-rowbar-part").length === 1 &&
+        withClass("stats-row")[0].words().includes("1.00k"),
+        withClass("stats-rowbar-part").map((n) => [partClass(n), n.style.width]));
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
 
   // ---- provider + model ------------------------------------------------
   const modelTable = withClass("stats-model-table")[0];

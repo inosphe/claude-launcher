@@ -8308,6 +8308,14 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   border-radius: 3px; overflow: hidden; vertical-align: middle;
 }
 .stats-rowbar-fill, .stats-llm-rowbar-fill { display: block; height: 100%; background: #58a6ff; }
+/* A session row's bar split into its four usage parts (claunch-qs2ev.1). The
+   track keeps the width the row's share of the busiest gives it; the segments
+   inside add up to that width, and their colours are the detail panel chart's
+   `.usage-in` / `.usage-cr` / `.usage-cw` / `.usage-out`. */
+.stats-rowbar-split { display: flex; background: transparent; }
+.stats-rowbar-part { display: block; height: 100%; }
+.stats-rowbar-unknown { background: #58a6ff; }
+.stats-rowbar-legend { margin: 0 0 6px; }
 .stats-rowvalue { margin-left: 8px; font-variant-numeric: tabular-nums; }
 .stats-unmetered, .stats-llm-unreported { color: #6e7681; }
 .stats-model-cell {
