@@ -407,7 +407,7 @@ def _cmd_reconcile(args) -> int:
 
 def _cmd_grant(args) -> int:
     return _call(args, "POST", f"/api/vm/{args.vm}/grant",
-                 {"session": args.session, "scopes": args.scopes},
+                 {"session": args.session, "scopes": args.scopes, **({"steal": True} if args.steal else {})},
                  show=lambda out: (print(f"{args.session}: {', '.join(out['grants'])}"),
                                    out.get("warning") and print(f"warning: {out['warning']}")))
 
@@ -613,6 +613,9 @@ def register(sub) -> None:
                          "installs (off unless named; implies view); files: copy files between the "
                          "VM's host folder and its guest work folder (off unless named; implies "
                          "nothing)")
+    sp.add_argument("--steal", action="store_true",
+                    help="control is held by one session per VM: take it from the current holder(s) "
+                         "(they keep their other scopes)")
     sp.set_defaults(func=_cmd_grant)
 
     sp = v.add_parser("revoke", help="take scopes (default: all) away from a session")

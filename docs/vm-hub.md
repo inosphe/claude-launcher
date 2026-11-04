@@ -604,3 +604,34 @@ guard that file. Wrapper options that take an argument (`env -u X`, `sudo -u U`,
   the switch, its state, why it cannot be turned on, and the recent blocks; each session row of the
   permissions table has the same switch.
 
+
+## One session holds `control` per VM
+
+`control` is held by at most one session on each VM (`view`, `exec` and `files`
+stay open to many sessions).
+
+- **Refusal.** A grant that adds `control` to a session while another session
+  holds it fails with `vm_control_held` (HTTP 409). The error names the holders
+  (`holders`). The rule applies to every grant path: `POST /api/vm/{id}/grant`,
+  `claunch vm grant`, the /vm permissions form and table, the session pane
+  (`🖥 vm`), and the user's approval of a `vm_request` (which has no steal option;
+  grant with steal instead). Re-granting `control` to the current holder is not
+  a conflict. The one-click new VM has no holder, so it needs no steal.
+- **Steal.** Only the user can take control from its holder: `{"steal": true}`
+  or `{"steal_from": "<session>"}` in the grant body, `claunch vm grant ... --steal`,
+  or the checkbox "<holder>에서 control을 빼앗아 부여" in the /vm form and the
+  session pane (shown only when a holder exists, unchecked by default, sent only
+  when checked; the table's `control` tick asks with a confirmation). A session
+  calling the route gets 403 `vm_user_only` and can only ask with `vm_request`.
+- **Effect on the holder.** The stolen session loses `control` and `exec` (exec
+  runs on top of control; the existing revoke rule). Its other scopes (view,
+  files) stay. A running controller or extra controller role is dropped and the
+  epoch advances, so its later calls are refused (`vm_not_controller`).
+- **Audit.** The registry log gets `steal_control` with `vm`, `from` and `to`; the
+  route also writes `user_grant` with the `steal` value and the caller.
+- **State from before the rule.** Several sessions already holding `control` are
+  left alone (no automatic revoke). The /vm page shows "control 보유자 N명 …
+  규칙 위반 상태" for the selected VM. A new `control` grant is then allowed only if
+  the steal names all holders (`steal: true`, or the checkbox, which lists them
+  all); `steal_from` with one name is refused while another holder remains.
+- A daemon restart is needed for the rule (server side).

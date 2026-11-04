@@ -104,8 +104,8 @@ async def test_a_session_acquires_as_itself_and_not_as_another(api):
 @scenario
 async def test_a_second_session_is_told_who_holds_it(api):
     await _up(api)
-    for s in ("s1", "s2"):
-        await api.post("/api/vm/a/grant", json={"session": s, "scopes": ["control"]})
+    await api.post("/api/vm/a/grant", json={"session": "s1", "scopes": ["control"]})
+    api.reg.get("a").grants["s2"] = ["view", "control"]  # a grant made before one-holder-per-VM
     await api.post("/api/vm/a/acquire", json={"session": "s1"}, headers=AGENT)
     resp = await api.post("/api/vm/a/acquire", json={"session": "s2"}, headers=OTHER)
     assert resp.status == 409
@@ -486,7 +486,7 @@ def test_a_session_that_ends_gives_back_its_vm_through_the_real_exit_hooks(tmp_p
         reg.set_state("a", "running")
         reg.set_ready("a", ssh=True, gui=True, cua=True, ip="192.168.64.2")
         reg.grant("a", "s1", ["control"])
-        reg.grant("a", "s2", ["control"])
+        reg.grant("a", "s2", ["view"])
         reg.acquire("a", "s1")
         mgr._run_exit_hooks(SimpleNamespace(sdef=SimpleNamespace(name="s2")))
         assert reg.get("a").controller == "s1"       # another session's exit changes nothing

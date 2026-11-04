@@ -30,7 +30,7 @@ const hits = [];
 let sessionsDown = false;
 const VM = {
   id: "alpha", tart_name: "alpha", state: "running", ready: true, channel: "up", controller: "",
-  grants: { s1: ["files"] }, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
+  grants: { s1: ["files"], s8: ["view", "control"], s9: ["view", "control"] }, human: "idle", ip: "", fault_reason: "", expose: ["2222:22"], allow: [],
   net_pending: true, net_applied_known: true, locked: false,
   shared_dirs: [{ name: "src", host_path: "/work/proj", mode: "ro", guest_path: "/Volumes/My Shared Files/src" }],
   share_rows: [
@@ -118,6 +118,15 @@ const server = http.createServer((req, res) => {
       const body = data ? JSON.parse(data) : {};
       posts.push([p, body]);
       if (planOf) { REMOVED.push(planOf[1]); return json(res, { ok: true, destroyed: planOf[1], tart_name: planOf[1], size_gb: 93, warnings: [] }); }
+      if (p === "/api/vm/alpha/grant" && (body.scopes || []).includes("control")) {
+        const holders = Object.entries(VM.grants).filter(([n, sc]) => n !== body.session && sc.includes("control")).map(([n]) => n);
+        if (holders.length && !body.steal) {
+          return json(res, { ok: false, code: "vm_control_held", holders, error: `vm_control_held: alpha의 control은 ${holders.join(", ")}이(가) 가지고 있습니다` }, 409);
+        }
+        for (const h of holders) VM.grants[h] = VM.grants[h].filter((x) => x !== "control");
+        VM.grants[body.session] = [...new Set([...(VM.grants[body.session] || []), ...body.scopes])];
+        return json(res, { ok: true, grants: VM.grants[body.session] });
+      }
       if (p === "/api/vm-share-roots") {
         if (body.action === "add") {
           if (body.path === "/home/u") return json(res, { ok: false, code: "vm_share_forbidden", error: "vm_share_forbidden: 공유할 수 없는 폴더입니다" }, 400);
@@ -295,11 +304,24 @@ const server = http.createServer((req, res) => {
     // 3. granting from the session list
     await frame.locator("#vm-grant-session option", { hasText: "s1" }).waitFor({ state: "attached", timeout: 15000 });
     await frame.locator("#vm-grant-session").selectOption("s1");
+    assert.equal(await frame.locator("#vm-grant-steal-row").isHidden(), true, "no steal box until control is ticked");
+    assert.match(await frame.locator("#vm-control-status").innerText(), /control 보유자 2명\(s8, s9\).*규칙 위반/s,
+      "several holders from before the rule are shown, not cleaned up");
     await frame.locator("#vm-grant-control").check();
+    await frame.locator("#vm-grant-steal-row").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await frame.locator("#vm-grant-steal-label").innerText(), /s8, s9에서 control을 빼앗아 부여/);
+    assert.equal(await frame.locator("#vm-grant-steal").isChecked(), false, "the steal box starts unchecked");
     await frame.locator("#vm-grant").click();
-    await frame.locator("#vm-activity", { hasText: "s1 view+control 부여" }).waitFor({ timeout: 5000 });
-    const grant = posts.find(([u]) => u === "/api/vm/alpha/grant");
-    assert.deepEqual(grant[1], { session: "s1", scopes: ["view", "control"] });
+    await frame.locator("#vm-activity", { hasText: /실패.*vm_control_held.*s8, s9/ }).waitFor({ timeout: 5000 });
+    assert.equal(posts.find(([u]) => u === "/api/vm/alpha/grant")[1].steal, undefined, "unchecked: no steal is sent");
+    await frame.locator("#vm-grant-steal").check();
+    await frame.locator("#vm-grant").click();
+    await frame.locator("#vm-activity", { hasText: "s1 view+control 부여 완료" }).waitFor({ timeout: 5000 });
+    const grant = posts.filter(([u]) => u === "/api/vm/alpha/grant")[1];
+    assert.deepEqual(grant[1], { session: "s1", scopes: ["view", "control"], steal: true });
+    await frame.locator("#vm-control-status").waitFor({ state: "hidden", timeout: 5000 });
+    assert.equal(await frame.locator("#vm-grant-steal-row").isHidden(), true, "s1 holds control now: no steal box");
+    await frame.locator("#vm-grant-control").uncheck();
     // 3c. shared folders and requests
     assert.match(await frame.locator("#vm-share-roots").innerText(), /\/work/, "the allowed root is shown");
     await frame.locator("#vm-shares tbody tr", { hasText: "/Volumes/My Shared Files/src" }).waitFor({ timeout: 5000 });

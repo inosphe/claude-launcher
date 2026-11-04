@@ -847,9 +847,48 @@ class Registry:
             return vm
 
     # ---- grants (the user's) --------------------------------------------- #
-    def grant(self, vm_id: str, session: str, scopes) -> List[str]:
+    def control_holders(self, vm_id: str) -> List[str]:
+        """Sessions whose grant on ``vm_id`` includes ``control``."""
+        with self._lock:
+            return sorted(s for s, sc in self.get(vm_id).grants.items() if CONTROL in sc)
+
+    def grant(self, vm_id: str, session: str, scopes, *, steal=None) -> List[str]:
+        """Add ``scopes`` to ``session``'s grant. ``control`` is held by at most
+        one session per VM: granting it while another session holds it is
+        refused (``vm_control_held``) unless ``steal`` names every current
+        holder (``True`` names them all). A stolen session loses ``control``
+        (and what rides on it) and any running controller role; its other
+        scopes stay. Grants made before this rule that left several holders
+        stay as they are; a new grant then has to steal from all of them."""
+        want = set(_normal(scopes))
         with self._lock:
             vm = self.get(vm_id)
+            others = [s for s in self.control_holders(vm_id) if s != session]
+            if CONTROL in want and CONTROL not in vm.grants.get(session, []) and others:
+                if steal is True:
+                    named = set(others)
+                elif isinstance(steal, str) and steal:
+                    named = {steal}
+                elif isinstance(steal, (list, tuple)) and all(isinstance(x, str) for x in steal):
+                    named = set(steal)
+                elif steal in (None, False):
+                    named = set()
+                else:
+                    raise VmError("vm_bad_request", "steal is true or a session name")
+                if not named:
+                    raise VmError("vm_control_held",
+                                  f"{vm_id}의 control은 {', '.join(others)}이(가) 가지고 있습니다. "
+                                  "한 VM의 control은 한 세션만 가질 수 있습니다. "
+                                  "빼앗아 부여하려면 사용자가 명시적으로 steal을 지정해야 합니다",
+                                  holders=others)
+                left = [s for s in others if s not in named]
+                if left:
+                    raise VmError("vm_control_held",
+                                  f"{vm_id}의 control 보유자 {', '.join(others)} 모두에게서 빼앗아야 합니다 "
+                                  f"(빠진 보유자: {', '.join(left)})", holders=others)
+                for victim in others:
+                    self.revoke(vm_id, victim, [CONTROL])
+                    self._log(vm_id, session, "steal_control", **{"from": victim, "to": session})
             got = sorted(set(vm.grants.get(session, [])) | set(_normal(scopes)),
                          key=SCOPES.index)
             vm.grants[session] = got
