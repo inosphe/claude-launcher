@@ -494,6 +494,15 @@ def spawn_daemon(
     from . import session_env
 
     env = session_env.scrub(env)
+    # What the registry has now, not what this process was handed at birth.
+    # A successor is spawned from inside the outgoing daemon, so without this
+    # every generation keeps the PATH of whichever shell first started the
+    # daemon: a tool installed since then is reported as not installed while
+    # sitting on disk (claunch-7etck.1, claunch-labxh). Merge only — see
+    # :mod:`win_path` for why nothing is removed.
+    from . import win_path
+
+    env = win_path.refresh_environment(env)
     log = _open_log_for_child()
     try:
         os.write(log, spawn_record(reason).encode("utf-8", "replace"))
