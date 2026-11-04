@@ -4969,7 +4969,9 @@ nodes:
     prompt: |
       이 런의 착지 요청을 받을 세션이 없다는 판정이 났다(landing의 여섯째
       확인, 종료 코드 1). 이제 그 판정의 근거를 모은다 — 요약하지 말고
-      명령의 출력을 옮긴다:
+      명령의 출력을 옮긴다. 이 노드는 갈래의 재측정(landing-target-retry,
+      1분 간격 3회)이 모두 1로 끝났거나 판정 불가로 끝났을 때만 온다 —
+      질문의 근거는 그 마지막 측정이다:
       1. `claunch gate landing-target --json` — 데몬의 Router가 낸 답이다.
          `why`가 탈락 사유 전체이고, `passed`는 지나온 세션과 그 이유,
          `refused`는 거절된 후보, `undecidable`은 판정 불가 여부다.
@@ -6424,8 +6426,20 @@ procedures:
             후보 그룹을 차례로 비우고 사람 앞에 서며, 그동안 런은 상한까지
             돈다(지금 상한은 5회·약 50분이고, 25회 상한 때의 실측이 25회·약
             4시간이다, claunch-od1mx). 없는 대상을 상위에
-            물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 곧바로
-            사람이다.
+            물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 사람이
+            정한다 — 다만 그 자리에서가 아니라 재측정 세 번이 끝난 뒤다
+            (claunch-sp0ut.1).
+            **1은 순간값이다.** 이 판정은 리더 세션이 선언한 landing 큐를
+            읽으므로, 리더가 회차 사이에 있으면 답이 바뀐다 — 실측: 한 회차가
+            21:51에 1을 냈고 22:13에 리더의 새 런이 뜨자 같은 명령이 0이 됐는데,
+            그 사이에 열린 사람 질문은 하루 동안 그대로 남았다(claunch-sp0ut).
+            그래서 no-target 갈래는 질문을 열기 전에 1분 간격으로 세 번 더 잰다
+            (landing-target-retry). 그 사이에 한 번이라도 0이 나오면 갈래를 떠나
+            평소의 request 경로(submit: 정렬 → 동료 리뷰 → 착지 요청)로 가고,
+            세 번 다 1일 때만 사람이 고른다. 재측정이 판정 불가(2)로 끝난 때도
+            사람에게 간다 — 이 갈래는 이미 1을 잰 뒤이고, 지금 잴 수 없다는 것이
+            그 근거를 지우지는 않는다. 재측정은 이 세션의 턴을 쓰지 않는다 —
+            엔진이 명령을 돌리는 대기다.
             **2면 escalate다.** 모르는 것을 request로 밀지 않는다 — 그 규칙은
             여섯째에도 그대로다. 다만 2를 1로 읽지도 않는다: 판정 불가는
             「아무도 없다」가 아니고, 사람에게 올릴 근거가 서지 않았다는 뜻이다.
@@ -6537,13 +6551,48 @@ procedures:
                           owner: "$data.landing_route.owner"
                           issue: "$data.landing_route.issue"
                           relation: "$data.landing_route.relation"
-                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 묻는다.
+                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 잰다.
                       ask-again: []
-                  # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
-                  - id: landing-target-ask
-                    call: landing-target-gate
-                    with: {relation: "$data.inputs.relation"}
-                    bind: landing_route
+                  # claunch-sp0ut.1: 여섯째 확인의 1은 그 순간의 값이다. 이 갈래에
+                  # 섰다는 것은 방금 1을 쟀다는 뜻이고, 그 1은 리더의 landing 큐가
+                  # 회차 사이에 비어 있었다는 것일 뿐이다(실측: 21:51 exit 1 ->
+                  # 22:13 리더 런 583이 뜨자 exit 0, 그 사이에 열린 질문이 하루를
+                  # 남았다). 사람을 세우기 전에 1분 간격으로 세 번 더 잰다.
+                  # poll 60 x 3 = seconds 180: 첫 폴이 진입 즉시(t=0), 다음이
+                  # 60·120초라 재측정이 정확히 세 번이고, 180초에 시간이 다 된다.
+                  # probe는 여섯째 확인과 같은 명령이다 — 다른 명령을 재면
+                  # 판정과 재측정이 서로 다른 것을 잰다.
+                  - id: landing-target-retry
+                    wait:
+                      probe: [claunch, gate, landing-target, --json]
+                      poll: 60
+                      seconds: 180
+                      undecided_max: 3
+                      describe: "착지 요청을 받을 세션이 생겼는지 1분 간격으로 세 번 더 잰다 — 하나라도 0이면 평소 착지 경로로 간다"
+                    # 두 실패 갈래를 빈 트리로 받아 둔다: 여기서 갈래를 끝내면
+                    # 아래 cond가 서지 못하고 timeout·undecidable이 이 seq 밖으로
+                    # 새어 나가는데, 그 둘은 land가 선언하지 않은 결과다(fail로
+                    # 회차 루프를 탈출한다 — claunch-improver-integration-request-
+                    # blocked-o6paj와 같은 사고 경로). 판정은 아래 cond가 한다.
+                    on:
+                      timeout: []
+                      undecidable: []
+                  - id: landing-target-reroute
+                    cond:
+                      # exit 0 — 3분 사이에 대상이 생겼다. then을 빈 트리로 두면
+                      # 이 cond가 ok로 끝나고, cond가 이 seq의 마지막 노드이므로
+                      # no-target 옵션의 트리도 ok로 끝난다. 그러면 choose가 ok로
+                      # 완결되고 land의 seq가 submit(정렬 → 동료 리뷰 → 착지
+                      # 요청)으로 이어진다 — 그것이 평소의 착지 경로다.
+                      - if: "$result['landing-target-retry'].outcome == 'ok'"
+                        then: []
+                      # 세 번 다 1(또는 판정 불가) — 지금처럼 사람이 정한다.
+                      - else:
+                          # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
+                          - id: landing-target-ask
+                            call: landing-target-gate
+                            with: {relation: "$data.inputs.relation"}
+                            bind: landing_route
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
