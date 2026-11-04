@@ -774,12 +774,15 @@ DAEMON_DEFAULTS = {
     # daemon start. cflow2_poll is its tick in seconds (read at start).
     "cflow2_clock": True,
     "cflow2_poll": 10.0,
-    # The v2 clock's re-nudge (daemon/cflow2_clock.py, claunch-slia4.1):
-    # seconds between "the run moved -- waiting on you" notices resent to a
-    # driver whose run still waits on it (an unreported task, an agent choose
-    # nobody picked). A choose has no wait to fire, so without this the run is
-    # silent from its entry until a restart's resume nudge. 0 or less
-    # disables the re-nudge. Read live by the clock on every pass.
+    # The v2 clock's re-nudge (daemon/cflow2_clock.py, claunch-slia4.1,
+    # claunch-3sen5): seconds a run that still waits on its driver (an
+    # unreported task, an agent choose nobody picked) waits before it is sent
+    # ONE more "the run moved -- waiting on you" notice. A choose has no wait
+    # to fire, so without this the run is silent from its entry until a
+    # restart's resume nudge. The notice is owed once per wait, not once per
+    # interval: a different wait (another task or choose) earns its own single
+    # nudge. 0 or less disables the re-nudge. Read live by the clock on every
+    # pass.
     "cflow2_renudge_interval": 600.0,
     # A cflow v2 ``fork`` delegation (a quick-fork of the run's driver per
     # group member, claunch-dm09i): the tokens that must be left before the

@@ -101,12 +101,15 @@ log = logging.getLogger("claunch.daemon.cflow2")
 
 DEFAULT_POLL = 10.0
 
-#: How often a run still waiting on its driver (an unreported task, an agent
-#: choose nobody picked) is told again, in seconds. A choose has no wait to
-#: fire, so without this the run is silent from its entry until a daemon
-#: restart's resume nudge -- the s1308 seven-hour stuck (claunch-slia4.1).
-#: Configurable as ``cflow2_renudge_interval`` (store.DAEMON_DEFAULTS); 0
-#: or less disables the re-nudge.
+#: How long a run still waiting on its driver (an unreported task, an agent
+#: choose nobody picked) waits before it is told ONE more time, in seconds. A
+#: choose has no wait to fire, so without this the run is silent from its
+#: entry until a daemon restart's resume nudge -- the s1308 seven-hour stuck
+#: (claunch-slia4.1). The nudge is owed once per wait: the same wait is never
+#: repeated, and a different one (a task reported, a choose picked) gets its
+#: own single nudge (claunch-3sen5). Configurable as
+#: ``cflow2_renudge_interval`` (store.DAEMON_DEFAULTS); 0 or less disables the
+#: re-nudge.
 DEFAULT_RENUDGE_INTERVAL = 600.0
 
 #: Who the journal names when a session's own ending finished its run: the
@@ -333,6 +336,10 @@ class Cflow2Clock:
         #: ``_open_delegations``: a restart forgets it and the resume nudge
         #: covers the down time.
         self._driver_nudged: Dict[Tuple[str, str], float] = {}
+        #: ``(cwd, scope) -> the wait (``_wait_identity``) that already had its
+        #: one re-nudge``. The same wait is never told twice; a different one
+        #: clears this and earns its own single nudge (claunch-3sen5).
+        self._driver_nudge_done: Dict[Tuple[str, str], Tuple[str, ...]] = {}
         #: ``(cwd, scope) -> (the slot's files, when the full pass ran)`` for
         #: a held driver's slot that pass found quiescent; a pass skips it
         #: while both still hold. In memory only, so a restart -- whose first
@@ -811,6 +818,9 @@ class Cflow2Clock:
         if first.get("status") not in runtime.LIVE_STATUSES:
             self._open_delegations.pop((cwd, scope), None)
             self._driver_nudged.pop((cwd, scope), None)
+            # The wait's record too: a run started in this slot next reads the
+            # same instance ids, and it is owed its own single nudge.
+            self._driver_nudge_done.pop((cwd, scope), None)
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
@@ -930,38 +940,65 @@ class Cflow2Clock:
 
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:
-        """Tell a run's driver again when the run has waited on it past the
-        re-nudge interval (claunch-slia4.1).
+        """Tell a run's driver once more when the run has waited on it past the
+        re-nudge interval -- once per wait, never repeatedly (claunch-slia4.1,
+        claunch-3sen5).
 
         A choose has no wait to fire, so ``ticked`` stays 0 and the run is
         silent from its entry -- the s1308 stuck. The interval starts at the
         wait's first sight (or at any notice above, which is fresh context for
         the driver) and stops when the run stops waiting on its driver, so a
-        resolved choose or a finished run cannot be nudged about again. A busy
-        driver is skipped without spending the interval: when its turn ends,
-        the next pass re-nudges at once if the wait is already that old. A
+        resolved choose or a finished run cannot be nudged about again.
+
+        The nudge is owed once for a given wait. A driver that does not pick
+        the run up is left alone: repeating the same block every interval only
+        filled its terminal, and the typed text also reset
+        ``Session.quiet_for``, so the idle hold could never free the session
+        (s1249 got one every ten minutes for six hours). A wait that is
+        actually a different one -- another task, another choose, another
+        sub-agent delegation (``_wait_identity``) -- clears the record and
+        earns its own single nudge.
+
+        A busy driver is skipped without spending the interval: when its turn
+        ends, the next pass nudges at once if the wait is already that old. A
         driver in an active session fault is skipped the same way, so the
         first pass after the fault's window (a usage limit's reset) tells it
         once and the run picks up again (claunch-ijot0)."""
         key = (cwd, scope)
         if not _waits_on_driver(payload):
             self._driver_nudged.pop(key, None)
+            self._driver_nudge_done.pop(key, None)
             return
+        identity = _wait_identity(payload)
         if told:
+            # A real notice just went out: fresh context for the driver, and
+            # this wait's one nudge is still owed, counted from now.
+            self._driver_nudged[key] = clock_now
+            self._driver_nudge_done.pop(key, None)
+            return
+        done = self._driver_nudge_done.get(key)
+        if done is not None and done != identity:
+            # The wait the last nudge was about is gone (a task reported, a
+            # choose picked, a delegation submitted). A new wait, its own
+            # interval, one nudge.
+            self._driver_nudged[key] = clock_now
+            self._driver_nudge_done.pop(key, None)
+            return
+        if done is not None:
+            return  # this wait already had its one nudge; stay quiet
+        last = self._driver_nudged.get(key)
+        if last is None:
             self._driver_nudged[key] = clock_now
             return
         interval = self._renudge_interval_seconds()
         if interval <= 0:
-            return
-        last = self._driver_nudged.get(key)
-        if last is None:
-            self._driver_nudged[key] = clock_now
             return
         if clock_now - last < interval or not self._driver_idle(scope):
             return
         if self._driver_faulted(scope):
             return
         self._driver_nudged[key] = clock_now
+        self._driver_nudge_done[key] = identity
         notices.append((cwd, payload.get("driver") or _name(scope),
                         moved_block(scope, payload, why=WHY_NUDGE)))
 
@@ -1506,8 +1543,9 @@ def _slot_files(cwd: str, scope: str) -> Optional[Tuple[Any, ...]]:
 
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
 WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
-WHY_NUDGE = ("the run is still waiting on you -- the clock re-nudges a waiting "
-             "driver on an interval (claunch-slia4.1)")
+WHY_NUDGE = ("the run is still waiting on you -- the clock nudges a waiting "
+             "driver once, after an interval, and then leaves it alone "
+             "(claunch-slia4.1, claunch-3sen5)")
 
 
 def _driver_runs(entry: Dict[str, Any]) -> bool:
@@ -1533,6 +1571,30 @@ def _waits_on_driver(payload: Dict[str, Any]) -> bool:
            for c in payload.get("choices") or []):
         return True
     return any(_driver_runs(d) for d in payload.get("delegations") or [])
+
+
+def _wait_identity(payload: Dict[str, Any]) -> Tuple[str, ...]:
+    """What the run is waiting on, as a value that changes when the wait does.
+
+    The re-nudge is owed once per wait, so the clock has to be able to tell
+    "still the same wait" from "a new one" (claunch-3sen5). It reads the
+    instance ids the payload carries, not the labels: a run that reports one
+    task into another of the same label would otherwise look unchanged, and
+    its new wait would never be announced. A task that entered again has a new
+    visit on its instance id for the same reason.
+    """
+    at: List[str] = []
+    for task in payload.get("tasks") or []:
+        at.append(str(task.get("instance") or task.get("id")
+                      or task.get("label") or ""))
+    for choice in payload.get("choices") or []:
+        if choice.get("chooser") == ir.CHOOSER_AGENT and not choice.get("held"):
+            at.append(str(choice.get("instance") or choice.get("id")
+                          or choice.get("label") or ""))
+    for entry in payload.get("delegations") or []:
+        if _driver_runs(entry):
+            at.append(str(entry.get("id") or entry.get("node") or ""))
+    return tuple(sorted(at))
 
 
 def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> str:
