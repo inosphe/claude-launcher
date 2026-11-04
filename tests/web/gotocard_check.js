@@ -15,7 +15,8 @@ const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
                          "static");
-const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const src = fs.readFileSync(
+  process.env.GOTOCARD_APP_JS || path.join(STATIC, "app.js"), "utf8");
 const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
 const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
 
@@ -75,6 +76,16 @@ list.querySelectorAll = (sel) => {
   if (sel !== "li[data-name]") throw new Error("unexpected list selector " + sel);
   return rail;
 };
+/* The rail is a scroll container, so it takes listeners: the press lays a
+   mark on it and takes the mark off when the animation settles (scrollend). */
+const listListeners = {};
+list.addEventListener = (type, fn) => {
+  (listListeners[type] = listListeners[type] || []).push(fn);
+};
+const fireList = (type) => {
+  const fns = (listListeners[type] || []).splice(0);
+  fns.forEach((fn) => fn());
+};
 const row = (name, cls, parent = list) => node({ name }, cls, parent);
 let rail = [];
 /* The tab strip as renderSessionGroupTabs builds it: one tab per group, each
@@ -96,7 +107,9 @@ const tabBar = { querySelectorAll: (sel) => {
 const setSessionGroupTab = (group, value) => opened.push([group, value]);
 const refreshSessions = (opts) => {
   redraws.push(opts);
-  const [group, value] = opened.at(-1);
+  const last = opened.at(-1);
+  if (!last) return;                     // ungrouped: the whole rail is open
+  const [group, value] = last;
   const open = tabs.find((t) => t.dataset.group === group && t.dataset.value === value);
   rail = open._groupRows.map((r) => row(r.session.name));
   if (onRedraw) onRedraw(opts);
@@ -182,17 +195,25 @@ const stubs = {
   sessionGridUnfolded, renderSessionGrid: (f) => renderSessionGrid(f),
   setSessionSearch, syncSessionSearchClear, syncSessionSearchOpen,
 };
+/* What the rail's drawn slice covers. The press's mark hands the covering
+   check to its release; whether that check asks for a pass is the caller's
+   business, so the harness sets it. */
+let sliceCovers = true;
+function railSliceCovers() { return sliceCovers; }
 new Function(
-  "exports", "document", "setTimeout", "clearTimeout", "getView", ...Object.keys(stubs),
+  "exports", "document", "setTimeout", "clearTimeout", "getView", "railSliceCovers",
+  ...Object.keys(stubs),
   // The module-level state the functions share, taken from app.js itself so
   // the window this checks is the shipped one.
   `let currentName = "s193";\n` +
   `let sessionSearch = { q: "", hits: null, pending: false, error: "", index: null };\n` +
   /const GOTO_FLASH_MS = \d+;/.exec(src)[0] + "\n" +
   /const RAIL_LAID_OUT_MS = \d+;/.exec(src)[0] + "\n" +
+  /const RAIL_SCROLL_TOP_ANIM_MS = \d+;/.exec(src)[0] + "\n" +
   "let gotoFlashName = null;\nlet gotoFlashTimer = null;\n" +
   "let railLaidOutTimer = null;\n" +
-  [slice("applyGotoFlash"), slice("layRailOut"), slice("revealSessionListRow"),
+  [slice("applyGotoFlash"), slice("layRailOut"), slice("railPressMark"),
+   slice("revealSessionListRow"),
    slice("revealSessionGridCell"),
    slice("revealSessionCard"), slice("gotoSessionCard"),
    slice("clearSessionSearch"), slice("gotoSessionCardFromHeader"),
@@ -210,9 +231,11 @@ Object.assign(exports, {
   bootPolls: () => BOOT_GOTO_POLLS,
   flashMs: () => ${/const GOTO_FLASH_MS = (\d+);/.exec(src)[1]},
   laidMs: () => ${/const RAIL_LAID_OUT_MS = (\d+);/.exec(src)[1]},
+  topMs: () => ${/const RAIL_SCROLL_TOP_ANIM_MS = (\d+);/.exec(src)[1]},
   setCur: (n) => { currentName = n; },
 });`
-)(ctx, document, setTimeout_, clearTimeout_, () => sessionView, ...Object.values(stubs));
+)(ctx, document, setTimeout_, clearTimeout_, () => sessionView, railSliceCovers,
+   ...Object.values(stubs));
 FLASH_MS = ctx.flashMs();
 LAID_MS = ctx.laidMs();
 
@@ -230,6 +253,43 @@ check("and the mark lands on that same row",
       JSON.stringify(flashed()) === JSON.stringify(["s193"]), flashed());
 check("the row the rail had lit is left alone",
       rail[1].classes.has("active") && !rail[1].classes.has("goto-flash"));
+
+/* ---- the smooth scroll owns the rail until it lands (claunch-7vd4v.1) ----
+   "여전히 세션 카드 이동 (#term-goto) 시 끊기는 상황이 있네. 끊긴 상태에서 다시
+   누르면 찾아가긴해." A pass that runs mid-animation writes the position with an
+   instant `scrollTop`, which aborts the smooth scroll (CSSOM View); a second
+   press, from closer, reaches the row. The press therefore marks the rail the
+   way the scroll-to-top press does, and the release runs the covering check
+   the scroll handler skipped. */
+check("the press marks the rail for the animation's run",
+      list._railScrollTopUntil > Date.now(), list._railScrollTopUntil);
+check("the mark is a deadline, not a bare flag",
+      ctx.topMs() > 0 && list._railScrollTopUntil <= Date.now() + ctx.topMs(),
+      [list._railScrollTopUntil - Date.now(), ctx.topMs()]);
+// Mid-animation the drawn slice still covers where the scroll is: nothing owed.
+// The release reads the slice the rail ended on, so the stub carries the
+// fields a real list has after a pass.
+list._railRows = [];
+list._railWindowPlan = { first: 0, last: 0 };
+list.clientHeight = 900;
+sliceCovers = true;
+let passes = redraws.length;
+fireList("scrollend");
+check("the mark comes off when the animation settles",
+      list._railScrollTopUntil === 0, list._railScrollTopUntil);
+check("...and a covering slice asks for no pass",
+      redraws.length === passes, [redraws.length, passes]);
+// A slice that no longer covers it is redrawn, as the scroll handler would
+// have done had the press not been running.
+sliceCovers = false;
+passes = redraws.length;
+ctx.gotoSessionCard();
+fireList("scrollend");
+check("a slice that does not cover the landing asks for one pass",
+      redraws.length === passes + 1, [redraws.length, passes]);
+check("...from the cache, not the daemon",
+      !!(redraws.at(-1) && redraws.at(-1).cached === true), redraws.at(-1));
+sliceCovers = true;
 
 /* ---- the rail is laid out for real before it is scrolled (claunch-ayaig) ----
    A row below the fold is not laid out: it answers with the
@@ -333,6 +393,7 @@ check("a row that cannot scroll is still marked rather than throwing",
 /* ---- grid view: the cell is scrolled to and marked, not the hidden list ---- */
 {
   settle();
+  list._railScrollTopUntil = 0;             // the last animation has settled
   sessionView = "grid";
   rail = [row("s193")];                     // the list is still built behind the grid
   layout.place = { s193: { row: 0, col: 2 }, s050: { row: 1, col: 5 } };
@@ -343,6 +404,8 @@ check("a row that cannot scroll is still marked rather than throwing",
   check("grid: the press finds the cell", ctx.gotoSessionCard() === true);
   check("grid: the cell is scrolled to, centred",
         cells[1].scrolls.length === 1 && cells[1].scrolls[0].block === "center", cells[1].scrolls);
+  check("grid: the rail is not what scrolls, so it carries no press mark",
+        list._railScrollTopUntil === 0, list._railScrollTopUntil);
   check("grid: the hidden list row is not scrolled", rail[0].scrolls.length === 0);
   check("grid: the cell is highlighted", cells[1].classes.has("goto-flash")
         && !cells[0].classes.has("goto-flash"));
