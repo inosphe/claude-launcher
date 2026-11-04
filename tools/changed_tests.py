@@ -120,6 +120,14 @@ for a green receipt filed under that hash *and* this selection. If one is
 there it prints what it stood on and runs nothing; when it does run, it
 leaves the receipt behind.
 
+Between that lookup and the run sits the test window, and the wait can last
+up to its cap (1800 s). So the hash the receipt is filed under is taken
+again *after* the window is granted: a commit made during the wait would
+otherwise leave a green receipt for a tree the run never read, which is the
+false green ``--check`` carries to the next session (claunch-1cn7l). The
+reuse decision is not remade there -- standing on a receipt starts no run --
+and a tree that cannot be measured after the wait leaves no receipt at all.
+
 The file name carries those two. Two more elements of the key live in the
 receipt body (:data:`REUSE_FIELD`): the merge base the selection was derived
 from, and the interpreter and installed packages pytest runs under
@@ -2852,6 +2860,40 @@ def main(argv: Optional[list] = None) -> int:
         print(f"cannot run selected tests: {exc}", file=sys.stderr)
         return CANNOT_TELL
 
+    # What pytest is about to read, measured after the wait. The key above was
+    # taken before the window for the reuse decision -- standing on a receipt
+    # starts no run, so it must not hold a slot. But the wait can run to the
+    # window's cap (1800 s), and a commit made inside it left this run's
+    # receipt filed under the pre-wait tree: ``--check`` answered "green" for
+    # content nobody read (claunch-1cn7l). So the key is re-measured here, and
+    # the run is filed under what it reads. A failed measurement is no answer,
+    # not the earlier one: the run then leaves no receipt at all.
+    measured = tree
+    try:
+        measured = worktree_tree(repo)
+    except (LookupError, OSError) as exc:
+        print(
+            f"WARNING: no tree hash after the window wait ({exc}); running "
+            f"without a receipt.",
+            file=sys.stderr,
+        )
+        measured = None
+    reuse = key_now
+    if measured != tree:
+        print(
+            f"NOTE: the working tree moved while waiting for a window "
+            f"({(tree or '?')[:12]} -> {(measured or '?')[:12]}); this run's "
+            f"receipt is filed under the tree it reads.",
+            file=sys.stderr,
+        )
+        reuse = (
+            None if measured is None
+            else reuse_key(
+                measured, merge_base(repo, base), files, deselect,
+                environment_identity(repo),
+            )
+        )
+
     cmd = apply_worker_advice(
         build_command(
             files, basetemp=args.basetemp, deselect=deselect,
@@ -2866,7 +2908,7 @@ def main(argv: Optional[list] = None) -> int:
             repo,
             files,
             cmd,
-            tree,
+            measured,
             args.base,
             args.receipts,
             environment=grant.child_env(),
@@ -2877,7 +2919,7 @@ def main(argv: Optional[list] = None) -> int:
                 str(args.known_failures) if args.known_failures is not None else None
             ),
             compare_at=compare_at,
-            reuse=key_now,
+            reuse=reuse,
             with_tail=args.with_tail,
         )
     finally:

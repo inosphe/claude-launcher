@@ -1052,6 +1052,100 @@ def test_the_tree_and_the_selection_still_key_a_run(repo, gate):
     assert gate.runs() == 3, "an edit is another tree"
 
 
+# --------------------------------------------------------------------------- #
+# when the key is measured: the window can make the run wait (claunch-1cn7l)
+# --------------------------------------------------------------------------- #
+def _fake_grant(monkeypatch, during):
+    """Stand in for the window: run ``during`` where the wait would be."""
+
+    class Grant:
+        advisory_n = 1
+
+        def child_env(self, base=None):
+            return dict(os.environ)
+
+        def receipt(self):
+            return {"class": "targeted", "workers": 1, "advisory_n": 1}
+
+        def release(self):
+            pass
+
+    calls = {"n": 0}
+
+    def acquire(*args, **kwargs):
+        calls["n"] += 1
+        during()
+        return Grant()
+
+    monkeypatch.setattr(changed_tests.test_window, "acquire", acquire)
+    return calls
+
+
+def test_the_receipt_names_the_tree_the_run_read(repo, gate, monkeypatch, capsys):
+    """A commit that lands while the run waits for a window.
+
+    ``worktree_tree`` was measured before the window was taken, and the wait
+    can run to the window's cap (1800s). A receipt filed under the pre-wait
+    tree then reports green for content pytest never read: ``--check`` on
+    that tree answers "green", and nobody ran it (claunch-1cn7l). The key is
+    what the run is about to read, so it is re-measured after the wait.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    before = changed_tests.worktree_tree(repo)
+
+    def commit_while_waiting():
+        _write(repo, "src/pkg/mesh.py", "x = 3\n")
+        _git(repo, "commit", "-qam", "a commit made while queueing for a window")
+
+    calls = _fake_grant(monkeypatch, commit_while_waiting)
+    assert gate() == 0
+    assert calls["n"] == 1, "the wait has to happen for this case to exist"
+
+    after = changed_tests.worktree_tree(repo)
+    assert after != before, "control: the wait really did move the tree"
+    files = _select(repo)
+    filed = changed_tests.receipt_path(repo, after, files, gate.receipts)
+    stale = changed_tests.receipt_path(repo, before, files, gate.receipts)
+    assert filed.is_file(), "the receipt was filed under the tree the run never read"
+    assert not stale.exists(), "a receipt claims the pre-wait tree is green"
+    receipt = json.loads(filed.read_text(encoding="utf-8"))
+    assert receipt["tree"] == after
+    assert receipt["reuse"]["tree"] == after, "the key names the tree it measured"
+    assert "moved" in capsys.readouterr().err
+
+    # The receipt this run just wrote is one the next run can stand on: a key
+    # that could not be reused would be a different way of claiming nothing.
+    calls["n"] = 0
+    assert gate() == 0
+    assert gate.runs() == 1, "the receipt filed after the wait was not reused"
+
+
+def test_a_tree_that_cannot_be_measured_after_the_wait_files_no_receipt(
+    repo, gate, monkeypatch, capsys
+):
+    """No second answer is not the first answer: a run that cannot say what it
+    read leaves no receipt, rather than filing the pre-wait tree it was
+    already wrong about."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    healthy = changed_tests.worktree_tree
+    _fake_grant(monkeypatch, lambda: None)
+    calls = {"n": 0}
+
+    def once_then_fail(repo_path):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("git went away")
+        return healthy(repo_path)
+
+    monkeypatch.setattr(changed_tests, "worktree_tree", once_then_fail)
+    receipts = gate.receipts
+    assert gate() == 0
+    assert calls["n"] == 2, "it measured before the wait and again after"
+    assert not (receipts.is_dir() and list(receipts.rglob("*.json"))), (
+        "a receipt was filed for a tree this run could not name"
+    )
+
+
 @pytest.mark.parametrize(
     "moved",
     ["tree", "base_commit", "selection", "environment"],
