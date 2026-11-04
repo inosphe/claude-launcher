@@ -69,6 +69,25 @@ def test_set_read_decide_and_the_block_the_session_receives(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_a_note_pick_reaches_the_session_and_gates_nothing(tmp_path):
+    """claunch-i0whx: a note's optional 「여기서 진행」/「이슈로 넘김」 is typed
+    into the session like a followup's; 버림 is not offered."""
+    async def scenario(req, mgr):
+        await req("POST", "/api/plan", {**PLAN, "steps": [], "closure": [
+            {"id": "n1", "kind": "note", "title": "could also cache X"}]})
+        res = await req("POST", "/api/plan/node/n1/decide", {"session": "s1", "rev": 1, "action": "here",
+                                                              "note": "this round"})
+        assert res["delivered"] is True and res["plan"]["summary"]["closable"] is True
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "picked up your plan's note n1: here" in block and "> this round" in block
+        assert "plan_set" in block
+        await req("POST", "/api/plan/node/n1/decide", {"session": "s1", "rev": 1, "action": "issue"})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "claunch beads create" in block and "(this replaces an earlier result: here)" in block
+        await req("POST", "/api/plan/node/n1/decide", {"session": "s1", "rev": 1, "action": "drop"}, status=400)
+    run(tmp_path, scenario)
+
+
 def test_who_may_write(tmp_path):
     async def scenario(req, mgr):
         await req("POST", "/api/plan", {**PLAN, "by": "s2"}, status=403)       # another session's plan
