@@ -962,8 +962,11 @@ def test_a_resumable_session_the_host_took_waits_in_a_restore_queue(host, tmp_pa
         assert dead.exited and dead.delayed_at and not getattr(dead, "failed_at", None)
         queue = restore_queue.RestoreQueue(mgr, interval=0.0, names=out.delayed)
         queue.start()
-        assert await _until_true(lambda: not mgr.get("h5").exited)
-        assert queue.started == ["h5"]
+        # The record turns live inside wake_async, before it returns and the
+        # queue books the name; wait for the booking, not for the respawn
+        # (claunch-wua3t: under load the first poll landed in between).
+        assert await _until_true(lambda: queue.started == ["h5"])
+        assert not mgr.get("h5").exited
         await _wait_screen(mgr.get("h5"), "READY")
         await queue.stop()
         await mgr.shutdown_all(mode="stop")
