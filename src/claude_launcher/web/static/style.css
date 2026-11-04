@@ -9189,14 +9189,13 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 #retrospection-view .retrospection-excerpt {
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
-#retrospection-view .retrospection-card-footer { flex-wrap: wrap; }
+#retrospection-view .glossary-card-footer { flex-wrap: wrap; }
 /* 190px is the app header plus the shell's own header above the layout: the
    pane has to end inside an 800px window both while it sits under that header
    and once the list scrolls it up to the view's top edge (sticky, top: 0). */
 #retrospection-view .retrospection-detail { max-height: calc(100vh - 190px); overflow-y: auto; }
 #retrospection-view .retrospection-detail .glossary-toolbar h3 { min-width: 0; overflow-wrap: anywhere; }
 #retrospection-view .retrospection-body { color: #ccd5df; font-size: 13.5px; line-height: 1.75; }
-#retrospection-view .retrospection-empty-action { margin-top: 4px; }
 @container (max-width: 760px) {
   #retrospection-view .retrospection-detail { max-height: none; overflow-y: visible; }
 }

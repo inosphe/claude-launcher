@@ -69,3 +69,27 @@ def test_the_page_and_the_css_agree_on_class_names() -> None:
     ):
         assert name in js, f"{name} is no longer put on the page"
         assert f".{name}" in css, f"{name} has no styling"
+
+
+def test_every_scoped_class_is_one_the_page_builds() -> None:
+    """A rule naming a class nothing emits styles nothing (claunch-u0wyo).
+
+    The view reuses the glossary shell's markup, so a styling rule has to name
+    the class that markup actually carries. Two rules shipped naming
+    ``retrospection-*`` classes that ``retrospection-page.js`` never emits —
+    invisible in review, invisible in the browser harness (an unmatched
+    selector is not an error), and found only by hand.
+    """
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    emitted = " ".join(
+        (STATIC / name).read_text(encoding="utf-8")
+        for name in ("retrospection-page.js", "glossary-page.js", "app.js", "index.html")
+    )
+    scoped = set()
+    for selector, _body in _rules(css):
+        if "#retrospection-view" not in selector:
+            continue
+        scoped.update(re.findall(r"\.([A-Za-z0-9_-]+)", selector))
+    assert scoped, "no rule is scoped to #retrospection-view"
+    dead = sorted(name for name in scoped if name not in emitted)
+    assert dead == [], f"styling rules name classes no page emits: {dead}"
