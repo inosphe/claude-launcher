@@ -3407,7 +3407,9 @@ class SessionManager:
             )
         return await self.redefine(name, env=env)
 
-    async def migrate(self, name: str, new_cwd: str, project: Optional[str] = None) -> Tuple[Session, bool]:
+    async def migrate(
+        self, name: str, new_cwd: str, project: Optional[str] = None
+    ) -> Tuple[Session, bool, List[str]]:
         """Move a session to another directory: stop it, carry its claude
         conversation's transcript, and relaunch it there.
 
@@ -3441,10 +3443,12 @@ class SessionManager:
         and the record keeps its old definition — so the failure mode is
         "still where it was", not "half-moved".
 
-        Returns the relaunched session and whether a transcript was actually
+        Returns the relaunched session, whether a transcript was actually
         carried (``False`` for other harnesses, and for a conversation that
         never wrote one — resuming that was already broken, and is reported
-        rather than refused because the move changes nothing about it).
+        rather than refused because the move changes nothing about it), and
+        the scope names of the cflow v2 run slots that moved with it (empty
+        when there was nothing to move).
         """
         session = self.get(name)
         old = session.sdef
@@ -3507,7 +3511,7 @@ class SessionManager:
                            transcript_moved=moved is not None,
                            slots_moved=moved_slots,
                            project=old.project if new_project != old.project else None)
-        return relaunched, moved is not None
+        return relaunched, moved is not None, list(moved_slots)
 
     async def shutdown_all(self, mode: str = "stop", *, reason: str = "stop") -> None:
         """End every live session, the daemon going down.
