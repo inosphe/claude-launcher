@@ -79,9 +79,9 @@ def _no_session(monkeypatch):
 class Drv:
     """A run driven by ``w1``, whose parent is ``boss``."""
 
-    def __init__(self, tmp_path, *, parent="boss", driver="w1", src=WORKER):
+    def __init__(self, tmp_path, *, parent="boss", driver="w1", src=WORKER, scope=None):
         self.cwd = str(tmp_path)
-        self.scope = driver
+        self.scope = scope or driver
         chart = frontend.compile_text(textwrap.dedent(src))
         self.st = runtime.start(chart, cwd=self.cwd, scope=self.scope, caps={}, now=T0,
                                 driver=driver, driver_parent=parent)
@@ -420,6 +420,41 @@ def test_a_child_without_a_parent_sends_nothing(tmp_path):
     d.to_end_decision()
     assert clock.scan() == []
     assert d.state().get("driver_parent") == ""
+
+
+def test_a_nested_runs_gate_is_not_pushed_to_the_parent(tmp_path):
+    """A nested run (a ``calls`` slot, ``<main>~cN``) is not the session's own
+    run: ``parent`` in its state names the slot, not a session, and
+    ``rail_entry``/``flow_gates`` never list it. The line for it would name the
+    main run from ``session_of(scope)`` and point the parent at a gate that is
+    not there, so the clock stays out of it entirely (peer review of
+    claunch-vjp4y)."""
+    from claude_launcher.daemon import cflow_clock
+
+    main = Drv(tmp_path, parent="")
+    nested = Drv(tmp_path, parent="", scope="w1~c1")
+    # what the engine writes when it starts the slot (runtime._new_run)
+    store = RunStore(nested.cwd, nested.scope)
+    state = store.load_state()
+    state["parent"] = {"cwd": nested.cwd, "scope": "w1", "call": "c1", "run": "x"}
+    with store.lock():
+        store.save_state(state)
+
+    manager = _FakeManager({"w1": _FakeSession("w1", main.cwd, parent="boss"),
+                            "boss": _FakeSession("boss", str(tmp_path / "boss"))})
+    (tmp_path / "boss").mkdir(exist_ok=True)
+    clock = cflow_clock.RunEventClock(manager)
+    assert clock.scan() == []                       # first sight arms
+    nested.to_end_decision()
+    assert [c["chooser"] for c in nested.st["choices"]] == ["user"]
+    assert clock.scan() == []                       # the nested gate is silent
+    # and nothing was written into the slot's state: its gates stay a person's
+    assert nested.state().get(runtime.DRIVER_PARENT) in (None, "")
+    # the main run is still the one the parent hears about
+    main.to_end_decision()
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["child-gate"]
+    assert f"session: {main.scope}" in events[0]["block"]
 
 
 def test_a_dead_parent_leaves_the_gate_alone(tmp_path):

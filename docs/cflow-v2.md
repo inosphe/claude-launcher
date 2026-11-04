@@ -2119,6 +2119,11 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   런에 부모가 없으면 이벤트 자체가 서지 않으며, 부모 세션이 죽었으면 전달할 곳이 없어
   버려진다(둘 다 gate는 사람 몫으로 남는다). 첫 목격은 알리지 않고 다음 변화부터
   알린다(v1 `human-gate`와 같은 계약 — 데몬 재기동이 지난 gate를 다시 쏘지 않는다).
+  알림도 `driver_parent` 갱신도 **세션의 자기 런**에만 적용된다. 중첩 런(`calls`·위임
+  슬롯, scope `<main>~<id>`)의 상태에는 `parent`가 슬롯 링크로 들어 있고, 그 런은
+  `rail_entry`도 `flow_gates`도 나열하지 않는다 — 알림을 내면 `session_of(scope)`가
+  주 런 이름을 만들어 부모를 주 런의 다른 gate로 보낸다. 그래서 중첩 런의 사람 gate는
+  그 슬롯을 보는 쪽(`flow_status`·대시보드)이 답하고, 부모 위임은 그 범위 밖이다.
 - CLI: `claunch cflow2 select`·`move --approve|--deny`를 부모 세션의 셸에서 실행하면
   그 답도 `by: <부모 세션>`으로 남는다. 드라이버 셸에서는 지금처럼 거절한다
   (`_refuse_own_session`).

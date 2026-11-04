@@ -3396,6 +3396,15 @@ class RunEventClock:
                     state = st.load_state()
                 except Exception:
                     continue
+                if state.get("parent"):
+                    # A nested run (a ``calls`` slot) is not the session's own
+                    # run and ``parent`` here names its slot, not a session.
+                    # ``rail_entry`` and ``flow_gates`` only list the session's
+                    # own run, so a line for this scope would name the main run
+                    # from ``session_of(scope)`` and point the parent at a gate
+                    # that is not there (peer review of claunch-vjp4y). The
+                    # slot's gate is answered by whoever reads the slot's run.
+                    continue
                 if v2_runtime.driver_of(state) != name:
                     continue
                 key = (str(st.cwd), scope)
