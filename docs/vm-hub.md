@@ -679,3 +679,22 @@ taken from them.
 **Panels.** The /vm page lists every lease of the selected VM, the session pane
 only its session's, each with the "원 주인에게 반환" button. Server rule: a daemon
 restart is needed.
+
+## VM access in the quick-fork form
+
+The dashboard's quick-fork form (⑂ fork) lists the VMs the origin holds a grant
+on (`GET /api/vm`; hidden when there are none or the VM feature is off). Per VM:
+
+- `view` and `files` start as the origin's; `control` and `exec` start off. Every
+  box can be changed per VM.
+- A VM whose `control` is held (by the origin or another session) shows the
+  steal box "<holders>에서 control을 빼앗아 부여", unchecked. Ticking `control`
+  without it is refused by the form before anything is sent.
+- `exec` asks for a confirmation, as the grant forms do.
+- After `POST /api/sessions/{origin}/quick-fork` returns the copy's name, the
+  page applies each row with `POST /api/vm/{id}/grant {session, scopes, steal?}`
+  (the user-only route; the copy cannot call it). A grant the daemon refuses is
+  listed in a message and the copy stays. The copy is created before its
+  grants, so it can start before they land.
+- A steal made this way is a lease (see "A steal is a loan"): the copy's
+  merge gives the control back to the one it was taken from.
