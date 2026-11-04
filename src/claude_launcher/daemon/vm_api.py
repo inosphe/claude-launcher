@@ -59,7 +59,7 @@ _STATUS = {
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
     "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_only_refused": 409, "vm_share_confirm_rw": 400, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
-    "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
+    "tart_exited": 502, "vm_no_controller": 409, "vm_control_held": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
@@ -153,6 +153,14 @@ def check_nested(tool: str, arguments: dict) -> None:
 OBSERVE_TOOLS = frozenset({"get_desktop_state", "get_window_state", "zoom"})
 
 SHOTS_KEEP = 20
+
+
+def _steal(body: dict):
+    """The user's explicit wish to take ``control`` from its holder(s):
+    ``steal: true`` (all) or ``steal_from: "session"``. Absent means no."""
+    if body.get("steal_from"):
+        return body["steal_from"]
+    return True if body.get("steal") is True else None
 
 
 def _err(exc: VmError) -> web.Response:
@@ -736,7 +744,7 @@ async def h_approve(request: web.Request) -> web.Response:
         _trace(request, reg, vm_id, "user_approve", to=session, scopes=row["scopes"],
                shares=[f"{s['name']}:{s['mode']}" for s in checked])
         if row["scopes"]:
-            reg.grant(vm_id, session, row["scopes"])
+            reg.grant(vm_id, session, row["scopes"], steal=_steal(body))
         for share in checked:
             reg.share_add(vm_id, {**share, "origin": vm_share.make_origin(vm_share.ORIGIN_REQUEST, session)})
         reg.request_drop(vm_id, session)
@@ -941,8 +949,10 @@ async def h_grant(request: web.Request) -> web.Response:
         session = str(body.get("session") or "")
         if not session:
             raise VmError("vm_bad_request", "'session' is required")
-        got = reg.grant(request.match_info["id"], session, body.get("scopes") or [])
-        _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got)
+        steal = _steal(body)
+        got = reg.grant(request.match_info["id"], session, body.get("scopes") or [], steal=steal)
+        _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got,
+               steal=steal if steal else None)
         await vm_pack.sync(request.app.get("manager"), reg, session)
         out = {"ok": True, "grants": got}
         preset = _template(request, {"tart_name": reg.get(request.match_info["id"]).tart_name})["template"]

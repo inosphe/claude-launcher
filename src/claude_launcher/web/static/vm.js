@@ -318,7 +318,38 @@ $("vm-allow-go").addEventListener("click", () => {
     $("vm-allow-cidr").value = "";
   });
 });
+/* One session at most holds control of a VM. These are the holders other than `except`. */
+const controlHolders = (vm, except) => Object.entries((vm && vm.grants) || {})
+  .filter(([s, sc]) => s !== except && sc.includes("control")).map(([s]) => s).sort();
+/* The "steal" checkbox is the user's explicit wish to take control from its holder(s); it is
+   sent only when checked, and shown only when it can matter. */
+function showSteal(prefix, vmId, session, wantsControl) {
+  const vm = vms.find((v) => v.id === vmId);
+  const holders = wantsControl && vm && session && !(vm.grants[session] || []).includes("control")
+    ? controlHolders(vm, session) : [];
+  $(`${prefix}-steal-row`).hidden = !holders.length;
+  $(`${prefix}-steal-label`).textContent = holders.length
+    ? `${holders.join(", ")}에서 control을 빼앗아 부여` : "";
+  if (!holders.length) $(`${prefix}-steal`).checked = false;
+}
+function refreshSteal() {
+  showSteal("vm-grant", selected, ($("vm-grant-session").hidden ? $("vm-grant-session-text").value : $("vm-grant-session").value).trim(),
+    $("vm-grant-control").checked);
+  if (SESSION) showSteal("vm-sess", $("vm-sess-pick").value, SESSION, $("vm-sess-ex-control").checked);
+}
+function renderControlStatus(vm) {
+  const el = $("vm-control-status");
+  const holders = controlHolders(vm, "");
+  el.hidden = holders.length < 2;
+  el.classList.toggle("error", holders.length > 1);
+  el.textContent = holders.length > 1
+    ? `control 보유자 ${holders.length}명(${holders.join(", ")}) — 규칙 위반 상태: 한 VM의 control은 한 세션만 가질 수 있습니다. `
+      + "자동으로 회수하지 않으며, 새 control 부여는 보유자 모두에게서 빼앗아야 허용됩니다."
+    : "";
+}
 function renderGrants(vm) {
+  renderControlStatus(vm);
+  refreshSteal();
   const body = document.querySelector("#vm-grants tbody");
   body.replaceChildren();
   for (const [session, scopes] of Object.entries(vm.grants || {}).sort()) {
@@ -337,8 +368,13 @@ function renderGrants(vm) {
           box.checked = false;
           return;
         }
+        const others = box.checked && scope === "control" ? controlHolders(vm, session) : [];
+        if (others.length && !confirm(`${others.join(", ")}에서 control을 빼앗아 ${session}에 부여합니다. 계속합니까?`)) {
+          box.checked = false;
+          return;
+        }
         act(`${session} ${scope} ${box.checked ? "부여" : "회수"}`, () => box.checked
-          ? post(`api/vm/${encodeURIComponent(vm.id)}/grant`, { session, scopes: [scope] })
+          ? post(`api/vm/${encodeURIComponent(vm.id)}/grant`, { session, scopes: [scope], ...(others.length ? { steal: true } : {}) })
           : post(`api/vm/${encodeURIComponent(vm.id)}/revoke`, { session, scopes: [scope] }));
       });
       td.appendChild(box);
@@ -916,20 +952,22 @@ function grantScopes() {
 }
 /* The one grant path: the permissions table's "권한 부여" and the session pane's
    "연결" both end here, so the template-copy and exec confirmations are one piece. */
-function grantTo(session, vmId, scopes) {
+function grantTo(session, vmId, scopes, steal) {
   const target = vms.find((v) => v.id === vmId);
   if (target && target.template &&
       !confirm(`${vmId}는 프리셋 ${target.template}의 복사본입니다. ${session}이 이 VM을 바꾸면 이후 그 프리셋으로 만드는 복제본이 바뀝니다. 그래도 부여합니까?`)) return null;
   if (scopes.includes("exec") &&
       !confirm(`${session}에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?`)) return null;
   return act(`${session} ${scopes.join("+")} 부여`,
-      () => post(`api/vm/${encodeURIComponent(vmId)}/grant`, { session, scopes }));
+      () => post(`api/vm/${encodeURIComponent(vmId)}/grant`, { session, scopes, ...(steal ? { steal: true } : {}) }));
 }
 $("vm-grant").addEventListener("click", () => {
   const session = ($("vm-grant-session").hidden ? $("vm-grant-session-text").value : $("vm-grant-session").value).trim();
   if (!session || !selected) return;
-  grantTo(session, selected, grantScopes());
+  grantTo(session, selected, grantScopes(), !$("vm-grant-steal-row").hidden && $("vm-grant-steal").checked);
 });
+for (const id of ["vm-grant-control", "vm-grant-session", "vm-grant-session-text"])
+  $(id).addEventListener("input", refreshSteal);
 
 /* ---- session mode: the connected VMs, one-click new VM, connecting an existing one ---- */
 const connectedVms = () => vms.filter((v) => v.grants && v.grants[SESSION]);
@@ -1026,6 +1064,7 @@ function renderSess() {
   setChoices(sel, "VM 선택", vms.filter((v) => !(v.grants && v.grants[SESSION]))
     .map((vm) => [vm.id, `${vm.id} (${vm.state})${vm.template ? " — 프리셋 템플릿" : ""}${vm.locked ? " — 잠김" : ""}`]));
   $("vm-sess-connect").disabled = !sel.value;
+  refreshSteal();
   const cur = vms.find((v) => v.id === selected);
   $("vm-sess-editing").textContent = cur ? `${cur.id}: ${SESSION}의 권한과 공유 폴더` : "";
   const sn = $("vm-sess-share-note");
@@ -1033,13 +1072,14 @@ function renderSess() {
   sn.textContent = "이 VM은 실행 중입니다. 공유 폴더 변경은 VM을 다시 시작해야 적용됩니다.";
 }
 $("vm-sess-new-pick").addEventListener("change", () => renderSess());
-$("vm-sess-pick").addEventListener("change", () => { $("vm-sess-connect").disabled = !$("vm-sess-pick").value; });
+$("vm-sess-pick").addEventListener("change", () => { $("vm-sess-connect").disabled = !$("vm-sess-pick").value; refreshSteal(); });
+$("vm-sess-ex-control").addEventListener("change", refreshSteal);
 $("vm-sess-connect").addEventListener("click", () => {
   const id = $("vm-sess-pick").value;
   if (!id) return;
   const scopes = ["view"];
   for (const s of ["control", "exec", "files"]) if ($(`vm-sess-ex-${s}`).checked) scopes.push(s);
-  grantTo(SESSION, id, scopes);
+  grantTo(SESSION, id, scopes, !$("vm-sess-steal-row").hidden && $("vm-sess-steal").checked);
 });
 $("vm-sess-new").addEventListener("click", async () => {
   const preset = sessPresetChoice();

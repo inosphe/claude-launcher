@@ -128,7 +128,7 @@ def test_acquire_needs_a_grant_and_a_ready_vm(reg):
 def test_one_controller_and_the_other_is_told_who(reg):
     _ready(reg)
     reg.grant("a", "s1", ["control"])
-    reg.grant("a", "s2", ["control"])
+    reg.get("a").grants["s2"] = ["view", "control"]  # legacy: several holders
     first = reg.acquire("a", "s1")
     second = reg.acquire("a", "s2")
     assert first["ok"] and not second["ok"]
@@ -139,7 +139,7 @@ def test_one_controller_and_the_other_is_told_who(reg):
 def test_a_call_under_an_old_epoch_is_refused(reg):
     _ready(reg)
     reg.grant("a", "s1", ["control"])
-    reg.grant("a", "s2", ["control"])
+    reg.get("a").grants["s2"] = ["view", "control"]
     old = reg.acquire("a", "s1")["epoch"]
     reg.release("a", "s1")
     reg.acquire("a", "s2")
@@ -178,7 +178,7 @@ def test_a_session_that_exits_gives_control_back_and_keeps_its_grant(reg):
 def test_a_duplicate_controller_needs_a_grant_a_reason_and_a_controller(reg):
     _ready(reg)
     reg.grant("a", "s1", ["control"])
-    reg.grant("a", "s2", ["control"])
+    reg.get("a").grants["s2"] = ["view", "control"]
     with pytest.raises(VmError) as e:
         reg.add_extra_controller("a", "s2", "pair")
     assert _code(e) == "vm_no_controller"
