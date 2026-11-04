@@ -47,7 +47,8 @@ def test_mark_keeps_every_other_key_and_the_file_mode(home):
     assert onboarding.mark(p) is True
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data == {"theme": "dark", "numStartups": 3, "hasCompletedOnboarding": True}
-    assert path.stat().st_mode & 0o777 == 0o644
+    if os.name != "nt":  # Windows has no POSIX permission bits to keep
+        assert path.stat().st_mode & 0o777 == 0o644
     assert onboarding.state(p) == onboarding.DONE
     # No temp file is left beside it.
     assert [f.name for f in path.parent.glob(".claude.json.*")] == []

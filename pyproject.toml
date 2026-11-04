@@ -19,6 +19,9 @@ dependencies = [
     "zvec>=0.7,<0.8",
     "pyte>=0.8.2",
     "pywinpty>=2.0.12; sys_platform == 'win32'",
+    # zoneinfo reads the OS tz database, which Windows does not have; the
+    # session-fault reset parser needs UTC and named zones (claunch-weo4k.1).
+    "tzdata>=2024.1; sys_platform == 'win32'",
     "truststore>=0.9.1",
 ]
 
