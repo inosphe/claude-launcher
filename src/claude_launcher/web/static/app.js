@@ -54065,12 +54065,18 @@ function sessCompact(data) {
    `claunch migrate-session`, from the panel that names the session. Claude
    keeps transcripts per working directory, so this is more than a cwd edit:
    the daemon stops the session, re-files its conversation under the target
-   directory's slug, and relaunches it there — same name, same conversation,
-   same mesh memberships. The picker offers the checkouts that make sense
-   from where the session stands: the repository's original checkout, its
-   existing worktrees, or a new one cut on the spot. Directories outside the
-   repository stay a CLI affair (`--to DIR`), the same way free-text paths
-   are kept out of the create form. */
+   directory's slug, moves its cflow run slots and relaunches it there — same
+   name, same conversation, same mesh memberships. The picker offers the
+   checkouts that make sense from where the session stands: the repository's
+   original checkout, its existing worktrees, or a new one cut on the spot.
+   Directories outside the repository stay a CLI affair (`--to DIR`), the same
+   way free-text paths are kept out of the create form.
+
+   A move is also where a session filed under the wrong project gets re-filed
+   (`--project`), so the second row offers the projects this daemon knows.
+   It defaults to keeping the current filing: a cwd change is not a filing
+   change, and the two are separate questions the operator answers one at a
+   time. */
 function sessMigrate(data) {
   const s = data.session || {};
   const box = el("div", "sess-migrate");
@@ -54109,10 +54115,36 @@ function sessMigrate(data) {
   kids.append(kidsBox, el(
     "span", null, "also move children standing in this directory"
   ));
+  // Re-filing travels with the same move: a session whose workspace was set
+  // wrong usually sits under the wrong project as well, and the daemon already
+  // re-files `project` on a migrate. First entry keeps the filing, which is
+  // the default — changing the directory is not, by itself, a change of
+  // project.
+  let projSel = null;
+  const projRow = el("div", "sess-send-row");
+  if (projectsCache.length) {
+    const current = s.project || "";
+    projSel = document.createElement("select");
+    projSel.title = "the project this session is filed under";
+    const addProject = (value, label) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      projSel.appendChild(opt);
+    };
+    addProject("", `project: keep ${current || "default"} as it is`);
+    if (current) addProject("default", "project: default (unfiled)");
+    for (const p of projectsCache) {
+      if (p.name !== current) addProject(p.name, `project: ${p.name}`);
+    }
+    projRow.appendChild(projSel);
+  }
   const moveBtn = el("button", "wf-btn option", "Migrate");
   moveBtn.disabled = true;
   const status = el("p", "wf-note hidden");
-  form.append(row, nameIn, kids, moveBtn, status);
+  form.append(row);
+  if (projSel) form.append(projRow); // no empty row when there is nothing to pick
+  form.append(nameIn, kids, moveBtn, status);
 
   const say = (msg, cls) => {
     status.className = cls || "wf-note";
@@ -54179,6 +54211,9 @@ function sessMigrate(data) {
     const target = dest.value === "root"
       ? { cwd: root }
       : { worktree: dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3) };
+    // Only a picked filing travels: sending the current project would ask the
+    // daemon to re-file under the name it already holds.
+    if (projSel && projSel.value) target.project = projSel.value;
     moveBtn.disabled = true;
     say("migrating… (stopping it, moving its transcript, relaunching)");
     let doc = {};
@@ -54202,8 +54237,19 @@ function sessMigrate(data) {
     }
     const kidsOk = (doc.children || []).filter((c) => c.ok);
     const kidsFailed = (doc.children || []).filter((c) => !c.ok);
+    // What travelled besides the session itself, so the operator can tell a
+    // plain directory change from one that also re-filed the session or
+    // carried its cflow runs over.
+    const slots = doc.slots_moved || [];
+    const carried = [
+      doc.project ? `project: ${doc.project}` : "",
+      slots.length
+        ? `${slots.length} cflow run slot${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}`
+        : "",
+    ].filter(Boolean);
     say(
       `migrated to ${doc.cwd}` +
+      (carried.length ? ` — ${carried.join("; ")}` : "") +
       (kidsOk.length ? ` — ${kidsOk.map((c) => c.name).join(", ")} too` : "") +
       (kidsFailed.length
         ? `; NOT moved: ${kidsFailed
