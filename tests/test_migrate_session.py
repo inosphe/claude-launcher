@@ -126,7 +126,7 @@ def test_migrate_moves_a_live_session_and_relaunches_it(home, tmp_path):
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
-        session, carried = await mgr.migrate("s1", str(b))
+        session, carried, _slots = await mgr.migrate("s1", str(b))
         assert session.sdef.cwd == str(b)
         assert not session.exited  # relaunched, not just re-filed
         assert carried is False  # nothing to carry for a non-claude harness
@@ -202,7 +202,7 @@ def test_migrate_carries_the_claude_transcript(home, tmp_path, monkeypatch):
         src.parent.mkdir(parents=True)
         src.write_text('{"type":"user"}\n', encoding="utf-8")
 
-        migrated, carried = await mgr.migrate("s1", str(b))
+        migrated, carried, _slots = await mgr.migrate("s1", str(b))
         assert carried is True
         assert migrated.sdef.cwd == str(b)
         assert migrated.sdef.conversation_id == cid  # same conversation
@@ -262,6 +262,7 @@ def test_api_migrate_moves_same_directory_children_only(home, tmp_path):
             mgr.create(
                 SessionDef(name="c2", harness="py", cwd=str(elsewhere), parent="s1")
             )
+            _slot(a / ".cflow2" / "runs", "s1@main")
 
             resp = await client.post(
                 "/api/sessions/s1/migrate",
@@ -272,7 +273,10 @@ def test_api_migrate_moves_same_directory_children_only(home, tmp_path):
             body = await resp.json()
             assert body["cwd"] == str(b)
             assert body["worktree"] is None
+            # what travelled is answered, so the panel can say it
+            assert body["slots_moved"] == ["s1@main"]
             assert [(c["name"], c["ok"]) for c in body["children"]] == [("c1", True)]
+            assert body["children"][0]["slots_moved"] == []
             assert mgr.get("c1").sdef.cwd == str(b)
             # a child already somewhere of its own is exactly where someone
             # put it, and stays
@@ -383,8 +387,11 @@ def test_migrate_moves_the_sessions_cflow_slots(home, tmp_path):
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
-        session, _ = await mgr.migrate("s1", str(b))
+        session, _, moved_slots = await mgr.migrate("s1", str(b))
         assert session.sdef.cwd == str(b)
+        # the caller is told what travelled — the web UI and the CLI both
+        # report it, and a silent move would leave the operator guessing
+        assert sorted(moved_slots) == ["s1@main", "s1@main+stack"]
         runs_b = b / ".cflow2" / "runs"
         assert (runs_b / "s1@main" / "state.json").is_file()
         assert (runs_b / "s1@main+stack" / "state.json").is_file()
@@ -452,12 +459,12 @@ def test_migrate_with_project_refiles_the_definition(home, tmp_path):
     async def run():
         mgr = _manager()
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(a)))
-        session, _ = await mgr.migrate("s1", str(b), project="hq")
+        session, _, _slots = await mgr.migrate("s1", str(b), project="hq")
         assert session.sdef.project == "hq"
         # without the argument the project filing stays as it was
         c = tmp_path / "dirC"
         c.mkdir()
-        session, _ = await mgr.migrate("s1", str(c))
+        session, _, _slots = await mgr.migrate("s1", str(c))
         assert session.sdef.project == "hq"
         await mgr.shutdown_all()
 

@@ -15317,15 +15317,22 @@ async def h_session_migrate(request: web.Request) -> web.Response:
                 os.path.abspath(manager.get(child).sdef.cwd or "")
             ) == old_key
         ]
-    migrated, carried = await manager.migrate(name, new_cwd, project=project)
+    migrated, carried, slots_moved = await manager.migrate(
+        name, new_cwd, project=project
+    )
     children = []
     for child in followers:
         try:
             # a follower's project is its own filing, not the parent's —
             # only the directory follows
-            _, child_carried = await manager.migrate(child, new_cwd)
+            _, child_carried, child_slots = await manager.migrate(child, new_cwd)
             children.append(
-                {"name": child, "ok": True, "transcript_moved": child_carried}
+                {
+                    "name": child,
+                    "ok": True,
+                    "transcript_moved": child_carried,
+                    "slots_moved": child_slots,
+                }
             )
         except (ManagerError, HarnessError, ProfileError) as exc:
             children.append({"name": child, "ok": False, "error": str(exc)})
@@ -15333,6 +15340,9 @@ async def h_session_migrate(request: web.Request) -> web.Response:
         {
             **migrated.info(),
             "transcript_moved": carried,
+            # the scopes whose run slots travelled — an empty list is the
+            # ordinary answer for a session driving no cflow run
+            "slots_moved": slots_moved,
             "worktree": (
                 {
                     "name": wt.name,

@@ -1484,7 +1484,13 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
         else ""
     )
     project = f" — project {info['project']!r}" if info.get("project") else ""
-    print(f"session {info['name']!r} migrated to {where}{carried}{project}")
+    slots = info.get("slots_moved") or []
+    moved_slots = (
+        f" — {len(slots)} cflow run slot(s) moved: {', '.join(slots)}"
+        if slots
+        else ""
+    )
+    print(f"session {info['name']!r} migrated to {where}{carried}{project}{moved_slots}")
     failed = False
     for child in info.get("children") or []:
         if child.get("ok"):
