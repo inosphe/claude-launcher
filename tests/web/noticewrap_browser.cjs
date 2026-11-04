@@ -68,6 +68,10 @@ const ASK = {
       await page.addInitScript(() => localStorage.setItem("claunch_token:/", "fixture-token"));
       await page.goto(`http://127.0.0.1:${server.address().port}`);
       await page.waitForFunction(() => typeof applyRunGate === "function" && !!document.getElementById("notices"));
+      // Cards are held until the dashboard's first frame stands
+      // (claunch-zrf3n), so a scenario that deals one by hand waits for that
+      // frame first — the same point the page's own polls run from.
+      await page.waitForFunction(() => booted === true);
       // The request is fed by hand; the rail poll's feed, which would settle
       // it as gone (this fixture serves no rail), is held still.
       await page.evaluate(() => { window.runGateFeed = () => {}; });

@@ -2143,8 +2143,10 @@ function gotoRec(rec) {
     // other (the failure tests/test_related_surfaces.py exists for).
     const defs = src.split("function noticeNewerFirst(").length - 1;
     check("the feed's order is defined once", defs === 1, defs);
+    // The placement itself moved into noticeCardPlace, which noticeCardAdd
+    // hands every card to once the page is up (claunch-zrf3n).
     check("the strip places a card by that one rule",
-          /function noticeCardAdd\([\s\S]*?noticeNewerFirst\(/.test(src));
+          /function noticeCardPlace\([\s\S]*?noticeNewerFirst\(/.test(src));
     check("and the panel's history sorts by it",
           /\.sort\(noticeNewerFirst\)/.test(src));
   }

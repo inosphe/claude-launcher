@@ -63117,7 +63117,11 @@ function dismissNotice(key) {
   if (!rec) return;
   notices.delete(key);
   if (rec.timer) clearTimeout(rec.timer);
-  if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
+  // Marked, not only removed: a card still held by noticeCardAdd is not on
+  // the page yet, and the release that puts held cards up must not revive
+  // one that was put away while it waited (claunch-zrf3n).
+  if (rec.node) rec.node.__noticeDropped = true;
+  if (rec.node && rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
 }
 
 /* What a session name's hover tooltip adds on top of the surface's own
@@ -63677,6 +63681,28 @@ function noticeFoldScan() {
    a notice card at all, and is treated as the oldest thing there — the new
    card goes above it, which is the order the strip always drew. */
 function noticeCardAdd(host, node, at, opts) {
+  if (noticeCardsHeld) {
+    noticeCardsHeldQueue.push({ host, node, at, opts });
+    return;
+  }
+  noticeCardPlace(host, node, at, opts);
+}
+
+/* Cards raised while the page is still coming up are held here and put up
+   by noticeCardsRelease once the first frame is standing (claunch-zrf3n):
+   boot()'s first pass polls the gates while the rail and the dashboard are
+   still being drawn, and a card that arrived then hung over an empty page.
+   A held card is a card that has been asked for, not a card that is on
+   screen: dismissNotice marks it, and the release skips it.
+
+   `noticeCardsHeld` is armed by boot() and not by this declaration: the page
+   is loading exactly while boot() runs its first pass, and a harness that
+   slices this section without boot() deals its cards directly. */
+let noticeCardsHeld = false;
+const noticeCardsHeldQueue = [];
+
+/* Puts one card up, in the place its stamp gives it (see noticeCardAdd). */
+function noticeCardPlace(host, node, at, opts) {
   const stamp = Number.isFinite(at) ? at : Date.now();
   node.__noticeAt = stamp;
   node.appendChild(noticeAgeLine(stamp, opts && opts.optionalAge));
@@ -63696,6 +63722,21 @@ function noticeCardAdd(host, node, at, opts) {
   else host.appendChild(node);
   noticeFlipMove(tops);
   noticeFoldClassify(node);
+}
+
+/* The first frame is up: the held cards go on screen, in the order they
+   arrived (noticeCardPlace re-sorts by stamp anyway, so a card that aged
+   while it waited lands where its own age says). Called once, from boot().
+   `__noticeDropped` is what the cards put away while they were held carry:
+   a request that was answered, hidden or reminded before the page stood has
+   nothing left to show. */
+function noticeCardsRelease() {
+  if (!noticeCardsHeld) return;
+  noticeCardsHeld = false;
+  for (const one of noticeCardsHeldQueue.splice(0)) {
+    if (one.node.__noticeDropped) continue;
+    noticeCardPlace(one.host, one.node, one.at, one.opts);
+  }
 }
 
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
@@ -67707,6 +67748,13 @@ function setDaemonOnline(up) {
 }
 
 async function boot() {
+  // The first pass is the page's loading window: the gate polls below run
+  // while the rail and the dashboard are still being drawn, and a card that
+  // arrived then hung over an empty page (claunch-zrf3n). Cards are held
+  // until the first frame stands, at the end of this function. A later boot
+  // (the daemon came back) re-reads a page that is already standing, so it
+  // holds nothing.
+  if (!booted) noticeCardsHeld = true;
   let info;
   try {
     const resp = await api("/api/daemon");
@@ -67782,6 +67830,10 @@ async function boot() {
     // The rail to the attached session's card, as ⇱ card would. Guarded:
     // reduced harnesses slice boot() alone.
     if (typeof armBootGoto === "function") armBootGoto();
+    // The first frame is standing, so the cards held while it was being
+    // drawn go up now (claunch-zrf3n). Guarded like the line above: reduced
+    // harnesses slice boot() and may not carry the strip's helpers.
+    if (typeof noticeCardsRelease === "function") noticeCardsRelease();
   }
 }
 
