@@ -1146,6 +1146,68 @@ def test_a_tree_that_cannot_be_measured_after_the_wait_files_no_receipt(
     )
 
 
+def test_a_test_module_added_while_waiting_is_in_the_selection(
+    repo, gate, monkeypatch, capsys
+):
+    """The tree the wait moved is re-read; so is the selection it was read from.
+
+    Re-measuring the tree after the window (claunch-1cn7l) says *which* tree
+    the run reads, and nothing about *what in it* runs: the module list was
+    derived before the window, so a test module committed during the wait is
+    absent from the run and from the receipt that stands for it. A reader of
+    that receipt cannot tell this from a round that simply had nothing more
+    to run (claunch-s8o59).
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    def add_a_module_while_waiting():
+        _write(repo, "tests/test_late.py", "def test_late():\n    pass\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "a test module that lands while queueing")
+
+    _fake_grant(monkeypatch, add_a_module_while_waiting)
+    assert gate() == 0
+    assert gate.runs() == 1, "control: the selection ran once"
+
+    receipt, path = _receipt_of(repo, gate)
+    assert path.is_file()
+    assert "tests/test_late.py" in receipt["selection"], (
+        "the module committed during the wait is not in the run's selection"
+    )
+    assert "tests/test_mesh.py" in receipt["selection"]
+    assert receipt["selection"] == _select(repo), (
+        "the receipt's selection is not what this tree derives"
+    )
+
+    err = capsys.readouterr().err
+    assert "selection moved" in err
+    assert "tests/test_late.py" in err, "the note does not say which module moved"
+
+
+def test_an_unmoved_tree_does_not_derive_the_selection_twice(
+    repo, gate, monkeypatch
+):
+    """The re-derivation is gated on the tree having moved.
+
+    The selection is a function of the change and the checkout, so an
+    unchanged tree has an unchanged selection. Deriving it again would buy
+    nothing and would spend git spawns on every run; the gate keeps the
+    measurement count where a reader expects it.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    derived = {"n": 0}
+    real = changed_tests.changed_paths
+
+    def counted(repo_path, base):
+        derived["n"] += 1
+        return real(repo_path, base)
+
+    monkeypatch.setattr(changed_tests, "changed_paths", counted)
+    _fake_grant(monkeypatch, lambda: None)
+    assert gate() == 0
+    assert derived["n"] == 1, "the selection was derived a second time for an unmoved tree"
+
+
 @pytest.mark.parametrize(
     "moved",
     ["tree", "base_commit", "selection", "environment"],
