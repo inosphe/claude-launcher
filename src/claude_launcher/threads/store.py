@@ -864,7 +864,7 @@ class ThreadStore:
             ).fetchall()
             threads = []
             for r in rows:
-                t = _thread(r, self._unread(db, r), self._last(db, r["id"]))
+                t = _thread(r, self._unread(db, r), self._last(db, r["id"]), self._guests(db, r["id"]))
                 recent = db.execute(
                     "SELECT * FROM messages WHERE thread = ? ORDER BY seq DESC LIMIT ?",
                     (r["id"], HISTORY_MESSAGES),
@@ -980,6 +980,53 @@ class ThreadStore:
                     "excerpt": _reply_excerpt(r["body"], r["images"], r["files"]), "at": r["at"],
                 })
         return out
+
+    # -- the daemon's copy (a quick-fork, claunch-yydhs) -------------------
+
+    def copy_session(self, source: str, target: str) -> int:
+        """Copy ``source``'s open threads onto ``target``, whole: one new
+        thread per source thread with the same title, and every message as
+        it was written (author, body, stamps, images, files, ``kind``,
+        ``ref``, ``data``). A copy is history, so nothing in it counts as
+        the target's unread input.
+
+        Two things do not travel: the ``qa`` link (the copied question has a
+        new id, and which one is the link is the caller's to make) and the
+        guest list (guests were invited to the origin's conversation; the
+        copy's participants are the copy's to invite). Closed threads stay
+        with the source. Returns how many threads landed."""
+        with self._write() as db:
+            threads = db.execute(
+                "SELECT * FROM threads WHERE session = ? AND status = 'open' ORDER BY created_at, id",
+                (source,),
+            ).fetchall()
+            copied = 0
+            for t in threads:
+                tid = "th-" + secrets.token_hex(3)
+                while db.execute("SELECT 1 FROM threads WHERE id = ?", (tid,)).fetchone():
+                    tid = "th-" + secrets.token_hex(3)
+                messages = db.execute(
+                    "SELECT * FROM messages WHERE thread = ? ORDER BY seq", (t["id"],)
+                ).fetchall()
+                db.execute(
+                    "INSERT INTO threads (id, session, title, status, opened_by, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (tid, target, t["title"], "open", t["opened_by"], t["created_at"], t["updated_at"]),
+                )
+                last = 0
+                for m in messages:
+                    cur = db.execute(
+                        "INSERT INTO messages (thread, session, author, body, at, images, kind, ref, data, files, guest) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (tid, target, m["author"], m["body"], m["at"], m["images"], m["kind"],
+                         m["ref"], m["data"], m["files"], m["guest"]),
+                    )
+                    last = int(cur.lastrowid)
+                db.execute(
+                    "UPDATE threads SET last_seq = ?, agent_read = ? WHERE id = ?", (last, last, tid)
+                )
+                copied += 1
+            return copied
 
     # -- operator conversations (claunch-iw5i8.12.1) -----------------------
 

@@ -147,6 +147,35 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   buttons('모두 접기')[0].onclick(); await settle();
   assert(!text().includes('기대효과: fast'));
   buttons('모두 펼치기')[0].onclick(); await settle();
+  const savedTree = JOINT.groups[0].members[1].tree, savedCalls = calls.length;
+  // claunch-vmcg7: the default pick reads 자동 선택됨, a ruled-out option is
+  // marked with its reason, a node under an option hangs inside that option.
+  JOINT.groups[0].members[1].tree = [
+    {id: 'h1', kind: 'decision', title: 'layout', choice: 'A', auto: true,
+     options: [{label: 'A', effect: 'fast', risk: 'untested', recommended: true, default: true},
+               {label: 'B', effect: 'safe', risk: 'slow'},
+               {label: 'C', effect: 'cheap', risk: 'brittle', rejected: 'no backup path'}],
+     children: [{id: 'h2', kind: 'decision', title: 'migrate on B', under: 'B', options: [{label: 'X', effect: 'x', risk: 'x'}], children: []},
+                {id: 'h3', kind: 'step', title: 'common step', status: 'todo', children: []}]},
+  ];
+  ctx.PlanPage._view().open(); await settle();
+  const h1 = byTitle('layout');
+  assert.strictEqual(h1.className, 'ptree-node ptree-decision ptree-decided');
+  assert(h1.children[0].children.some(c => c.textContent === '자동 선택됨'));
+  const hb = h1.children[1].children;
+  assert.deepStrictEqual(hb.map(c => c.className), ['ptree-node ptree-option ptree-chosen ptree-recommended',
+    'ptree-node ptree-option ptree-unchosen', 'ptree-node ptree-option ptree-unchosen ptree-rejected',
+    'ptree-node ptree-step ptree-st-todo']);
+  const hText = (n) => all(n).map(c => c.textContent).join('\n');
+  assert(hText(hb[2]).includes('배제 이유: no backup path'));
+  assert(hText(hb[1]).includes('migrate on B') && hText(hb[1]).includes('선택되지 않은 안의 하위 항목'));
+  assert(all(hb[1]).some(n => n.tag === 'li' && String(n.className).includes('ptree-inactive')));
+  assert(!hText(hb[0]).includes('migrate on B'));
+
+  JOINT.groups[0].members[1].tree = savedTree;
+  ctx.PlanPage._view().open(); await settle();
+  calls.length = savedCalls;                                     // the reads above are this case's own
+
   // a filter that keeps s2 keeps its group whole: s1 drawn, dimmed
   buttons('내 차례')[0].onclick(); await settle();
   assert.deepStrictEqual(rows(), ['s1', 's2']);

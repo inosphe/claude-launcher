@@ -79,8 +79,9 @@ from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
+from . import pr_actions
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
-from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
+from ..cflow2 import inputs as cflow2_inputs, ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, model_tiers, onboard,
@@ -1060,6 +1061,10 @@ def build_app(
     r.add_put("/api/delegate-setting", h_delegate_setting_set)
     r.add_get("/api/sweep-batch-setting", h_sweep_batch_setting_get)
     r.add_put("/api/sweep-batch-setting", h_sweep_batch_setting_set)
+    # How many key switches one session may spend per usage-limit fault
+    # (daemon/key_switch.py). A machine default, read live by the pause clock.
+    r.add_get("/api/key-switch-setting", h_key_switch_setting_get)
+    r.add_put("/api/key-switch-setting", h_key_switch_setting_set)
     r.add_get("/api/model-tiers", h_model_tiers_get)
     r.add_put("/api/model-tiers", h_model_tiers_put)
     r.add_get("/api/provider-affinity", h_provider_affinity_get)
@@ -1122,6 +1127,8 @@ def build_app(
     # of a run (a chooser: user choice, a loop at its max) and a read-only
     # definition view. Same token as the v1 approve/select endpoints.
     r.add_get("/api/cflow2/run", h_cflow2_run)
+    r.add_get("/api/cflow2/layout", h_cflow2_layout)
+    r.add_get("/api/cflow2/layouts", h_cflow2_layouts)
     r.add_get("/api/cflow2/node", h_cflow2_node)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
     r.add_get("/api/cflow2/rail", h_cflow2_rail)
@@ -1332,6 +1339,17 @@ def build_app(
     # Recorded PRs across every session, for the PR page (#/pr). Read-only and
     # local: no gh call, so it answers without gh installed or logged in.
     r.add_get("/api/prs", h_prs)
+    # One PR, read from the forge by the daemon (daemon/pr_actions.py). The
+    # page never calls gh and never leaves the daemon's origin: a browser
+    # behind a relay tunnel cannot reach github.ncsoft.com at all.
+    r.add_get("/api/prs/{host}/{owner}/{name}/{number}", h_pr_detail)
+    # The merge is the user's, from the dashboard: a cookie request and only
+    # that (see h_pr_merge), never an MCP tool and never a bearer token. The
+    # documented residue -- a token traded for a cookie -- is in that
+    # handler's docstring and docs/pr-tab.md section 4.
+    r.add_post("/api/prs/{host}/{owner}/{name}/{number}/merge", h_pr_merge)
+    r.add_post("/api/prs/{host}/{owner}/{name}/{number}/rebase-request",
+               h_pr_rebase_request)
     r.add_get("/api/transcripts", h_transcripts_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -1417,6 +1435,10 @@ def build_app(
     # (claunch-wllke.1). `.../keys` above is keystrokes into the pty; this
     # one is a launcher key.
     r.add_post("/api/sessions/{name}/key", h_session_key)
+    # Whether the daemon may switch this session onto another pool key when
+    # its harness paints a usage limit (claunch-d2t79). A definition edit,
+    # not a restart: the answer is about the next fault, not this process.
+    r.add_post("/api/sessions/{name}/auto-key-switch", h_session_auto_key_switch)
     r.add_post(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
@@ -3878,6 +3900,13 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
             "cached": cached,
             "updated_at": updated_at,
             "next_at": updated_at + profile_usage.PERIOD_SECONDS,
+            # The account's month split by API key and the daemon's reason
+            # for an empty one: the profile usage card draws both under the
+            # total (:func:`keyRows`), so a body rebuilt without them makes a
+            # Fireworks account claim it did not break its spend down
+            # (claunch-feb3f review). They are already in the fetch answer.
+            "api_keys": body.get("api_keys") or [],
+            "api_keys_note": body.get("api_keys_note"),
         }
     except (usage.UsageError, credentials.CredentialsError) as exc:
         usage_error = str(exc)
@@ -5521,6 +5550,49 @@ async def h_sweep_batch_setting_set(request: web.Request) -> web.Response:
         for key, value in writes.items():
             store.set_daemon_field(key, value)
         return json_response(_sweep_batch_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _key_switch_setting_state() -> dict:
+    cfg = store.daemon_config()
+    return {
+        "retries": cfg["fault_key_switch_retries"],
+        "defaults": {
+            "retries": store.DAEMON_DEFAULTS["fault_key_switch_retries"],
+        },
+    }
+
+
+async def h_key_switch_setting_get(request: web.Request) -> web.Response:
+    """``daemon.fault_key_switch_retries``: how many keys one session may be
+    switched onto for the same usage limit, with the built-in default."""
+    try:
+        return json_response(_key_switch_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_key_switch_setting_set(request: web.Request) -> web.Response:
+    """Set the retry cap (``{"retries": int}``); ``null`` restores the default.
+
+    ``0`` switches the feature off fleet-wide without touching each session's
+    own answer; ``1`` (the default) means one switch per fault, and a session
+    that hits the limit again after it falls back to the pause.
+    """
+    body = await _json_body(request)
+    value = body.get("retries")
+    if value is not None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return json_error(400, "'retries' must be a whole number or null")
+        if value != int(value):
+            return json_error(400, "'retries' must be a whole number")
+        if not 0 <= value <= 10:
+            return json_error(400, "'retries' must be between 0 and 10")
+        value = int(value)
+    try:
+        store.set_daemon_field("fault_key_switch_retries", value)
+        return json_response(_key_switch_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -7248,6 +7320,26 @@ async def h_cflow2_run(request: web.Request) -> web.Response:
     return json_response(data)
 
 
+async def h_cflow2_layout(request: web.Request) -> web.Response:
+    """A v2 run's layout as a view model (``?cwd=&scope=``): the contract B
+    payload ``{layout, api, title, blocks}``, built from the layout the run's
+    chart snapshot carries. A block whose type the layout does not allow comes
+    back as a placeholder, not as a failure (cflow2/layouts.py)."""
+    cwd, scope = _cflow2_slot(request)
+    data = await asyncio.to_thread(cflow2_web.layout_view, cwd, scope)
+    if data is None:
+        return json_error(404, f"no cflow2 run in {scope!r}")
+    return json_response(data)
+
+
+async def h_cflow2_layouts(request: web.Request) -> web.Response:
+    """The layout registry the layers offer (``?cwd=``): each layout's id,
+    version, ``api`` and allowed component types."""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
+    data = await asyncio.to_thread(cflow2_web.layouts_view, cwd)
+    return json_response(data)
+
+
 async def h_cflow2_node(request: web.Request) -> web.Response:
     """One node of a v2 run in full, for the run page's node pane
     (cflow2_web.node_detail): ``?cwd=&scope=&node=<id>``."""
@@ -7584,7 +7676,8 @@ async def h_cflow2_input(request: web.Request) -> web.Response:
     got = json.dumps((payload.get("inputs") or {}).get(name), ensure_ascii=False)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
-        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got),
+        NUDGE_CFLOW2_INPUT_SET.format(name=name, value=got)
+        + cflow2_inputs.format_impact(payload.get("input_impact")),
     )
     return json_response(payload)
 
@@ -11118,6 +11211,260 @@ async def h_prs(request: web.Request) -> web.Response:
     return json_response({"prs": rows, "projects": projects, "count": len(rows)})
 
 
+#: A repository coordinate in a PR route: host, owner and name are one path
+#: segment each, so an encoded slash cannot smuggle a second one in.
+_PR_PART = re.compile(r"^[A-Za-z0-9._-]+$")
+_PR_METHODS = ("auto", "merge", "squash", "rebase")
+
+
+def _pr_target(request: web.Request) -> Optional[tuple]:
+    """``(host, owner, name, number)`` from the route, or ``None``.
+
+    The four are separate segments rather than one ``owner/name`` slug
+    because aiohttp routes on the decoded path: ``%2F`` would be a separator
+    by the time the match ran."""
+    info = request.match_info
+    host = str(info.get("host") or "").strip()
+    owner = str(info.get("owner") or "").strip()
+    name = str(info.get("name") or "").strip()
+    try:
+        number = int(str(info.get("number") or ""))
+    except (TypeError, ValueError):
+        return None
+    if not all(_PR_PART.match(part) for part in (host, owner, name)):
+        return None
+    if number <= 0:
+        return None
+    return host, owner, name, number
+
+
+def _recorded_pr(manager, host: str, owner: str, name: str, number: int) -> dict:
+    """The row a session recorded for this PR, or ``{}``.
+
+    It is what the page already shows beside the live values: which session
+    opened the PR and which issues it names. ``_recorded_prs`` is the same
+    cached scan the list uses, so this costs nothing extra."""
+    wanted = pr_actions.slug(host, owner, name).lower()
+    try:
+        rows, _projects = _recorded_prs(manager)
+    except Exception:  # noqa: BLE001 -- a live read must not depend on records
+        return {}
+    for row in rows:
+        if (str(row.get("repo") or "").lower() == wanted
+                and row.get("number") == number):
+            return row
+    return {}
+
+
+async def h_pr_detail(request: web.Request) -> web.Response:
+    """One recorded PR, read from the forge by the daemon.
+
+    The answer is always the same shape: ``{"ok", "pr", "verdict",
+    "conflicts", "error", "recorded"}``. A failed read is ``ok: False`` with
+    ``error.kind``/``error.raw`` -- the page keeps the recorded row it
+    already has and shows the reason beside it.
+
+    Conflict paths are computed only when the verdict says the PR collides:
+    it costs a ``git fetch`` and a ``merge-tree`` in a local checkout, and a
+    PR that is clean has no use for them."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    host, owner, name, number = target
+    view = await asyncio.to_thread(pr_actions.detail, host, owner, name, number)
+    pr = view.get("pr") or {}
+    if view.get("ok") and (view.get("verdict") or {}).get("kind") == "conflict":
+        view["conflicts"] = await asyncio.to_thread(
+            pr_actions.conflict_files, host, owner, name,
+            str(pr.get("base") or ""), str(pr.get("head") or ""))
+    # Off the loop: the answer is cached for PRS_CACHE_SECONDS, and the read
+    # that fills it walks every session's run state. On a cold cache that is
+    # a filesystem walk per session, and this handler is polled per open card.
+    view["recorded"] = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
+    view["repo"] = pr_actions.slug(host, owner, name)
+    view["number"] = number
+    return json_response(view)
+
+
+async def h_pr_merge(request: web.Request) -> web.Response:
+    """Merge one PR -- the user's action from the dashboard, and only that.
+
+    Two gates before gh is run at all:
+
+    - **The dashboard's cookie.** A bearer token is how a shell and a managed
+      session reach this API, and merging master is not something an agent
+      may do (AGENTS.md). The token is not a secret from a session on this
+      host, so the check is on *how* the request authenticated
+      (``daemon/actors.py``), not on who it claims to be.
+    - **``confirm: true``.** The page asks once more before it sends this;
+      a lone POST does not merge.
+
+    What this closes is the path an agent normally takes -- CLI, MCP, the
+    daemon client all authenticate with the token. What it does NOT close is
+    a session that deliberately trades that token for a cookie at
+    ``/api/auth/session`` (a route the middleware exempts) and then posts
+    here with no ``Origin``/``Sec-Fetch-Site``: ``_foreign_origin`` lets such
+    a request through, as it does for every other cookie write on this
+    daemon. That residue is the same one AGENTS.md describes for the restart
+    gate, and it is why the rule is written down rather than claimed to be
+    enforced -- see ``docs/pr-tab.md`` section 4.
+
+    A refusal is HTTP 409 with ``error.kind`` (or 403/502 where that is the
+    truer code), never a silent no."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    if request.get(actors.AUTH_VIA_KEY) != actors.AUTH_COOKIE:
+        return json_error(
+            403, "머지는 대시보드에서만 실행합니다. 토큰으로 인증한 요청(셸·에이전트 세션)은 "
+                 "이 경로를 쓸 수 없습니다 — 워커는 master에 머지하지 않는다는 규칙이 그대로입니다.")
+    host, owner, name, number = target
+    body = await _json_body(request)
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return json_error(400, "confirm: true 를 함께 보내야 머지를 실행합니다(2단계 확인).")
+    method = str(body.get("method") or "auto").strip().lower()
+    if method not in _PR_METHODS:
+        return json_error(400, f"method 는 {', '.join(_PR_METHODS)} 가운데 하나여야 합니다.")
+    result = await asyncio.to_thread(
+        pr_actions.merge, host, owner, name, number, method)
+    if result.get("ok"):
+        await asyncio.to_thread(
+            pr_actions.record_merge, host, owner, name, number, result.get("method", method),
+            actors.from_request(request) or {}, remote=request.remote or "")
+        return json_response({**result, "repo": pr_actions.slug(host, owner, name),
+                              "number": number})
+    kind = str((result.get("error") or {}).get("kind") or "other")
+    status = {"permission": 403, "network": 502, "no-gh": 503,
+              "not-found": 404}.get(kind, 409)
+    return json_response(
+        {**result, "repo": pr_actions.slug(host, owner, name), "number": number},
+        status=status)
+
+
+async def h_pr_rebase_request(request: web.Request) -> web.Response:
+    """Ask the session that opened this PR to rebase it.
+
+    The request goes over the mesh as the operator (``external``, no sender
+    handle) to the session recorded with the PR, and it is *also* written to
+    the issue the record names -- a mesh message is delivered once and only
+    to a live member, so a session that exited, or belongs to another
+    machine, would otherwise leave no trace of the ask anywhere. The board
+    line is what the next session to pick the issue up reads.
+
+    Cookie-only, like the merge: ``external`` means "the operator typed
+    this", and a token is not a secret from a session on this host. Without
+    the gate, a session could put words in the operator's mouth into any
+    member's terminal. ``docs/pr-tab.md`` section 4 describes the residue
+    this shares with every cookie write on the daemon.
+
+    A request that was not delivered over the mesh is never reported as
+    sent; ``text`` is returned either way so the user can still pass it on."""
+    target = _pr_target(request)
+    if target is None:
+        return json_error(400, "PR 주소는 /api/prs/<host>/<owner>/<name>/<number> 형식이어야 합니다.")
+    if request.get(actors.AUTH_VIA_KEY) != actors.AUTH_COOKIE:
+        return json_error(
+            403, "rebase 요청은 대시보드에서만 보냅니다. 토큰으로 인증한 요청(셸·에이전트 세션)은 "
+                 "운영자 이름으로 다른 세션에 메시지를 넣을 수 없습니다.")
+    host, owner, name, number = target
+    body = await _json_body(request)
+    body = body if isinstance(body, dict) else {}
+    recorded = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
+    session = str(recorded.get("session") or body.get("session") or "").strip()
+    note = str(body.get("note") or "").strip()
+    text = note or (
+        f"PR #{number} ({pr_actions.slug(host, owner, name)})이 기준선과 충돌합니다. "
+        f"브랜치를 rebase해 다시 push하고, 끝나면 이 스레드에 알려 주세요.")
+    if not session:
+        return json_response({
+            "delivered": False, "session": "", "text": text,
+            "why": "이 PR을 기록한 세션을 찾지 못했습니다.",
+            "noted": [], "noted_why": "기록된 세션이 없어 이슈도 알 수 없습니다.",
+        }, status=200)
+    delivered, why = await _ask_session(request, session, text)
+    noted, noted_why = await _note_rebase_request(
+        request, recorded, host, owner, name, number, text, delivered, why)
+    return json_response({
+        "delivered": delivered, "session": session, "text": text, "why": why,
+        "noted": noted, "noted_why": noted_why,
+    })
+
+
+async def _note_rebase_request(
+    request: web.Request, recorded: dict, host: str, owner: str, name: str,
+    number: int, text: str, delivered: bool, why: str,
+) -> tuple:
+    """Write the ask to the board the PR's session works on; ``(ids, why)``.
+
+    The record names the issues the PR was opened for (``issues`` in the
+    row). One comment per issue, so the ask survives the mesh message: a
+    member that is offline never reads a message, but the next session to
+    claim the issue reads the board. Delivery is stated in the line -- a
+    request that reached only the board must not read as one that reached
+    the session."""
+    issues = [str(i).strip() for i in (recorded.get("issues") or []) if str(i).strip()]
+    if not issues:
+        return [], "이 PR을 기록한 행이 이슈를 이름으로 남기지 않았습니다."
+    session = str(recorded.get("session") or "").strip()
+    manager = request.app.get("manager")
+    # ``list`` rather than ``get``: the row was produced by the same listing,
+    # and it keeps answering for a session that has exited -- which is
+    # exactly the case where the mesh message went nowhere.
+    live = None
+    for candidate in (manager.list() if manager is not None else []):
+        if getattr(getattr(candidate, "sdef", None), "name", "") == session:
+            live = candidate
+            break
+    if live is None:
+        return [], f"기록한 세션 '{session}'이 이 데몬에 없어 그 보드를 알 수 없습니다."
+    board = request.app.get("beads")
+    if board is None:
+        return [], "이 데몬에 보드 하위 시스템이 없습니다."
+    try:
+        root = await board.root_for(_session_cwd(live))
+    except Exception as exc:  # noqa: BLE001 -- the note is best effort
+        return [], f"보드 루트를 찾지 못했습니다: {str(exc)[:200]}"
+    if root is None:
+        return [], f"세션 '{session}'의 디렉터리에 이슈 보드가 없습니다."
+    line = f"REBASE REQUEST @ {pr_actions.slug(host, owner, name)}#{number}: {text}"
+    line += " (메시로도 전달됨)" if delivered else (
+        f" (메시 전달 실패 — {why})" if why else " (메시 미전달)")
+    noted, failed = [], []
+    for issue in issues:
+        try:
+            await board.br(root, ["comments", "add", issue, line])
+            noted.append(issue)
+        except Exception as exc:  # noqa: BLE001 -- one issue must not sink the rest
+            failed.append(f"{issue}: {str(exc)[:120]}")
+    why = "" if not failed else "일부 이슈에 남기지 못했습니다 — " + "; ".join(failed)
+    return noted, why
+
+
+async def _ask_session(request: web.Request, session: str, text: str) -> tuple:
+    """Send ``text`` to ``session`` as the operator; ``(delivered, why)``."""
+    try:
+        manager = _mesh_mgr(request)
+    except Exception:  # noqa: BLE001 -- no mesh subsystem is not a crash
+        return False, "이 데몬에 메시 하위 시스템이 없습니다."
+    for mesh in manager.list():
+        member = mesh.members.get(session) if getattr(mesh, "members", None) else None
+        if member is None:
+            for handle, candidate in (getattr(mesh, "members", {}) or {}).items():
+                if str(getattr(candidate, "session", "") or "") == session:
+                    member, session = candidate, handle
+                    break
+        if member is None:
+            continue
+        try:
+            await manager.send(mesh.name, "", session, text, external=True, type="ask")
+        except Exception as exc:  # noqa: BLE001 -- report, do not fail the read
+            return False, f"메시 전송이 거절되었습니다: {str(exc)[:300]}"
+        return True, ""
+    return False, "그 세션이 이 데몬이 아는 어느 메시에도 속해 있지 않습니다(종료되었거나 다른 머신)."
+
+
 async def h_sessions_list(request: web.Request) -> web.Response:
     """The session list; for a rail read that sends its row digests, only
     the rows that changed (claunch-4thlk.3, :func:`_rail_rows_delta`).
@@ -11200,6 +11547,11 @@ RAIL_FIELDS = {
     # The pool key this session is pinned to, or absent. The rail draws the
     # key chip from it and the modal preselects it (claunch-wllke.1).
     "key_id",
+    # Whether the daemon may switch this session onto another pool key when a
+    # usage limit stops it (claunch-d2t79). The rail draws the auto badge off
+    # this poll, so leaving it out would keep the badge off every live card
+    # while the detail panel still showed it on.
+    "auto_key_switch",
     "reminder_note",
     "status",
     "score_goal", "user_reward", "user_penalty",
@@ -14399,6 +14751,78 @@ def _origin_run_name(origin: str, cwd: str) -> str:
     return str(status.get("workflow") or "")
 
 
+#: The origin's side items a quick-fork may carry (claunch-yydhs). The
+#: conversation itself is the harness's copy; these live in the daemon's own
+#: stores and have to be carried on purpose.
+QUICK_FORK_CARRY = ("plan", "qa", "threads")
+
+
+def _quick_fork_carry(value) -> list:
+    """The ``copy`` field of a quick-fork body as a list of store names.
+
+    Omitted or empty is "carry none". A name outside :data:`QUICK_FORK_CARRY`
+    is a bad request rather than a silently dropped item: a caller that asked
+    for something the fork does not carry should hear so."""
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise QuickForkError(400, "copy must be a list of plan, qa, threads")
+    wanted = []
+    for raw in value:
+        name = str(raw or "").strip()
+        if name not in QUICK_FORK_CARRY:
+            raise QuickForkError(
+                400, f"copy names {name!r}; a quick-fork carries {', '.join(QUICK_FORK_CARRY)}"
+            )
+        if name not in wanted:
+            wanted.append(name)
+    return wanted
+
+
+def _copy_quick_fork_carry(origin: str, fork: str, wanted: list, warnings: list) -> dict:
+    """Copy the asked-for items of ``origin`` onto the freshly launched
+    ``fork``: its plan, its still-open questions, its open threads.
+
+    Each part is its own try: a store that refuses costs that part and a
+    warning line, never the fork -- the session is already running, and the
+    copy is what it asked for on top. Returns what landed, shaped
+    ``{"plan": bool, "qa": <count>, "threads": <count>}`` for the parts that
+    were asked for."""
+    out: dict = {}
+    if not wanted:
+        return out
+    if "plan" in wanted:
+        try:
+            from ..plan import store as plan_store
+
+            out["plan"] = plan_store.PlanStore(paths.plan_db()).copy(origin, fork)
+        except Exception as exc:  # noqa: BLE001 - the fork stands without it
+            log.warning("quick-fork %s: plan not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the plan was not copied from {origin}: {exc}")
+            out["plan"] = False
+    if "qa" in wanted:
+        try:
+            from ..qa import store as qa_store
+
+            out["qa"] = qa_store.QaStore(paths.qa_db()).copy_open(origin, fork)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quick-fork %s: questions not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the questions were not copied from {origin}: {exc}")
+            out["qa"] = 0
+    if "threads" in wanted:
+        try:
+            from ..threads import store as thread_store
+
+            out["threads"] = thread_store.ThreadStore(paths.threads_db()).copy_session(origin, fork)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quick-fork %s: threads not copied from %s: %s", fork, origin, exc)
+            warnings.append(f"the threads were not copied from {origin}: {exc}")
+            out["threads"] = 0
+    return out
+
+
 class QuickForkError(Exception):
     """A quick-fork that cannot be made, with the HTTP status it answers."""
 
@@ -14479,6 +14903,11 @@ async def stage_quick_fork(
     # conversation, its directory -- which is what stage_child's place_under
     # keeps apart.
     sibling = body.get("sibling") in (True, "true", "1", 1)
+    # Which of the origin's side items the copy carries (claunch-yydhs): the
+    # plan, the questions still waiting on the user, the open threads. Omitted
+    # is "none", which is what every other caller of this route has always
+    # got (the conversation is copied by the harness; these three are not).
+    carry = _quick_fork_carry(body.get("copy"))
     if self_merge_allowed is None:
         self_merge_allowed = body.get("self_merge_allowed") in (True, "true", "1", 1)
     placed = (origin.sdef.parent or "") if sibling else parent
@@ -14610,6 +15039,9 @@ async def stage_quick_fork(
         raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
         raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
+    # After the launch, so a fork that never started leaves nothing copied,
+    # and before the response, so the caller is told what landed.
+    carried = _copy_quick_fork_carry(parent, session.sdef.name, carry, warnings)
     out = {
         "session": session.info(), "origin": parent, "marker": marker,
         "forked_at": forked_at, **result,
@@ -14632,6 +15064,9 @@ async def stage_quick_fork(
         "sibling": sibling,
         "parent": placed,
         "role": fork_role if named_mesh else "",
+        # The origin's side items the copy carried (claunch-yydhs): only the
+        # parts that were asked for, and what each one actually landed.
+        "carried": carried,
     }
     if warnings:
         out["warnings"] = warnings
@@ -15050,6 +15485,28 @@ async def h_session_key(request: web.Request) -> web.Response:
         )
     except ManagerError as exc:
         return json_error(400, str(exc))
+    return json_response(session.info())
+
+
+async def h_session_auto_key_switch(request: web.Request) -> web.Response:
+    """Allow (or stop) the automatic key switch for one session.
+
+    Body: ``{"enabled": true|false}``. The answer is the session's own, kept
+    in its definition (:meth:`SessionManager.set_auto_key_switch`), so it
+    survives a daemon restart like the rest of it. Nothing is restarted here:
+    the switch clock reads the answer off the live session on its next pass,
+    and only then -- when a usage limit actually appears -- is the session
+    relaunched onto another key (``daemon/key_switch.py``).
+
+    Operator-only, like reborrow and the key pin: whether a session may be
+    moved under the person's feet is the operator's arrangement.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return json_error(400, "pass 'enabled': true or false")
+    session = manager.set_auto_key_switch(request.match_info["name"], enabled)
     return json_response(session.info())
 
 

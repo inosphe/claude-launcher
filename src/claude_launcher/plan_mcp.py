@@ -36,6 +36,16 @@ _OPTION = {"type": "object", "properties": {
     "effect": {"type": "string", "description": "what the user gets by picking it"},
     "risk": {"type": "string", "description": "what can go wrong; irreversible effects, cost, other sessions hit"},
     "recommended": {"type": "boolean", "description": "your recommendation (at most one)"},
+    "default": {"type": "boolean",
+                "description": "take this option yourself now (it is also your recommendation): the decision is "
+                               "answered by you, waits on nobody, and the pane shows it as 자동 선택됨 -- the user "
+                               "may still pick another option, which reaches you as a [claunch plan] change. Use "
+                               "it for a plain call you want the user to see with its alternatives; a call with "
+                               "no real alternative needs no decision at all"},
+    "rejected": {"type": "string",
+                 "description": "you weighed this option and ruled it out: why, in a line. The pane shows it "
+                                "struck out with the reason; nobody can pick it. Keep the options you set aside "
+                                "here instead of dropping them, so the user sees what was ruled out"},
 }, "required": ["label", "effect", "risk"]}
 _STEP = {"type": "object", "properties": {
     **_NODE_COMMON,
@@ -43,15 +53,30 @@ _STEP = {"type": "object", "properties": {
     "status": {"type": "string", "enum": ["todo", "doing", "done", "skipped", "blocked"],
                "description": "a step's status (default todo)"},
     "options": {"type": "array", "items": _OPTION, "description": "a decision's branches (2-8)"},
-    "children": {"type": "array", "items": {"type": "object"}, "description": "sub-steps, same shape"},
+    "children": {"type": "array", "items": {"type": "object"},
+                 "description": "sub-steps, same shape, up to 5 levels deep. Under a decision, a child that "
+                                "depends on one option names it in 'under'; the others belong to the whole "
+                                "decision"},
+    "under": {"type": "string",
+              "description": "only on a child of a decision, and only when it depends on one of its options: "
+                             "that option's label. It counts (waits, blocks) only while that option is the "
+                             "decision's choice. Do not hang a sub-decision under every option -- only where the "
+                             "choice actually opens it"},
 }, "required": ["title"]}
 _CLOSURE = {"type": "object", "properties": {
     **_NODE_COMMON,
-    "kind": {"type": "string", "enum": ["verify", "followup"],
+    "kind": {"type": "string", "enum": ["verify", "followup", "note"],
              "description": "verify: a check a person must make by hand (say what and how in detail); "
-                            "followup: related work the user may keep here, hand over as an issue, or drop"},
+                            "followup: related work whose fate the user has to decide (scope, priority) -- "
+                            "keep here, hand over as an issue, or drop; when where it goes is plain, do it "
+                            "(add the steps, or file the issue) and write it done -- an open followup puts 'here / issue / "
+                            "drop' buttons in front of the user, so leave one open only when its scope or "
+                            "priority is theirs, and never make that same disposition a decision's options; "
+                            "note: for the record only (a further recommendation, an aside) -- it never "
+                            "waits on the user or keeps the session open, the user reads notes once at the end"},
     "status": {"type": "string", "enum": ["open", "done"],
-               "description": "a followup's: done once you acted on the user's 'here' or 'issue'"},
+               "description": "a followup's: done once you acted on the user's 'here' or 'issue', or on "
+                              "your own when its disposition was plain (then it waits on nobody)"},
 }, "required": ["kind", "title"]}
 
 TOOLS = [
@@ -61,7 +86,8 @@ TOOLS = [
                     "few more in detail), status todo/doing/done/skipped/blocked. A decision is a branch the "
                     "user picks: give each option its expected effect and risk, and mark your recommendation. "
                     "Closure: the verify items a person must test by hand and the followup candidates -- what "
-                    "keeps the session open; the pane says when it may close. The user's choices arrive as "
+                    "keeps the session open; the pane says when it may close. Only hand the user a choice "
+                    "that is theirs; notes carry what is merely worth knowing. The user's choices arrive as "
                     "'[claunch plan]' blocks. revision: the plan's revision as you last read it (0 for the "
                     "first plan); a refusal carries the current plan -- the user may have just decided. " + LANGUAGE,
      "inputSchema": {"type": "object", "properties": {
@@ -75,12 +101,18 @@ TOOLS = [
     {"name": "plan_node",
      "description": "Change one node of your plan: a step's status as you work (no revision needed), or its "
                     "title, detail or options. Changing what the user decides on (title, detail, options) "
-                    "asks the user again: a decision or check made on the old text is set aside. " + LANGUAGE,
+                    "asks the user again: a decision made on the old text, or a failed or unchecked check, is "
+                    "set aside. A settled closure item -- a passed or deferred verify item, a disposed "
+                    "followup -- keeps its result when you only reword it; when what was checked actually "
+                    "changed (you edited the code it checked, the procedure changed), give reopen with the "
+                    "reason and the user is asked again. " + LANGUAGE,
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "the node id"},
          "status": {"type": "string", "enum": ["todo", "doing", "done", "skipped", "blocked", "open"]},
          "title": {"type": "string"}, "detail": {"type": "string"},
          "options": {"type": "array", "items": _OPTION},
+         "reopen": {"type": "string", "description": "ask the user again about a settled verify item or "
+                                                     "followup: why (what changed in what was checked)"},
      }, "required": ["id"]}},
     {"name": "plan_get",
      "description": "Read a plan: yours (default) or another session's (a leader reading a worker's). It "
@@ -146,7 +178,7 @@ def call_tool(name: str, args: dict) -> dict:
         nid = str(args.get("id") or "")
         if not nid:
             raise PlanMcpError("id is required")
-        body = {k: args[k] for k in ("title", "detail", "status", "options") if k in args}
+        body = {k: args[k] for k in ("title", "detail", "status", "options", "reopen") if k in args}
         return c.post(f"/api/plan/node/{urllib.parse.quote(nid, safe='')}", {**body, "session": me, "by": me})
     if name == "plan_clear":
         return c.post("/api/plan/clear", {"revision": args.get("revision"), "session": me, "by": me})

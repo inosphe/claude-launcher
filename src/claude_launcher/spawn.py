@@ -548,6 +548,17 @@ def check(
             child["env"], enabled=enabled, window=window
         )
 
+    if request.get("auto_key_switch") is not None:
+        # Ungated on purpose, like auto_compact and --null above: it hands the
+        # child no credential it would not already have had. The pool belongs
+        # to the profile the child inherits (or one the allow_profile gate
+        # already let the caller name); this only says that when the key it
+        # launched on hits a usage limit the daemon may restart it on another
+        # usable key of that same pool and type ``continue``. It is the
+        # operator's answer about what happens to the child's own faults, and
+        # a child that had it while its siblings did not is not a wider grant.
+        child["auto_key_switch"] = bool(request.get("auto_key_switch"))
+
     if "model" in request:
         # After the profile re-resolution: a preset names a slot in the
         # CHILD's profile, which is only known now (claunch-yl0to).

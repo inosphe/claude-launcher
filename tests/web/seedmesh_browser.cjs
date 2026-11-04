@@ -128,6 +128,12 @@ function answer(pathname) {
         $('new-session').name.value = 'probe1';
         $('new-session').requestSubmit();
       });
+      // A create that would go out with permission skipping off is asked about
+      // once more before it is sent, and nothing goes out before that answer
+      // (claunch-1ztit.1.1). This form leaves the box unticked, so answer it
+      // the way an operator does; without this the request never happens.
+      const startAnyway = page.getByRole('button', { name: 'Start without skip permissions', exact: true });
+      if (await startAnyway.waitFor({ timeout: 1500 }).then(() => true, () => false)) await startAnyway.click();
       await page.waitForTimeout(600);
     };
     const create = (posts) => posts.find((p) => p.path === '/api/sessions'

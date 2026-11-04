@@ -261,6 +261,14 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     };
     return openQuickForkModal('lead');
   });
+  // claunch-yydhs: the origin's plan/qa/threads start unticked (the
+  // conversation is always copied) and ride the request only when ticked.
+  assert.equal(await page.locator('#new-quick-fork-copy').isVisible(),true);
+  for (const k of ['plan','qa','threads']) {
+    assert.equal(await page.locator(`[name=quick_fork_copy_${k}]`).isChecked(),false,
+      `${k} starts unticked`);
+  }
+  await page.locator('[name=quick_fork_copy_plan]').check();
   await page.getByRole('button',{name:'Fork',exact:true}).click();
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#modal-overlay').isVisible(),true);
@@ -270,6 +278,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     openSpawnModal('lead');
   });
   assert.equal(await page.evaluate(()=>posts.length),2);
+  assert.deepEqual(await page.evaluate(()=>posts.at(-1).body.copy),['plan'],
+    'the ticked item is the only one the request carries');
   assert.equal(await page.evaluate(()=>sessionFormView().mode),'fork');
   await page.evaluate(()=>finishFork());
   await page.waitForFunction(()=>location.hash==='#/s/copy');
@@ -316,6 +326,23 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     const before = await page.evaluate(()=>posts.length);
     await page.evaluate(()=>document.getElementById('new-session').dispatchEvent(
       new Event('submit', {bubbles:true,cancelable:true})));
+    // claunch-1ztit.1.1: a create whose claude runtime row is open and
+    // unticked is asked about once more before it sends, and nothing may go
+    // out before that answer. The row is open here — the profile's harness is
+    // claude and the row is not locked — so this harness answers it the way an
+    // operator does. A child whose row the spawn policy locked inherits its
+    // parent's answer and is never asked (skipconfirm_check.js owns when the
+    // question is asked and what "No" does).
+    const startAnyway = page.getByRole('button', {name:'Start without skip permissions', exact:true});
+    const asked = await Promise.race([
+      startAnyway.waitFor({timeout:3000}).then(()=>true, ()=>false),
+      page.waitForFunction(n=>posts.length>n, before, {timeout:3000}).then(()=>false, ()=>false),
+    ]);
+    if (asked) {
+      assert.equal(await page.evaluate(()=>posts.length), before,
+        'nothing is sent before the confirm answer');
+      await startAnyway.click();
+    }
     await page.waitForFunction(n=>posts.length>n, before);
     const post = await page.evaluate(()=>posts.at(-1));
     assert.equal(post.url, mode === 'new' ? '/api/sessions' : '/api/sessions/lead/children');

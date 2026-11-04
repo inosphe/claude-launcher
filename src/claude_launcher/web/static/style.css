@@ -666,8 +666,8 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
    scroll position for a card that is already in hand.
 
    min       one line: dot, name, role. Reviewer and oneshot rows.
-   compact   two lines: name, briefing one-line, plus the status-check chips.
-             The default.
+   compact   the name line, the briefing one-line, the status-check chips,
+             and the reader's own note when the session has one. The default.
    expanded  every line the row has, plus the briefing card.
 
    `.rail-actions` belongs to expanded cards, with one named pair of
@@ -681,12 +681,21 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
    refresh labels off the identity line also keeps the profile position
    stable.
 
-   `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
-   case: they SAY something the name and the dot cannot, so both survive the
-   compact card. The chips are what the agent reported about its own work.
+   `.rail-quiet` (next paragraph), `.rail-status-checks` and `.rail-note` are
+   the opposite case: they SAY something the name and the dot cannot, so all
+   three survive the compact card. The chips are what the agent reported about
+   its own work; the note is the one line on the card the reader wrote — a
+   folded card that hid it would hide the reader's own words from the rail
+   they annotate it on (claunch-5b12o, operator request: "카드가 fold 상태일
+   때도 'note' 가 표시되도록"). A session with no note draws no line at all
+   (app.js decorateNoteRow removes it), so the extra height is paid only by
+   the rows somebody annotated.
+
+   The chips are what the agent reported about its own work.
    They do not reach the one-line card: that card exists for roles a fleet
    holds many of at once, it is specified as the dot, the name and the role,
-   and "collapsed" in the reader's request names the compact card.
+   and "collapsed" in the reader's request names the compact card. The note
+   does not reach it either, for the same reason (see the block above).
 
    Hidden with `display: none` rather than `visibility`, so an expanded row
    is the only one whose height counts these lines at all -- which is what
@@ -742,7 +751,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 #session-list li[data-rail-mode="compact"] .rail-seen,
 #session-list li[data-rail-mode="compact"] .rail-life,
 #session-list li[data-rail-mode="compact"] .rail-quiet:not(:has(.quiet-fault, .quiet-hold, .quiet-waiting)),
-#session-list li[data-rail-mode="compact"] .rail-note,
 #session-list li[data-rail-mode="compact"] .rail-progress,
 #session-list li[data-rail-mode="compact"] .rail-procs,
 #session-list li[data-rail-mode="compact"] .rail-commits,
@@ -2168,8 +2176,15 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   }
   #rail-nav-pin:hover { opacity: 0.9; background: #22262d; }
   #rail-nav-pin[aria-pressed="true"] { opacity: 1; filter: none; }
-  #rail-nav-dock.pinned { height: auto; }
-  #rail-nav-dock.pinned #rail-nav { position: static; max-height: none; box-shadow: none; }
+  /* The page list keeps growing (26 links at claunch-ijkge, 27 now), and
+     past a certain count the pinned rows no longer fit under the rail's
+     header: the dock used to grow past the window's bottom edge with no way
+     to reach the rows below it. So the pinned dock gives up room like the
+     list does and the nav scrolls inside it; the pin is the dock's child,
+     not the scroller's, so it stays where it can always be pressed. */
+  #rail-nav-dock.pinned { height: auto; flex: 0 1 auto; min-height: 0; }
+  #rail-nav-dock.pinned #rail-nav { position: static; height: 100%; max-height: none;
+    box-shadow: none; overflow-y: auto; }
 }
 @media (min-width: 821px) and (hover: hover) and (prefers-reduced-motion: reduce) {
   #rail-nav { transition: none; }
@@ -4138,6 +4153,20 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: SFMono-Regular, Consolas, monospace;
 }
+/* The automatic key switch is ON for this session (claunch-d2t79). Deliberately
+   a different shape from the key chip beside it (a short word, not a masked
+   key) so the two never read as the same fact: the chip names the key, this
+   says the daemon may move the session to another one on a usage limit. */
+#session-list .sess-auto-key {
+  flex: none; background: none; border: 1px solid #9e6a03;
+  border-radius: 9px; color: #d29922; font-size: 9px; line-height: 1;
+  letter-spacing: .04em; padding: 2px 5px; cursor: pointer;
+}
+#session-list .sess-auto-key:hover { color: #e3b341; border-color: #e3b341; }
+.sess-key-section { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.key-picker-auto { margin-top: 8px; }
+.key-picker-auto-label { display: flex; align-items: center; gap: 6px; }
+.key-picker-auto-note { margin-top: 4px; }
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
@@ -9149,6 +9178,10 @@ a.ar-name:hover { color: #58a6ff; }
 .ar-cwd { font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; max-width: 46ch; }
 .ar-session-head .wf-btn { margin-left: auto; margin-right: 0; padding: 3px 10px; }
+/* The head's buttons move together: only the group takes the free space, so
+   the second button does not sit apart from the first. */
+.ar-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.ar-session-head .ar-actions .wf-btn { margin-left: 0; margin-right: 0; padding: 3px 10px; }
 .ar-size { font-size: 12px; color: #b8c8db; white-space: nowrap; margin-left: auto; }
 .ar-session-head .ar-size { margin-left: 0; }
 .ar-rows { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -9165,6 +9198,9 @@ a.ar-name:hover { color: #58a6ff; }
 .wt-chip.ar-why { background: #3a2422; color: #ffa198; }
 .wt-chip.ar-running { background: #1c2d4a; color: #79c0ff; }
 .wt-chip.ar-scheduled { background: #3d2e00; color: #e3b341; }
+.wt-chip.ar-plan-chip { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-plan-ready { background: #12301c; color: #3fb950; }
+.ar-plan-reason { flex: 1 1 200px; overflow-wrap: anywhere; }
 .wt-chip.ar-receipt { background: #30363d; color: #8b949e; }
 .ar-cleanup { display: flex; flex-direction: column; gap: 2px; padding-top: 4px;
   border-top: 1px dashed #2a2e36; }
@@ -9905,6 +9941,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .profile-usage-bar.high > span { background: #f85149; }
 .profile-usage-pct.mid { color: #e3b341; }
 .profile-usage-pct.high { color: #ff7b72; }
+.profile-usage-keys { margin-top: 4px; border-top: 1px solid #21262d; padding-top: 4px; }
+.profile-usage-keys-head { margin: 4px 0 0; }
+.profile-usage-key { padding-left: 14px; }
+.profile-usage-key strong { font-weight: 500; }
 .profile-usage-updated { margin-top: 4px; }
 .profile-usage-other { margin: 16px 0; color: #8b949e; }
 .profile-usage-other summary { cursor: pointer; }
@@ -10407,6 +10447,20 @@ body.split-max #term-wf { flex: 1 1 0; }
 .th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
   border-bottom-left-radius: 3px; }
 .th-msg.th-guest .th-msg-who { color: #d2a8ff; }
+/* Guest marks (claunch-br084): with two or more guests the shared purple
+   bubble is not enough to tell them apart, so each guest also carries a
+   numbered mark whose colour cycles. The bubble background stays the same
+   for every guest; only this mark differs. */
+.th-guest-mark { display: inline-flex; align-items: center; justify-content: center; min-width: 15px;
+  height: 15px; padding: 0 4px; margin-right: 4px; border-radius: 8px; font-size: 10px; font-weight: 700;
+  line-height: 1; color: #0d1117; background: #d2a8ff; vertical-align: middle; }
+.th-guest-mark-1 { background: #d2a8ff; }
+.th-guest-mark-2 { background: #7ee787; }
+.th-guest-mark-3 { background: #79c0ff; }
+.th-guest-mark-4 { background: #ffa657; }
+.th-guest-mark-5 { background: #ff7b72; }
+.th-guest-mark-6 { background: #e3b341; }
+.th-guest-chip .th-guest-mark { margin-right: 3px; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
 /* A thread's chips never push the conversation off screen: the box holds
    at most a few rows and scrolls inside, and it gives way first when the
@@ -10628,6 +10682,7 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-item-head { display: flex; gap: 8px; align-items: baseline; }
 .plan-title { overflow-wrap: anywhere; }
 .plan-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--plan-border); border-radius: 10px; color: var(--plan-muted); white-space: nowrap; }
+.plan-id { font-size: 11px; color: var(--plan-muted); font-family: var(--mono, monospace); white-space: nowrap; user-select: all; }
 .plan-detail { margin: 2px 0 0 4px; color: var(--plan-muted); white-space: pre-wrap; font-size: 12px; }
 .plan-option-head { display: flex; gap: 6px; align-items: baseline; }
 .plan-effect { color: #9fd8a8; }
@@ -10708,6 +10763,16 @@ a.category-ref:hover { text-decoration: underline; }
 .ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
 .ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
 .ptree-unchosen > .ptree-opt { opacity: 0.5; }
+/* claunch-vmcg7: an option the session ruled out, a decision it answered
+   with its default, and the nodes under an option that is not the path taken. */
+.ptree-rejected > .ptree-opt { opacity: 0.6; border-style: dashed; }
+.ptree-rejected > .ptree-opt .plan-option-head strong, .ptree-rejected > .ptree-opt .plan-effect,
+.ptree-rejected > .ptree-opt .plan-risk { text-decoration: line-through; }
+.plan-rejected { color: var(--plan-muted); }
+.plan-chip.plan-chip-rejected { color: #ff7b72; border-color: #da3633; }
+.plan-chip.plan-chip-auto, .ptree-decided > .ptree-label .plan-chip.plan-chip-auto { color: #79b8ff; border-color: #427fdf; }
+.ptree-inactive > .ptree-label, .ptree-inactive > .plan-detail { opacity: 0.5; }
+.ptree-branch-note { color: var(--plan-muted); font-size: 11px; list-style: none; }
 /* Each project is the root of its tree (claunch-7jzp8.5.2). */
 .ptree-root + .ptree-root { margin-top: 14px; }
 .ptree-project > .ptree-label { background: var(--plan-panel); border-color: var(--plan-border); font-size: 14px; padding: 3px 10px; }
@@ -11367,4 +11432,48 @@ a.category-ref:hover { text-decoration: underline; }
 .pr-error {
   margin-top: 8px; padding: 8px 10px; border: 1px solid #f8514966;
   border-radius: 6px; background: #2d1517; color: #ffa198; font-size: 12px;
+}
+/* One row's panel: live state from the daemon, and the merge. */
+.pr-clickable { cursor: pointer; }
+.pr-detail-box {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid #30363d;
+  border-radius: 6px; background: #0d1117;
+}
+.pr-detail-head { display: flex; align-items: baseline; gap: 8px; }
+.pr-detail-heading { font-size: 13px; color: #e6edf3; overflow-wrap: anywhere; flex: 1; }
+.pr-detail-close {
+  flex: none; background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.pr-detail-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; font-size: 11px; }
+.pr-detail-external { color: #58a6ff; text-decoration: none; }
+.pr-detail-external:hover { text-decoration: underline; }
+.pr-detail-hint { color: #8b949e; font-size: 11px; }
+.pr-detail-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin-top: 8px; font-size: 11.5px; }
+.pr-detail-row { display: contents; }
+.pr-detail-key { color: #8b949e; }
+.pr-detail-val { color: #c9d1d9; overflow-wrap: anywhere; }
+.pr-verdict { margin-top: 8px; padding: 6px 9px; border-radius: 5px; font-size: 12px; border: 1px solid #30363d; }
+.pr-verdict-ok { background: #0f2417; border-color: #2ea04366; color: #7ee787; }
+.pr-verdict-stop { background: #241c0f; border-color: #9e6a0366; color: #e3b341; }
+.pr-detail-section { margin-top: 10px; font-size: 12px; }
+.pr-detail-section h4 { font-size: 11px; color: #8b949e; margin: 0 0 4px; letter-spacing: 0.3px; }
+.pr-conflicts {
+  margin: 0; padding-left: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: #ffa198; overflow-wrap: anywhere;
+}
+.pr-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.pr-merge, .pr-rebase, .pr-merge-cancel, .pr-merge-method, .pr-rebase-note {
+  font-size: 12px; border-radius: 5px; border: 1px solid #30363d;
+  background: #21262d; color: #c9d1d9; padding: 3px 10px;
+}
+.pr-merge, .pr-rebase { cursor: pointer; }
+.pr-merge-go { background: #238636; border-color: #2ea043; color: #ffffff; font-weight: 600; }
+.pr-merge-cancel { cursor: pointer; }
+.pr-rebase-note { flex: 1; min-width: 180px; padding: 3px 8px; }
+.pr-detail-raw {
+  margin: 6px 0 0; padding: 6px 8px; max-height: 180px; overflow: auto;
+  background: #161b22; border: 1px solid #30363d; border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: #c9d1d9; white-space: pre-wrap; overflow-wrap: anywhere;
 }

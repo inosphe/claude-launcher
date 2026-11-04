@@ -271,6 +271,33 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
   같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+- 자동 키 전환 (claunch-d2t79): 키 풀을 가진 프로필의 세션이 `usage_limit`을
+  맞으면, 그 세션이 스스로 켜 둔 경우(`SessionDef.auto_key_switch`, 기본 꺼짐)
+  pause 전에 다른 키로 갈아탄다(`daemon/key_switch.py`). 같은 pass에서 이 전환이
+  먼저 돌고, 살아난 세션은 fault 판독이 새 화면이라 pause 대상에서 빠진다 —
+  clock을 둘로 나누면 전환이 재시작하려는 세션을 pause가 먼저 잡는 창이 생긴다.
+  - 켜는 자리는 셋이다. (1) 키 모달 — 세션 카드의 키 칩이나 detail panel의
+    Restart settings에서 연 「Change key…」 모달 안의 체크박스이고, 값을 쓰는
+    라우트는 `POST /api/sessions/<name>/auto-key-switch`다. Restart settings 줄은
+    지금 키와 이 값의 상태를 함께 보여 준다. (2) new session 폼과 spawn child
+    폼의 체크박스 — 체크되었을 때만 `auto_key_switch: true`를 바디에 싣고,
+    생성 라우트와 `spawn.check()`가 각각 정의에 옮긴다. 요청에 값이 없으면
+    자식은 꺼짐으로 시작한다(상속하지 않는다). (3) Settings 페이지의
+    `fault_key_switch_retries` — 세션별 스위치가 아니라 재시도 횟수다.
+  - 고르는 키는 `usage min` 하나로 고정한다(`profile_keys.switch_candidate`).
+    후보는 풀의 키 가운데 (1) 어느 윈도도 한도에 닿지 않았고 (2) 지금 이 세션이
+    쓰는 키가 아닌 것이다. 순서는 윈도별 사용률의 **최댓값**이 작은 순이고,
+    동률이면 5시간 → 1주 → 1개월 순으로 낮은 쪽이다(`usage.tie_break_key`).
+    사용량을 읽을 수 없는 키는 건너뛴다 — 읽히지 않은 키에는 비교할 최솟값이 없다.
+  - 전환은 `SessionManager.set_key`(정의에 핀을 쓰고 재시작)로 하고, 프로세스가
+    입력을 받을 수 있게 되면 `continue`를 한 줄 넣는다(`key_switch.CONTINUE`).
+  - 한 fault당 시도 횟수는 설정 키 `daemon.fault_key_switch_retries`(기본 1, 0이면
+    전 기능 끔)로 제한한다. 시도 횟수는 세션 디렉터리의 `key-switch.json`에
+    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다(메모리에만 두던
+    `FaultPauseClock.paused`가 재기동 뒤 같은 한도로 다시 pause하던 문제
+    claunch-ijot0.1과 같은 자리다). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
+    pause한다. 갈 곳이 없다는 판정은 10분간 유지해, 며칠짜리 한도 동안 30초마다
+    provider에 키마다 묻지 않는다(`key_switch.RECONSULT`).
 - pause는 beads 이슈를 open으로 돌리지 않는다. hold와 같이 in_progress로
   남고, pause된 기록을 kill·archive·remove할 때 `SESSION ENDED` 정리가 돈다
   (`SessionManager.unpause`/`settle_pause`, `beads.Board.session_settled`).

@@ -1845,8 +1845,19 @@ function syncBulkActions(sessions, filter = "current") {
    safe answer and the destructive one side by side, one click apart. The
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
-function showModal({ title, body, actions, checkbox = null, choices = null, controls = null }) {
-  if (typeof sessionModal !== "undefined" && sessionModal) {
+function showModal({ title, body, actions, checkbox = null, choices = null,
+                     controls = null, overForm = false }) {
+  // The session form lives inside this same dialog's body, so a question
+  // asked FROM that form (the skip-permissions confirm) cannot simply take
+  // the body: the form would be deleted out of the page. `overForm` parks
+  // the form in #new-view for the length of the question and puts it back
+  // untouched after the answer, which is what makes "Back to the form" a
+  // place that still exists (claunch-9mwba). Every other caller keeps the
+  // older arrangement: the session modal is closed first, because a dialog
+  // raised over a form it is not about would otherwise draw on top of one.
+  const parked = overForm && typeof sessionModal !== "undefined" && sessionModal
+    ? parkSessionForm() : null;
+  if (!parked && typeof sessionModal !== "undefined" && sessionModal) {
     sessionModalClose();
     if (sessionModal) return Promise.resolve(null);
   }
@@ -1860,6 +1871,7 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const done = (value) => {
       overlay.classList.add("hidden");
       document.removeEventListener("keydown", onKey);
+      if (parked) restoreSessionForm(parked);
       resolve(value);
     };
     const onKey = (e) => { if (e.key === "Escape") done(null); };
@@ -1964,6 +1976,54 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const first = row.querySelector("button");
     if (first) first.focus();
   });
+}
+
+/* Parking for a question asked on top of the session form (showModal's
+   `overForm`), and putting it back.
+
+   The form is a node inside #modal-body, so the question's body would clear
+   it away. The node is moved home to #new-view for the length of the
+   question and returned as it stands: nothing here reads or writes a field,
+   which is the difference from sessionModalClose -- that one restores every
+   row to what it held when the box opened, and the operator is still typing
+   in that box. The session modal's own answers are taken out for the same
+   length (Escape, a backdrop press), so the answer given belongs to the
+   question. */
+function parkSessionForm() {
+  const form = $("new-session");
+  const home = $("new-view");
+  const overlay = $("modal-overlay");
+  if (!form || !home || !overlay) return null;
+  const focused = document.activeElement;
+  home.appendChild(form);
+  $("modal-body").innerText = "";
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", sessionModalKey);
+  overlay.onclick = null;
+  return { focused };
+}
+
+function restoreSessionForm(parked) {
+  if (typeof sessionModal === "undefined" || !sessionModal) return;
+  const overlay = $("modal-overlay");
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild($("new-session"));
+  // The question's own answers go with the question. Left in the bar they
+  // would stand over a form that never asks them again, and a press on one
+  // settles a promise that settled already — the button would only blink.
+  // openSessionModal leaves this bar empty and puts the form's Cancel inside
+  // the form, so empty is what the form's own state looks like.
+  $("modal-actions").innerHTML = "";
+  // The form's own ways out, put back exactly as openSessionModal set them.
+  overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
+  document.addEventListener("keydown", sessionModalKey);
+  // The title and the submit wording are the question's right now.
+  syncSessionModalChrome();
+  overlay.classList.remove("hidden");
+  refitSoon(60);
+  const back = parked && parked.focused;
+  if (back && back.focus && document.contains(back)) back.focus();
 }
 
 const modalInfo = (title, body) =>
@@ -17157,6 +17217,15 @@ function renderNewUsage() {
   const keysBox = $("new-usage-keys");
   const keys = (doc && doc.keys) || [];
   const multi = !!(doc && doc.pooled) && keys.length > 1;
+  const autoRow = $("new-auto-key-row");
+  if (autoRow) {
+    // Ticking it needs two keys to switch between; a pool that changes under
+    // the tick (a key removed in another tab) leaves the box hidden, and a
+    // hidden answer must not ride the submit as if it were chosen.
+    autoRow.classList.toggle("hidden", !multi);
+    const autoBox = $("new-auto-key-switch");
+    if (!multi && autoBox) autoBox.checked = false;
+  }
   const strategy = (doc && doc.strategy) || "rotation";
   if (keysBox) {
     keysBox.innerHTML = "";
@@ -18343,6 +18412,10 @@ async function confirmStartWithoutSkipPermissions(f, parent) {
       { label: "Back to the form", value: null },
       { label: "Start without skip permissions", value: true },
     ],
+    // The form this submit came from is still open behind the question, and
+    // "Back to the form" means that one -- not a fresh box with the rows
+    // reset to what they held when it opened (claunch-9mwba).
+    overForm: true,
   });
   return answer === true;
 }
@@ -18498,6 +18571,12 @@ $("new-session").addEventListener("submit", async (e) => {
     return;
   }
   const parent = spawnParent();
+  // Read here, not at the report below: the skip-permissions confirm further
+  // down is a showModal, and showing one closes the session modal. A create
+  // made for an agent's spawn request still has to report back to it
+  // (claunch-oaxni), and that answer cannot depend on a box the question
+  // took away.
+  const spawnRid = sessionModal && sessionModal.spawnRequest;
   if (sessionFormView().mode === "spawn" && !parent) {
     $("create-error").textContent = "Choose a parent session.";
     $("create-error").classList.remove("hidden");
@@ -18672,6 +18751,10 @@ $("new-session").addEventListener("submit", async (e) => {
   // session (claunch-i985h). Absent unless pressed; the daemon refuses an id
   // the profile's pool does not hold.
   if (newSessionKeyId) body.key_id = newSessionKeyId;
+  // The auto-switch permission (claunch-d2t79), sent only when ticked so a form
+  // that never showed the row (a single-key pool) cannot turn it on. The box
+  // lives in the usage block and is hidden unless the pool has two keys.
+  if (f.auto_key_switch && f.auto_key_switch.checked) body.auto_key_switch = true;
   // The operator's note goes on the session record with the launch
   // (claunch-zy9yk); empty is left off, which is "no note".
   if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
@@ -18827,7 +18910,6 @@ $("new-session").addEventListener("submit", async (e) => {
     // the request learns which session the person made from it, top-level
     // or child — the tab it was created from, which need not be the scope
     // the agent asked for (claunch-oaxni).
-    const spawnRid = sessionModal && sessionModal.spawnRequest;
     if (spawnRid && made.name) spawnGateLink(spawnRid, made.name, parent ? "child" : "root");
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
@@ -19801,6 +19883,10 @@ function configureSessionFork(source) {
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
   f.quick_fork_self_merge.checked = false;
+  // The origin's side items start unchecked: the conversation is always
+  // copied, and a copy that carried the plan or the open questions by
+  // default would change every existing fork (claunch-yydhs).
+  for (const key of ["plan", "qa", "threads"]) f[`quick_fork_copy_${key}`].checked = false;
   quickForkFill(f.quick_fork_place, [
     { value: "child", label: `As child of ${source.name} (recommended)` },
     { value: "sibling", label: inherited.parent
@@ -19954,6 +20040,10 @@ function quickForkRequestOptions(f, view) {
   if (mesh && mesh !== "-") options.mesh = mesh;
   const wf = f.quick_fork_workflow.value;
   if (wf && wf !== "-") options.workflow = wf;
+  // The origin's side items (claunch-yydhs). Omitted when nothing is
+  // ticked, so an ordinary fork sends exactly what it always sent.
+  const copy = ["plan", "qa", "threads"].filter((key) => f[`quick_fork_copy_${key}`].checked);
+  if (copy.length) options.copy = copy;
   const inputsBox = $("new-quick-fork-inputs");
   if (options.workflow && inputsBox && !inputsBox.classList.contains("hidden")) {
     options.cflow_inputs = cflowInputsValues(inputsBox);
@@ -20010,6 +20100,7 @@ async function quickForkSession(name, task, options, view = {}) {
   if (options && options.role) body.role = options.role;
   if (options && options.sibling) body.sibling = true;
   if (options && options.self_merge_allowed) body.self_merge_allowed = true;
+  if (options && options.copy && options.copy.length) body.copy = options.copy;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -24510,6 +24601,14 @@ function renderTermCflow() {
    the rule reaches every session created before it existed, and why a new one
    shows it until a person presses ignore once.
 
+   A session already running on skip permissions shows nothing at all: the
+   advice has been taken and the classifier is not called, and the strip
+   would be offering only "ignore" -- a permanent record pressed in the one
+   state where it buys nothing, and the one press that could keep the warning
+   away from a session that later runs without the flag. Turning the flag off
+   is a restart, and the strip paints again on the next poll from the row
+   (claunch-9mwba.1).
+
    The provider pair rides the session row (``provider``/``provider_service``,
    published by the daemon): a browser cannot open the config that decides it,
    and a provider's name alone does not say whether it is Anthropic's (the
@@ -24528,8 +24627,16 @@ function termProviderWarnView() {
   const skipping = (typeof argvHasGroup === "function" && group.length)
     ? argvHasGroup((s.args || []).map(String), group)
     : false;
-  return { name: s.name, provider: s.provider || "", skipping,
-           canYolo: group.length > 0 };
+  // A session already on skip permissions is the advice taken: the
+  // permission classifier this strip warns about does not run. So the strip
+  // is not drawn at all -- and it offers no "ignore" press in that state,
+  // because that record is permanent and pressing it there would be the only
+  // way to lose the warning for a session that later runs without the flag.
+  // Nothing is recorded here, so the restart that turns the flag off (a
+  // fresh PTY under the same name) paints the strip again on the next poll
+  // (claunch-9mwba.1).
+  if (skipping) return null;
+  return { name: s.name, provider: s.provider || "", canYolo: group.length > 0 };
 }
 
 function renderTermProviderWarn() {
@@ -24537,7 +24644,7 @@ function renderTermProviderWarn() {
   if (!box) return;
   const view = termProviderWarnView();
   const sig = view
-    ? JSON.stringify([view.name, view.provider, view.skipping])
+    ? JSON.stringify([view.name, view.provider])
     : "hidden";
   // Rebuilt only when what it draws changes: the two-second poll answers the
   // same thing on almost every tick, and replacing a button under the pointer
@@ -24561,17 +24668,13 @@ function renderTermProviderWarn() {
   const btns = el("span", "tpw-buttons");
   // A harness that declares no skip-permissions args has nothing to restart
   // into: offering the press there would be a button that cannot do what it
-  // says. The warning and "ignore" still stand.
+  // says. The warning and "ignore" still stand. A session already ON skip
+  // permissions never reaches this painter -- the view above answers null
+  // for it (claunch-9mwba.1).
   if (view.canYolo) {
-    const yolo = el(
-      "button", "tpw-btn tpw-yolo",
-      view.skipping ? "already on yolo mode" : "restart with yolo mode"
-    );
+    const yolo = el("button", "tpw-btn tpw-yolo", "restart with yolo mode");
     yolo.type = "button";
-    yolo.disabled = !!view.skipping;
-    yolo.title = view.skipping
-      ? "this session already runs with skip permissions"
-      : "restart it with skip permissions — same name, same conversation";
+    yolo.title = "restart it with skip permissions — same name, same conversation";
     yolo.addEventListener("click", () => restartSessionYolo(view.name, yolo));
     btns.appendChild(yolo);
   }
@@ -31003,6 +31106,7 @@ function openSettings(section) {
   refreshTestOutputDir();
   refreshDelegateSetting();
   refreshSweepBatchSetting();
+  refreshKeySwitchSetting();
   refreshWebdebugSetting();
   refreshModelTiers();
   refreshProviderAffinity();
@@ -38080,6 +38184,7 @@ function renderWorkspaces() {
   view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
   view.appendChild(sweepBatchSettingCard());
+  view.appendChild(keySwitchSettingCard());
   view.appendChild(webdebugSettingCard());
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
@@ -40898,6 +41003,107 @@ function sweepBatchField(field, label, unit, detail) {
   row.appendChild(head);
   row.appendChild(el("p", "wf-note", detail));
   return row;
+}
+
+/* Automatic key switch (#/settings, claunch-d2t79). One machine-wide number:
+   how many times one session may be moved onto another key of its pool for
+   the same usage-limit fault. Whether a *particular* session is switched at
+   all is that session's own answer, set in the new-session form, the spawn
+   form or the key modal -- this card only bounds the retries, which is the
+   part that should not differ session by session. Read live by the fault
+   clock, so a saved value applies on its next pass. */
+let keySwitchSetting = {
+  retries: 1, defaults: { retries: 1 }, loaded: false, error: "", busy: false,
+};
+
+function takeKeySwitchSetting(data) {
+  Object.assign(keySwitchSetting, {
+    retries: data.retries,
+    defaults: data.defaults || keySwitchSetting.defaults,
+    loaded: true, error: "",
+  });
+}
+
+async function refreshKeySwitchSetting() {
+  try {
+    const resp = await api("/api/key-switch-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeKeySwitchSetting(data);
+  } catch (err) {
+    keySwitchSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveKeySwitchSetting(value) {
+  keySwitchSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/key-switch-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retries: value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeKeySwitchSetting(data);
+  } catch (err) {
+    keySwitchSetting.error = String(err);
+  }
+  keySwitchSetting.busy = false;
+  renderWorkspaces();
+}
+
+function keySwitchSettingCard() {
+  const st = keySwitchSetting;
+  const card = el("section", "ws-add key-switch-settings");
+  card.appendChild(el("h3", null, "Automatic key switch"));
+  card.appendChild(el("p", "wf-note",
+    "When a session that asked for it hits a usage limit, the daemon restarts " +
+    "it on another key of its profile's pool and types continue. The key is " +
+    "the usable one with the lowest usage, read across the 5-hour, weekly and " +
+    "monthly windows together; a key whose window is already spent is never " +
+    "chosen. This is how many switches one session may spend on the same " +
+    "fault — after that it is paused until the plan resets, which is the " +
+    "behaviour without this feature. Same setting as daemon." +
+    "fault_key_switch_retries in ~/.claude-launcher/.claunch.yaml. 0 turns " +
+    "the switch off for every session; whether a session is switched at all " +
+    "is set per session (new-session form, spawn form, or the key modal)."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const row = el("div", "sweep-batch-row");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = "key-switch-retries";
+  input.min = "0";
+  input.max = "10";
+  input.step = "1";
+  input.disabled = st.busy;
+  input.value = String(st.retries);
+  input.addEventListener("change", () => {
+    const text = String(input.value).trim();
+    if (text === "") return saveKeySwitchSetting(null);
+    return saveKeySwitchSetting(Number(text));
+  });
+  const reset = el("button", "wf-btn clear", "Reset");
+  reset.type = "button";
+  reset.disabled = st.busy || st.retries === st.defaults.retries;
+  reset.title = `back to the default, ${st.defaults.retries}`;
+  reset.addEventListener("click", () => saveKeySwitchSetting(null));
+  const head = el("label", "sweep-batch-label", "Retries per fault ");
+  head.append(input,
+    el("span", "sweep-batch-unit", ` (default ${st.defaults.retries})`), reset);
+  row.appendChild(head);
+  row.appendChild(el("p", "wf-note",
+    "Range 0-10. 1 (the default) means one switch per fault: if the second " +
+    "key also hits a limit, the session is paused instead of being restarted " +
+    "again."));
+  card.appendChild(row);
+  return card;
 }
 
 function sweepBatchSettingCard() {
@@ -52294,11 +52500,56 @@ function sessInputJournal(name) {
    the same question creation asks: its own token or a borrowed one; Claude
    additionally offers none (--null). Picking any clears the others, so a
    borrow chosen on a --null Claude session turns the token back on. */
+/* Which key of a multi-key pool this session spends, and the way to another
+   (claunch-d2t79). The panel already restarts the session; the key is the
+   other half of the same restart, so it belongs here rather than only on the
+   rail's chip. Returns null for a session with no pool or a single key — a
+   one-key profile has nothing to choose between, and a row saying so would be
+   noise on every session of the fleet. */
+function sessKeySection(s) {
+  const poolProfile = keyPoolProfile(s);
+  if (!poolProfile) return null;
+  const box = el("div", "sess-key-section");
+  const line = el("p", "wf-note", "Key: reading the pool…");
+  const pick = el("button", "wf-btn option", "Change key…");
+  pick.type = "button";
+  pick.disabled = true;
+  pick.title = "restart this session on another key of the same pool";
+  pick.addEventListener("click", () => openKeyPicker(s.name, poolProfile));
+  box.append(line, pick);
+  fetchKeyPool(poolProfile).then((pool) => {
+    if (!pool || !pool.pooled || (pool.keys || []).length < 2) {
+      box.remove();
+      return;
+    }
+    const keys = pool.keys || [];
+    const pinned = s.key_id ? keys.find((k) => k.id === s.key_id) : null;
+    const current = pinned || keys.find((k) => k.current) || keys[0];
+    const shown = current.label || current.masked;
+    line.textContent = `Key: ${shown}${pinned ? " (pinned)" : ""}`
+      + ` of ${keys.length} in ${pool.owner || poolProfile}'s pool`
+      + (s.auto_key_switch
+        ? " — switched automatically on a usage limit"
+        : "");
+    pick.disabled = false;
+  }).catch(() => { line.textContent = "Key: the daemon did not answer"; });
+  return box;
+}
+
 function sessReborrow(data) {
   const s = data.session || {};
   const harness = data.harness || {};
   const box = el("div", "sess-reborrow");
   box.appendChild(el("h3", null, "Restart settings"));
+
+  // The key half of the same restart (claunch-d2t79). Before this the panel
+  // could say whose token a session runs on but not *which key* of a multi-key
+  // pool it spends, and could not change it: the answers here were the three
+  // auth modes only, and switching keys meant finding the rail's key chip.
+  // It is drawn before the borrowability gate below because a pool is not a
+  // borrow: a harness with no shared-token route can still have several keys.
+  const keySection = sessKeySection(s);
+  if (keySection) box.appendChild(keySection);
 
   // Borrowability comes from the packaged/custom harness auth contract. Keep
   // Claude as the old-daemon fallback, but do not infer every other harness is
@@ -52654,6 +52905,7 @@ function keyPoolSignature() {
 function decorateKeyRow(li, s) {
   const actions = li && li.querySelector(".rail-actions");
   if (!actions) return;
+  decorateAutoKeyBadge(actions, s);
   const existing = actions.querySelector(".sess-key");
   const chip = railKeyChip(s);
   if (chip) {
@@ -52666,6 +52918,37 @@ function decorateKeyRow(li, s) {
   if (existing && (!poolProfile || (hit && (!hit.data || !hit.data.pooled)))) {
     existing.remove();
   }
+}
+
+/* The auto-switch badge on a session's card (claunch-d2t79). Drawn from the
+   session's own answer (``auto_key_switch``), not from the pool cache: the
+   answer is what the daemon will do on a usage limit, and it is a fact about
+   the session that arrives on the rail poll, while the pool behind it is
+   fetched lazily and may not have arrived yet. Idempotent like the chip
+   beside it — replaced when present, removed when the answer is off. */
+function decorateAutoKeyBadge(actions, s) {
+  const existing = actions.querySelector(".sess-auto-key");
+  if (!s || !s.auto_key_switch) {
+    if (existing) existing.remove();
+    return;
+  }
+  const badge = document.createElement("button");
+  badge.className = "sess-auto-key on";
+  badge.type = "button";
+  badge.dataset.name = s.name;
+  badge.textContent = "AUTO";
+  badge.title = "on a usage limit this session is switched onto another "
+    + "usable key of its pool and told to continue — click for the key settings";
+  if (typeof badge.setAttribute === "function") {
+    badge.setAttribute("aria-label", "automatic key switch on");
+  }
+  badge.addEventListener("click", (e) => {
+    e.stopPropagation();     // the row itself attaches; this button does not
+    const poolProfile = keyPoolProfile(s);
+    if (poolProfile) openKeyPicker(s.name, poolProfile);
+  });
+  if (existing) existing.replaceWith(badge);
+  else actions.appendChild(badge);
 }
 
 /* The usage selector for a session's pool: the profile asked with the
@@ -52729,10 +53012,20 @@ function keyPickerFillUsage(options, doc, nextId) {
    The pool's own profile is the target — a session on a child profile reads
    its ancestor's pool, and a write to the child's nonexistent one would
    silently do nothing (the split ``h_profile_key_strategy`` documents). */
-async function keyPickerWrite(profileName, leaf, body) {
+/* One write to the key machinery. Three of the modal's writes are the
+   *pool's* (``/api/profiles/<name>/keys/<leaf>``: strategy, roll, and the
+   pin) and one is the *session's* (``/api/sessions/<name>/auto-key-switch``,
+   claunch-d2t79): whether this session may be switched under a usage limit
+   is a fact about the session, not about the pool every other session of the
+   profile also reads. ``opts.session`` picks the second route — the first
+   argument is then the session name. */
+async function keyPickerWrite(profileName, leaf, body, opts = {}) {
+  const where = opts.session
+    ? `/api/sessions/${encodeURIComponent(profileName)}/${leaf}`
+    : `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`;
   try {
     const resp = await api(
-      `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`,
+      where,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}) });
     const doc = await resp.json().catch(() => null);
@@ -52756,7 +53049,7 @@ async function keyPickerWrite(profileName, leaf, body) {
    `paint` is called with whatever the next pick currently is (the pool's
    stored pick at open, the peek when the usage read lands, a fresh draw after
    a roll), so the line always names the key the next launch would spend. */
-function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
+function keyPickerControls({ profileName, keys, strategy, onStrategy, auto, onAuto }) {
   const box = el("div", "key-picker-controls");
   const row = el("div", "key-picker-row");
   const label = el("label", "key-picker-strategy");
@@ -52777,7 +53070,28 @@ function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
   row.append(label, roll);
   const next = el("p", "key-picker-next");
   const note = el("p", "key-picker-note muted");
-  box.append(row, next, note);
+  /* The automatic switch (claunch-d2t79). Off unless the session asked for
+     it: the answer says the daemon may restart this session on its own when a
+     usage limit appears, which is a bigger thing than picking a key for it.
+     When it is on, the sentence names the two halves a person needs — the
+     rule the key is chosen by, and that a session with nothing usable falls
+     back to the pause. */
+  const autoRow = el("div", "key-picker-row key-picker-auto");
+  const autoLabel = el("label", "key-picker-auto-label");
+  const autoBox = document.createElement("input");
+  autoBox.type = "checkbox";
+  autoBox.id = "key-picker-auto";
+  autoBox.checked = !!auto;
+  autoLabel.append(autoBox, document.createTextNode(" switch keys on a usage limit"));
+  const autoNote = el("p", "key-picker-auto-note muted");
+  autoNote.textContent = autoBox.checked
+    ? "Restarts this session on the usable key with the lowest usage "
+      + "(5-hour, weekly and monthly windows together) and types continue. "
+      + "A session with nothing usable left is paused as before."
+    : "Off: a usage limit pauses this session until the plan resets.";
+  autoBox.addEventListener("change", () => onAuto(autoBox.checked));
+  autoRow.append(autoLabel);
+  box.append(row, next, note, autoRow, autoNote);
 
   const nameOf = (id) => {
     const hit = keys.find((k) => k.id === id);
@@ -52878,7 +53192,26 @@ async function openKeyPicker(name, profile) {
   const controls = keyPickerControls({
     profileName: poolName, keys, strategy,
     onStrategy: (name) => writeStrategy(name),
+    auto: !!(session && session.auto_key_switch),
+    onAuto: (on) => writeAuto(on),
   });
+
+  /* The automatic switch's answer is the session's, not the pool's: it is a
+     definition edit on the daemon and costs no restart, so the modal writes
+     it and repaints without touching the key list or the strategy. */
+  async function writeAuto(on) {
+    const res = await keyPickerWrite(name, "auto-key-switch", { enabled: !!on },
+      { session: true });
+    if (!res.ok) {
+      controls.paint({ nextPick, strategy, pinned: !!pinnedTo,
+                       flash: `not saved: ${res.error}` });
+      return;
+    }
+    const row = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+      .find((x) => x.name === name);
+    if (row) row.auto_key_switch = !!(res.doc && res.doc.auto_key_switch);
+    requestSessionsRefresh();
+  }
 
   /* Change the pool's strategy. Under manual the key the operator marked in
      the list is the one it names, so "manual" and the press on a key are one
@@ -55210,7 +55543,11 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "note", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
+    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt",
+    // Asked on the face of the form on both tabs (claunch-d2t79). Without
+    // the name here renderSessionForm greys the box and sessionFormPayload
+    // drops the tick, so the answer would read as taken and never travel.
+    "auto_key_switch"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
@@ -55218,7 +55555,7 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "resume", "fork_session", "key_id"] },
+        "resume", "fork_session", "key_id", "auto_key_switch"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
@@ -55226,11 +55563,12 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "fork", "connect", "over_limit", "auto_compact"] },
+        "fork", "connect", "over_limit", "auto_compact", "auto_key_switch"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
-        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge"],
-      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs"] },
+        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge",
+        "quick_fork_copy_plan", "quick_fork_copy_qa", "quick_fork_copy_threads"],
+      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs", "copy"] },
   };
   return modes[mode] || modes.new;
 }

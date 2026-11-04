@@ -21,7 +21,18 @@
                      Fireworks account, claunch-f5w4x.5) chart in dollars:
                      credit left and month spend, unclamped; a dollar window
                      is shown even at 0%; the axis tops out at a 1-2-5 step.
-     disk         -- sizes read as B / KB / MB. */
+     disk         -- sizes read as B / KB / MB.
+     api keys     -- an account's month split by API key (claunch-uqnek):
+                     each key's label and share of the account total, and a
+                     note when the account does not break spend down.
+     key pool     -- a multi-key profile lists every key of its pool
+                     (claunch-feb3f): the pooled card asks /api/usage/keys
+                     alone (that answer carries the profile's own reading, so
+                     one account is not read twice), each key row carries
+                     that key's own windows and the current-key mark, a
+                     failed key is that row's error, and every empty answer
+                     says which one it is (unread, failed, unmeasurable, no
+                     keys). */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -196,6 +207,126 @@ const body = {
   assert.ok(Math.abs(hover(W - R - 0.5) - (W - R)) < 1e-6, 'right end: last sample');
   const quarter = L + (W - L - R) / 4;
   assert.ok(Math.abs(hover(quarter) - quarter) < 1e-6, 'a quarter in: the sample at 2h');
+
+  // API keys of one account (claunch-uqnek): a Fireworks account several
+  // keys share reports one total whichever key asks, so the card splits it.
+  // The label is the local profile that holds the key when the daemon can
+  // tell, the console's own name next, the key id last; the share is against
+  // the account's month, and an answer with no breakdown says so instead of
+  // drawing nothing.
+  const split = T.keyRows({ data: { source: 'fireworks-billing', windows: [
+    { name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }],
+    api_keys: [
+      { key_id: 'key_b', label: 'ds4-kdj', used_dollars: 3.44 },
+      { key_id: 'key_a', label: 'ds4', used_dollars: 2.53 },
+      { key_id: 'key_c', used_dollars: 0 }] } });
+  const rows = split.children.slice(1);
+  same(rows.map((el) => el.children[0].textContent), ['ds4-kdj', 'ds4', 'key_c']);
+  same(rows.map((el) => el.children.find((c) => c.tag === 'small').textContent),
+    ["58% of the account's month", "42% of the account's month",
+     "0% of the account's month"]);
+  assert.strictEqual(rows[2].children[1].textContent, '$0.00');
+  const bare = T.keyRows({ data: { windows: [], api_keys: [] } });
+  assert.strictEqual(bare.children.length, 1);
+  assert.ok(bare.children[0].textContent.includes('did not break its spend down by API key'));
+  // The daemon words the reason when it has one (claunch-uqnek.1): an empty
+  // month, unreadable keys and an account that does not rate keys are three
+  // answers, and the card shows the daemon's sentence rather than one of its
+  // own. The sentence above is the fallback for an older daemon.
+  const emptyMonth = T.keyRows({ data: { source: 'fireworks-billing', windows: [], api_keys: [],
+    api_keys_note: 'No spend this month yet, so there is nothing to break down by API key.' } });
+  assert.strictEqual(emptyMonth.children[0].textContent,
+    'No spend this month yet, so there is nothing to break down by API key.');
+  const unread = T.keyRows({ data: { source: 'fireworks-billing', windows: [], api_keys: [],
+    api_keys_note: "The account's key-by-key spend could not be read; only the account total is shown." } });
+  assert.ok(unread.children[0].textContent.includes('could not be read'));
+
+  // Every key of a multi-key profile (claunch-feb3f): the pooled card asks
+  // /api/usage/keys alone — that answer carries both the pool and the
+  // profile's own reading (`usage`), so asking /api/usage beside it would
+  // read the same account twice — and a profile without a pool asks nothing
+  // more (the reads above count one call each).
+  const pooled = { ...row, key: 'oc/opencode/opencode-go', profile: 'oc', pooled: true };
+  calls.length = 0;
+  answer = { ok: true, status: 200, json: async () => ({
+    profile: 'oc', pooled: true, keys: [],
+    usage: { source: 'opencode-go', windows: [{ name: 'five_hour', utilization: 42 }],
+      cached: false, updated_at: 1792650200, next_at: 1792651100 } }) };
+  await T.readUsage(pooled, false);
+  same(calls.map((c) => c[0]), ['/api/usage/keys?profile=oc&refresh=auto']);
+  assert.strictEqual(calls[0][1].noBatch, true);
+  assert.strictEqual(T.state.values.get(pooled.key).data.source, 'opencode-go');
+  assert.strictEqual(T.state.values.get(pooled.key).updatedAt, 1792650200);
+  assert.strictEqual(T.state.nextAt.get(pooled.key), 1792651100);
+  // A pool read that fails takes the card's reading with it (one request
+  // carried both), and the card says why.
+  answer = { ok: false, status: 409, json: async () => ({ error: 'cannot read key pool: bad json' }) };
+  await T.readKeyPool(pooled, '&refresh=manual');
+  assert.strictEqual(T.state.keyPools.get(pooled.key).error, 'cannot read key pool: bad json');
+  assert.strictEqual(T.state.values.get(pooled.key).error, 'cannot read key pool: bad json');
+  // A pool that answered without a reading for the account keeps the keys and
+  // shows the daemon's reason above them.
+  answer = { ok: true, status: 200, json: async () => ({
+    profile: 'oc', pooled: true, keys: [], usage: null, usage_error: 'no login' }) };
+  await T.readKeyPool(pooled, '&refresh=auto');
+  assert.strictEqual(T.state.keyPools.get(pooled.key).error, '');
+  assert.strictEqual(T.state.values.get(pooled.key).error, 'no login');
+
+  // The pool's rows: the label (the mask when it has none), the key's own
+  // windows, the current-key mark, and one failing key that does not blank
+  // the others.
+  const poolOf = (keys, unmeasurable) => ({
+    data: { profile: 'oc', pooled: true, unmeasurable: unmeasurable || null, keys }, error: '' });
+  const two = T.keyPoolRows(poolOf([
+    { id: 'k-79fde7', label: '', masked: 'oc_s…BUEB', current: true,
+      usage: { windows: [
+        { name: 'five_hour', utilization: 41.2 },
+        { name: 'weekly', utilization: 17 },
+        { name: 'monthly', utilization: 8 }] } },
+    { id: 'k-842cc4', label: 'gmail-inosphe2-nc', masked: 'oc_s…-igh', current: false,
+      usage: { error: 'OpenCode rejected the API key (401)' } },
+  ]), false);
+  assert.strictEqual(two.children[0].textContent, "All 2 keys in this profile's pool");
+  const keyLines = two.children.slice(1);
+  same(keyLines.map((el) => el.children[0].textContent), ['oc_s…BUEB', 'gmail-inosphe2-nc']);
+  assert.strictEqual(keyLines[0].children[1].textContent, '5h 41.2% · week 17.0% · month 8.0%');
+  assert.strictEqual(keyLines[1].children[1].textContent, 'usage: OpenCode rejected the API key (401)');
+  assert.ok(keyLines[0].children[2].textContent.includes('current'));
+  assert.strictEqual(keyLines[0].children.length, 4, 'the key at 41% draws its bar');
+  assert.strictEqual(keyLines[1].children.length, 3, 'a failed key draws no bar');
+  assert.strictEqual(T.keyWindowText({ name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }),
+    'month spend $5.97');
+  assert.strictEqual(T.keyWindowText({ name: 'today', utilization: 0, detail: '2 req · in 1.4k' }),
+    'today 2 req · in 1.4k');
+  // Every way the block can have nothing to list says which one it is.
+  assert.ok(T.keyPoolRows(null, true).children[0].textContent.includes('Reading every key'));
+  assert.ok(T.keyPoolRows(null, false).children[0].textContent.includes('has not been read yet'));
+  assert.ok(T.keyPoolRows({ data: null, error: 'HTTP 409' }, false).children[0].textContent
+    .includes('could not be read: HTTP 409'));
+  assert.ok(T.keyPoolRows(poolOf([], 'the usage reader belongs to the login'), false)
+    .children[0].textContent.includes('cannot be read: the usage reader belongs to the login'));
+  assert.ok(T.keyPoolRows(poolOf([]), false).children[0].textContent.includes('no keys in its pool'));
+
+  // The card() wiring: a pooled row draws the pool under its reading, and a
+  // Fireworks reading keeps the account's month split by API key. The daemon
+  // used to rebuild the preview body without api_keys/api_keys_note, so the
+  // card told a Fireworks account it had not broken its spend down
+  // (claunch-feb3f review).
+  const cardRow = { key: 'fw/fireworks-billing', profile: 'fw',
+    provider: 'fireworks', harness: 'claude', pooled: true };
+  T.state.values.set(cardRow.key, { data: {
+    source: 'fireworks-billing',
+    windows: [{ name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }],
+    api_keys: [{ key_id: 'key_a', label: 'ds4', used_dollars: 5.97 }],
+  }, cached: false, updatedAt: 1792650200, error: '' });
+  T.state.keyPools.set(cardRow.key, poolOf([
+    { id: 'k-1', label: 'main', masked: 'fw_…AB12', current: true,
+      usage: { windows: [{ name: 'monthly_spend', utilization: 0, used_dollars: 5.97 }] } }]));
+  const texts = (el) => [el.textContent].concat(...el.children.map(texts));
+  const shown = texts(T.card(cardRow)).join('\n');
+  assert.ok(shown.includes('This month by API key'), 'the card keeps the API-key split');
+  assert.ok(!shown.includes('did not break its spend down'), 'the card does not deny the split');
+  assert.ok(shown.includes("All 1 key in this profile's pool"), 'the card draws the pool rows');
 
   // Sizes.
   assert.deepStrictEqual([T.sizeText(512), T.sizeText(2048), T.sizeText(3 * 1024 ** 2)],

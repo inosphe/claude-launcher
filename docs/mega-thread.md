@@ -312,8 +312,11 @@ threshold = ln(megathread_threshold_ratio)      # 기본 ratio 9 = ln 9 ≈ 2.19
 
 ### 좌하단 nav
 
-데스크톱에서 `#rail-nav`는 첫 행만 보이고 hover하면 펼쳐진다. 펼침 상한은 `--rail-nav-rows`(24) × 행
-높이이고, 그 수는 링크 수(현재 21) 이상이어야 한다. 링크를 더 넣으면 이 값을 같이 올린다.
+데스크톱에서 `#rail-nav`는 첫 행만 보이고 hover하면 펼쳐진다. 펼침 상한은 `--rail-nav-rows`(27) × 행
+높이이고, 그 수는 링크 수(현재 27) 이상이어야 한다. 링크를 더 넣으면 이 값을 같이 올린다.
+
+고정(pin)하면 `#rail-nav-dock.pinned`가 창 높이 안에서 줄어들고(`flex: 0 1 auto; min-height: 0`)
+`#rail-nav`가 그 안에서 스크롤된다 — 목록이 상한보다 길어져도 마지막 행에 닿는다(claunch-1pne3).
 
 ### 아직 하지 않은 것
 

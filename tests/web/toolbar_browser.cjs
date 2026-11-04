@@ -210,19 +210,30 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.getElementById("term-link").classList.remove("hidden");
       document.getElementById("term-link").textContent = "reconnecting (10)";
     });
-    for (const width of [360, 800, 1193]) await check(width);
+    const glyphs = () => page.locator("#term-header").evaluate(
+      el => el.querySelectorAll("[data-toolbar-glyph]").length);
+    const stressed = {};
+    for (const width of [360, 800, 1193]) {
+      await check(width);
+      stressed[width] = await glyphs();
+    }
     assert.match(await page.locator("#term-hold").getAttribute("title"), /queued.*999.*Resume delivery/);
     // Back to the ordinary row: a short name and the socket up again. The
-    // header turns its glyphs back into labels once the row fits — what this
-    // asserts is that the glyph state is undone, not how many pixels the stress step
-    // above had to spare (the lifecycle group keeps all four of its
-    // segments on the row, claunch-ndz47).
+    // header gives back the glyphs the stress step above had to spend; how
+    // many it keeps is the row's business, not this harness's — the row is
+    // wider than it was when this last asserted zero (the lifecycle pill
+    // took hold in, claunch-p6me5). What the row must never do is put a
+    // control in the menu at a width where the stress step did not
+    // (claunch-qzhea.1).
     await page.evaluate(() => {
       document.getElementById("term-title").textContent = "s581";
       document.getElementById("term-link").classList.add("hidden");
     });
     await check(1920);
-    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll("[data-toolbar-glyph]").length), 0);
+    assert.ok((await glyphs()) < stressed[1193],
+      `the row gives back glyphs when it widens: ${await glyphs()} at 1920, ${stressed[1193]} at 1193`);
+    assert.equal(await page.locator("#term-header").evaluate(el => el.querySelectorAll(".toolbar-overflow").length), 0,
+      "nothing moves into the menu on the ordinary row at 1920");
     // The lifecycle group on the row is one Tab stop walked by the arrow keys
     // (claunch-468ec). Kill is checked but disabled here (and resume is
     // disabled), so the stop is the first segment that can be pressed, and

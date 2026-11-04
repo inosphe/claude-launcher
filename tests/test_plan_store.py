@@ -133,3 +133,28 @@ def test_clear_and_feedback(store):
         store.clear("s1", "s1", 5)
     store.clear("s1", "s1", 1)
     assert store.get("s1") is None
+
+
+# -- a quick-fork's copy (claunch-yydhs) ---------------------------------- #
+
+def test_copy_carries_the_plan_as_it_stands_and_leaves_the_source(store):
+    plan(store)
+    store.decide(P.USER, "s1", "d1", 1, choice="A")
+    assert store.copy("s1", "s1-qf1") is True
+    src, dst = store.get("s1"), store.get("s1-qf1")
+    assert dst["revision"] == 1
+    assert dst["title"] == src["title"] and dst["goal"] == src["goal"]
+    assert dst["steps"] == src["steps"] and dst["closure"] == src["closure"]
+    # the user's decision rode its node: the copy is not asked again
+    assert dst["steps"][1]["result"]["choice"] == "A"
+    assert dst["summary"]["waiting"] == src["summary"]["waiting"]
+    # the source is untouched -- its revision did not move
+    assert src["revision"] == 2
+
+
+def test_copy_lands_nothing_when_either_side_is_empty(store):
+    assert store.copy("s1", "s1-qf1") is False      # no plan at the source
+    plan(store)
+    assert store.copy("s1", "s1-qf1") is True
+    assert store.copy("s1", "s1-qf1") is False      # the target already has one
+    assert store.get("s1-qf1")["revision"] == 1

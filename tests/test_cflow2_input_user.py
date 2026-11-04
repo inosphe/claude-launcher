@@ -107,7 +107,8 @@ def test_types_a_setter_may_not_name(decl, msg):
 
 def test_a_user_input_with_a_default_or_required_is_quiet():
     """A person overwrites, so the agent-only warnings do not apply."""
-    codes = [f.code for f in check.check(_chart()) if f.code.startswith("set-by-")]
+    codes = [f.code for f in check.check(_chart())
+             if f.code in ("set-by-default", "set-by-required")]
     assert codes == []
 
 

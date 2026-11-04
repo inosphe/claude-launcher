@@ -132,13 +132,14 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   // the tree: the steps hang from the plan, the decision forks into its options, then its own steps
   assert.strictEqual(d1.className, 'ptree-node ptree-decision ptree-undecided plan-item plan-decision');
   assert.strictEqual(d1.parent.className, 'ptree ptree-steps');
-  assert.deepStrictEqual(d1.children[0].children.map(c => c.textContent), ['◆', 'storage', '결정 필요']);
+  // every item names its node id (th-437508), between the mark and the title
+  assert.deepStrictEqual(d1.children[0].children.map(c => c.textContent), ['◆', 'd1', 'storage', '결정 필요']);
   const optionClasses = () => all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'))
     .children.find(c => c.className === 'ptree plan-options-tree').children.map(c => c.className);
   assert.deepStrictEqual(optionClasses(), ['ptree-node ptree-option ptree-recommended', 'ptree-node ptree-option']);
   const sub = d1.children.find(c => c.className === 'ptree ptree-steps');
   assert.strictEqual(sub.children[0].className, 'ptree-node ptree-step ptree-st-doing plan-item plan-step');
-  assert.deepStrictEqual(sub.children[0].children[0].children.map(c => c.textContent), ['◐', 'write store', '진행 중']);
+  assert.deepStrictEqual(sub.children[0].children[0].children.map(c => c.textContent), ['◐', 's2', 'write store', '진행 중']);
   const closures = all(host).find(n => n.className === 'ptree ptree-closures');
   assert.deepStrictEqual(closures.children.map(c => c.className),
     ['ptree-node ptree-closure ptree-st-todo plan-item plan-verify', 'ptree-node ptree-closure ptree-st-todo plan-item plan-followup']);
@@ -248,6 +249,78 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   plan = {...plan, revision: 3};
   ctx.PlanPane._view().open(); await settle();
   assert.strictEqual(host.scrollTop, 240, 'the scroll position is put back');
+
+  // A poll with the same plan leaves the DOM alone (th-437508): a text
+  // selection being dragged spans these very nodes.
+  const kept = buttons(host, '이 안 선택')[0];
+  ctx.PlanPane._view().open(); await settle();
+  assert.strictEqual(buttons(host, '이 안 선택')[0], kept, 'an unchanged poll does not redraw');
+  // ...and a changed one waits while the user holds a selection in the pane.
+  doc.getSelection = () => ({isCollapsed: false, rangeCount: 1, anchorNode: kept});
+  plan = {...plan, title: 'Ship X, while selecting'};
+  ctx.PlanPane._view().open(); await settle();
+  assert(!text(host).includes('Ship X, while selecting'), 'a selection holds the redraw back');
+  doc.getSelection = () => ({isCollapsed: true, rangeCount: 0, anchorNode: null});
+  timers.length = 0;
+  kept.dispatch('mouseup'); runTimers();
+  assert(text(host).includes('Ship X, while selecting'), 'letting the selection go draws it');
+  delete doc.getSelection;
+
+  // 보류 (claunch-jw1v2 D), a reopened check, a followup the session closed
+  // itself and a note (th-62379d).
+  plan = {...plan, revision: 9, closure: [
+    {id: 'v2', kind: 'verify', title: 'live run', detail: '', rev: 3, result: null,
+     previous: {verdict: 'passed'}, reopened: {reason: 'the pane code changed'}},
+    {id: 'f2', kind: 'followup', title: 'filed as claunch-y', detail: '', status: 'done', rev: 1, result: null},
+    {id: 'n1', kind: 'note', title: 'could also cache X', detail: 'later', rev: 1, result: null},
+  ]};
+  ctx.PlanPane._view().open(); await settle();
+  let ct = text(host);
+  assert(ct.includes('세션이 다시 확인을 요청했습니다: the pane code changed'));
+  assert(ct.includes('세션이 처리함'));
+  assert(ct.includes('참고 (최종 확인용 · 게이트 없음)') && ct.includes('could also cache X'));
+  assert.strictEqual(buttons(host, '여기서 진행').length, 0, 'a followup the session closed has nothing to decide');
+  const notes = all(host).find(n => n.className === 'ptree ptree-notes');
+  assert.strictEqual(notes.children.length, 1);
+  assert.strictEqual(all(notes).filter(n => n.tag === 'button').length, 0, 'a note has no controls');
+  buttons(host, '보류')[0].onclick(); await settle();
+  assert.deepStrictEqual(posts().slice(-1)[0].body, {session: 's1', note: '', rev: 3, verdict: 'deferred'});
+  assert(text(host).includes('확인: 보류'));
+
+  // claunch-vmcg7: the session's default pick, a ruled-out option, and the
+  // nodes under an option (the chosen one open, the other faded).
+  plan = {...plan, revision: 10, closure: [], steps: [
+    {id: 'h1', kind: 'decision', title: 'layout', detail: '', rev: 1,
+     options: [{label: 'A', effect: 'fast', risk: 'untested', recommended: true, default: true},
+               {label: 'B', effect: 'safe', risk: 'slow'},
+               {label: 'C', effect: 'cheap', risk: 'brittle', rejected: 'no backup path'}],
+     result: {choice: 'A', by: 'agent', note: ''},
+     children: [
+       {id: 'h2', kind: 'decision', title: 'index on A', under: 'A', detail: '', rev: 1, result: null,
+        options: OPTS, children: []},
+       {id: 'h3', kind: 'decision', title: 'migrate on B', under: 'B', detail: '', rev: 1, result: null,
+        options: OPTS, children: []},
+       {id: 'h4', kind: 'step', title: 'write it', status: 'todo', detail: '', rev: 1, children: []},
+     ]}]};
+  ctx.PlanPane._view().open(); await settle();
+  const h1 = all(host).find(n => n.tag === 'li' && n.className.includes('plan-decision'));
+  assert.deepStrictEqual(h1.children[0].children.map(c => c.textContent), ['◆', 'h1', 'layout', '자동 선택됨']);
+  const hopts = h1.children.find(c => c.className === 'ptree plan-options-tree').children;
+  assert.deepStrictEqual(hopts.map(c => c.className), ['ptree-node ptree-option ptree-chosen ptree-recommended',
+    'ptree-node ptree-option ptree-unchosen', 'ptree-node ptree-option ptree-unchosen ptree-rejected']);
+  assert(text(hopts[2]).includes('배제 이유: no backup path') && text(hopts[2]).includes('배제'));
+  assert.strictEqual(buttons(hopts[2], '이 안 선택').length, 0, 'a ruled-out option cannot be picked');
+  assert.strictEqual(buttons(hopts[1], '이 안 선택').length, 1, 'the user may still change the default');
+  assert(text(hopts[0]).includes('index on A') && !text(hopts[0]).includes('migrate on B'));
+  assert(text(hopts[1]).includes('migrate on B') && text(hopts[1]).includes('선택되지 않은 안의 하위 항목'));
+  const h3 = all(hopts[1]).find(n => n.tag === 'li' && n.className.includes('plan-decision'));
+  assert(h3.className.includes('ptree-inactive'));
+  assert(text(h3).includes('대기 (상위 안 미선택)'));
+  assert.strictEqual(buttons(h3, '이 안 선택').length, 0, 'an inactive branch takes no choice yet');
+  assert.strictEqual(input(h3, '선택에 붙일 메모 (선택 사항)').length, 0);
+  // the common child hangs from the decision itself, outside every option
+  assert(!hopts.some(o => text(o).includes('write it')) && text(h1).includes('write it'));
+  assert(text(host).includes('자동 선택됨 · 다른 안을 고르면 세션에 전달됩니다'));
 
   // Closable, and a session without a plan.
   plan.summary = {...plan.summary, closable: true, blockers: [], waiting: 0};

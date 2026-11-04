@@ -54,6 +54,10 @@ function measure() {
   return {
     total: links.length, visible,
     dockHeight: dock.getBoundingClientRect().height,
+    dockBottom: dock.getBoundingClientRect().bottom,
+    dockTop: dock.getBoundingClientRect().top,
+    innerHeight: window.innerHeight,
+    scrolled: nav.scrollHeight, shown: nav.clientHeight,
     navHeight: box.height,
     firstTop: first.top,
     columns: getComputedStyle(nav).gridTemplateColumns.split(" ").length,
@@ -132,10 +136,32 @@ async function settle(page) {
     await page.mouse.move(1100, 400);
     await settle(page);
     const pinned = await page.evaluate(measure);
-    assert.equal(pinned.visible.length, pinned.total, `pinned shows every link: ${pinned.visible}`);
-    assert.ok(pinned.dockHeight > folded.dockHeight * 2, `the dock holds every row: ${pinned.dockHeight}`);
+    // The page list outgrew the rail: 27 links at this width are 14 rows,
+    // and the pinned dock cannot hold all of them under the header in an
+    // 800px window. Pinned therefore means "reachable", not "all at once":
+    // the dock stays inside the window and the nav scrolls to the rows that
+    // do not fit. Before this the dock grew past the window's bottom edge,
+    // where nothing could scroll to them.
+    assert.ok(pinned.dockBottom <= pinned.innerHeight + 1,
+      `the pinned dock stays in the window: ${pinned.dockBottom} / ${pinned.innerHeight}`);
+    assert.ok(pinned.dockTop >= -1, `the pinned dock starts in the window: ${pinned.dockTop}`);
+    assert.ok(pinned.dockHeight > folded.dockHeight * 2, `the dock holds more than one row: ${pinned.dockHeight}`);
+    assert.ok(pinned.scrolled >= pinned.navHeight - 1,
+      `every row is inside the scroller: ${pinned.scrolled} / ${pinned.navHeight}`);
     assert.ok(Math.abs(pinned.dockHeight - pinned.navHeight) < 2,
       `the nav stands in the dock, not over the list: ${pinned.dockHeight} / ${pinned.navHeight}`);
+    const reach = await page.evaluate(() => {
+      const nav = document.getElementById("rail-nav");
+      nav.scrollTop = nav.scrollHeight;
+      const links = [...nav.querySelectorAll("a")];
+      const box = nav.getBoundingClientRect();
+      const last = links[links.length - 1].getBoundingClientRect();
+      return { page: links[links.length - 1].dataset.page,
+        inBox: last.top >= box.top - 0.5 && last.bottom <= box.bottom + 0.5 };
+    });
+    assert.deepEqual(reach, { page: "settings", inBox: true },
+      "scrolling the pinned nav reaches its last link");
+    await page.evaluate(() => { document.getElementById("rail-nav").scrollTop = 0; });
     assert.equal(await page.getAttribute("#rail-nav-pin", "aria-pressed"), "true");
     const stored = () => page.evaluate(() => {
       const k = Object.keys(localStorage).find((k) => k.startsWith("claunch_rail_nav_pinned:"));
@@ -145,7 +171,9 @@ async function settle(page) {
     await page.reload();
     await page.mouse.move(1100, 400);
     await settle(page);
-    assert.equal((await page.evaluate(measure)).visible.length, folded.total, "pinned after a reload");
+    const reloaded = await page.evaluate(measure);
+    assert.ok(reloaded.dockBottom <= reloaded.innerHeight + 1 && reloaded.dockHeight > folded.dockHeight * 2,
+      `pinned after a reload: the dock still holds more than a row and stays in the window (${reloaded.dockBottom})`);
     await page.click("#rail-nav-pin");
     await page.mouse.move(1100, 400);
     await settle(page);

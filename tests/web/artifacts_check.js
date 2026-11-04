@@ -1,5 +1,5 @@
-/* Artifacts page: size/age formatting, the ordering, and what counts as
-   unmeasured (artifacts-page.js). */
+/* Artifacts page: size/age formatting, the ordering, what counts as
+   unmeasured, and whether a cleanup plan may be applied (artifacts-page.js). */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -123,4 +123,22 @@ assert.deepStrictEqual(Array.from(page.measurable(data)), ['/t/scratch', '/t/s1w
 assert.deepStrictEqual(
   Array.from(page.unmeasured({ ...data, orphans: [{ path: '/t/orphan' }] })), ['/t/orphan']);
 assert.deepStrictEqual(Array.from(page.unmeasured(null)), []);
+
+// A plan is submitted only when it has a ready item and no schedule already
+// owns the next run: the daemon answers a plan request with `scheduled` when
+// one is standing, and applying that plan is what its own contract forbids.
+// (The vm context has its own Object.prototype, so fields are compared.)
+const summary = (value) => {
+  const s = page.planSummary(value);
+  return [s.ready, s.pending, s.applies];
+};
+const plan = (items, scheduled) => ({ plan_id: 'p', items, scheduled });
+assert.deepStrictEqual(summary(plan([
+  { path: '/t/a', status: 'ready' },
+  { path: '/t/b', status: 'cleanup_pending', reason: 'changed' },
+])), [1, 1, true]);
+assert.deepStrictEqual(summary(plan([{ path: '/t/b', status: 'cleanup_pending' }])), [0, 1, false]);
+assert.deepStrictEqual(summary(plan([{ path: '/t/a', status: 'ready' }], { attempts: 1 })), [1, 0, false]);
+assert.deepStrictEqual(summary(plan([])), [0, 0, false]);
+assert.deepStrictEqual(summary(null), [0, 0, false]);
 console.log('ok');

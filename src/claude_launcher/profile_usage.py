@@ -210,7 +210,15 @@ def due(rows: list[dict], now: Optional[float] = None) -> list[dict]:
 
 def targets() -> list[dict]:
     """One row per profile: its provider, the harness that reads the quota,
-    and whether any reader applies (``supported``, else ``reason``).
+    whether any reader applies (``supported``, else ``reason``), and whether
+    a launch of it reads a key pool (``pooled``).
+
+    ``pooled`` is what tells the page to ask :func:`key_usage` beyond the
+    profile's own reading: a profile without a pool has no keys to list, and
+    asking would spend one request per profile on every page load. It is
+    answered from the pool file, so a corrupt pool is ``False`` here and stays
+    an error on ``/api/usage/keys`` (409) for the caller that asks for the
+    keys themselves.
 
     Answered from configuration alone; nothing here reaches an account.
     """
@@ -228,11 +236,26 @@ def targets() -> list[dict]:
             row["key"] = _key(selected, row["provider"], row["reader"])
             row["supported"] = True
             row["schedule"] = schedule(row["key"])
+            row["pooled"] = _pooled(profile)
         except _ERRORS as exc:
             row.setdefault("key", profile.name)
             row.update(supported=False, reason=str(exc))
         rows.append(row)
     return rows
+
+
+def _pooled(profile) -> bool:
+    """Whether a launch of ``profile`` reads a key pool (a multi-key profile).
+
+    Follows the same chain :func:`key_usage` does, so a child profile that
+    holds no token of its own counts its ancestor's pool. An unreadable pool
+    file answers ``False``: the row keeps its own reading, and the keys
+    endpoint still refuses the pool with its reason.
+    """
+    try:
+        return bool(profile_keys.view(profile).get("pooled"))
+    except (profile_keys.KeysError, lineage.LineageError):
+        return False
 
 
 def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
@@ -294,6 +317,21 @@ def fetch(selector: str, *, manual: bool = False) -> tuple[dict, bool, float]:
                     }
                     for item in report.windows
                 ],
+                # An account several keys share reports one total; this is
+                # what the page splits it into, and an empty list means the
+                # reader could not (or need not) rate the keys apart.
+                "api_keys": [
+                    {
+                        "key_id": item.key_id,
+                        "label": item.label,
+                        "used_dollars": item.used_dollars,
+                    }
+                    for item in report.api_keys
+                ],
+                # Why that list is empty, already worded for the page: nothing
+                # spent yet, the keys could not be read, or the account does
+                # not rate keys (claunch-uqnek.1).
+                "api_keys_note": report.api_keys_note,
             }
         except _ERRORS as exc:
             with _guard:
