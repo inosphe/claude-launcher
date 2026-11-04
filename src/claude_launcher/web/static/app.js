@@ -17042,6 +17042,17 @@ function newUsageBar(pct, level) {
   return bar;
 }
 
+/* The bar's column, drawn even when there is no percentage to fill it. The
+   countdown after it is auto-placed into the next free column, so a row that
+   skipped the bar would put its countdown where the bar belongs and the
+   countdowns would stop standing in one column (claunch-hz9ma.1). It paints
+   nothing: an empty track would read as "0% used". */
+function newUsageBarSlot() {
+  const slot = document.createElement("span");
+  slot.className = "new-usage-bar-slot";
+  return slot;
+}
+
 /* The profile's own reading, one row per window. The window's name sits in
    its own column so the short window is always first and the same column
    means the same span from one row to the next (claunch-hz9ma). */
@@ -17059,7 +17070,9 @@ function newUsageWindowLine(window) {
   accent.className = `new-usage-pct ${level}`.trim();
   accent.textContent = parts.value;
   li.append(label, accent);
-  if (Number.isFinite(parts.pct)) li.appendChild(newUsageBar(parts.pct, level));
+  li.appendChild(Number.isFinite(parts.pct)
+    ? newUsageBar(parts.pct, level)
+    : newUsageBarSlot());
   if (parts.reset) {
     const reset = document.createElement("span");
     reset.className = "new-usage-window-reset";
@@ -17110,7 +17123,9 @@ function newUsageKeyCell(window, name) {
   value.textContent = parts.value;
   head.append(label, value);
   cell.appendChild(head);
-  if (Number.isFinite(parts.pct)) cell.appendChild(newUsageBar(parts.pct, level));
+  cell.appendChild(Number.isFinite(parts.pct)
+    ? newUsageBar(parts.pct, level)
+    : newUsageBarSlot());
   if (parts.reset) {
     const reset = document.createElement("span");
     reset.className = "new-usage-cell-reset";
