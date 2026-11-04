@@ -9077,7 +9077,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .spec-preview h3 { margin: 14px 0 6px; }
 .spec-preview .spec-table td:first-child { white-space: pre; }
 /* Glossary: scoped design tokens keep controls consistent with the dark shell. */
-#glossary-view, #knowledge-view {
+#glossary-view, #knowledge-view, #retrospection-view {
   --gl-border: #303843; --gl-muted: #a4afbd; --gl-panel: #1b2028;
   flex: 1; overflow-y: auto; padding: 36px clamp(16px, 3vw, 48px); min-height: 0;
   container-type: inline-size;
@@ -9088,21 +9088,21 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .glossary-head h2 { font-size: clamp(22px, 2.5vw, 30px); font-weight: 650; letter-spacing: -.04em; margin-bottom: 6px; }
 .glossary-muted { color: var(--gl-muted); font-size: 13px; }
 .glossary-scope { flex: 0 0 200px; font-size: 11px; color: var(--gl-muted); display: grid; gap: 6px; }
-:is(#glossary-view, #knowledge-view) input, :is(#glossary-view, #knowledge-view) textarea, :is(#glossary-view, #knowledge-view) select {
+:is(#glossary-view, #knowledge-view, #retrospection-view) input, :is(#glossary-view, #knowledge-view, #retrospection-view) textarea, :is(#glossary-view, #knowledge-view, #retrospection-view) select {
   font: inherit; color: #e3e9f0; background: #12171e; border: 1px solid #3b4552;
   border-radius: 8px; padding: 10px 12px; min-width: 0; max-width: 100%; color-scheme: dark;
 }
-:is(#glossary-view, #knowledge-view) :is(input, textarea, select, button):focus-visible { outline: 2px solid #79aeff; outline-offset: 3px; }
-:is(#glossary-view, #knowledge-view) textarea { resize: vertical; }
-:is(#glossary-view, #knowledge-view) .wf-btn { margin: 0; min-height: 38px; padding: 8px 14px; border: 1px solid var(--gl-border); background: #242d38; border-radius: 8px; font-weight: 550; white-space: nowrap; }
-:is(#glossary-view, #knowledge-view) .wf-btn:hover { background: #354153; }
-:is(#glossary-view, #knowledge-view) .glossary-primary { background: #427fdf; color: #fff; border-color: #6099ef; }
-:is(#glossary-view, #knowledge-view) .glossary-primary:hover { background: #5390ed; }
-:is(#glossary-view, #knowledge-view) .glossary-danger { background: transparent; color: #f0a4a0; border-color: transparent; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) :is(input, textarea, select, button):focus-visible { outline: 2px solid #79aeff; outline-offset: 3px; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) textarea { resize: vertical; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .wf-btn { margin: 0; min-height: 38px; padding: 8px 14px; border: 1px solid var(--gl-border); background: #242d38; border-radius: 8px; font-weight: 550; white-space: nowrap; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .wf-btn:hover { background: #354153; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-primary { background: #427fdf; color: #fff; border-color: #6099ef; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-primary:hover { background: #5390ed; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-danger { background: transparent; color: #f0a4a0; border-color: transparent; }
 .glossary-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--gl-border); margin-bottom: 28px; padding-bottom: 12px; }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .wf-btn { border-color: transparent; background: transparent; color: var(--gl-muted); }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .is-active { background: #253753; color: #b6d4ff; border-color: #3b5377; }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .glossary-refresh { margin-left: auto; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .wf-btn { border-color: transparent; background: transparent; color: var(--gl-muted); }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .is-active { background: #253753; color: #b6d4ff; border-color: #3b5377; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .glossary-refresh { margin-left: auto; }
 .glossary-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
 .glossary-layout.is-editing { grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); }
 .glossary-main, .glossary-aside { min-width: 0; }
@@ -9122,7 +9122,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .glossary-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--gl-border); margin-top: 18px; padding-top: 12px; }
 .glossary-card-footer code { font-size: 11px; color: #8998ae; min-width: 0; overflow-wrap: anywhere; }
 .glossary-actions { display: flex; gap: 6px; flex: none; }
-:is(#glossary-view, #knowledge-view) .glossary-actions .wf-btn { font-size: 12px; min-height: 34px; padding: 6px 11px; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-actions .wf-btn { font-size: 12px; min-height: 34px; padding: 6px 11px; }
 .glossary-help { background: #1d293b; border: 1px solid #354962; padding: 22px; border-radius: 12px; }
 .glossary-help p { color: #b3c2d7; font-size: 13px; margin-top: 12px; line-height: 1.8; }
 .glossary-help code { display: block; color: #c2daff; background: #141e2d; padding: 12px; border-radius: 6px; margin-top: 18px; }
@@ -9150,9 +9150,9 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
   .glossary-scope { flex-basis: auto; width: 100%; }
 }
 @media (max-width: 600px) {
-  #glossary-view, #knowledge-view { padding: 24px 16px; }
+  #glossary-view, #knowledge-view, #retrospection-view { padding: 24px 16px; }
   .glossary-tabs { gap: 3px; flex-wrap: wrap; }
-  :is(#glossary-view, #knowledge-view) .glossary-tabs .wf-btn { padding: 8px 10px; }
+  :is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .wf-btn { padding: 8px 10px; }
   .glossary-toolbar { flex-wrap: wrap; }
   .glossary-search { flex-basis: 100%; }
   .glossary-card, .glossary-form { padding: 16px; }
@@ -9173,6 +9173,33 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 #knowledge-view .knowledge-version.is-current { border-left-color: #6f9ad8; }
 #knowledge-view .knowledge-version > p { font-size: 12px; margin-bottom: 6px; }
 #knowledge-view .knowledge-version-body { color: #c6d1df; font-size: 13px; line-height: 1.7; }
+/* Retrospection (#/retrospection, retrospection-page.js) rides the glossary
+   shell on its own scroll container (the selector above). Its list is a stack
+   of cards: the selected one is marked, a long excerpt is cut to three lines,
+   and a record body taller than the window scrolls inside the sticky aside
+   instead of running past its bottom edge. */
+#retrospection-view .glossary-toolbar { flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+#retrospection-view .glossary-toolbar .glossary-search { flex: 1 1 260px; }
+#retrospection-view .glossary-toolbar > select { width: auto; flex: 0 1 220px; }
+#retrospection-view .retrospection-card { transition: border-color .12s ease, background .12s ease; }
+#retrospection-view .retrospection-card:hover { border-color: #4a5c75; }
+#retrospection-view .retrospection-card.is-selected { border-color: #5b8bdc; background: #1d2836; }
+#retrospection-view .retrospection-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+#retrospection-view .retrospection-card-head h4 { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+#retrospection-view .retrospection-excerpt {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+#retrospection-view .retrospection-card-footer { flex-wrap: wrap; }
+/* 190px is the app header plus the shell's own header above the layout: the
+   pane has to end inside an 800px window both while it sits under that header
+   and once the list scrolls it up to the view's top edge (sticky, top: 0). */
+#retrospection-view .retrospection-detail { max-height: calc(100vh - 190px); overflow-y: auto; }
+#retrospection-view .retrospection-detail .glossary-toolbar h3 { min-width: 0; overflow-wrap: anywhere; }
+#retrospection-view .retrospection-body { color: #ccd5df; font-size: 13.5px; line-height: 1.75; }
+#retrospection-view .retrospection-empty-action { margin-top: 4px; }
+@container (max-width: 760px) {
+  #retrospection-view .retrospection-detail { max-height: none; overflow-y: visible; }
+}
 /* Composer suggestions remain outside the textarea and preserve its caret. */
 .glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
 .glossary-composer[hidden] { display: none; }
