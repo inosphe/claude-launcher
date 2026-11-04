@@ -8143,18 +8143,34 @@ async function refreshCflow2Rail() {
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
-   hold only a person releases, or an open choice whose chooser is `user`. */
+   hold only a person releases, or an open choice whose chooser is `user`.
+
+   `blocking` is the narrower question the shape answers (claunch-hbmhk):
+   is the run stopped on this row, or does it merely offer a door? A choice
+   in a settle: race/any region is the second — the engine cancels it when a
+   sibling finishes, so the row must not wear the filled "it is on you" mark.
+   A payload from before `blocking` existed carries no such field; absent is
+   read as a stop, which is what every one of these used to be. */
 function cflow2RailMarkState(r) {
-  if (r.gated) return "yours";
+  if (r.gated) return r.blocking === false ? "optional" : "yours";
   if (r.status === "done") return "done";
   if (r.status === "failed" || r.status === "aborted" || r.status === "error")
     return "error";
   return "running";
 }
 
+/* The rail line's one sentence. Blocking gates keep the flag that says the
+   run is held; an optional door is named as optional and gets no flag, since
+   nothing is being held. Both can be open at once, and the order is the
+   order of the claims: what stops the run first. */
 function cflow2RailLabel(r) {
   if (r.status === "error") return `error${r.error ? ": " + r.error : ""}`;
-  if (r.gated) return `⚑ ${(r.owed || []).join(" · ")}`;
+  if (r.gated) {
+    const parts = [];
+    if ((r.owed || []).length) parts.push(`⚑ ${r.owed.join(" · ")}`);
+    for (const x of r.optional || []) parts.push(x);
+    return parts.join(" · ") || "⚑";
+  }
   if (r.status === "done" || r.status === "failed" || r.status === "aborted")
     return r.status;
   const where = (r.current || []).join(", ");
@@ -8163,6 +8179,18 @@ function cflow2RailLabel(r) {
   const shown = Number.isFinite(r.round_now) ? r.round_now : r.round;
   const round = shown ? ` · round ${shown}` : "";
   return `${r.status || "running"}${round}${where ? " · " + where : ""}`;
+}
+
+/* The hover of the v2 line: what the run owes the reader, one line each.
+   An optional door says what it is — the reader cannot tell from the word
+   "optional" alone whether leaving it alone loses anything, and it does
+   not: the run carries on and the door closes by itself. */
+function cflow2RailTip(r) {
+  const lines = (r.owed || []).slice();
+  for (const x of r.optional || []) {
+    lines.push(`${x} — the run carries on without it, and closes it by itself`);
+  }
+  return lines.join("\n");
 }
 
 function applyCflow2Badges() {
@@ -8185,7 +8213,11 @@ function applyCflow2Badges() {
     const wf = `${r.scope}|${r.cwd}`;
     if (line.dataset.wf !== wf) line.dataset.wf = wf;
     line.href = "#/wf/" + encodeURIComponent(wf);
-    line.className = `sess-cflow2${r.gated ? " gated" : ""}`;
+    // Amber is for a row the run is held on. A door nobody has to take keeps
+    // its own class so the stylesheet, and anyone reading the DOM, can tell
+    // the two apart (claunch-hbmhk).
+    const blocking = r.gated && r.blocking !== false;
+    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`;
     const state = cflow2RailMarkState(r);
     const mark = document.createElement("span");
     mark.className = `wf-mark wf-mark-${state}`;
@@ -8196,7 +8228,7 @@ function applyCflow2Badges() {
     const txt = document.createElement("span");
     txt.className = "sess-cflow2-text";
     txt.textContent = `${r.workflow || "cflow2"} · ${cflow2RailLabel(r)}`;
-    line.title = (r.gated ? r.owed : r.current || []).join("\n");
+    line.title = r.gated ? cflow2RailTip(r) : (r.current || []).join("\n");
     const linkLabel = document.createElement("span");
     linkLabel.className = "sess-cflow-link";
     linkLabel.textContent = "Run ↗";
@@ -12629,6 +12661,12 @@ function wfDotClass(status, run) {
                       so it must not look like either kind of "waiting"
      ◆  your move   — stopped, filled: it is on the person reading this
      ◇  with a peer — stopped, hollow: it is on somebody else
+     ○  optional    — a door, not a stop: the person MAY pick here, and the
+                      run carries on without a pick and closes the door by
+                      itself (a choice in a settle: race/any par —
+                      claunch-hbmhk). Its own shape because ◆ would claim
+                      the row is held by the reader, which is the one thing
+                      this is not
      ✓  done
      ✕  error/aborted
 
@@ -12641,6 +12679,7 @@ const WF_GLYPH = {
   held: "‖",
   yours: "◆",
   peer: "◇",
+  optional: "○",
   done: "✓",
   error: "✕",
 };
@@ -24967,6 +25006,9 @@ function personGateRecords() {
         session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 2,
         kind: a.kind, label: a.label || a.instance || a.kind,
         urgent: !!a.urgent, prompt: termCflow2Question(a),
+        // A choice the run is not held on (claunch-hbmhk): the card says so
+        // and counts its age as how long the door has been open.
+        optional: !!a.optional,
         // What the step declared about its own notice (ask.criteria): keywords
         // the panel shows by, never a rank (noticeCriteriaOf).
         criteria: Array.isArray(a.criteria) ? a.criteria.slice() : [],
@@ -48359,8 +48401,13 @@ function renderCflow2Into(box, data, ui, force = false) {
       (mr.decided_reason ? ` — ${mr.decided_reason}` : "")));
   }
   for (const c of run.choices || []) {
+    // `optional` (claunch-hbmhk): the region around this choice settles
+    // without it and the engine cancels it, so picking is a convenience and
+    // the card must not imply the round is standing still until it is used.
     const card = cf2Card("choice", c.label || c.node,
-      c.chooser === "user" ? "yours to pick" : "the agent's — you may pick for it");
+      c.optional ? "optional — the run goes on without a pick"
+        : c.chooser === "user" ? "yours to pick"
+        : "the agent's — you may pick for it");
     if (c.prompt) card.appendChild(mdInto(el("div", "md cf2-body"), c.prompt));
     const key = `${host}:choice:${c.instance}`;
     const presses = (c.options || []).map((o) => {
@@ -62395,8 +62442,17 @@ function noticeElapsed(at) {
   return `${h}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
 }
 
-function noticeAgeText(at) {
-  return `${noticeStamp(at)} · ${noticeElapsed(at)} ago`;
+/* The clock reading, then what the elapsed half MEANS.
+   "… · 5m ago" counts from the moment a request arrived, which reads as
+   time the reader has been holding the run. For a door the run is not held
+   on that is the wrong sentence (claunch-hbmhk): the run was never waiting,
+   so the same span is said as how long the door has been OPEN — "… · open
+   5m". Same stamp, same tick, one word different. */
+function noticeAgeText(at, optional) {
+  const el = noticeElapsed(at);
+  return optional
+    ? `${noticeStamp(at)} · open ${el}`
+    : `${noticeStamp(at)} · ${el} ago`;
 }
 
 /* The pair sits at the bottom of every card and every panel row, and it
@@ -62405,12 +62461,12 @@ function noticeAgeText(at) {
    without waiting for a repaint. The set keeps the text span rather than
    the line, because a history row draws "ended …" beside it
    (noticePanelHistoryRow). */
-const noticeAges = new Set();      // {node, at}
-function noticeAgeLine(at) {
+const noticeAges = new Set();      // {node, at, optional}
+function noticeAgeLine(at, optional) {
   const line = el("div", "notice-sub notice-when");
-  const text = el("span", null, noticeAgeText(at));
+  const text = el("span", null, noticeAgeText(at, optional));
   line.appendChild(text);
-  const rec = { node: text, at };
+  const rec = { node: text, at, optional: !!optional };
   noticeAges.add(rec);
   // The record rides on the line so a card that already drew it can be
   // re-aged in place when the daemon's `opened` reaches it (noticeAgeSetFor).
@@ -62422,14 +62478,19 @@ function noticeAgeLine(at) {
    (claunch-l9znm.1). A gate's age is the run's own stamp for when it started
    waiting on a person; a row written before that answer carried the stamp
    gets it on a later poll, and the card must say the true age then rather
-   than keep counting from the arrival it was drawn with. */
-function noticeAgeSetFor(root, at) {
+   than keep counting from the arrival it was drawn with. `optional` rides
+   along because it is what the wording is built from, not the stamp
+   (claunch-hbmhk): a card that learns both at once must not keep "ago". */
+function noticeAgeSetFor(root, at, optional) {
   if (!root || !Number.isFinite(at) || typeof root.querySelector !== "function") return;
   const line = root.querySelector(".notice-when");
   const rec = line && line.__noticeAge;
-  if (!rec || rec.at === at) return;
+  if (!rec) return;
+  const opt = !!optional;
+  if (rec.at === at && rec.optional === opt) return;
   rec.at = at;
-  const text = noticeAgeText(at);
+  rec.optional = opt;
+  const text = noticeAgeText(at, opt);
   if (rec.node.textContent !== text) rec.node.textContent = text;
 }
 
@@ -62438,7 +62499,7 @@ function noticeAgesPaint() {
     // A card put away or a panel redrawn leaves its node behind; the tick
     // drops it here rather than every painter having to remember to.
     if (rec.node.isConnected === false) { noticeAges.delete(rec); continue; }
-    const text = noticeAgeText(rec.at);
+    const text = noticeAgeText(rec.at, rec.optional);
     if (rec.node.textContent !== text) rec.node.textContent = text;
   }
 }
@@ -63122,10 +63183,10 @@ function noticeFoldScan() {
    cards newer than it. A child with no stamp predates this rule or is not
    a notice card at all, and is treated as the oldest thing there — the new
    card goes above it, which is the order the strip always drew. */
-function noticeCardAdd(host, node, at) {
+function noticeCardAdd(host, node, at, opts) {
   const stamp = Number.isFinite(at) ? at : Date.now();
   node.__noticeAt = stamp;
-  node.appendChild(noticeAgeLine(stamp));
+  node.appendChild(noticeAgeLine(stamp, opts && opts.optionalAge));
   const tops = noticeFlipRead(host);
   let ref = null;
   for (const child of host.children) {
@@ -64106,8 +64167,10 @@ function noticePanelGateRow(type, rec) {
   ));
   row.appendChild(actions);
   // The same bottom line the card carries (claunch-egqrq): a request that
-  // has waited an hour says so here as well as in the corner.
-  row.appendChild(noticeAgeLine(gateSeenAt(type, rid)));
+  // has waited an hour says so here as well as in the corner. A door nobody
+  // has to take reads the same way in both places — "open 5m", not "5m ago"
+  // (claunch-hbmhk).
+  row.appendChild(noticeAgeLine(gateSeenAt(type, rid), !!rec.optional));
   return row;
 }
 
@@ -64417,8 +64480,9 @@ function noticePanelHistoryRow(entry) {
     row.appendChild(who);
   }
   // Arrival and age, the same pair a card carries (claunch-egqrq); a settled
-  // row says when it ended beside them.
-  const when = noticeAgeLine(entry.at);
+  // row says when it ended beside them. `optional` is the row's own copy of
+  // the card's wording (claunch-hbmhk).
+  const when = noticeAgeLine(entry.at, !!entry.optional);
   if (entry.settledAt) {
     when.appendChild(el("span", null, ` · ended ${noticeStamp(entry.settledAt)}`));
   }
@@ -66558,6 +66622,10 @@ const RUN_GATE_WORDS = {
   acceptance: "waits on its acceptance check",
   // A run stopped until the user decides in its plan panel (claunch-rzepk).
   "plan-wait": "waits on your plan decision",
+  // A door the run is not held on (claunch-hbmhk): the lane words above all
+  // say the run is stopped, and this one is not. Kept beside them so one map
+  // still answers "what does this card say".
+  optional: "has an optional gate open",
   waiting_approval: "waits on your approval", waiting_selection: "waits on your pick",
   waiting_answer: "waits on your answer",
 };
@@ -66566,6 +66634,10 @@ function runGateTitle(rec) {
   // A plan wait names no step to answer: what it asks for is the plan's own
   // decisions, and the card body carries the run's sentence about them.
   if (rec.kind === "plan-wait") return RUN_GATE_WORDS["plan-wait"];
+  // An optional choice is not waited on: saying "waits on your pick" would
+  // be false, and the fix a reader takes from a false "waiting" is to drop
+  // what they are doing (claunch-hbmhk).
+  if (rec.optional) return `${RUN_GATE_WORDS.optional}: ${rec.label}`;
   return `${RUN_GATE_WORDS[rec.kind] || "waits on you"}: ${rec.label}`;
 }
 
@@ -66692,9 +66764,12 @@ function applyRunGate(pending, settled) {
     const key = RUN_GATE_PREFIX + rec.id;
     gateHistoryOpen("ask", String(rec.id), `${rec.session} ${runGateTitle(rec)}`,
                     rec.prompt || "",
-                    rec.opened === undefined
-                      ? { session: rec.session }
-                      : { session: rec.session, opened: rec.opened });
+                    Object.assign({ session: rec.session },
+                                  rec.opened === undefined ? {} : { opened: rec.opened },
+                                  // The history row counts its age the way the
+                                  // card does: "open …" for a door the run is
+                                  // not held on (claunch-hbmhk).
+                                  rec.optional ? { optional: true } : {}));
     // The run's own stamp for when it started waiting lands on the row even
     // when the row was written before the answer carried it: the age is
     // about the request, not about this browser (claunch-l9znm.1). A card
@@ -66705,7 +66780,8 @@ function applyRunGate(pending, settled) {
     if (rec.opened !== undefined
         && gateHistoryOpened("ask", rec.id, rec.opened)
         && notices.get(key)) {
-      noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened));
+      noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened),
+                      !!rec.optional);
     }
     if (gateCardAside("ask", rec.id)) continue;
     seen.add(key);
@@ -66726,6 +66802,14 @@ function applyRunGate(pending, settled) {
     title.appendChild(gateSessionLink(rec.session));
     title.appendChild(el("span", null, ` ${runGateTitle(rec)}`));
     node.appendChild(title);
+    if (rec.optional) {
+      // What "optional" means for THIS kind of gate, in the card's own words:
+      // nothing is lost by leaving it alone, and it goes by itself
+      // (claunch-hbmhk). The one-line `prompt` below is the driver's, and
+      // the run page still offers the press.
+      node.appendChild(el("div", "notice-sub gate-optional",
+        "optional — the run carries on without it, and this closes by itself"));
+    }
     if (rec.prompt || rec.prompt_md) node.appendChild(noticeAskBody("notice-sub gate-reason", rec));
     node.appendChild(el("div", "notice-sub gate-nudge" + (note ? "" : " hidden"), note));
     if (rec.workflow) {
@@ -66742,7 +66826,8 @@ function applyRunGate(pending, settled) {
     node.appendChild(actions);
     node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => runGateGo(rec, key));
-    noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
+    noticeCardAdd(host, node, gateSeenAt("ask", rec.id),
+                  { optionalAge: !!rec.optional });
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {

@@ -1166,6 +1166,60 @@ def _par_child_done(r: Run, iid: str, role: str, outcome: str, value: Any) -> No
     _complete(r, iid, decided[0], decided[1])
 
 
+def optional_choice(inst: Dict[str, Dict[str, Any]], chart, iid: str) -> bool:
+    """Whether the choice instance ``iid`` is a door nobody has to take.
+
+    A choice parked in a branch of a region that settles without that
+    branch runs on by itself: :func:`_par_child_done` calls
+    :func:`_cancel_children` the moment the settle is satisfied, so
+    leaving the door alone changes nothing. ``improv-worker-v2``'s
+    ``test-skip-gate`` -- a ``skip`` button racing the targeted-test loop
+    under ``settle: race`` -- is the case this exists for
+    (claunch-dsr4o, claunch-hbmhk): the rail used to draw it exactly like
+    a gate the run was stopped on.
+
+    The nearest enclosing ``par`` answers it. ``race`` and ``any`` decide
+    on the first branch, so every branch is skippable while there are two
+    or more (with one branch they behave like ``all``). ``quorum:K``
+    decides on K, so a branch is skippable while K is below the number of
+    branches. ``all`` and ``allSettled`` need every branch. Everything
+    this cannot prove -- no enclosing par, an unreadable node, a settle
+    mode it does not know -- answers ``False``: a gate that really does
+    stop the run must never be drawn as optional.
+
+    Takes the run's instance map (``Run.inst``, or the ``inst`` document
+    of a saved state) and its chart, so the daemon's rail asks the same
+    question without building a :class:`Run` (``daemon/cflow2_web.py``
+    ``rail_entry`` reads the saved state directly).
+    """
+    seen = set()
+    cur = (inst.get(iid) or {}).get("parent")
+    while cur is not None and cur not in seen:
+        seen.add(cur)
+        rec = inst.get(cur)
+        if not rec:
+            return False
+        try:
+            node = chart.node(rec.get("node"))
+        except ir.IRError:
+            return False
+        if node.type == ir.T_PAR:
+            names = list((node.get("branches") or {}).keys())
+            if len(names) < 2:
+                return False
+            base, _, k = str(node.get("settle") or ir.SETTLE_ALL).partition(":")
+            if base in (ir.SETTLE_RACE, ir.SETTLE_ANY):
+                return True
+            if base == ir.SETTLE_QUORUM:
+                try:
+                    return int(k or 1) < len(names)
+                except (TypeError, ValueError):
+                    return False
+            return False
+        cur = rec.get("parent")
+    return False
+
+
 def _group_child_done(r: Run, iid: str, child: str, role: str, outcome: str, value: Any) -> None:
     frame = r.inst[iid]["frame"]
     if role == "do":
@@ -5818,6 +5872,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 # the node entered and started waiting on this pick then; the
                 # notification's age is this stamp (claunch-l9znm.1)
                 "opened_at": inst.get("entered_at"),
+                # nobody has to take this door: the region around it settles
+                # without it and cancels it (claunch-hbmhk). False when the
+                # structure cannot prove that, so a stopping gate is never
+                # drawn as a choice.
+                "optional": optional_choice(r.inst, r.chart, iid),
             })
             held = inst["frame"].get("held")
             if held:

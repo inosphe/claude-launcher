@@ -1406,6 +1406,10 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   min-width: 0; white-space: normal; overflow-wrap: anywhere;
 }
 #session-list .sess-cflow2.gated { color: #d29922; font-weight: 600; }
+/* A door the run is not held on (claunch-hbmhk): no amber and no weight, so
+   the row does not read as "stopped on you". The muted default colour is the
+   point — the word "optional" carries the meaning, the calm carries the rest. */
+#session-list .sess-cflow2.optional { color: #7d8590; }
 #session-list :is(a.sess-cflow, a.sess-cflow2) {
   text-decoration: none; cursor: pointer;
 }
