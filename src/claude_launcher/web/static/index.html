@@ -200,14 +200,18 @@
       </a>
       <span id="session-search-note" class="session-search-note hidden"></span>
     </div>
-    <!-- List or Grid: two views of the same sessions. The list orders them
-         by lineage and state; the grid keeps each one in a fixed cell of a
-         named row that only a person moves (session-grid.js). Remembered per
-         browser. -->
+    <!-- List, Grid or Chart: three views of the same sessions. The list
+         orders them by lineage and state; the grid keeps each one in a fixed
+         cell of a named row that only a person moves (session-grid.js); the
+         chart draws the Chart page's timeline (chart-page.js) in the rail and
+         narrows by its own toolbar, so the state filters and the grouping
+         below are hidden in that view. The project tabs above stay: the
+         project is one pick for the whole page. Remembered per browser. -->
     <fieldset id="session-view" class="session-view-tabs">
       <legend class="sr-only">Session view</legend>
       <label><input type="radio" name="session-view" value="list" checked><span>List</span></label>
       <label><input type="radio" name="session-view" value="grid"><span>Grid</span></label>
+      <label><input type="radio" name="session-view" value="chart"><span>Chart</span></label>
     </fieldset>
     <!-- The boot's restore queue (claunch-v4uyt): how many sessions the
          daemon has started again after a restart, while any still wait. -->
@@ -292,6 +296,10 @@
          #/r/<machine>/<name>. -->
     <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
+    <!-- The Chart view of the rail: the same timeline as #/chart, drawn by
+         chart-page.js into this box (ChartPage.openRail). A row opens its
+         session. -->
+    <div id="session-chart" class="hidden" aria-label="Sessions on a time axis"></div>
     </div>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is

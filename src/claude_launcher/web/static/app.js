@@ -3228,8 +3228,14 @@ function toggleSessionPin(name) {
    helpers expect is missing. */
 const SESSION_VIEW_KEY = `claunch_session_view:${BASE}`;
 const SESSION_GRID_KEY = `claunch_session_grid:${BASE}`;
+/* The rail's views: list, grid and chart (the Chart page's timeline drawn in
+   the rail, chart-page.js openRail). Anything else reads as the list. */
+const SESSION_VIEWS = ["list", "grid", "chart"];
+function sessionViewOf(value) {
+  return SESSION_VIEWS.includes(value) ? value : "list";
+}
 let sessionView = (() => {
-  try { return localStorage.getItem(SESSION_VIEW_KEY) === "grid" ? "grid" : "list"; } catch {}
+  try { return sessionViewOf(localStorage.getItem(SESSION_VIEW_KEY)); } catch {}
   return "list";
 })();
 const SESSION_GRID_PER_LINE_KEY = `claunch_session_grid_per_line:${BASE}`;
@@ -3293,7 +3299,7 @@ function sessionGridLayout() {
 }
 
 function setSessionView(view, remember = true) {
-  sessionView = view === "grid" ? "grid" : "list";
+  sessionView = sessionViewOf(view);
   if (remember) {
     try { localStorage.setItem(SESSION_VIEW_KEY, sessionView); } catch {}
   }
@@ -3302,22 +3308,31 @@ function setSessionView(view, remember = true) {
 
 function syncSessionView() {
   const grid = sessionView === "grid";
-  $("session-list")?.classList.toggle("hidden", grid);
+  const chart = sessionView === "chart";
+  $("session-list")?.classList.toggle("hidden", grid || chart);
   $("session-grid")?.classList.toggle("hidden", !grid);
+  $("session-chart")?.classList.toggle("hidden", !chart);
   // The ancestor band belongs to the list above the rows it names; the grid
-  // has no rows to anchor it (renderRailAncestors hides it in that view).
+  // and the chart have no rows to anchor it (renderRailAncestors hides it
+  // while the list is hidden).
   if (typeof renderRailAncestors === "function") renderRailAncestors();
   // Mesh and workspace grouping split the list into tabs; the grid's rows
-  // are its grouping, so the mode and the tabs would do nothing there.
+  // are its grouping, so the mode and the tabs would do nothing there. The
+  // chart groups and filters with its own toolbar (Group by, Range, archived,
+  // killed), so the rail's state filters go too in that view: two filter
+  // bars over one chart would not say which one narrowed it.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
-    el.classList.toggle("hidden", grid));
+    el.classList.toggle("hidden", grid || chart));
+  $("session-filters")?.classList.toggle("view-hidden", chart);
   const groupTabs = $("session-group-tabs");
-  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
+  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid || chart);
   const groupHeader = $("session-group-header");
-  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid);
+  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid || chart);
   document.querySelectorAll('input[name="session-view"]').forEach((input) => {
     input.checked = input.value === sessionView;
   });
+  if (chart) globalThis.ChartPage?.openRail();
+  else globalThis.ChartPage?.stopRail();
   if (grid) renderSessionGrid(true);
   else drawSessionGridLineage();   // clears it: the list has no overlay
 }
@@ -14388,7 +14403,9 @@ function setCurrentProject(name) {
   refreshSessions({ cached: true });
   refreshMeshList({ cached: true });
   if (currentPage === "home") renderHome();
-  if (currentPage === "chart") globalThis.ChartPage?.render(true);
+  if (currentPage === "chart" || (typeof sessionView !== "undefined" && sessionView === "chart")) {
+    globalThis.ChartPage?.render(true);
+  }
   if (currentPage === "hive") globalThis.HivePage?.render(true);
 }
 
@@ -28150,12 +28167,14 @@ function layRailOut() {
    second ago can legitimately have none yet, and that is a no-op rather than
    an error — the next poll builds it and the reader can press again. */
 function revealSessionCard(name) {
-  const card = sessionView === "grid"
-    ? revealSessionGridCell(name) : revealSessionListRow(name);
+  const card = sessionView === "chart"
+    ? (globalThis.ChartPage?.railRow?.(name) || null)
+    : sessionView === "grid"
+      ? revealSessionGridCell(name) : revealSessionListRow(name);
   if (!card) return false;
   // The list view's rows are the ones that skip their layout; a grid cell is
   // always laid out.
-  const laidOut = sessionView === "grid" ? null : layRailOut();
+  const laidOut = sessionView === "list" ? layRailOut() : null;
   if (laidOut) {
     if (railLaidOutTimer) clearTimeout(railLaidOutTimer);
     railLaidOutTimer = setTimeout(() => {

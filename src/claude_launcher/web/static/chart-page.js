@@ -584,6 +584,22 @@ globalThis.ChartPage = (() => {
   }
 
   function view() { return typeof document !== "undefined" && document.getElementById("chart-view"); }
+  // The rail's Chart view (app.js syncSessionView): the same timeline drawn
+  // into the session rail, kept current while railOpen is set.
+  function railView() { return typeof document !== "undefined" && document.getElementById("session-chart"); }
+  let pageOpen = false;
+  let railOpen = false;
+
+  /* The boxes a redraw paints: the page's when it is shown, the rail's when
+     the rail is on its Chart view. Both draw one model from the same picks. */
+  function targets() {
+    const out = [];
+    const page = view();
+    if (page && !page.classList.contains("hidden")) out.push({ root: page, rail: false });
+    const rail = railOpen ? railView() : null;
+    if (rail && !rail.classList.contains("hidden")) out.push({ root: rail, rail: true });
+    return out;
+  }
 
   function node(tag, cls, text) {
     const e = document.createElement(tag);
@@ -839,12 +855,16 @@ globalThis.ChartPage = (() => {
     render(true);
   }
 
-  function toolbar(sessions, model) {
+  function toolbar(sessions, model, rail = false) {
     const bar = node("div", "chart-toolbar");
-    const project = currentProjectPick();
-    bar.appendChild(select("Project",
-      [["", "All projects"], ...projectNames(sessions).map((n) => [n, n])],
-      project, pickProject));
+    // In the rail the project tabs above it are the same pick (app.js
+    // currentProject), so a second control for it is left out there.
+    if (!rail) {
+      const project = currentProjectPick();
+      bar.appendChild(select("Project",
+        [["", "All projects"], ...projectNames(sessions).map((n) => [n, n])],
+        project, pickProject));
+    }
     bar.appendChild(seg("Group by", GROUPS, state.group,
       (v) => set({ group: v, groupPick: "" })));
     if (state.group) {
@@ -1207,16 +1227,23 @@ globalThis.ChartPage = (() => {
     render(true);
   }
 
-  function sessionRow(r, model) {
-    const on = r.name === state.selected;
+  /* A rail row opens its session, as a list row or a grid cell does; the
+     rail has no room for the detail column a page row fills. */
+  function openSession(name) {
+    if (typeof location !== "undefined") location.hash = "#/s/" + encodeURIComponent(name);
+  }
+
+  function sessionRow(r, model, rail = false) {
+    const on = rail ? r.name === railCurrent() : r.name === state.selected;
     const row = node("div", `chart-row cat-${r.category}${on ? " selected" : ""}`);
     row.dataset.name = r.name;
     row.tabIndex = 0;
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", String(on));
-    row.onclick = () => pick(r.name);
+    const act = rail ? () => openSession(r.name) : () => pick(r.name);
+    row.onclick = act;
     row.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(r.name); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); }
     };
     // The row's hover card (rowTip) replaces the browser's title tooltips on
     // its cells: two tooltips over one row would cover each other.
@@ -1522,28 +1549,21 @@ globalThis.ChartPage = (() => {
     return bar;
   }
 
+  // The session the page has open (app.js currentName), marked in the rail.
+  function railCurrent() {
+    return typeof currentName === "string" ? currentName : "";
+  }
+
   function render(force = false) {
-    const root = view();
-    if (!root || root.classList.contains("hidden")) return;
+    const boxes = targets();
+    if (!boxes.length) return;
     // A redraw replaces the toolbar; skip the timer's while a picker is open
     // in it, or the list would close under the viewer's pointer. A drag of
     // the divider is skipped the same way.
     if (!force && dragging) return;
     const focused = typeof document !== "undefined" && document.activeElement;
-    if (!force && focused && focused.tagName === "SELECT" && root.contains(focused)) return;
-    const keepFocus = focused && root.contains(focused)
-      ? (focused.classList.contains("chart-divider") ? "divider"
-         : focused.dataset && focused.dataset.name ? focused.dataset.name : "")
-      : "";
-    const oldMain = root.querySelector(".chart-main");
-    const oldSide = root.querySelector(".chart-detail");
-    const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
-    // The grid keeps its own horizontal place across a redraw; read it before
-    // the rebuild replaces the node. The timeline column (.chart-main) is the
-    // scroller, so the axis header and the name column stick to it.
-    const prevScroll = root.querySelector(".chart-main");
-    const prevLeft = prevScroll ? prevScroll.scrollLeft : null;
-    const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
+    if (!force && focused && focused.tagName === "SELECT"
+        && boxes.some((b) => b.root.contains(focused))) return;
     // The fleet's token use over the same window and the same picks
     // (claunch-x15q5) is read before the rows are built: the rows print their
     // own figures from the same payload, so the column and the chart cannot
@@ -1559,13 +1579,35 @@ globalThis.ChartPage = (() => {
       sort: state.sort, cflowOf: appCflowOf,
       meshesOf: appMeshesOf, scale: state.scale, tokensOf: seriesTokens,
     });
+    for (const b of boxes) paint(b.root, b.rail, sessions, model, smodel, focused);
+    refreshTip(model);
+  }
+
+  function paint(root, rail, sessions, model, smodel, focused) {
+    const keepFocus = focused && root.contains(focused)
+      ? (focused.classList.contains("chart-divider") ? "divider"
+         : focused.dataset && focused.dataset.name ? focused.dataset.name : "")
+      : "";
+    const oldMain = root.querySelector(".chart-main");
+    const oldSide = root.querySelector(".chart-detail");
+    const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
+    // The grid keeps its own horizontal place across a redraw; read it before
+    // the rebuild replaces the node. The timeline column (.chart-main) is the
+    // scroller, so the axis header and the name column stick to it.
+    const prevScroll = oldMain;
+    const prevLeft = prevScroll ? prevScroll.scrollLeft : null;
+    const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
+    // The rail box scrolls as a whole (style.css #session-chart); keep it.
+    const railTop = rail ? root.scrollTop : 0;
     root.innerHTML = "";
-    const head = node("div", "wf-head");
-    head.appendChild(node("h2", null, "Chart"));
-    head.appendChild(node("span", "chart-muted",
-      "세션별 생성 시점과 생존 시간, cflow 상태"));
-    root.appendChild(head);
-    root.appendChild(toolbar(sessions, model));
+    if (!rail) {
+      const head = node("div", "wf-head");
+      head.appendChild(node("h2", null, "Chart"));
+      head.appendChild(node("span", "chart-muted",
+        "세션별 생성 시점과 생존 시간, cflow 상태"));
+      root.appendChild(head);
+    }
+    root.appendChild(toolbar(sessions, model, rail));
     if (archivedError) root.appendChild(node("p", "chart-error", `archived 읽기 실패: ${archivedError}`));
     root.appendChild(summary(model));
     root.appendChild(usageBlock(model, smodel, seriesRead.error));
@@ -1593,7 +1635,7 @@ globalThis.ChartPage = (() => {
         chart.appendChild(node("div", "chart-group-head",
           `${groupLabel(state.group, r.group)} · ${count}`));
       }
-      chart.appendChild(sessionRow(r, model));
+      chart.appendChild(sessionRow(r, model, rail));
     }
     const split = node("div", "chart-split");
     split.style.setProperty("--chart-left", `${clampSplit(state.split)}%`);
@@ -1606,7 +1648,7 @@ globalThis.ChartPage = (() => {
     // does not.
     main.appendChild(chart);
     split.appendChild(main);
-    const side = detail(model, sessions);
+    const side = rail ? null : detail(model, sessions);
     if (side) {
       split.appendChild(divider(split));
       split.appendChild(side);
@@ -1623,7 +1665,7 @@ globalThis.ChartPage = (() => {
     // cap changed) opens on the newest time -- the right edge.
     const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);
     main.scrollLeft = sameWidth ? prevLeft : main.scrollWidth;
-    refreshTip(model);
+    if (rail) root.scrollTop = railTop;
     if (keepFocus === "divider") split.querySelector(".chart-divider").focus();
     else if (keepFocus) {
       const again = [...main.querySelectorAll(".chart-row")].find((x) => x.dataset.name === keepFocus);
@@ -1631,11 +1673,30 @@ globalThis.ChartPage = (() => {
     }
   }
 
-  function open() {
-    if (state.archived && !archivedRecords.length) loadArchived();
-    render();
+  /* One timer for both boxes: it runs while the page or the rail's view is
+     open, and each redraw paints whichever of them is shown. */
+  function startTimer() {
     if (timer) clearInterval(timer);
     timer = setInterval(() => render(), REDRAW_MS);
+  }
+
+  function open() {
+    pageOpen = true;
+    if (state.archived && !archivedRecords.length) loadArchived();
+    render();
+    startTimer();
+    watchResize();
+  }
+
+  function openRail() {
+    railOpen = true;
+    if (state.archived && !archivedRecords.length) loadArchived();
+    render(true);
+    if (!timer) startTimer();
+    watchResize();
+  }
+
+  function watchResize() {
     // A window that changed width would keep the old tick spacing until the
     // next redraw. Registered once; a redraw of the hidden view does nothing.
     if (!onResize) {
@@ -1646,13 +1707,36 @@ globalThis.ChartPage = (() => {
     }
   }
 
-  function stop() {
+  function stopTimerIfIdle() {
+    if (pageOpen || railOpen) return;
     if (timer) clearInterval(timer);
     timer = null;
+  }
+
+  function stop() {
+    pageOpen = false;
+    stopTimerIfIdle();
     hideTip();
   }
 
-  return { open, stop, render, category, projectOf, spanOf, formatDuration,
+  function stopRail() {
+    if (!railOpen) return;
+    railOpen = false;
+    stopTimerIfIdle();
+    hideTip();
+    const box = railView();
+    if (box) box.innerHTML = "";
+  }
+
+  /* The rail's row for `name`, scrolled into view by app.js revealSessionCard;
+     null when the chart has no row for it (filtered out, not drawn yet). */
+  function railRow(name) {
+    const box = railOpen ? railView() : null;
+    if (!box) return null;
+    return [...box.querySelectorAll(".chart-row")].find((x) => x.dataset.name === name) || null;
+  }
+
+  return { open, stop, openRail, stopRail, railRow, render, category, projectOf, spanOf, formatDuration,
            median, ticks, buildModel, barGeometry, roleOf, clampSplit,
            positionOf, axisTicks, cflowAge, cflowChangedAt,
            buildSeriesModel, seriesSpan, seriesTip, formatTokens, formatRate,
