@@ -123,10 +123,14 @@ const server = http.createServer((req, res) => {
         if (holders.length && !body.steal) {
           return json(res, { ok: false, code: "vm_control_held", holders, error: `vm_control_held: alpha의 control은 ${holders.join(", ")}이(가) 가지고 있습니다` }, 409);
         }
-        for (const h of holders) VM.grants[h] = VM.grants[h].filter((x) => x !== "control");
+        for (const h of holders) {
+          VM.grants[h] = VM.grants[h].filter((x) => x !== "control");
+          (VM.leases = VM.leases || []).push({ from: h, to: body.session, scopes: ["control"], at: 1 });
+        }
         VM.grants[body.session] = [...new Set([...(VM.grants[body.session] || []), ...body.scopes])];
         return json(res, { ok: true, grants: VM.grants[body.session] });
       }
+      if (p === "/api/vm/alpha/return_steal") return json(res, { ok: true, returned: [], vm: VM });
       if (p === "/api/vm-share-roots") {
         if (body.action === "add") {
           if (body.path === "/home/u") return json(res, { ok: false, code: "vm_share_forbidden", error: "vm_share_forbidden: 공유할 수 없는 폴더입니다" }, 400);
@@ -322,6 +326,13 @@ const server = http.createServer((req, res) => {
     await frame.locator("#vm-control-status").waitFor({ state: "hidden", timeout: 5000 });
     assert.equal(await frame.locator("#vm-grant-steal-row").isHidden(), true, "s1 holds control now: no steal box");
     await frame.locator("#vm-grant-control").uncheck();
+    // 3b. a steal is a loan: both stolen-from owners are listed with a give-back button
+    await frame.locator("#vm-leases").waitFor({ state: "visible", timeout: 5000 });
+    assert.deepEqual(await frame.locator("#vm-leases-list li").allInnerTexts().then((t) => t.map((x) => x.replace(/\s*원 주인에게 반환$/, ""))),
+      ["s1이(가) s8에게서 빼앗은 control", "s1이(가) s9에게서 빼앗은 control"]);
+    await frame.locator("#vm-leases-list li button").first().click();
+    await frame.locator("#vm-activity", { hasText: "s1의 control 반환 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.find(([u]) => u === "/api/vm/alpha/return_steal")[1], { session: "s1" });
     // 3c. shared folders and requests
     assert.match(await frame.locator("#vm-share-roots").innerText(), /\/work/, "the allowed root is shown");
     await frame.locator("#vm-shares tbody tr", { hasText: "/Volumes/My Shared Files/src" }).waitFor({ timeout: 5000 });
