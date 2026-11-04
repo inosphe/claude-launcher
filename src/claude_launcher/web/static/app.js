@@ -24741,8 +24741,14 @@ function termCflow2Question(a) {
 
 /* What the strip draws for the attached session, from whichever run waits
    on the reader: the v1 run first (its strip predates this one and its
-   gate stops the session outright), else the v2 run's first owed answer.
-   `null` when neither does. */
+   gate stops the session outright), else the v2 run's first answer.
+   `null` when neither does.
+
+   A v2 run whose answers are all optional (`blocking === false`,
+   claunch-hbmhk.1) still draws the strip -- its choice can be taken from
+   here, which is why a person keeps it -- but it says so: `· ○ optional`
+   on the head and the `optional` class on the box, the rail chip's own
+   distinction (○ and plain colour) carried to the terminal. */
 function termCflowView() {
   // The terminal and the session's HTML view alike (claunch-hjux5).
   if (!sessionLineOnPage(currentPage) || !currentName) return null;
@@ -24760,16 +24766,19 @@ function termCflowView() {
   }
   const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[currentName];
   if (!r2 || !r2.gated) return null;
+  // Absent `blocking` is an older payload: read it as the run being held.
+  const optional = r2.blocking === false;
   const owed = r2.answers || [];
   const a = owed[0] || { kind: "", prompt: (r2.owed || []).join(" · ") };
   const more = owed.length > 1 ? ` (+${owed.length - 1} more)` : "";
   const question = termCflow2Question(a);
   const presses = termCflow2Answers(r2, a, currentName);
   return {
-    key: [r2.run, r2.status, a.kind, a.instance || "", owed.length],
+    key: [r2.run, r2.status, a.kind, a.instance || "", owed.length, optional],
     href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
     what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
-      `${a.kind || "waiting"}${more}`,
+      `${a.kind || "waiting"}${more}${optional ? " · ○ optional" : ""}`,
+    optional,
     // A plan wait has no press on the run page: its decision is taken in the
     // session's plan pane, so the strip points there instead (claunch-rzepk).
     question: presses.length ? question
@@ -24799,6 +24808,7 @@ function renderTermCflow() {
   box.innerHTML = "";
   if (!show) {
     box.classList.add("hidden");
+    box.classList.remove("optional");
     refitSoon(60);
     return;
   }
@@ -24833,6 +24843,10 @@ function renderTermCflow() {
   }
   box.appendChild(btns);
   box.classList.remove("hidden");
+  // A choice the run is not held on still shows here (its press is real),
+  // and the box says so the way the rail chip does (claunch-hbmhk.1).
+  if (view.optional) box.classList.add("optional");
+  else box.classList.remove("optional");
   refitSoon(60);
 }
 

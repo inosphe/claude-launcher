@@ -616,7 +616,7 @@ globalThis.MegaThreadPage = (() => {
     const cflow = run
       ? `${run.workflow || "cflow"} · ${run.status || "?"}` +
         (run.current && run.current.length ? ` · ${run.current.join(", ")}` : "") +
-        (run.gated ? " · ⚑" : "")
+        (run.gated ? (run.blocking === false ? " · ○" : " · ⚑") : "")
       : "";
     return [
       roleOf(s, meshOf),

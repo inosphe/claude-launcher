@@ -223,7 +223,8 @@ globalThis.HivePage = (() => {
     const add = (k, v) => { const t = String(v ?? "").trim(); if (t) rows.push([k, t]); };
     if (v2) {
       add("workflow", v2.workflow || "cflow2");
-      add("status", v2.status + (v2.gated ? " · 사람 대기" : ""));
+      add("status", v2.status + (v2.gated
+        ? (v2.blocking === false ? " · 선택 열림" : " · 사람 대기") : ""));
       add("round", v2.round_now ?? v2.round);
       add("현재", (v2.current || []).join(", "));
       add("대기", (v2.owed || []).join("\n"));
