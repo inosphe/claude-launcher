@@ -204,11 +204,15 @@ lists what is on disk — name, width, model, byte size, and the presets that
 read it — and the card shows that list under the DB field as a table with
 **one row per DB name** (claunch-r4796): the collections of every corpus
 that share an identity fold into one row (`ragDbGroups`), and a pre-preset
-`<corpus>.zvec` keeps a row of its own marked legacy. Clicking a row's name
-fills the DB field with it (for a legacy row, the slug of the model it was
-made with, which is the name a preset adopts it under); when the last
-connection test measured a different width the row carries a
-"차원 불일치" badge and the status line warns before anything is saved. The
+`<corpus>.zvec` keeps a row of its own marked legacy. The table carries the
+name, the presets that read it, and the rename/delete actions; the widths,
+models and sizes it used to repeat are drawn on the Semantic search card
+instead, so one screen owns each number (claunch-i2i95). Clicking a row's
+name fills the DB field with it (for a legacy row, the slug of the model it
+was made with, which is the name a preset adopts it under); when the last
+connection test measured a different width the status line says so before
+anything is saved, and the save sends that measured width as `probe_dims` so
+the daemon refuses a collection it cannot fill. The
 field shows the name it will actually be stored under (the same slug rule as
 `store.rag_model_key_slug`) while it is typed. Each row has 이름 변경 and 삭제.
 `POST /api/rag/dbs/rename` with `{"from": "<db>", "to": "<new name>"}`
@@ -371,11 +375,12 @@ write-up matches on any part.
 |---|---|
 | `GET /api/search?q=&kind=beads\|sessions&cwd=\|parent=&limit=&rerank=&wait=` | ranked results + `index: {total, indexed, pending, syncing, error}` + `timing` |
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
-| `GET /api/rag/status` | configured, host, models, each loaded index's coverage and root, the queue (depth, pending keys, last consume, watcher interval) |
+| `GET /api/rag/status` | configured, host, models, each loaded index's coverage, root, and the DB it belongs to (`db` from the collection's path, `db_configured` from the preset, `legacy` when the path predates presets), the queue (depth, pending keys, last consume, watcher interval) |
 | `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
 | `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it ; `{"db": "<db>"}` removes every collection of that DB name (claunch-r4796) |
 | `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same names and for a name taken on disk or by another preset (claunch-r4796) |
-| `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync |
+| `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync and says what the request did: `started`, `running` (a pass was already going), `force_applied`, `force_pending` (a forced request that arrived mid-pass and will run as one more pass) — claunch-i2i95 |
+| `POST /api/rag/cancel` `{kind, cwd}` | 200 when a pass was running and is now asked to stop at its next embedding group; 409 when nothing was running. Vectors already embedded stay; a forced pass queued behind the stopped one is dropped (claunch-i2i95) |
 | `GET /api/sessions` | now also `rag_configured` |
 
 400 when the block is not configured or `q` is empty, 404 for a directory
@@ -432,7 +437,7 @@ few, so typing narrows by substring at once and Enter asks by meaning.
 | **Issue detail pane** | "Related by meaning" block | the focused issue's nearest neighbours, score-chipped, fetched with the detail |
 | **New-session form picker** | the existing "filter the board" box | typing stays substring; Enter asks the board of the chosen directory (or the parent session's) by meaning and lists the daemon's ranking first, then the substring matches it did not name; lead row says "by meaning" |
 | **Spawn modal picker** | the same box | same behaviour, asked of the board the candidates came from |
-| **Settings** | "Semantic search (RAG)" card | configured or not (with the yaml to fill in), endpoint host, models, TLS, and each loaded index's coverage with Sync and Rebuild buttons |
+| **Settings** | "Semantic search (RAG)" card | configured or not (with the yaml to fill in), endpoint host, models, TLS; the queue line with pause/resume; then one block per DB holding the collections it reads (`Search anything`, `sessions`, one row per board) with a state badge (정상/색인 중/실패/대기), the row's own progress, and its physical path when it is the pre-preset form. `Sync` and `Rebuild` act on the whole DB; a syncing row offers `취소`. A click reports what the daemon answered, and the card re-reads the status every 3 s while work remains (bounded at 200 polls) — claunch-i2i95 |
 
 Interaction rules the code keeps: a search box that is focused pauses the
 page's poll-driven re-render (`formInUse`), so Enter blurs the box before

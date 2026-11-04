@@ -738,6 +738,195 @@ def test_queue_reruns_a_key_enqueued_mid_sync(tmp_path, repo):
     asyncio.run(run())
 
 
+def test_a_forced_reindex_during_a_pass_runs_one_more_pass(tmp_path, repo):
+    """A Rebuild clicked mid-sync is remembered, not dropped (claunch-i2i95).
+
+    ``ensure_sync`` used to return the running progress and forget the force,
+    so the second request left no trace anywhere the reader could see.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
+            gate = asyncio.Event()
+            reading = asyncio.Event()
+            real_docs = svc._docs
+
+            async def slow_docs(kind, root):
+                reading.set()
+                await gate.wait()
+                return await real_docs(kind, root)
+
+            svc._docs = slow_docs
+            prog = svc.ensure_sync("beads", repo)
+            await asyncio.wait_for(reading.wait(), 5)
+            again = svc.ensure_sync("beads", repo, force=True)
+            assert again is prog
+            assert prog.force_pending is True and prog.cancel_requested is False
+            gate.set()
+            await svc.drain(10)
+            # the pass that was running, then the remembered one
+            assert prog.runs == 2 and prog.force_pending is False
+            assert len(_embedded_docs(ep)) == 6
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_cancel_stops_the_pass_before_its_next_group_and_keeps_what_it_wrote(tmp_path, repo):
+    """Nothing could stop a running pass before this (claunch-i2i95).
+
+    ``pause_backfill`` holds the *next* corpus; the one a pass is on always
+    finished. The cancel is cooperative: the group already in flight is not
+    torn mid-request, the pass stops at the next boundary, and the vectors it
+    wrote stay in the collection.
+    """
+    class CancelOnFirst(Endpoint):
+        def __init__(self):
+            super().__init__()
+            self.on_first = None
+
+        async def embeddings(self, request):
+            response = await super().embeddings(request)
+            hook, self.on_first = self.on_first, None
+            if hook:
+                hook()
+            return response
+
+    ep = CancelOnFirst()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server, batch=1)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
+            ep.on_first = lambda: svc.cancel_sync("beads", repo)
+            prog = svc.ensure_sync("beads", repo)
+            await svc.drain(10)
+            assert prog.runs == 1
+            assert prog.cancel_requested is True
+            # one document reached the endpoint; the group after it did not
+            assert prog.indexed == 1 and prog.pending == 2
+            index = await svc._index("beads", repo, cfg)
+            assert len(index.entries) == 1
+            # a corpus with no pass running reports so instead of inventing one
+            assert svc.cancel_sync("beads", repo) == {
+                "key": svc._key("beads", repo), "running": False, "cancelled": False}
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_reindex_returns_whether_it_started_and_cancel_is_a_route(tmp_path, repo, monkeypatch):
+    """The card needs an answer to click against (claunch-i2i95).
+
+    ``/api/rag/reindex`` now says what happened to the request — started,
+    already running, or queued as a forced pass — and ``/api/rag/cancel``
+    is the stop the running pass never had.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+    monkeypatch.chdir(repo)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+        board = _board(br, repo)
+        cfg_box = {"cfg": _cfg(server)}
+        service = rag.RagService(board=board, manager=mgr, config=lambda: cfg_box["cfg"],
+                                 root_dir=tmp_path / "rag")
+        gate = asyncio.Event()
+        reading = asyncio.Event()
+        real_docs = service._docs
+
+        async def slow_docs(kind, root):
+            reading.set()
+            await gate.wait()
+            return await real_docs(kind, root)
+
+        service._docs = slow_docs
+        client = await _serve(mgr, board, service)
+        try:
+            resp = await client.post("/api/rag/reindex", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 202
+            first = await resp.json()
+            assert first["started"] is True and first["force_applied"] is False
+
+            await asyncio.wait_for(reading.wait(), 5)
+            resp = await client.post("/api/rag/reindex", json={"cwd": str(repo)}, headers=BEARER)
+            during = await resp.json()
+            assert during["running"] is True and during["started"] is False
+            assert during["force_pending"] is False
+
+            resp = await client.post("/api/rag/reindex",
+                                     json={"cwd": str(repo), "force": True}, headers=BEARER)
+            forced = await resp.json()
+            assert forced["running"] is True and forced["started"] is False
+            assert forced["force_pending"] is True
+
+            # the cancel wins over the queued forced pass
+            resp = await client.post("/api/rag/cancel", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 200
+            cancelled = await resp.json()
+            assert cancelled["key"] == service._key("beads", repo)
+            assert cancelled["running"] is True and cancelled["cancelled"] is True
+            gate.set()
+            await service.drain(10)
+            prog = service._progress_of(service._key("beads", repo))
+            assert prog.runs == 1 and prog.force_pending is False
+
+            resp = await client.post("/api/rag/cancel", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 409
+            assert (await resp.json())["cancelled"] is False
+            resp = await client.post("/api/rag/cancel", json={"kind": "nope"}, headers=BEARER)
+            assert resp.status == 400
+        finally:
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_status_rows_name_the_collection_db_and_whether_the_path_is_legacy(tmp_path, repo):
+    """The two screens judged different evidence (claunch-i2i95).
+
+    The RAG card read the collection's path; Search settings read the
+    preset's DB name. A row now carries both, plus whether ``_index_path``
+    reached it through the legacy adoption rule.
+    """
+    br = FakeBr(_issues())
+
+    async def run():
+        base = tmp_path / "rag"
+        cfg = dict(store.RAG_DEFAULTS)
+        cfg.update({"db": "kept", "model_key": "kept", "embedding_model": "emb"})
+        svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=base)
+        await svc._index("beads", repo, cfg)
+        row = next(r for r in svc.status()["indexes"] if r["kind"] == "beads")
+        assert row["db"] == "kept" and row["db_configured"] == "kept"
+        assert row["legacy"] is False
+
+        legacy_cfg = {k: v for k, v in cfg.items() if k not in ("db", "model_key")}
+        svc2 = rag.RagService(board=_board(br, repo), config=lambda: legacy_cfg, root_dir=base)
+        await svc2._index("beads", repo, legacy_cfg)
+        row = next(r for r in svc2.status()["indexes"] if r["kind"] == "beads")
+        assert row["db"] == "" and row["db_configured"] == ""
+        assert row["legacy"] is True
+        await svc.shutdown()
+        await svc2.shutdown()
+
+    asyncio.run(run())
+
+
 def test_board_write_hook_enqueues_and_restamps(tmp_path, repo):
     """(e) a ``br`` write through Board.br reaches the queue (and a read
     does not); the daemon's own write does not trip the watcher again."""

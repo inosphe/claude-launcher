@@ -4853,6 +4853,21 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .rag-index-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .rag-index-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rag-index-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; }
+/* the RAG card's DB blocks: one heading per DB, its buckets underneath */
+.rag-db-block { border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+.rag-db-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rag-db-head strong { flex: 1 1 auto; }
+.rag-db-head .wf-btn { flex: none; margin: 0; }
+.rag-notice { border-left: 3px solid #1f6feb; padding-left: 8px; }
+.rag-queue-line .wf-btn { margin: 0 0 0 6px; padding: 1px 8px; font-size: 11px; }
+.rag-badge { display: inline-block; width: max-content; font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid #30363d; color: #9da5b0; }
+.rag-badge-ok { border-color: #238636; color: #3fb950; }
+.rag-badge-busy { border-color: #1f6feb; color: #58a6ff; }
+.rag-badge-failed { border-color: #da3633; color: #f85149; }
+.rag-badge-pending { border-color: #9e6214; color: #f0883e; }
+.rag-state-text { font-size: 11px; color: #9da5b0; overflow-wrap: anywhere; }
+.rag-state-failed { color: #f85149; }
+.rag-state-busy { color: #58a6ff; }
 /* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
 .gh-head { display: flex; align-items: center; gap: 10px; }
 .gh-head h3 { flex: 1 1 auto; margin: 0; }
