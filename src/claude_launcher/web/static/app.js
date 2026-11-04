@@ -35740,6 +35740,69 @@ function statsOverviewRows(d) {
     (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
 }
 
+/* The four parts a session row's bar is split into, under the provider
+   filter in force: the whole window's, or the picked provider's slice of it.
+   They are the parts of the same quantity `statsRowTotal` sums, so the bar's
+   length and the segments inside it always agree. */
+function statsRowBarParts(row) {
+  const parts = statsRowParts(row).filter(
+    (p) => !statsProvider || p.provider === statsProvider);
+  const sum = (key) => parts.reduce((n, p) => n + (Number(p[key]) || 0), 0);
+  return USAGE_PARTS.map(([key, label, short]) =>
+    ({ key, label, short, tokens: sum(key) }));
+}
+
+/* One row's tokens bar, split into those parts in USAGE_PARTS order (fresh
+   input at the left). The colours are the detail panel's chart colours
+   (`.usage-in` and friends), so a session is the same picture in both
+   readings. A part that is zero draws no segment — a slice of nothing is a
+   smudge, not information — and a payload carrying a total but no breakdown
+   (an older daemon) keeps one unnamed segment so the length still reads. */
+function statsRowBar(row, peak) {
+  const value = statsRowTotal(row);
+  const bar = el("span", "stats-rowbar");
+  const fill = el("span", "stats-rowbar-fill stats-rowbar-split");
+  fill.style.width = ((value / peak) * 100).toFixed(2) + "%";
+  const parts = statsRowBarParts(row);
+  const known = parts.reduce((n, p) => n + p.tokens, 0);
+  if (!known) {
+    const seg = el("span", "stats-rowbar-part stats-rowbar-unknown");
+    seg.style.width = "100%";
+    seg.title = "no breakdown for this reading: the tokens it counted " +
+      "carry no part";
+    fill.appendChild(seg);
+  } else {
+    for (const p of parts) {
+      if (!p.tokens) continue;
+      const seg = el("span", `stats-rowbar-part usage-${p.short}`);
+      seg.style.width = ((p.tokens / known) * 100).toFixed(2) + "%";
+      seg.title = `${p.label}: ${p.tokens.toLocaleString()} of ` +
+        `${known.toLocaleString()} tokens`;
+      fill.appendChild(seg);
+    }
+  }
+  bar.appendChild(fill);
+  bar.title = known
+    ? parts.map((p) => `${p.label} ${p.tokens.toLocaleString()}`).join("\n")
+    : `${value.toLocaleString()} tokens, with no breakdown by part`;
+  return bar;
+}
+
+/* The four colours named once above the table: a stack is only readable
+   when the reader can tell which band is which without hovering every row.
+   Same order and swatches as the detail panel's legend. */
+function statsRowBarLegend() {
+  const box = el("div", "usage-legend stats-rowbar-legend");
+  for (const [, label, short] of USAGE_PARTS) {
+    const item = el("span", "usage-legend-item");
+    item.append(el("span", `usage-swatch usage-${short}`),
+               el("span", null, label));
+    box.appendChild(item);
+  }
+  box.title = "each row's tokens bar is split into these parts, in this order";
+  return box;
+}
+
 /* The table: one row per session, longest bar first. A row with no figure
    (an OAuth route writes no ledger line) says so instead of drawing zero,
    because "not measured here" and "spent nothing" are different answers. */
@@ -35814,11 +35877,8 @@ function statsOverviewTable(d) {
 
     const tokens = el("td", "num stats-tokens-cell");
     if (value) {
-      const bar = el("span", "stats-rowbar");
-      const fill = el("span", "stats-rowbar-fill");
-      fill.style.width = ((value / peak) * 100).toFixed(2) + "%";
-      bar.appendChild(fill);
-      tokens.append(bar, el("span", "stats-rowvalue", usageShort(value)));
+      tokens.append(statsRowBar(r, peak),
+                    el("span", "stats-rowvalue", usageShort(value)));
     } else if (r.source === "none") {
       const dash = el("span", "stats-unmetered", "—");
       dash.title = "no figure for this session: the ledger has no record " +
@@ -36866,9 +36926,12 @@ function renderStatsOverview(main) {
   }
 
   const rows = statsOverviewRows(d);
-  main.appendChild(statsSection(`Sessions by usage`, rows.length,
-    rows.length ? statsScroll(statsOverviewTable(d))
-      : el("p", "wf-note", "no session worked in this window")));
+  const usageBody = el("div", "stats-usage-body");
+  if (rows.length) usageBody.appendChild(statsRowBarLegend());
+  usageBody.appendChild(rows.length
+    ? statsScroll(statsOverviewTable(d))
+    : el("p", "wf-note", "no session worked in this window"));
+  main.appendChild(statsSection(`Sessions by usage`, rows.length, usageBody));
 
   const models = statsModelSection(d);
   if (models) main.appendChild(models);
