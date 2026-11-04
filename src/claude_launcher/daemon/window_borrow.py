@@ -634,7 +634,13 @@ class BorrowRunner:
         if run.get("repo") and checkout.exists():
             subprocess.run(["git", "-C", run["repo"], "worktree", "remove", "--force",
                             str(checkout)], capture_output=True)
-        shutil.rmtree(workdir, ignore_errors=True)
+        # A process killed a moment ago still holds its working directory on
+        # Windows, so the first removal can fail silently; retry briefly.
+        for attempt in range(25 if os.name == "nt" else 1):
+            shutil.rmtree(workdir, ignore_errors=True)
+            if not workdir.exists():
+                break
+            time.sleep(0.2)
         if run.get("repo"):
             subprocess.run(["git", "-C", run["repo"], "worktree", "prune"],
                            capture_output=True)

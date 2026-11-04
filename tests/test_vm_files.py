@@ -35,7 +35,7 @@ pytestmark = pytest.mark.usefixtures("vm_on")
 AGENT = {actors.HEADER: "agent:s1"}
 needs_guest = pytest.mark.skipif(sys.platform != "darwin", reason="the guest scripts use BSD find/stat/mktemp")
 # ROLL BACK together with vm_files.HOST_FILES when put/get gain a Windows
-# implementation (see VM_TEST_PREFIX in tests/conftest.py).
+# implementation (see VM_TEST_PREFIXES in tests/conftest.py).
 needs_host_files = pytest.mark.skipif(not vm_files.HOST_FILES,
                                       reason="put/get walk the host folder by descriptor (POSIX only)")
 

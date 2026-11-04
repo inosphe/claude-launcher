@@ -1476,7 +1476,8 @@ def test_d():
 
 def test_e():
     out = _run("--repo")
-""".replace("@LITERAL@", _HERE).replace("@ELSEWHERE@", _HERE + "-elsewhere")
+""".replace("@LITERAL@", _HERE.replace("\\", "\\\\")).replace(
+        "@ELSEWHERE@", (_HERE + "-elsewhere").replace("\\", "\\\\"))  # escape backslashes: a Windows path holds "\f"
     by_line = {n: (a, r) for n, a, r in _tool_invocations(sample)}
 
     # The sample carries its own ``_run`` definition: a source handed to

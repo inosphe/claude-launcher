@@ -260,6 +260,10 @@ def sandbox(tmp_path: Path):
         tmp_path: the defaults are computed from whichever HOME the run gets,
         and the script answers from the sandbox's own home directory.
         """
+        if os_name != "Linux" and os.name == "nt":
+            # Git Bash puts /usr/bin ahead of any PATH entry, so the stub
+            # `uname` never answers and the script sees MINGW, not Darwin.
+            pytest.skip("the stub uname cannot shadow /usr/bin/uname under Git Bash")
         pkg_config(pkg, crypto)
         env = dict(os.environ)
         inherited = env.get("PATH", "")
