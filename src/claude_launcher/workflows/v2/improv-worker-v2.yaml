@@ -1950,6 +1950,13 @@ nodes:
       그 사유를 보고에 적고 스레드 없이 진행한다 — 전달은 필수이나 게이트를
       세우는 승인이 아니므로 이 작업의 실패로 보고하지 않는다.
 
+      ── 사용자 결정 갈림 (claunch-tcczr) ──
+      이 회차의 consult-check reason(`claunch cflow2 journal`)이 사용자의 결정이
+      필요한 갈림(대상·방식·범위)을 적었으면 그 갈림을 plan에 `default` 없는
+      decision으로 쓴다. plan이 이미 있으면 plan_get으로 읽고 id를 유지한 채
+      plan_set으로 더한다. 이 decision이 다음 plan-wait에서 work를 세운다 —
+      승인 게이트의 유무와 관계없다.
+
       ── plan_waiting: 계획에 남은 결정 수 (claunch-rzepk) ──
       plan_set(또는 plan_node)의 응답에 있는 `summary.waiting_decisions`을 plan_waiting에
       그대로 적는다(그 키가 없는 이전 데몬이면 `summary.waiting`). 지난 회차의
@@ -1977,8 +1984,8 @@ nodes:
       미결정이 남아 있으면 work를 시작하지 않는다(claunch-rzepk 규칙 1).
 
       `plan_get`으로 이 세션의 plan을 읽는다.
-      · plan이 이미 있으면 손대지 않는다. 지금 `summary.waiting_decisions` 값을
-        plan_waiting에 적는다.
+      · plan이 이미 있으면 아래 셋째 항목의 갈림 decision을 더하는 것 말고는
+        손대지 않는다. 지금 `summary.waiting_decisions` 값을 plan_waiting에 적는다.
       · plan이 없으면 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
         (title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈, steps는
         이번 일감의 단계), 그 응답의 `summary.waiting_decisions`을 plan_waiting에 적는다.

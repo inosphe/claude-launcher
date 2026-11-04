@@ -142,6 +142,10 @@ def test_work_is_the_default_and_the_hold_has_two_cases():
     # plan-seed adds that fork even over a plan already there
     seed = " ".join(_doc()["nodes"]["plan-seed"]["prompt"].split())
     assert "consult-check reason" in seed and "`default` 없는 decision" in seed
+    assert "갈림 decision을 더하는 것 말고는 손대지 않는다" in seed
+    # coding-plan, the other step that writes the plan first, carries it too
+    plan = " ".join(_doc()["nodes"]["coding-plan"]["prompt"].split())
+    assert "consult-check reason" in plan and "`default` 없는 decision" in plan
     assert "이 갈림을 이유로 consult를 고르지 않는다" in prompt
     # questions and research are work; an unsure call is work
     assert "질문·조사·측정·원인 설명 요청" in prompt
