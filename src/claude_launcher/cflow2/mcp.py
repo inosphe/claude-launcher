@@ -30,12 +30,15 @@ AUTHORITY = (
     "cflow v2 (flow_*) tools are the intended agent interface for a v2 workflow "
     "run in this directory: call them within the task without extra human "
     "confirmation. The engine enforces the workflow's structure, guards and "
-    "who may choose; a choice whose chooser is 'user' is refused here and taken "
-    "by a person with 'claunch cflow2 select'. A task's ask is answered by the "
-    "responders it was routed to (flow_answer) or a person ('claunch cflow2 "
-    "approve'); flow_approve is accepted only for an ask that fell through to "
-    "'otherwise: self'. A halted run refuses every move until a person resumes it. "
-    "Aborting a run is the user's ('claunch cflow2 abort'); there is no tool for it."
+    "who may choose; a choice whose chooser is 'user' is refused to the run's "
+    "driver and taken by a person with 'claunch cflow2 select' -- or, when the "
+    "driver has a parent session, by that parent with flow_select on the child's "
+    "scope (flow_gates lists what your children wait on). A task's ask is "
+    "answered by the responders it was routed to (flow_answer) or a person "
+    "('claunch cflow2 approve'); flow_approve is accepted only for an ask that "
+    "fell through to 'otherwise: self'. A halted run refuses every move until a "
+    "person resumes it. Aborting a run is the user's ('claunch cflow2 abort'); "
+    "there is no tool for it."
 )
 
 _SCOPE = {
@@ -153,8 +156,12 @@ TOOLS = [
             "Pick an option of an open choice (flow_status 'choices'). Only "
             "options listed as available can be picked; their guards are "
             "re-checked. A choice with require_reason needs 'reason' (give the "
-            "evidence). A choice whose chooser is 'user' is refused: show the "
-            "user the options and your recommendation instead."
+            "evidence). A choice whose chooser is 'user' is refused to the "
+            "driver: show the user the options and your recommendation instead. "
+            "The one exception is a child of yours -- name its run with 'scope' "
+            "(and 'cwd' when it lives elsewhere) and the choice its driver may "
+            "not take is yours to take, as flow_gates lists. Your answer is "
+            "journaled as the parent's; the user may still answer it too."
         ),
         "inputSchema": {
             "type": "object",
@@ -165,6 +172,46 @@ TOOLS = [
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["option"],
+        },
+    },
+    {
+        "name": "flow_gates",
+        "description": (
+            "What your child sessions' runs wait on a person for: each live "
+            "child's open 'chooser: user' choices (prompt, options, which are "
+            "available now), a pending move/report request, and a loop or visit "
+            "limit. This is the list the delegation exists for -- a child's end "
+            "'new-task'/hold decision and its 'move to round' request are yours "
+            "to answer here instead of waiting for the user. Answer a choice with "
+            "flow_select(scope=<child run>), a request with flow_move(scope=<child "
+            "run>, decision approve|deny). Asks whose resolution is 'human' are "
+            "listed for information: those are a person's, not the parent's. A "
+            "child with no live parent-answerable gate does not appear."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "flow_move",
+        "description": (
+            "Answer a child run's pending move or report request as its parent "
+            "session (flow_gates shows the request; name the child's run with "
+            "'scope', and 'cwd' when it lives elsewhere). 'approve' performs what "
+            "the driver asked -- moving its run to the force_target node, or "
+            "reporting a task with the outcome it asked for (the task's verify "
+            "still runs) -- and 'deny' leaves the run where it is with your "
+            "reason kept for the driver to read. Say why in 'reason'. This is "
+            "the only agent-side grant: the driving session itself can never "
+            "approve its own request, and no other session can."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["approve", "deny"],
+                             "description": "answer the pending request"},
+                "reason": {"type": "string", "description": "why; journaled in the run"},
+                "scope": _SCOPE, "cwd": _CWD,
+            },
+            "required": ["decision"],
         },
     },
     {
@@ -475,6 +522,154 @@ def _where(args: dict) -> tuple:
     return cwd, scope
 
 
+def _where_gate(args: dict) -> tuple:
+    """``(cwd, scope, authority)`` for a tool the driver's parent may also
+    call (claunch-vjp4y): the same run the driver works, or a child's run the
+    caller is the parent of. ``authority`` is ``runtime.CALLER_AGENT`` for the
+    driver and ``runtime.CALLER_PARENT`` for the parent; any other session is
+    refused by :func:`runtime.authorize` as before."""
+    cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+    scope = _scope(args)
+    authority = runtime.authorize(cwd=cwd, scope=scope, session=_session(), gate=True)
+    return cwd, scope, authority
+
+
+#: The line typed into a child's session after its parent answered one of its
+#: gates (claunch-vjp4y). The child's turn had ended -- that is why the gate
+#: was open -- and filing the answer in its run files does not wake it.
+PARENT_PICKED = (
+    "cflow2: your parent session {parent} answered this run's gate "
+    "({what}) -- call the flow_status tool and continue (person_picks keeps "
+    "the pick and its reason)"
+)
+
+
+def _wake_driver(cwd: str, scope: Any, message: str) -> None:
+    """Ask the daemon to type ``message`` into the run's session. Best effort:
+    without a daemon, or with the driver gone, the answer is recorded and the
+    driver reads it on its next status."""
+    from . import asks
+
+    try:
+        asks.nudge_driver(message, cwd=cwd, scope=scope)
+    except Exception:  # noqa: BLE001 - the answer stands either way
+        pass
+
+
+def _daemon():
+    """A client for the running daemon, or None. The parent edge lives in the
+    session registry, so the parent-aware calls ask it -- and lose only the
+    delegation when it cannot be reached, never the call itself."""
+    from .. import daemon_client
+
+    try:
+        return daemon_client.connect()
+    except Exception:  # noqa: BLE001 - a missing daemon is an ordinary answer here
+        return None
+
+
+def _daemon_parent(session: str) -> str:
+    """The session that spawned ``session``, from the daemon's registry."""
+    if not session:
+        return ""
+    client = _daemon()
+    if client is None:
+        return ""
+    try:
+        info = client.get(f"/api/sessions/{session}")
+    except Exception:  # noqa: BLE001 - unknown session, unreachable daemon
+        return ""
+    parent = info.get("parent") if isinstance(info, dict) else None
+    return str(parent or "").strip()
+
+
+def _live_children(session: str):
+    """``[(name, cwd)]`` of ``session``'s children that are still live, in
+    the daemon's own order. Empty when there is no daemon or no session."""
+    client = _daemon()
+    if client is None or not session:
+        return []
+    try:
+        answer = client.get(f"/api/sessions/{session}/children")
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for row in (answer or {}).get("children") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name or str(row.get("status") or "") in ("exited", "archived"):
+            continue
+        cwd = str(row.get("cwd") or "").strip()
+        if not cwd:
+            try:
+                info = client.get(f"/api/sessions/{name}")
+                cwd = str((info or {}).get("cwd") or "").strip()
+            except Exception:  # noqa: BLE001
+                cwd = ""
+        if cwd:
+            out.append((name, cwd))
+    return out
+
+
+def _child_gates(session: str) -> Dict[str, Any]:
+    """What ``session``'s live children's runs wait on a person for
+    (``flow_gates``). Read from each child's own run files, the same payload
+    the child's ``flow_status`` shows; only the parts a parent may answer (or
+    must know) are carried."""
+    children = []
+    for name, cwd in _live_children(session):
+        try:
+            payload = runtime.status(cwd=cwd, scope=name, tick=False)
+        except Exception:  # noqa: BLE001 - a slot with no run, an unreadable one
+            continue
+        if payload.get("status") not in runtime.LIVE_STATUSES:
+            continue
+        choices = []
+        for c in payload.get("choices") or []:
+            if (c.get("chooser") or ir.CHOOSER_AGENT) != ir.CHOOSER_USER:
+                continue
+            unavailable = {str(u) for u in c.get("unavailable") or []}
+            choices.append({
+                "instance": c.get("instance"), "node": c.get("node"),
+                "label": c.get("label"), "prompt": c.get("prompt"),
+                "require_reason": bool(c.get("require_reason")),
+                "options": [{"name": o.get("name"), "description": o.get("description"),
+                             "available": str(o.get("name")) not in unavailable}
+                            for o in c.get("options") or []],
+            })
+        move_req = payload.get("move_request")
+        if isinstance(move_req, dict) and move_req.get("decision"):
+            move_req = None
+        asks = [{"instance": a.get("instance"), "label": a.get("label"),
+                 "resolution": a.get("resolution"),
+                 "options": [o.get("name") for o in a.get("options") or []],
+                 "how": a.get("how")}
+                for a in payload.get("asks") or []]
+        gates = {
+            "child": name, "cwd": cwd, "run": payload.get("run"),
+            "workflow": payload.get("workflow"), "status": payload.get("status"),
+            "choices": choices,
+            "move_request": move_req,
+            "asks": asks,
+            "loop_limits": payload.get("loop_limits") or [],
+            "visit_limits": payload.get("visit_limits") or [],
+        }
+        # A loop or visit limit is answered by a person (`claunch cflow2
+        # extend`), and an ask that fell to 'human' is a person's: both are
+        # listed so the parent knows why the child is stuck, not as something
+        # it can grant.
+        if not (choices or move_req or asks or gates["loop_limits"]
+                or gates["visit_limits"]):
+            continue
+        children.append(gates)
+    return {"session": session or None, "children": children,
+            "note": ("answer a choice with flow_select(node, option, reason, scope=<child>), "
+                     "a move/report request with flow_move(decision approve|deny, "
+                     "scope=<child>, reason=...). An ask whose resolution is 'human' and a "
+                     "loop or visit limit are a person's: tell the user, no tool takes them")}
+
+
 def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Put a new ask's question to its responders now rather than on the
     daemon clock's next tick; re-read the status if anything moved."""
@@ -489,13 +684,30 @@ def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _foreign_run(args: dict) -> bool:
+    """Whether the call names a run this session does not drive and only
+    reads -- a parent's look at its child's run (claunch-vjp4y). Such a read
+    routes nothing: the child's asks are the child's clock's business, not
+    the reader's."""
+    scope = _scope(args)
+    if scope is None:
+        return False
+    cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+    try:
+        state = store.RunStore(cwd, scope).load_state()
+    except Exception:  # noqa: BLE001 - no run there: nothing to route either
+        return False
+    return not runtime.may_drive(state, _session())
+
+
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-                "flow_call",
+                "flow_move", "flow_call",
                 "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
-        cwd = str(args.get("cwd") or "").strip() or os.getcwd()
-        out = _route(cwd, _scope(args), out)
+        if not _foreign_run(args):
+            cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+            out = _route(cwd, _scope(args), out)
         if not args.get("full"):
             keep = args.get("results") if name == "flow_status" else None
             out = brief(out, keep=keep if isinstance(keep, list) else ())
@@ -621,9 +833,14 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         return runtime.start(chart, cwd=cwd, scope=own, params=params, inputs=inputs,
                              caps=runtime.resolve_caps(), force=force,
                              driver=session, caller=runtime.CALLER_AGENT, mesh=mesh,
-                             catalog=_input_catalog())
+                             catalog=_input_catalog(),
+                             driver_parent=_daemon_parent(session))
     if name == "flow_status":
-        cwd, scope = _where(args)
+        cwd, scope, authority = _where_gate(args)
+        if authority == runtime.CALLER_PARENT:
+            # a parent reads its child's run to decide its gates; ticking it
+            # would let the reader advance somebody else's run
+            return runtime.status(cwd=cwd, scope=scope, tick=False)
         st = store.RunStore(cwd, scope)
         if st.exists() and st.load_state().get("status") in runtime.LIVE_STATUSES:
             return runtime.wait_tick(probe_runner=runtime.default_probe_runner,
@@ -637,11 +854,40 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             args.get("text"), cwd=cwd, scope=scope,
         )
     if name == "flow_select":
-        cwd, scope = _where(args)
-        return runtime.select(
+        cwd, scope, authority = _where_gate(args)
+        parent = authority == runtime.CALLER_PARENT
+        out = runtime.select(
             str(args.get("node") or "").strip() or None, str(args.get("option") or ""),
-            args.get("reason"), caller=runtime.CALLER_AGENT, cwd=cwd, scope=scope,
+            args.get("reason"),
+            caller=runtime.CALLER_PARENT if parent else runtime.CALLER_AGENT,
+            cwd=cwd, scope=scope, by=session if parent else None,
         )
+        if parent and not out.get("held"):
+            _wake_driver(cwd, scope, PARENT_PICKED.format(
+                parent=session or "its parent", what=str(args.get("option") or "")))
+        return out
+    if name == "flow_gates":
+        return _child_gates(session)
+    if name == "flow_move":
+        cwd, scope, authority = _where_gate(args)
+        if authority != runtime.CALLER_PARENT:
+            raise runtime.FlowError(
+                "flow_move answers a child run's move/report request as its parent; this "
+                "run is yours, so its request is not something you may grant. Present it "
+                "to the user ('claunch cflow2 move --approve|--deny'), or answer a child's "
+                "with scope=<child run>")
+        out = runtime.resolve_move(
+            str(args.get("decision") or ""), reason=args.get("reason"), by=session,
+            cwd=cwd, scope=scope, caller=runtime.CALLER_PARENT,
+        )
+        req = out.get("move_request") or {}
+        what = ("report of " if req.get("kind") == runtime.MOVE_KIND_REPORT
+                else "move to ")
+        _wake_driver(cwd, scope, PARENT_PICKED.format(
+            parent=session or "its parent",
+            what=f"{req.get('decision') or 'answered'}: {what}"
+                 f"{req.get('label') or req.get('node') or ''}"))
+        return out
     if name == "flow_fork":
         cwd, scope = _where(args)
         return runtime.fork(str(args.get("group") or "").strip() or None,

@@ -1994,7 +1994,7 @@ body:
 | 조작 | CLI | 웹 API | MCP |
 |---|---|---|---|
 | 강제 이동 | `claunch cflow2 move <노드> [--reason R]` | `POST /api/cflow2/move {cwd, scope, node, reason}` | 없음 |
-| 이동·보고 요청에 답함 | `claunch cflow2 move --approve\|--deny [--reason R]` | `POST /api/cflow2/move/resolve {cwd, scope, decision, reason}` | 없음(요청은 `flow_request_move`) |
+| 이동·보고 요청에 답함 | `claunch cflow2 move --approve\|--deny [--reason R]` | `POST /api/cflow2/move/resolve {cwd, scope, decision, reason}` | `flow_move`(자식 런의 부모 세션만) |
 | 강제 결과 보고 | `claunch cflow2 report <작업> <결과> [--value JSON] [--reason R]` | `POST /api/cflow2/report {cwd, scope, node, outcome, value, reason}` | 없음(요청은 `flow_request_move`의 `outcome`) |
 | 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
 | 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
@@ -2085,6 +2085,43 @@ verify가 사라져 작업이 `verifying`으로 남았다.
 - CLI의 `report`와 `move --approve`는 자기가 시작한 verify가 끝날 때까지 기다린 뒤
   종료한다(`cli_cflow2._after_verify`). verify는 그 명령을 실행한 프로세스의
   스레드에서 돌기 때문이다.
+
+#### 부모 세션으로의 위임 (claunch-vjp4y)
+
+사람의 gate(`chooser: user` 선택, 드라이버의 이동·보고 요청)는 원래 사람만 답한다.
+부모-자식 위계에서는 그 gate가 대개 부모가 이미 판단하는 일이고, 사람이 자식 런의
+상태를 대신 보지 않으면 매 회차 멈춘다. 그래서 부모 세션도 답할 수 있다.
+
+| 주체 | 누구 | 경로 |
+|---|---|---|
+| `user` | 세션 셸 밖의 CLI, 대시보드 | 지금과 같다 |
+| `parent` | 드라이버 세션의 부모(`SessionDef.parent`) | MCP `flow_gates`·`flow_select`·`flow_move`, 부모 셸의 `claunch cflow2 select`·`move --approve` |
+
+- 드라이버 자신은 언제나 제외한다(자기가 자기 요청을 승인하는 grant는 grant가
+  아니다). 형제·무관한 세션도 제외한다. 부모 권한은 사람의 권한을 빼앗지 않는다 —
+  사람은 언제나 답할 수 있고, 부모가 답하지 않은 gate는 지금처럼 대시보드에 남는다.
+- 위계의 출처는 데몬 세션 레지스트리 하나다. 런은 그 값을 `driver_parent`로 복사해
+  두고(상태 키, `runtime.driver_parent_of`), 판정은 그 값으로 한다.
+  - `flow_start`가 시작할 때 데몬에 물어 기록한다. 데몬에 닿지 못하면 빈 값이고 그
+    런은 위임 없이 사람만 답한다(안전한 실패).
+  - 데몬의 v2 스캔(`RunEventClock._scan_v2_gates`, 20초 주기)이 매 패스 갱신한다.
+    reparent·orphan이 여기서 반영되므로 낡은 값은 최대 한 패스만 산다.
+- 위임되는 것은 답뿐이다. `flow_report`·`flow_fork`·`flow_input`·
+  `flow_request_move`는 부모에게도 거절한다.
+- 답은 손을 구분해 남는다: 저널 `selected`에 `by: <부모 세션>`, `delegated: true`,
+  `move_approved`·`move_denied`에 `by`·`decided_by`(부모 세션). `person_picks`의
+  항목에도 `by`와 `delegated`가 실린다. `flow_status`는 `driver_parent`를 싣고,
+  열린 `chooser: user` 선택이 있으면 `next`에서 부모 이름도 알린다.
+- 부모는 `choice`의 `require_reason`과 간격(`interval`) 창을 사람처럼 넘기지 않는다:
+  그 둘은 사람에게만 면제된다(`runtime.select`의 `person`).
+- 데몬의 알림: v2 런이 사람 gate에 들어서면 살아 있는 부모 세션 터미널에 한 줄이
+  타이핑된다(`child-gate`, `cflow_events` 스위치). 게이트 집합이 바뀔 때만 나가고,
+  런에 부모가 없으면 이벤트 자체가 서지 않으며, 부모 세션이 죽었으면 전달할 곳이 없어
+  버려진다(둘 다 gate는 사람 몫으로 남는다). 첫 목격은 알리지 않고 다음 변화부터
+  알린다(v1 `human-gate`와 같은 계약 — 데몬 재기동이 지난 gate를 다시 쏘지 않는다).
+- CLI: `claunch cflow2 select`·`move --approve|--deny`를 부모 세션의 셸에서 실행하면
+  그 답도 `by: <부모 세션>`으로 남는다. 드라이버 셸에서는 지금처럼 거절한다
+  (`_refuse_own_session`).
 
 ### 2.12 동적 호출: `calls`와 `flow_call` (claunch-z17c9)
 
@@ -2556,7 +2593,9 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_start` | v2 런 시작(`workflow`, `params`, `inputs`, `force`). 호출 세션의 slot에만 시작한다. 그 세션이 런의 드라이버가 된다 |
 | `flow_status` | 활성 구성, 렌더된 현재 작업 프롬프트, 고를 수 있는 옵션, 시작 입력, 진행 중인 verify, 대기 항목 |
 | `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`). verify가 있으면 `verifying`으로 바로 돌아온다 |
-| `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`) |
+| `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`). 자기 런의 `chooser: user` 선택은 사람의 것이고, 부모 세션은 자식 런을 `scope`로 지목해 그 선택을 대신 답한다(2.11의 「부모 세션으로의 위임」) |
+| `flow_gates` | 이 세션의 살아 있는 자식 세션 런이 사람에게 기다리는 것: 열린 `chooser: user` 선택(프롬프트·옵션·지금 가용한지), 열린 이동·보고 요청, 루프·방문 한도. 부모만 답할 수 있는 항목과, 사람 몫이라 정보로만 싣는 ask를 함께 보여 준다 |
+| `flow_move` | 자식 런의 열린 이동·보고 요청에 답함(`decision`: `approve`·`deny`, `reason`, `scope`, `cwd`). 부모 세션만 쓸 수 있고, 그 답은 `by: <부모 세션>`으로 저널에 남는다 |
 | `flow_fork` | `group`에 멤버 추가(`group`, `with`) |
 | `flow_call` | 활성 작업이 `calls`에 선언한 프로시저를 중첩 런으로 호출(`procedure`, `node`, `with`). 끝나면 같은 작업이 `call_result`와 함께 다시 활성이 된다(2.12) |
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
@@ -2583,17 +2622,22 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 - `flow_status(results=[키])`는 그 키의 레코드를 전문으로, `flow_status(full=true)`는
   전체 payload를 돌려준다.
 
-런 중단(abort), 보관(archive), 강제 이동(move), 이동 요청에 대한 답, 사람의 강제 결과
-보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동과 결과 보고를
-요청만 할 수 있다(`flow_request_move`).
+런 중단(abort), 보관(archive), 강제 이동(move), 사람의 강제 결과 보고는 MCP 툴이
+없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동과 결과 보고를 요청만 할 수
+있다(`flow_request_move`). 이동·보고 요청에 답하는 길은 하나 열려 있다: 자식 런의
+부모 세션이 `flow_move`로 답한다. 드라이버 자신은 자기 요청을 승인할 수 없다.
 
 권한(`cflow2/mcp.py`, `runtime.may_drive`):
 
 - 호출 세션은 MCP 서버 환경의 `CLAUNCH_SESSION`이다. 인자로 정하지 않는다.
 - `scope`·`cwd`를 생략하면 호출 세션의 slot이다. 모든 툴은 대상 런의 드라이버만
-  쓸 수 있다. 예외는 중첩 위임 런이다. 그 런은 해당 위임의 담당 세션(`subagent`면
+  쓸 수 있다. 예외가 둘이다. 하나는 중첩 위임 런이다. 그 런은 해당 위임의 담당 세션(`subagent`면
   상위 런의 드라이버, `session`이면 배정된 자식 세션)이 `scope`(와 필요하면 `cwd`)를
-  지정해 쓸 수 있다.
+  지정해 쓸 수 있다. 다른 하나는 사람의 gate다: `flow_status`(읽기),
+  `flow_select`, `flow_move`는 드라이버의 부모 세션(`SessionDef.parent`)이 자식 런을
+  `scope`(와 필요하면 `cwd`)로 지목해 쓸 수 있다(2.11의 「부모 세션으로의 위임」).
+  판정은 `runtime.gate_authority`가 런 상태의 `driver_parent`와 호출 세션을 견주어
+  하고, 드라이버 자신·형제·무관한 세션은 지금처럼 거절한다.
 - `flow_start`는 다른 scope나 `cwd`를 받지 않는다. `force`는 기존 런의 드라이버만
   쓸 수 있고, 기존 런이 사람을 기다리는 동안(`chooser: user` 선택, 열린 ask, halt,
   `loop_limit`, `visit_limit`, `acceptance`) 거절된다. 열린 중첩 위임 런이 사람을

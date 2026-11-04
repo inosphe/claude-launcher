@@ -3098,6 +3098,10 @@ class RunEventClock:
         #: still tracked (the ledger below gets the mark) so toggling it back
         #: on replays nothing.
         self._end_done: Set[Tuple[str, str, str]] = set()
+        #: ``(cwd, scope)`` -> the v2 run's gate signature last told to its
+        #: parent (claunch-vjp4y): ``(run_id, owed items)``. In memory, same
+        #: trade as the rest -- a restart re-sends at most one line per run.
+        self._v2_gates: Dict[Tuple[str, str], tuple] = {}
         #: One-shot done runs whose session is queued for the end-sequence.
         #: scan() fills this; the loop drains it into :meth:`_finish_end`
         #: tasks. Same in-memory trade as the reminder's timers.
@@ -3262,6 +3266,7 @@ class RunEventClock:
             ):
                 events.append(self._event(cwd, scope, "round-done", payload))
         self._scan_v2_ends(kill_on_end)
+        events.extend(self._scan_v2_gates(enabled))
         events.extend(self._exit_events(enabled))
         for key in list(self._seen):
             if key not in live:
@@ -3335,6 +3340,117 @@ class RunEventClock:
             "kind": kind,
             "block": event_block(scope, kind, payload),
         }
+
+    def _scan_v2_gates(self, enabled: bool) -> List[dict]:
+        """Tell a driver's parent when its child's v2 run waits on a person
+        (claunch-vjp4y).
+
+        The v1 ``human-gate`` event says the gate is a person's and the
+        overseer must not clear it -- correct for a v1 run, whose gates only a
+        person can answer. A v2 run inside a hierarchy is different: the
+        parent session *can* answer its child's gate (``flow_gates``,
+        ``flow_select``, ``flow_move``), so the person does not have to be
+        found for every end decision and every move request.
+
+        Two jobs per pass over the same live sessions the end pass walks:
+
+        * keep ``driver_parent`` current in each v2 run's state -- the run's
+          own copy of the session registry's ``sdef.parent``, which is what
+          the engine checks a gate answer against. A reparent or an orphan
+          moves it within one pass.
+        * push one line to the live parent when the run's set of owed gates
+          changes, and nothing while it stays the same. ``owed`` is read from
+          the run files (:func:`cflow2_web.rail_entry`), never taken from an
+          agent. No parent, no gate, or a dead parent: nothing is sent and
+          the gate stays a person's, exactly as before.
+
+        Gated by ``cflow_events`` like the other transitions; the recorded
+        signatures move even while it is off, so turning it back on does not
+        replay every gate that opened in the dark.
+        """
+        from ..cflow2 import runtime as v2_runtime, store as v2_store
+        from . import cflow2_web
+
+        events: List[dict] = []
+        try:
+            sessions = [s for s in self.manager.list() if not getattr(s, "exited", True)]
+        except Exception:
+            return events
+        live = set()
+        for session in sessions:
+            sdef = getattr(session, "sdef", None)
+            name = str(getattr(sdef, "name", "") or "")
+            cwd = str(getattr(sdef, "cwd", "") or "")
+            parent = str(getattr(sdef, "parent", "") or "")
+            if not name or not cwd:
+                continue
+            try:
+                scopes = v2_store.list_scopes(cwd)
+            except Exception:
+                continue
+            for scope in scopes:
+                if v2_store.side_of(scope):
+                    continue
+                st = v2_runtime.RunStore(cwd, scope)
+                try:
+                    state = st.load_state()
+                except Exception:
+                    continue
+                if v2_runtime.driver_of(state) != name:
+                    continue
+                key = (str(st.cwd), scope)
+                live.add(key)
+                self._sync_driver_parent(st, state, parent)
+                owed: List[str] = []
+                if parent and state.get("status") in v2_runtime.LIVE_STATUSES:
+                    try:
+                        entry = cflow2_web.rail_entry(str(st.cwd), scope) or {}
+                    except Exception:
+                        entry = {}
+                    owed = [str(x) for x in entry.get("owed") or []]
+                # The signature is recorded whether or not anything is owed:
+                # ``{} -> {gate}`` is exactly the transition worth a line, and
+                # popping the empty state would swallow the next gate as a
+                # first sight.
+                sig = (str(state.get("run_id") or ""), tuple(owed))
+                previous = self._v2_gates.get(key)
+                self._v2_gates[key] = sig
+                if previous is None or previous == sig or not enabled or not owed:
+                    continue
+                events.append({
+                    "cwd": str(st.cwd), "scope": scope, "kind": "child-gate",
+                    "to": parent,
+                    "block": child_gate_block(
+                        scope, str(state.get("workflow") or "?"),
+                        str(state.get("run_id") or "-"), owed),
+                })
+        for key in list(self._v2_gates):
+            if key not in live:
+                del self._v2_gates[key]
+        return events
+
+    @staticmethod
+    def _sync_driver_parent(st, state: dict, parent: str) -> None:
+        """Keep the run's copy of the session registry's parent edge current.
+
+        Under the run's lock: the state read above may already be stale, and
+        the driver may be writing the same file this moment. A failure is
+        logged at debug and retried next pass -- a run with a stale edge keeps
+        yesterday's answer, never a wrong one."""
+        from ..cflow2 import runtime as v2_runtime
+
+        if str(state.get(v2_runtime.DRIVER_PARENT) or "") == parent:
+            return
+        try:
+            # a short hold: this is a fact about the edge, not the run's work,
+            # and a driver busy with its own mutation is asked again next pass
+            with st.lock(timeout=2.0):
+                fresh = st.load_state()
+                if str(fresh.get(v2_runtime.DRIVER_PARENT) or "") != parent:
+                    fresh[v2_runtime.DRIVER_PARENT] = parent
+                    st.save_state(fresh)
+        except Exception as exc:  # noqa: BLE001 - retried next pass
+            log.debug("cflow2 driver_parent not refreshed for %s: %s", st.scope, exc)
 
     def _scan_v2_ends(self, kill_on_end: bool) -> None:
         """Kill-on-end for cflow v2 runs (claunch-du6mx).
@@ -3953,6 +4069,42 @@ def event_block(scope: str, kind: str, payload: dict) -> str:
         f"(details: claunch cflow journal -t {scope})"
     )
     lines.append("---")
+    return "\n".join(lines)
+
+
+def child_gate_block(scope: str, workflow: str, run_id: str, owed: List[str]) -> str:
+    """The line a parent session hears when its child's v2 run stops on a
+    person gate (claunch-vjp4y).
+
+    Unlike the v1 ``human-gate`` fyi this one names the tools: in the
+    hierarchy the gate is the parent's to answer, and an agent told only that
+    a run is stuck will wait for a person who is not coming. It still says the
+    user may answer too -- the delegation adds a hand, it does not take the
+    person's away.
+    """
+    from ..cflow2 import store as v2_store
+
+    # the slot is the session name with the instance suffix (``w1@main``); the
+    # agent names the run by the session, and every flow_* call normalizes it
+    session = v2_store.session_of(scope) or scope
+    lines = [
+        "---",
+        "# claunch cflow2: a run you parent is waiting on you -- machine-generated",
+        f"session: {session}",
+        f"run: {run_id} ({workflow})",
+    ]
+    if owed:
+        lines.append("waiting on a person: " + "; ".join(owed))
+    lines.extend([
+        "note: in this hierarchy these gates are yours to answer, not only the "
+        "user's. flow_gates lists every gate of your children; answer a choice "
+        "with flow_select(node, option, reason, scope=" + repr(session) + "), a "
+        "move/report request with flow_move(decision approve|deny, scope="
+        + repr(session) + ", reason=...). The user may still answer them -- if you "
+        "leave one, it stays on their dashboard.",
+        f"read it yourself: claunch cflow2 status -t {session} --json",
+        "---",
+    ])
     return "\n".join(lines)
 
 
