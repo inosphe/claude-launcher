@@ -14,7 +14,7 @@ globalThis.RetrospectionPage = (() => {
     if (cls) n.className = cls;
     return n;
   };
-  let workspace = "", session = "", query = "", sequence = 0;
+  let workspace = "", session = "", query = "", sequence = 0, refocusSearch = false;
   let facets = {workspaces: [], sessions: []}, records = [], selected = null, selectedId = "", error = "";
   const view = () => document.getElementById("retrospection-view");
   function markdown(target, text) {
@@ -54,7 +54,9 @@ globalThis.RetrospectionPage = (() => {
   }
   async function choose(id) {
     if (typeof location !== "undefined" && location.hash !== "#/retrospection/" + id) {
-      selectedId = id; location.hash = "#/retrospection/" + encodeURIComponent(id);
+      selectedId = id;
+      const q = location.hash.includes("?") ? location.hash.slice(location.hash.indexOf("?")) : "";
+      location.hash = "#/retrospection/" + encodeURIComponent(id) + q;
       return;          // the router calls open(id)
     }
     const seq = ++sequence;
@@ -77,10 +79,13 @@ globalThis.RetrospectionPage = (() => {
       row.issue, day(row.created_at), row.auto ? "자동 기록" : "사용자 확정"].filter(Boolean).join(" · ");
   }
   function card(row) {
-    const c = node("article", null, "glossary-card retrospection-card" + (row.id === selectedId ? " is-selected" : ""));
-    const h = node("h4");
-    h.append(node("span", `문제 ${row.problems} · 제안 ${row.proposals}`, "glossary-badge"), node("span", " " + row.title));
-    c.append(h, node("p", row.excerpt || "", "glossary-definition"));
+    const current = row.id === selectedId;
+    const c = node("article", null, "glossary-card retrospection-card" + (current ? " is-selected" : ""));
+    if (current) c.setAttribute("aria-current", "true");
+    const head = node("div", null, "retrospection-card-head");
+    head.append(node("span", `문제 ${row.problems} · 제안 ${row.proposals}`, "glossary-badge"),
+      node("h4", row.title));
+    c.append(head, node("p", row.excerpt || "", "glossary-definition retrospection-excerpt"));
     const footer = node("div", null, "glossary-card-footer");
     footer.append(node("code", row.id), node("span", meta(row), "glossary-muted"));
     const actions = node("div", null, "glossary-actions");
@@ -88,15 +93,23 @@ globalThis.RetrospectionPage = (() => {
     actions.append(b); footer.append(actions); c.append(footer);
     return c;
   }
+  // The address keeps its query (`?project=…`) across selecting and closing a
+  // record, so the page the user arrived on is the page they navigate inside.
+  function listHash() {
+    if (typeof location === "undefined") return "#/retrospection";
+    const h = location.hash || "";
+    return "#/retrospection" + (h.includes("?") ? h.slice(h.indexOf("?")) : "");
+  }
+  function close() {
+    selected = null; selectedId = "";
+    if (typeof location !== "undefined") location.hash = listHash(); else render();
+  }
   function detail() {
     const box = node("article", null, "glossary-help retrospection-detail");
-    const close = node("button", "닫기", "wf-btn"); close.type = "button";
-    close.onclick = () => {
-      selected = null; selectedId = "";
-      if (typeof location !== "undefined") location.hash = "#/retrospection"; else render();
-    };
+    const shut = node("button", "닫기", "wf-btn"); shut.type = "button";
+    shut.onclick = close;
     const head = node("div", null, "glossary-toolbar");
-    head.append(node("h3", selected.title), close);
+    head.append(node("h3", selected.title), shut);
     box.append(head, node("p", meta(selected), "glossary-muted"),
       node("p", `문제 ${selected.problems} · 제안 ${selected.proposals}` + (selected.run ? ` · 런 ${selected.run}` : ""), "glossary-muted"),
       markdown(node("div", null, "glossary-definition retrospection-body"), selected.body));
@@ -123,10 +136,15 @@ globalThis.RetrospectionPage = (() => {
     search.setAttribute("aria-label", "회고 검색");
     search.oninput = () => { query = search.value; };
     const submit = node("button", "검색", "wf-btn");
-    form.append(search, submit); form.onsubmit = e => { e.preventDefault(); load(); };
+    form.append(search, submit); form.onsubmit = e => { e.preventDefault(); refocusSearch = true; load(); };
     const sessions = facets.sessions.filter(s => !workspace || s.workspace === workspace);
     toolbar.append(form, select("세션", [["", "전체 세션"], ...sessions.map(s => [s.name, `${s.name} (${s.count})`])],
       session, v => { session = v; load(); }));
+    if (workspace || session || query) {
+      const reset = node("button", "필터 초기화", "wf-btn"); reset.type = "button";
+      reset.onclick = () => { workspace = ""; session = ""; query = ""; load(); };
+      toolbar.append(reset);
+    }
     main.append(toolbar, node("p", `기록 ${records.length}개 · 최대 100개 표시`, "glossary-list-meta"));
     if (!records.length) main.append(empty(query || session || workspace ? "조건에 맞는 회고가 없습니다" : "아직 회고 기록이 없습니다",
       "세션이 끝날 때 improv-worker-v2의 회고 노드가, 또는 claunch retro <세션>이 기록을 남깁니다. 시작 입력 retrospection_auto_record가 꺼져 있으면 세션의 wrap-up pane에서 확정해야 기록됩니다."));
@@ -142,6 +160,23 @@ globalThis.RetrospectionPage = (() => {
       aside.append(help);
     }
     layout.append(main, aside); shell.append(layout);
+    // A submitted search redraws the page; keep the caret in the box so the
+    // user can refine the query without clicking back into it.
+    if (refocusSearch) {
+      refocusSearch = false;
+      if (typeof search.focus === "function") search.focus();
+    }
+  }
+  // Escape closes an open record — the same action as its 닫기 button — but
+  // only while this page is the one on screen.
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || !selected) return;
+      const root = view();
+      if (!root || (root.classList && root.classList.contains && root.classList.contains("hidden"))) return;
+      event.preventDefault();
+      close();
+    });
   }
   async function open(id = "") {
     selectedId = id || "";
