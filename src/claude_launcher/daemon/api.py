@@ -11298,7 +11298,7 @@ async def h_pr_detail(request: web.Request) -> web.Response:
 async def h_pr_merge(request: web.Request) -> web.Response:
     """Merge one PR -- the user's action from the dashboard, and only that.
 
-    Two gates before gh is run at all:
+    Three gates before gh is run at all:
 
     - **The dashboard's cookie.** A bearer token is how a shell and a managed
       session reach this API, and merging master is not something an agent
@@ -11307,6 +11307,9 @@ async def h_pr_merge(request: web.Request) -> web.Response:
       (``daemon/actors.py``), not on who it claims to be.
     - **``confirm: true``.** The page asks once more before it sends this;
       a lone POST does not merge.
+    - **The delayed queue's pause.** A repository whose sweep failed admits
+      only its repair issue's merge, and this route asks the same queue
+      before gh runs (``pr_actions.admit_state``, claunch-0r2m2).
 
     What this closes is the path an agent normally takes -- CLI, MCP, the
     daemon client all authenticate with the token. What it does NOT close is
@@ -11340,12 +11343,17 @@ async def h_pr_merge(request: web.Request) -> web.Response:
     pin = str(body.get("match_head_commit") or "").strip().lower()
     if pin and not pr_actions.SHA_PATTERN.fullmatch(pin):
         return json_error(400, "match_head_commit 은 40자 커밋 SHA 여야 합니다.")
+    # The queue's pause is the repository's own verdict on merging right now:
+    # a failed delayed sweep stops every merge but the repair issue's
+    # (claunch-0r2m2). The merge asks it before gh runs, and the refusal is
+    # written to the ledger the same way a skipped sweep is, so "attempted and
+    # nothing merged" is readable afterwards.
+    recorded = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
     result = await asyncio.to_thread(
         pr_actions.merge, host, owner, name, number, method,
-        match_head_commit=pin or None)
+        match_head_commit=pin or None, issues=recorded.get("issues") or ())
     if result.get("ok"):
-        recorded = await asyncio.to_thread(
-            _recorded_pr, request.app["manager"], host, owner, name, number)
         sweep = await asyncio.to_thread(
             pr_actions.sweep_after_merge, host, owner, name, number,
             issues=recorded.get("issues") or (),
@@ -11357,6 +11365,15 @@ async def h_pr_merge(request: web.Request) -> web.Response:
                               "repo": pr_actions.slug(host, owner, name),
                               "number": number})
     kind = str((result.get("error") or {}).get("kind") or "other")
+    if kind == "paused":
+        admit = result.get("admit") or {}
+        await asyncio.to_thread(
+            pr_actions.record_merge, host, owner, name, number,
+            str(result.get("method") or method), actors.from_request(request) or {},
+            remote=request.remote or "",
+            refused={"kind": "paused", "issue": str(admit.get("issue") or ""),
+                     "job": str(admit.get("job") or ""),
+                     "why": str(admit.get("why") or "")})
     status = {"permission": 403, "network": 502, "no-gh": 503,
               "not-found": 404}.get(kind, 409)
     return json_response(

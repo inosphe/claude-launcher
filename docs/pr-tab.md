@@ -103,9 +103,18 @@ squashMergeAllowed, rebaseMergeAllowed`)을 읽어 merge → squash → rebase �
 실행하므로 gh도 같은 커밋을 확인한다. 형식이 40자 SHA가 아니면 400이다. 값이
 없으면(옛 페이지) 고정 없이 머지한다.
 
-거절은 HTTP 409(저장소 상태가 막음 · `head-moved`) · 400(형식) · 403(권한) ·
-404 · 502(네트워크·기타) · 503(gh 없음)로 나가고, 본문에 `error.kind`·
-`error.message`·`error.raw`가 있다.
+**정지 중 거절(`error.kind: "paused"`, claunch-0r2m2).** 지연 스윕 큐는 회귀
+검증에 실패한 저장소를 정지시키고(`delayed_sweep.Queue.admit`), 그동안은 그
+실패를 고치는 수리 이슈의 머지만 받는다. 데몬은 gh를 부르기 전에 같은 게이트에
+물어보고(`pr_actions.admit_state`) 정지 중이면 409로 거절한다 — 응답의
+`admit`에 큐의 사유(`issue`·`job`·`why`)가 들어 있다. 기록된 PR 행의 이슈
+가운데 수리 이슈가 있으면 통과한다. 로컬 체크아웃이 없어 정지 상태를 읽지
+못한 경우는 거절하지 않는다(`state: "unknown"`) — 확인되지 않은 것을 거절
+사유로 쓰지 않는다.
+
+거절은 HTTP 409(저장소 상태가 막음 · `head-moved` · `paused`) · 400(형식) ·
+403(권한) · 404 · 502(네트워크·기타) · 503(gh 없음)로 나가고, 본문에
+`error.kind`·`error.message`·`error.raw`가 있다.
 
 **머지 뒤 스윕(`sweep`, claunch-ijkge.3.2).** 성공하면 데몬이 그 머지 커밋을
 `delayed_sweep` 큐에 넣는다 — 리더 워크플로가 자기 머지마다 하는 것과 같은
@@ -115,9 +124,17 @@ squashMergeAllowed, rebaseMergeAllowed`)을 읽어 merge → squash → rebase �
 squash/rebase처럼 두 부모가 아닌 커밋 · 큐의 거절) **사유를 응답과 장부에 남긴다**.
 응답은 `{"sweep": {"state": "queued"|"skipped", "job", "ref", "issue", "why"}}`다.
 
-성공하면 `~/.claude-launcher/daemon/pr-merges.jsonl`에 한 줄이 남는다(누가·언제·
-어느 PR을·어떤 방식으로, 그리고 `sweep`: 큐에 넣었으면 잡 id·ref, 못 넣었으면
-사유).
+기준 브랜치가 저장소의 기본 브랜치가 아니면(릴리스·유지보수 브랜치로의 머지)
+큐에 넣지 않고 그 사실을 사유로 남긴다(claunch-c9h9w) — 지연 스윕은 기본
+브랜치의 트리를 검증하고, 다른 브랜치로의 머지는 다른 이력이다. 기준 브랜치나
+기본 브랜치를 읽지 못한 경우도 같은 자리에 사유를 남긴다(스윕 대상인지 확인하지
+못한 것을 "대상 아님"으로 읽지 않는다).
+
+머지는 성공했거나 큐의 정지로 거절됐을 때 `~/.claude-launcher/daemon/pr-merges.jsonl`에
+한 줄이 남는다(누가·언제·어느 PR을·어떤 방식으로). 성공한 줄에는 `sweep`이
+따르고(큐에 넣었으면 잡 id·ref, 못 넣었으면 사유), 거절된 줄은 `merged: false`와
+`refused`(`kind`·`issue`·`job`·`why`)를 싣는다 — "머지를 시도했고 아무것도
+머지되지 않았다"를 나중에 요청을 다시 재생하지 않고 읽을 수 있다.
 
 ### `POST …/rebase-request`
 
