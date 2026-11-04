@@ -24408,6 +24408,7 @@ const TERM_TIMER_GLYPH = {
   pause: "↻",
   ask: "?",
   timer: "⏱",    // a report timer the agent set for itself
+  grace: "⛨",    // a resumed session the usage-limit pause leaves alone (claunch-x9agn)
 };
 const TERM_TIMER_GLYPH_DEFAULT = "⏱";
 

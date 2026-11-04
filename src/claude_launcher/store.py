@@ -686,6 +686,13 @@ DAEMON_DEFAULTS = {
     # resumed by a person before the reset is not paused again for the same
     # limit. Read live on every pass.
     "fault_auto_pause": True,
+    # Resume grace (daemon/fault_pause.py, claunch-x9agn): seconds after a
+    # session is brought back (respawn, wake, resume out of a pause, hold or
+    # kill) or restarted on another key or borrowed profile during which the
+    # fault pause and the automatic key switch leave it alone, so a limit
+    # line still painted from before the resume does not pause it again at
+    # once. Drawn on the session's timer line. 0 turns it off. Read live.
+    "fault_resume_grace": 30.0,
     # Automatic key switch (daemon/key_switch.py, claunch-d2t79): a session
     # whose own definition asks for it (``SessionDef.auto_key_switch``) and
     # that hit a usage limit is restarted on another usable key of its

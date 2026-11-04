@@ -147,3 +147,22 @@ def agent_provider(ctx: Context) -> List[dict]:
     from . import agent_timers
 
     return agent_timers.strip_timers(ctx.session)
+
+
+@register("fault")
+def fault_provider(ctx: Context) -> List[dict]:
+    """The resume grace of the fault pause (``daemon/fault_pause.py``,
+    claunch-x9agn): a countdown while a session just brought back is left
+    alone by the usage-limit pause. Read off the live session object, so it
+    needs the daemon's manager in ``ctx.app``."""
+    manager = ctx.app.get("manager") if ctx.app else None
+    if manager is None:
+        return []
+    from . import fault_pause
+
+    try:
+        session = manager.get(ctx.session)
+    except Exception:  # noqa: BLE001 - an unknown name has no grace
+        return []
+    chip = fault_pause.grace_timer(session, now=ctx.now)
+    return [chip] if chip else []

@@ -2950,6 +2950,7 @@ class SessionManager:
         # restore_all's unattended relaunch after a daemon restart. See
         # Session.resumed_by_human for what this buys the session.
         relaunched.resumed_by_human = True
+        relaunched.resumed_at = time.time()
         action = "resume" if session.paused_at else "respawn"
         if getattr(session, "delayed_at", None):
             self.events.record(relaunched, "resume", "대기 중이던 세션 복원")
@@ -3108,7 +3109,7 @@ class SessionManager:
         """
         del self._sessions[name]
         try:
-            return self.create(
+            relaunched = self.create(
                 new_def,
                 restoring=True,
                 created_at=session.created_at,
@@ -3120,6 +3121,12 @@ class SessionManager:
             self._sessions[name] = session  # keep the record, as it was
             self.persist()
             raise
+        # A restart under a changed definition (a key switch, a borrow) is a
+        # resume as far as the fault pause is concerned: the new key or
+        # profile gets the grace before an old limit line pauses it again
+        # (claunch-x9agn).
+        relaunched.resumed_at = time.time()
+        return relaunched
 
     async def reborrow(
         self, name: str, borrow: Optional[str], *, null_token: bool = False,
