@@ -10659,6 +10659,12 @@ a.category-ref:hover { text-decoration: underline; }
 .category-filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
 .category-filter { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--cat-muted); cursor: pointer; }
 .category-filter input { margin: 0; }
+/* The "running only" preset beside the partition boxes: a button, not a box,
+   because it sets several of them at once. Pressed state is derived from the
+   set, so it never contradicts the boxes next to it. */
+.category-preset { font: inherit; font-size: 12px; color: var(--cat-muted); background: none;
+  border: 1px solid var(--cat-border); border-radius: 10px; padding: 1px 9px; cursor: pointer; }
+.category-preset[aria-pressed="true"] { color: var(--cat-text, inherit); border-color: currentColor; }
 .category-proposal-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--cat-muted); margin-top: 6px; cursor: pointer; }
 .category-proposal-opt input { margin: 0; }
 .category-loose { margin-top: 14px; }
