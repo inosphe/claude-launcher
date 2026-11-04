@@ -373,9 +373,12 @@ class StatusSession(FakeSession):
         return self._status
 
 
-def test_a_choose_waiting_driver_is_renudged_on_an_interval(tmp_path, monkeypatch):
+def test_a_choose_waiting_driver_is_nudged_once(tmp_path, monkeypatch):
     """claunch-slia4.1: a run left at an agent choose -- no wait to fire, so
-    the ticked-based notice never resends -- is told again on an interval."""
+    the ticked-based notice never resends -- is told again after an interval,
+    and claunch-3sen5: that is the only time. The same wait is never repeated
+    (s1249 got one every ten minutes for six hours, and each one reset the
+    idle hold's quiet clock)."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     _start(tmp_path, CHOOSE_RUN)
     clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
@@ -388,9 +391,9 @@ def test_a_choose_waiting_driver_is_renudged_on_an_interval(tmp_path, monkeypatc
     assert cwd == str(tmp_path) and name == "own"
     assert "waiting on you" in text
     assert cflow2_clock.WHY_NUDGE in text
-    assert clock.scan(now=T0 + 602) == []      # one nudge per interval
-    notices = clock.scan(now=T0 + 1202)
-    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+    assert clock.scan(now=T0 + 602) == []      # the one nudge is spent
+    assert clock.scan(now=T0 + 1202) == []     # and the same wait is not
+    assert clock.scan(now=T0 + 7200) == []     # repeated, however long it lasts
 
 
 def test_a_busy_driver_is_not_renudged(tmp_path, monkeypatch):
@@ -484,6 +487,9 @@ def test_resolving_the_choice_stops_its_renudge(tmp_path, monkeypatch):
     notices = clock.scan(now=T0 + 1202)
     assert len(notices) == 1
     assert "waiting on you: a" in notices[0][2]
+    # the new wait got its one nudge; it does not get a third (claunch-3sen5)
+    assert clock.scan(now=T0 + 1803) == []
+    assert clock.scan(now=T0 + 3603) == []
 
 
 def test_a_finished_run_drops_its_renudge_baseline(tmp_path, monkeypatch):
