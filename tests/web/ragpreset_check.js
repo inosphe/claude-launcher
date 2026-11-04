@@ -53,8 +53,11 @@ const css = fs.readFileSync(
   path.join(root, "src", "claude_launcher", "web", "static", "style.css"), "utf8");
 
 function sliceFrom(text, name) {
-  const start = text.indexOf(`function ${name}(`);
+  let start = text.indexOf(`function ${name}(`);
   if (start < 0) throw new Error("missing " + name);
+  // An `async` function keeps its keyword: a slice that starts at `function`
+  // turns every `await` inside it into a syntax error.
+  if (text.slice(Math.max(0, start - 6), start) === "async ") start -= 6;
   const body = text.indexOf(") {", start) + 2;
   let depth = 0;
   for (let j = body; j < text.length; j++) {
@@ -130,6 +133,10 @@ check("a cancelled pass and a queued rebuild each say so on the busy line",
 check("an error outranks every other state and keeps the daemon's words",
       cardApi.bucketState({ kind: "all", error: "dims 4096 != 768", syncing: true, pending: 9 }),
       { state: "failed", text: "dims 4096 != 768" });
+check("a failed row carries the time of the pass that failed",
+      cardApi.bucketState({ kind: "all", error: "dims 4096 != 768",
+                            finished_at: "2026-11-04T08:05:09+00:00" }),
+      { state: "failed", text: "dims 4096 != 768 · 마지막 실패 2026-11-04 08:05:09" });
 check("a bucket with no counts still draws a percentage of zero",
       cardApi.bucketState({ kind: "all", indexed: 0, total: 0, syncing: true }),
       { state: "busy", text: "색인 중 0/0 (0%)" });
@@ -237,6 +244,50 @@ check("a syncing bucket can be cancelled from its own row",
       [app.includes('api("/api/rag/cancel"'), app.includes('row.cancel_requested ? "취소 요청됨" : "취소"'),
        app.includes('el("button", "wf-btn clear", row.cancel_requested ? "취소 요청됨" : "취소")')],
       [true, true, true]);
+check("the card draws the request's notice and lock before the first await",
+      [app.includes("let ragBusy = false;"), app.includes("ragBusy = true;"),
+       app.includes("renderWorkspaces();  // the notice and the locked buttons, before the first await"),
+       app.includes("renderWorkspaces();  // drawn before the request, like ragDbAction"),
+       app.includes("} finally {\n    ragBusy = false;\n  }")],
+      [true, true, true, true, true]);
+
+/* ---- the click's first frame, run rather than read -----------------------
+   A source check cannot tell "the notice is set" from "the notice is drawn";
+   the peer review found exactly that gap. So `ragDbAction` is run here
+   against stubs: the render count and ragBusy are read straight after the
+   call (before its first await resolves) and again after it settles. */
+const clickApi = {};
+new Function("exports", `
+  let ragPolls = 0, ragBusy = false, ragNotice = "";
+  let renders = 0;
+  const renderWorkspaces = () => { renders++; };
+  const ragBucketLabel = row => "bucket-" + row.kind;
+  async function ragReindex(row, force) { await Promise.resolve(); return { started: true }; }
+  async function refreshRagStatus() { renders += 0; }
+  ${sliceFrom(app, "ragDbAction")}
+  exports.click = (group) => {
+    const pending = ragDbAction({}, group, false);
+    const during = { renders, busy: ragBusy, notice: ragNotice };
+    return { during, done: pending.then(() => ({ renders, busy: ragBusy, notice: ragNotice })) };
+  };
+`)(clickApi);
+const click = clickApi.click({ name: "kept", rows: [{ kind: "all" }, { kind: "sessions" }] });
+check("a click renders before the request is awaited, with the notice and the lock",
+      [click.during.renders, click.during.busy, click.during.notice],
+      [1, true, "kept Sync 요청 중…"]);
+const laterChecks = [];
+function checkLater(label, promise, want) {
+  laterChecks.push(promise.then(got => check(label, got, want)));
+}
+checkLater("the lock and the notice settle into the daemon's answer",
+           click.done.then(a => [a.busy, a.notice]),
+           [false, "kept Sync — bucket-all: 색인 시작 · bucket-sessions: 색인 시작"]);
+
+check("every control is disabled while a request is in flight",
+      [app.includes("pause.disabled = ragBusy;"), app.includes("sync.disabled = ragBusy;"),
+       app.includes("force.disabled = ragBusy;"),
+       app.includes("cancel.disabled = Boolean(row.cancel_requested) || ragBusy;")],
+      [true, true, true, true]);
 check("the card draws one block per DB, with Sync and Rebuild on its heading",
       [app.includes("for (const group of ragDbGroups(st))"), app.includes("`DB ${group.name}`"),
        app.includes('el("button", "wf-btn clear", "Sync")'), app.includes('el("button", "wf-btn clear", "Rebuild")')],
@@ -280,5 +331,7 @@ check("the stylesheet ships the card's rules",
 check("the stale per-entry flex rule is gone (it broke the table rows)",
       css.includes(".search-settings .rag-db-entry { display: flex"), false);
 
-if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
-console.log("ragpreset ok");
+Promise.all(laterChecks).then(() => {
+  if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
+  console.log("ragpreset ok");
+});

@@ -31322,6 +31322,12 @@ let ragNotice = "";
 let ragPolls = 0;
 const RAG_POLL_LIMIT = 200;
 const RAG_POLL_MS = 3000;
+/* True while a click's request is in flight. The card draws the notice and
+   the disabled buttons in one render *before* the request goes out, so
+   "요청 중…" is on screen while it is on the wire — setting the notice and
+   waiting for the status refresh to draw it left the reader with no feedback
+   at all (peer review of claunch-i2i95). */
+let ragBusy = false;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31730,7 +31736,13 @@ function ragBucketLabel(row) {
 }
 
 function ragBucketState(row) {
-  if (row.error) return { state: "failed", text: row.error };
+  if (row.error) {
+    // A failure keeps its time: the daemon stamps the pass it belongs to, and
+    // "실패" alone cannot tell a failure from five minutes ago from one that
+    // just happened (peer review of claunch-i2i95).
+    const when = row.finished_at ? String(row.finished_at).replace("T", " ").slice(0, 19) : "";
+    return { state: "failed", text: when ? `${row.error} · 마지막 실패 ${when}` : row.error };
+  }
   if (row.syncing) {
     const pct = row.total ? Math.floor((row.indexed / row.total) * 100) : 0;
     return { state: "busy", text: `색인 중 ${row.indexed}/${row.total} (${pct}%)` +
@@ -31744,19 +31756,25 @@ function ragBucketState(row) {
 async function ragDbAction(st, group, force) {
   const label = force ? "Rebuild" : "Sync";
   ragPolls = 0;  // a fresh request restarts the bounded watch
+  ragBusy = true;
   ragNotice = `${group.name} ${label} 요청 중…`;
+  renderWorkspaces();  // the notice and the locked buttons, before the first await
   const outcomes = [];
-  for (const row of group.rows) {
-    const data = await ragReindex(row, force);
-    if (!data) {
-      outcomes.push(`${ragBucketLabel(row)}: 오류`);
-      continue;
+  try {
+    for (const row of group.rows) {
+      const data = await ragReindex(row, force);
+      if (!data) {
+        outcomes.push(`${ragBucketLabel(row)}: 오류`);
+        continue;
+      }
+      if (data.force_applied) outcomes.push(`${ragBucketLabel(row)}: 재색인 시작`);
+      else if (data.started) outcomes.push(`${ragBucketLabel(row)}: 색인 시작`);
+      else if (data.force_pending) outcomes.push(`${ragBucketLabel(row)}: 색인 중 — 재색인 예약`);
+      else if (data.running) outcomes.push(`${ragBucketLabel(row)}: 이미 색인 중 — 실행하지 않음`);
+      else outcomes.push(`${ragBucketLabel(row)}: 요청 수락 안 됨`);
     }
-    if (data.force_applied) outcomes.push(`${ragBucketLabel(row)}: 재색인 시작`);
-    else if (data.started) outcomes.push(`${ragBucketLabel(row)}: 색인 시작`);
-    else if (data.force_pending) outcomes.push(`${ragBucketLabel(row)}: 색인 중 — 재색인 예약`);
-    else if (data.running) outcomes.push(`${ragBucketLabel(row)}: 이미 색인 중 — 실행하지 않음`);
-    else outcomes.push(`${ragBucketLabel(row)}: 요청 수락 안 됨`);
+  } finally {
+    ragBusy = false;
   }
   ragNotice = `${group.name} ${label} — ${outcomes.join(" · ")}`;
   await refreshRagStatus();
@@ -31766,7 +31784,9 @@ async function ragCancel(row) {
   const body = { kind: row.kind };
   if (row.root) body.cwd = row.root;
   ragPolls = 0;
+  ragBusy = true;
   ragNotice = `${ragBucketLabel(row)} 취소 요청 중…`;
+  renderWorkspaces();  // drawn before the request, like ragDbAction
   try {
     const resp = await api("/api/rag/cancel", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -31779,13 +31799,17 @@ async function ragCancel(row) {
       : `${ragBucketLabel(row)}: 진행 중인 작업이 없습니다`;
   } catch (err) {
     ragNotice = `${ragBucketLabel(row)} 취소 실패 · ${err.message}`;
+  } finally {
+    ragBusy = false;
   }
   await refreshRagStatus();
 }
 
 async function ragBackfill(hold) {
   ragPolls = 0;
+  ragBusy = true;
   ragNotice = hold ? "소급 임베딩을 일시정지하는 중…" : "소급 임베딩을 재개하는 중…";
+  renderWorkspaces();  // drawn before the request, like ragDbAction
   try {
     const resp = await api(hold ? "/api/rag/backfill/pause" : "/api/rag/backfill/resume", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -31795,6 +31819,8 @@ async function ragBackfill(hold) {
     ragNotice = data.paused ? "일시정지됨 — 진행 중 pass는 끝까지 갑니다" : "재개됨";
   } catch (err) {
     ragNotice = `전환 실패 · ${err.message}`;
+  } finally {
+    ragBusy = false;
   }
   await refreshRagStatus();
 }
@@ -31849,6 +31875,7 @@ function ragCard() {
   const queueRow = el("p", "beads-bits rag-queue-line", ragQueueLine(q));
   const pause = el("button", "wf-btn clear", st.backfill_paused ? "재개" : "일시정지");
   pause.type = "button";
+  pause.disabled = ragBusy;  // a request is in flight; the card says which
   pause.title = st.backfill_paused
     ? "대기 중인 색인을 다시 시작합니다"
     : "다음 버킷의 색인을 시작하지 않습니다. 진행 중인 pass는 끝까지 갑니다";
@@ -31863,10 +31890,12 @@ function ragCard() {
     head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
     const sync = el("button", "wf-btn clear", "Sync");
     sync.type = "button";
+    sync.disabled = ragBusy;
     sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
     sync.addEventListener("click", () => ragDbAction(st, group, false));
     const force = el("button", "wf-btn clear", "Rebuild");
     force.type = "button";
+    force.disabled = ragBusy;
     force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
     force.addEventListener("click", () => ragDbAction(st, group, true));
     head.append(sync, force);
@@ -31892,7 +31921,7 @@ function ragCard() {
       if (row.syncing) {
         const cancel = el("button", "wf-btn clear", row.cancel_requested ? "취소 요청됨" : "취소");
         cancel.type = "button";
-        cancel.disabled = Boolean(row.cancel_requested);
+        cancel.disabled = Boolean(row.cancel_requested) || ragBusy;
         cancel.title = "다음 임베딩 묶음에서 멈춥니다. 지금까지 임베딩한 것은 남습니다";
         cancel.addEventListener("click", () => ragCancel(row));
         item.append(cancel);
