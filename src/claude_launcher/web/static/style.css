@@ -2645,10 +2645,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-refresh:hover:not(:disabled) { border-color: #58a6ff; color: #e6edf3; }
 .new-usage-refresh:disabled { opacity: .6; cursor: default; }
 .new-usage-windows, .new-usage-keys { margin: 5px 0 0; padding: 0; list-style: none; }
-.new-usage-window { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
-.new-usage-pct.low { color: #3fb950; }
-.new-usage-pct.mid { color: #d29922; }
-.new-usage-pct.high { color: #f85149; }
+/* One row per window, with the name in its own column: the short window is
+   always first and the pct/bar/countdown columns line up under each other
+   (claunch-hz9ma). */
+.new-usage-window {
+  display: grid; align-items: center; gap: 8px; padding: 1px 0;
+  grid-template-columns: 46px 90px minmax(40px, 150px) minmax(0, 1fr);
+}
+.new-usage-window-label { color: #6e7681; }
+.new-usage-window-reset {
+  color: #6e7681; font-size: 11px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.new-usage-window-status { color: #d29922; font-size: 11px; }
+.new-usage-pct.low, .new-usage-cell-pct.low { color: #3fb950; }
+.new-usage-pct.mid, .new-usage-cell-pct.mid { color: #d29922; }
+.new-usage-pct.high, .new-usage-cell-pct.high { color: #f85149; }
 .new-usage-bar {
   flex: 1 1 60px; max-width: 140px; height: 4px; border-radius: 2px;
   background: #21262d; overflow: hidden;
@@ -2659,7 +2671,10 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* The key rows: what the next launch takes, which key is in the token file
    now, and that key's own numbers. */
 .new-usage-keys { border-top: 1px solid #21262d; padding-top: 4px; }
-.new-usage-key { display: flex; align-items: baseline; gap: 7px; padding: 1px 0; }
+.new-usage-key {
+  display: grid; align-items: center; gap: 7px; padding: 2px 0;
+  grid-template-columns: 42px minmax(44px, 140px) max-content minmax(0, 1.8fr) max-content max-content;
+}
 .new-usage-key.next { color: #e6edf3; }
 .new-usage-key-mark {
   flex: none; min-width: 42px; color: #6e7681; font-size: 10px;
@@ -2667,13 +2682,52 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .new-usage-key.next .new-usage-key-mark { color: #3fb950; }
 .new-usage-key-name {
-  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
-.new-usage-key-token { flex: none; color: #6e7681; font-size: 11px; }
-.new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
-.new-usage-key-used { flex: none; color: #6e7681; font-size: 11px; }
+.new-usage-key-token { min-width: 0; color: #6e7681; font-size: 11px; white-space: nowrap; }
+/* The window columns. Every row draws the same number of cells in the same
+   order, so the pct, the bar and the countdown of one account sit directly
+   under another's — the comparison this block exists for (claunch-hz9ma). */
+.new-usage-key-use {
+  min-width: 0; display: grid; align-items: start; gap: 8px;
+  grid-template-columns: repeat(var(--window-count, 1), minmax(0, 1fr));
+  color: #7d8590;
+}
+.new-usage-cell { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.new-usage-cell-head { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.new-usage-cell-label {
+  color: #6e7681; font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+}
+.new-usage-cell-pct {
+  color: #9da5b0; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.new-usage-cell-reset {
+  color: #6e7681; font-size: 10px; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.new-usage-cell .new-usage-bar { flex: none; width: 100%; max-width: none; }
+.new-usage-cell.empty .new-usage-cell-pct { color: #484f58; }
+.new-usage-key-used { color: #6e7681; font-size: 11px; white-space: nowrap; }
 .new-usage-key-use.bad { color: #d29922; }
+/* A narrow form keeps the key columns but drops the row's less needed parts
+   to a second line, so the pct columns still line up instead of scrolling
+   sideways (claunch-hz9ma). The placements are explicit: an auto-placed
+   `used`/button pair would land in the 42px marker column and centre the
+   button under the cells. */
+@media (max-width: 720px) {
+  .new-usage-key { grid-template-columns: 42px minmax(0, 1fr) max-content max-content; }
+  .new-usage-key-mark { grid-area: 1 / 1; }
+  .new-usage-key-name { grid-area: 1 / 2; max-width: none; }
+  .new-usage-key-token { display: none; }
+  .new-usage-key-used { grid-area: 1 / 3; }
+  .new-usage-key-take { grid-area: 1 / 4; }
+  .new-usage-key-use { grid-area: 2 / 1 / 3 / 5; }
+  .new-usage-window { grid-template-columns: 40px 64px minmax(0, 1fr); }
+  .new-usage-window .new-usage-bar { display: none; }
+  .new-usage-window-reset { text-align: right; }
+}
 /* The manual choice per row (claunch-i985h): small, quiet, and never the
    loudest thing on a row — the usage numbers are what the block exists for. */
 .new-usage-key-take {

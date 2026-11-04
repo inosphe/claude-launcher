@@ -16852,6 +16852,14 @@ const NEW_USAGE_WINDOW_LABELS = {
   five_hour: "5h", seven_day: "7d", weekly: "week", monthly: "month",
   monthly_spend: "month spend", credit: "credit",
 };
+/* The order every usage readout lists its windows in: shortest window first.
+   The same column then means the same span on every row a reader compares
+   (claunch-hz9ma) — a provider is free to report its windows in any order.
+   A name this table does not know keeps its place after the known ones, so a
+   provider that invents a window is still drawn rather than dropped. */
+const NEW_USAGE_WINDOW_ORDER = [
+  "five_hour", "seven_day", "weekly", "monthly", "monthly_spend", "credit",
+];
 const NEW_USAGE_STRATEGY_LABELS = {
   rotation: "rotation (one key per launch, in order)",
   "usage-min": "usage-min (lowest usage)",
@@ -16908,6 +16916,22 @@ function newUsageWindowLabel(name) {
   return NEW_USAGE_WINDOW_LABELS[name] || String(name || "window");
 }
 
+/* The windows of a reading in NEW_USAGE_WINDOW_ORDER, stable for names the
+   table does not know. Used for every list this block draws and for the
+   scrollable picker's line, so the 5h/week/month columns line up wherever a
+   reader compares two accounts (claunch-hz9ma). */
+function newUsageOrderedWindows(windows) {
+  const rank = (name) => {
+    const at = NEW_USAGE_WINDOW_ORDER.indexOf(String(name || ""));
+    return at < 0 ? NEW_USAGE_WINDOW_ORDER.length : at;
+  };
+  return (windows || [])
+    .map((window, index) => ({ window, index }))
+    .sort((a, b) => rank(a.window && a.window.name) - rank(b.window && b.window.name)
+      || a.index - b.index)
+    .map((item) => item.window);
+}
+
 /* Peak utilization across a reading's windows: the number the pool's usage
    strategies compare keyed readers on (usage.utilization_for_token). */
 function newUsagePeak(windows) {
@@ -16929,13 +16953,26 @@ function newUsageMoney(value) {
   return Number.isFinite(number) ? `$${number.toFixed(2)}` : "";
 }
 
+/* A span of minutes under one unit rule, so "4h47m" and "430h32m" are read
+   at the same scale: minutes below an hour, hours below a day, days above it
+   (claunch-hz9ma). Minutes are dropped once a day is in the number — the
+   reader comparing a 5h window with a 17d one needs the magnitude, not the
+   remainder. */
+function newUsageSpan(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest ? `${days}d ${rest}h` : `${days}d`;
+}
+
 function newUsageReset(resetsAt) {
   const at = Date.parse(String(resetsAt || ""));
   if (!Number.isFinite(at)) return "";
   const minutes = Math.floor((at - Date.now()) / 60000);
   if (minutes <= 0) return "resetting";
-  if (minutes < 60) return `resets in ${minutes}m`;
-  return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+  return `resets in ${newUsageSpan(minutes)}`;
 }
 
 /* One window as a text summary — `5h 42% · resets in 2h05m`. Used for both
@@ -16967,26 +17004,124 @@ function newUsageWindowText(window) {
   return `${label} ${parts.join(" · ")}`;
 }
 
+/* What one window is worth on its own, as parts a row places in fixed
+   columns: the value a reader compares (a percent, an amount, or the
+   reader's own detail sentence), the reset countdown, and the reset's
+   absolute time for the tooltip. `pct` is NaN when there is no percentage
+   to draw a bar from. */
+function newUsageWindowParts(window) {
+  const pct = Number(window && window.utilization);
+  const detail = typeof (window && window.detail) === "string" ? window.detail : "";
+  const amount = newUsageMoney(window && window.used_dollars);
+  const limit = newUsageMoney(window && window.limit_dollars);
+  const left = newUsageMoney(window && window.remaining_dollars);
+  const amountOnly = !!amount && !limit;
+  let value = "—";
+  if (detail) value = detail;
+  else if (amountOnly) value = amount;
+  else if (Number.isFinite(pct)) value = `${pct.toFixed(0)}%`;
+  const extra = [];
+  if (limit) extra.push(`of ${limit}`);
+  if (left) extra.push(`${left} left`);
+  const reset = newUsageReset(window && window.resets_at);
+  const absolute = Date.parse(String((window && window.resets_at) || ""));
+  return {
+    pct: detail ? NaN : pct,
+    value: extra.length ? `${value} ${extra.join(" · ")}` : value,
+    reset,
+    absolute: Number.isFinite(absolute) ? new Date(absolute).toLocaleString() : "",
+  };
+}
+
+function newUsageBar(pct, level) {
+  const bar = document.createElement("span");
+  bar.className = `new-usage-bar ${level}`.trim();
+  const fill = document.createElement("i");
+  fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  bar.appendChild(fill);
+  return bar;
+}
+
+/* The profile's own reading, one row per window. The window's name sits in
+   its own column so the short window is always first and the same column
+   means the same span from one row to the next (claunch-hz9ma). */
 function newUsageWindowLine(window) {
   const li = document.createElement("li");
   li.className = "new-usage-window";
-  const pct = Number(window && window.utilization);
-  const level = newUsageLevel(pct);
+  const name = String((window && window.name) || "");
+  if (name) li.dataset.window = name;
+  const parts = newUsageWindowParts(window);
+  const level = newUsageLevel(parts.pct);
+  const label = document.createElement("span");
+  label.className = "new-usage-window-label";
+  label.textContent = newUsageWindowLabel(name);
   const accent = document.createElement("span");
   accent.className = `new-usage-pct ${level}`.trim();
-  accent.textContent = newUsageWindowText(window);
-  li.appendChild(accent);
-  const hasDetail = !!(window && typeof window.detail === "string" && window.detail);
-  if (Number.isFinite(pct) && !hasDetail) {
-    const bar = document.createElement("span");
-    bar.className = `new-usage-bar ${level}`.trim();
-    const fill = document.createElement("i");
-    fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-    bar.appendChild(fill);
-    li.appendChild(bar);
-    li.title = `${newUsageWindowLabel(window.name)}: ${pct.toFixed(1)}% used`;
+  accent.textContent = parts.value;
+  li.append(label, accent);
+  if (Number.isFinite(parts.pct)) li.appendChild(newUsageBar(parts.pct, level));
+  if (parts.reset) {
+    const reset = document.createElement("span");
+    reset.className = "new-usage-window-reset";
+    reset.textContent = parts.reset;
+    if (parts.absolute) reset.title = `resets ${parts.absolute}`;
+    li.appendChild(reset);
+  }
+  if (window && window.status && !["ok", "allowed"].includes(String(window.status))) {
+    const status = document.createElement("span");
+    status.className = "new-usage-window-status";
+    status.textContent = String(window.status);
+    li.appendChild(status);
+  }
+  if (Number.isFinite(parts.pct)) {
+    li.title = `${newUsageWindowLabel(name)}: ${parts.pct.toFixed(1)}% used`
+      + (parts.absolute ? ` · resets ${parts.absolute}` : "");
   }
   return li;
+}
+
+/* One window of a key's row. Every key row draws the same columns in the
+   same order, so a window the key does not report is still a cell (a dash)
+   and the columns after it stay lined up with the other keys — that is what
+   makes two accounts comparable at a glance (claunch-hz9ma). */
+function newUsageKeyCell(window, name) {
+  const cell = document.createElement("span");
+  const label = document.createElement("span");
+  label.className = "new-usage-cell-label";
+  label.textContent = newUsageWindowLabel(name);
+  const head = document.createElement("span");
+  head.className = "new-usage-cell-head";
+  cell.dataset.window = String(name || "");
+  if (!window) {
+    cell.className = "new-usage-cell empty";
+    const dash = document.createElement("span");
+    dash.className = "new-usage-cell-pct";
+    dash.textContent = "—";
+    head.append(label, dash);
+    cell.appendChild(head);
+    cell.title = `${newUsageWindowLabel(name)}: not reported for this key`;
+    return cell;
+  }
+  const parts = newUsageWindowParts(window);
+  const level = newUsageLevel(parts.pct);
+  cell.className = `new-usage-cell ${level}`.trim();
+  const value = document.createElement("span");
+  value.className = `new-usage-cell-pct ${level}`.trim();
+  value.textContent = parts.value;
+  head.append(label, value);
+  cell.appendChild(head);
+  if (Number.isFinite(parts.pct)) cell.appendChild(newUsageBar(parts.pct, level));
+  if (parts.reset) {
+    const reset = document.createElement("span");
+    reset.className = "new-usage-cell-reset";
+    reset.textContent = parts.reset;
+    cell.appendChild(reset);
+  }
+  const title = [newUsageWindowLabel(name)];
+  if (Number.isFinite(parts.pct)) title.push(`${parts.pct.toFixed(1)}% used`);
+  if (parts.absolute) title.push(`resets ${parts.absolute}`);
+  cell.title = title.join(" · ");
+  return cell;
 }
 
 function newUsageKeySummary(reading, unmeasurable) {
@@ -16994,7 +17129,7 @@ function newUsageKeySummary(reading, unmeasurable) {
   if (reading.error) return reading.error;
   const windows = reading.windows || [];
   if (!windows.length) return unmeasurable || "no windows";
-  return windows.map(newUsageWindowText).join("  ·  ");
+  return newUsageOrderedWindows(windows).map(newUsageWindowText).join("  ·  ");
 }
 
 /* The strategy select: one option per strategy the daemon accepts
@@ -17204,9 +17339,10 @@ function renderNewUsage() {
     refresh.textContent = reading ? "reading…" : "refresh";
   }
 
-  // The profile's own reading — the effective token's quota.
+  // The profile's own reading — the effective token's quota. Shortest window
+  // first, in the same order the key rows use (claunch-hz9ma).
   const windowsBox = $("new-usage-windows");
-  const windows = (doc && doc.usage && doc.usage.windows) || [];
+  const windows = newUsageOrderedWindows(doc && doc.usage && doc.usage.windows);
   if (windowsBox) {
     windowsBox.innerHTML = "";
     for (const window of windows) windowsBox.appendChild(newUsageWindowLine(window));
@@ -17217,6 +17353,18 @@ function renderNewUsage() {
   const keysBox = $("new-usage-keys");
   const keys = (doc && doc.keys) || [];
   const multi = !!(doc && doc.pooled) && keys.length > 1;
+  // The columns every key row draws: the union of the windows the profile and
+  // its keys report, in one order. A key that does not report a window still
+  // gets that window's cell, so the columns after it never shift between two
+  // accounts a reader is comparing (claunch-hz9ma).
+  const keyColumnNames = [];
+  for (const window of newUsageOrderedWindows([
+    ...windows,
+    ...keys.flatMap((key) => (key.usage && key.usage.windows) || []),
+  ])) {
+    const name = String((window && window.name) || "");
+    if (name && !keyColumnNames.includes(name)) keyColumnNames.push(name);
+  }
   const autoRow = $("new-auto-key-row");
   if (autoRow) {
     // Ticking it needs two keys to switch between; a pool that changes under
@@ -17249,8 +17397,22 @@ function renderNewUsage() {
         token.title = key.id || "";
         const use = document.createElement("span");
         use.className = "new-usage-key-use";
-        use.textContent = newUsageKeySummary(key.usage, doc.unmeasurable) || "not measured";
-        if (key.usage && key.usage.error) use.classList.add("bad");
+        use.style.setProperty("--window-count", String(Math.max(1, keyColumnNames.length)));
+        const reading = key.usage || null;
+        if (!reading) {
+          use.textContent = doc.unmeasurable || "not measured";
+        } else if (reading.error) {
+          use.textContent = reading.error;
+          use.classList.add("bad");
+        } else if (!keyColumnNames.length) {
+          use.textContent = doc.unmeasurable || "no windows";
+        } else {
+          for (const column of keyColumnNames) {
+            const window = (reading.windows || [])
+              .find((item) => String(item && item.name) === column);
+            use.appendChild(newUsageKeyCell(window, column));
+          }
+        }
         // When the key was last spent — the second half of "which key is this",
         // and the thing a pool's rotation is actually moving through.
         const used = document.createElement("span");

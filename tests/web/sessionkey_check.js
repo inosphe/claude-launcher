@@ -223,12 +223,14 @@ const usageApi = (path) => {
   });
 };
 const usageHelpers = ["newUsageWindowLabel", "newUsagePeak", "newUsageLevel",
-  "newUsageMoney", "newUsageReset", "newUsageWindowText", "newUsageKeySummary"]
+  "newUsageMoney", "newUsageOrderedWindows", "newUsageSpan", "newUsageReset",
+  "newUsageWindowText", "newUsageKeySummary"]
   .map(slice).join("\n");
 function usageLabelTable() {
   const start = src.indexOf("const NEW_USAGE_WINDOW_LABELS =");
-  if (start < 0) throw new Error("cannot locate NEW_USAGE_WINDOW_LABELS in app.js");
-  return src.slice(start, src.indexOf("};", start) + 2);
+  const order = src.indexOf("const NEW_USAGE_WINDOW_ORDER =");
+  if (start < 0 || order < 0) throw new Error("cannot locate the usage window tables in app.js");
+  return src.slice(start, src.indexOf("];", order) + 2);
 }
 const keyPickerUsage = new Function("api", "encodeURIComponent",
   slice("keyPickerUsage") + "; return keyPickerUsage;")(usageApi, encodeURIComponent);

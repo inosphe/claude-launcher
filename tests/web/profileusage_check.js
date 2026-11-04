@@ -74,11 +74,13 @@ const body = {
   const facts = T.readFacts({ headers: { get: (k) => headers[k] ?? null } }, {});
   assert.deepStrictEqual([facts.cached, facts.updatedAt], [false, 1792650100]);
 
-  // Reset text as cli._fmt_reset writes it.
+  // Reset text under the page's unit rule (claunch-hz9ma): minutes, hours,
+  // then days — the same rule the create form's readout uses.
   const now = Date.UTC(2026, 9, 22, 7, 0, 0);
   const at = (m) => new Date(now + m * 60000 + 30000);
   assert.strictEqual(T.resetText(at(136), now), 'resets in 2h16m');
-  assert.strictEqual(T.resetText(at(5336), now), 'resets in 88h56m');
+  assert.strictEqual(T.resetText(at(5336), now), 'resets in 3d 16h');
+  assert.strictEqual(T.resetText(at(25832), now), 'resets in 17d 22h');
   assert.strictEqual(T.resetText(at(42), now), 'resets in 42m');
   assert.strictEqual(T.resetText(new Date(now - 1000), now), 'resetting');
 
