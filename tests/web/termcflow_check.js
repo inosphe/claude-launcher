@@ -447,6 +447,37 @@ const RUN = {
         ctx.asked().includes("Pick 'hold' for end-decision?"), ctx.asked());
   ctx.reset();
 
+  /* A v2 run held only by choices it does not stop on (claunch-hbmhk.1):
+     the strip stays -- its press is a real one, which is why a person keeps
+     it -- and says which kind it is: `· ○ optional` on the head and the
+     `optional` class on the box, the rail chip's own distinction. */
+  ctx.setRail({ s16: { ...ROW, gated: true, blocking: false, owed: [], answers: [
+    { kind: "choose", instance: "round/test-skip@9", label: "test-skip-gate",
+      optional: true, prompt: "skip the tests?", require_reason: false,
+      options: [{ name: "skip", description: "skip them" }] }] } });
+  ctx.renderTermCflow();
+  check("v2 optional: an optional-only run still shows the strip",
+        !strip.classes.has("hidden"));
+  check("v2 optional: the head says the choice does not hold the run",
+        texts(strip).includes("improv-worker-v2 · v2 · test-skip-gate — choose · ○ optional"),
+        texts(strip));
+  check("v2 optional: the box wears the optional class", strip.classes.has("optional"));
+  check("v2 optional: the press is still offered",
+        buttons(strip).map((b) => b.text).join() === "skip",
+        buttons(strip).map((b) => b.text));
+
+  // A payload from before `blocking` existed is read as the run being held,
+  // the same way the rail reads it -- and the class comes back off.
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: end-decision"], answers: [
+    { kind: "choose", instance: "round/end@40", label: "end-decision",
+      prompt: "end the session?", require_reason: false,
+      options: [{ name: "end" }, { name: "hold" }] }] } });
+  ctx.renderTermCflow();
+  check("v2 optional: a payload without blocking is a held gate again",
+        !strip.classes.has("optional") && !texts(strip).includes("· ○ optional"),
+        texts(strip));
+  ctx.reset();
+
   /* the driver's move request (flow_request_move, claunch-kgfr5): Move or
      Refuse, the run page's /api/cflow2/move/resolve */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["move: round"], answers: [

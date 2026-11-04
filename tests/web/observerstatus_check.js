@@ -10,8 +10,12 @@
      thread reply newer than this browser's seen mark; a session never marked
      announces nothing (its history is not news), and only the newest three
      replies are drawn, with the rest counted;
-   - what the reader owes a session (actionCount) adds a gated v2 run and the
-     waiting QA questions to the events and v1 gates it counted before;
+   - what the reader owes a session (actionCount) adds a v2 run the gate holds
+     (the rail's `blocking`; a gate the run can proceed past is a choice, not
+     an owed answer) and the waiting QA questions to the events and v1 gates
+     it counted before — and the activity label says the same, so a run with
+     only an optional gate open leaves the session 「유휴」, not 「대기」; a
+     payload too old to carry `blocking` reads as held, like the rail chip;
    - nothing is drawn for a session with neither. */
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +30,7 @@ function between(start, end) {
 }
 const nodeSrc = src.slice(src.indexOf("const node = "), src.indexOf("\n", src.indexOf("const node = ")));
 const accessors = between("const appRow = ", "let draftTarget");
+const activity = between("function activity(s) {", "function addGate(");
 const block = between("/* What else waits on the reader in a session", "/* One observation pass for one session, now.");
 const action = between("function actionCount(s) {", "function syncTargets(");
 
@@ -42,13 +47,13 @@ new Function("exports", "document", "env", `
 const cflow2RailCache = env.cflow2RailCache, qaRailCache = env.qaRailCache, threadsRailCache = env.threadsRailCache;
 const gatePending = env.gatePending;
 const loadThreadsSeen = () => env.seen;
-const cflow2RailMarkState = r => r.gated ? "yours" : r.status === "done" ? "done" : "running";
+const cflow2RailMarkState = r => r.gated ? (r.blocking === false ? "optional" : "yours") : r.status === "done" ? "done" : "running";
 const cflow2RailLabel = r => r.gated ? "gated" : "label:" + r.status;
 const sessCflowGated = r => String(r.status).startsWith("waiting");
 const sessionRuns = s => env.runs.filter(r => r.scope === s.name);
-` + nodeSrc + "\n" + accessors + "\n" + block + "\n" + action + `
+` + nodeSrc + "\n" + accessors + "\n" + activity + "\n" + block + "\n" + action + `
 exports.sessionStatus = sessionStatus; exports.actionCount = actionCount; exports.newReplies = newReplies;
-exports.gateWaits = gateWaits;
+exports.activity = activity; exports.gateWaits = gateWaits;
 `)(ctx, { createElement: mkel }, env);
 
 let failures = 0;
@@ -71,9 +76,29 @@ check("v2 line", [runs.children[0].className, runs.children[0].href, text(runs.c
       ["observer-run run-running", "#/wf/" + encodeURIComponent("s1@main|/repo"), "cflow2improv-worker-v2label:running"]);
 check("v1 line skips done and waiting", text(runs.children[1]), "cflowv1runrunning · work");
 
+/* The rail says with `blocking` whether a gate holds the run. An optional gate
+   is a choice the reader may take, not one they owe, so it is neither counted
+   nor read as a session waiting (claunch-hbmhk.1.1). A payload too old to
+   carry `blocking` reads as held, the same as the rail chip. */
+const s2 = { name: "s2", cwd: "/repo", running: true, status: "idle", events: [] };
 env.cflow2RailCache.s1.gated = true;
-check("a gated v2 run is owed", ctx.actionCount(s1), 2);
-check("gated mark", ctx.sessionStatus(s1)[0].children[0].className, "observer-run run-yours");
+check("no `blocking`: an older payload reads as held", ctx.actionCount(s1), 2);
+check("held v2 run: the mark is the rail's yours", ctx.sessionStatus(s1)[0].children[0].className, "observer-run run-yours");
+
+env.cflow2RailCache.s1.blocking = false;
+check("an optional v2 run is not owed", ctx.actionCount(s1), 1);
+check("optional v2 run: the mark is the rail's optional", ctx.sessionStatus(s1)[0].children[0].className, "observer-run run-optional");
+
+env.cflow2RailCache.s2 = { scope: "s2@main", cwd: "/repo", workflow: "improv-worker-v2", status: "running", gated: true, blocking: true };
+check("a held v2 run is a session waiting", ctx.activity(s2).label, "응답·작업 대기");
+check("and it is owed", ctx.actionCount(s2), 1);
+env.cflow2RailCache.s2.blocking = false;
+check("an optional v2 run is not a session waiting", ctx.activity(s2).label, "유휴");
+check("and it is not owed", ctx.actionCount(s2), 0);
+delete env.cflow2RailCache.s2.blocking;
+check("no `blocking` reads as held here too", [ctx.activity(s2).label, ctx.actionCount(s2)], ["응답·작업 대기", 1]);
+delete env.cflow2RailCache.s2;
+env.cflow2RailCache.s1.blocking = true;
 
 env.qaRailCache.s1 = { waiting: [{ id: "qa-1", title: "어느 쪽으로?", status: "open" }] };
 check("a waiting question is owed", ctx.actionCount(s1), 3);
