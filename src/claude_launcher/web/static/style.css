@@ -9254,6 +9254,18 @@ a.ar-name:hover { color: #58a6ff; }
 .wt-chip.ar-scheduled { background: #3d2e00; color: #e3b341; }
 .wt-chip.ar-plan-chip { background: #1c2d4a; color: #79c0ff; }
 .wt-chip.ar-plan-ready { background: #12301c; color: #3fb950; }
+/* One chip per path: not walked, walking, walked (size shown next to it), or
+   failed (the reason is the chip's title). Four states, four colours -- the
+   reader's complaint was that they all looked the same. */
+.wt-chip.ar-status { background: #30363d; color: #b8c8db; }
+.wt-chip.ar-status-unmeasured { background: #2b2f36; color: #8b949e; }
+.wt-chip.ar-status-running { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-status-done { background: #12301c; color: #3fb950; }
+.wt-chip.ar-status-failed { background: #3a2422; color: #ffa198; }
+.wt-chip.ar-status-missing { background: #30363d; color: #8b949e; }
+.wt-chip.ar-measure-state { background: #1c2d4a; color: #79c0ff; }
+.ar-row.is-running { background: #101c2e; }
+.wf-btn.is-busy { opacity: .65; cursor: progress; }
 .ar-plan-reason { flex: 1 1 200px; overflow-wrap: anywhere; }
 .wt-chip.ar-receipt { background: #30363d; color: #8b949e; }
 .ar-cleanup { display: flex; flex-direction: column; gap: 2px; padding-top: 4px;
