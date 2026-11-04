@@ -73,7 +73,9 @@ _CLOSURE = {"type": "object", "properties": {
                             "drop' buttons in front of the user, so leave one open only when its scope or "
                             "priority is theirs, and never make that same disposition a decision's options; "
                             "note: for the record only (a further recommendation, an aside) -- it never "
-                            "waits on the user or keeps the session open, the user reads notes once at the end"},
+                            "waits on the user or keeps the session open, the user reads notes once at the end; "
+                            "the user may still pick 'here' or 'issue' on it (an optional [claunch plan] block "
+                            "that gates nothing) -- then do that and write what became of it in its detail"},
     "status": {"type": "string", "enum": ["open", "done"],
                "description": "a followup's: done once you acted on the user's 'here' or 'issue', or on "
                               "your own when its disposition was plain (then it waits on nobody)"},

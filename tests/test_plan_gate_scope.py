@@ -12,6 +12,8 @@
 * ``deferred`` (보류) waits on nobody and keeps nothing open.
 * A followup the session wrote ``done`` itself waits on nobody; a ``note``
   never waits and never keeps the session open.
+  The user may still pick ``here`` or ``issue`` on a note (claunch-i0whx);
+  the pick gates nothing.
 * A stop is told once per distinct set of items (``--notify``).
 """
 
@@ -175,6 +177,28 @@ def test_a_note_never_waits_and_takes_no_decision(store):
         store.decide(P.USER, "s1", "n1", 1, verdict="passed")
     with pytest.raises(P.PlanError):
         _write(store, 1, closure=[{"id": "n1", "kind": "note", "title": "t", "status": "done"}])
+
+
+@pytest.mark.parametrize("action", ["here", "issue"])
+def test_a_note_takes_an_optional_pick_that_gates_nothing(store, action):
+    """claunch-i0whx (th-3e4e9e): the user may take a note into this round
+    or hand it over as an issue; picking does not make it wait or block."""
+    _write(store, 0, closure=[{"id": "n1", "kind": "note", "title": "could also cache X"}])
+    p = store.decide(P.USER, "s1", "n1", 1, action=action)["plan"]
+    assert p["closure"][0]["result"]["action"] == action
+    s = p["summary"]
+    assert s["waiting"] == 0 and s["closable"] is True and s["blockers"] == []
+    # the session writes what became of it into the detail; the pick stays
+    p = store.patch("s1", "s1", "n1", detail="filed as claunch-x")["plan"]
+    assert p["closure"][0]["result"]["action"] == action and p["summary"]["closable"] is True
+
+
+def test_a_note_has_no_drop_and_takes_only_an_action(store):
+    _write(store, 0, closure=[{"id": "n1", "kind": "note", "title": "could also cache X"}])
+    with pytest.raises(P.PlanError, match="here, issue"):
+        store.decide(P.USER, "s1", "n1", 1, action="drop")
+    with pytest.raises(P.PlanError):
+        store.decide(P.USER, "s1", "n1", 1, choice="A")
 
 
 # -- the stop notice --------------------------------------------------------- #

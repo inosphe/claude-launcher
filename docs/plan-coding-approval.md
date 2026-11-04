@@ -150,7 +150,7 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 | 보류 판정 | verify의 `deferred`(보류)는 waiting·closable을 막지 않는다. 세션은 그 확인을 보드 이슈로 옮기고 detail에 이슈 id를 적는다 | `store.VERDICTS`, `plan_api.decided_text` |
 | 결과 유지 | passed·deferred verify와 처리된 followup은 title·detail만 바뀌면 결과와 rev를 유지하고 `set` 이벤트의 `reworded_kept`에 남는다. 다시 물으려면 `plan_node`에 `reopen=<이유>`를 준다. failed verify는 문구가 바뀌면 다시 묻는다 | `store._kept`, `store.patch` |
 | 세션이 처리한 followup | 세션이 `status=done`으로 쓴 followup은 사용자 결정 없이 waiting에서 빠진다 | `store.summarize` |
-| 참고(note) | closure 종류 `note`는 결정을 받지 않고 waiting·closable을 막지 않는다. 패널의 「참고」 절과 end-decision 브리프에 목록으로 나온다 | `store.CLOSURE_KINDS`, `plan-pane.js` |
+| 참고(note) | closure 종류 `note`는 waiting·closable을 막지 않는다. 패널의 「참고」 절과 end-decision 브리프에 목록으로 나온다. 사용자는 선택 사항으로 「여기서 진행」·「이슈로 넘김」을 누를 수 있고(「버림」은 없다), 그 결과는 followup과 같은 `[claunch plan]` 블록으로 세션에 전달되지만 게이트를 세우지 않는다(claunch-i0whx) | `store.NOTE_ACTIONS`, `plan_api.decided_text`, `plan-pane.js` |
 
 ## 8. 계층 결정, 자동 선택, 배제 선택지, 변경 전달 (`claunch-vmcg7`)
 

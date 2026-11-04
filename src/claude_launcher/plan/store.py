@@ -25,7 +25,9 @@ plan here is the same intent cut down to what that person decides on:
             on nobody (th-62379d). A ``note`` is for the record only (a
             further recommendation, a measurement aside): it never waits and
             never keeps the session open; the user reads the notes once, at
-            the end.
+            the end. The user may still take a note into this round or hand
+            it over as an issue (claunch-i0whx) -- an optional result that
+            reaches the session like a followup's and gates nothing.
 
 The plan is one JSON document per session, written whole by the session
 (``set``) or one node at a time (``patch``). Two writers share it:
@@ -80,6 +82,10 @@ STEP_STATUS = ("todo", "doing", "done", "skipped", "blocked")
 FOLLOWUP_STATUS = ("open", "done")
 VERDICTS = ("passed", "failed", "deferred")
 ACTIONS = ("here", "issue", "drop")
+#: what the user may do with a note (claunch-i0whx): take it into this round
+#: or hand it over as an issue. Both are optional -- a note with no result
+#: still waits on nobody -- so there is no "drop": leaving it alone is that.
+NOTE_ACTIONS = ("here", "issue")
 FINISHED = ("done", "skipped")
 
 #: What the user decides on, per kind: a change to any of these moves the
@@ -713,8 +719,8 @@ class PlanStore:
     def decide(self, actor: str, session: str, node_id: str, rev, *, choice=None, verdict=None, action=None,
                note=None) -> dict:
         """The user's result on one node: a decision's ``choice`` (an option
-        label), a verify item's ``verdict`` (passed / failed / deferred) or a followup's
-        ``action`` (here / issue / drop). ``rev`` is the node's as the user
+        label), a verify item's ``verdict`` (passed / failed / deferred), a followup's
+        ``action`` (here / issue / drop) or a note's optional ``action`` (here / issue). ``rev`` is the node's as the user
         saw it. Returns ``{"plan", "node", "previous"}``."""
         if actor != USER:
             raise Forbidden("only the user decides on a plan")
@@ -734,7 +740,7 @@ class PlanStore:
                                "you read it. Read it again and decide on what it says now.", current=before)
             kind = node["kind"]
             given = {k for k, v in (("choice", choice), ("verdict", verdict), ("action", action)) if v}
-            want = {"decision": "choice", "verify": "verdict", "followup": "action"}.get(kind)
+            want = {"decision": "choice", "verify": "verdict", "followup": "action", "note": "action"}.get(kind)
             if want is None:
                 raise PlanError(f"node {node_id} is a {kind}: the session moves it, there is nothing to decide")
             if given != {want}:
@@ -757,6 +763,11 @@ class PlanStore:
                 if verdict == "failed" and not note:
                     raise PlanError("a failed check needs a note: what went wrong")
                 result = {"verdict": verdict}
+            elif kind == "note":
+                if action not in NOTE_ACTIONS:
+                    raise PlanError(f"a note's action is one of {', '.join(NOTE_ACTIONS)} (leaving it alone "
+                                    "is the default; it never waits on anyone)")
+                result = {"action": action}
             else:
                 if action not in ACTIONS:
                     raise PlanError(f"an action is one of {', '.join(ACTIONS)}")

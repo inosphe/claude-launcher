@@ -279,10 +279,17 @@ const posts = () => JSON.parse(JSON.stringify(calls.filter(c => c.method === 'PO
   assert(ct.includes('세션이 다시 확인을 요청했습니다: the pane code changed'));
   assert(ct.includes('세션이 처리함'));
   assert(ct.includes('참고 (최종 확인용 · 게이트 없음)') && ct.includes('could also cache X'));
-  assert.strictEqual(buttons(host, '여기서 진행').length, 0, 'a followup the session closed has nothing to decide');
   const notes = all(host).find(n => n.className === 'ptree ptree-notes');
+  const gated = all(host).find(n => n.className === 'ptree ptree-closures');
+  assert.strictEqual(all(gated).filter(n => n.tag === 'button' && n.textContent === '여기서 진행').length, 0,
+                     'a followup the session closed has nothing to decide');
   assert.strictEqual(notes.children.length, 1);
-  assert.strictEqual(all(notes).filter(n => n.tag === 'button').length, 0, 'a note has no controls');
+  // claunch-i0whx: a note offers the two optional picks, never 버림.
+  const noteButtons = all(notes).filter(n => n.tag === 'button').map(n => n.textContent);
+  assert.deepStrictEqual(noteButtons, ['여기서 진행', '이슈로 넘김'], 'a note offers here / issue only');
+  all(notes).find(n => n.tag === 'button' && n.textContent === '이슈로 넘김').onclick(); await settle();
+  assert.deepStrictEqual(posts().slice(-1)[0].body, {session: 's1', note: '', rev: 1, action: 'issue'});
+  assert(text(host).includes('처분: 이슈로 넘김'), 'the note shows the pick');
   buttons(host, '보류')[0].onclick(); await settle();
   assert.deepStrictEqual(posts().slice(-1)[0].body, {session: 's1', note: '', rev: 3, verdict: 'deferred'});
   assert(text(host).includes('확인: 보류'));
