@@ -128,6 +128,17 @@ false green ``--check`` carries to the next session (claunch-1cn7l). The
 reuse decision is not remade there -- standing on a receipt starts no run --
 and a tree that cannot be measured after the wait leaves no receipt at all.
 
+The selection is read the same way and for the same reason. It is derived
+from the change before the wait, so a test module committed in the wait was
+missing from the run *and* from the receipt filed under the new tree: the
+tree was right and the module list was the old one, which is the harder
+half to notice (claunch-s8o59). When the tree moved, the change and the
+selection are derived again from it and the run uses that list; when it did
+not move the derivation is skipped, because the selection is a function of
+the change and the checkout and an unmoved tree cannot have moved it. A
+re-derivation that comes back empty ends the gate without running pytest --
+an empty path list is not "run nothing" to pytest, it is "run everything".
+
 The file name carries those two. Two more elements of the key live in the
 receipt body (:data:`REUSE_FIELD`): the merge base the selection was derived
 from, and the interpreter and installed packages pytest runs under
@@ -2878,7 +2889,6 @@ def main(argv: Optional[list] = None) -> int:
             file=sys.stderr,
         )
         measured = None
-    reuse = key_now
     if measured != tree:
         print(
             f"NOTE: the working tree moved while waiting for a window "
@@ -2886,6 +2896,58 @@ def main(argv: Optional[list] = None) -> int:
             f"receipt is filed under the tree it reads.",
             file=sys.stderr,
         )
+        # The tree the run reads is also the tree the selection was derived
+        # from, and that derivation happened before the wait. A test module
+        # committed in the wait was missing from the run, and the receipt
+        # filed under the new tree spelled out the old module list -- a wrong
+        # selection wearing a right tree is the harder half of claunch-1cn7l
+        # to see (claunch-s8o59). Gated on the move, not done on every run:
+        # the selection is a function of the change and the checkout, so an
+        # unmoved tree cannot have moved it.
+        try:
+            late_paths = changed_paths(repo, base)
+            late_files = select(repo, late_paths)
+        except (LookupError, OSError) as exc:
+            print(
+                f"WARNING: cannot re-derive the selection after the window "
+                f"wait ({exc}); running the one measured before it.",
+                file=sys.stderr,
+            )
+        else:
+            late_derived = set(late_files)
+            late_files = sorted(late_derived | set(named))
+            if late_files != files:
+                added = sorted(set(late_files) - set(files))
+                dropped = sorted(set(files) - set(late_files))
+                print(
+                    f"NOTE: the selection moved with it "
+                    f"(+{len(added)} -{len(dropped)} module(s)); this run uses "
+                    f"the one this tree gives:",
+                    file=sys.stderr,
+                )
+                for rel in added:
+                    print(f"  + {rel}", file=sys.stderr)
+                for rel in dropped:
+                    print(f"  - {rel}", file=sys.stderr)
+                files = late_files
+                included = [f for f in named if f not in late_derived]
+                if not files:
+                    # Selected nothing, so there is nothing to run -- and an
+                    # empty ``files`` must never reach pytest, which reads it
+                    # as "no path arguments" and runs the whole suite. The
+                    # window was taken for a run this gate no longer has, so
+                    # it is handed back here rather than held to the end.
+                    grant.release()
+                    print(
+                        f"no test modules map to this change any more "
+                        f"({len(late_paths)} path(s) touched vs "
+                        f"{base}{_base_note(how)}) -- nothing for this gate "
+                        f"to run."
+                    )
+                    return 0
+
+    reuse = key_now
+    if measured != tree:
         reuse = (
             None if measured is None
             else reuse_key(
