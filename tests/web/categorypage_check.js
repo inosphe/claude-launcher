@@ -162,6 +162,9 @@ const last = () => calls[calls.length - 1];
   const toggle = (life, on) => { const box = filter(life); box.checked = on; box.onchange(); };
   toggle('killed', true);
   assert(shown('s10') && !shown('s11') && all().some(n => n.textContent === 'killed'));
+  // The chip carries the partition in its class, which is what the colour
+  // palette (style.css :root --life-*) is keyed to.
+  assert(all().some(n => String(n.className || '').includes('category-status-killed')));
   // Orthogonal: opening one box does not touch another partition.
   assert(filter('archived').checked === false && shown('s4'));
   toggle('archived', true);
