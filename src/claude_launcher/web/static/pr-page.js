@@ -263,7 +263,14 @@ globalThis.PrPage = (() => {
     mergeResult = null;
     render();
     try {
-      const { res, body } = await postDetail("merge", { method: mergeMethod, confirm: true });
+      /* The commit this page showed. The daemon pins the merge to it and
+         refuses if the branch moved in between, so the click lands what the
+         person read rather than whatever is at the head by then
+         (claunch-ijkge.3.1). */
+      const headSha = (detail && detail.pr && detail.pr.head_sha) || "";
+      const { res, body } = await postDetail("merge", {
+        method: mergeMethod, confirm: true, match_head_commit: headSha,
+      });
       if (body && body.ok) {
         mergeResult = body;
       } else {

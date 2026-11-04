@@ -11334,13 +11334,27 @@ async def h_pr_merge(request: web.Request) -> web.Response:
     method = str(body.get("method") or "auto").strip().lower()
     if method not in _PR_METHODS:
         return json_error(400, f"method 는 {', '.join(_PR_METHODS)} 가운데 하나여야 합니다.")
+    # The commit the page showed the person. Optional so an older page still
+    # merges, but a page that sends it makes the merge act on what was read
+    # (claunch-ijkge.3.1); a malformed value is refused rather than ignored.
+    pin = str(body.get("match_head_commit") or "").strip().lower()
+    if pin and not pr_actions.SHA_PATTERN.fullmatch(pin):
+        return json_error(400, "match_head_commit 은 40자 커밋 SHA 여야 합니다.")
     result = await asyncio.to_thread(
-        pr_actions.merge, host, owner, name, number, method)
+        pr_actions.merge, host, owner, name, number, method,
+        match_head_commit=pin or None)
     if result.get("ok"):
+        recorded = await asyncio.to_thread(
+            _recorded_pr, request.app["manager"], host, owner, name, number)
+        sweep = await asyncio.to_thread(
+            pr_actions.sweep_after_merge, host, owner, name, number,
+            issues=recorded.get("issues") or (),
+            owner_label=str(recorded.get("session") or "daemon"))
         await asyncio.to_thread(
             pr_actions.record_merge, host, owner, name, number, result.get("method", method),
-            actors.from_request(request) or {}, remote=request.remote or "")
-        return json_response({**result, "repo": pr_actions.slug(host, owner, name),
+            actors.from_request(request) or {}, remote=request.remote or "", sweep=sweep)
+        return json_response({**result, "sweep": sweep,
+                              "repo": pr_actions.slug(host, owner, name),
                               "number": number})
     kind = str((result.get("error") or {}).get("kind") or "other")
     status = {"permission": 403, "network": 502, "no-gh": 503,
