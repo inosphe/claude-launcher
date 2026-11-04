@@ -1550,6 +1550,7 @@ def build_app(
     r.add_get("/api/search/stream", h_search_stream)
     r.add_get("/api/rag/status", h_rag_status)
     r.add_post("/api/rag/reindex", h_rag_reindex)
+    r.add_post("/api/rag/cancel", h_rag_cancel)
     # The GitHub CLI as the daemon sees it (ghcli.py): installed, signed in
     # to each host the registered repositories push to, and what to run when
     # not -- the Settings card behind improv-worker-remote's remote-setup.
@@ -18197,7 +18198,12 @@ async def h_gh_status(request: web.Request) -> web.Response:
 async def h_rag_reindex(request: web.Request) -> web.Response:
     """Start (or restart) an index sync. Body: ``kind`` (beads|sessions,
     default beads), ``cwd`` for the board, ``force`` to re-embed everything.
-    Returns 202 with the sync's progress; the work continues in the daemon.
+
+    Returns 202 with the sync's progress and, in ``started`` / ``running`` /
+    ``force_applied`` / ``force_pending``, what the request actually did. The
+    card used to send this request and read none of it, so a Rebuild clicked
+    during a sync looked like it had worked while the pass dropped its force
+    (claunch-i2i95).
     """
     service: rag_mod.RagService = request.app["rag"]
     try:
@@ -18217,10 +18223,54 @@ async def h_rag_reindex(request: web.Request) -> web.Response:
         root = await service.resolve_root(cwd)
         if root is None:
             return json_error(404, f"no board for {cwd}")
-    prog = service.ensure_sync(kind, root, force=bool(body.get("force")))
+    force = bool(body.get("force"))
+    before = service.progress(kind, root).task
+    running = before is not None and not before.done()
+    prog = service.ensure_sync(kind, root, force=force)
+    started = prog.task is not None and not prog.task.done() and prog.task is not before
     return json_response(
-        {"kind": kind, "root": str(root) if root else None, "index": prog.view()},
+        {
+            "kind": kind,
+            "root": str(root) if root else None,
+            "index": prog.view(),
+            "started": started,
+            "running": running and not started,
+            "force": force,
+            "force_applied": bool(force and started),
+            "force_pending": bool(prog.force_pending),
+        },
         status=202,
+    )
+
+
+async def h_rag_cancel(request: web.Request) -> web.Response:
+    """Stop the pass a corpus is running. Body: ``kind``, ``cwd`` for beads.
+
+    Cooperative: the pass stops before its next embedding group and keeps
+    what it already wrote, so the collection can be partial — the status row
+    says so. Before this route a running rebuild had no stop at all outside a
+    daemon restart (claunch-i2i95).
+    """
+    service: rag_mod.RagService = request.app["rag"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    kind = str(body.get("kind") or "beads").strip()
+    if kind not in rag_mod.KINDS:
+        return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    root = None
+    if kind == "beads":
+        cwd = str(body.get("cwd") or "") or os.getcwd()
+        root = await service.resolve_root(cwd)
+        if root is None:
+            return json_error(404, f"no board for {cwd}")
+    result = service.cancel_sync(kind, root)
+    return json_response(
+        {"kind": kind, "root": str(root) if root else None, **result},
+        status=200 if result.get("running") else 409,
     )
 
 

@@ -31309,6 +31309,19 @@ let statusCheckDraft = { name: "", question: "" };
 /* The semantic-search feature's state (/api/rag/status), for its card. */
 let ragStatus = null;
 let ragError = "";
+/* The last thing a click on the RAG card did — "요청 중…", then what the
+   daemon answered ("색인 시작" / "이미 색인 중 — 실행하지 않음" / "예약").
+   Kept across the status re-render so the answer survives the refresh that
+   follows the request (claunch-i2i95). */
+let ragNotice = "";
+/* While the card shows work moving it re-reads its status on a timer: one
+   pass can run for minutes, and a card that only refreshed on click leaves
+   the reader unable to tell whether the click was received at all
+   (claunch-i2i95). Bounded like the settings-card poll it replaces, and it
+   stops re-arming as soon as nothing is left to watch. */
+let ragPolls = 0;
+const RAG_POLL_LIMIT = 200;
+const RAG_POLL_MS = 3000;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31516,6 +31529,24 @@ async function refreshRagStatus() {
     ragError = String(err);
   }
   if (wsOpen) renderWorkspaces();
+  ragSchedulePoll();
+}
+
+/* Whether the status payload has anything left to watch. A reindex request
+   that arrived during a pass sits in ``force_pending`` and the queue holds
+   buckets waiting on the consumer, so both keep the poll armed. */
+function ragHasWork(st) {
+  if (!st) return false;
+  if ((st.indexes || []).some(r => r && (r.syncing || r.pending || r.force_pending))) return true;
+  const q = st.queue || {};
+  return Boolean(q.depth || (q.pending || []).length);
+}
+
+function ragSchedulePoll() {
+  if (!(wsOpen && wsSection === "") || !ragHasWork(ragStatus)) { ragPolls = 0; return; }
+  if (ragPolls >= RAG_POLL_LIMIT) return;
+  ragPolls++;
+  setTimeout(() => { if (wsOpen && wsSection === "") refreshRagStatus(); }, RAG_POLL_MS);
 }
 
 async function refreshGhStatus() {
@@ -31661,31 +31692,120 @@ async function ragReindex(row, force) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     ragError = "";
+    return data;
   } catch (err) {
     ragError = String(err);
+    return null;
+  } finally {
+    setTimeout(refreshRagStatus, 1200);
   }
-  setTimeout(refreshRagStatus, 1500);
 }
 
-function ragIndexLine(row) {
-  const parts = [`${row.documents} document${row.documents === 1 ? "" : "s"}`];
-  if (row.dims) parts.push(`${row.dims} dimensions`);
-  if (row.total) parts.push(`${row.indexed}/${row.total} current`);
-  if (row.pending) parts.push(`${row.pending} pending`);
-  parts.push(row.syncing ? "syncing" : "idle");
-  if (row.updated_at) parts.push(`updated ${String(row.updated_at).replace("T", " ").slice(0, 19)}`);
-  return parts.join(" · ");
+/* One DB's buckets as the card draws them: the DB the active preset resolves
+   to is the heading, and every collection it reads is a row under it. A
+   collection still on a pre-preset directory carries no identity of its own —
+   it is read through the legacy adoption rule — and the row says so, because
+   that is the fact the two screens disagreed about (claunch-i2i95). */
+function ragDbGroups(st) {
+  const rows = st.indexes || [];
+  const db = st.db || "(이름 없는 DB)";
+  const groups = new Map();
+  for (const row of rows) {
+    const name = row.db_configured || db;
+    let g = groups.get(name);
+    if (!g) {
+      g = { name, dims: 0, rows: [] };
+      groups.set(name, g);
+    }
+    g.rows.push(row);
+    if (row.dims && !g.dims) g.dims = row.dims;
+  }
+  return [...groups.values()];
 }
 
-/* The index queue in one line: how much is waiting, when the consumer last
-   ran, how often the board files are checked for a CLI write. */
+function ragBucketLabel(row) {
+  if (row.kind === "all") return "Search anything (전체)";
+  if (row.kind === "sessions") return "sessions (세션)";
+  return `board ${beadsNameOfRoot(row.root)}`;
+}
+
+function ragBucketState(row) {
+  if (row.error) return { state: "failed", text: row.error };
+  if (row.syncing) {
+    const pct = row.total ? Math.floor((row.indexed / row.total) * 100) : 0;
+    return { state: "busy", text: `색인 중 ${row.indexed}/${row.total} (${pct}%)` +
+      (row.cancel_requested ? " · 취소 요청됨" : "") +
+      (row.force_pending ? " · 재색인 예약" : "") };
+  }
+  if (row.pending) return { state: "pending", text: `대기 ${row.pending}건` };
+  return { state: "ok", text: "정상" };
+}
+
+async function ragDbAction(st, group, force) {
+  const label = force ? "Rebuild" : "Sync";
+  ragPolls = 0;  // a fresh request restarts the bounded watch
+  ragNotice = `${group.name} ${label} 요청 중…`;
+  const outcomes = [];
+  for (const row of group.rows) {
+    const data = await ragReindex(row, force);
+    if (!data) {
+      outcomes.push(`${ragBucketLabel(row)}: 오류`);
+      continue;
+    }
+    if (data.force_applied) outcomes.push(`${ragBucketLabel(row)}: 재색인 시작`);
+    else if (data.started) outcomes.push(`${ragBucketLabel(row)}: 색인 시작`);
+    else if (data.force_pending) outcomes.push(`${ragBucketLabel(row)}: 색인 중 — 재색인 예약`);
+    else if (data.running) outcomes.push(`${ragBucketLabel(row)}: 이미 색인 중 — 실행하지 않음`);
+    else outcomes.push(`${ragBucketLabel(row)}: 요청 수락 안 됨`);
+  }
+  ragNotice = `${group.name} ${label} — ${outcomes.join(" · ")}`;
+  await refreshRagStatus();
+}
+
+async function ragCancel(row) {
+  const body = { kind: row.kind };
+  if (row.root) body.cwd = row.root;
+  ragPolls = 0;
+  ragNotice = `${ragBucketLabel(row)} 취소 요청 중…`;
+  try {
+    const resp = await api("/api/rag/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok && resp.status !== 409) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragNotice = data.cancelled
+      ? `${ragBucketLabel(row)}: 취소 요청됨 — 다음 묶음에서 멈추고 지금까지의 임베딩은 보존합니다`
+      : `${ragBucketLabel(row)}: 진행 중인 작업이 없습니다`;
+  } catch (err) {
+    ragNotice = `${ragBucketLabel(row)} 취소 실패 · ${err.message}`;
+  }
+  await refreshRagStatus();
+}
+
+async function ragBackfill(hold) {
+  ragPolls = 0;
+  ragNotice = hold ? "소급 임베딩을 일시정지하는 중…" : "소급 임베딩을 재개하는 중…";
+  try {
+    const resp = await api(hold ? "/api/rag/backfill/pause" : "/api/rag/backfill/resume", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragNotice = data.paused ? "일시정지됨 — 진행 중 pass는 끝까지 갑니다" : "재개됨";
+  } catch (err) {
+    ragNotice = `전환 실패 · ${err.message}`;
+  }
+  await refreshRagStatus();
+}
+
 function ragQueueLine(q) {
-  const parts = [`queue ${q.depth || 0} waiting`];
-  if (q.pending && q.pending.length) parts.push(`pending ${q.pending.join(", ")}`);
+  const parts = [`대기 ${q.depth || 0}`];
+  if (q.pending && q.pending.length) parts.push(`순서: ${q.pending.join(" → ")}`);
   parts.push(q.last_consumed_at
-    ? `last sync ${String(q.last_consumed_at).replace("T", " ").slice(0, 19)}`
-    : "no sync yet");
-  parts.push(q.watch_interval > 0 ? `board files checked every ${q.watch_interval}s` : "board watcher off");
+    ? `마지막 sync ${String(q.last_consumed_at).replace("T", " ").slice(0, 19)}`
+    : "아직 sync 없음");
+  parts.push(q.watch_interval > 0 ? `보드 확인 ${q.watch_interval}초` : "보드 감시 꺼짐");
   return parts.join(" · ");
 }
 
@@ -31697,6 +31817,7 @@ function ragCard() {
     "an embedding endpoint to rank the board and the fleet by meaning. " +
     "Manage the endpoint and models in Search settings below. Indexes update automatically."));
   if (ragError) card.appendChild(el("p", "error", ragError));
+  if (ragNotice) card.appendChild(el("p", "wf-note rag-notice", ragNotice));
   const st = ragStatus;
   if (!st) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -31707,7 +31828,8 @@ function ragCard() {
     card.appendChild(el("pre", "rag-yaml",
       "rag:\n  source: custom             # or profile (with profile: <name>)\n" +
       "  base_url: https://host/v1\n  api_key: <key>        # or CLAUNCH_RAG_API_KEY\n" +
-      "  embedding_model: <model id>\n  rerank_model: <model id>   # optional\n" +
+      "  embedding_model: <model id>\n" +
+      "  rerank_model: <model id>   # optional\n" +
       "  verify_tls: true           # false for a self-signed chain"));
     return card;
   }
@@ -31719,31 +31841,74 @@ function ragCard() {
     st.dimensions ? `${st.dimensions} dims` : "model dims",
   ];
   card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
-  if (st.queue) card.appendChild(el("p", "beads-bits rag-queue-line", ragQueueLine(st.queue)));
-  const list = el("div", "rag-index-list");
-  for (const row of st.indexes || []) {
-    const item = el("div", "rag-index-row");
-    const text = el("div", "rag-index-text");
-    text.appendChild(el("strong", null, row.kind === "all" ? "Search anything" : row.kind === "sessions" ? "sessions" : `board ${beadsNameOfRoot(row.root)}`.trim()));
-    text.appendChild(el("span", "beads-bits", ragIndexLine(row)));
-    if (row.error) text.appendChild(el("span", "error", row.error));
-    item.appendChild(text);
-    const sync = el("button", "wf-btn clear", "Sync"); sync.type = "button";
-    sync.title = "embed what changed since the last sync";
-    sync.addEventListener("click", () => ragReindex(row, false));
-    const force = el("button", "wf-btn clear", "Rebuild"); force.type = "button";
-    force.title = "re-embed every document";
-    force.addEventListener("click", () => ragReindex(row, true));
-    item.append(sync, force);
-    list.appendChild(item);
+
+  // The queue and its two controls. Pausing holds the next bucket, not the
+  // one a pass is on — the line says so rather than promising a stop it
+  // cannot make (claunch-i2i95).
+  const q = st.queue || {};
+  const queueRow = el("p", "beads-bits rag-queue-line", ragQueueLine(q));
+  const pause = el("button", "wf-btn clear", st.backfill_paused ? "재개" : "일시정지");
+  pause.type = "button";
+  pause.title = st.backfill_paused
+    ? "대기 중인 색인을 다시 시작합니다"
+    : "다음 버킷의 색인을 시작하지 않습니다. 진행 중인 pass는 끝까지 갑니다";
+  pause.addEventListener("click", () => ragBackfill(!st.backfill_paused));
+  queueRow.append(" ", pause);
+  card.appendChild(queueRow);
+
+  for (const group of ragDbGroups(st)) {
+    const box = el("div", "rag-db-block");
+    const head = el("div", "rag-db-head");
+    head.appendChild(el("strong", null, `DB ${group.name}`));
+    head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
+    const sync = el("button", "wf-btn clear", "Sync");
+    sync.type = "button";
+    sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
+    sync.addEventListener("click", () => ragDbAction(st, group, false));
+    const force = el("button", "wf-btn clear", "Rebuild");
+    force.type = "button";
+    force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
+    force.addEventListener("click", () => ragDbAction(st, group, true));
+    head.append(sync, force);
+    box.appendChild(head);
+
+    const list = el("div", "rag-index-list");
+    for (const row of group.rows) {
+      const item = el("div", "rag-index-row");
+      const text = el("div", "rag-index-text");
+      text.appendChild(el("strong", null, ragBucketLabel(row)));
+      const state = ragBucketState(row);
+      const bits = [
+        row.dims ? `${row.dims}차원` : "차원 미상",
+        `${row.indexed}/${row.total || row.documents}`,
+        row.legacy ? "경로: 프리셋 도입 전 형식" : `DB ${row.db || "?"}`,
+      ];
+      text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+      text.appendChild(el("span", `rag-badge rag-badge-${state.state}`,
+        state.state === "ok" ? "정상" : state.state === "busy" ? "색인 중"
+          : state.state === "failed" ? "실패" : "대기"));
+      text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+      item.appendChild(text);
+      if (row.syncing) {
+        const cancel = el("button", "wf-btn clear", row.cancel_requested ? "취소 요청됨" : "취소");
+        cancel.type = "button";
+        cancel.disabled = Boolean(row.cancel_requested);
+        cancel.title = "다음 임베딩 묶음에서 멈춥니다. 지금까지 임베딩한 것은 남습니다";
+        cancel.addEventListener("click", () => ragCancel(row));
+        item.append(cancel);
+      }
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+    card.appendChild(box);
   }
   if (!(st.indexes || []).length) {
-    list.appendChild(el("p", "wf-note",
+    card.appendChild(el("p", "wf-note",
       "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
   }
-  card.appendChild(list);
   return card;
 }
+
 
 function closeWorkspaces() {
   if (!wsOpen) return;

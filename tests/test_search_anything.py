@@ -1864,6 +1864,98 @@ def test_a_named_db_that_cannot_hold_the_models_width_is_refused(tmp_path):
     asyncio.run(run())
 
 
+def test_a_derived_db_is_width_checked_and_a_measured_probe_wins(tmp_path):
+    """The common preset names no ``db`` — its identity is the model's.
+
+    Only a stored ``db`` was checked before, so the preset nobody configured
+    by hand could save a model of one width over a collection of another and
+    fail at the first query (claunch-i2i95). The probe is the width the
+    card's connection test just measured, which beats a sidecar that may
+    predate a server changing its output width under the same model name.
+    """
+    base = tmp_path / "index"
+    _write_store(base, "sessions.emb-a", dims=4096, model="emb-a", model_key="emb-a")
+    doc = {"rag": {
+        "preset": "p",
+        "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                     "api_key": "rag-secret", "embedding_model": "emb-a"}],
+    }}
+    error = search_anything._db_width_conflict(doc, base, probe_dims=768)
+    assert error and "emb-a" in error and "4096" in error and "768" in error
+    # the width the collection already holds is no conflict
+    assert search_anything._db_width_conflict(doc, base, probe_dims=4096) is None
+    # a named DB that does not exist yet has nothing to conflict with
+    assert search_anything._db_width_conflict(doc, tmp_path / "empty", probe_dims=768) is None
+
+
+def test_the_probe_width_rides_the_save_without_being_stored(tmp_path):
+    """``probe_dims`` is read from the body and must not reach the file.
+
+    ``proposed`` treats an unknown numeric key as a numeric setting, so the
+    key is taken out before the walk — otherwise every save would store the
+    card's last measured width as if it were configuration (claunch-i2i95).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.emb-a", dims=4096, model="emb-a", model_key="emb-a")
+        block = dict(_cfg(server, watch_interval=0))
+        block.update({
+            "preset": "p",
+            "presets": [{"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                         "api_key": "rag-secret", "embedding_model": "emb-a"}],
+        })
+        store.save({"rag": block})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            preset = {"id": "p", "source": "custom", "base_url": "http://h:1/v1",
+                      "api_key": "rag-secret", "embedding_model": "emb-a"}
+            response = await client.put("/api/rag/settings", json={
+                "presets": [preset], "preset": "p", "probe_dims": 768,
+            })
+            assert response.status == 400
+            assert "768" in (await response.json())["error"]
+
+            response = await client.put("/api/rag/settings", json={
+                "presets": [preset], "preset": "p", "probe_dims": 4096,
+            })
+            assert response.status == 200
+            assert "probe_dims" not in json.dumps(store.load())
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_read_paths_attributes_a_board_collection_to_its_reader(tmp_path):
+    """The DB panel said ``없음`` beside a collection search was reading.
+
+    ``_read_paths`` asked for the three fixed kinds only; a board corpus is
+    keyed ``beads-<hash>`` per root, so no reader was ever paired with it
+    (claunch-i2i95).
+    """
+    base = tmp_path / "index"
+    base.mkdir()
+    service = rag.RagService(root_dir=base)
+    root = tmp_path / "board"
+    root.mkdir()
+    key = service._key("beads", root)
+    service._watched = {key: root}
+    cfg = {"db": "kept", "model_key": "kept"}
+    paths = search_anything._read_paths(service, base, cfg)[""]
+    assert base / f"{key}.kept.zvec" in paths
+    assert base / "sessions.kept.zvec" in paths
+
+
 def test_the_dbs_route_lists_collections_and_the_presets_that_read_them(tmp_path):
     async def run():
         endpoint = Endpoint()
