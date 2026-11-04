@@ -53,10 +53,12 @@ const server = http.createServer((req, res) => {
    default compact card — and the per-density rules reach it because
    sessionGridTipStyles re-scopes every `#session-list …` rule onto `#sg-tip`
    verbatim, `[data-rail-mode="compact"]` and all.
-   Compact tips draw the spawn+pin pair (claunch-g6ecv — the pair the compact
-   card wears by name) and hide the other session actions and both refreshes;
-   the key picker is independently covered by sessionkey_browser. Hidden
-   controls must stay hidden when the copied card narrows. */
+   The compact tip draws no session action button: the buttons line belongs
+   to the expanded card (claunch-5b12o.1, the operator withdrawing the
+   spawn+pin exception claunch-g6ecv had put on the collapsed card), so the
+   spawn+pin pair and the other three actions are all hidden, as are both
+   refreshes; the key picker is independently covered by sessionkey_browser.
+   Hidden controls must stay hidden when the copied card narrows. */
 const BUTTONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info",
   ".sess-status-check-rowref", ".sess-brief-rowref"];
 const ACTIONS = [".sess-plus", ".sess-pin", ".sess-observe", ".sess-note-edit", ".sess-info"];
@@ -126,16 +128,14 @@ const REFRESHES = [".sess-status-check-rowref", ".sess-brief-rowref"];
     assert.ok(got.pinned, "a right-click pins the card");
     assert.ok(got.actions !== null, "the pinned card holds the list's row");
     assert.deepEqual(offActions(got), [], `every painted button sits on the buttons line at ${got.width}px`);
-    // The spawn+pin pair is drawn on the compact card by name (claunch-g6ecv)
-    // and the tip is a copy of one; the other three actions are expanded-only
-    // — and both expectations are pinned, so this file cannot quietly stop
-    // covering them by having them disappear for another reason.
+    // The buttons line is the expanded card's (claunch-5b12o.1, the operator
+    // withdrawing the spawn+pin exception claunch-g6ecv added to the compact
+    // card); the tip is a copy of a compact row, so no session action is
+    // painted there — and the expectation is pinned, so this file cannot
+    // quietly stop covering it by having the buttons disappear for another
+    // reason.
     assert.equal(got.mode, "compact", "the tip copies the list row's compact density");
-    for (const sel of [".sess-plus", ".sess-pin"]) {
-      assert.ok(painted(got).includes(sel),
-        `${sel} rides the compact card, so the compact tip draws it`);
-    }
-    for (const sel of [".sess-observe", ".sess-note-edit", ".sess-info"]) {
+    for (const sel of ACTIONS) {
       assert.ok(unpainted(got).includes(sel),
         `${sel} is the expanded card's, so the compact tip does not draw it`);
     }
