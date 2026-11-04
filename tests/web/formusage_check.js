@@ -423,6 +423,56 @@ async function main() {
   check("the key rows and the profile's rows draw the same columns",
     row1.length === row2.length && row1.length === windowsBox.children.length, true);
 
+  /* ---- a key window with no percentage keeps the bar's place too ---- */
+  // A key cell stacks its parts vertically (head, bar, countdown) instead of
+  // the profile row's four-column grid, so the bar is child 1 and the
+  // countdown child 2. A window that reports a detail line has no usable
+  // percentage, and that is exactly where the bar used to vanish and the
+  // countdown ride up — the same regression the profile-row assertions above
+  // pin, on the other renderer (claunch-hz9ma.1.1). `atCell` reads a missing
+  // child as "" so the failure is a check, not a TypeError that would hide
+  // every check after it.
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      next: { key_id: "k-1", strategy: "rotation", fallback: null },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true,
+          usage: { windows: [
+            { name: "five_hour", detail: "12 calls this machine",
+              resets_at: resetsIn(287) },
+            { name: "weekly", utilization: 40, resets_at: resetsIn(6997) },
+          ], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false,
+          usage: { windows: [
+            { name: "five_hour", utilization: 5, resets_at: resetsIn(287) },
+            { name: "weekly", utilization: 100, resets_at: resetsIn(6997) },
+          ], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  const atCell = (cell, index) =>
+    ((cell && cell.children[index] && cell.children[index].className) || "");
+  const detailCell = cellsOf(keysBox.children[0])[0];
+  const pctCell = cellsOf(keysBox.children[1])[0];
+  check("a key window that reports a detail line says so",
+    cellValue(detailCell), "12 calls this machine");
+  check("a key window with a detail line still has three parts",
+    detailCell.children.length, 3);
+  check("...with the bar's place kept, unpainted",
+    atCell(detailCell, 1), "new-usage-bar-slot");
+  check("...so its countdown sits under it in the same unit",
+    [atCell(detailCell, 2), cellReset(detailCell)],
+    ["new-usage-cell-reset", "resets in 4h47m"]);
+  check("a percentage key window paints that same place",
+    [atCell(pctCell, 1).startsWith("new-usage-bar "),
+     atCell(pctCell, 2), cellReset(pctCell)],
+    [true, "new-usage-cell-reset", "resets in 4h47m"]);
+
   /* A pool that shrinks under the tick leaves a hidden box ticked. A hidden
      answer must not ride the submit as if it were chosen, so the render
      clears it. */
