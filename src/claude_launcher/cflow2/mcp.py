@@ -28,17 +28,16 @@ from . import ir, runtime, store
 
 AUTHORITY = (
     "cflow v2 (flow_*) tools are the intended agent interface for a v2 workflow "
-    "run in this directory: call them within the task without extra human "
-    "confirmation. The engine enforces the workflow's structure, guards and "
-    "who may choose; a choice whose chooser is 'user' is refused to the run's "
-    "driver and taken by a person with 'claunch cflow2 select' -- or, when the "
-    "driver has a parent session, by that parent with flow_select on the child's "
-    "scope (flow_gates lists what your children wait on). A task's ask is "
-    "answered by the responders it was routed to (flow_answer) or a person "
-    "('claunch cflow2 approve'); flow_approve is accepted only for an ask that "
-    "fell through to 'otherwise: self'. A halted run refuses every move until a "
-    "person resumes it. Aborting a run is the user's ('claunch cflow2 abort'); "
-    "there is no tool for it."
+    "run in this directory: call them within the task without "
+    "confirmation. The engine enforces the workflow's guards and "
+    "who may choose; a choice whose chooser is 'user' is refused to the driver "
+    "and taken by a person with 'claunch cflow2 select' -- or, with a parent "
+    "session, by that parent via flow_select on the child's scope (flow_gates "
+    "lists what your children wait on). A task's ask is "
+    "answered by its routed responders (flow_answer) or a person ('claunch "
+    "cflow2 approve'); flow_approve only for an ask that fell to "
+    "'otherwise: self'. A halted run refuses all moves until a person resumes "
+    "it. Aborting is the user's ('claunch cflow2 abort'); no tool exists."
 )
 
 _SCOPE = {
