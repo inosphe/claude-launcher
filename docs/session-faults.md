@@ -276,6 +276,16 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   기록이 `until`을 추정해 채운 경우 그 값은 신원이 아니므로, 옛 기록은 하네스가
   시각을 적었을 때만 `until`로 맞춘다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+- 재개 후 유예 (claunch-x9agn): 세션이 pause·hold·kill에서 다시 실행되거나
+  (respawn·wake·resume) 키 변경·borrow·redefine으로 재시작되면, 데몬은 그 시각을
+  `Session.resumed_at`에 남기고 그 뒤 `daemon.fault_resume_grace`초(기본 30, 0이면
+  끔) 동안 그 세션을 자동 pause하지도 자동 키 전환하지도 않는다. 재개한 대화가
+  이전 실행이 멈춘 한도 문구를 화면에 다시 그리면, 그 문구가 새 키·프로필이
+  응답하기 전에 세션을 다시 pause했다. 유예 중에는 세션 상단 timer line에
+  `fault`/`grace` chip(⛨ `usage-limit grace`)이 남은 시간을 보인다. 유예가 끝난
+  뒤의 pass에서 한도 문구가 아직 화면 하단에 있으면 이전처럼 pause한다(pass가
+  30초 주기라 재개부터 최대 약 60초). 데몬 재기동 뒤의 자동 복원은 유예 대상이
+  아니다(`resumed_at`은 메모리에만 있다).
 - 자동 키 전환 (claunch-d2t79): 키 풀을 가진 프로필의 세션이 `usage_limit`을
   맞으면, 그 세션이 스스로 켜 둔 경우(`SessionDef.auto_key_switch`, 기본 꺼짐)
   pause 전에 다른 키로 갈아탄다(`daemon/key_switch.py`). 같은 pass에서 이 전환이
