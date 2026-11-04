@@ -149,6 +149,10 @@
       이 페이지의 동작을 사용자 이름으로 호출할 수 있습니다. 그래서 이 페이지의 변경은 감사 기록에 선언된 주체(actor)와 함께 남습니다.
     </p>
     <p class="vm-muted" id="vm-control-status" hidden></p>
+    <div id="vm-leases" hidden>
+      <p class="vm-muted">빼앗은 control은 빌린 것입니다. 빼앗은 세션이 종료되거나 그 quick-fork가 merge되면 원 주인에게 돌아갑니다(hold·pause·데몬 재시작은 제외).</p>
+      <ul id="vm-leases-list"></ul>
+    </div>
     <table id="vm-grants"><thead><tr><th>세션</th><th>view</th><th>control</th><th>exec</th><th>files</th><th>VM 전용</th><th></th></tr></thead><tbody></tbody></table>
     <div id="vm-grant-add">
       <label class="sr-only" for="vm-grant-session">권한을 줄 세션</label>

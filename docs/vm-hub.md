@@ -635,3 +635,66 @@ stay open to many sessions).
   the steal names all holders (`steal: true`, or the checkbox, which lists them
   all); `steal_from` with one name is refused while another holder remains.
 - A daemon restart is needed for the rule (server side).
+
+## A steal is a loan
+
+Every steal of `control` (the /vm form, the session pane, `grant --steal`, the
+approval of a request) is saved on the VM record as a lease:
+`{from, to, scopes, at}` — `to` took `scopes` (`control`, plus `exec` when it went
+with it) from `from`. `control` and `exec` are stored and restored together. The
+records are in the VM's `leases` (saved, user view only; a session's view of a
+VM does not carry them). A steal made before this feature left no record, so
+nothing is given back for it.
+
+**When it is given back.** (a) the borrowing session ends (the exit hook, reason
+`kill`), and (b) its quick-fork merges (reason `merge`); (c) the user presses
+"원 주인에게 반환" (`POST /api/vm/{id}/return_steal {session}`, user only,
+reason `manual`, at once). A held, paused or idle session, an answered turn, and
+a daemon restart give nothing back (a restart keeps the records; the exit hook
+does not run for a daemon going down). Only a borrower that still holds `control`
+gives anything back.
+
+**The chain A→B→C.** The leases are `A→B` and `B→C`. When C ends, control goes to
+B. If B has ended, the walk follows `A→B` and gives it to A, and so on. Whether
+a session has ended is read from the session manager (`session_alive`): it is
+gone when the manager has no such session or it exited and is not held (a
+held session waits and counts as alive). If no session on the way is alive,
+`control` is left empty. A link that is missing or a record that is malformed
+is never guessed at: a missing link ends the walk with `control` empty, and a
+damaged `leases` list is dropped on load and nothing is returned (the holder
+keeps what it has). A borrower that was itself stolen from, and ends first,
+gives nothing back but its record stays as a link for the walk.
+
+**By-hand changes.** If the user revokes the borrower's `control` (or `view`,
+which takes it with it) before the return, that is not a steal: the borrower's
+lease and the links it inherited are cancelled and nothing is returned. A plain
+grant on an empty control creates no lease.
+
+**Audit.** `steal_control` (vm, from, to, scopes) at the steal;
+`steal_return` (vm, from = the borrower, to = who got it back or empty, reason
+`kill`|`merge`|`manual`) at the return; `user_return_steal` for the button.
+Several holders from before the one-holder rule are each given back what was
+taken from them.
+
+**Panels.** The /vm page lists every lease of the selected VM, the session pane
+only its session's, each with the "원 주인에게 반환" button. Server rule: a daemon
+restart is needed.
+
+## VM access in the quick-fork form
+
+The dashboard's quick-fork form (⑂ fork) lists the VMs the origin holds a grant
+on (`GET /api/vm`; hidden when there are none or the VM feature is off). Per VM:
+
+- `view` and `files` start as the origin's; `control` and `exec` start off. Every
+  box can be changed per VM.
+- A VM whose `control` is held (by the origin or another session) shows the
+  steal box "<holders>에서 control을 빼앗아 부여", unchecked. Ticking `control`
+  without it is refused by the form before anything is sent.
+- `exec` asks for a confirmation, as the grant forms do.
+- After `POST /api/sessions/{origin}/quick-fork` returns the copy's name, the
+  page applies each row with `POST /api/vm/{id}/grant {session, scopes, steal?}`
+  (the user-only route; the copy cannot call it). A grant the daemon refuses is
+  listed in a message and the copy stays. The copy is created before its
+  grants, so it can start before they land.
+- A steal made this way is a lease (see "A steal is a loan"): the copy's
+  merge gives the control back to the one it was taken from.

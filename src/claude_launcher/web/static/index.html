@@ -970,6 +970,14 @@
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>
+          <!-- The VMs the origin holds a grant on, each with the scopes the copy
+               gets: view/files are inherited, control/exec start off, and a
+               held control is taken only with the steal box. Drawn by
+               renderQuickForkVms; hidden when the origin has none. -->
+          <div id="new-quick-fork-vms" class="hidden">
+            <p class="wf-note">VMs — the copy's access (view and files follow the origin; control and exec are off)</p>
+            <div id="new-quick-fork-vm-rows"></div>
+          </div>
           <!-- Off by default: the copy ends only when you press merge. -->
           <label class="check">
             <input type="checkbox" name="quick_fork_self_merge">

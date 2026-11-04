@@ -347,7 +347,29 @@ function renderControlStatus(vm) {
       + "자동으로 회수하지 않으며, 새 control 부여는 보유자 모두에게서 빼앗아야 허용됩니다."
     : "";
 }
+/* The steals not yet given back: who took control (and exec) from whom, with the
+   "give it back now" button. A session's pane lists only its own. */
+function renderLeases(vm) {
+  const rows = (vm.leases || []).filter((l) => !SESSION || l.to === SESSION);
+  $("vm-leases").hidden = !rows.length;
+  const ul = $("vm-leases-list");
+  ul.replaceChildren();
+  for (const l of rows) {
+    const li = document.createElement("li");
+    const what = l.scopes.includes("exec") ? "control+exec" : "control";
+    li.appendChild(document.createTextNode(`${l.to}이(가) ${l.from}에게서 빼앗은 ${what} `));
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "원 주인에게 반환";
+    b.setAttribute("aria-label", `${l.to}이(가) 빼앗은 control 반환`);
+    b.addEventListener("click", () => act(`${l.to}의 control 반환`,
+      () => post(`api/vm/${encodeURIComponent(vm.id)}/return_steal`, { session: l.to })));
+    li.appendChild(b);
+    ul.appendChild(li);
+  }
+}
 function renderGrants(vm) {
+  renderLeases(vm);
   renderControlStatus(vm);
   refreshSteal();
   const body = document.querySelector("#vm-grants tbody");
