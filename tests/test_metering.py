@@ -1730,10 +1730,28 @@ def _two_sessions_streaming(clock, fp="fp", other_fp=None):
         clock.t += 0.25
         m1.chunk(_delta("x" * 40))
         m2.chunk(_delta("x" * 80))
-        a.flush()
+        _flush_until_written(a)
         if b is not a:
-            b.flush()
+            _flush_until_written(b)
     return a, b
+
+
+def _flush_until_written(board, attempts=20):
+    """Flush until every live file the board owes has been replaced.
+
+    ``flush`` swallows a failed atomic replace and leaves the session dirty
+    for the next flush (a quarter of a second later in the shim): on Windows a
+    scanner or indexer holding the old file open makes ``os.replace`` raise
+    ``PermissionError`` for a moment. A test that flushes once per fake tick
+    has no next tick, so a single failure on the last one drops that tick's
+    chunk from the file (7 of 8 chunks read 35 tok/s, not 40; claunch-wgdcm).
+    """
+    for _ in range(attempts):
+        board.flush()
+        if not any(st["dirty"] for st in board._sessions.values()):
+            return
+        time.sleep(0.01)
+    raise AssertionError("live board could not write its files")
 
 
 def test_sessions_sharing_a_shim_carry_its_total_mean_and_count(home):

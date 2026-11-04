@@ -2214,6 +2214,38 @@ def test_sessions_list_survives_a_config_it_cannot_read(home, tmp_path):
     asyncio.run(run())
 
 
+def test_sessions_list_survives_a_config_it_cannot_read_outside_the_read_window(
+    home, tmp_path, monkeypatch
+):
+    """claunch-wgdcm: the poll that reaches the unreadable file for real.
+
+    ``store.load`` serves a repeat read inside ``_DISK_TTL`` from memory, so
+    the test above only reaches the broken file when the machine is slow
+    enough for 100ms to pass between ``mgr.create`` and the poll (a loaded
+    sweep). With the window at zero the poll always does.
+    """
+    monkeypatch.setattr(store, "_DISK_TTL", 0.0)
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            store.path().write_text("{ this: is: not: valid", encoding="utf-8")
+
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            assert [s["name"] for s in body["sessions"]] == ["s1"]
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_sessions_list_attaches_the_cached_briefing_digest(home, tmp_path):
     """The list poll pours each session's cached one-liner: a rail row can
     show it folded or open, and a browser refresh repaints it from the
