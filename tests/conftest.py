@@ -92,6 +92,22 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if test_tiers.is_tail(m.name for m in item.iter_markers()):
             item.add_marker(getattr(pytest.mark, test_tiers.TAIL_MARKER))
+        if sys.platform == "win32" and item.path.name.startswith(VM_TEST_PREFIX):
+            item.add_marker(_VM_ON_WINDOWS)
+
+
+# The VM feature (daemon/vm*.py, tart guests) is developed and run on macOS
+# only for now. On a Windows host its tests fail on POSIX-only behaviour
+# (share paths with a drive colon, 0o600 file modes, dir_fd host traversal),
+# so every tests/test_vm*.py test is skipped on Windows.
+# ROLL BACK when Windows hosts are supported: delete VM_TEST_PREFIX,
+# _VM_ON_WINDOWS and the two lines that use them in
+# pytest_collection_modifyitems, then fix what fails on Windows.
+VM_TEST_PREFIX = "test_vm"
+_VM_ON_WINDOWS = pytest.mark.skip(
+    reason="VM feature is macOS-only for now; Windows support is not implemented "
+    "(see VM_TEST_PREFIX in tests/conftest.py to roll back)"
+)
 
 
 def pytest_sessionstart(session):

@@ -71,6 +71,7 @@ _STATUS = {
     "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
+    "vm_files_unsupported": 501,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
     "vm_share_limit": 400, "vm_preset_copy": 409, "vm_destroy_granted": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
     "vm_disabled": 409,
