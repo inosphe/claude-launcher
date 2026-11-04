@@ -116,10 +116,11 @@ thread and no session.
   (`unread`) and how many of those the owner wrote after your last read
   (`owner_unread`): almost nothing is typed into your terminal by default,
   so a nonzero `owner_unread` means read the thread again. Read it with
-  `thread_read` and answer with `thread_reply` on that thread — name the
-  session you are answering (`@<session>` or `@all`) or your answer stays in
-  the thread unread until it next reads it. To answer the user alone, write
-  `@user`: nobody's terminal, the owner included, is typed into. Do not carry
+  `thread_read` and answer with `thread_reply` on that thread. Name the
+  session you are answering (`@<session>` or `@all`); with no mention at all
+  your answer is typed into the owner alone, so name the session you mean. To
+  answer the user alone, write `@user`: nobody's terminal, the owner
+  included, is typed into. Do not carry
   out the thread's work yourself (no edits, commits, commands or child
   sessions for it), and do not use the QA tools
   (`qa_*`) for it: a question for the user goes into your reply. You cannot
