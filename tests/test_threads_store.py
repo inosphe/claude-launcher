@@ -604,6 +604,16 @@ def test_t13_mentions_are_the_at_tokens_of_a_body():
     assert S.parse_mentions("`@s2` 코드 안") == ["s2"]                   # no fence parsing: it is a token
 
 
+def test_t13b_the_user_mention_is_a_token_like_any_other():
+    """claunch-ikcvw: ``@user`` names the person reading the thread, not a
+    session; the store still only reads the token and the route decides that
+    it adds no target."""
+    assert S.MENTION_USER == "user"
+    assert S.parse_mentions("@user 이건 사용자에게만") == [S.MENTION_USER]
+    assert S.parse_mentions("@user @all") == ["user", "all"]
+    assert S.parse_mentions("@users 는 이름이 다르다") == ["users"]
+
+
 def test_t14_a_forked_thread_seats_its_guest_in_the_same_write(st):
     """claunch-uaxp8: the owner of a forked thread does not exist yet when the
     thread is written, so ``open(guest=...)`` writes the thread and the

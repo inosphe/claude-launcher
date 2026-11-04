@@ -65,9 +65,13 @@ stopping (claunch-p9wes.1).
 
 Mentions (claunch-p9wes.1.1). A message body may name the sessions it is
 for: ``@<session>`` names one, ``@all`` names every participant of the
-thread (the owner and its guests). :func:`parse_mentions` only reads the
+thread (the owner and its guests), and ``@user`` names the person reading
+the thread (claunch-ikcvw). :func:`parse_mentions` only reads the
 tokens; which of them are participants, and who is then typed in, is the
-route's call (daemon/threads_api.py).
+route's call (daemon/threads_api.py). ``@user`` is how a guest says
+something to the user alone: the user reads the thread anyway, and the
+token names no session, so an ``@user`` message is typed into nobody
+unless it also names a session.
 
 Operator conversations (claunch-iw5i8.12.1). An operator v2 keeps its
 conversation with the user here too, in threads whose owner is
@@ -138,6 +142,13 @@ def operator_owner(op_id: str) -> str:
 #: The mention that names every participant of a thread -- its owner and its
 #: guests (claunch-p9wes.1.1).
 MENTION_ALL = "all"
+
+#: The mention that names the person reading the thread and no session
+#: (claunch-ikcvw). A guest writes ``@user`` to say something to the user
+#: alone: the owner and the other guests are not typed into, because the
+#: token matches none of them. A session of this name is read as the user
+#: first -- the alias is reserved and is not a participant.
+MENTION_USER = USER
 
 #: ``@name`` in a message body. The ``@`` must not follow a name character,
 #: so ``bob@example.com`` is an address and not a mention; the name takes the

@@ -83,7 +83,8 @@ as a guest (`thread_invite`; `thread_uninvite` removes it). A guest is a
 reviewer and advisor in that thread and nothing more.
 
 A message names who it is for: `@<session>` names one session, `@all` names
-the thread's owner and every guest.
+the thread's owner and every guest, `@user` names the person reading the
+thread and no session.
 
 - No mention at all: the message goes to the owner alone, exactly as in a
   thread without guests. Guests are not typed into; they read the thread
@@ -94,6 +95,11 @@ the thread's owner and every guest.
   The owner is included only when it is named, so a user who wants guest B
   to answer first names B and the owner learns it later from the thread.
 - `@all`: the owner and every guest.
+- `@user`: nobody's terminal — the user reads it in the pane. As a guest,
+  write `@user` when the answer is for the user alone: no mention would
+  type it into the owner, and the owner has nothing to act on. `@user`
+  adds no session, so `@user @s1234` still reaches `s1234`, while `@user`
+  with `@all` reaches everyone (`@all` is the wider claim).
 - Nobody is typed into for its own message, and a name that is no
   participant of the thread is returned in `unknown_mentions` and delivered
   to nobody — check that field when a reply seems to have gone nowhere.
