@@ -404,7 +404,10 @@ ask:
   `· 선택 열림`(선택만 있는 런)으로, Mega threads는 세션 행의 cflow 줄을 `⚑`와
   `○`로 나누고, 터미널 위 답변 스트립(`#term-cflow`)은 선택만 있는 런에도 서되
   머리에 `· ○ optional`을 붙이고 박스에 `optional` 클래스를 단다 — 그 런의 버튼은
-  그대로 눌리는 실제 선택이므로 스트립을 없애지 않는다.
+  그대로 눌리는 실제 선택이므로 스트립을 없애지 않는다. Observer 페이지도 같은
+  판정을 쓴다(claunch-hbmhk.1.1): `activity()`의 대기 판정과 `actionCount()`의
+  빚진 것 수는 `gated`이면서 `blocking !== false`인 런만 세므로, 선택만 열려 있는
+  세션은 「응답·작업 대기」가 아니라 「유휴」로 남고 좌측 배지 수에 더해지지 않는다.
 - 질문 본문의 markdown(claunch-ns4kd): `/api/cflow2/rail`의 `answers[]` 항목은
   `prompt`(한 줄로 접고 400자에서 자른 값 — 터미널 스트립과 상태 줄이 읽는다)와
   `prompt_md`(ask가 쓴 그대로의 줄바꿈을 보존하고 1600자에서 자른 값)를 함께 싣는다.
