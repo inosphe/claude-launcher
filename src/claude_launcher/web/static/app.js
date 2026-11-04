@@ -39643,7 +39643,9 @@ function simDefaultsCard() {
   if (bModel && (draft.judge_profile || draft.interpreter_profile) === draft.interpreter_profile && draft.judge_model === bModel) {
     form.appendChild(el("p", "wf-note", "The judge uses the interpreter's model: its judgement is not independent."));
   }
-  const save = el("button", "wf-btn", simDefaultsBusy ? "Saving…" : "Save simulation models");
+  // The card's one primary action: the three fields above save themselves
+  // nowhere until this is pressed.
+  const save = el("button", "wf-btn approve", simDefaultsBusy ? "Saving…" : "Save simulation models");
   save.type = "submit";
   save.disabled = simDefaultsBusy;
   form.appendChild(save);
@@ -41859,7 +41861,9 @@ function webdebugSwitchRow(field, label, detail) {
 
 function webdebugSettingCard() {
   const st = webdebugSetting;
-  const card = el("section", "ws-add sweep-batch-settings");
+  // Its own class: this card wore sweep-batch-settings, which is the other
+  // card's, so a rule written for one of them styled both.
+  const card = el("section", "ws-add webdebug-settings");
   card.appendChild(el("h3", null, "Web debug browser"));
   card.appendChild(el("p", "wf-note",
     "The browser behind /webdebug (the 'web' button in a session's terminal " +

@@ -6757,6 +6757,76 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .model-tier-add-field { flex: 1 1 180px; }
   .model-tier-add-tier-field { flex: 1 1 200px; }
 }
+/* Settings > the other cards (claunch-61vj3.1.1): delegated child session,
+   post-merge sweep batching, key switch, web debug and sim defaults. Like the
+   Model tiers card above, these had no rule of their own, so their controls
+   fell in at the browser's inline defaults and a field's name sat on the same
+   line as an input of the browser's sizing. Each card is a few named fields
+   and one action, so the shape is the same everywhere: labelled fields in a
+   two-column grid where the fields are short and independent (delegate, sim
+   defaults), one field per line where each carries its own explanation
+   (sweep batching, key switch, web debug), and at most one primary button.
+   The last three share .sweep-batch-field/.sweep-batch-row — their builders
+   already reuse those classes across the three cards. */
+.delegate-settings {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px; align-items: start;
+}
+/* The prose and an error span the grid; the fields share the rows below. */
+.delegate-settings > h3, .delegate-settings > .wf-note,
+.delegate-settings > .error { grid-column: 1 / -1; }
+.delegate-field {
+  display: flex; flex-direction: column; gap: 5px; min-width: 0;
+  color: #7d8590; font-size: 12px;
+}
+.delegate-field select {
+  width: 100%; min-width: 0; box-sizing: border-box; padding: 8px;
+  font-size: 13px; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+/* One field per line: its label, value and Reset form a single row, and the
+   explanation of what the value does sits directly under that row. */
+.sweep-batch-field, .sweep-batch-row {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid #21262d;
+}
+/* The first field of a card follows its prose, so it needs no divider. */
+.sweep-batch-settings > .sweep-batch-field:first-of-type,
+.key-switch-settings .sweep-batch-row,
+.webdebug-settings > .sweep-batch-field:first-of-type {
+  margin-top: 4px; padding-top: 0; border-top: none;
+}
+.sweep-batch-label {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  color: #c9d1d9; font-size: 12.5px;
+}
+.sweep-batch-label input[type="number"] {
+  width: 7ch; min-width: 52px; box-sizing: border-box; padding: 6px 8px;
+  font-size: 13px; text-align: right; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.sweep-batch-label input[type="checkbox"] { margin: 0; }
+.sweep-batch-unit { color: #7d8590; }
+/* Reset is the row's only action; at the far right the values read straight
+   down the card. */
+.sweep-batch-label .wf-btn { margin: 0 0 0 auto; padding: 4px 10px; font-size: 12px; }
+.sweep-batch-field > .wf-note, .sweep-batch-row > .wf-note { margin: 0; }
+/* Sim defaults picks its two models in a .llm-settings-form; what the card
+   adds is the Save row (the form's only button) spanning the grid. */
+.sim-defaults-settings .llm-settings-form > p { grid-column: 1 / -1; }
+.sim-defaults-settings .llm-settings-form .wf-btn {
+  grid-column: 1 / -1; justify-self: start;
+}
+@media (max-width: 720px) {
+  .delegate-settings { grid-template-columns: minmax(0, 1fr); }
+  /* .llm-settings-form collapses at 600px for cards that sit alone; on this
+     page the block next to it has folded at 720px, and one card still holding
+     two columns reads as a mistake. */
+  .sim-defaults-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .delegate-field select { font-size: 16px; }
+  .sweep-batch-label input[type="number"] { font-size: 16px; }
+  .sweep-batch-label .wf-btn { margin-left: 0; }
+}
 /* Settings > Providers (#/settings/providers): the installed list on top, the
    install form under it. One field per row -- label column, control, note --
    so a long list of schema keys stays scannable, and the note sits under the
