@@ -2964,9 +2964,21 @@ class SessionManager:
     def archive(self, name: str, *, reason: Optional[str] = None) -> AnySession:
         """Move an exited record out of the working fleet while retaining it.
 
-        The definition, conversation id, output log and lineage remain in
-        place, so archive is reversible through :meth:`respawn`. Repeating
-        the operation is idempotent and preserves the original archive time.
+        The definition, conversation id and lineage remain in place, so
+        archive is reversible through :meth:`respawn`. Repeating the
+        operation is idempotent and preserves the original archive time.
+
+        Filing a record is also the clean that ``clear-sessions --logs``
+        performs (claunch-i0vje.2): the session directory -- captured output,
+        scratch, uploads -- is removed and only the record stays. Doing it
+        here rather than in a route is what makes every way of filing take
+        it: a person's archive, :meth:`stop_and_archive`, and the clock in
+        :mod:`.auto_archive` all reach this method. :meth:`respawn` recreates
+        the directory (``Session.__init__``) and starts a fresh output log,
+        so resume still works; what the deleted directory held does not come
+        back. The removal is retried by a later archive of the same record --
+        a file still open on Windows, or a record filed before this rule
+        existed, leaves the rest to be taken then.
 
         This is the filing half alone, so it refuses a session that is still
         running: a record written as archived while its program runs would
@@ -2988,12 +3000,27 @@ class SessionManager:
         # Filing a held record away is its real ending: settle what it owed.
         self.unhold(name)
         self.settle_pause(name)
-        if not session.archived_at:
+        first_filing = not session.archived_at
+        if first_filing:
             session.archived_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
             )
             self.persist()
+        # The clean rides on the filing itself (claunch-i0vje.2). It runs on
+        # every call, not only the first: a second archive takes what an open
+        # file or an older daemon left behind, and doing it here is what makes
+        # stop_and_archive and the auto archive clock clean on the same terms.
+        taken = paths.session_dir(name)
+        shutil.rmtree(taken, ignore_errors=True)
+        cleaned = not taken.exists()
+        if not cleaned:
+            log.warning(
+                "archive of %s left part of %s in place (open file or "
+                "permissions); a later archive tries again", name, taken,
+            )
+        if first_filing:
             self.events.record(session, "archive", "세션 보관",
+                               cleaned=cleaned,
                                **({"reason": reason} if reason else {}))
             self._run_filed_hooks(session, "archived")
         return session

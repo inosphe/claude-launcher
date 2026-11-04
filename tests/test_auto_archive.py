@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
-from claude_launcher.daemon import auto_archive
+from claude_launcher.daemon import auto_archive, paths
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.session import DeadSession
@@ -82,7 +82,11 @@ def test_the_archive_event_names_the_clock(home):
     auto_archive.sweep_once(mgr, days=7, batch=5, now=NOW)
 
     events = [e for e in mgr.events.rows(record) if e["kind"] == "archive"]
-    assert events and events[-1]["details"] == {"reason": "auto-archive"}
+    # `cleaned` is the filing's other half (claunch-i0vje.2): the session
+    # directory was taken in the same call.
+    assert events and events[-1]["details"] == {
+        "reason": "auto-archive", "cleaned": True,
+    }
 
 
 def test_days_or_batch_zero_turns_the_sweep_off(home):
@@ -210,3 +214,19 @@ def test_install_starts_the_clock_with_the_app_and_stops_it_on_shutdown(home):
     running, task, after = asyncio.run(run())
     assert running
     assert task.cancelled() and after is None
+
+
+def test_the_clock_takes_the_session_directory_of_what_it_files(home):
+    # The clock reaches manager.archive, so the clean that a person's archive
+    # makes (claunch-i0vje.2) is the one the backlog gets: a record filed
+    # here leaves no scratch or captured output behind.
+    mgr = manager()
+    add_dead(mgr, "old", exited_days=10)
+    taken = paths.session_dir("old")
+    (taken / "scratch").mkdir(parents=True)
+    (taken / "scratch" / "proof.txt").write_text("x", encoding="utf-8")
+    (taken / "output.log").write_text("captured\n", encoding="utf-8")
+
+    assert auto_archive.sweep_once(mgr, days=7, batch=2, now=NOW)["archived"] == ["old"]
+    assert mgr.get("old").archived_at
+    assert not taken.exists()
