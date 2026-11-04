@@ -154,6 +154,7 @@ const build = new Function(
   slice("newUsageLevel") + slice("newUsageMoney") + slice("newUsageSpan") +
   slice("newUsageReset") +
   slice("newUsageWindowText") + slice("newUsageWindowParts") + slice("newUsageBar") +
+  slice("newUsageBarSlot") +
   slice("newUsageWindowLine") + slice("newUsageKeyCell") +
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
   slice("newUsageLender") + slice("newUsageSelector") +
@@ -261,6 +262,43 @@ async function main() {
   check("no window error is shown", note.textContent.includes("usage unavailable"), false);
   check("a single token cannot switch keys on a limit",
     autoRow.classList.contains("hidden"), true);
+
+  /* ---- a window with no percentage keeps the countdown in its column
+     (claunch-hz9ma.1) ----
+     A detail sentence, or an amount with no limit, leaves nothing for the
+     bar to fill. The row must still draw the bar's place: the countdown is
+     auto-placed into the next free column, so dropping the bar moved it into
+     the bar's own column and the two rows' countdowns stopped lining up. */
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      usage: {
+        source: "oauth-usage", cached: true, updated_at: Date.now() / 1000,
+        windows: [
+          { name: "five_hour", detail: "12 calls this machine",
+            resets_at: resetsIn(287) },
+          { name: "weekly", utilization: 40, resets_at: resetsIn(6997) },
+        ],
+      },
+    }),
+  });
+  await flush();
+  const detailRow = windowsBox.children[0];
+  const pctRow = windowsBox.children[1];
+  // `at` stays safe when the row loses a column: the failure is then reported
+  // as a check, instead of a TypeError that would hide every check after it.
+  const at = (row, index) =>
+    ((row && row.children[index] && row.children[index].className) || "");
+  check("a detail window's row has four columns",
+    detailRow.children.length, 4);
+  check("...with the bar's place kept, unpainted",
+    at(detailRow, 2), "new-usage-bar-slot");
+  check("...so its countdown is in the fourth column",
+    at(detailRow, 3), "new-usage-window-reset");
+  check("a percentage window counts down in that same column",
+    [at(pctRow, 2).startsWith("new-usage-bar "), at(pctRow, 3)],
+    [true, "new-usage-window-reset"]);
 
   /* ---- a pool: every key, and the next launch's key marked ---- */
   selectorNow = "work:claude";

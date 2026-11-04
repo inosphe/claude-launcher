@@ -2662,6 +2662,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-bar i { display: block; height: 100%; background: #3fb950; }
 .new-usage-bar.mid i { background: #d29922; }
 .new-usage-bar.high i { background: #f85149; }
+/* The bar's place in a row that has no percentage to fill it — a detail
+   sentence, or an amount with no limit. It keeps the column, so the
+   countdown after it stays in the fourth column instead of moving into the
+   bar's own (claunch-hz9ma.1), and it draws nothing. */
+.new-usage-bar-slot { min-width: 0; height: 4px; }
+.new-usage-cell .new-usage-bar-slot { flex: none; width: 100%; }
 /* The key rows: what the next launch takes, which key is in the token file
    now, and that key's own numbers. */
 .new-usage-keys { border-top: 1px solid #21262d; padding-top: 4px; }
@@ -2720,6 +2726,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   .new-usage-key-use { grid-area: 2 / 1 / 3 / 5; }
   .new-usage-window { grid-template-columns: 40px 64px minmax(0, 1fr); }
   .new-usage-window .new-usage-bar { display: none; }
+  .new-usage-window .new-usage-bar-slot { display: none; }
   .new-usage-window-reset { text-align: right; }
 }
 /* The manual choice per row (claunch-i985h): small, quiet, and never the
