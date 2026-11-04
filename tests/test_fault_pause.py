@@ -1,9 +1,10 @@
 """The fault pause clock (daemon/fault_pause.py, claunch-ijot0)."""
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from claude_launcher.daemon import actors, fault_pause
+from claude_launcher.daemon import actors, fault_pause, paths
 from claude_launcher.daemon.session import STATUS_IDLE
 
 
@@ -96,6 +97,64 @@ def test_the_clock_does_nothing_when_switched_off():
     assert clock.pass_once() == []
     clock = fault_pause.FaultPauseClock(manager, config=lambda: {})
     assert clock.pass_once() == ["s29"]
+
+
+# --- the pause the clock made is remembered on disk (claunch-ijot0.1) ----
+#
+# The clock's map dies with the daemon. Without the record, the first pass
+# after a restart pauses a session a person resumed while the same limit was
+# still on its screen.
+
+def test_a_restarted_daemon_does_not_pause_a_resumed_session_again(home):
+    manager = FakeManager(FakeSession("s29", _limit()))
+    assert fault_pause.sweep(manager, {}) == ["s29"]
+    assert fault_pause.read_record("s29")[fault_pause.KEY_FIELD] == "2026-11-02T00:00:00+00:00"
+    # A person resumes it before the reset and the daemon restarts: a fresh
+    # clock with an empty map, a fresh session reading the same limit.
+    manager.sessions["s29"] = FakeSession("s29", _limit())
+    restarted = fault_pause.FaultPauseClock(manager, config=lambda: {})
+    assert restarted.paused == {}
+    assert restarted.pass_once() == []
+    assert len(manager.paused) == 1
+    # The disk answer is remembered, so later passes do not read the file.
+    assert restarted.paused == {"s29": "2026-11-02T00:00:00+00:00"}
+
+
+def test_a_fault_with_no_stated_reset_is_recognised_across_a_restart(home):
+    """The record's capped ``until`` is a guess, not an identity: the key is
+    the live ``until`` (empty), which the restarted pass reads again."""
+    manager = FakeManager(FakeSession("s29", _limit(until="")))
+    assert fault_pause.sweep(manager, {}) == ["s29"]
+    record = fault_pause.read_record("s29")
+    assert record["until"] == "2026-10-31T04:00:00+00:00"  # the kind's window
+    assert record[fault_pause.KEY_FIELD] == ""
+    manager.sessions["s29"] = FakeSession("s29", _limit(until=""))
+    assert fault_pause.FaultPauseClock(manager, config=lambda: {}).pass_once() == []
+
+
+def test_a_new_reset_deadline_still_pauses_after_a_restart(home):
+    manager = FakeManager(FakeSession("s29", _limit()))
+    fault_pause.sweep(manager, {})
+    manager.sessions["s29"] = FakeSession("s29", _limit(until="2026-11-09T00:00:00+00:00"))
+    assert fault_pause.FaultPauseClock(manager, config=lambda: {}).pass_once() == ["s29"]
+
+
+def test_a_record_from_before_the_key_names_its_fault_by_its_stated_until(home):
+    """A file an older daemon wrote has no ``pause_key``. Its ``until`` stands
+    in when the harness stated it; a guessed one matches nothing."""
+    fault_pause.write_record("s29", _stated(), paused_at="2026-10-30T04:00:00+00:00")
+    target = paths.session_dir("s29") / fault_pause.RECORD
+    legacy = fault_pause.read_record("s29")
+    del legacy[fault_pause.KEY_FIELD]
+    target.write_text(json.dumps(legacy), encoding="utf-8")
+    assert fault_pause.paused_before("s29", "2026-11-02T00:00:00+00:00") is True
+    assert fault_pause.paused_before("s29", "2026-11-09T00:00:00+00:00") is False
+    # A guessed deadline (until_stated false) is the pause's own invention.
+    fault_pause.write_record("s29", _limit(until=""), paused_at="2026-10-30T04:00:00+00:00")
+    legacy = fault_pause.read_record("s29")
+    del legacy[fault_pause.KEY_FIELD]
+    target.write_text(json.dumps(legacy), encoding="utf-8")
+    assert fault_pause.paused_before("s29", "") is False
 
 
 AFTER = datetime(2026, 11, 2, 1, tzinfo=timezone.utc)

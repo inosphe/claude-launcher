@@ -27,7 +27,10 @@ Who is paused, measured on the live object every pass:
 
 A session this clock has paused once for a fault is not paused again for
 the same fault (the same reset deadline): a person who resumes it before the
-reset has decided to, and the clock does not undo that.
+reset has decided to, and the clock does not undo that. That memory outlives
+the daemon that made it: the pair is in :data:`RECORD` as well, so a restart
+-- which empties the in-memory map -- does not pause again a session a person
+resumed while the same limit was still on its screen (claunch-ijot0.1).
 
 Nothing resumes the session at the reset: whether to spend the new plan on it
 is the person's decision. What the daemon can do is say when that decision
@@ -93,9 +96,28 @@ RECORD_FIELDS = (
     "action", "resolved_by", "code",
 )
 
+#: The record field naming the fault the pause was made for: the ``until``
+#: the live reading carried, empty when the harness stated none. It is the
+#: key :func:`sweep` keeps per session, so a daemon that restarts can tell it
+#: already paused this session for this fault (claunch-ijot0.1). Not part of
+#: :data:`RECORD_FIELDS`: it is the clock's own bookkeeping and the pause
+#: view never shows it.
+KEY_FIELD = "pause_key"
+
 #: What a reading taken from :data:`RECORD` says in ``source``, so a reader
 #: can tell it apart from one taken off a screen (``session_fault``).
 SOURCE = "pause-record"
+
+
+def pause_key(record: dict) -> str:
+    """The identity of the fault a pause is made for: its stated ``until``.
+
+    The same key the clock keeps in memory, written to the session directory
+    too. A fault with no stated deadline keys on ``""`` -- the in-memory map
+    has always held that for it, so a restart matches it the same way rather
+    than inventing an identity the live reading would not repeat.
+    """
+    return str(record.get("until") or "")
 
 
 def enabled(cfg: Optional[dict] = None) -> bool:
@@ -122,9 +144,12 @@ def fault_to_pause(session) -> Optional[dict]:
 def sweep(manager, paused: Dict[str, str]) -> List[str]:
     """Pause every session :func:`fault_to_pause` names; the names paused.
 
-    ``paused`` maps a session to the ``until`` of the fault it was paused
-    for, kept across passes so a resumed session is not paused again for
-    the same fault.
+    ``paused`` maps a session to the key of the fault it was paused for
+    (:func:`pause_key`), kept across passes so a resumed session is not
+    paused again for the same fault. It dies with the daemon, so the record
+    on disk answers the same question for a pass that runs after a restart
+    (:func:`paused_before`); a match there is remembered in ``paused`` too,
+    so the file is read once per session, not once per pass.
     """
     out: List[str] = []
     for session in list(manager.list()):
@@ -133,8 +158,11 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
             record = fault_to_pause(session)
             if record is None:
                 continue
-            until = str(record.get("until") or "")
-            if paused.get(name) == until:
+            key = pause_key(record)
+            if paused.get(name) == key:
+                continue
+            if paused_before(name, key):
+                paused[name] = key
                 continue
             manager.pause(name, by=actors.make(actors.DAEMON, reason=REASON))
         except Exception:  # noqa: BLE001 -- one session must not stop the pass
@@ -145,11 +173,37 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
         # whose stamp is the session's, and two separate ``now()`` calls can
         # land on either side of a second boundary.
         write_record(name, record, paused_at=getattr(session, "paused_at", None))
-        paused[name] = until
+        paused[name] = key
         out.append(name)
     if out:
         log.info("fault pause (usage limit): %s", ", ".join(out))
     return out
+
+
+def paused_before(name: str, key: str) -> bool:
+    """Whether this clock already paused ``name`` for fault ``key`` before.
+
+    Answered from :data:`RECORD`, so it survives a daemon restart. The
+    session is a live candidate here -- exited and ending ones are filtered
+    by :func:`fault_to_pause` -- so a record for this fault means a person
+    resumed the session while the limit was still on its screen, and the
+    clock leaves that decision alone.
+
+    A record written before :data:`KEY_FIELD` existed has no key; its
+    ``until`` stands in only when the harness stated it, because a guessed
+    one is the pause's own invention and never equals a live ``until``.
+
+    A name reused by a later session can still find an older record; it has
+    to name the same deadline to match, and the cost of a false match is one
+    pause not made, not a wrong stop.
+    """
+    record = read_record(name)
+    if not record:
+        return False
+    stored = record.get(KEY_FIELD)
+    if stored is None:
+        return bool(record.get("until_stated")) and str(record.get("until") or "") == key
+    return str(stored) == key
 
 
 def kind_window(kind: str) -> float:
@@ -174,6 +228,9 @@ def write_record(name: str, record: dict, *, paused_at: Optional[str] = None) ->
     body = {k: record.get(k) for k in RECORD_FIELDS if k in record}
     stamp = paused_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     body["paused_at"] = stamp
+    # The key the pause was made for, from the live reading -- before the
+    # capping below invents an ``until`` this fault never carried.
+    body[KEY_FIELD] = pause_key(record)
     if _parse(body.get("until")) is None:
         window = kind_window(str(body.get("kind") or ""))
         paused = _parse(stamp)
