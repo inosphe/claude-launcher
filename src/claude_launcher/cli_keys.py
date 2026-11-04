@@ -231,7 +231,9 @@ def register(sub) -> None:
             "reader (get-token, inheritance, borrow checks) keeps seeing one "
             "effective token. Strategies: rotation (round-robin in file "
             "order), usage-min / usage-max (compare the keys' own usage where "
-            "the token is the account credential), random (a drawn key, which "
+            "the token is the account credential; a key with a window already "
+            "spent is left out, and a tie goes to the lower shorter window), "
+            "random (a drawn key, which "
             "'keys roll' re-draws), manual (the key you name)."
         ),
     )
