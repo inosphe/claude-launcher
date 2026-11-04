@@ -594,6 +594,37 @@ def test_user_mention_keeps_a_guest_message_out_of_the_owner_terminal(tmp_path):
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
 
 
+def test_user_mention_stays_the_user_even_with_a_session_named_user(tmp_path):
+    """claunch-ikcvw: the alias is reserved. A guest literally named ``user``
+    -- or any thread that has one -- must not turn ``@user`` into that
+    session's name: the token still names the person reading the thread, and
+    the build has to keep that, not only its docs. ``@all`` is a different
+    claim and still reaches that session, because it is a real participant."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "user"})
+
+        def counts():
+            return {n: len(s.delivered) for n, s in mgr.sessions.items()}
+
+        # @user names the person, not the guest of that name
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s1", "text": "@user 이건 사용자에게만"})
+        assert res["mentions"] == {"all": False, "targets": [], "user": True}
+        assert "guests_delivered" not in res and counts() == base
+        assert "unknown_mentions" not in res
+
+        # @all is every participant, and that guest is one of them
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s1", "text": "@all 모두 봐 주세요"})
+        assert res["mentions"] == {"all": True, "targets": ["user"]}
+        assert res["guests_delivered"] == {"user": True}
+        assert counts() == {**base, "user": base["user"] + 1}
+    run(tmp_path, scenario, names=("s1", "user"))
+
+
 def test_a_named_guest_that_cannot_take_it_now_says_why(home, tmp_path):
     """claunch-p9wes.1.1: a mention types the message into the guest, and the
     response carries the guest's ``hold`` the way the owner's ``hold`` is

@@ -118,7 +118,8 @@ thread and no session.
   so a nonzero `owner_unread` means read the thread again. Read it with
   `thread_read` and answer with `thread_reply` on that thread — name the
   session you are answering (`@<session>` or `@all`) or your answer stays in
-  the thread unread until it next reads it. Do not carry
+  the thread unread until it next reads it. To answer the user alone, write
+  `@user`: nobody's terminal, the owner included, is typed into. Do not carry
   out the thread's work yourself (no edits, commits, commands or child
   sessions for it), and do not use the QA tools
   (`qa_*`) for it: a question for the user goes into your reply. You cannot

@@ -547,7 +547,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         guests = [g["session"] for g in thread.get("guests") or []]
         everyone = [owner, *guests]
         all_named = thread_store.MENTION_ALL in tokens
-        named = [n for n in everyone if n in tokens]
+        # ``@user`` is the user even when a session of this thread is named
+        # ``user`` (claunch-ikcvw): the alias is reserved, so it never names
+        # that session here. ``@all`` still reaches it -- it is a real
+        # participant of the thread.
+        named = [n for n in everyone
+                 if n in tokens and n != thread_store.MENTION_USER]
         if all_named:
             chosen = everyone
         elif named:
