@@ -828,20 +828,29 @@ async def _uncancelled(awaitable):
     """Await ``awaitable`` to its end even if the caller is cancelled
     meanwhile, then pass the cancel on. The cleanup thread cannot be stopped
     anyway; returning early would let the run's terminal status be written
-    while its checkout is still being removed (claunch-whm4e.1.1.1.1)."""
+    while its checkout is still being removed (claunch-whm4e.1.1.1.1).
+
+    Once a cancel has arrived the await ends in CancelledError whatever the
+    awaitable ended with: an error it raised is logged and kept as the
+    cancel's ``__context__``, and does not replace the cancel
+    (claunch-whm4e.1.1.1.1.1). ``asyncio.wait`` leaves ``inner`` running
+    when the waiter is cancelled, as ``shield`` did, without leaving a
+    cancelled shield whose late error asyncio reports as never retrieved."""
     inner = asyncio.ensure_future(awaitable)
     cancelled = False
-    while True:
+    while not inner.done():
         try:
-            result = await asyncio.shield(inner)
-            break
+            await asyncio.wait({inner})
         except asyncio.CancelledError:
-            if inner.done():
-                raise
             cancelled = True
-    if cancelled:
+    if not cancelled:
+        return inner.result()
+    try:
+        inner.result()
+    except Exception as exc:  # noqa: BLE001 — the cancel wins; keep the error
+        log.warning("cleanup failed after a cancel: %s", exc)
         raise asyncio.CancelledError
-    return result
+    raise asyncio.CancelledError
 
 
 def _arg_paths(args: list) -> "list[tuple[str, str]]":
