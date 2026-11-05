@@ -174,6 +174,12 @@ CALLER_USER = "user"
 #: session registry and copied into the run (``DRIVER_PARENT``).
 CALLER_PARENT = "parent"
 
+#: The ``from`` candidate role that names the driver's own parent session
+#: (``{role: parent}``) instead of a mesh role (claunch-vjp4y.2). It is
+#: resolved by :mod:`.asks` from ``DRIVER_PARENT``, never from the roster: the
+#: parent relationship is not one the mesh knows.
+PARENT_ROLE = "parent"
+
 #: State key: the session that spawned the driver (``SessionDef.parent``),
 #: recorded at start and refreshed by the daemon's v2 scan. Empty means the
 #: run has no delegating parent -- the person answers every gate.
@@ -6290,11 +6296,14 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "prompt": str(raw.get("prompt") or ""),
         "brief": raw.get("brief"), "format": raw.get("format"),
         "choices": raw.get("choices"), "from_param": raw.get("from_param"),
+        "delegate": _ask_delegate(raw.get("delegate")),
+        "delegate_param": raw.get("delegate_param"),
         "require_reason": raw.get("require_reason") or False,
         "from": cands,
         "otherwise": base or ASK_OTHERWISE_HUMAN,
         "default_option": raw.get("default_option") or (default or None),
         "timeout": float(raw["timeout"]) if raw.get("timeout") else None,
+        "timeout_param": raw.get("timeout_param"),
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
         "on_unroutable": raw.get("on_unroutable") or None,
         "urgent": raw.get("urgent") is True,
@@ -6305,6 +6314,24 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
                      if isinstance(c, str)],
         "options": list(options) if options else None,
     }
+
+
+def _ask_delegate(raw: Any) -> Optional[Dict[str, Any]]:
+    """``ask.delegate`` normalised: ``{allow: [option, ...]}`` or ``None``.
+
+    ``allow`` names the options a delegated answerer -- the driver's parent
+    session -- may take. Every option stays visible to it (user decision,
+    thread th-ea5c7c: the parent picks within known bounds, so its answer is
+    a judgement rather than a guess), and taking one outside the list is
+    recorded as a refusal and drops the question to a person
+    (:func:`answer`). A person is never restricted."""
+    if not isinstance(raw, dict):
+        return None
+    allow = raw.get("allow")
+    if not isinstance(allow, list):
+        return None
+    names = [str(a).strip() for a in allow if str(a).strip()]
+    return {"allow": names} if names else None
 
 
 def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -6384,6 +6411,34 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
                 errors.append(f"from: {exc}")
         else:
             cands = []
+    dg = spec.get("delegate")
+    if spec.get("delegate_param") and not errors:
+        dg = _ask_delegate(param(spec["delegate_param"]))
+    timeout_v = spec.get("timeout")
+    if spec.get("timeout_param") and not errors:
+        # A shared procedure passes its caller's deadline through, so the
+        # definition that opens the question decides how long a candidate
+        # group holds it before the next one (or a person) gets it.
+        raw_t = param(spec["timeout_param"])
+        timeout_v = None
+        if raw_t not in (None, "", 0):
+            try:
+                timeout_v = float(raw_t)
+            except (TypeError, ValueError):
+                errors.append(f"timeout: {raw_t!r} is not a number of seconds")
+            else:
+                if timeout_v <= 0:
+                    errors.append(f"timeout: must be greater than 0, got {raw_t!r}")
+    if dg and decl is not None and brief is not None and not errors:
+        # The allow list names options of *this* brief, which only exists now:
+        # a shared procedure passes its caller's list through a param, so a
+        # name that the brief never offers is caught here.
+        offered = {str(o.get("name") or "").casefold()
+                   for o in (norm.get(decl["options"]) or [])}
+        missing = [a for a in dg["allow"] if a.casefold() not in offered]
+        if missing:
+            errors.append(f"delegate.allow names {', '.join(missing)}, which the brief's "
+                          f"options ({', '.join(sorted(offered))}) do not have")
     if errors:
         # A brief whose options do not match the fixed choices is a framing
         # slip the frame task can repair: it is asked again once, with the
@@ -6398,6 +6453,7 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
         return None
     return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
             "from": cands, "question_text": q_mod.render_text(norm, decl),
+            "delegate": dg, "timeout": timeout_v,
             "require_reason": bool(param(spec.get("require_reason")))}
 
 
@@ -6549,6 +6605,9 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         if brief is None:
             return
         spec["options"], spec["from"] = brief["options"], brief["from"]
+        spec["delegate"] = brief.get("delegate") or spec.get("delegate")
+        if brief.get("timeout") is not None:
+            spec["timeout"] = brief["timeout"]
     aid = f"ask2-{secrets.token_hex(4)}"
     rec: Dict[str, Any] = {
         "id": aid, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
@@ -6559,6 +6618,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "on_decline": None if spec["options"] else spec["on_decline"],
         "on_unroutable": spec.get("on_unroutable"), "urgent": bool(spec.get("urgent")),
         "criteria": list(spec.get("criteria") or []),
+        "delegate": spec.get("delegate"),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
@@ -6938,6 +6998,11 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "criteria": [str(c) for c in (rec.get("criteria") or [])],
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
+        # Which options a delegated answerer -- the driver's parent -- may
+        # take (claunch-vjp4y.2). Present only when the definition declared
+        # ``ask.delegate``; it is shown with the question so the parent's
+        # answer is a choice within known bounds (user decision).
+        "delegate": rec.get("delegate"),
         # when the ask was opened (``_open_ask``): the notification's age is
         # this stamp, not when a browser first saw the card (claunch-l9znm.1)
         "opened_at": rec.get("opened_at"),
@@ -7027,6 +7092,23 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
     return payload
 
 
+def _delegated_refusal(r: Run, rec: Dict[str, Any], choice: str, *, session: str) -> bool:
+    """Whether this answer must be refused instead of applied: a *delegated*
+    answerer picked an option outside the ask's ``delegate.allow``.
+
+    Only the driver's parent session is restricted (``gate_authority`` says
+    ``CALLER_PARENT``); a person, and any responder of a routed group, is
+    not. ``abstain`` and ``reframe`` always pass: they say "not mine to
+    decide" and "these options do not fit", which a bounded answerer must
+    still be able to say."""
+    allow = (rec.get("delegate") or {}).get("allow") or []
+    if not allow or choice in (ASK_ABSTAIN, q_mod.REFRAME):
+        return False
+    if gate_authority(r.state, session) != CALLER_PARENT:
+        return False
+    return str(choice).casefold() not in {str(a).casefold() for a in allow}
+
+
 def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
            by_session: str, cwd: Optional[str] = None, scope: Optional[str] = None,
            now: Optional[float] = None) -> Dict[str, Any]:
@@ -7068,18 +7150,36 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
         receipt.update({"ask": ask_id, "decision": choice, "reason": reason, "as": handle,
                         "workflow": r.state.get("workflow"), "task": rec.get("label")
                         or rec["node"], "prompt": rec.get("prompt")})
-        if choice == ASK_ABSTAIN:
+        refused = _delegated_refusal(r, rec, choice, session=session)
+        if choice == ASK_ABSTAIN or refused:
+            channel = "responder"
+            if refused:
+                # A delegated answerer's pick outside the declared allow list
+                # is not applied: it is recorded and counted as that
+                # answerer's abstention, so the question goes on to the rest
+                # of its group and then to a person (user decision, thread
+                # th-ea5c7c: no retry).
+                r.emit("ask_delegated_refused", ask=ask_id, node=rec["node"],
+                       instance=rec["instance"], decision=choice, by=handle,
+                       by_session=session, reason=reason,
+                       allow=list((rec.get("delegate") or {}).get("allow") or []),
+                       channel="responder")
             r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
                    decision=ASK_ABSTAIN, by=handle, by_session=session, reason=reason,
-                   channel="responder")
+                   channel=channel)
             # one member's abstention leaves the question with the rest of
             # its group; it moves on when every member abstained (or the
             # group's deadline passes) -- to the group's next untried member
             # when the group asks one at a time, else to the next group
             rec.setdefault("abstained", []).append(session)
             asked = {e.get("session") for e in rec.get("asked") or []}
+            why = "every responder of the group abstained"
+            if refused:
+                why = (f"{handle} chose {choice!r}, which is not in this ask's delegate.allow "
+                       f"({', '.join((rec.get('delegate') or {}).get('allow') or [])}); "
+                       f"recorded as its abstention")
             if asked <= set(rec["abstained"]):
-                _ask_escalate(r, rec, "every responder of the group abstained"
+                _ask_escalate(r, rec, why
                               + (f" (last: {handle}: {reason})" if reason else ""))
                 receipt["moved"] = True
                 receipt["note"] = ("recorded as an abstention; everyone asked abstained, so "
@@ -7089,6 +7189,11 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                 receipt["moved"] = False
                 receipt["note"] = ("recorded as an abstention; the others asked with you may "
                                    "still answer")
+            if refused:
+                receipt["refused"] = choice
+                receipt["note"] = (f"{choice!r} is not one of the options this answerer may "
+                                   f"take ({', '.join((rec.get('delegate') or {}).get('allow') or [])}); "
+                                   f"nothing was applied. " + receipt["note"])
             return
         _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
         _ask_resolve(r, rec, choice, by=handle, reason=reason, channel="responder")

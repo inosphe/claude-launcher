@@ -2153,6 +2153,49 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   그 답도 `by: <부모 세션>`으로 남는다. 드라이버 셸에서는 지금처럼 거절한다
   (`_refuse_own_session`).
 
+#### ask에 대한 위임과 허용 목록 (claunch-vjp4y.2)
+
+앞 절의 위임은 `chooser: user` 선택과 이동·보고 요청에만 걸려 있었다. `ask`(2.2)는
+응답자를 `from`의 후보 그룹으로 정하므로 같은 위임이 다른 길로 들어간다: 후보 하나를
+`{role: parent}`로 선언하면 그 그룹은 **드라이버 세션의 부모**다(사용자 결정, thread
+th-ea5c7c).
+
+```yaml
+ask:
+  prompt: …
+  from: [{role: parent}]
+  timeout: 900
+  delegate: {allow: [merge-by-agent]}
+  options: {merge-by-agent: {…}, merge-by-person: {…}, …}
+```
+
+- **해석**: `{role: parent}`는 메시 명부의 role이 아니다. 후보는 `driver_parent`
+  (`runtime.driver_parent_of`)로 풀리고(`asks.plan_route`), 그룹에는 그 세션 하나만
+  들어간다. 부모가 없는 런에서는 그 그룹이 「no parent session」 사유로 건너뛰어지고
+  질문은 다음 후보로, 후보가 없으면 `otherwise`대로 사람에게 간다. 같은 함수를 고친
+  `from`의 `scope` 처리(`responders.Pool.in_scope`, `ancestor`/`sibling`/`root` 순서)는
+  건드리지 않는다.
+- **전달**: 부모는 메시 명부의 멤버가 아니므로 메시 `decide` 메시지를 보낼 자리가
+  없다. 질문은 부모 터미널에 타이핑되고(응답자 nudge와 같은 문), 답은 다른 응답자와
+  같이 `flow_answer`로 돌아온다. ask id는 응답자 색인에 실리므로 `flow_asks`에 뜬다.
+- **기한**: `timeout`이 지나면 그룹은 실패한 후보로 기록되고 다음 후보로 넘어간다
+  (`_expire_asks` → `_ask_escalate`). 후보가 다 떨어지면 `otherwise: human`이 서서
+  사람이 답한다. 기한이 없으면 부모가 답할 때까지 선다.
+- **허용 목록**: `delegate: {allow: [...]}`는 부모가 **고를 수 있는** 선택지를 정한다.
+  나머지 선택지도 질문에 그대로 보인다 — 부모가 선택지 전체를 보고 그 안에서
+  판단하게 하는 것이 이 목록의 목적이고, 그래서 「무엇이 내 것인지」도 함께 보인다
+  (`_describe_ask`·`flow_asks`·전달 문구의 `delegate`). 목록 밖 선택을 받으면 그 답은
+  적용되지 않고 저널 `ask_delegated_refused`(선택지·이유·허용 목록)로 남은 뒤 그
+  응답자의 추상으로 기록되어 질문이 다음 후보나 사람에게 내려간다(사용자 결정 —
+  다시 고를 기회를 주지 않는다). `abstain`과 `reframe`은 언제나 허용된다.
+- **사람은 제한되지 않는다**: 허용 목록은 부모(`gate_authority`가 `parent`)에게만
+  걸린다. 사람은 어느 해상도에서든 아무 선택지로 답할 수 있고, 다른 응답자 그룹의
+  멤버도 마찬가지다. `delegate`를 선언하지 않은 ask의 `resolution` 계산은 지금과
+  같다.
+- **공용 프로시저**: `ask-common`의 `ask-user`가 `delegate`·`timeout` 파라미터를
+  그대로 받는다. 파라미터로 준 허용 목록은 ask가 열릴 때 그 질문의 선택지와 대조되어
+  (`_brief_ask`), 없는 이름이면 그 ask가 `fail`로 끝난다.
+
 ### 2.12 동적 호출: `calls`와 `flow_call` (claunch-z17c9)
 
 `call:`(2.2, 2.3)은 컴파일 시점에 프로시저를 호출 지점에 펼친다. 호출 여부·시점·

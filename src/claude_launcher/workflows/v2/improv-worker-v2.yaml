@@ -6269,6 +6269,16 @@ procedures:
                 추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
               merge-by-agent만 이 워커가 master를 머지하지 않는다는 규칙
               (no-master-merge)의 예외다. 나머지 셋은 그 규칙을 그대로 둔다.
+            # 부모 세션이 이 질문을 답한다(claunch-vjp4y.2, 사용자 결정
+            # thread th-ea5c7c). 네 선택지는 그대로 보이고, 부모가 고를 수
+            # 있는 것은 merge-by-agent 하나다 — 자기 착지는 워커가 실행할
+            # 수 있는 유일한 갈래이고, 나머지 셋은 메시·머지·동결처럼
+            # 사람이나 리더가 해야 하는 일이다. 부모가 그 밖을 고르거나
+            # 900초 동안 답하지 않으면 질문은 사람에게 내려간다. 부모가
+            # 없는 런은 이 후보가 서지 않으므로 지금처럼 사람이 답한다.
+            from: [{role: parent}]
+            timeout: 900
+            delegate: {allow: [merge-by-agent]}
           cases:
             # rebase-and-repost는 rework가 아니라 blocked다(claunch-1aj1a.1).
             # rework는 배치 루프를 다시 돌 뿐 이 게이트의 입력(런 cwd 저장소)을
