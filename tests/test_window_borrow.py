@@ -558,6 +558,71 @@ def test_borrower_restart_gives_its_open_borrows_back(lender_clone, tmp_path):
 
 
 
+class _OrderRunner(window_borrow.BorrowRunner):
+    """A borrower whose run is scripted and whose cleanup is slow: it
+    records the status a reader saw while the checkout was still there."""
+
+    def __init__(self, tmp_path, outcome):
+        async def transport(machine, path, body):
+            return {"beat": "ok"}
+
+        super().__init__(None, transport, lambda: "borrower",
+                         root=tmp_path / "borrows" / "window-borrow")
+        self.outcome = outcome
+        self.seen_during_cleanup = []
+
+    async def _run(self, run, workdir, state):
+        self._set(run, status="testing")
+        if self.outcome == "cancel":
+            await asyncio.sleep(60)
+        if self.outcome == "raise":
+            raise RuntimeError("setup broke")
+        state["final"] = {"status": "passed"}
+
+    def _cleanup(self, run, workdir):
+        time.sleep(0.3)
+        self.seen_during_cleanup.append(run["status"])
+
+
+@pytest.mark.parametrize("outcome, final", [
+    ("cancel", "aborted"), ("raise", "failed"), ("pass", "passed")])
+def test_a_run_reads_finished_only_after_its_cleanup(tmp_path, monkeypatch, outcome, final):
+    """claunch-whm4e.1.1.1: the terminal status was written before the grant
+    was released and the checkout removed, so a reader that waited for it
+    (test_borrower_stops_and_cleans_up_when_the_lender_revokes) could still
+    find the worktree when the cleanup was slow."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _OrderRunner(tmp_path, outcome)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await _until(lambda: doc["status"] == "testing", 5)
+        if outcome == "cancel":
+            task.cancel()
+        await task
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == final and doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
+
+
+def test_recover_marks_a_stale_run_aborted_after_its_cleanup(tmp_path):
+    async def run():
+        runner = _OrderRunner(tmp_path, "pass")
+        runner._runs.append({"id": "dead", "machine": "lender", "grant_id": "g",
+                             "token": "t", "status": "testing"})
+        await runner.recover()
+        assert runner.seen_during_cleanup == ["testing"]
+        assert runner.runs()[0]["status"] == "aborted"
+
+    asyncio.run(run())
+
+
 def _tampering(transport, change):
     """A lender whose borrow answer is rewritten by ``change`` -- one that
     does not check what it lends, or a recipe the borrower cannot meet."""

@@ -612,11 +612,11 @@ class BorrowRunner:
             reason = self._stop_reason.pop(run["id"], "the daemon is stopping")
             if not run.get("revoked"):
                 await self._give_back(run, reason)
-            self._set(run, status="aborted", error=reason, finished_at=_utcnow())
+            state["final"] = {"status": "aborted", "error": reason}
         except Exception as exc:  # noqa: BLE001 — any failure gives the waiter back
             log.warning("window borrow %s failed: %s", run["id"], exc)
             await self._give_back(run, str(exc)[:200])
-            self._set(run, status="failed", error=str(exc)[:500], finished_at=_utcnow())
+            state["final"] = {"status": "failed", "error": str(exc)[:500]}
         finally:
             beat.cancel()
             proc = state.get("proc")
@@ -626,8 +626,17 @@ class BorrowRunner:
             if grant:
                 with contextlib.suppress(Exception):
                     self._window.release(grant)
-            await asyncio.to_thread(self._cleanup, run, workdir)
-            self._tasks.pop(run["id"], None)
+            try:
+                await asyncio.to_thread(self._cleanup, run, workdir)
+            finally:
+                # The terminal status is written only once the grant is back
+                # and the checkout is gone (claunch-whm4e.1.1.1): a reader
+                # that sees a finished run must not still find its worktree
+                # or its window holder.
+                final = state.get("final")
+                if final:
+                    self._set(run, **final, finished_at=_utcnow())
+                self._tasks.pop(run["id"], None)
 
     def _cleanup(self, run: dict, workdir: Path) -> None:
         checkout = workdir / "checkout"
@@ -729,12 +738,11 @@ class BorrowRunner:
         }
         self._set(run, status="reporting", exit_code=code, duration=round(seconds, 1))
         verdict = await self._send_result(run, payload)
+        # _drive writes it after the cleanup.
         if verdict == "ok":
-            self._set(run, status="passed" if code == 0 else "failed-tests",
-                      finished_at=_utcnow())
+            state["final"] = {"status": "passed" if code == 0 else "failed-tests"}
         else:
-            self._set(run, status="discarded", error=f"lender answered {verdict}",
-                      finished_at=_utcnow())
+            state["final"] = {"status": "discarded", "error": f"lender answered {verdict}"}
 
     async def _send_result(self, run: dict, payload: dict) -> str:
         """Post the result, retrying while the lender may still accept it."""
@@ -791,9 +799,11 @@ class BorrowRunner:
         stale = [r for r in self._runs if r.get("status") in ACTIVE]
         for run in stale:
             await self._give_back(run, "the borrower's daemon restarted")
-            self._set(run, status="aborted", error="the borrower's daemon restarted",
-                      finished_at=_utcnow())
-            await asyncio.to_thread(self._cleanup, run, self._root / run["id"])
+            try:
+                await asyncio.to_thread(self._cleanup, run, self._root / run["id"])
+            finally:
+                self._set(run, status="aborted", error="the borrower's daemon restarted",
+                          finished_at=_utcnow())
 
     async def close(self) -> None:
         for run_id, task in list(self._tasks.items()):
