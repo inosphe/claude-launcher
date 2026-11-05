@@ -50,6 +50,14 @@ in the table, the endpoint, or the profile's provider selection via
 ``claunch set-provider`` — reaches running sessions without a relaunch.
 Values the table has no answer for pass through unchanged.
 
+``providers.<name>.anthropic_translation: openai`` (also read live, see
+:data:`routing.TRANSLATION_KEY`) turns a ``/v1/messages`` request into Chat
+Completions sent to the shim's upstream (the provider's ``endpoints.openai``
+base) and the answer back into Messages, streamed or not
+(:mod:`claude_launcher.anthropic_openai`); ``/v1/messages/count_tokens`` is
+answered locally with an estimate. Other paths (Pi's ``/chat/completions``
+through the same shim) pass through untouched.
+
 Exit codes: ``3`` the port was taken (the caller re-probes and reuses whoever
 won it), ``2`` bad arguments.
 """
@@ -67,7 +75,7 @@ import aiohttp
 from aiohttp import web
 from multidict import CIMultiDict
 
-from . import metering, routing
+from . import anthropic_openai, metering, routing
 
 #: Header a session-affinity shim forwards the session name under (see
 #: :mod:`routing` for why a provider asks for this). Defined there so the
@@ -195,6 +203,54 @@ def _metered_path(path: str) -> bool:
     return path.endswith("/messages") or path.endswith("/chat/completions")
 
 
+def _messages_path(path: str) -> "str | None":
+    """``"messages"`` / ``"count_tokens"`` for an Anthropic Messages path."""
+    path = path.rstrip("/")
+    if path.endswith("/messages/count_tokens"):
+        return "count_tokens"
+    if path.endswith("/messages"):
+        return "messages"
+    return None
+
+
+def _translation(app: web.Application, request: web.Request, path: str):
+    """``(kind, options)`` when this request is to be translated, else ``None``.
+
+    Read live (:func:`routing.translation_options`), like the header rules.
+    Unlike them, a malformed value is not skipped: the shim's upstream is the
+    OpenAI base, so an untranslated Messages request could only fail there.
+    The :class:`routing.RoutingError` reaches the caller, which answers 502.
+    """
+    if request.method != "POST":
+        return None
+    kind = _messages_path(path)
+    if kind is None:
+        return None
+    cfg = app["cfg"]
+    options = routing.translation_options(cfg.get("provider"), cfg.get("route"))
+    return (kind, options) if options else None
+
+
+def _error(status: int, message: str) -> web.Response:
+    return web.json_response(
+        {"type": "error", "error": {"type": "api_error", "message": message}},
+        status=status,
+    )
+
+
+def _translated_headers(headers: CIMultiDict) -> None:
+    """Make Claude Code's Messages headers fit a Chat Completions upstream."""
+    for name in [k for k in headers.keys() if k.lower().startswith("anthropic-")]:
+        headers.popall(name, None)
+    key = headers.get("x-api-key")
+    if key is not None:
+        headers.popall("x-api-key", None)
+        if "Authorization" not in headers:
+            headers["Authorization"] = f"Bearer {key}"
+    headers.popall("content-type", None)
+    headers["content-type"] = "application/json"
+
+
 def _inject_auth(headers: CIMultiDict, key: str) -> None:
     """Swap the caller's credential for the route's current one.
 
@@ -266,6 +322,31 @@ async def _proxy_counted(request: web.Request) -> web.StreamResponse:
             )
         if auth:
             _inject_auth(headers, auth)
+    try:
+        xlate = _translation(request.app, request, path)
+    except routing.RoutingError as exc:
+        return _error(502, f"claunch routing shim: {exc}")
+    if xlate is not None:
+        kind, options = xlate
+        try:
+            anthropic_body = json.loads(body or b"{}")
+            if kind == "count_tokens":
+                return web.json_response(anthropic_openai.count_tokens(anthropic_body))
+            translated = anthropic_openai.request(
+                anthropic_body,
+                reasoning_format=options.get("reasoning_format"),
+                reasoning_effort=options.get("reasoning_effort"),
+            )
+        except (ValueError, anthropic_openai.TranslationError) as exc:
+            return web.json_response(
+                {"type": "error", "error": {
+                    "type": "invalid_request_error",
+                    "message": f"claunch routing shim: cannot translate: {exc}"}},
+                status=400,
+            )
+        body = json.dumps(translated, ensure_ascii=False).encode()
+        path = "/chat/completions"
+        _translated_headers(headers)
     if request.method in ("POST", "PUT", "PATCH") and _is_json(
         request.headers.get("content-type", "")
     ):
@@ -290,6 +371,9 @@ async def _proxy_counted(request: web.Request) -> web.StreamResponse:
     if meter is not None:
         live.begin(meter)
     try:
+        if xlate is not None:
+            return await _forward_translated(request, upstream, path, body,
+                                             headers, meter)
         return await _forward(request, cfg, upstream, path, body, headers, meter)
     finally:
         # Every way out -- an answer, an upstream error, a client that hung up
@@ -338,6 +422,71 @@ async def _forward(request, cfg, upstream, path, body, headers, meter) -> web.St
                 if meter is not None:
                     meter.chunk(chunk)
                 await response.write(chunk)
+        except (aiohttp.ClientError, ConnectionResetError):
+            pass  # either end hung up mid-stream; nothing left to say
+        if meter is not None:
+            _record(request.app, meter, upstream)
+        await response.write_eof()
+        return response
+
+
+async def _forward_translated(request, upstream, path, body, headers,
+                              meter) -> web.StreamResponse:
+    """Send a translated request and answer in the Messages shape.
+
+    ``body`` is already Chat Completions. The meter reads the upstream's own
+    OpenAI bytes (it knows both shapes), so first-token timing is the
+    backend's, not the translator's. The caller's query string (Claude Code
+    sends ``?beta=true``) belongs to the Messages API and is not forwarded.
+    """
+    session: aiohttp.ClientSession = request.app["session"]
+    url = upstream.rstrip("/") + path
+    try:
+        model = json.loads(body).get("model")
+    except ValueError:
+        model = None
+    try:
+        upstream_resp = await session.post(url, headers=headers, data=body,
+                                           allow_redirects=False)
+    except aiohttp.ClientError as exc:
+        if meter is not None:
+            meter.status = 502
+            _record(request.app, meter, upstream)
+        return _error(502, f"claunch routing shim could not reach {upstream}: {exc}")
+    async with upstream_resp:
+        if meter is not None:
+            meter.headers(upstream_resp.status, upstream_resp.headers)
+        ctype = upstream_resp.headers.get("content-type", "").lower()
+        if upstream_resp.status >= 400 or "text/event-stream" not in ctype:
+            raw = await upstream_resp.read()
+            if meter is not None:
+                meter.chunk(raw)
+                _record(request.app, meter, upstream)
+            if upstream_resp.status >= 400:
+                return web.json_response(
+                    anthropic_openai.error(upstream_resp.status, raw),
+                    status=upstream_resp.status,
+                )
+            try:
+                doc = json.loads(raw)
+            except ValueError:
+                return _error(502, "claunch routing shim: upstream answered "
+                                   "with a body that is not JSON")
+            return web.json_response(anthropic_openai.response(doc, model=model))
+        response = web.StreamResponse(status=200, headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+        })
+        await response.prepare(request)
+        translator = anthropic_openai.StreamTranslator(model=model)
+        try:
+            async for chunk in upstream_resp.content.iter_any():
+                if meter is not None:
+                    meter.chunk(chunk)
+                for event in translator.feed(chunk):
+                    await response.write(event)
+            for event in translator.close():
+                await response.write(event)
         except (aiohttp.ClientError, ConnectionResetError):
             pass  # either end hung up mid-stream; nothing left to say
         if meter is not None:
