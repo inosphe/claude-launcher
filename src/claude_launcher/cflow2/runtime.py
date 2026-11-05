@@ -5163,6 +5163,11 @@ def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
     env = {"CFLOW2_RUN": str(r.state.get("run_id") or ""),
            "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
            store_mod.SESSION_ENV: _probe_session(r)}
+    rnd = _trigger_round(r)
+    if rnd is not None:
+        # The round the run is in, for a probe that compares it with a
+        # record of its own (gate plan-waiting, claunch-r3j1o.1).
+        env["CFLOW2_ROUND"] = str(rnd)
     env.update(_input_env(r))
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     if iid and iid in r.inst:
@@ -7730,6 +7735,7 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
         rec: Dict[str, Any] = {"id": tid, "run": str(r.state.get("run_id") or ""),
                                "node": node.id, "label": node.label or None,
                                "instance": iid, "at": at, "do": do,
+                               "round": _trigger_round(r),
                                "queued_at": store_mod.utcnow()}
         if push is not None:
             rec["push"] = copy.deepcopy(push)
@@ -7743,6 +7749,21 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
         r.state.setdefault("triggers", []).append(rec)
         r.emit("trigger_queued", trigger=tid, node=node.id, label=node.label or None,
                instance=iid, at=at, do=do)
+
+
+def _trigger_round(r: "Run") -> Optional[int]:
+    """The round a trigger is recorded in: :func:`current_round` (the
+    iteration of the ``rounds: true`` loop, or a recurring slot's round),
+    else ``state.round``. ``plan-round`` opens the driver's plan of this
+    round (claunch-r3j1o.1); the value is taken now, as the record is
+    performed later."""
+    try:
+        value = current_round(r.state, r.chart)
+    except Exception:  # noqa: BLE001 -- a trigger never holds the run
+        value = None
+    if value is None:
+        value = r.state.get("round")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 #: A claim older than this many seconds is released and handed out again

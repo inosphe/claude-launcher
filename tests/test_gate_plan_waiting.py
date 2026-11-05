@@ -154,3 +154,69 @@ def test_main_reads_the_session_it_is_given_and_exits_with_the_verdict(capsys):
 
     assert gate.main(["--session", "s1", "--json"]) == gate.WAITING
     assert json.loads(capsys.readouterr().out)["waiting"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# rounds (claunch-r3j1o.1): a plan of another round says nothing about this one
+# --------------------------------------------------------------------------- #
+def _round_plan(run, rnd, session="s1"):
+    store = plan_store.PlanStore(paths.daemon_dir() / gate.DB_NAME)
+    store.new_round(session, session, run=run, round=rnd)
+    plan = store.get(session)
+    store.set(session, session, plan["revision"], title="round",
+              steps=[{"id": "s1", "kind": "step", "title": "구현", "status": "doing"}])
+
+
+def test_the_previous_rounds_empty_plan_does_not_clear_this_round():
+    _round_plan("r1", 1)
+    summary, why = gate.read_summary(gate.db_path(), "s1", run="r1", round=2)
+    assert summary is None and "not open yet" in why
+    assert gate.verdict(summary) == gate.CANNOT_TELL
+    summary, why = gate.read_summary(gate.db_path(), "s1", run="r0", round=1)
+    assert summary is None
+
+
+def test_the_rounds_own_plan_is_read_as_before():
+    _round_plan("r1", 2)
+    summary, why = gate.read_summary(gate.db_path(), "s1", run="r1", round=2)
+    assert why == "" and gate.verdict(summary) == gate.CLEAR
+
+
+def test_a_plan_without_a_round_or_a_probe_without_one_is_read_as_before():
+    _plan("s1", steps=[{"id": "s1", "kind": "step", "title": "구현", "status": "doing"}])
+    summary, _ = gate.read_summary(gate.db_path(), "s1", run="r1", round=2)
+    assert gate.verdict(summary) == gate.CLEAR
+    _round_plan("r1", 1, session="s2")
+    summary, _ = gate.read_summary(gate.db_path(), "s2")
+    assert gate.verdict(summary) == gate.CLEAR
+
+
+def test_main_takes_the_round_from_the_probe_environment(monkeypatch, capsys):
+    _round_plan("r1", 1)
+    monkeypatch.setenv("CFLOW2_RUN", "r1")
+    monkeypatch.setenv("CFLOW2_ROUND", "2")
+    assert gate.main(["--session", "s1"]) == gate.CANNOT_TELL
+    assert "not open yet" in capsys.readouterr().err
+    monkeypatch.setenv("CFLOW2_ROUND", "1")
+    assert gate.main(["--session", "s1"]) == gate.CLEAR
+    assert gate.main(["--session", "s1", "--round", "3"]) == gate.CANNOT_TELL
+
+
+def test_the_start_scope_and_the_round_are_read_together(monkeypatch, capsys):
+    """``--scope start`` and the round are two axes of one probe: a carried
+    unchecked verify waits on the user at settle but not at start, and a
+    probe of a round not open yet cannot tell under either scope."""
+    store = plan_store.PlanStore(paths.daemon_dir() / gate.DB_NAME)
+    store.new_round("s1", "s1", run="r1", round=1)
+    plan = store.get("s1")
+    store.set("s1", "s1", plan["revision"], title="round",
+              steps=[{"id": "s1", "kind": "step", "title": "구현", "status": "done"}],
+              closure=[{"id": "v1", "kind": "verify", "title": "화면 확인"}])
+    store.new_round("s1", "s1", run="r1", round=2)
+    monkeypatch.setenv("CFLOW2_RUN", "r1")
+    monkeypatch.setenv("CFLOW2_ROUND", "2")
+    assert gate.main(["--session", "s1", "--scope", "start"]) == gate.CLEAR
+    assert gate.main(["--session", "s1", "--scope", "settle"]) == gate.WAITING
+    for scope in ("start", "settle"):
+        assert gate.main(["--session", "s1", "--scope", scope, "--round", "3"]) == gate.CANNOT_TELL
+    capsys.readouterr()

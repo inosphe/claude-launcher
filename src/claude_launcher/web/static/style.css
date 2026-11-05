@@ -11063,6 +11063,12 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-feedback textarea { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 4px 6px; font: inherit; resize: vertical; }
 .plan-feedback .wf-btn { justify-self: start; }
 .plan-joint-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+/* Rounds (claunch-r3j1o.1): the current plan and the sealed rounds. */
+.plan-round-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 6px; }
+.plan-round-bar .wf-btn { font-size: 11px; padding: 1px 6px; }
+.plan-round-bar .plan-round-on { border-color: var(--accent, #58a6ff); }
+.plan-sealed { color: var(--plan-muted); margin: 2px 0 6px; font-style: italic; }
+.plan-from { margin-left: 4px; }
 .plan-joint { list-style: none; margin: 0; padding: 0; }
 .plan-joint-member { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
 .plan-joint-member p { margin: 2px 0; }

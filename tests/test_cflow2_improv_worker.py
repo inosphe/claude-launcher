@@ -428,10 +428,11 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
 # --------------------------------------------------------------------------- #
 # the plan's own decisions stop the round before the gate (claunch-rzepk)
 # --------------------------------------------------------------------------- #
-def test_the_plan_wait_is_declared_on_both_paths():
-    """One wait beside the gate, one on the path that skips ``coding-plan``.
+def test_the_plan_wait_is_one_node_on_every_path():
+    """One wait after the plan step, whether the plan was written by
+    ``coding-plan`` (gate path) or ``plan-seed`` (no gate) -- claunch-r3j1o.2.
 
-    Both probe ``claunch gate plan-waiting --scope start`` -- the unchosen
+    It probes ``claunch gate plan-waiting --scope start`` -- the unchosen
     decisions only, claunch-jw1v2 -- (0 clear, 1 still owed, 2 could
     not tell), poll, and cap undecided reads -- but carry no ``seconds``:
     the confirmed rule has no upper bound on "stop until the user decides",
@@ -443,7 +444,7 @@ def test_the_plan_wait_is_declared_on_both_paths():
     waits = [n for n in chart.nodes.values() if n.type == "wait"
              and n.get("probe") == ["claunch", "gate", "plan-waiting", "--scope", "start", "--notify"]
              and "closure-wait" not in n.id]
-    assert len(waits) == 2, [n.id for n in waits]
+    assert [n.label for n in waits] == ["plan-wait"], [n.id for n in waits]
     for n in waits:
         assert "plan-wait" in n.id
         assert n.get("poll") == 30 and n.get("undecided_max") == 3
@@ -1396,8 +1397,13 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
     assert set(v1) == {"work", "commit", "integration-request", "landed", "wrapup"}
     chart = _chart()
     seen = set()
+    v2_only = []
     for node in chart.nodes.values():
-        trig = node.get("triggers")
+        # plan-round has no v1 counterpart: v1 has no per-round plan
+        # (claunch-r3j1o). It is declared once, at intake.
+        v2_only += [(node.label, t["do"]) for t in node.get("triggers") or []
+                    if t["do"] == "plan-round"]
+        trig = [t for t in node.get("triggers") or [] if t["do"] != "plan-round"]
         if not trig:
             continue
         assert node.label in v1, node.id
@@ -1411,6 +1417,7 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
         assert got == v1[node.label], node.id
         seen.add(node.label)
     assert seen == set(v1)
+    assert v2_only == [("intake", "plan-round")]
 
 
 def test_landing_queue_item_records_who_passed_the_review():
@@ -4718,3 +4725,40 @@ def test_the_second_round_takes_the_recheck_kind_not_the_seed(tmp_path):
     st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
     assert st["result"]["round"]["value"] == {"mode": "second"}
 
+
+
+# --------------------------------------------------------------------------- #
+# the round's plan: opened at intake, written after the consult (claunch-r3j1o)
+# --------------------------------------------------------------------------- #
+def test_intake_opens_the_rounds_plan():
+    """Entering intake rolls the plan to this round (trigger plan-round)."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert {"do": "plan-round", "at": "enter"} in doc["nodes"]["intake"]["triggers"]
+
+
+def test_the_plan_is_first_written_in_the_item_after_the_consult():
+    """Both nodes that write the round's first plan -- coding-plan on the gate
+    path, plan-seed without a gate -- sit in the item's plan step, so they run
+    after consult-check and can take its reason's branch decision
+    (claunch-tcczr). Neither stands before the consult."""
+    chart = _chart()
+    assert [n.id for n in chart.nodes.values() if n.label == "plan-seed"] == ["round/item/plan-seed"]
+    assert [n.id for n in chart.nodes.values() if n.label == "coding-plan"] == ["round/item/coding-plan"]
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    body = doc["procedures"]["worker-round"]["body"]
+    head = [s.get("id") if isinstance(s, dict) else s for s in body[0]["cond"][1]["else"]]
+    assert "plan-open" not in head and "plan-seed" not in head
+
+
+def test_every_plan_writer_is_told_to_open_this_round_first():
+    """The trigger is asynchronous; the rule delivered to each node that
+    writes the plan says to call plan_new_round when the plan is another
+    round's, and plan-seed writes only when this round's plan has no steps."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    rule = doc["rules"]["plan-panel"]
+    assert {"coding-plan", "plan-seed", "work"} <= set(rule["deliver"])
+    text = _words(rule["text"])
+    assert "plan_new_round" in text and "round_now" in text
+    assert "note와 보류(deferred)한 verify는 넘어오지 않는다" in text
+    seed = _words(doc["nodes"]["plan-seed"]["prompt"])
+    assert "plan_new_round" in seed and "steps가 없으면" in seed

@@ -115,6 +115,12 @@ sides:
 #                            decision으로 묻는다. hold는 협의만 하자는 명시나 바꿀
 #                            대상을 특정할 수 없는 경우로 한정한다. claunch-xpnae,
 #                            claunch-tcczr)
+#   (v2 전용)              -> plan-seed, plan-wait
+#                            (회차 plan — intake의 트리거 plan-round가 앞 회차 plan을
+#                            봉인하고 이 회차 plan을 연다. 일감 처리에서 coding-plan
+#                            또는 plan-seed가 그 plan을 쓰고, plan-wait 하나가 게이트·
+#                            work 앞에서 고르지 않은 결정을 기다린다. claunch-rzepk,
+#                            claunch-jw1v2, claunch-r3j1o)
 #   (v2 전용)              -> feasibility-check(choose), feasibility-gate(ask: 사람),
 #                            feasibility-hold
 #                            (착수 정당성 점검 — worker-round의 batch 첫 자리, 일감·코딩
@@ -747,9 +753,18 @@ rules:
       · plan에 쓰는 글(title, goal, detail, 선택지의 label·effect·risk)은
         한국어로 쓴다(claunch-lp7c6). 명령·경로·식별자·오류 메시지 인용은
         원문 그대로 둔다.
+      · plan은 회차마다 따로 있다(claunch-r3j1o). intake에 들어가는 순간 데몬이
+        앞 회차 plan을 봉인해 지난 회차로 보관하고 이 회차 번호의 빈 plan을 연다
+        (트리거 plan-round). 앞 회차 closure 가운데 아직 닫지 못하게 막는 항목
+        (확인하지 않았거나 실패한 verify, 처분하지 않았거나 처분 뒤 끝내지 않은
+        followup — summary의 blockers)은 출처 회차 표시(`from`)와 함께 이 회차
+        plan의 closure로 넘어온다 — 지우지 않는다(빼고 써도 저장소가 다시
+        붙인다). note와 보류(deferred)한 verify는 넘어오지 않는다. plan_get의 `run`·`round`가 이 회차(`flow_status`의 `run`,
+        `round_now`)가 아니면 쓰기 전에 `plan_new_round(run, round, issue=<회차
+        이슈>)`를 부른다 — 같은 회차면 아무것도 바꾸지 않는다.
       · 착수할 때(coding-plan, 그 단계가 없으면 plan-seed, 그것도 없으면
-        work를 시작할 때) plan_set으로 쓴다: title은 목표 요지, goal은 목표·범위
-        한두 줄, issue는 회차 이슈.
+        work를 시작할 때) 이 회차 plan에 steps가 없으면 plan_set으로 쓴다:
+        title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈.
         steps는 단계마다 한 줄이고 detail은 몇 줄까지다. 사용자가 정해야 하는
         갈래(범위·방식·우선순위)만 decision 노드로 두고, 선택지마다 effect(기대
         효과)와 risk(리스크)를 적고 권장안 하나에 recommended를 붙인다. 바로
@@ -807,7 +822,9 @@ rules:
       claunch-7jzp8: 사용자 1명이 세션 수십~백수십 개와 계획을 맞추는 일이 병목이었고,
       정제되지 않은 산문 보고는 1:m 보고 관계에서 읽히지 않았다. 세션을 닫지 못하는
       이유(사람 확인 미완, 연관 후속 작업)도 패널의 closure로 드러낸다(th-0b38dc).
-    deliver: [coding-plan, work, wrapup]
+      claunch-r3j1o: 회차가 바뀌어도 plan 하나에 덧쓰면 앞 회차의 결정이 같은 id의
+      다음 회차 결정으로 이어지고, 회차별 기록이 남지 않았다.
+    deliver: [coding-plan, plan-seed, work, wrapup]
 
 # ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
 # 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
@@ -930,6 +947,12 @@ nodes:
     # 없다(sim_start·sim_round 거절, 모델 작성·조회는 허용). 판정은
     # sim/run_gate.py, 근거는 claunch-efnbt.9.
     sims: deny
+    # 회차의 plan을 연다(claunch-r3j1o): 들어가는 순간 데몬이 앞 회차 plan을
+    # 봉인하고 이 회차 번호의 빈 plan을 연다(cflow2_triggers의 plan-round).
+    # 같은 회차에 다시 들어오면 아무것도 하지 않는다. 트리거는 비동기라서
+    # 규칙 plan-panel이 plan을 쓰는 노드에 같은 연산(plan_new_round)을 시킨다.
+    triggers:
+      - {do: plan-round, at: enter}
     prompt: |
       새 회차다 — 이번 회차의 목표 하나를 확정한다.
 
@@ -2040,10 +2063,12 @@ nodes:
       그래도 work를 시작하기 전에 plan 패널의 상태를 확정해야 한다 — plan에
       미결정이 남아 있으면 work를 시작하지 않는다(claunch-rzepk 규칙 1).
 
-      `plan_get`으로 이 세션의 plan을 읽는다.
-      · plan이 이미 있으면 아래 셋째 항목의 갈림 decision을 더하는 것 말고는
-        손대지 않는다. 지금 `summary.waiting_decisions` 값을 plan_waiting에 적는다.
-      · plan이 없으면 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
+      `plan_get`으로 이 세션의 plan을 읽는다. 그 plan의 `run`·`round`가 이
+      회차가 아니면 먼저 `plan_new_round`로 이 회차 plan을 연다(규칙 plan-panel).
+      · 이 회차 plan에 steps가 이미 있으면 아래 셋째 항목의 갈림 decision을
+        더하는 것 말고는 손대지 않는다. 지금 `summary.waiting_decisions` 값을
+        plan_waiting에 적는다.
+      · steps가 없으면(회차가 막 열렸다) 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
         (title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈, steps는
         이번 일감의 단계), 그 응답의 `summary.waiting_decisions`을 plan_waiting에 적는다.
         work가 계획을 처음 쓰는 자리를 이 노드가 대신하는 것이다 — work는
@@ -5812,22 +5837,30 @@ procedures:
                         # 계획부터 다시 쓴다
                         - {seq: [route-direct], bind: route}
                         - {continue: plan-work}
-                # 승인 게이트가 서는 조건: require_coding_approval이 켜져 있고 이 런에서
-                # 아직 approve-always를 답하지 않았다(claunch-sxdnc). approve-always 뒤에는
-                # 게이트가 꺼진 것과 같다 — session_routing이면 계획의 권장대로, 아니면
-                # 계획 없이 work로 간다.
-                - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
-                  then:
-                    - coding-plan
-                    # 계획의 결정이 해소되기 전에는 게이트도 서지 않는다
-                    # (claunch-rzepk 규칙 2·3: 순서는 plan 결정 → 게이트 → work).
+                - else:
+                    # 계획 단계: 승인 게이트가 서면(require_coding_approval이 켜져 있고 이
+                    # 런에서 아직 approve-always를 답하지 않았다, claunch-sxdnc) 또는
+                    # session_routing이면 coding-plan이 이번 일감의 변경 계획을 쓴다.
+                    # 그 밖(게이트 꺼짐, approve-always 뒤)은 plan-seed가 이 회차 plan을
+                    # 확보한다(work가 처음 쓰는 자리를 대신한다). 어느 쪽이든
+                    # consult-check 뒤이므로 그 reason의 갈림 decision이 여기서 plan에
+                    # 들어간다(claunch-tcczr).
+                    - id: plan-step
+                      cond:
+                        - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
+                          then: [coding-plan]
+                        - else: [plan-seed]
+                    # plan 대기는 이 노드 하나다(claunch-r3j1o.2). 게이트가 있든 없든
+                    # 같은 대기를 지난다 — 순서는 plan 결정 → 게이트 → work
+                    # (claunch-rzepk 규칙 1·2·3, docs/plan-coding-approval.md 3절).
                     # probe는 `claunch gate plan-waiting --scope start`: 0 고르지 않은
-                    # decision이 없다(통과), 1 아직 결정이 남았다, 그 밖은 판정 불가.
-                    # 지난 회차의 closure verify·followup은 세지 않는다 — 그것은
-                    # 착지한 일의 확인이라 settle의 closure-gate가 기다린다
-                    # (claunch-jw1v2). seconds를 주지 않는다 — 규칙 1의 「멈춘다」에
-                    # 상한이 없고, 판정 불가가 세 번 쌓이면 undecidable로 사람에게 간다.
-                    - id: plan-wait-before-gate
+                    # decision이 없다(통과), 1 아직 결정이 남았다, 그 밖은 판정 불가 —
+                    # plan이 다른 런·회차의 것일 때도 2다(CFLOW2_RUN·CFLOW2_ROUND).
+                    # 지난 회차에서 넘어온 closure verify·followup은 세지 않는다 —
+                    # 그것은 settle의 closure-gate가 기다린다(claunch-jw1v2). seconds를
+                    # 주지 않는다 — 규칙 1의 「멈춘다」에 상한이 없고, 판정 불가가 세 번
+                    # 쌓이면 undecidable로 사람에게 간다.
+                    - id: plan-wait
                       wait:
                         probe: [claunch, gate, plan-waiting, --scope, start, --notify]
                         poll: 30
@@ -5856,26 +5889,9 @@ procedures:
                             try: [{seq: [coding-approval], bind: coding_approval}]
                             catch:
                               rejected: {continue: plan-work}
-                        - else: {seq: [route-planned], bind: route}
-                - else:
-                    # 게이트가 없는 경로도 plan 미결정이면 work 앞에서 멈춘다
-                    # (claunch-rzepk 규칙 1·3, docs/plan-coding-approval.md 3절 4번).
-                    # coding-plan이 없으니 계획을 먼저 확보하고(work가 처음 쓰는
-                    # 자리를 대신한다) 같은 대기를 한 번 둔다.
-                    - plan-seed
-                    # 위 plan-wait-before-gate와 같은 --scope start(claunch-jw1v2).
-                    - id: plan-wait-after-seed
-                      wait:
-                        probe: [claunch, gate, plan-waiting, --scope, start, --notify]
-                        poll: 30
-                        undecided_max: 3
-                        describe: "plan의 고르지 않은 결정이 해소되기를 기다린다 — 사용자가 계획 패널에서 결정하면 이어 간다(closure 항목은 settle에서 기다린다)"
-                      on:
-                        undecidable:
-                          try: [plan-wait-unclear]
-                          catch:
-                            ok: {continue: plan-work}
-                            skipped: []
+                        - if: "$data.inputs.session_routing == true"
+                          then: {seq: [route-planned], bind: route}
+                        - else: []
             - id: work-group
               group:
                 name: found
