@@ -6,7 +6,7 @@ branch while the plan is being prepared, checked, reviewed and approved, the
 approval card fails with "original source changed; replan" and the whole
 round is lost (s1116 against d73e6029, merged over by 7cd1e969).
 
-So while such a run stands in ``prepare`` .. ``execute`` (:data:`SPAN`) the repository is
+So while such a run stands in ``prepare`` .. ``execute`` the repository is
 paused for ordinary merges: ``tools/delayed_sweep.py admit`` asks this module
 (through ``GET /api/reposync/pause``) and refuses every candidate except the
 sync's own issue. ``inspect`` does not pause; a master that moved meanwhile
