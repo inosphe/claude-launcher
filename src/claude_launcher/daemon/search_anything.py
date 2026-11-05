@@ -630,7 +630,7 @@ def public_settings():
 def install(app):
     service = app["rag"]
     service.all_docs = Corpus(service, app["observer"]).docs
-    changed = lambda: service.enqueue("all")
+    changed = lambda: service.enqueue("unified")
     search_records.change_hooks.append(changed)
 
     async def cleanup(_app):
@@ -668,7 +668,7 @@ def install(app):
             service._progress.clear()
             service.start()
             await service.catch_up()
-            service.enqueue("all")
+            service.enqueue("unified")
             return web.json_response(public_settings())
         except (ValueError, store.StoreError) as exc:
             service.start()

@@ -31789,7 +31789,13 @@ function ragDbGroups(st) {
 }
 
 function ragBucketLabel(row) {
-  if (row.kind === "all") return "Search anything (전체)";
+  // `unified` is the combined corpus; `all` was its name and the daemon may
+  // still report it during a rollout, so both draw the same row
+  // (claunch-7aujp). The label names what the corpus holds: the name alone
+  // read as "everything, including the board indexes", which it is not.
+  if (row.kind === "unified" || row.kind === "all") {
+    return "Search anything (통합: 이슈·코멘트·세션)";
+  }
   if (row.kind === "sessions") return "sessions (세션)";
   return `board ${beadsNameOfRoot(row.root)}`;
 }

@@ -513,17 +513,17 @@ def test_board_and_record_changes_queue_unified_search(tmp_path):
     queued = []
     service.enqueue = lambda kind, root=None: queued.append(kind)
     service.on_board_write(tmp_path)
-    assert queued == ["beads", "all"]
+    assert queued == ["beads", "unified"]
     queued.clear()
     service._board_moved(tmp_path)
-    assert queued == ["beads", "all"]
+    assert queued == ["beads", "unified"]
     queued.clear()
-    hook = lambda: queued.append("all")
+    hook = lambda: queued.append("unified")
     search_records.change_hooks.append(hook)
     try:
         search_records.capture("s1", "checks", {"answer": "yes"}, "2026-09-18")
         search_records.capture("s1", "checks", {"answer": "yes"}, "2026-09-18")
-        assert queued == ["all"]
+        assert queued == ["unified"]
     finally:
         search_records.change_hooks.remove(hook)
 
@@ -911,6 +911,13 @@ def test_search_stream_route_speaks_server_sent_events(tmp_path):
             assert [name for name, _ in events] == ["ranked", "reranked"]
             assert events[0][1]["rerank_pending"] is True
             assert events[1][1]["reranked"] is True
+            # The combined corpus is `unified`; `all` is its deprecated name
+            # and every answer names the corpus it read by the current one
+            # (claunch-7aujp).
+            for asked in ("unified", "all"):
+                response = await client.get("/api/search", params={"q": "relay", "kind": asked})
+                assert response.status == 200
+                assert (await response.json())["kind"] == "unified"
             response = await client.get("/api/search/stream", params={"q": "", "kind": "all"})
             assert response.status == 400 and (await response.json())["error"] == "q is required"
             response = await client.get("/api/search/stream", params={"q": "x", "kind": "nope"})
