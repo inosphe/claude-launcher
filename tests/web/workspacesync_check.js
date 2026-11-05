@@ -139,7 +139,8 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncRemotePicker", "wsSyncPanel", "wsSyncPullBody",
        "wsSyncShared", "wsSyncUnmerged", "wsSyncSaved", "wsSyncSave", "wsSyncSavedBasis",
-       "wsSyncRemoteNames", "wsSyncPlanFor", "wsSyncInitSelection", "wsSyncToggleRemote",
+       "wsSyncRemoteNames", "wsSyncPlanFor", "wsSyncOrderMatches",
+       "wsSyncInitSelection", "wsSyncToggleRemote",
        "wsSyncToggleBasis",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
        "wsSyncWhyDisabled", "wsSyncButtonRow", "commitRef", "commitText"].map(slice),
@@ -588,6 +589,29 @@ async function tick() {
   assert.ok(orderText.includes("1. origin (basis) — rebase"), "the basis runs first");
   assert.ok(orderText.includes("2. mirror — push"), "the mirror is pushed to after it");
   assert.ok(nodes.some((n) => n.text === "Sync 2 remotes"), "the button names the set");
+  // an order computed for another checked set is not drawn as this set's
+  // (claunch-cj1qi): the checkboxes follow the page at once, the order only
+  // follows the status read, so a read that is in flight -- or one that
+  // failed and left the previous answer on screen -- names another set
+  st.remotes = ["origin"];
+  st.basis = "origin";
+  st.loading = true;
+  let staleText = walk(ctx.wsSyncPanel(W)).map(deep).join("\n");
+  assert.ok(!staleText.includes("mirror — push"),
+            "in flight: an unchecked remote is not listed");
+  assert.ok(staleText.includes("Reading the execution order for the remotes checked now"),
+            "in flight: the panel says it is reading the checked set");
+  st.loading = false;
+  staleText = walk(ctx.wsSyncPanel(W)).map(deep).join("\n");
+  assert.ok(!staleText.includes("mirror — push"),
+            "after a failed read: an unchecked remote is not listed");
+  assert.ok(staleText.includes("No execution order for the remotes checked now"),
+            "after a failed read: the panel says the order does not cover the set");
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.map(deep).join("\n").includes("2. mirror — push"),
+            "the same set is drawn again once the checkboxes agree with the answer");
   // the last checked remote springs back instead of emptying the set
   st.remotes = ["origin"];
   st.basis = "origin";

@@ -43159,6 +43159,20 @@ function wsSyncPlanFor(doc, remote) {
   return ((doc && doc.plans) || []).find((r) => r.remote === remote) || null;
 }
 
+/* Whether the last status answer was computed for the set checked now.
+   The checkboxes follow this page at once, the answer only after the read
+   that follows -- so while that read is in flight, and for as long as it has
+   not succeeded, `sync_order` names another set. An order computed for
+   another set is the previous read's answer and is not drawn as this one's
+   (claunch-cj1qi). A daemon that predates `selected_remotes` leaves nothing
+   to compare and keeps the old behaviour. */
+function wsSyncOrderMatches(doc, remotes) {
+  const asked = doc && doc.selected_remotes;
+  if (!Array.isArray(asked)) return true;
+  const key = (list) => [...list].sort().join(",");
+  return key(asked) === key(remotes || []);
+}
+
 /* Seed the checked set on the first read, or keep the one this page already
    has. The remembered choice wins when it is still present; otherwise the
    plan's remote, then the first remote. The basis follows a checked remote. */
@@ -44243,7 +44257,7 @@ function wsSyncRemotePicker(st, name, doc) {
       "These remotes cannot be brought to one branch (their tips are not on one line): " +
       doc.incompatible.map((p) => p.join(" / ")).join(", ")));
   }
-  if ((doc.sync_order || []).length) {
+  if ((doc.sync_order || []).length && wsSyncOrderMatches(doc, st.remotes)) {
     const order = el("div", "ws-sync-order");
     order.appendChild(el("h5", null, "Execution order"));
     (doc.sync_order || []).forEach((remote, i) => {
@@ -44253,6 +44267,13 @@ function wsSyncRemotePicker(st, name, doc) {
         `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
     });
     box.appendChild(order);
+  } else if ((doc.sync_order || []).length) {
+    // the read the order came from covered another set (claunch-cj1qi)
+    box.appendChild(el("p", "wf-note ws-sync-order-stale",
+      st.loading
+        ? "Reading the execution order for the remotes checked now…"
+        : "No execution order for the remotes checked now: the last status read " +
+          "did not cover them. Refresh to read it again."));
   }
   return box;
 }
