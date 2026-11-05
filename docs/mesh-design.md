@@ -135,7 +135,10 @@ Kept (as concepts or ported logic):
   `ref` points. A batch containing one is marked `needs_action: true` and
   its note says so — under the bare no-reply wording responders drained past
   routed asks until they expired to the next group
-  (claunch-ask-decide-needs-reply-zaxct)
+  (claunch-ask-decide-needs-reply-zaxct). Because the note names the entry's
+  `ref`, the entry carries it: a message's `ref` is relayed verbatim into the
+  delivery block, still uninterpreted, so the pointer the note gives resolves
+  instead of naming a field the block dropped
 - per-member delivery cursors into the log (durable "what was delivered")
 - settle-based burst coalescing before delivery
 - (phase 3) heartbeat / task-poll / stall-warning *policies*, running in the
