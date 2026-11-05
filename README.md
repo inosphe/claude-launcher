@@ -5818,8 +5818,9 @@ The supported cases are deliberately narrow:
   purchased or free credits) against what is left, in dollars, resetting at
   the end of the billing period. A plan with rolling limits (Go, Pro, Max,
   ...) adds `five_hour` and `weekly` before it. The output names the plan
-  (`plan: Provider`). Without an active subscription the pool is what is left
-  plus what the period has spent (`/alpha/usage/summary`).
+  (`plan: Provider`). Without an active subscription, or with one whose plan
+  the CLI's plan table does not name, the pool is what is left plus what the
+  period has spent (`/alpha/usage/summary`).
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
 - `usage work:kimi` starts the Kimi Code local server under that profile's
