@@ -51,7 +51,8 @@ def compute(state, cards=(), precard=1800.0, now=NOW):
 # --------------------------------------------------------------------------- #
 # the span and its releases
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("node", ["prepare", "checks", "review", "execute"])
+@pytest.mark.parametrize("node", ["prepare", "checks", "review", "auto-execute",
+                                  "approval-check", "approval-wait", "retry-route", "execute"])
 def test_prepare_through_execute_pause(node):
     pause = compute(run_state(node))
     assert pause["node"] == node and not pause["expired"]
@@ -59,7 +60,7 @@ def test_prepare_through_execute_pause(node):
     assert pause["issue"] == "claunch-sync"
 
 
-@pytest.mark.parametrize("node", ["inspect", "receipt", None])
+@pytest.mark.parametrize("node", ["inspect", "stall-notice", "sync-stall", "receipt", None])
 def test_inspect_and_receipt_do_not_pause(node):
     assert compute(run_state(node)) is None
 

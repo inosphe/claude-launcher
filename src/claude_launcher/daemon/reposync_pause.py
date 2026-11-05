@@ -33,8 +33,14 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import reposync_agent
 
-#: The nodes of ``reposync-merge-push-v2`` that hold the pause.
-SPAN = ("prepare", "checks", "review", "execute")
+#: The nodes of ``reposync-merge-push-v2`` that hold the pause. The approval
+#: window (claunch-dqgpt) stands in ``auto-execute`` (the optional gate, active
+#: for the whole five minutes), then ``approval-check`` or ``approval-wait``; a
+#: retry after the remote moved stands in ``retry-route``. ``stall-notice`` and
+#: ``sync-stall`` do not pause: the run waits for a person there and replans
+#: from ``inspect`` afterwards.
+SPAN = ("prepare", "checks", "review", "auto-execute", "approval-check",
+        "approval-wait", "retry-route", "execute")
 
 #: How long the pause outlives the approval card's deadline (seconds).
 CARD_GRACE = 600.0
