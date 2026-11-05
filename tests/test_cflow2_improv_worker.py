@@ -44,7 +44,16 @@ BLOCK_END = "것만은 금지다."
 ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group"),
                      ("par-write-overlap", "round/item/slices"),
                      # claunch-0b8dx: no cap on the number of rounds
-                     ("unbounded-visits", None)}
+                     ("unbounded-visits", None),
+                     # claunch-yzwut: the one place a worker may merge master --
+                     # merge-by-agent's apply step, once per attempt (the
+                     # self-merge procedure tries three times). The ban is the
+                     # conditional rule master-merge-effect, so the check warns
+                     # instead of failing; a fourth entry here is a second
+                     # merging node and must be argued for, not added.
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply"),
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply#2"),
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply#3")}
 
 # Every v1 step id -> the v2 labels that carry it.
 V1_TO_V2 = {
@@ -1104,8 +1113,16 @@ def test_rules_and_master_merge_invariant():
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     rule = doc["rules"]["no-master-merge"]
     assert "claunch-97knp" in rule["why"]
-    assert chart.spec["invariants"]["no-master-merge"] == {"never_effect": "git.merge",
-                                                           "target": "master"}
+    # claunch-yzwut: the unconditional never_effect invariant could not admit
+    # merge-by-agent's merge, so the static ban moved to the conditional rule
+    # master-merge-effect. The text everyone reads stays in no-master-merge.
+    assert "no-master-merge" not in (chart.spec.get("invariants") or {})
+    ban = chart.rules["master-merge-effect"]
+    assert ban["effect"] == {"deny": "git.merge", "target": "master"}
+    assert ban["when"] == "$data.self_merge.armed != true"
+    assert ban["deliver"] == []
+    assert "claunch-yzwut" in rule["why"]
+    assert chart.spec["paths"]["review-before-self-merge"]["must_pass"] == ["peer-review"]
     assert chart.spec["paths"]["settle-before-end"]["must_pass"] == ["settle"]
 
 
@@ -1155,9 +1172,14 @@ def test_allow_work_on_main_is_a_user_input_read_by_branch_setup_only():
     assert chart.rules["work-on-main"]["when"] == f"{MODE} == 'main'"
     assert "branch-setup" not in chart.rules["no-master-commit"]["deliver"]
     assert "branch-setup" not in chart.rules["work-on-main"]["deliver"]
-    # the merge ban stays unconditional, effect and invariant included
+    # the merge ban's text stays unconditional; its static effect is the
+    # conditional rule master-merge-effect (claunch-yzwut), whose condition is
+    # the self-merge mark and never the work-on-main mode
     assert "when" not in chart.rules["no-master-merge"]
-    assert chart.rules["no-master-merge"]["effect"] == {"deny": "git.merge", "target": "master"}
+    assert chart.rules["no-master-merge"].get("effect") is None
+    assert chart.rules["master-merge-effect"]["effect"] == {"deny": "git.merge",
+                                                           "target": "master"}
+    assert MODE not in chart.rules["master-merge-effect"]["when"]
     assert "master 체크아웃 후 커밋" not in chart.rules["no-master-merge"]["text"]
     deps = inputs.dependencies(chart)["allow_work_on_main"]
     assert deps["conditional"] == ["branch-on-main"]
@@ -2154,9 +2176,12 @@ def test_the_landing_request_is_gated_on_a_bound_issue():
     # and the request; nothing else may raise a request there. claunch-ijkge
     # adds pr-submitted-route after the gate: auto_merge=false ends the round
     # at PR submission, so it must not reach the request either — and it runs
-    # after the gate so the marker task has the bound issue.
+    # after the gate so the marker task has the bound issue. claunch-yzwut
+    # adds self-merge-route: a round the person sent to merge-by-agent leaves
+    # here as landed instead of filing a request, and a round whose receiver
+    # appeared meanwhile falls through to the channel check.
     between = labels[labels.index("issue-gate") + 1:labels.index("integration-request")]
-    assert between == ["pr-submitted-route", "landing-channel"]
+    assert between == ["pr-submitted-route", "self-merge-route", "landing-channel"]
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
