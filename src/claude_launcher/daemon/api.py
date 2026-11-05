@@ -15299,6 +15299,12 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     that project (validated against the registry); followers keep their own
     project — it is a filing of the session, not of the directory.
 
+    A mirror mesh the named session built by joining is filed where that
+    session stood (``MeshManager.join`` seeds it from the session), so the
+    same ``project`` re-files it too — while this session is its one local
+    member (``MeshManager.refile_mirrors_for``); the answer's
+    ``mirrors_refiled`` names what moved.
+
     The move itself is :meth:`SessionManager.migrate`: stop, carry the claude
     transcript to the new directory's slug, move the session's cflow v2 run
     slots to the same scope under the new directory (runs are keyed
@@ -15357,6 +15363,19 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     migrated, carried, slots_moved = await manager.migrate(
         name, new_cwd, project=project
     )
+    # A mirror is filed where the session that built it stood (MeshManager.join
+    # seeds it from the session), so re-filing the session alone would leave
+    # that row in the project it came from. Asked of the mesh manager here, not
+    # done inside SessionManager, for the same reason as _mesh_holds: the
+    # manager knows nothing of meshes. Only when ``project`` was given — without
+    # it the filing did not change, and a mesh an operator filed by hand keeps
+    # its project.
+    mirrors_refiled = (
+        request.app["mesh"].refile_mirrors_for(
+            name, migrated.sdef.project or ""
+        )
+        if project is not None else []
+    )
     children = []
     for child in followers:
         try:
@@ -15380,6 +15399,9 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             # the scopes whose run slots travelled — an empty list is the
             # ordinary answer for a session driving no cflow run
             "slots_moved": slots_moved,
+            # mirrors this session's re-filing moved with it (see above) — an
+            # empty list is the ordinary answer for a session on no mesh
+            "mirrors_refiled": mirrors_refiled,
             "worktree": (
                 {
                     "name": wt.name,

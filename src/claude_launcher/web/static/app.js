@@ -54935,13 +54935,19 @@ function sessMigrate(data) {
     const kidsOk = (doc.children || []).filter((c) => c.ok);
     const kidsFailed = (doc.children || []).filter((c) => !c.ok);
     // What travelled besides the session itself, so the operator can tell a
-    // plain directory change from one that also re-filed the session or
-    // carried its cflow runs over.
+    // plain directory change from one that also re-filed the session, carried
+    // its cflow runs over, or moved a mesh mirror it had built.
     const slots = doc.slots_moved || [];
+    const mirrors = doc.mirrors_refiled || [];
     const carried = [
       doc.project ? `project: ${doc.project}` : "",
       slots.length
         ? `${slots.length} cflow run slot${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}`
+        : "",
+      mirrors.length
+        ? `${mirrors.length} mesh row${mirrors.length === 1 ? "" : "s"} re-filed: ${mirrors
+            .map((m) => `${m.mesh} (${m.was} → ${m.now})`)
+            .join(", ")}`
         : "",
     ].filter(Boolean);
     say(

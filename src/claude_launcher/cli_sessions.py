@@ -1491,6 +1491,12 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
         else ""
     )
     print(f"session {info['name']!r} migrated to {where}{carried}{project}{moved_slots}")
+    refiled = info.get("mirrors_refiled") or []
+    for row in refiled:
+        print(
+            f"  mesh {row['mesh']!r} re-filed with it: "
+            f"{row['was']} -> {row['now']}"
+        )
     failed = False
     for child in info.get("children") or []:
         if child.get("ok"):

@@ -531,6 +531,12 @@ via the mirror's rank list).
   mesh page's header) moves any mesh, own or mirrored; peers are not told.
   A mirror attached before this sits in the default project, so a project-
   narrowed rail or create form does not list it until it is moved.
+  The filing does not follow the session on its own: a mirror seeded from
+  the joining session is re-filed when that session is re-filed by
+  `claunch migrate-session --project` (`POST /api/sessions/{name}/migrate`,
+  `MeshManager.refile_mirrors_for`), and only while the session is the
+  mirror's one local member — with a second one the filing is theirs too.
+  A later `claunch mesh project` still overrides either.
 - **`local` is reserved** as the host part meaning "this daemon"; a daemon
   registered under that relay name logs a warning, since peers could not
   address its meshes.
