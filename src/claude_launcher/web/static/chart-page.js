@@ -1304,8 +1304,11 @@ globalThis.ChartPage = (() => {
     row.setAttribute("aria-selected", String(on));
     const act = rail ? () => openSession(r.name) : () => pick(r.name);
     row.onclick = act;
+    // The session card's keys (k, p, a, e, q, f) act on the row's session
+    // while the row holds the keyboard (app.js chartRowKey, claunch-h0wi6.2.1).
     row.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); return; }
+      if (typeof chartRowKey === "function") chartRowKey(e, r.name);
     };
     // The row's hover card (rowTip) replaces the browser's title tooltips on
     // its cells: two tooltips over one row would cover each other.
@@ -1351,6 +1354,13 @@ globalThis.ChartPage = (() => {
       }
       track.appendChild(strip);
     }
+    // The card's "⌨ card" chip, shown by CSS while the row holds the
+    // keyboard: the reader sees that a letter key now acts on this session.
+    // On the track, not in the name cell: the rail's name column is too
+    // narrow to give a pill room without clipping the name. No title: the
+    // row's hover card (rowTip) is its only tooltip.
+    const chip = typeof RAIL_KEYS_CHIP === "object" && RAIL_KEYS_CHIP ? RAIL_KEYS_CHIP.card : null;
+    track.appendChild(node("span", "chart-keys", chip ? chip.text : "⌨ card"));
     row.appendChild(track);
     row.onmouseenter = (e) => showTip(r, model, e);
     row.onmousemove = (e) => showTip(r, model, e);

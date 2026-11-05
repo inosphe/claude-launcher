@@ -9081,6 +9081,21 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-row.chart-series-row, .chart-row.chart-series-row:hover { cursor: default; background: none; }
 .chart-row.selected, .chart-row.selected:hover { background: #1f2d3d; box-shadow: inset 3px 0 0 #388bfd; }
 .chart-row:focus-visible { outline: 1px solid #388bfd; outline-offset: -1px; }
+/* A session row that holds the keyboard takes the session card's keys
+   (app.js chartRowKey), so it says so the way a focused card does
+   (#session-list li.sess-card:focus, .rail-keys.on-card): a red inset ring
+   that moves nothing, and the "⌨ card" chip at the track's right end. */
+.chart-row:not(.chart-axis):not(.chart-series-row):focus {
+  outline: none; box-shadow: inset 0 0 0 1px #6e2c2c;
+}
+.chart-row.selected:focus { box-shadow: inset 3px 0 0 #388bfd, inset 0 0 0 1px #6e2c2c; }
+.chart-keys {
+  display: none; position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  z-index: 3; font-size: 10px; line-height: 12px; padding: 0 4px; border-radius: 9px;
+  white-space: nowrap; pointer-events: none;
+  background: #3d1a1a; color: #f85149; border: 1px solid #6e2c2c;
+}
+.chart-row:focus .chart-keys { display: inline-block; }
 .chart-axis { position: sticky; top: 0; z-index: 3; background: #0d1117; color: #8b949e; font-size: 11px; min-height: 26px; border-bottom: 1px solid #30363d; }
 .chart-group-head { margin-top: 12px; padding: 4px 2px; font-weight: 600; color: #c9d1d9; border-bottom: 1px solid #30363d; overflow-wrap: anywhere; }
 .chart-name { display: flex; align-items: center; gap: 6px; min-width: 0; color: #c9d1d9; text-decoration: none; }

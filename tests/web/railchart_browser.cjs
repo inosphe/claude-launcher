@@ -26,7 +26,10 @@
         is on its Chart view;
     10. rows run parent-before-child: a child sits right under its parent,
         stepped in with a branch mark, in the rail and on the page, and the
-        toolbar's 위계 box turns that off and on (claunch-h0wi6.2). */
+        toolbar's 위계 box turns that off and on (claunch-h0wi6.2);
+    11. a session row that holds the keyboard shows the card's "⌨ card"
+        chip and takes the card's keys: k on it asks the daemon to kill that
+        row's session, in the rail and on the page (claunch-h0wi6.2.1). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -46,10 +49,16 @@ const CURRENT = [
 const PROJECTS = [{ name: "default" }, { name: "other" }];
 
 const TYPES = { ".js": "application/javascript", ".css": "text/css", ".html": "text/html" };
+const kills = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.startsWith("/api/")) {
     res.setHeader("Content-Type", "application/json");
+    const kill = url.pathname.match(/^\/api\/sessions\/([^/]+)\/kill$/);
+    if (kill && req.method === "POST") {
+      kills.push(decodeURIComponent(kill[1]));
+      return res.end("{}");
+    }
     if (url.pathname === "/api/sessions") {
       const archived = url.searchParams.get("state") === "archived";
       return res.end(JSON.stringify({ sessions: archived ? [] : CURRENT }));
@@ -130,13 +139,16 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
 
     // 10. Parent before child: delta (the newest) sits right under alpha,
     // stepped in; the 위계 box gives the flat newest-first order back.
-    const order = (root) => page.$$eval(`${root} .chart-row:not(.chart-axis):not(.chart-series-row)`,
-      (rows) => rows.map((r) => {
+    // Query and read in one evaluate: $$eval resolves the rows in one round
+    // trip and reads them in the next, and a timer redraw between the two
+    // hands it detached rows whose computed padding is "" (NaN).
+    const order = (root) => page.evaluate((sel) =>
+      [...document.querySelectorAll(sel)].map((r) => {
         const n = r.querySelector(".chart-name");
         return { name: r.dataset.name, child: n.classList.contains("chart-child"),
                  branch: !!n.querySelector(".chart-branch"),
                  pad: parseFloat(getComputedStyle(n).paddingLeft) };
-      }));
+      }), `${root} .chart-row:not(.chart-axis):not(.chart-series-row)`);
     let rows = await order("#session-chart");
     assert.deepEqual(rows.map((r) => r.name), ["alpha", "delta", "gamma", "beta"], JSON.stringify(rows));
     const child = rows.find((r) => r.name === "delta");
@@ -166,6 +178,24 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
     await page.waitForFunction(() => location.hash === "#/s/gamma", null, { timeout: 5000 });
     await page.waitForSelector(`${ROWS}.selected[data-name="gamma"]`, { timeout: 8000 });
 
+    // 11. The clicked row keeps the keyboard, says so, and takes k.
+    const keysShown = (root, name) => page.$eval(
+      `${root} .chart-row[data-name="${name}"] .chart-keys`,
+      (el) => getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0);
+    await page.waitForFunction(() => document.activeElement
+      && document.activeElement.matches('#session-chart .chart-row[data-name="gamma"]'),
+    null, { timeout: 5000 });
+    assert.equal(await keysShown("#session-chart", "gamma"), true, "the focused row shows ⌨ card");
+    assert.equal(await keysShown("#session-chart", "alpha"), false, "an unfocused row shows no chip");
+    assert.equal(await page.$eval('#session-chart .chart-row[data-name="gamma"] .chart-keys',
+      (el) => el.textContent), "⌨ card");
+    await page.keyboard.press("k");
+    for (let i = 0; i < 50 && !kills.includes("gamma"); i++) await page.waitForTimeout(100);
+    assert.deepEqual(kills, ["gamma"], "k on the rail row kills its session");
+    // c is the list card's details toggle and does nothing on a chart row.
+    await page.keyboard.press("c");
+    assert.equal(await page.$eval("#session-chart", (el) => getComputedStyle(el).display !== "none"), true);
+
     // 7. The view survives a reload.
     await page.goto(`http://127.0.0.1:${port}/#/`);
     await page.waitForFunction((sel) => document.querySelectorAll(sel).length >= 4, ROWS, { timeout: 15000 });
@@ -184,6 +214,23 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
       { timeout: 5000 });
     const pageRows = await order("#chart-view");
     assert.deepEqual(pageRows.map((r) => r.name), ["alpha", "delta", "gamma", "beta"]);
+    // 11, on the page: a click selects the row and leaves it the keyboard.
+    await page.click('#chart-view .chart-row[data-name="beta"] .chart-name');
+    await page.waitForFunction(() => document.activeElement
+      && document.activeElement.matches('#chart-view .chart-row[data-name="beta"]'),
+    null, { timeout: 5000 });
+    assert.equal(await keysShown("#chart-view", "beta"), true, "the page row shows ⌨ card");
+    await page.keyboard.press("k");
+    for (let i = 0; i < 10 && !kills.includes("beta"); i++) await page.waitForTimeout(100);
+    // beta has exited: the card's rule (railCardKill) leaves an exited record alone.
+    assert.deepEqual(kills, ["gamma"], "k does nothing on an exited session's row");
+    await page.click('#chart-view .chart-row[data-name="delta"] .chart-name');
+    await page.waitForFunction(() => document.activeElement
+      && document.activeElement.matches('#chart-view .chart-row[data-name="delta"]'),
+    null, { timeout: 5000 });
+    await page.keyboard.press("k");
+    for (let i = 0; i < 50 && !kills.includes("delta"); i++) await page.waitForTimeout(100);
+    assert.deepEqual(kills, ["gamma", "delta"], "k on the page row kills its session");
 
     // 8. Back to List: the list and the filters return, the rail chart empties.
     await page.click('#session-view input[value="list"] + span');
