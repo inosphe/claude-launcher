@@ -49,6 +49,9 @@ globalThis.ChartPage = (() => {
   // from: the ledger never saw it, so the numbers are the transcript's.
   const TRANSCRIPT_SOURCE = "transcript (원장 기록 없음)";
   const REDRAW_MS = 5000;
+  // How many steps a child row is indented at most, on the page and in the
+  // rail (the rail list caps its cards at four, app.js refreshSessions).
+  const PAGE_DEPTH_CAP = 6, RAIL_DEPTH_CAP = 4;
   const STORE_KEY = "claunch_chart_view";
   // The timeline column's share of the split, in percent.
   const SPLIT_DEFAULT = 64, SPLIT_MIN = 30, SPLIT_MAX = 82;
@@ -438,6 +441,41 @@ globalThis.ChartPage = (() => {
      from the window's start (or, for "all", the earliest kept creation) to
      now. Groups are listed with their counts before the group pick narrows
      the rows, so the picker can offer every group of the project. */
+  /* Rows parent-before-child (claunch-h0wi6.2), each with its depth. The
+     rule is the rail's (app.js byLineage): a row whose parent is not among
+     these rows -- filtered out by range, project or group, archived, or
+     never recorded -- is a root, so no row is dropped; a self-parent or a
+     cycle is cut by the visited set and what it leaves is appended at depth
+     0. Siblings keep the order the rows came in, so the chosen sort orders
+     the roots and, under each parent, its children. */
+  function treeOrder(rows) {
+    const names = new Set(rows.map((r) => r.name));
+    const parentOf = (r) => {
+      const p = r.session && r.session.parent;
+      return p && p !== r.name && names.has(p) ? p : "";
+    };
+    const kids = new Map();
+    const roots = [];
+    for (const r of rows) {
+      const p = parentOf(r);
+      if (!p) { roots.push(r); continue; }
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(r);
+    }
+    const out = [];
+    const seen = new Set();
+    const walk = (r, depth) => {
+      if (seen.has(r.name)) return;
+      seen.add(r.name);
+      r.depth = depth;
+      out.push(r);
+      for (const k of kids.get(r.name) || []) walk(k, depth + 1);
+    };
+    for (const r of roots) walk(r, 0);
+    for (const r of rows) if (!seen.has(r.name)) walk(r, 0);
+    return out;
+  }
+
   function buildModel(sessions, opts = {}) {
     const now = opts.now ?? Date.now();
     const range = RANGES.find((r) => r[0] === opts.range) || RANGES[1];
@@ -485,6 +523,19 @@ globalThis.ChartPage = (() => {
     if (group && !pick) {
       // Stable: within a group the chosen order holds.
       rows.sort((a, b) => a.group.localeCompare(b.group));
+    }
+    for (const r of rows) r.depth = 0;
+    if (opts.tree) {
+      // Group by group (rows of one group are adjacent after the sort above),
+      // so a child sits under its parent only inside its own group.
+      const ordered = [];
+      for (let i = 0; i < rows.length;) {
+        let j = i;
+        while (j < rows.length && rows[j].group === rows[i].group) j++;
+        ordered.push(...treeOrder(rows.slice(i, j)));
+        i = j;
+      }
+      rows.splice(0, rows.length, ...ordered);
     }
     let t0 = from;
     if (!Number.isFinite(t0)) {
@@ -572,6 +623,7 @@ globalThis.ChartPage = (() => {
   const state = (() => {
     const fallback = { group: "", groupPick: "", range: "7d",
                        archived: false, excludeKilled: false, sort: "created",
+                       tree: true,
                        split: SPLIT_DEFAULT, selected: "", scale: "log" };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
@@ -880,6 +932,16 @@ globalThis.ChartPage = (() => {
     bar.appendChild(seg("Sort", [["created", "생성 순"], ["lifetime", "생존 시간 순"],
                                  ["tokens", "토큰 순"]],
       state.sort, (v) => set({ sort: v })));
+    // Parent-before-child with indentation (claunch-h0wi6.2); off gives the
+    // flat order the Sort above alone makes. Its own class: the two
+    // .chart-check boxes are the ones that change what is fetched.
+    const tree = node("label", "chart-tree");
+    const treeBox = node("input");
+    treeBox.type = "checkbox"; treeBox.checked = !!state.tree;
+    treeBox.onchange = () => set({ tree: treeBox.checked });
+    tree.appendChild(treeBox);
+    tree.appendChild(node("span", null, "위계"));
+    bar.appendChild(tree);
     const arch = node("label", "chart-check");
     const box = node("input");
     box.type = "checkbox"; box.checked = !!state.archived;
@@ -1248,6 +1310,15 @@ globalThis.ChartPage = (() => {
     // The row's hover card (rowTip) replaces the browser's title tooltips on
     // its cells: two tooltips over one row would cover each other.
     const name = node("div", "chart-name");
+    // A child steps in under its parent; the cap keeps a deep chain from
+    // pushing the name out of its column (the rail's is narrower).
+    const depth = Math.min(r.depth || 0, rail ? RAIL_DEPTH_CAP : PAGE_DEPTH_CAP);
+    if (depth) {
+      name.classList.add("chart-child");
+      name.style.setProperty("--chart-depth", String(depth));
+      name.dataset.depth = String(r.depth);
+      name.appendChild(node("span", "chart-branch", "└"));
+    }
     name.appendChild(node("span", `chart-dot cat-${r.category}`));
     name.appendChild(node("span", "chart-name-text", r.name));
     name.appendChild(node("span", "chart-role", r.role));
@@ -1576,7 +1647,7 @@ globalThis.ChartPage = (() => {
       now: Date.now(), project: currentProjectPick(), group: state.group,
       groupValue: appGroupValue, groupPick: state.groupPick, range: state.range,
       archived: state.archived, excludeKilled: state.excludeKilled,
-      sort: state.sort, cflowOf: appCflowOf,
+      sort: state.sort, tree: !!state.tree, cflowOf: appCflowOf,
       meshesOf: appMeshesOf, scale: state.scale, tokensOf: seriesTokens,
     });
     for (const b of boxes) paint(b.root, b.rail, sessions, model, smodel, focused);
