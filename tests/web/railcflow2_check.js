@@ -78,7 +78,10 @@ const location = { hash: "" };
 const ctx = {};
 new Function(
   "exports", "$", "document", "location", "cflow2RailCache",
-  [wfGlyphTable(), slice("cflow2RailMarkState"), slice("cflow2RailLabel"),
+  [wfGlyphTable(),
+   src.slice(src.indexOf("const CFLOW2_CHOOSE_PREFIX ="),
+             src.indexOf(";", src.indexOf("const CFLOW2_CHOOSE_PREFIX =")) + 1),
+   slice("cflow2RailUserChoices"), slice("cflow2RailMarkState"), slice("cflow2RailLabel"),
    slice("cflow2RailTip"), slice("applyCflow2Badges")].join("\n") + `
 exports.apply = applyCflow2Badges;
 exports.setRows = (rows) => { cflow2RailCache = rows; };
@@ -95,10 +98,14 @@ function check(what, got, want) {
 }
 
 const line = (li) => li.querySelector(".sess-cflow2");
-const lineText = (li) => {
+const part = (li, cls) => {
   const b = line(li);
-  return b && b.children[2] ? b.children[2].textContent : null;
+  if (!b) return null;
+  const found = b.children.find((c) => c.className.split(" ").includes(cls));
+  return found ? found.textContent : null;
 };
+const lineText = (li) => part(li, "sess-cflow2-text");
+const badge = (li) => part(li, "sess-cflow2-you");
 
 const rows = { s1: row("s1"), quiet: row("quiet") };
 // A v1 badge already on the row: the v2 painter must leave it alone.
@@ -123,7 +130,7 @@ check("a session without an entry grows no line", line(rows.quiet), null);
 check("the v1 badge stays on the row", rows.s1.children.includes(v1), true);
 
 check("run navigation is a native link", line(rows.s1).tag, "a");
-check("run destination is explicit", line(rows.s1).children[3].textContent, "Run ↗");
+check("run destination is explicit", part(rows.s1, "sess-cflow-link"), "Run ↗");
 check("link href targets this run", line(rows.s1).href, "#/wf/" + encodeURIComponent("s1|F:/repo"));
 
 // A workflow that does not recur runs its rounds as iterations of a loop in
@@ -139,8 +146,16 @@ ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
                     blocking: true,
                     owed: ["loop_limit: rounds", "choose: landing"] } });
 ctx.apply();
+// A `choose:` entry in `owed` is a decision only the reader can answer, so
+// the row wears the badge and the class apart from every other gate
+// (claunch-np69t P4).
 check("an owed run is flagged as the reader's move",
-      line(rows.s1).className, "sess-cflow2 gated");
+      line(rows.s1).className, "sess-cflow2 gated user-choice");
+check("...and a choice only the reader can answer wears the badge",
+      badge(rows.s1), "⚠ your decision");
+check("...which names the choice in its hover",
+      line(rows.s1).children.find((c) => c.className === "sess-cflow2-you").title,
+      "only you can answer: landing");
 check("the flagged line names what is owed",
       lineText(rows.s1), "improv-worker-v2 · ⚑ loop_limit: rounds · choose: landing");
 check("the mark says it is yours", line(rows.s1).children[0].textContent, "◆");
@@ -177,6 +192,8 @@ check("a stopped run with a door open reads as both, stop first",
 check("...and the row is amber, because something really is stopped",
       [line(rows.s1).className, line(rows.s1).children[0].textContent],
       ["sess-cflow2 gated", "◆"]);
+check("...a hold with no choice on it is nobody's decision, so no badge",
+      badge(rows.s1), null);
 
 // An older daemon sends `gated` and no `blocking`: absent is read as a stop,
 // which is what every one of these used to be.
@@ -185,7 +202,7 @@ ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
 ctx.apply();
 check("a payload without `blocking` keeps the old reading",
       [line(rows.s1).className, line(rows.s1).children[0].textContent],
-      ["sess-cflow2 gated", "◆"]);
+      ["sess-cflow2 gated user-choice", "◆"]);
 
 ctx.setRows({ s1: { ...running, status: "done", current: [] } });
 ctx.apply();
@@ -213,6 +230,10 @@ check("...and the amber of a reader's move",
       /#session-list \.sess-cflow2\.gated \{[^}]*#d29922/.test(css), true);
 check("...while an optional door keeps the calm colour (claunch-hbmhk)",
       /#session-list \.sess-cflow2\.optional \{[^}]*#7d8590/.test(css), true);
+check("...and its own tone for a decision only the reader can answer (claunch-np69t P4)",
+      /#session-list \.sess-cflow2\.user-choice \{[^}]*#f0b429/.test(css), true);
+check("...whose badge carries the words the row cannot",
+      /#session-list \.sess-cflow2-you \{/.test(css), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
