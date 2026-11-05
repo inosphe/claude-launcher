@@ -74,13 +74,15 @@ Reading a delivery block:
 
 - `needs_action: true` — the batch asks you to **decide**. There is nothing
   to send back in this thread: the decision is recorded where the message
-  points (the entry's `ref` — for a cflow2 ask, `flow_answer` on the run).
-  Decide before you continue. Draining past it is how a routed ask expired
-  unanswered and fell to the next responder.
+  points — the `ref:` lines under that entry name it (for a cflow2 ask,
+  `kind: cflow2.ask` and the ask `id` you answer with `flow_answer` on the
+  run). Decide before you continue. Draining past it is how a routed ask
+  expired unanswered and fell to the next responder.
 - `needs_reply: false` — the batch is fyi/ack only: absorb it and continue
   your work; do NOT reply (that is the point of those intents).
 - otherwise — act on it and/or answer the sender. Each entry shows `from`,
-  its message `id`, a `type` when not `say`, and `reply_to` when threaded.
+  its message `id`, a `type` when not `say`, `reply_to` when threaded, and
+  `ref` when the sender attached a pointer to whatever the message is about.
 - **Never leave a reply-expecting message unanswered.** If you can answer
   now, answer. If it instead puts work on you that will take a while, answer
   NOW with a brief `--type ack` ("taking it") and send the real outcome as an

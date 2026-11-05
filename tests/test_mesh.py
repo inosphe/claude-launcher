@@ -244,12 +244,23 @@ def test_format_delivery_a_decide_owes_an_action_but_no_reply():
     assert "no reply in this thread" in block
     assert "do not drain past it" in block    # names the failure it prevents
     assert "`ref`" in block                   # where the decision is recorded
+    # ...and that pointer has to RESOLVE. The note names the entry's `ref`, so
+    # an entry that dropped it made the sentence point at nothing — which is
+    # exactly how this fix first landed (claunch-ask-decide-needs-reply-zaxct,
+    # CHANGES REQUESTED from the reviewer @ 14df2c31e0). Assert the carried
+    # values, not the word `ref` in the prose.
+    assert "ref:" in block
+    assert "kind: cflow2.ask" in block
+    assert "id: ask2-1" in block
+    assert "task: peer-review" in block
 
-    # A batch that owes nothing grows neither the flag nor the wording.
+    # A batch that owes nothing grows neither the flag nor the wording — and
+    # a message with no ref grows no ref line.
     fyi = [{"from": "w1", "to": "rev", "type": "fyi", "body": "stall: w2"}]
     quiet = format_delivery("m1", "rev", fyi)
     assert "needs_action" not in quiet
     assert "fyi/ack only" in quiet
+    assert "ref:" not in quiet
 
     # A reply-expecting message still owns the note, but the decide in the
     # same batch stays marked — a reader must not take it as reply-only.

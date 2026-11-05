@@ -10548,6 +10548,16 @@ def format_delivery(
     it, and the reader protocol in ``mesh_install`` has never listed it. The
     roster is still on the message in the log, so ``claunch mesh history``
     remains the way to ask who else received one (claunch-mesh-drop-batch-to-8lqg1).
+
+    ``ref`` IS carried, verbatim, on every entry whose message has one. It is
+    the block's own answer to "where do I record this?" — the ``decide`` note
+    tells the reader to record the decision where the entry's ``ref`` points,
+    and a pointer to a key this function dropped is a pointer to nothing.
+    cflow2 sends every ask that way (``{"kind": "cflow2.ask", "id": ..., "task":
+    ...}``), so without this the whole action sentence named a field the
+    reader could not find (claunch-ask-decide-needs-reply-zaxct). It is passed
+    through untouched: the mesh relayed it without interpreting it on the way
+    in (:data:`REF_KEY`), and it does not start interpreting it on the way out.
     """
     batch = []
     intents = []
@@ -10565,6 +10575,9 @@ def format_delivery(
             entry["type"] = intent
         if m.get("reply_to"):
             entry["reply_to"] = m["reply_to"]
+        ref = m.get(REF_KEY)
+        if isinstance(ref, dict) and ref:
+            entry[REF_KEY] = ref
         entry["body"] = _Literal(body) if "\n" in body else body
         batch.append(entry)
     needs_reply = any(expects_reply(t) for t in intents)
