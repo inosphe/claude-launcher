@@ -104,7 +104,7 @@ sides:
 #                            무효화된 캐시를 다시 prefill 해야 한다 -- claunch-aobd0 /
 #                            claunch-q4cqy.6)
 #   end-hold              -> end-hold (보류 사유·상위 fyi. 뒤에 release-decision을 새 ask로
-#                            다시 올리고 그 질문을 연 채 `claunch hold` — claunch-llfac.
+#                            다시 올리고 그 질문을 연 채 `claunch hold <세션>` — claunch-llfac.
 #                            v1의 keep-alive + delivery-hold는 쓰지 않는다)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
 #   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
@@ -5063,7 +5063,7 @@ nodes:
          질문이 열린 채 남는다는 사실과 handoff 이슈 id(있다면). 데몬은 hold에
          대해 상위에게 아무 통지도 보내지 않는다(종료 통지는 실제로 종료된
          세션에만 붙는다).
-      3. 이 노드를 보고한다. `claunch hold`는 여기서 실행하지 않는다 — hold는
+      3. 이 노드를 보고한다. `claunch hold $CLAUNCH_SESSION`은 여기서 실행하지 않는다 — hold는
          그 즉시 프로그램을 내리므로, 바로 뒤 release-decision의 질문을 올리고
          nudge까지 마친 다음 그 턴의 마지막 동작으로 실행한다(release-decision의
          nudge 절이 같은 지시를 싣는다).
@@ -8267,24 +8267,28 @@ procedures:
                       criteria: [deferrable]
                       # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
                       # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
-                      nudge: |
-                        이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 질문은
-                        열린 채로 남는다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
-                        `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
-                        무엇을 정해야 하는지와 답하는 명령
-                        (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
-                        **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
-                        그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
-                        진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
-                        않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
-                        REPEAT_AFTER).
-                        **이 질문 바로 앞에서 end-hold를 보고했으면**(hold 답으로 다시
-                        선 질문이다, claunch-llfac) `flow_nudge` 뒤 그 턴의 **마지막
-                        동작으로** `claunch hold`(인자를 주지 않으면 자기 세션)를 실행한다. hold는
-                        그 즉시 프로그램을 내리므로 그 뒤에 글을 쓰지 않는다 — 대화는
-                        보존되고, 답이 오면 깨어나 이 질문의 결과부터 이어 간다. 바로
-                        앞이 auto-release였으면 실행하지 않는다(그때는 사람이 아직
-                        보류를 고르지 않았다). keep-alive·delivery-hold는 세우지 않는다.
+                      # $CLAUNCH_SESSION을 그대로 싣기 위해 lit로 감싼다 — 맨 문자열의 $는
+                      # 식으로 읽힌다(claunch-llfac TRIED).
+                      nudge:
+                        lit: |
+                          이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 질문은
+                          열린 채로 남는다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
+                          `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
+                          무엇을 정해야 하는지와 답하는 명령
+                          (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
+                          **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
+                          그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
+                          진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
+                          않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
+                          REPEAT_AFTER).
+                          **이 질문 바로 앞에서 end-hold를 보고했으면**(hold 답으로 다시
+                          선 질문이다, claunch-llfac) `flow_nudge` 뒤 그 턴의 **마지막
+                          동작으로** `claunch hold $CLAUNCH_SESSION`을 실행한다(세션 인자는 생략할 수
+                          없다 — 인자 없는 `claunch hold`는 `error: no session given`으로 끝난다). hold는
+                          그 즉시 프로그램을 내리므로 그 뒤에 글을 쓰지 않는다 — 대화는
+                          보존되고, 답이 오면 깨어나 이 질문의 결과부터 이어 간다. 바로
+                          앞이 auto-release였으면 실행하지 않는다(그때는 사람이 아직
+                          보류를 고르지 않았다). keep-alive·delivery-hold는 세우지 않는다.
                       topic: |
                         회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
                         이 질문에는 기한이 없다 — 답이 없으면 질문은 열린 채로 남는다.
