@@ -164,7 +164,7 @@ def load(profile: Profile) -> Optional[Pool]:
     """
     file = path(profile)
     try:
-        text = file.read_text(encoding="utf-8")
+        text = atomic.read_text(file)
     except FileNotFoundError:
         # Includes the pool that a concurrent clear removed between the open
         # and the read: a pool file that no longer exists is a profile with

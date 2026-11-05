@@ -220,3 +220,63 @@ def test_a_scratch_that_was_renamed_away_is_not_an_error(tmp_path):
 
     assert dest.read_text(encoding="utf-8") == "new"
     assert list(tmp_path.glob(dest.name + ".*.tmp")) == []
+
+
+def test_a_reader_refused_by_a_replace_in_flight_is_retried(tmp_path, monkeypatch):
+    """claunch-labxh.1: a read that lands inside a writer's replace is retried."""
+    doc = tmp_path / "pool.json"
+    doc.write_text("whole", encoding="utf-8")
+    real = type(doc).read_text
+    calls = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _perm(5)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(doc), "read_text", flaky)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    assert atomic.read_text(doc) == "whole"
+    assert len(calls) == 3
+
+
+def test_a_missing_file_is_answered_at_once_by_read_text(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(atomic.time, "sleep", sleeps.append)
+    with pytest.raises(FileNotFoundError):
+        atomic.read_text(tmp_path / "absent.json")
+    assert sleeps == []
+
+
+def test_a_reader_that_is_never_let_in_raises_the_original_error(tmp_path, monkeypatch):
+    doc = tmp_path / "pool.json"
+    doc.write_text("x", encoding="utf-8")
+
+    def always(self, *args, **kwargs):
+        raise _perm(5)
+
+    monkeypatch.setattr(type(doc), "read_text", always)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    with pytest.raises(OSError) as info:
+        atomic.read_text(doc)
+    assert info.value.winerror == 5 if WINDOWS else True
+
+
+@windows_only
+def test_a_read_refused_with_errno_only_is_retried(tmp_path, monkeypatch):
+    """open() reports the sharing refusal as EACCES without a winerror."""
+    doc = tmp_path / "pool.json"
+    doc.write_text("whole", encoding="utf-8")
+    real = type(doc).read_text
+    calls = []
+
+    def flaky(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) < 2:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(doc), "read_text", flaky)
+    monkeypatch.setattr(atomic.time, "sleep", lambda _s: None)
+    assert atomic.read_text(doc) == "whole"
