@@ -171,6 +171,7 @@ def test_the_known_field_list_covers_every_key_routing_writes(home):
         routing.AFFINITY_KEY,
         routing.SESSION_HEADER_KEY,
         routing.ANTHROPIC_AUTH_KEY,
+        routing.TRANSLATION_KEY,
         routing.DYNAMIC_KEY,
     ):
         assert key in known, f"routing writes providers.<name>.{key}, the field list does not know it"

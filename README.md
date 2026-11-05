@@ -1598,6 +1598,60 @@ sessions on the same provider worked — the header was applied inside the shim,
 and the briefing never goes through the shim. The same failure reached every
 observer pass and every search index sync for the same reason.
 
+### Running Claude Code on an OpenAI-only backend (`anthropic_translation`)
+
+Some backends serve a model on the OpenAI protocol only. Command Code's
+`deepseek/deepseek-v4.1-flash` answers `/provider/v1/chat/completions` and is
+refused on `/provider/messages` (`Model is not supported on this endpoint`),
+so the Claude harness, which speaks only Anthropic Messages, cannot reach it.
+`anthropic_translation: openai` on the provider makes the shim translate:
+
+| Request at the shim | What goes upstream |
+|---|---|
+| `POST /v1/messages` (Claude Code) | `POST <endpoints.openai>/chat/completions`, body translated; the answer (JSON or SSE stream) is translated back to the Messages shape |
+| `POST /v1/messages/count_tokens` | nothing — answered by the shim with an estimate (4 characters per token) |
+| anything else (`/chat/completions` from Pi) | forwarded unchanged |
+
+The key is opt-in and read live. Without it nothing is translated. With it the
+provider always goes through the shim, and the shim's upstream is the
+`endpoints.openai` base whether or not `endpoints.anthropic` is set; a value
+other than `openai`, or a missing `endpoints.openai`, refuses the launch (and
+the shim answers 502 for a value edited in later). The mapping lives in
+`src/claude_launcher/anthropic_openai.py`:
+
+- request: `system`, text/image/`tool_use`/`tool_result` blocks, `tools`
+  (server tools such as web search are dropped), `tool_choice`,
+  `max_tokens`, `stop_sequences`, `temperature`, `top_p`, and `thinking`
+  carried as `openai_reasoning_format` says (`deepseek`: `thinking` +
+  `reasoning_effort`, and earlier thinking returned as `reasoning_content`;
+  `openai`: `reasoning_effort`; unset: dropped). A configured
+  `reasoning_effort` wins over one derived from `budget_tokens`.
+- response: `content` → text, `reasoning_content` (or `reasoning`) →
+  thinking, `tool_calls` → `tool_use`, `finish_reason` → `stop_reason`,
+  `usage` (cached prompt tokens → `cache_read_input_tokens`), and an
+  upstream error body → an Anthropic error body with the same status.
+- not carried: `top_k`, `cache_control`, `metadata`, non-text documents.
+
+The credential is sent as `Authorization: Bearer`, the OpenAI form; an
+`x-api-key` from the harness is moved there. The daemon's own LLM calls
+(briefing, observer, search) do not go through the shim and do not read this
+key.
+
+```yaml
+providers:
+  commandcode:
+    allowed_harnesses: [claude, pi]
+    anthropic_translation: openai
+    context_window: 1000000
+    endpoints:
+      openai: https://api.commandcode.ai/provider/v1
+    models:
+      default: deepseek/deepseek-v4.1-flash
+      large: deepseek/deepseek-v4.1-flash
+      small: deepseek/deepseek-v4.1-flash
+    openai_reasoning_format: deepseek
+```
+
 ### Prompt-cache TTL
 
 Claude Code decides how long a prompt-cache entry lives: the setting

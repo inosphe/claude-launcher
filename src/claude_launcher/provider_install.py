@@ -128,6 +128,11 @@ def _extra_problems(name: str, doc: dict) -> List[str]:
         except routing.RoutingError as exc:
             out.append(str(exc))
     try:
+        if routing.anthropic_translation(name, doc):
+            routing.translation_upstream(name, doc)
+    except routing.RoutingError as exc:
+        out.append(str(exc))
+    try:
         harness_policy.provider_constraint(name, doc)
         harness_policy.provider_default(name, doc)
     except harness_policy.HarnessPolicyError as exc:

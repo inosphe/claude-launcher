@@ -120,6 +120,20 @@ ANTHROPIC_AUTH_KEY = "anthropic_auth_header"
 #: default (the bearer goes out as sent) and only exists to be written down.
 ANTHROPIC_AUTH_HEADERS = ("authorization", "x-api-key")
 
+#: Per-provider config key that makes the shim translate Claude Code's
+#: Anthropic Messages requests into another protocol
+#: (``providers.<name>.anthropic_translation``). Its one value, ``openai``,
+#: sends ``/v1/messages`` to ``<endpoints.openai>/chat/completions`` and turns
+#: the answer back (:mod:`claude_launcher.anthropic_openai`). For a backend
+#: that serves a model on the OpenAI protocol only -- Command Code's
+#: ``deepseek/deepseek-v4.1-flash`` is refused on its ``/messages`` route --
+#: so the claude harness can still run on it. Opt-in: absent, nothing is
+#: translated, and a provider with an anthropic endpoint keeps using it.
+TRANSLATION_KEY = "anthropic_translation"
+
+#: The values :data:`TRANSLATION_KEY` accepts.
+TRANSLATIONS = ("openai",)
+
 #: Body field the spec is merged into. OpenRouter's name for it.
 BODY_FIELD = "provider"
 
@@ -273,12 +287,104 @@ def anthropic_auth_header(provider_name: str, doc: Optional[dict] = None) -> Opt
     return "x-api-key" if value.lower() == "x-api-key" else None
 
 
+def _translation_of(entry: dict, where: str) -> Optional[str]:
+    value = entry.get(TRANSLATION_KEY)
+    if value is None or value is False:
+        return None
+    if not isinstance(value, str) or value.lower() not in TRANSLATIONS:
+        raise RoutingError(
+            f"{where}.{TRANSLATION_KEY} must be one of "
+            f"{', '.join(TRANSLATIONS)} (got {value!r})"
+        )
+    return value.lower()
+
+
+def _provider_entry(provider_name: str, doc: dict) -> Optional[dict]:
+    section = doc.get("providers")
+    if not isinstance(section, dict):
+        return None
+    entry = section.get(provider_name)
+    return entry if isinstance(entry, dict) else None
+
+
+def anthropic_translation(provider_name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """``"openai"`` when ``provider_name`` asks the shim to translate Claude
+    Code's Messages requests to Chat Completions, else ``None``.
+
+    Absent key is off. Any other value is a config error, same policy as
+    :func:`session_affinity`.
+    """
+    doc = store.load() if doc is None else doc
+    entry = _provider_entry(provider_name, doc)
+    if entry is None:
+        return None
+    return _translation_of(entry, f"providers.{provider_name}")
+
+
+def _openai_base(entry: dict, where: str) -> str:
+    endpoints = entry.get("endpoints")
+    raw = str(endpoints.get("openai") or "").strip() if isinstance(endpoints, dict) else ""
+    if not raw:
+        raise RoutingError(
+            f"{where} sets {TRANSLATION_KEY}: openai but no endpoints.openai "
+            "to translate to"
+        )
+    from .provider_spec import SpecError, openai_urls
+
+    try:
+        return openai_urls(raw).base_url
+    except SpecError as exc:
+        raise RoutingError(f"{where}: {exc}") from None
+
+
+def translation_upstream(provider_name: str, doc: Optional[dict] = None) -> str:
+    """The OpenAI API base a translating provider's claude shim forwards to."""
+    doc = store.load() if doc is None else doc
+    entry = _provider_entry(provider_name, doc) or {}
+    return _openai_base(entry, f"providers.{provider_name}")
+
+
+def translation_options(provider_name: Optional[str] = None,
+                        route: Optional[str] = None,
+                        doc: Optional[dict] = None) -> Optional[dict]:
+    """What the shim needs to translate a request right now, or ``None``.
+
+    ``{"to": "openai", "reasoning_format": ..., "reasoning_effort": ...}``
+    read live from the provider (a dynamic ``route`` resolves its provider,
+    and its profile's ``reasoning_effort`` overlays the provider's), so a
+    config edit reaches a running shim without a restart.
+    """
+    doc = store.load() if doc is None else doc
+    if route:
+        entry, profile_entry, _ = _split_route(route, doc)
+        where = f"route {route!r}"
+    elif provider_name:
+        entry = _provider_entry(provider_name, doc)
+        profile_entry = None
+        where = f"providers.{provider_name}"
+    else:
+        return None
+    if entry is None:
+        return None
+    kind = _translation_of(entry, where)
+    if kind is None:
+        return None
+    effort = (profile_entry or {}).get("reasoning_effort") or entry.get("reasoning_effort")
+    fmt = entry.get("openai_reasoning_format")
+    return {
+        "to": kind,
+        "reasoning_format": str(fmt) if fmt else None,
+        "reasoning_effort": str(effort) if effort else None,
+    }
+
+
 def requires_shim(provider_name: str, doc: Optional[dict] = None) -> bool:
     """Whether the upstream refuses requests a harness sends unaided, so
     the provider must go through the shim even with metering off."""
     return bool(
         session_header(provider_name, doc)
         or anthropic_auth_header(provider_name, doc)
+        or anthropic_translation(provider_name, doc)
     )
 
 
@@ -502,7 +608,9 @@ def _split_route(route: str, doc: Optional[dict] = None):
 
 
 def route_upstream(route: str, doc: Optional[dict] = None) -> str:
-    """The anthropic endpoint a dynamic route points at right now.
+    """The anthropic endpoint a dynamic route points at right now (the
+    ``endpoints.openai`` base instead when the provider translates, see
+    :data:`TRANSLATION_KEY`).
 
     Read from the live config on every request, so editing the provider (or
     moving a profile onto another provider with ``claunch set-provider``)
@@ -510,6 +618,8 @@ def route_upstream(route: str, doc: Optional[dict] = None) -> str:
     """
     doc = store.load() if doc is None else doc
     entry, _, _ = _split_route(route, doc)
+    if _translation_of(entry, f"route {route!r}"):
+        return _openai_base(entry, f"the provider behind route {route!r}")
     endpoints = entry.get("endpoints")
     url = (
         str(endpoints.get("anthropic") or "").strip()
@@ -1223,6 +1333,11 @@ def apply(env: dict, provider_name: str, doc: Optional[dict] = None,
     ):
         return
     upstream = env.get("ANTHROPIC_BASE_URL")
+    if anthropic_translation(provider_name, doc):
+        # Claude Code still speaks Messages; the shim turns that into Chat
+        # Completions against the OpenAI base, so that base is the upstream
+        # whatever the anthropic endpoint (if any) says.
+        upstream = translation_upstream(provider_name, doc)
     if not upstream:
         if block:
             raise RoutingError(
