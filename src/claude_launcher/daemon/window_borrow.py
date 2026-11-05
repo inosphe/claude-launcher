@@ -608,15 +608,18 @@ class BorrowRunner:
         state: dict = {}
         try:
             await self._run(run, workdir, state)
+        # The terminal status is settled before the give-back is awaited: a
+        # second cancel landing inside that await must not leave the run
+        # without one (claunch-whm4e.1.1.1.1).
         except asyncio.CancelledError:
             reason = self._stop_reason.pop(run["id"], "the daemon is stopping")
+            state["final"] = {"status": "aborted", "error": reason}
             if not run.get("revoked"):
                 await self._give_back(run, reason)
-            state["final"] = {"status": "aborted", "error": reason}
         except Exception as exc:  # noqa: BLE001 — any failure gives the waiter back
             log.warning("window borrow %s failed: %s", run["id"], exc)
-            await self._give_back(run, str(exc)[:200])
             state["final"] = {"status": "failed", "error": str(exc)[:500]}
+            await self._give_back(run, str(exc)[:200])
         finally:
             beat.cancel()
             proc = state.get("proc")
@@ -627,7 +630,7 @@ class BorrowRunner:
                 with contextlib.suppress(Exception):
                     self._window.release(grant)
             try:
-                await asyncio.to_thread(self._cleanup, run, workdir)
+                await _uncancelled(asyncio.to_thread(self._cleanup, run, workdir))
             finally:
                 # The terminal status is written only once the grant is back
                 # and the checkout is gone (claunch-whm4e.1.1.1): a reader
@@ -819,6 +822,26 @@ def _kill(proc) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
+
+
+async def _uncancelled(awaitable):
+    """Await ``awaitable`` to its end even if the caller is cancelled
+    meanwhile, then pass the cancel on. The cleanup thread cannot be stopped
+    anyway; returning early would let the run's terminal status be written
+    while its checkout is still being removed (claunch-whm4e.1.1.1.1)."""
+    inner = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(inner)
+            break
+        except asyncio.CancelledError:
+            if inner.done():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def _arg_paths(args: list) -> "list[tuple[str, str]]":

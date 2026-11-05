@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -621,6 +622,63 @@ def test_recover_marks_a_stale_run_aborted_after_its_cleanup(tmp_path):
         assert runner.runs()[0]["status"] == "aborted"
 
     asyncio.run(run())
+
+
+class _SecondCancelRunner(_OrderRunner):
+    """A cancelled run whose give-back to the lender and cleanup both take
+    long enough for a second cancel to land inside them."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path, "cancel")
+        self.giving_back = asyncio.Event()
+        self.cleaning = threading.Event()
+        self.gave_back = []
+
+    async def _give_back(self, run, reason):
+        self.giving_back.set()
+        await asyncio.sleep(60)
+        self.gave_back.append(reason)
+
+    def _cleanup(self, run, workdir):
+        self.cleaning.set()
+        super()._cleanup(run, workdir)
+
+
+@pytest.mark.parametrize("during", ["give-back", "cleanup"])
+def test_a_second_cancel_still_ends_the_run_aborted_after_its_cleanup(
+        tmp_path, monkeypatch, during):
+    """claunch-whm4e.1.1.1.1: a second cancel that landed while the first
+    one's except branch awaited the give-back left the run ACTIVE (testing)
+    for good; one that landed while the cleanup thread ran wrote the
+    terminal status with the checkout still there."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _SecondCancelRunner(tmp_path)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await _until(lambda: doc["status"] == "testing", 5)
+        task.cancel()
+        if during == "give-back":
+            await asyncio.wait_for(runner.giving_back.wait(), 5)
+        else:
+            runner._give_back = _no_give_back
+            await _until(runner.cleaning.is_set, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == "aborted" and doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
+
+
+async def _no_give_back(run, reason):
+    return None
 
 
 def _tampering(transport, change):
