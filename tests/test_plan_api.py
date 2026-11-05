@@ -149,3 +149,30 @@ def test_joint_tree_reads_the_live_parent(tmp_path):
         one = (await req("GET", "/api/plan/joint?session=s2&steps=1"))["group"]
         assert one["members"][1]["tree"][0]["choice"] == "B"
     run(tmp_path, scenario)
+
+
+def test_rounds_open_seal_list_and_read(tmp_path):
+    """claunch-r3j1o.1: POST /api/plan/round, GET /api/plan/rounds and
+    GET /api/plan?round=."""
+    async def scenario(req, mgr):
+        opened = await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 1})
+        assert opened["opened"] is True and opened["plan"]["context"]["project"] == "claunch"
+        await req("POST", "/api/plan", {**PLAN, "revision": opened["plan"]["revision"]})
+        again = await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 1})
+        assert again["opened"] is False
+        # v1 and f1 are still owed: require_disposed refuses and seals nothing
+        await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2,
+                                              "leftover": "require_disposed"}, status=409)
+        await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2,
+                                              "leftover": "bogus"}, status=400)
+        assert (await req("GET", "/api/plan/rounds?session=s1"))["rounds"] == []
+        nxt = await req("POST", "/api/plan/round", {"session": "s1", "by": "s1", "run": "r1", "round": 2})
+        assert nxt["sealed"]["key"] == "r1/1" and set(nxt["carried"]) == {"v1", "f1"}
+        listed = await req("GET", "/api/plan/rounds?session=s1")
+        assert [r["key"] for r in listed["rounds"]] == ["r1/1"] and listed["current"]["round"] == 2
+        old = await req("GET", "/api/plan?session=s1&round=r1/1")
+        assert old["plan"]["sealed"] is True and old["plan"]["steps"][0]["id"] == "d1"
+        assert (await req("GET", "/api/plan?session=s1&round=r1/7"))["plan"] is None
+        await req("GET", "/api/plan?session=s1&round=bad", status=400)
+        await req("POST", "/api/plan/round", {"session": "s1", "run": "r1", "round": 3}, status=403)
+    run(tmp_path, scenario)

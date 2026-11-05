@@ -39,11 +39,12 @@ GATES = {
     # goes to a person instead of spending its wait (claunch-od1mx.1).
     "landing-target": "landing_target",
     # Does this session's plan still wait on the user? Polled by
-    # improv-worker-v2's plan waits (plan-wait-before-gate, and
-    # plan-wait-after-seed on the path that skips coding-plan), so the run
-    # stops for the plan panel's decisions before it reaches the
-    # coding-approval gate (claunch-rzepk). 0 clear, 1 still waiting,
-    # 2 cannot tell.
+    # improv-worker-v2's one start wait (plan-wait, after coding-plan or
+    # plan-seed and before the coding-approval gate and work), so the run
+    # stops for the plan panel's decisions before it reaches the gate
+    # (claunch-rzepk, claunch-r3j1o.2), and by its settle closure waits.
+    # 0 clear, 1 still waiting, 2 cannot tell (also: the plan is another
+    # run's or round's).
     "plan-waiting": "plan_waiting",
 }
 

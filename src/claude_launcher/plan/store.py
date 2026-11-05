@@ -51,6 +51,19 @@ from ``plan_get`` keeping the ids.
 The summary (counts, ``waiting``, ``closable`` and the ``blockers`` that
 keep it from closing) is computed on every write and stored beside the
 document, so the rail that lights every session's button reads one column.
+
+Rounds (claunch-r3j1o.1). A session that runs a workflow round after round
+writes one plan per round. ``new_round(run, round)`` seals the current plan
+into ``plan_rounds`` (read back with ``rounds`` and ``get_round``) and opens
+the next one with an empty carry index, so a decision of the old round never
+answers the new one -- even when the session reuses the node id and text.
+It is idempotent on (run, round): a second call for the round the plan is
+already in, or for a round already sealed, changes nothing, so the daemon's
+round trigger and the workflow's own call may both arrive. What the user
+still owes the old round (a verify not checked or failed, a followup not
+disposed of or kept and not done) is carried into the new plan's closure
+with ``from`` naming its round, and a plain ``set`` that leaves such a node
+out keeps it: it is the user's to settle, not the session's to drop.
 """
 
 from __future__ import annotations
@@ -87,6 +100,11 @@ ACTIONS = ("here", "issue", "drop")
 #: still waits on nobody -- so there is no "drop": leaving it alone is that.
 NOTE_ACTIONS = ("here", "issue")
 FINISHED = ("done", "skipped")
+
+#: The document keys a plan row stores. ``run`` and ``round`` are written by
+#: ``new_round`` only; every other write keeps them.
+DOC_KEYS = ("title", "goal", "issue", "context", "steps", "closure", "run", "round")
+MAX_RUN = 120
 
 #: What the user decides on, per kind: a change to any of these moves the
 #: node's ``rev`` and takes its result away -- except on a closure node whose
@@ -153,6 +171,20 @@ CREATE TABLE IF NOT EXISTS events (
     data TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS events_session ON events (session, seq);
+CREATE TABLE IF NOT EXISTS plan_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session TEXT NOT NULL CHECK (length(session) > 0),
+    run TEXT NOT NULL DEFAULT '',
+    round INTEGER,
+    issue TEXT,
+    revision INTEGER NOT NULL,
+    doc TEXT NOT NULL CHECK (json_valid(doc)),
+    summary TEXT NOT NULL CHECK (json_valid(summary)),
+    opened_at TEXT NOT NULL,
+    closed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_rounds_session ON plan_rounds (session, id);
+CREATE INDEX IF NOT EXISTS plan_rounds_key ON plan_rounds (session, run, round);
 CREATE TRIGGER IF NOT EXISTS plans_revision_advances
 BEFORE UPDATE ON plans
 WHEN NEW.revision <> OLD.revision + 1
@@ -348,6 +380,9 @@ class _Builder:
             node["rev"] = 1
             node["result"] = None
             return False
+        if old.get("from"):
+            # a node carried in from a sealed round keeps saying where it came from
+            node["from"] = old["from"]
         same = _content(old) == _content(node)
         if same or _kept(old):
             node["rev"] = old["rev"]
@@ -407,6 +442,50 @@ def _index(doc: Optional[dict]) -> dict:
     return {n["id"]: n for n in [*walk(doc.get("steps") or []), *(doc.get("closure") or [])]}
 
 
+LEFTOVER = ("carry", "require_disposed")
+
+
+def closure_blocker(node: dict) -> Optional[tuple]:
+    """(why, who) when this closure node keeps the plan from closing, else
+    None. The one judgement both :func:`summarize` (``blockers``, ``waiting``)
+    and :meth:`PlanStore.new_round` (what moves into the next round, what
+    ``require_disposed`` refuses on) read, so the two cannot drift apart.
+
+    A verify not checked waits on the user, a failed one on the session (fix
+    it and reword it). A deferred one ("보류") is handed over as an issue and
+    waits on nobody. A note waits on nobody (claunch-i0whx). A followup not
+    disposed of waits on the user, unless the session marked it done itself;
+    one the user kept ("here", "issue") waits on the session until it is
+    done."""
+    kind = node.get("kind")
+    res = node.get("result") or {}
+    if kind == "verify":
+        if not res:
+            return ("not checked yet", "user")
+        if res.get("verdict") == "failed":
+            return ("check failed", "session")
+        return None
+    if kind != "followup":
+        return None
+    if not res:
+        return None if node.get("status") == "done" else ("not disposed of", "user")
+    if res.get("action") != "drop" and node.get("status") != "done":
+        return (f"followup kept ({res.get('action')}) and not done", "session")
+    return None
+
+
+def _round_value(value, name: str = "round") -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PlanError(f"{name} must be an integer >= 0")
+    return value
+
+
+def round_key(run: Optional[str], rnd: Optional[int]) -> str:
+    """``<run>/<round>`` as the API spells a round; ``unknown`` for a plan
+    sealed before it carried one."""
+    return f"{run or ''}/{'unknown' if rnd is None else rnd}"
+
+
 def summarize(doc: dict) -> dict:
     """Counts, what waits on the user, and whether the session may close.
 
@@ -447,22 +526,9 @@ def summarize(doc: dict) -> dict:
         elif not n.get("result"):
             block(n, "decision not taken", "user")
     for n in closure:
-        res = n.get("result") or {}
-        if n["kind"] == "verify":
-            if not res:
-                block(n, "not checked yet", "user")
-            elif res.get("verdict") == "deferred":
-                pass
-            elif res.get("verdict") == "failed":
-                block(n, "check failed", "session")
-        elif n["kind"] == "note":
-            continue
-        else:
-            if not res:
-                if n.get("status") != "done":   # done by the session: it disposed of it itself
-                    block(n, "not disposed of", "user")
-            elif res.get("action") != "drop" and n.get("status") != "done":
-                block(n, f"followup kept ({res.get('action')}) and not done", "session")
+        held = closure_blocker(n)
+        if held:
+            block(n, *held)
     waiting = [b for b in blockers if b["who"] == "user"]
     return {
         "steps": s_total, "done": s_done,
@@ -537,15 +603,22 @@ class PlanStore:
         db.execute("INSERT INTO events (session, node, actor, kind, revision, at, data) VALUES (?,?,?,?,?,?,?)",
                    (session, node, actor, kind, revision, _now(), json.dumps(data or {}, ensure_ascii=False)))
 
-    def _store(self, db, session: str, before: Optional[dict], doc: dict) -> dict:
+    def _store(self, db, session: str, before: Optional[dict], doc: dict, *, opens_round: bool = False) -> dict:
         now = _now()
-        body = {k: doc[k] for k in ("title", "goal", "issue", "context", "steps", "closure")}
+        body = {k: doc[k] for k in DOC_KEYS if k in doc and (k not in ("run", "round") or doc[k] is not None)}
         summary = summarize(body)
         if before is None:
             db.execute("INSERT INTO plans (session, revision, doc, summary, created_at, updated_at) "
                        "VALUES (?,?,?,?,?,?)",
                        (session, 1, json.dumps(body, ensure_ascii=False), json.dumps(summary, ensure_ascii=False),
                         now, now))
+        elif opens_round:
+            # A new round: same row, so the revision keeps counting up and a
+            # write made against the old round's revision is refused.
+            db.execute("UPDATE plans SET revision = revision + 1, doc = ?, summary = ?, created_at = ?, "
+                       "updated_at = ? WHERE session = ?",
+                       (json.dumps(body, ensure_ascii=False), json.dumps(summary, ensure_ascii=False), now, now,
+                        session))
         else:
             db.execute("UPDATE plans SET revision = revision + 1, doc = ?, summary = ?, updated_at = ? "
                        "WHERE session = ?",
@@ -627,7 +700,13 @@ class PlanStore:
             doc = {"title": title, "goal": goal, "issue": issue,
                    "context": context if context is not None else (before or {}).get("context") or {},
                    "steps": [build.node(n, STEP_KINDS, 1) for n in steps or []],
-                   "closure": [build.node(n, CLOSURE_KINDS, 1) for n in closure or []]}
+                   "closure": [build.node(n, CLOSURE_KINDS, 1) for n in closure or []],
+                   "run": (before or {}).get("run"), "round": (before or {}).get("round")}
+            # A node carried from an earlier round that the user still owes
+            # stays even when this write leaves it out.
+            for old in (before or {}).get("closure") or []:
+                if old.get("from") and old["id"] not in build.ids and closure_blocker(old):
+                    doc["closure"].append(json.loads(json.dumps(old)))
             after = self._store(db, session, before, doc)
             data = {"nodes": build.count}
             if build.reworded:
@@ -662,8 +741,7 @@ class PlanStore:
             old = _index(before).get(node_id)
             if old is None:
                 raise NotFound(f"the plan of {session} has no node {node_id!r}")
-            doc = json.loads(json.dumps({k: before[k] for k in ("title", "goal", "issue", "context", "steps",
-                                                                 "closure")}))
+            doc = json.loads(json.dumps({k: before[k] for k in DOC_KEYS if k in before}))
             target = _index(doc)[node_id]
             raw = {**{k: target.get(k) for k in ("id", "kind", "title", "detail", "status", "options", "under")},
                    **fields}
@@ -710,9 +788,135 @@ class PlanStore:
             if before["revision"] != revision:
                 raise Conflict(f"the plan of {session} is at revision {before['revision']}, not {revision}",
                                current=before)
+            sealed = self._seal(db, session, before)
             db.execute("DELETE FROM plans WHERE session = ?", (session,))
-            self._event(db, session, actor, "clear", revision, data={"snapshot": before})
-        return {"cleared": session}
+            self._event(db, session, actor, "clear", revision, data={"snapshot": before, "sealed": sealed})
+        return {"cleared": session, "sealed": sealed}
+
+    # -- rounds ------------------------------------------------------------
+
+    def new_round(self, actor: str, session: str, *, run, round, title=None, goal=None, issue=None,
+                  context: Optional[dict] = None, leftover: Optional[str] = None) -> dict:
+        """Seal the current plan and open the plan of (``run``, ``round``).
+
+        Returns ``{"plan", "opened", "sealed", "carried", "why"}``. ``opened``
+        is False -- and nothing is written -- when the plan is already that
+        round's, or when that round was sealed before and a later plan stands
+        (a late or repeated call must not overwrite the round that followed
+        it). After ``clear`` there is no plan to overwrite, so the round opens
+        again; its earlier copy stays sealed beside it.
+
+        ``leftover`` says what happens to the closure nodes that still block
+        the plan -- exactly :func:`closure_blocker`'s, the ones ``summarize``
+        lists as ``blockers`` (an unchecked or failed verify, an undisposed
+        followup, a kept one not done; never a note, a deferred verify or a
+        followup the session finished): ``carry`` (the default) moves them
+        into the new round marked with their round; ``require_disposed``
+        refuses with :class:`Conflict` naming them, and nothing is sealed or
+        opened."""
+        self._owner(session, actor)
+        leftover = leftover or "carry"
+        if leftover not in LEFTOVER:
+            raise PlanError(f"leftover must be one of {', '.join(LEFTOVER)}")
+        run = _text(run, "run", MAX_RUN, required=True)
+        rnd = _round_value(round)
+        title = _text(title, "title", MAX_TITLE)
+        goal = _text(goal, "goal", MAX_GOAL)
+        issue = _text(issue, "issue", 80) or None
+        with self._write() as db:
+            before = self._load(db, session)
+            if before is not None and before.get("run") == run and before.get("round") == rnd:
+                return {"plan": before, "opened": False, "sealed": None, "carried": [],
+                        "why": f"the plan is already round {round_key(run, rnd)}"}
+            if before is not None and db.execute(
+                    "SELECT 1 FROM plan_rounds WHERE session = ? AND run = ? AND round = ?",
+                    (session, run, rnd)).fetchone():
+                return {"plan": before, "opened": False, "sealed": None, "carried": [],
+                        "why": f"round {round_key(run, rnd)} was sealed already"}
+            owed = [n["id"] for n in (before or {}).get("closure") or [] if closure_blocker(n)]
+            if owed and leftover == "require_disposed":
+                raise Conflict(f"round {round_key(before.get('run'), before.get('round'))} still blocks "
+                               f"on: {', '.join(owed)} (settle of them, or open the round with "
+                               f"leftover=carry)", current=before)
+            sealed = None
+            carried: list = []
+            if before is not None:
+                sealed = self._seal(db, session, before)
+                origin = {"run": before.get("run") or "", "round": before.get("round")}
+                for node in before.get("closure") or []:
+                    if closure_blocker(node):
+                        node = json.loads(json.dumps(node))
+                        node.setdefault("from", origin)
+                        carried.append(node)
+            doc = {"title": title or (before or {}).get("title") or f"round {rnd}",
+                   "goal": goal, "issue": issue,
+                   "context": context if context is not None else (before or {}).get("context") or {},
+                   "steps": [], "closure": carried, "run": run, "round": rnd}
+            after = self._store(db, session, before, doc, opens_round=True)
+            self._event(db, session, actor, "round", after["revision"],
+                        data={"run": run, "round": rnd, "sealed": sealed,
+                              "carried": [n["id"] for n in carried]})
+        return {"plan": after, "opened": True, "sealed": sealed, "carried": [n["id"] for n in carried],
+                "why": ""}
+
+    @staticmethod
+    def _seal(db, session: str, plan: dict) -> dict:
+        """Keep ``plan`` in plan_rounds. A plan written before rounds existed
+        (no run, no round) is sealed as round ``unknown``."""
+        run = plan.get("run") or ""
+        rnd = plan.get("round")
+        body = {k: plan[k] for k in DOC_KEYS if k in plan}
+        db.execute("INSERT INTO plan_rounds (session, run, round, issue, revision, doc, summary, opened_at, "
+                   "closed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (session, run, rnd, plan.get("issue"), plan["revision"], json.dumps(body, ensure_ascii=False),
+                    json.dumps(plan["summary"], ensure_ascii=False), plan["created_at"], _now()))
+        return {"run": run, "round": rnd, "key": round_key(run, rnd)}
+
+    def rounds(self, session: str) -> dict:
+        """The session's sealed rounds, oldest first, and the round the
+        current plan is in. Each row carries its summary without blockers."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM plan_rounds WHERE session = ? ORDER BY id", (session,)).fetchall()
+            current = self._load(db, session)
+        out = []
+        for r in rows:
+            doc = json.loads(r["doc"])
+            summary = json.loads(r["summary"])
+            summary.pop("blockers", None)
+            out.append({"run": r["run"], "round": r["round"], "key": round_key(r["run"], r["round"]),
+                        "title": doc.get("title", ""), "issue": r["issue"], "revision": int(r["revision"]),
+                        "opened_at": r["opened_at"], "closed_at": r["closed_at"], **summary})
+        cur = None
+        if current is not None:
+            cur = {"run": current.get("run"), "round": current.get("round"),
+                   "key": round_key(current.get("run"), current.get("round")) if current.get("run") else None,
+                   "title": current.get("title", ""), "revision": current["revision"]}
+        return {"session": session, "rounds": out, "current": cur}
+
+    def get_round(self, session: str, key: str) -> Optional[dict]:
+        """One sealed round by its ``<run>/<round>`` key (``<run>/unknown``
+        for a plan sealed without one; the latest row of that key). The plan is
+        shaped like ``get``'s, plus ``sealed: true`` and ``closed_at``."""
+        if not isinstance(key, str) or "/" not in key:
+            raise PlanError("a round is named <run>/<round> (or <run>/unknown)")
+        run, _, tail = key.rpartition("/")
+        with self._connect() as db:
+            if tail == "unknown":
+                r = db.execute("SELECT * FROM plan_rounds WHERE session = ? AND run = ? AND round IS NULL "
+                               "ORDER BY id DESC LIMIT 1", (session, run)).fetchone()
+            else:
+                try:
+                    rnd = int(tail)
+                except ValueError:
+                    raise PlanError(f"round {tail!r} is not a number (or 'unknown')") from None
+                r = db.execute("SELECT * FROM plan_rounds WHERE session = ? AND run = ? AND round = ? "
+                               "ORDER BY id DESC LIMIT 1", (session, run, rnd)).fetchone()
+        if r is None:
+            return None
+        return {"session": session, "revision": int(r["revision"]), **json.loads(r["doc"]),
+                "run": r["run"], "round": r["round"],
+                "summary": json.loads(r["summary"]), "created_at": r["opened_at"], "updated_at": r["closed_at"],
+                "closed_at": r["closed_at"], "key": round_key(r["run"], r["round"]), "sealed": True}
 
     # -- the user's write --------------------------------------------------
 
@@ -730,8 +934,7 @@ class PlanStore:
             before = self._load(db, session)
             if before is None:
                 raise NotFound(f"{session} has no plan")
-            doc = json.loads(json.dumps({k: before[k] for k in ("title", "goal", "issue", "context", "steps",
-                                                                 "closure")}))
+            doc = json.loads(json.dumps({k: before[k] for k in DOC_KEYS if k in before}))
             node = _index(doc).get(node_id)
             if node is None:
                 raise NotFound(f"the plan of {session} has no node {node_id!r}", current=before)

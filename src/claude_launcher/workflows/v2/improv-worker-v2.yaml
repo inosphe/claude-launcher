@@ -9,7 +9,9 @@ description: >
   머지가 git에 있는지 기계가 본 뒤에 회차가 닫힌다. 상위가 거절하면 그
   거절을 보드에 정산하고 사용자 승인을 거쳐 재작업한다. 머지 실행은 언제나
   한 단계 위 세션의 몫이고, master 머지는 리더 전권이다(규칙
-  no-master-merge). 하위 워커를 둔 중첩 편성이면 자식 브랜치들은 세션 수명의
+  no-master-merge). 예외는 하나다: 착지 요청을 받을 세션이 없어 사람이
+  착지 대상 없음 질문에서 merge-by-agent를 고른 회차에는 워커가 rebase 후
+  compare-and-swap 머지로 직접 착지한다(claunch-yzwut). 하위 워커를 둔 중첩 편성이면 자식 브랜치들은 세션 수명의
   스택 브랜치에 --no-ff로 모이고, 착지마다 그 컷이 회차 브랜치에 --no-ff로 한
   번 머지된다. 전체 스윕 테스트는 워커 몫이 아니다 — 워커는 바꾼 영역의
   테스트만 표적으로 돌린다. 이 표적 단위 테스트가 리더의 머지 관문이고, 전체
@@ -101,7 +103,9 @@ sides:
 #                            피어에게 종료를 예고한다. 게이트 안에 두면 오래 선 세션의
 #                            무효화된 캐시를 다시 prefill 해야 한다 -- claunch-aobd0 /
 #                            claunch-q4cqy.6)
-#   end-hold              -> end-hold (keep-alive + delivery-hold)
+#   end-hold              -> end-hold (보류 사유·상위 fyi. 뒤에 release-decision을 새 ask로
+#                            다시 올리고 그 질문을 연 채 `claunch hold <세션>` — claunch-llfac.
+#                            v1의 keep-alive + delivery-hold는 쓰지 않는다)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
 #   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
 #                            (코딩 전 사용자 협의 — worker-round의 일감 귀속 뒤,
@@ -111,6 +115,12 @@ sides:
 #                            decision으로 묻는다. hold는 협의만 하자는 명시나 바꿀
 #                            대상을 특정할 수 없는 경우로 한정한다. claunch-xpnae,
 #                            claunch-tcczr)
+#   (v2 전용)              -> plan-seed, plan-wait
+#                            (회차 plan — intake의 트리거 plan-round가 앞 회차 plan을
+#                            봉인하고 이 회차 plan을 연다. 일감 처리에서 coding-plan
+#                            또는 plan-seed가 그 plan을 쓰고, plan-wait 하나가 게이트·
+#                            work 앞에서 고르지 않은 결정을 기다린다. claunch-rzepk,
+#                            claunch-jw1v2, claunch-r3j1o)
 #   (v2 전용)              -> feasibility-check(choose), feasibility-gate(ask: 사람),
 #                            feasibility-hold
 #                            (착수 정당성 점검 — worker-round의 batch 첫 자리, 일감·코딩
@@ -163,7 +173,9 @@ sides:
 #   (settle-check, 회고, 종료 예고, end-watch)은 그 루프의 finally다 — 모든
 #   경로가 지난다(spec.paths.settle-before-end). 종료 예고는 게이트 앞이다
 #   (claunch-q4cqy.6).
-# - master 머지 금지 산문 7곳 -> rules.no-master-merge(+ spec.invariants).
+# - master 머지 금지 산문 7곳 -> rules.no-master-merge(사람이 읽는 금지)와
+#   조건부 규칙 master-merge-effect(정적 effect 금지, claunch-yzwut — 예전의
+#   spec.invariants.no-master-merge를 대신한다).
 #
 # ── 옮기지 못한 것(후속) ─────────────────────────────────────────────────
 # - 저장소 특화 verify(workspace_check, changed_tests, report_check 등)는 v1과
@@ -544,6 +556,14 @@ data:
   # 이번 회차의 tip을 새로 싣는다.
   landing_route: {decision: null, reason: null, tip: null, repo: null,
                   owner: null, issue: null, relation: null}
+  # 이 회차가 자기 착지(merge-by-agent)로 표시됐는가(claunch-yzwut). land가
+  # 들어갈 때마다 false로 되돌리고, no-target 갈래가 사람의 merge-by-agent
+  # 답(새로 받았거나 landing_route에서 재사용한 답)을 확인했을 때만 true로
+  # 쓴다. landing_route는 회차를 넘어 남는 「사람의 결정」이고, 이 값은 「이번
+  # 회차가 그 결정을 실행 중인가」다 — 둘을 한 값으로 두면 수신자가 생긴 다음
+  # 회차에도 직접 머지로 간다. 규칙 master-merge-effect·self-merge-scope의
+  # when이 이 값을 읽는다.
+  self_merge: {armed: false, reason: null}
   # 이 회차 마지막 커밋의 보고 — commit 노드가 내는 {commits, tip}이고 item이
   # 묶는다(bind: commit). landing_route.tip과 비교해 「지금 브랜치 끝에 대한
   # 결정인가」를 가른다: 끝이 움직였으면 지난 답을 다시 쓰지 않고 묻는다.
@@ -565,22 +585,65 @@ rules:
       cherry-pick·fast-forward로 반영, master로의 push — 전부
       금지다. 사용자가 승인했다는 이유로도, 리더가 응답이 없다는 이유로도,
       충돌이 없어 안전해 보인다는 이유로도 예외가 아니다. master 반영
-      경로는 리더 워크플로우(improv-leader)의 통합 단계 하나뿐이다.
-      이 금지에는 예외가 없다 — 터미널 사용자(운영자)가 세션에 직접 "머지까지
-      해줘"라고 지시해도 실행하지 않는다. 할 일은 하나다: 그 브랜치를
-      in_review로 올리고 LANDING REQUEST 코멘트를 남긴 뒤 대기하며, 운영자에게는
-      "머지는 리더가 게이트를 거쳐 처리한다"고 말한다.
+      경로는 리더 워크플로우(improv-leader)의 통합 단계와, 아래의 자기 착지
+      절차 둘뿐이다.
+      예외는 엔진이 정한 자리 하나다: 착지 요청을 받을 세션이 없다는 질문
+      (landing-target-gate)에서 사람이 merge-by-agent를 골랐고, 런이 그
+      회차를 자기 착지로 표시한($data.self_merge.armed) 동안의 self-merge-apply
+      스텝. 그 스텝 밖에서는 이 금지가 그대로다 — 터미널 사용자(운영자)가
+      세션에 직접 "머지까지 해줘"라고 지시해도 실행하지 않는다. 할 일은
+      하나다: 그 브랜치를 in_review로 올리고 LANDING REQUEST 코멘트를 남긴 뒤
+      대기하며, 운영자에게는 "머지는 리더가 게이트를 거쳐 처리한다(받을
+      세션이 없으면 착지 대상 없음 질문에서 merge-by-agent를 고를 수
+      있다)"고 말한다.
     why: >-
       실측 2026-09-20, claunch-97knp: 워커가 운영자 지시를 이 규칙보다 우선해
       네 건을 직접 --no-ff 머지했고, 사용자 판정으로 예외 없음이 확정됐다.
       master를 지키는 방어는 리더의 머지 전권과 통합 후 전체 스윕이다.
+      2026-11-05 claunch-yzwut: 받을 세션이 없을 때 사람이 질문에서 고르는
+      merge-by-agent 하나를 예외로 열었다(사용자 결정, thread th-f8d4c3).
+      터미널 지시로 여는 경로는 여전히 없다.
     deliver: [branch-setup, commit, rebase, integration-request, landing-declined, landed, wrapup]
+  # master 머지 효과의 정적 금지(claunch-yzwut). 예전에는 no-master-merge의
+  # effect와 spec.invariants.no-master-merge가 조건 없이 git.merge:master를
+  # 막았다. merge-by-agent의 self-merge-apply가 그 효과를 선언해야 하므로
+  # 금지를 조건부 규칙으로 옮긴다: 검사(cflow2/check.py)는 조건부 금지와
+  # 겹치는 선언을 오류가 아니라 경고 never-effect-when으로 내고,
+  # tests/test_worker_v2_landing_target.py가 그 경고가 self-merge-apply
+  # 하나에서만 난다는 것을 고정한다. 둘째 머지 노드가 생기면 그 테스트가
+  # 깨진다. deliver가 없는 것은 문구를 어느 프롬프트에도 붙이지 않기
+  # 위해서다 — 사람이 읽는 금지는 no-master-merge가 진다.
+  master-merge-effect:
+    when: "$data.self_merge.armed != true"
+    text: |
+      master로의 git.merge 효과는 자기 착지로 표시된 회차의 self-merge-apply만
+      선언할 수 있다(no-master-merge).
+    why: >-
+      claunch-yzwut: 조건 없는 never_effect 불변식으로는 merge-by-agent를
+      선언할 수 없다. 금지를 조건부로 두고, 예외가 한 노드뿐이라는 것은
+      테스트가 고정한다.
     effect: {deny: git.merge, target: master}
+  # 자기 착지 스텝에 붙는 범위 규칙(claunch-yzwut). 무장된 회차에만 붙는다.
+  self-merge-scope:
+    when: "$data.self_merge.armed == true"
+    text: |
+      ── 자기 착지(merge-by-agent)의 범위 ──
+      이 회차는 사람이 착지 대상 없음 질문에서 merge-by-agent를 골라 워커가
+      직접 착지한다. 허용되는 것은 이 회차 착지 기준 브랜치
+      ($data.landing.base, 비었으면 master) 하나로의 머지 하나다. 다른
+      브랜치로의 머지, 기준 브랜치로의 강제 push, 리뷰를 지나지 않은 tip의
+      머지, 대상이 고정한 tip에서 움직였는데 덮어쓰는 반영은 전부 금지다.
+      대상 체크아웃에 미커밋 변경이 있거나 그 체크아웃이 기준 브랜치에 서
+      있지 않으면 건드리지 않고 blocked로 끝낸다.
+    why: >-
+      사용자 결정(thread th-f8d4c3, D2·D3): 대상은 착지 기준 하나, 반영은
+      compare-and-swap, 남의 체크아웃은 건드리지 않는다.
+    deliver: [self-merge-prepare, self-merge-apply]
   # no-master-merge에 있던 「master 체크아웃 후 커밋」 금지를 떼어 낸 조건부
   # 규칙(claunch-cetzf.2). branch-setup이 mode=main(시작 입력 allow_work_on_main을
   # 켠 회차)을 기록한 회차에는 전달되지 않는다 — 그 회차는 사용자의 명시적
   # 지시로 master 체크아웃에 커밋한다. 머지·push 금지(no-master-merge와
-  # spec.invariants)는 두 경우 모두 그대로다. 조건이 입력 대신 mode를 읽는
+  # master-merge-effect)는 두 경우 모두 그대로다. 조건이 입력 대신 mode를 읽는
   # 것은 회차 도중 입력이 바뀌어도 실제 작업 위치를 따르기 위해서다.
   no-master-commit:
     when: "$result['branch-setup'].value.mode != 'main'"
@@ -690,9 +753,18 @@ rules:
       · plan에 쓰는 글(title, goal, detail, 선택지의 label·effect·risk)은
         한국어로 쓴다(claunch-lp7c6). 명령·경로·식별자·오류 메시지 인용은
         원문 그대로 둔다.
+      · plan은 회차마다 따로 있다(claunch-r3j1o). intake에 들어가는 순간 데몬이
+        앞 회차 plan을 봉인해 지난 회차로 보관하고 이 회차 번호의 빈 plan을 연다
+        (트리거 plan-round). 앞 회차 closure 가운데 아직 닫지 못하게 막는 항목
+        (확인하지 않았거나 실패한 verify, 처분하지 않았거나 처분 뒤 끝내지 않은
+        followup — summary의 blockers)은 출처 회차 표시(`from`)와 함께 이 회차
+        plan의 closure로 넘어온다 — 지우지 않는다(빼고 써도 저장소가 다시
+        붙인다). note와 보류(deferred)한 verify는 넘어오지 않는다. plan_get의 `run`·`round`가 이 회차(`flow_status`의 `run`,
+        `round_now`)가 아니면 쓰기 전에 `plan_new_round(run, round, issue=<회차
+        이슈>)`를 부른다 — 같은 회차면 아무것도 바꾸지 않는다.
       · 착수할 때(coding-plan, 그 단계가 없으면 plan-seed, 그것도 없으면
-        work를 시작할 때) plan_set으로 쓴다: title은 목표 요지, goal은 목표·범위
-        한두 줄, issue는 회차 이슈.
+        work를 시작할 때) 이 회차 plan에 steps가 없으면 plan_set으로 쓴다:
+        title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈.
         steps는 단계마다 한 줄이고 detail은 몇 줄까지다. 사용자가 정해야 하는
         갈래(범위·방식·우선순위)만 decision 노드로 두고, 선택지마다 effect(기대
         효과)와 risk(리스크)를 적고 권장안 하나에 recommended를 붙인다. 바로
@@ -750,7 +822,9 @@ rules:
       claunch-7jzp8: 사용자 1명이 세션 수십~백수십 개와 계획을 맞추는 일이 병목이었고,
       정제되지 않은 산문 보고는 1:m 보고 관계에서 읽히지 않았다. 세션을 닫지 못하는
       이유(사람 확인 미완, 연관 후속 작업)도 패널의 closure로 드러낸다(th-0b38dc).
-    deliver: [coding-plan, work, wrapup]
+      claunch-r3j1o: 회차가 바뀌어도 plan 하나에 덧쓰면 앞 회차의 결정이 같은 id의
+      다음 회차 결정으로 이어지고, 회차별 기록이 남지 않았다.
+    deliver: [coding-plan, plan-seed, work, wrapup]
 
 # ── 카테고리 갱신 절차(claunch-06fwj) ──────────────────────────────────
 # 회차 앞(intake 뒤·코딩 전)과 wrapup 뒤의 두 노드가 같은 산문을 쓴다. 산문을
@@ -873,6 +947,12 @@ nodes:
     # 없다(sim_start·sim_round 거절, 모델 작성·조회는 허용). 판정은
     # sim/run_gate.py, 근거는 claunch-efnbt.9.
     sims: deny
+    # 회차의 plan을 연다(claunch-r3j1o): 들어가는 순간 데몬이 앞 회차 plan을
+    # 봉인하고 이 회차 번호의 빈 plan을 연다(cflow2_triggers의 plan-round).
+    # 같은 회차에 다시 들어오면 아무것도 하지 않는다. 트리거는 비동기라서
+    # 규칙 plan-panel이 plan을 쓰는 노드에 같은 연산(plan_new_round)을 시킨다.
+    triggers:
+      - {do: plan-round, at: enter}
     prompt: |
       새 회차다 — 이번 회차의 목표 하나를 확정한다.
 
@@ -1984,10 +2064,12 @@ nodes:
       그래도 work를 시작하기 전에 plan 패널의 상태를 확정해야 한다 — plan에
       미결정이 남아 있으면 work를 시작하지 않는다(claunch-rzepk 규칙 1).
 
-      `plan_get`으로 이 세션의 plan을 읽는다.
-      · plan이 이미 있으면 아래 셋째 항목의 갈림 decision을 더하는 것 말고는
-        손대지 않는다. 지금 `summary.waiting_decisions` 값을 plan_waiting에 적는다.
-      · plan이 없으면 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
+      `plan_get`으로 이 세션의 plan을 읽는다. 그 plan의 `run`·`round`가 이
+      회차가 아니면 먼저 `plan_new_round`로 이 회차 plan을 연다(규칙 plan-panel).
+      · 이 회차 plan에 steps가 이미 있으면 아래 셋째 항목의 갈림 decision을
+        더하는 것 말고는 손대지 않는다. 지금 `summary.waiting_decisions` 값을
+        plan_waiting에 적는다.
+      · steps가 없으면(회차가 막 열렸다) 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
         (title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈, steps는
         이번 일감의 단계), 그 응답의 `summary.waiting_decisions`을 plan_waiting에 적는다.
         work가 계획을 처음 쓰는 자리를 이 노드가 대신하는 것이다 — work는
@@ -3566,10 +3648,29 @@ nodes:
         남기고 스폰 없이 넘어간다. 넘어간 peer-review가 명단을 못 읽으면
         review-unrouted 선택으로 온다.
 
+      ── 재활용: 앞 런의 리뷰어를 되살렸는가 (claunch-phkt1) ──
+      1이 나왔으면 스폰하기 전에 이 런의 이슈(`claunch beads comments
+      ${data.claim.issue}`)에 앞 런의 end-new-task가 남긴 `REVIEWER RECYCLE:
+      <리뷰어> resume-request <요청 id>`가 있는지 본다. 없으면 위 1대로
+      스폰한다. 있으면 MCP `resume_session`에 `request: <요청 id>`만 주어
+      처분을 읽는다:
+      · approved — 그 리뷰어가 다시 살아 있다. 응답자 명령을 다시 돌린다.
+        0이면 스폰하지 않는다(그 리뷰어는 여전히 내 직속 자식이고 role
+        reviewer다). 그래도 1이면 위 1대로 스폰한다.
+      · pending — `withdraw: true`로 요청을 거둔 뒤 위 1대로 스폰한다.
+        기다리지 않는다(되살리기는 기한이 없고, 리뷰를 그 답에 묶으면 런이
+        사람 앞에 선다). 거두지 않고 스폰하면 승인이 늦게 났을 때 리뷰어가
+        둘이 된다.
+      · rejected·failed·withdrawn·moot — 위 1대로 스폰한다.
+      어느 경우든 처분과 그 결과(재활용한 리뷰어 이름 또는 새로 세운
+      리뷰어)를 보고에 적는다. 이 절은 런마다 첫 1에서 한 번이다 — 같은
+      런의 다음 회차는 살아 있는 리뷰어로 0이 나온다.
+
       이 런이 세운 자식 리뷰어는 런이 끝날 때까지 산다 — 재리뷰(changes
       → work → … → peer-review)와 다음 회차의 리뷰에 다시 쓴다. 끝내는
       자리는 settle-check다(queue-recheck가 done을 낸 뒤라 남은 리뷰가
-      없다). 거기서 끝내지 못한 리뷰어는 데몬이 종료한다 — 런이 done이
+      없다). auto-release가 그 상태를 확인하고, 그래도 남은 리뷰어만 kill을
+      요청한다(claunch-phkt1). 거기서 끝내지 못한 리뷰어는 데몬이 종료한다 — 런이 done이
       된 뒤 이 세션을 끝내기 직전(kill-on-end, claunch-du6mx.1), keep-alive나
       사람의 재기동으로 이 세션이 남을 때도 런이 done이면 그때, 그리고 이
       세션이 런 done 이외의 이유(kill, wind-down, 크래시)로 끝날 때다
@@ -4869,6 +4970,33 @@ nodes:
          이미 마쳤으면 `wrapup 완료, 재호출 없음`을 적는다. 이슈가 없으면
          `$CLAUNCH_SCRATCH/auto-release-<런 id>.md`에 같은 내용을 쓰고 그
          경로를 보고에 적는다.
+      5. **자식 리뷰어 정리 (claunch-phkt1).** 이 세션의 직속 자식 리뷰어를
+         찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
+         children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
+         맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
+         메시> --state all`에서 role 열(둘째 열)에 reviewer가 든 행의 셋째
+         열과 같은 것이 직속 자식 리뷰어다. 역할이 여럿이면 그 열은
+         `worker+reviewer`처럼 `+`로 이어지므로 `+`로 나눈 조각 가운데
+         reviewer가 있는지 본다(데몬도 role·roles 중 하나가 reviewer면 고른다). 셋째 열은 `<데몬>/<세션>`(예:
+         `shared-daemon-main/s1011`)이므로 `/` 뒤의 세션 이름과 비교한다 —
+         첫 열 핸들과도, 셋째 열 전체와도 비교하지 않는다. 살아 있는지는
+         `children` 행의 status로 읽는다. 데몬이 직속 리뷰어를 고르는 기준도
+         같다(직속 자식 + 메시 role reviewer, `cflow_clock._reviewer_children`).
+         명부를 읽지 못하면 추측하지 않고 `reviewer: 명부 없음`으로 적는다.
+         데몬은 이 런이 settle에
+         들어설 때 그 리뷰어를 이미 종료했으므로(settle-reap, claunch-5aysr)
+         정상 경로에서는 전부 exited다 — 그 이름을 4번의 `AUTO-RELEASE` 줄에
+         `reviewer: <이름> exited`로 덧붙이고 아무것도 호출하지 않는다.
+         살아 있는 리뷰어가 남아 있으면(그 리뷰어 앞으로 열린 질문이 있어
+         데몬이 종료를 미룬 경우) MCP `kill`로 끝낸다. 에이전트의 kill은 사람의
+         승인 카드를 거치는 요청이다(`daemon/kill_gate.py`; 도구 설명이 말하는
+         「워크플로가 남긴 리뷰어」가 이 경우다) — 응답의 요청 id를
+         `reviewer: <이름> kill-request <id>`로 같은 줄에 적고, 답을 기다리지
+         않는다(답은 `[claunch kill-request]` 블록으로 온다). 승인되지 않아도
+         런이 done이 되면 데몬이 kill-on-end에서 그 리뷰어를 끝낸다. 리뷰어가
+         아닌 자식과 퀵포크(`quick_fork_of`)는 이 단계의 대상이 아니다.
+         종료된 리뷰어는 지우지 않는다 — 기록이 남아 있어야 new-task의 새 런이
+         그 리뷰어를 되살려 다시 쓸 수 있다(end-new-task의 3번).
 
       ── 기한 초과로 들어왔다면 (claunch-q4cqy.4) ──
       이 스텝에 end-decision의 5분 무응답으로 들어왔는지는 터미널 사용자가
@@ -4881,19 +5009,23 @@ nodes:
       카드가 실제로 선다. 여기서는 4번의 `AUTO-RELEASE` 줄에 `기한 초과(5분
       무응답)`을 함께 적어, 왜 이 단계가 자동으로 돌았는지 보드에 남긴다.
 
-      이 단계는 세션을 끝내지 않는다. 정리 뒤에 무엇이 오는지는 입구가 둘이다
-      (claunch-q4cqy.6): 기한 초과나 auto-release 선택으로 왔으면 이어서
-      release-decision이 end|hold|new-task를 묻고, end-decision에서 end를 골라
-      왔으면 이 단계 뒤에 곧바로 런이 마감된다(다시 묻지 않는다).
+      이 단계는 세션을 끝내지 않는다. 정리 뒤에 무엇이 오는지는 입구가 셋이다
+      (claunch-q4cqy.6, claunch-llfac): 기한 초과나 auto-release 선택으로 왔으면
+      이어서 release-decision이 end|hold|new-task를 묻고, end-decision에서 hold를
+      골라 왔으면 end-hold를 지나 같은 release-decision이 서며 세션은 그 질문을
+      연 채 hold된다. end-decision에서 end를 골라 왔으면 이 단계 뒤에 곧바로
+      런이 마감된다(다시 묻지 않는다).
     done_when: |
       정리 계획을 조회해 실행했거나(지운 개수·용량), 실행이 예약됐거나
       (`scheduled`, 이번 호출이 만든 것과 `already: true`로 확인한 기존 예약
       모두), 실행하지 못한 사유가 cleanup_pending으로 남아 있거나, wrapup이
       이미 마쳐 이 단계가 호출하지 않았다는 판정이 있고, 그 결과가 이슈
-      코멘트나 scratch 기록으로 남았다.
+      코멘트나 scratch 기록으로 남았다. 같은 기록에 직속 자식 리뷰어의 상태
+      (`reviewer: <이름> exited` 또는 `kill-request <id>`, 리뷰어가 없었으면
+      `reviewer: 없음`)가 있다.
     returns:
       ok: {}
-    effects: [fs.read, fs.write, board.write]
+    effects: [fs.read, fs.write, board.write, session.kill]
 
   end-notice:
     title: 세션 종료 예고 (종료 결정 전)
@@ -4923,36 +5055,48 @@ nodes:
     effects: [mesh.send]
 
   end-hold:
-    title: 종료 보류 (사용자 보류)
+    title: 종료 보류 (세션을 hold 상태로)
     prompt: |
-      사용자가 종료를 보류했다(end-decision 또는 release-decision의 hold). 이
-      세션은 살아 있어야 하므로 먼저
-      `claunch keep-alive $CLAUNCH_SESSION`을 실행해 플래그를 세운다 — 이
-      플래그가 없으면 런이 done이 되는 즉시 데몬이 세션을 끝낸다(플래그는
-      킬만 막고 종결 기록은 그대로 남는다).
-      그리고 **같은 턴에서** `claunch delivery-hold $CLAUNCH_SESSION --on`을
-      실행한다 — 보류는 사람이 깨울 때까지 메시지로도 깨어나지 않는다는 뜻이다.
-      keep-alive만 세우면 살아 있는 유휴 세션에 메시지가 idle일 때 그대로
-      타이핑되어 에이전트가 깨어나고 비용이 든다(daemon/mesh.py의 idle 게이트는
-      delivery-hold만 예외로 둔다). 해제는 `claunch delivery-hold
-      $CLAUNCH_SESSION --off`, 플래그를 내리는 것은 사람 또는 상위의 지시다.
-      그다음 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
-      (`claunch cflow2 journal`); 없으면 터미널 사용자에게 묻는다.
-      사유가 추가 작업이면 그것은 이 회차의
-      범위 밖이다: 이슈로 남기고(`claunch beads create "<제목>" --priority 3
-      --labels handoff --description "<규격>"`) 그 id를 보고에 적는다.
-      이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
-      관계없는 일이면 붙이지 않는다.
-      상위에게는 fyi 한 줄로 이 세션이 keep-alive로 살아 있다는 사실과 그
-      이슈 id를 알린다 — 데몬은 살아남은 세션에 대해서는 아무 통지도 보내지
-      않는다(종료 통지는 실제로 종료된 세션에만 붙는다).
-      이 런은 여기서 done으로 마감하고, 세션은 keep-alive로 다음 지시를
-      기다린다. 플래그를 내리는 것은 사람 또는 상위의 지시다:
-      `claunch keep-alive $CLAUNCH_SESSION off`.
+      사용자가 종료를 보류했다(end-decision 또는 release-decision의 hold).
+      보류는 이 세션을 세션 hold 상태(daemon/hold.py의 held_at,
+      claunch-5l35i)로 보내는 답이다: 프로그램을 내리고 대화·런·워크트리를
+      보존한다. 런은 끝나지 않는다 — 이 노드 뒤에 release-decision이 새
+      질문(새 ask id)으로 다시 서서 end|hold|new-task를 묻고, 그 질문이 열린
+      채로 세션이 hold된다(claunch-llfac).
+
+      keep-alive와 delivery-hold는 세우지 않는다.
+      · keep-alive: 런이 done이 아니므로 kill-on-end가 이 세션을 끝낼 일이
+        없다. 세우면 오히려 유휴 hold의 대상에서 빠진다(daemon/hold.py의
+        `eligible`) — 메시지에 깨어난 세션이 다시 hold되지 않는다.
+      · delivery-hold: hold된 세션은 delivery-hold와 관계없이 메시지가 오면
+        깨어난다(daemon/mesh.py의 `_deliver_to`). 세워 두면 깨어난 뒤의
+        입력만 막혀, 남은 메시지 때문에 다시 hold되지도 않는다.
+      hold된 세션은 질문에 대한 사람의 답, 메시 메시지, cflow 알림, 뷰어
+      접속에 대화를 유지한 채 깨어난다. 깨어나 일을 마친 뒤
+      `hold_idle_minutes`(기본 60분) 동안 조용하면 데몬이 다시 hold한다.
+      사람이나 생성 설정이 세워 둔 keep-alive·delivery-hold는 여기서 내리지
+      않는다 — 사람의 설정이다.
+
+      1. 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
+         (`claunch cflow2 journal`). 없으면 묻지 않고 「사유 없음」으로
+         적는다(곧 hold되므로 답을 받을 턴이 없다).
+         사유가 추가 작업이면 그것은 이 회차의 범위 밖이다: 이슈로
+         남기고(`claunch beads create "<제목>" --priority 3 --labels handoff
+         --description "<규격>"`) 그 id를 보고에 적는다. 이 회차 이슈에서
+         나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고, 관계없는 일이면
+         붙이지 않는다.
+      2. 상위에게 fyi 한 줄을 보낸다: 이 세션이 hold 상태로 들어가고 종료
+         질문이 열린 채 남는다는 사실과 handoff 이슈 id(있다면). 데몬은 hold에
+         대해 상위에게 아무 통지도 보내지 않는다(종료 통지는 실제로 종료된
+         세션에만 붙는다).
+      3. 이 노드를 보고한다. `claunch hold $CLAUNCH_SESSION`은 여기서 실행하지 않는다 — hold는
+         그 즉시 프로그램을 내리므로, 바로 뒤 release-decision의 질문을 올리고
+         nudge까지 마친 다음 그 턴의 마지막 동작으로 실행한다(release-decision의
+         nudge 절이 같은 지시를 싣는다).
     done_when: |
-      keep-alive와 delivery-hold 플래그가 세워졌고(두 명령의 출력을 보고에
-      붙인다), 보류 사유와 그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸
-      fyi의 메시지 id가 보고에 있다.
+      보류 사유(또는 「사유 없음」)와 그에 따라 만든 handoff 이슈 id(있다면),
+      상위에 보낸 fyi의 메시지 id(상위가 없으면 그 사실)가 보고에 있다.
+      keep-alive·delivery-hold 명령은 실행하지 않았다.
     effects: [board.write, mesh.send]
 
   end-new-task:
@@ -4979,15 +5123,42 @@ nodes:
       2. 이 작업을 보고한다(value에 issue). 런이 done이 된 뒤 **같은 턴에서**
          `flow_start`로 새 런을 시작한다: `workflow`는 이 런과 같은 정의,
          `inputs: {issue: <그 id>}`. 끝난 런은 시작이 보관한다.
+      3. **리뷰어 재활용 (claunch-phkt1).** 이 런의 자식 리뷰어는 settle에서
+         데몬이 종료했다(auto-release 5번이 그 상태를 기록했다). 새 런의 리뷰도
+         그 리뷰어가 맡도록, 2의 `flow_start`로 새 런이 선 **뒤에** 같은 턴에서
+         되살리기를 요청한다. 보고 전에 요청하지 않는다 — 이 런이 아직 settle에
+         있는 동안 승인되면 데몬의 settle-reap이 되살아난 리뷰어를 곧바로 다시
+         종료하고(`daemon/cflow_clock.py`의 `_queue_settle_reap`, 런이 done이 될
+         때까지 매 확인마다 돈다), 재활용은 아무 표시 없이 새 스폰으로
+         떨어진다. 새 런이 서면 끝난 런의 kill-on-end는 리뷰어까지 취소된다
+         (`_finish_end`의 successor 갈래). 대상은 auto-release 5번과 같은
+         방법(`children` 자식 이름 ∩ 메시 명부의 role reviewer 세션 이름)으로
+         찾은 직속 자식 리뷰어 가운데 status가 exited인 것이다. 둘 이상이면 이
+         런의 auto-release 5번이 이슈의 `AUTO-RELEASE` 줄에 `reviewer: <이름>`으로
+         적은 이름을 고른다 — `claunch cflow2 status`는 2의 `flow_start` 뒤에는
+         새 런을 읽으므로 끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다.
+         그래도 하나로 좁혀지지 않으면 추측하지 않고 건너뛴다. 없으면 이 항목은
+         건너뛰고 새 런의 reviewer-ensure가 지금처럼 새로 세운다. 그 세션에 MCP
+         `resume_session`을 부른다 — reason에는 「<내 세션>의 새 런(이슈 <그
+         id>)의 peer-review를 이전 런의 리뷰 맥락으로 맡길 리뷰어」를 적는다.
+         되살리기는 사람의 승인 카드를 거치는 요청이고 기한이 없다
+         (`daemon/resume_gate.py`); 사용자가 방금 new-task를 고른 자리라 바로
+         답할 수 있다. `claunch respawn`과 `/api/sessions/<이름>/respawn`은
+         operator의 경로이므로 쓰지 않는다. 결과를 새 이슈에 한 줄 남긴다:
+         `REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>`(요청이
+         거절되면 — 이미 요청이 있거나 대상이 살아 있음 — 그 사유를 같은 줄에).
+         답을 기다리지 않는다. 그 요청의 처분은 새 런의 reviewer-ensure가
+         읽는다.
       상위에게는 fyi 한 줄로 이 세션이 새 이슈로 다음 런을 시작한다는 사실과
       그 id를 알린다.
     done_when: |
       새 작업의 이슈 id가 정해졌고(기존 id 또는 새로 만든 id), 상위 fyi의
-      메시지 id가 보고에 있다(상위가 없으면 그 사실). 새 런 시작은 이 보고 뒤
-      같은 턴에서 한다.
+      메시지 id가 보고에 있다(상위가 없으면 그 사실). 새 런 시작과 리뷰어
+      되살리기 요청(종료된 자식 리뷰어가 있었으면 새 이슈의 `REVIEWER
+      RECYCLE:` 코멘트)은 이 보고 뒤 같은 턴에서, 그 순서로 한다.
     returns:
       ok: {issue: str}
-    effects: [board.write, mesh.send]
+    effects: [board.write, mesh.send, session.spawn]
 
   landing-target-evidence:
     title: 착지 대상 없음의 근거 (라우팅 판정 원문)
@@ -5029,6 +5200,143 @@ nodes:
     returns:
       ok: {why: str, members: str, relation: "str?", owner: "str?"}
     effects: [fs.read, board.write]
+
+  # ── 자기 착지(merge-by-agent, claunch-yzwut) ───────────────────────────
+  self-merge-prepare:
+    title: 자기 착지 준비 (대상 고정 → rebase → 리뷰 유효성 → 재측정)
+    prompt: |
+      이 회차는 사람이 착지 대상 없음 질문에서 merge-by-agent를 골라 워커가
+      직접 착지한다(${data.self_merge.reason}). 이 스텝은 한 번의 시도를
+      준비한다: 대상 tip을 하나 고정하고 그 위로 rebase한 브랜치가 리뷰한
+      내용 그대로인지, 표적 테스트가 그 트리에서 초록인지 잰다. 반영은 다음
+      스텝(self-merge-apply)이 한다 — 여기서 대상 브랜치를 움직이지 않는다.
+      착지 매체: ${data.landing.medium}, 원격: ${data.landing.remote}, 기준:
+      ${data.landing.base}(비었으면 master). 이 기준 하나가 머지 대상이다.
+
+      1. 리뷰 확인: 이슈 ${data.claim.issue}의 코멘트에서 마지막
+         `REVIEWED: pass @ <tip>`을 찾는다. 없거나 그 뒤에 `REVIEW SKIPPED`나
+         `CHANGES REQUESTED @`가 있으면 리뷰를 지나지 않은 브랜치다 —
+         outcome **blocked**(reason: 리뷰 없음, 찾은 마커). 그 tip을
+         reviewed_tip으로, `git merge-base <reviewed_tip> <대상>`을
+         reviewed_base로 적는다.
+      2. 대상 고정: pr이면 `git fetch <원격> <기준>` 뒤 T =
+         `git rev-parse <원격>/<기준>`, local이면 T = `git rev-parse <기준>`.
+         읽지 못하면 outcome **blocked**. 이 시도의 모든 판정은 이 T 하나로
+         한다 — 중간에 다시 fetch해 T를 바꾸지 않는다.
+      3. rebase: 항상 `git rebase T`를 친다(behind가 0이면 아무것도 바뀌지
+         않는다). behind를 0으로 만드는 것이 이 단계의 목적이다 — 대상이
+         내 브랜치의 조상이면 `--no-ff` 머지는 텍스트로 충돌할 수 없다
+         (tools/merge_ready.py 머리말). 충돌이 나면 rebase 스텝의 규칙대로
+         대상이 정한 방향을 먼저 읽고 그 위에 내 변경을 얹어 푼다. 풀 수 없으면
+         `git rebase --abort`로 브랜치를 rebase 전 tip으로 되돌리고 outcome
+         **rework**(reason: 충돌 파일과 T, rework: true).
+      4. 리뷰 유효성: `git range-diff <reviewed_base>..<reviewed_tip> T..HEAD`.
+         모든 줄이 `=`(같은 패치)면 리뷰가 그대로 유효하다. 하나라도 `!`·`<`·
+         `>`가 있으면(충돌 해결이나 대상 변경으로 패치 내용이 바뀌었다)
+         outcome **review**(reason: range-diff 요약). 호출부가 submit을
+         처음부터 다시 돌아 새 tip을 리뷰받는다.
+      5. 재측정: 새 tip에서 표적 테스트를 돌린다
+         (`uv run --no-sync python tools/changed_tests.py --base T`, 저장소의
+         표적 명령이 따로 있으면 그것). 텍스트 충돌이 없어도 의미 충돌은 있을
+         수 있다(90a07a9 사례). red면 outcome **rework**(reason: 실패 출력,
+         rework: true).
+      6. 받을 세션 재확인: `claunch gate landing-target --json`. 종료 코드 0이면
+         그 사이 착지 요청을 받을 세션이 생긴 것이다 — 직접 머지하지 않고
+         outcome **target**(reason: owner와 why). 1이면 그대로 진행한다.
+      7. pr이면 rebase한 브랜치를 올린다:
+         `git push --force-with-lease=<브랜치>:<올리기 전 원격 tip> <원격>
+         HEAD:refs/heads/<브랜치>`. 기준 브랜치로는 push하지 않는다.
+      이슈에 한 줄 남긴다:
+          SELF-MERGE @ <tip> — target <기준> @ <T>, reviewed <reviewed_tip>, range-diff <같음|다름>, tests <수치>
+      보고 형식: {target: <기준>, target_tip: T, tip: <rebase 뒤 HEAD>,
+      reviewed_tip, tests: <표적 수치 요약>}.
+    done_when: |
+      T가 하나로 고정돼 보고에 있고, 브랜치가 T 위로 rebase돼 있으며
+      (`git merge-base --is-ancestor T HEAD`가 0), range-diff가 리뷰한 패치와
+      같고, 새 tip의 표적 테스트 수치와 받을 세션 재확인의 종료 코드(1)가
+      보고와 이슈의 SELF-MERGE 코멘트에 있다. 대상 브랜치는 움직이지 않았다.
+    executor: [inline]
+    returns:
+      ok: {target: str, target_tip: str, tip: str, reviewed_tip: str, tests: str}
+      review: {reason: str}
+      target: {reason: str}
+      rework: {reason: "str?", rework: bool}
+      blocked: {reason: str}
+    effects: [git.rebase, git.push, test.run, board.write]
+
+  self-merge-apply:
+    title: 자기 착지 반영 (대상이 고정한 tip일 때만 — compare-and-swap)
+    prompt: |
+      앞 스텝이 고정한 대상 tip: ${result['self-merge-prepare'].value.target_tip}
+      (기준 ${result['self-merge-prepare'].value.target}), 반영할 tip:
+      ${result['self-merge-prepare'].value.tip}. 대상이 아직 그 tip일 때만
+      반영한다. 대상이 움직였으면 아무것도 덮어쓰지 않고 outcome **moved**로
+      끝낸다 — 프로시저가 다음 시도를 처음(대상 고정)부터 다시 한다.
+
+      · pr: `gh pr merge ${data.landing.pr_number} -R ${data.landing.repo}
+        --merge --match-head-commit <반영할 tip>`. head가 그 tip이 아니면
+        GitHub이 거절한다. 거절·충돌·「base branch was modified」면 moved다.
+        머지 뒤 `git fetch <원격> <기준>`으로 머지 커밋을 읽는다.
+      · local: 대상 브랜치를 체크아웃한 작업 트리를 `git worktree list
+        --porcelain`에서 찾는다.
+        1) 임시 detached 워크트리에서 머지 커밋 M을 만든다:
+             git worktree add --detach "$CLAUNCH_SCRATCH/self-merge" <T>
+             git -C "$CLAUNCH_SCRATCH/self-merge" merge --no-ff <브랜치>
+           behind=0이므로 충돌하지 않는다. 충돌하면 그 자체가 T가 고정되지
+           않았다는 뜻이다 — `merge --abort` 뒤 moved.
+        2) 대상 브랜치를 체크아웃한 작업 트리가 있으면 그 트리가 깨끗한지
+           (`git -C <그 트리> status --porcelain`이 빈 출력) 보고, 깨끗하면
+           `git -C <그 트리> merge --ff-only M`. 깨끗하지 않으면 그 트리를
+           건드리지 않고 outcome **blocked**(reason: 누구의 어떤 변경인지).
+           ff-only가 거절되면(대상이 T에서 움직였다) moved.
+        3) 체크아웃한 곳이 없으면 `git update-ref refs/heads/<기준> M T`.
+           셋째 인자가 compare-and-swap이다 — 대상이 T가 아니면 거절되고,
+           그때 moved.
+        끝나면 임시 워크트리를 `git worktree remove`로 지운다.
+      어느 쪽이든 기준 브랜치로의 강제 push, `reset --hard`, 다른 브랜치로의
+      머지는 하지 않는다. 원격이 있는 로컬 매체에서 기준 브랜치를 원격에
+      push하는 것도 이 스텝의 일이 아니다(리더의 통합 단계에서도 따로 하는
+      일이고, 원격과 로컬의 반영 차이는 보고에 적는다).
+      보고 형식: {merge: <머지 커밋 해시>, tip: <반영한 tip>, target: <기준>}.
+    done_when: |
+      기준 브랜치가 머지 커밋 M을 가리키고 M의 두 부모가 고정한 대상 tip과
+      반영한 tip이다(`git rev-parse M^1 M^2`). 반영은 대상이 그 tip일 때만
+      성공하는 명령(--match-head-commit, --ff-only, update-ref의 이전 값)으로
+      했다. 그렇지 않으면 moved나 blocked와 그 사유가 보고에 있다.
+    executor: [inline]
+    returns:
+      ok: {merge: str, tip: str, target: str}
+      moved: {reason: str}
+      blocked: {reason: str}
+    # 대상을 적지 않는다(claunch-yzwut.1). 머지 대상은 $data.landing.base라
+    # 런마다 다르고(스택 자식이면 부모의 스택 브랜치), effect 대상은 정적
+    # 문자열이라 그 값을 적을 수 없다. 대상 없는 effect는 검사(cflow2/check.py
+    # _effect_hits)가 「어느 대상에도 닿을 수 있다」로 읽으므로 master에도
+    # 닿는다 — master-merge-effect의 경고는 그대로 이 노드에서 난다.
+    effects: [git.merge, board.write]
+
+  self-merge-record:
+    title: 자기 착지 기록 (머지 뒤 스윕 미실행 표시)
+    prompt: |
+      자기 착지가 끝났고 기계가 착지를 확인했다(머지
+      ${result.landed.value.merge}, tip ${result.landed.value.tip}). 이 착지에는
+      리더의 머지 뒤 전체 스윕(T2)이 돌지 않았다 — 워커 워크플로는 저장소별
+      스윕 도구를 알지 못한다. 그 사실을 보드에 남긴다. 이슈
+      ${data.claim.issue}에:
+          merged <머지 해시>
+          SWEEP NOT RUN: self-merge <머지 해시> — 받을 세션이 없어 merge-by-agent로 착지
+      `claunch mesh members <런의 메시>`에 leader 역할 세션이 있으면 그 세션에
+      fyi 한 줄을 보낸다: 이슈 id, 머지 해시, 「SWEEP NOT RUN」. 없으면 보내지
+      않고 그 사실을 보고에 적는다. 마커에 BLOCKED·HOLD·CHANGES REQUESTED를
+      넣지 않는다(landing의 넷째 확인이 그 셋을 제동 마커로 읽는다).
+    done_when: |
+      이슈에 `merged <머지 해시>`와 `SWEEP NOT RUN: self-merge <머지 해시>`
+      코멘트가 있고, 리더에게 보낸 fyi의 메시지 id나 리더가 없다는 사실이 보고에
+      있다.
+    executor: [inline]
+    returns:
+      ok: {merge: str, notified: "str?"}
+    effects: [board.write, mesh.send]
 
   landing-channel-gate:
     title: 착지 요청 수신자와의 메시지 채널 없음 — 사용자 조치·승인
@@ -5530,22 +5838,30 @@ procedures:
                         # 계획부터 다시 쓴다
                         - {seq: [route-direct], bind: route}
                         - {continue: plan-work}
-                # 승인 게이트가 서는 조건: require_coding_approval이 켜져 있고 이 런에서
-                # 아직 approve-always를 답하지 않았다(claunch-sxdnc). approve-always 뒤에는
-                # 게이트가 꺼진 것과 같다 — session_routing이면 계획의 권장대로, 아니면
-                # 계획 없이 work로 간다.
-                - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
-                  then:
-                    - coding-plan
-                    # 계획의 결정이 해소되기 전에는 게이트도 서지 않는다
-                    # (claunch-rzepk 규칙 2·3: 순서는 plan 결정 → 게이트 → work).
+                - else:
+                    # 계획 단계: 승인 게이트가 서면(require_coding_approval이 켜져 있고 이
+                    # 런에서 아직 approve-always를 답하지 않았다, claunch-sxdnc) 또는
+                    # session_routing이면 coding-plan이 이번 일감의 변경 계획을 쓴다.
+                    # 그 밖(게이트 꺼짐, approve-always 뒤)은 plan-seed가 이 회차 plan을
+                    # 확보한다(work가 처음 쓰는 자리를 대신한다). 어느 쪽이든
+                    # consult-check 뒤이므로 그 reason의 갈림 decision이 여기서 plan에
+                    # 들어간다(claunch-tcczr).
+                    - id: plan-step
+                      cond:
+                        - if: "$data.inputs.session_routing == true or ($data.inputs.require_coding_approval == true and $data.coding_approval.decision != 'approve-always')"
+                          then: [coding-plan]
+                        - else: [plan-seed]
+                    # plan 대기는 이 노드 하나다(claunch-r3j1o.2). 게이트가 있든 없든
+                    # 같은 대기를 지난다 — 순서는 plan 결정 → 게이트 → work
+                    # (claunch-rzepk 규칙 1·2·3, docs/plan-coding-approval.md 3절).
                     # probe는 `claunch gate plan-waiting --scope start`: 0 고르지 않은
-                    # decision이 없다(통과), 1 아직 결정이 남았다, 그 밖은 판정 불가.
-                    # 지난 회차의 closure verify·followup은 세지 않는다 — 그것은
-                    # 착지한 일의 확인이라 settle의 closure-gate가 기다린다
-                    # (claunch-jw1v2). seconds를 주지 않는다 — 규칙 1의 「멈춘다」에
-                    # 상한이 없고, 판정 불가가 세 번 쌓이면 undecidable로 사람에게 간다.
-                    - id: plan-wait-before-gate
+                    # decision이 없다(통과), 1 아직 결정이 남았다, 그 밖은 판정 불가 —
+                    # plan이 다른 런·회차의 것일 때도 2다(CFLOW2_RUN·CFLOW2_ROUND).
+                    # 지난 회차에서 넘어온 closure verify·followup은 세지 않는다 —
+                    # 그것은 settle의 closure-gate가 기다린다(claunch-jw1v2). seconds를
+                    # 주지 않는다 — 규칙 1의 「멈춘다」에 상한이 없고, 판정 불가가 세 번
+                    # 쌓이면 undecidable로 사람에게 간다.
+                    - id: plan-wait
                       wait:
                         probe: [claunch, gate, plan-waiting, --scope, start, --notify]
                         poll: 30
@@ -5574,26 +5890,9 @@ procedures:
                             try: [{seq: [coding-approval], bind: coding_approval}]
                             catch:
                               rejected: {continue: plan-work}
-                        - else: {seq: [route-planned], bind: route}
-                - else:
-                    # 게이트가 없는 경로도 plan 미결정이면 work 앞에서 멈춘다
-                    # (claunch-rzepk 규칙 1·3, docs/plan-coding-approval.md 3절 4번).
-                    # coding-plan이 없으니 계획을 먼저 확보하고(work가 처음 쓰는
-                    # 자리를 대신한다) 같은 대기를 한 번 둔다.
-                    - plan-seed
-                    # 위 plan-wait-before-gate와 같은 --scope start(claunch-jw1v2).
-                    - id: plan-wait-after-seed
-                      wait:
-                        probe: [claunch, gate, plan-waiting, --scope, start, --notify]
-                        poll: 30
-                        undecided_max: 3
-                        describe: "plan의 고르지 않은 결정이 해소되기를 기다린다 — 사용자가 계획 패널에서 결정하면 이어 간다(closure 항목은 settle에서 기다린다)"
-                      on:
-                        undecidable:
-                          try: [plan-wait-unclear]
-                          catch:
-                            ok: {continue: plan-work}
-                            skipped: []
+                        - if: "$data.inputs.session_routing == true"
+                          then: {seq: [route-planned], bind: route}
+                        - else: []
             - id: work-group
               group:
                 name: found
@@ -5871,14 +6170,33 @@ procedures:
               return: ok
               value: {decision: ask-again}
 
+  self-merge-arm:
+    description: >-
+      이 회차가 자기 착지(merge-by-agent)를 실행 중인지 표시한다(claunch-yzwut).
+      land가 들어갈 때 false로, no-target 갈래가 사람의 merge-by-agent 답을
+      확인했을 때 true로, 재측정 중에 받을 세션이 생겼거나 자기 착지 루프가
+      받을 세션을 새로 찾았을 때 false로 쓴다. 호출부가 결과를 data.self_merge로
+      묶는다. 본문은 값을 그대로 돌려주는 return 하나다 — 데이터 변수를 쓰는
+      길이 노드 결과의 bind뿐이기 때문이다.
+    params:
+      armed: {type: bool, default: false}
+      reason: {type: str, default: ""}
+    returns:
+      ok: {armed: bool, reason: "str?"}
+    body:
+      - return: ok
+        value: {armed: "$params.armed", reason: "$params.reason"}
+
   landing-target-gate:
     description: >-
       착지 요청을 받을 세션이 아무도 없을 때(claunch-od1mx.1) 그 사실을 사람에게
       올리고 이 런의 착지 경로를 사람이 정하게 한다. 근거는 추측이 아니라
       라우팅 판정 그 자체다 — 데몬의 Router가 낸 탈락 사유를 그대로 싣는다.
       보드를 건드리지 않는다: in_review 전이도, LANDING REQUEST 코멘트도 없다.
-      결과는 land의 둘 중 하나로 낸다: blocked(사람이 직접 머지하거나, 메시를
-      고친 뒤 다음 회차가 다시 잰다), held(동결하고 마감한다). 사람의 답은
+      결과는 land의 둘 중 하나로 내거나(blocked: 사람이 직접 머지하거나, 메시를
+      고친 뒤 다음 회차가 다시 잰다 / held: 동결하고 마감한다), ok로 끝나
+      land가 착지 절차를 이어 가게 한다(merge-by-agent: 워커가 정렬·리뷰 뒤
+      직접 머지한다, claunch-yzwut). 사람의 답은
       land가 landing_route로 묶어 다음 회차가 같은 브랜치 끝에서 다시 묻지
       않게 한다(claunch-1aj1a.1).
 
@@ -5895,8 +6213,13 @@ procedures:
       # 값이다(claunch-1aj1a.1). decision은 어느 선택지였는지, tip은 그 결정을
       # 내린 시점의 브랜치 끝이다 — 다음 회차의 land가 tip이 그대로면 같은
       # 질문을 다시 하지 않는다.
-      # rework는 더 선언하지 않는다: 세 선택지가 전부 회차를 끝내므로 이
-      # 프로시저가 rework로 끝나는 갈래가 없다(claunch-1aj1a.1).
+      # rework는 더 선언하지 않는다: 이 프로시저가 rework로 끝나는 갈래가
+      # 없다(claunch-1aj1a.1).
+      # ok는 merge-by-agent 하나의 결과다(claunch-yzwut): 회차를 끝내지 않고
+      # land가 착지 절차(정렬·리뷰·자기 착지)를 이어 간다. land의 결과가
+      # 아니므로 land의 returns는 늘지 않는다.
+      ok: {reason: str, decision: str, tip: "str?", repo: "str?", owner: "str?",
+           issue: "str?", relation: "str?"}
       blocked: {reason: str, decision: "str?", tip: "str?", repo: "str?", owner: "str?",
                 issue: "str?", relation: "str?"}
       held: {reason: str, rework: bool, decision: "str?", tip: "str?", repo: "str?",
@@ -5920,9 +6243,9 @@ procedures:
             topic: |
               이 런의 착지 요청을 받을 세션이 아무도 없다는 것이 기계 판정으로
               확인됐다(근거 칸의 사유가 데몬 라우팅 판정의 원문이다). 이 요청을
-              어떻게 할지 정한다. 워커는 이 선택을 스스로 하지 않는다 — 어느
-              쪽이든 머지 실행이나 메시 구성 변경이 사람의 몫이기 때문이다.
-              선택지 셋:
+              어떻게 할지 정한다. 워커는 이 선택을 스스로 하지 않는다 — 머지를
+              누가 실행하는지, 메시를 고칠지가 사람이 정할 일이기 때문이다.
+              선택지 넷:
               · rebase-and-repost — 메시를 고쳐(그 저장소의 착지 큐를 가진 세션을
                 메시에 넣거나, 워커를 그런 세션이 있는 메시에 조인시킨다) 이
                 브랜치를 다시 올린다. 워커는 배치 루프를 되감아 착지 절차를 처음부터
@@ -5931,9 +6254,32 @@ procedures:
               · merge-by-person — 대상이 없는 상태 그대로 두고 사람이 직접 머지한다
                 (착지 경로를 사람이 정한다). 워커는 요청을 세우지 않고 회차를
                 차단 상태로 마감한다. 머지 결과는 다음 회차나 사람이 확인한다.
+              · merge-by-agent — 워커가 직접 착지한다. 정렬과 동료 리뷰는 평소
+                착지와 같고, 착지 요청·대기 대신 자기 착지 루프를 돈다(최대
+                3회): 대상 tip T를 고정하고 → 항상 `git rebase T` → 리뷰한
+                패치와 `git range-diff`로 비교(달라졌으면 다시 리뷰) → 새 tip에서
+                표적 테스트 → 받을 세션이 생겼는지 다시 확인(생겼으면 평소 착지
+                요청으로 간다) → 대상이 아직 T일 때만 반영(PR: `gh pr merge
+                --merge --match-head-commit`, 로컬: 머지 커밋을 만들어 `git merge
+                --ff-only` 또는 `git update-ref <기준> <머지> T`) → 착지 확인.
+                대상이 세 번 다 움직였거나 대상 체크아웃이 깨끗하지 않으면
+                blocked로 마감한다. 머지 뒤 전체 스윕은 돌지 않는다(이슈에
+                `SWEEP NOT RUN` 코멘트가 남는다). 같은 저장소·같은 방향이면
+                다음 회차도 다시 묻지 않고 같은 루프를 돈다.
               · freeze-and-close — 브랜치를 동결하고 이 착지를 접는다. 워커는
                 추가 커밋 없이 회차를 held로 마감하고, 남은 일감 판정으로 넘어간다.
-              셋 다 이 워커가 master를 머지하지 않는다는 규칙을 그대로 둔다.
+              merge-by-agent만 이 워커가 master를 머지하지 않는다는 규칙
+              (no-master-merge)의 예외다. 나머지 셋은 그 규칙을 그대로 둔다.
+            # 부모 세션이 이 질문을 답한다(claunch-vjp4y.2, 사용자 결정
+            # thread th-ea5c7c). 네 선택지는 그대로 보이고, 부모가 고를 수
+            # 있는 것은 merge-by-agent 하나다 — 자기 착지는 워커가 실행할
+            # 수 있는 유일한 갈래이고, 나머지 셋은 메시·머지·동결처럼
+            # 사람이나 리더가 해야 하는 일이다. 부모가 그 밖을 고르거나
+            # 900초 동안 답하지 않으면 질문은 사람에게 내려간다. 부모가
+            # 없는 런은 이 후보가 서지 않으므로 지금처럼 사람이 답한다.
+            from: [{role: parent}]
+            timeout: 900
+            delegate: {allow: [merge-by-agent]}
           cases:
             # rebase-and-repost는 rework가 아니라 blocked다(claunch-1aj1a.1).
             # rework는 배치 루프를 다시 돌 뿐 이 게이트의 입력(런 cwd 저장소)을
@@ -5953,6 +6299,11 @@ procedures:
             freeze-and-close:
               return: held
               value: {reason: "착지 요청을 받을 세션이 없다 — 브랜치를 동결하고 회차를 마감한다", rework: false, decision: freeze-and-close, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
+            # claunch-yzwut: 회차를 끝내지 않는 유일한 답. ok로 돌아가 land가
+            # 이 회차를 자기 착지로 표시하고(self_merge) 착지 절차를 잇는다.
+            merge-by-agent:
+              return: ok
+              value: {reason: "착지 요청을 받을 세션이 없다 — 사람이 merge-by-agent를 골랐다: 워커가 정렬·리뷰 뒤 직접 착지한다", decision: merge-by-agent, tip: "$data.commit.tip", repo: "$data.landing.repo", owner: "$result['landing-target-evidence'].value.owner", issue: "$data.claim.issue", relation: "$params.relation"}
         catch:
           # 선택지 셋이 문제에 맞지 않는다는 답. 다시 물을 선택지가 이
           # 프로시저에 없으므로 사람이 경로를 정하겠다는 뜻으로 읽고
@@ -5960,6 +6311,51 @@ procedures:
           reframe:
             return: blocked
             value: {reason: "사람이 이 질문의 선택지를 부정했다(reframe) — 착지 경로를 사람이 정한다"}
+
+  self-merge:
+    description: >-
+      자기 착지(merge-by-agent, claunch-yzwut). 착지 요청을 받을 세션이 없고
+      사람이 landing-target-gate에서 merge-by-agent를 고른 회차에만 land의
+      submit이 부른다. 정렬·동료 리뷰·PR 게시는 이미 지났다. 이 프로시저는
+      rebase 후 머지를 대상 이동과 충돌에 강건하게 한다: 시도마다 대상 tip T를
+      하나 고정하고(prepare: fetch → 항상 rebase T → range-diff로 리뷰 유효성
+      → 표적 테스트 → 받을 세션 재확인), 대상이 아직 T일 때만 반영한다(apply:
+      compare-and-swap). 대상이 움직였으면(moved) 처음부터 다시 시도한다.
+      시도는 세 번이다 — loop가 아니라 try를 세 단으로 쓴다. loop는 상한에
+      닿으면 loop_limit으로 사람을 기다리지만, 여기서 세 번째 moved는
+      blocked로 끝나야 한다(ask-common의 ask-user와 같은 이유).
+      결과: landed(머지 해시) / rework(rebase 충돌을 풀지 못했거나 표적
+      테스트 red) / blocked(대상을 읽지 못함, 대상 체크아웃이 깨끗하지 않음,
+      리뷰가 없음, 세 번 다 대상이 움직임) / review(rebase로 패치가 바뀌어
+      다시 리뷰가 필요) / target(받을 세션이 생겼다). review·target은 land의
+      결과가 아니다 — 호출부(self-merge-run)가 catch로 받는다.
+    returns:
+      landed: {merge: str, tip: "str?"}
+      rework: {reason: "str?", rework: bool}
+      blocked: {reason: str}
+      review: {reason: str}
+      target: {reason: str}
+    body:
+      - id: self-merge-attempt-1
+        try: {seq: [self-merge-prepare, self-merge-apply]}
+        catch:
+          moved:
+            id: self-merge-attempt-2
+            try: {seq: [self-merge-prepare, self-merge-apply]}
+            catch:
+              moved:
+                id: self-merge-attempt-3
+                try: {seq: [self-merge-prepare, self-merge-apply]}
+                catch:
+                  moved:
+                    return: blocked
+                    value: {reason: "자기 착지를 세 번 시도하는 동안 대상 브랜치가 매번 움직였다 — 매 시도의 대상 tip은 이슈의 SELF-MERGE 코멘트에 있다"}
+      # 반영이 끝났다. 착지 판정은 평소처럼 기계가 한다(머지 커밋이 내 tip을
+      # 부모로 갖는가 + 트리가 깨끗한가).
+      - call: confirm-landed
+      - self-merge-record
+      - return: landed
+        value: {merge: "$result.landed.value.merge", tip: "$result.landed.value.tip"}
 
   cut-unreachable:
     description: >-
@@ -6065,6 +6461,12 @@ procedures:
       # 그랬던 경로).
       pr-submitted: {url: "str?", number: "int?", tip: "str?"}
     body:
+      # 자기 착지 표시를 지운다(claunch-yzwut). 앞 회차가 merge-by-agent로
+      # 착지했어도 이 회차의 표시는 이 회차의 no-target 갈래만 다시 세운다.
+      - id: self-merge-reset
+        call: self-merge-arm
+        with: {armed: false}
+        bind: self_merge
       # branch-setup이 mode=main을 기록한 회차(claunch-cetzf.2): 착지 요청·rebase·리뷰·push를
       # 건너뛰고 master 커밋 해시를 landed로 반환한다. worker-round의 catch
       # landed가 배치를 끝내고 wrapup이 그 해시로 이슈를 닫는다.
@@ -6576,6 +6978,14 @@ procedures:
                           owner: "$data.landing_route.owner"
                           issue: "$data.landing_route.issue"
                           relation: "$data.landing_route.relation"
+                      # claunch-yzwut: 회차를 끝내지 않는 재사용 답. 이 회차를
+                      # 자기 착지로 표시하고 아래 재측정으로 간다 — 그 3분 사이에
+                      # 받을 세션이 생기면 표시를 지우고 평소 착지로 간다.
+                      merge-by-agent:
+                        id: landing-target-replay-arm
+                        call: self-merge-arm
+                        with: {armed: true, reason: "저장된 결정(merge-by-agent)을 그대로 쓴다 — 같은 저장소·같은 방향이라 같은 질문을 다시 서지 않는다"}
+                        bind: self_merge
                       # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 잰다.
                       ask-again: []
                   # claunch-sp0ut.1: 여섯째 확인의 1은 그 순간의 값이다. 이 갈래에
@@ -6609,15 +7019,39 @@ procedures:
                       # no-target 옵션의 트리도 ok로 끝난다. 그러면 choose가 ok로
                       # 완결되고 land의 seq가 submit(정렬 → 동료 리뷰 → 착지
                       # 요청)으로 이어진다 — 그것이 평소의 착지 경로다.
+                      # 자기 착지로 표시된 회차(재사용 답)였으면 표시를 지운다
+                      # — 받을 세션이 있는 회차는 평소 착지다(claunch-yzwut).
                       - if: "$result['landing-target-retry'].outcome == 'ok'"
+                        then:
+                          id: landing-target-disarm
+                          call: self-merge-arm
+                          with: {armed: false, reason: "재측정 중에 착지 요청을 받을 세션이 생겼다 — 평소 착지 경로로 간다"}
+                          bind: self_merge
+                      # 저장된 merge-by-agent를 재사용한 회차 — 묻지 않고 잇는다.
+                      # 결정 이름이 아니라 위 replay가 쓴 표시를 읽는다(손으로 쓴
+                      # 결정 문자열 비교를 쓰지 않는다 — landing-route-replay 설명).
+                      # 잇는 것은 재측정 세 번이 전부 1(받을 세션 없음)로 시간이
+                      # 다 된 timeout일 때뿐이다(claunch-yzwut.1). undecidable은
+                      # 「받을 세션이 없다」를 이번 회차에 재지 못했다는 뜻이고,
+                      # 사람이 merge-by-agent를 고른 전제가 그것이므로 아래 else의
+                      # 질문으로 간다 — 다시 merge-by-agent를 고르면 다시 표시된다.
+                      - if: "$data.self_merge.armed == true and $result['landing-target-retry'].outcome == 'timeout'"
                         then: []
                       # 세 번 다 1(또는 판정 불가) — 지금처럼 사람이 정한다.
                       - else:
                           # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
+                          # 게이트가 ok로 돌아오는 답은 merge-by-agent 하나뿐이다
+                          # (나머지는 blocked·held로 land를 끝낸다). 그래서 다음
+                          # 노드에 닿았다는 것 자체가 그 답이고, 이 회차를 자기
+                          # 착지로 표시한다.
                           - id: landing-target-ask
                             call: landing-target-gate
                             with: {relation: "$data.inputs.relation"}
                             bind: landing_route
+                          - id: landing-target-arm
+                            call: self-merge-arm
+                            with: {armed: true, reason: "$data.landing_route.reason"}
+                            bind: self_merge
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
@@ -6794,6 +7228,34 @@ procedures:
                       value: {url: "$data.landing.pr_url",
                               number: "$data.landing.pr_number",
                               tip: "$data.landing.tip"}
+                - else: []
+            # 자기 착지 갈래(claunch-yzwut). 이 회차의 no-target 갈래가 사람의
+            # merge-by-agent 답을 확인했을 때만 선다($data.self_merge.armed).
+            # 정렬·리뷰어 확보·동료 리뷰·(merge-approval)·PR 게시까지는 위의 평소
+            # 순서를 그대로 지났다. 여기서 착지 요청(integration-request)과
+            # 대기(await-landing) 대신 self-merge가 rebase 후 compare-and-swap
+            # 머지를 하고 landed로 land를 끝낸다. auto_merge=false 회차는 위
+            # pr-submitted-route가 먼저 끝내므로 여기 오지 않는다 — PR 머지를
+            # 사용자에게 남긴다는 시작 입력이 이 답보다 앞선다.
+            #   review — rebase로 패치가 바뀌었다: submit을 처음부터 다시 돌아
+            #            새 tip을 리뷰받는다(정렬은 behind=0이라 바로 지난다).
+            #   target — 그 사이 받을 세션이 생겼다: 표시를 지우고 아래 평소
+            #            착지 요청으로 간다.
+            #   landed·rework·blocked는 land의 결과로 그대로 나간다.
+            - id: self-merge-route
+              cond:
+                - if: "$data.self_merge.armed == true"
+                  then:
+                    id: self-merge-run
+                    try:
+                      call: self-merge
+                    catch:
+                      review: {continue: submit}
+                      target:
+                        id: self-merge-handback
+                        call: self-merge-arm
+                        with: {armed: false, reason: "자기 착지 직전 재확인에서 착지 요청을 받을 세션이 생겼다 — 평소 착지 요청으로 간다"}
+                        bind: self_merge
                 - else: []
             # 착지 요청 수신자와의 메시지 채널 점검(claunch-101wi). 채널이 없다는
             # 사실은 await-landing의 재촉이 실패하거나 상위의 통지가 오지 않는
@@ -7691,9 +8153,20 @@ procedures:
       #   A end-decision — 5분. 답이 없으면 auto-release로 넘어간다.
       #   B auto-release — wrapup과 같은 정리(테스트 산출물)를 먼저 한다.
       #   C release-decision — end|hold|new-task를 사람이 고른다. 기한이 없다.
+      #     hold는 런을 끝내지 않는다(claunch-llfac): end-hold 뒤에 같은 질문을 새
+      #     ask id로 다시 올리고, 그 질문을 연 채 세션을 세션 hold 상태(held_at)로
+      #     보낸다. 사람의 답이 hold된 드라이버를 깨운다(claunch-xxxsx). 런이
+      #     done이 아니므로 kill-on-end도 keep-alive도 끼어들 자리가 없다.
       # 끝낼지는 여전히 사람이 정하고, 기다리는 동안의 정리만 자동이 된다. 정리 뒤에
       # 세션을 그냥 kill해도 C에서 end를 고른 것과 같은 종결 기록이 남는다
       # (daemon/cflow2_clock의 `end_on_session_exit`).
+      # 자식 리뷰어의 불변식(claunch-phkt1): end를 고른 경로와 세션이 이 질문
+      # 도중 kill된 경로에서 자식 리뷰어는 이미 종료되어 있다. settle에 들어설
+      # 때 데몬이 끝냈고(settle-reap, claunch-5aysr), 열린 질문 때문에 남은
+      # 리뷰어는 auto-release가 kill을 요청하며, 그래도 남으면 런 done 뒤의
+      # kill-on-end나 세션 exit의 parent-exited가 끝낸다(claunch-472wq.1).
+      # new-task만 리뷰어를 되살린다 — end-new-task가 resume을 요청하고 새 런의
+      # reviewer-ensure가 그 처분을 읽는다.
       # self-improve(claunch-c4e6f)는 종료 대신 고르는 답이다: 자기 회고를 두
       # 갈래(일반·cflow v2)로 보고하고 사용자와 합의한 항목만 이슈로 등록한 뒤
       # 이 질문으로 돌아온다 — 그래서 질문을 루프로 감싼다. 나머지 답은 각자의
@@ -7745,8 +8218,10 @@ procedures:
                         다시 사람 손이 필요하면 `claunch respawn <세션>`이 있다.
                         auto-release: 지금 정리부터 한다 — 테스트 산출물을 회수하고,
                         그 뒤 release-decision에서 end|hold|new-task를 고른다.
-                        hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께
-                        세워 세션을 살려 두고, 메시지로 깨어나지 않게 한다.
+                        hold: 종료를 보류한다 — 정리(auto-release) 뒤 이 세션을 세션
+                        hold 상태로 보낸다: 프로그램을 내리고 대화·런·워크트리를
+                        보존하며, end|hold|new-task 질문은 새 번호로 열린 채 남는다.
+                        답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채 깨어난다.
                         new-task: 이 세션에 새 작업을 맡긴다 — 이 런을 마감하고 같은
                         세션에서 그 작업의 이슈로 새 런(목표 수립부터)을 시작한다.
                         사용자가 이 질문에 답하지 않고 터미널에 새 작업을 주었다면 그
@@ -7772,7 +8247,10 @@ procedures:
                       # 지나지 않았다(claunch-q4cqy.6). 정리가 끝나면 이 런은
                       # 마감되고 release-decision은 묻지 않는다.
                       end: {seq: [auto-release, {break: end-watch}]}
-                      hold: [end-hold, {break: end-watch}]
+                      # hold는 end처럼 정리를 먼저 지나고, 루프를 끝내지 않는다 —
+                      # 이 단계를 빠져나가 아래 release-watch가 질문을 다시 올린다
+                      # (claunch-llfac). 그 질문의 end는 정리를 다시 하지 않는다.
+                      hold: {seq: [auto-release, end-hold]}
                       new-task: [end-new-task, {break: end-watch}]
                       self-improve:
                         # 리뷰 → 논의 → 합의 게이트(사람만) → 등록은 공용
@@ -7794,49 +8272,72 @@ procedures:
                   # 기한 초과: 답이 없는 것이 auto-release를 고른 것과 같다.
                   - auto-release
             # C. 정리 뒤의 릴리스 질문 — 기한 없다. 사람이 고를 때까지 선다.
-            - id: release-decision
-              call: ask-user
-              bind: release_decision
-              with:
-                require_reason: true
-                # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
-                # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
-                # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
-                # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
-                # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
-                # 영향받지 않는다.
-                criteria: [deferrable]
-                # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
-                # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
-                nudge: |
-                  이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 세션은
-                  살아 있는 채로 선다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
-                  `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
-                  무엇을 정해야 하는지와 답하는 명령
-                  (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
-                  **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
-                  그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
-                  진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
-                  않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
-                  REPEAT_AFTER).
-                topic: |
-                  회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
-                  이 질문에는 기한이 없다 — 답이 없으면 세션은 살아 있는 채로 선다.
+            # hold 답은 end-hold를 지나 이 질문을 새 ask id로 다시 올린다
+            # (claunch-llfac) — 그래서 질문만 따로 루프로 감싼다. end-decision의
+            # 5분 기한은 다시 돌지 않는다. end·new-task는 바깥 루프를 끝낸다.
+            - id: release-watch
+              loop:
+                while: "true"
+                max: 100
+                do:
+                  - id: release-decision
+                    call: ask-user
+                    bind: release_decision
+                    with:
+                      require_reason: true
+                      # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
+                      # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
+                      # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
+                      # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
+                      # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
+                      # 영향받지 않는다.
+                      criteria: [deferrable]
+                      # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
+                      # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
+                      # $CLAUNCH_SESSION을 그대로 싣기 위해 lit로 감싼다 — 맨 문자열의 $는
+                      # 식으로 읽힌다(claunch-llfac TRIED).
+                      nudge:
+                        lit: |
+                          이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 질문은
+                          열린 채로 남는다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
+                          `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
+                          무엇을 정해야 하는지와 답하는 명령
+                          (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
+                          **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
+                          그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
+                          진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
+                          않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
+                          REPEAT_AFTER).
+                          **이 질문 바로 앞에서 end-hold를 보고했으면**(hold 답으로 다시
+                          선 질문이다, claunch-llfac) `flow_nudge` 뒤 그 턴의 **마지막
+                          동작으로** `claunch hold $CLAUNCH_SESSION`을 실행한다(세션 인자는 생략할 수
+                          없다 — 인자 없는 `claunch hold`는 `error: no session given`으로 끝난다). hold는
+                          그 즉시 프로그램을 내리므로 그 뒤에 글을 쓰지 않는다 — 대화는
+                          보존되고, 답이 오면 깨어나 이 질문의 결과부터 이어 간다. 바로
+                          앞이 auto-release였으면 실행하지 않는다(그때는 사람이 아직
+                          보류를 고르지 않았다). keep-alive·delivery-hold는 세우지 않는다.
+                      topic: |
+                        회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
+                        이 질문에는 기한이 없다 — 답이 없으면 질문은 열린 채로 남는다.
+                        hold 답으로 다시 선 질문이면 세션은 이미 hold 상태다(번호가 바뀐
+                        같은 질문이다).
 
-                  end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤
-                  세션을 종료한다(archive는 별도 단계다). 브랜치와 beads 이슈는 남는다.
-                  hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께 세워
-                  세션을 살리고, 메시지로 깨어나지 않게 한다.
-                  new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
+                        end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤
+                        세션을 종료한다(archive는 별도 단계다). 브랜치와 beads 이슈는 남는다.
+                        hold: 종료를 보류한다 — 세션을 세션 hold 상태로 보낸다: 프로그램을
+                        내리고 대화·런·워크트리를 보존하며, 이 질문은 새 번호로 열린 채
+                        남는다. 답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채
+                        깨어난다.
+                        new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
 
-                  이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
-                  데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
-              cases:
-                # 정리는 이미 auto-release가 했다 — 노드 없이 런을 마감한다
-                # (claunch-q4cqy.6). 예고는 게이트 앞에서 이미 나갔다.
-                end: [{break: end-watch}]
-                hold: [end-hold, {break: end-watch}]
-                new-task: [end-new-task, {break: end-watch}]
+                        이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
+                        데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
+                    cases:
+                      # 정리는 이미 auto-release가 했다 — 노드 없이 런을 마감한다
+                      # (claunch-q4cqy.6). 예고는 게이트 앞에서 이미 나갔다.
+                      end: [{break: end-watch}]
+                      hold: [end-hold, {continue: release-watch}]
+                      new-task: [end-new-task, {break: end-watch}]
 
 body:
   try:
@@ -7884,11 +8385,14 @@ body:
       - {push: {to: signals, item: {name: "'settle'"}}, at: enter}
 
 spec:
-  invariants:
-    no-master-merge: {never_effect: git.merge, target: master}
+  # 조건 없는 invariants.no-master-merge(never_effect git.merge:master)는
+  # 지웠다(claunch-yzwut). 같은 금지는 조건부 규칙 master-merge-effect가 진다
+  # — 사람이 merge-by-agent를 고른 회차의 self-merge-apply 하나만 예외다.
   paths:
     settle-before-end: {to: end, must_pass: [settle]}
     review-before-request: {to: integration-request, must_pass: [peer-review]}
+    # 자기 착지도 동료 리뷰를 지나야 한다(claunch-yzwut).
+    review-before-self-merge: {to: self-merge-apply, must_pass: [peer-review]}
     wrapup-before-report: {to: round-report, must_pass: [wrapup]}
   ensures:
     land.landed: "$result.landed.value.merge != null"

@@ -53,6 +53,14 @@ a probe that asked it would need the daemon to be up and would sit on a
 route that exists only in a build new enough to serve it. The file is the
 same one the API writes, and opening it read-only means a probe can never
 change what the user is looking at.
+
+Rounds (claunch-r3j1o.1). A plan opened by ``new_round`` carries the run and
+round it belongs to. When the probe is given the run's own (``CFLOW2_RUN``,
+``CFLOW2_ROUND``; ``--run``/``--round``) and the plan names another, the plan
+is the previous round's -- the round trigger has not opened this one yet --
+and its emptiness says nothing about this round: the verdict is 2, not 0. A
+plan without a run (written before rounds, or outside a run) and a probe
+without one are read as before.
 """
 
 from __future__ import annotations
@@ -96,10 +104,12 @@ def db_path() -> Optional[str]:
     return str(path) if path.exists() else None
 
 
-def read_summary(path: str, session: str) -> Tuple[Optional[Dict[str, Any]], str]:
+def read_summary(path: str, session: str, *, run: str = "",
+                 round: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], str]:
     """(the stored summary, why there is none). Read-only: a probe may run
     every ``poll`` seconds next to the daemon's own writers, and it must
-    never be the one that changes the row."""
+    never be the one that changes the row. With ``run`` (and ``round``), a
+    plan that names another run or round has no summary for this one."""
     try:
         uri = "file:{}?mode=ro".format(path.replace("?", "%3f").replace("#", "%23"))
         db = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -107,13 +117,19 @@ def read_summary(path: str, session: str) -> Tuple[Optional[Dict[str, Any]], str
         return None, f"cannot open {path} ({exc})"
     try:
         row = db.execute(
-            "SELECT summary FROM plans WHERE session = ?", (session,)).fetchone()
+            "SELECT summary, json_extract(doc, '$.run'), json_extract(doc, '$.round') "
+            "FROM plans WHERE session = ?", (session,)).fetchone()
     except sqlite3.Error as exc:
         return None, f"cannot read the plans table ({exc})"
     finally:
         db.close()
     if row is None:
         return None, f"session {session!r} has no plan"
+    plan_run, plan_round = row[1], row[2]
+    if run and plan_run:
+        if plan_run != run or (round is not None and plan_round != round):
+            return None, (f"the plan of {session!r} is round {plan_run}/{plan_round}, not "
+                          f"{run}/{round if round is not None else '?'}: this round's plan is not open yet")
     try:
         summary = json.loads(row[0] or "{}")
     except (TypeError, ValueError) as exc:
@@ -295,6 +311,12 @@ def main(argv: Optional[List[str]] = None) -> int:
              "gate stops on a new set of items (best effort)",
     )
     parser.add_argument(
+        "--run", default=None,
+        help="the run the plan must belong to (default: $CFLOW2_RUN)")
+    parser.add_argument(
+        "--round", type=int, default=None,
+        help="the round the plan must belong to (default: $CFLOW2_ROUND)")
+    parser.add_argument(
         "--json", action="store_true",
         help="print the stored summary instead of the one-line verdict",
     )
@@ -312,7 +334,17 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"({DB_NAME})", file=sys.stderr)
         return CANNOT_TELL
 
-    summary, why = read_summary(path, session)
+    # Two independent axes: which round the plan must belong to (a plan of
+    # another round answers nothing about this one -> 2) and what the gate
+    # waits on (--scope). A plan of the right round is judged by the scope.
+    run = (args.run if args.run is not None else os.environ.get("CFLOW2_RUN") or "").strip()
+    rnd = args.round
+    if rnd is None:
+        try:
+            rnd = int(os.environ.get("CFLOW2_ROUND") or "")
+        except ValueError:
+            rnd = None
+    summary, why = read_summary(path, session, run=run, round=rnd)
     code = verdict(summary, args.scope)
     if args.notify:
         notify_stall(session, summary, code, args.scope)

@@ -13,6 +13,9 @@ is a reason string.
 * ``briefing`` / ``checks``: the v1 implementation
   (:func:`.cflow_clock.recompose_briefing`, :func:`.cflow_clock.request_checks`)
   aimed at the run's driver session; skipped when that session is not live.
+* ``plan-round``: seal the driver session's plan and open the one of the
+  record's (run, round) (:meth:`..plan.store.PlanStore.new_round`,
+  claunch-r3j1o.1). Idempotent on (run, round); the driver need not be live.
 * ``push`` / ``enqueue-landing``: facts measured now in the run's checkout
   (:func:`measure_facts`), ``each``/``item`` evaluated with the v2 expression
   language over ``{facts, each}``, then the record goes to the one run of the
@@ -48,6 +51,7 @@ DO_BRIEFING = "briefing"
 DO_CHECKS = "checks"
 DO_PUSH = "push"
 DO_ENQUEUE_LANDING = "enqueue-landing"
+DO_PLAN_ROUND = "plan-round"
 
 #: The collection name that also reaches a v1 run's ``landing_queue:``.
 LANDING = "landing"
@@ -616,6 +620,8 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
                     return False
             return await cflow_clock.request_checks(session, deliver)
         return await cflow_clock.recompose_briefing(session)
+    if do == DO_PLAN_ROUND:
+        return await asyncio.to_thread(plan_round, driver, trig)
     if do in (DO_PUSH, DO_ENQUEUE_LANDING):
         if not driver:
             return False, "the run has no driver session"
@@ -627,6 +633,31 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
             facts_fn or session_facts(manager), trigger_tid(cwd, scope, trig),
             trig.get("data"), mesh)
     return False, f"this daemon has no trigger action named {do!r}"
+
+
+def plan_round(driver: Optional[str], trig: Dict[str, Any], store: Any = None) -> Result:
+    """``plan-round``: the driver's plan moves to the record's round. The
+    session's own write path (the plan API) is not used: the daemon is the
+    store's process, and the write is the driver's own plan."""
+    if not driver:
+        return False, "the run has no driver session"
+    run = str(trig.get("run") or "")
+    rnd = trig.get("round")
+    if not run or not isinstance(rnd, int) or isinstance(rnd, bool):
+        return False, "the trigger record carries no run and round"
+    from ..plan import store as plan_store
+    from . import paths
+    try:
+        plans = store or plan_store.PlanStore(paths.plan_db())
+        res = plans.new_round(driver, driver, run=run, round=rnd)
+    except plan_store.PlanError as exc:
+        return False, f"plan store: {exc}"
+    key = plan_store.round_key(run, rnd)
+    if not res["opened"]:
+        return True, f"plan of {driver} unchanged: {res['why']}"
+    sealed = (res.get("sealed") or {}).get("key")
+    return True, (f"plan of {driver} opened round {key}" + (f", sealed {sealed}" if sealed else "")
+                  + (f", carried {', '.join(res['carried'])}" if res["carried"] else ""))
 
 
 def trigger_tid(cwd: str, scope: str, trig: Dict[str, Any]) -> str:

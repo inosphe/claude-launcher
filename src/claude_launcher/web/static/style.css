@@ -8150,17 +8150,29 @@ body.embed #main { width: 100%; }
 .notice-panel-section-row { display: flex; align-items: baseline; gap: 8px; }
 .notice-panel-section-row .notice-panel-section { flex: 1; }
 .notice-panel-section-row .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
-/* Folding "Waiting on you" (thread th-3b3470): the line left behind says how
-   many the fold keeps back, so a folded list never hides a request silently. */
-.notice-folded-note { margin: 2px 0 8px; }
-.notice-panel-section-row .wf-btn.fold-open { color: #58a6ff; }
-/* The Waiting head carries the fold press beside its heading (thread
-   th-3b3470). Its own class, not notice-panel-section-row: that one names
-   the History head, which is where the filter presses live. */
-.notice-waiting-head { display: flex; align-items: baseline; gap: 8px; }
-.notice-waiting-head .notice-panel-section { flex: 1; }
-.notice-waiting-head .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
-.notice-waiting-head .wf-btn.fold-open { color: #58a6ff; }
+/* The panel's sub tabs (claunch-slab3): "Waiting on you" first, then
+   History; the open one is underlined, and the Waiting tab carries the
+   unread waiting count as a badge. They replace the fold the Waiting list
+   had (thread th-3b3470). */
+.notice-tabs {
+  display: flex; gap: 2px; margin: 8px 0 6px;
+  border-bottom: 1px solid #2a2e36;
+}
+.notice-tabs .wf-btn.notice-tab {
+  margin: 0 0 -1px; padding: 5px 10px; font-size: 12px;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: #8b949e;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.notice-tabs .wf-btn.notice-tab:hover { color: #c9d1d9; }
+.notice-tabs .wf-btn.notice-tab.active {
+  color: #e6edf3; border-bottom-color: #58a6ff; font-weight: 600;
+}
+.notice-tab-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
+  border-radius: 9px; background: #d29922; color: #0d1117;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+}
 .notice-row {
   background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
   border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
@@ -11063,6 +11075,12 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-feedback textarea { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 4px 6px; font: inherit; resize: vertical; }
 .plan-feedback .wf-btn { justify-self: start; }
 .plan-joint-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+/* Rounds (claunch-r3j1o.1): the current plan and the sealed rounds. */
+.plan-round-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 6px; }
+.plan-round-bar .wf-btn { font-size: 11px; padding: 1px 6px; }
+.plan-round-bar .plan-round-on { border-color: var(--accent, #58a6ff); }
+.plan-sealed { color: var(--plan-muted); margin: 2px 0 6px; font-style: italic; }
+.plan-from { margin-left: 4px; }
 .plan-joint { list-style: none; margin: 0; padding: 0; }
 .plan-joint-member { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
 .plan-joint-member p { margin: 2px 0; }

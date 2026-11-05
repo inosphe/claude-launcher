@@ -990,3 +990,44 @@ def test_landing_holders_reads_each_slot_once_for_every_session_asked(tmp_path, 
     assert [(h.cwd, h.run) for h in holders("lead2", None)] == [(base, "lead2@main")]
     assert holders("w1", None) == []
     assert sorted(reads) == ["lead1@main", "lead2@main"]
+
+
+# -- plan-round (claunch-r3j1o.1) ---------------------------------------------------
+
+
+ROUNDS = """cflow: 2
+name: rounds
+nodes:
+  open:
+    prompt: O
+    triggers: [{do: plan-round, at: enter}]
+body: open
+"""
+
+
+def test_a_trigger_record_carries_the_round(tmp_path):
+    _start(tmp_path, ROUNDS, "w1")
+    trig = _state(tmp_path, "w1")["triggers"][0]
+    assert trig["do"] == "plan-round" and trig["round"] == 1
+
+
+def test_plan_round_opens_the_drivers_round_once(tmp_path):
+    from claude_launcher.daemon import paths
+    from claude_launcher.plan import store as plan_store
+
+    trig = {"do": "plan-round", "run": "r1", "round": 2}
+    ok, detail = asyncio.run(cflow2_triggers.perform(Manager(), str(tmp_path), "w1", trig, driver="w1"))
+    assert ok and "opened round r1/2" in detail
+    plan = plan_store.PlanStore(paths.plan_db()).get("w1")
+    assert (plan["run"], plan["round"]) == ("r1", 2)
+    ok, detail = asyncio.run(cflow2_triggers.perform(Manager(), str(tmp_path), "w1", trig, driver="w1"))
+    assert ok and "unchanged" in detail
+
+
+def test_plan_round_without_a_round_or_a_driver_is_a_skip(tmp_path):
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        Manager(), str(tmp_path), "w1", {"do": "plan-round", "run": "r1"}, driver="w1"))
+    assert not ok and "no run and round" in detail
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        Manager(), str(tmp_path), "w1", {"do": "plan-round", "run": "r1", "round": 1}, driver=""))
+    assert not ok and "no driver" in detail

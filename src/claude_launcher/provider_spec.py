@@ -170,7 +170,7 @@ PROVIDER_EXTRA_FIELDS: Tuple[str, ...] = (
     "service",
     "harness",
     "allowed_harnesses",
-    # The four :mod:`routing` facts, spelled here rather than imported: this
+    # The :mod:`routing` facts, spelled here rather than imported: this
     # module is loaded by every reader and must not drag the routing shim's
     # imports in behind it. ``tests/test_provider_install.py`` holds this list
     # to the constants routing actually reads, so the two spellings cannot
@@ -178,6 +178,7 @@ PROVIDER_EXTRA_FIELDS: Tuple[str, ...] = (
     # from a first cut of this tuple while `claunch routing set` was writing
     # them.
     "anthropic_auth_header",
+    "anthropic_translation",
     "session_header",
     "session_affinity",
     "routing",

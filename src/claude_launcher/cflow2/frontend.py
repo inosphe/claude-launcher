@@ -221,7 +221,7 @@ MOMENT_ENTER = "enter"
 MOMENT_LEAVE = "leave"
 MOMENTS = (MOMENT_ENTER, MOMENT_LEAVE)
 #: ``triggers:`` actions (2.8). ``push`` is spelled as a ``push:`` key.
-TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing")
+TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing", "plan-round")
 TRIGGER_PUSH = "push"
 COMBINATORS = (
     "seq", "waterfall", "cond", "choose", "foreach", "loop", "par", "retry",
@@ -1005,14 +1005,21 @@ def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
             "brief", "format", "choices", "require_reason", "on_unroutable", "urgent",
-            "criteria")
+            "criteria", "delegate")
+#: ``ask.delegate`` keys: the options a delegated answerer may take
+#: (claunch-vjp4y.2). An agent-side answerer -- the driver's parent session --
+#: sees every option but may only land the ones named here; anything else is
+#: recorded as a refusal and the question goes to a person.
+ASK_DELEGATE_KEYS = ("allow",)
 #: What a step may say about the notice its ask raises, besides ``urgent``
 #: (which is its own boolean). These are keywords, not a rank: the dashboard
 #: shows a notice because it carries one of them, never because it scored
 #: above another one (thread th-3b3470, 2026-10-30). ``deferrable`` means the
 #: question can wait — the run stands still, nothing else is blocked by the
-#: answer — so a folded "Waiting on you" leaves it out while the run is
-#: otherwise busy. ``fatal``, ``blocking`` and ``expiring`` are derived by the
+#: answer. The dashboard reads it into the notice's criteria
+#: (``noticeCriteriaOf``); the "Waiting on you" fold that hid deferrable
+#: requests was replaced by the panel's sub tabs (claunch-slab3), so no
+#: surface acts on it today. ``fatal``, ``blocking`` and ``expiring`` are derived by the
 #: dashboard from what the notice already is (a stopped leader, a gate, a
 #: deadline) and are not declared here.
 ASK_CRITERIA = ("deferrable",)
@@ -1177,6 +1184,47 @@ def _ask_criteria(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: i
     return list(dict.fromkeys(value))
 
 
+def _ask_delegate(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int,
+                  choices: Optional[List[str]] = None) -> Dict[str, Any]:
+    """``ask.delegate``: which of the ask's options a delegated answerer may
+    take, as ``{allow: [option, ...]}``.
+
+    The answerer this restricts is the driver's parent session
+    (``runtime.gate_authority``); a person is never restricted. The list is
+    shown to the parent with the question, so its answer is a choice within
+    known bounds rather than a guess (user decision, thread th-ea5c7c).
+
+    Either a literal mapping or one ``${params.<p>}`` reference, the latter
+    resolved when the ask opens (a shared procedure passes its caller's list
+    through). A literal whose names are not among ``choices`` is refused here;
+    a param is checked against the brief's options when the ask opens."""
+    raw = ask.get("delegate")
+    if raw is None:
+        return {"delegate": None, "delegate_param": None}
+    pm = _PARAM_REF.match(raw.strip()) if isinstance(raw, str) else None
+    if pm:
+        return {"delegate": None, "delegate_param": f"$params.{pm.group(1)}"}
+    spec = _need_map(ctx, file, raw, f"task {name!r}: ask.delegate", aline)
+    _check_keys(ctx, file, spec, ASK_DELEGATE_KEYS, f"task {name!r}: ask.delegate")
+    allow = spec.get("allow")
+    if not isinstance(allow, list) or not allow \
+            or not all(isinstance(a, str) and a.strip() for a in allow):
+        raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow must be a non-empty "
+                      f"list of option names")
+    names = [a.strip() for a in allow]
+    if len({n.lower() for n in names}) != len(names):
+        raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow repeats a name "
+                      f"(answers are matched case-insensitively)")
+    if choices is not None:
+        want = {c.lower() for c in choices}
+        missing = [n for n in names if n.lower() not in want]
+        if missing:
+            raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow names "
+                          f"{', '.join(missing)}, which the fixed choices "
+                          f"({', '.join(choices)}) do not have")
+    return {"delegate": {"allow": names}, "delegate_param": None}
+
+
 def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
     """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
     default_option, timeout, on_decline, options}``.
@@ -1277,6 +1325,8 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "urgent": _ask_urgent(ctx, file, name, ask, aline),
         "criteria": _ask_criteria(ctx, file, name, ask, aline),
+        **_ask_delegate(ctx, file, name, ask, aline,
+                        [o["name"] for o in options] if options is not None else None),
         "options": options,
     }
 
@@ -2015,6 +2065,9 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
     from_param = param_or(raw.get("from"), "from")
     if from_param is not None:
         raw.pop("from")
+    timeout_param = param_or(raw.get("timeout"), "timeout")
+    if timeout_param is not None:
+        raw.pop("timeout")
     for key in ("brief", "format", "choices", "prompt", "require_reason", "urgent"):
         raw.pop(key, None)
     try:
@@ -2038,9 +2091,16 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
         "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
                  for c in delegate.candidates],
         "from_param": from_param,
+        # A literal allow list is checked against the fixed choices here; one
+        # given as ``${params.<p>}`` is checked against the brief's own
+        # options when the ask opens (``runtime._brief_ask``), because the
+        # names are not known before then.
+        **_ask_delegate(ctx, file, name, ask, aline,
+                        choices_v if isinstance(choices_v, list) else None),
         "otherwise": delegate.otherwise,
         "default_option": default,
         "timeout": delegate.timeout,
+        "timeout_param": timeout_param,
         "on_decline": None,
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "urgent": _ask_urgent(ctx, file, name, ask, aline),
