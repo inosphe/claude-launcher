@@ -167,7 +167,10 @@ _OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _trustst
 #: its next request instead of being served until the session moves.
 #: 2 — summaries describe the work and refer to nothing by id (session
 #: names, issue ids in any form, PR numbers, run ids, hashes).
-PROMPT_VERSION = 2
+#: 3 — the work's subject is named instead of a bare 「변경」-style reference,
+#: and a workflow step's name (「단계 전환」, 「마무리 정리」) is not used in
+#: place of what that step actually does.
+PROMPT_VERSION = 3
 
 _STATES = frozenset({"working", "blocked", "waiting", "idle", "done", "unknown"})
 
@@ -898,7 +901,7 @@ def build_prompt(
         '{"goal": "작업 목표 1~2문장", "now": "지금 하는 일 1~2문장",'
         ' "state": "working|blocked|waiting|idle|done|unknown",'
         ' "progress": "진행 정도 한 문장",'
-        ' "one-line-job-description": "맡은 일의 내용을 한 줄로",'
+        ' "one-line-job-description": "맡은 일의 대상과 동작을 한 줄로",'
         ' "faq": [{"question": "사용자 FAQ 질문", "answer": "현재 세션 자료에 근거한 답변"}]}',
         "opening task 안에 포함된 과거 요약 문구는 현재 상태의 근거로",
         "사용하지 않는다. live 상태와 최신 로그를 우선한다. 자료에 없는",
@@ -920,12 +923,25 @@ def build_prompt(
         "  자기 지칭 없이 무엇을 어떻게 하는지를 바로 적는다.",
         "- 다른 세션·이슈의 일을 다루면 그 식별자 대신 그 일의 내용을",
         "  적는다. 자료에 내용이 없으면 지어내지 않고 일반적으로 적는다.",
+        "- 대상은 그 이름으로 적는다. 「변경」·「그 작업」·「이 작업」·",
+        "  「해당 이슈」·「이번 회차」처럼 무엇을 가리키는지가 문장 안에",
+        "  드러나지 않는 명사는 대상이 될 수 없다. 그 세션이 다루는 기능·",
+        "  모듈·화면·동작의 이름을 주어로 세운다(예: 「세션 카드의 한 줄 요약",
+        "  지침」, 「통계 페이지의 세션별 막대 그래프」). 자료에 그 이름이",
+        "  없으면 빈 명사로 되돌아가지 말고, 확인 가능한 동작과 산출물을",
+        "  적는다 — 무엇을 고치고, 무엇을 재고, 무엇을 남기는지.",
+        "- 워크플로 절차의 이름을 작업 내용 대신 쓰지 않는다. 「단계 전환」·",
+        "  「마무리 정리」·「착지 절차」·「회차 정리」는 그 단계에서 실제로",
+        "  하는 일이 아니다. 그 단계에서 무엇을 확인하고 무엇을 바꾸는지를",
+        "  적는다.",
         '- 나쁜 예: "s173의 변경을 최신 master 위로 재정렬하고 PR #164를 만드는 작업."',
         '  좋은 예: "프로시저 정의 UI 변경을 최신 master 위로 재정렬하고 PR을 연다."',
         '- 나쁜 예: "s173 런의 peer-review에 대해 보드(claunch-4avda)와 브랜치 근거로 판정하는 리뷰어 세션."',
         '  좋은 예: "프로시저 정의 UI 변경의 동료 리뷰 — 브랜치 diff와 테스트로 판정을 내린다."',
         '- 나쁜 예: "gds6-rbyq 변경의 리뷰 통과·master 착지·마무리 상태 점검을 처리하는 세션"',
-        '  좋은 예: "리뷰를 통과한 변경의 master 착지를 확인하고 회차 마무리 상태를 점검한다."',
+        '  좋은 예: "세션 카드 요약 지침 변경의 동료 리뷰를 마치고, 그 커밋을 master에 착지시킨다."',
+        '- 나쁜 예: "변경의 master 착지를 확인하고 착지 후 단계 전환과 마무리 정리를 수행한다."',
+        '  좋은 예: "세션 카드 한 줄 요약 지침을 고친 커밋을 master에 착지시키고, 남은 이슈 상태를 정리한다."',
         "faq 답변에는 이 제한을 적용하지 않는다.",
         "",
         "[세션]",
