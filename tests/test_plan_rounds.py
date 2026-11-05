@@ -119,7 +119,7 @@ def test_require_disposed_refuses_while_the_user_still_owes(store):
     write(store, closure=[{"id": "v1", "kind": "verify", "title": "check A"},
                           {"id": "f1", "kind": "followup", "title": "later B"}])
     before = store.get("s1")
-    with pytest.raises(P.Conflict, match="round r1/1 still owes the user: v1, f1") as exc:
+    with pytest.raises(P.Conflict, match="round r1/1 still blocks on: v1, f1") as exc:
         store.new_round("s1", "s1", run="r1", round=2, leftover="require_disposed")
     assert exc.value.current["round"] == 1
     assert store.get("s1") == before and store.rounds("s1")["rounds"] == []
@@ -203,3 +203,39 @@ def test_patch_keeps_the_round(store):
     write(store)
     out = store.patch("s1", "s1", "s1", status="doing")["plan"]
     assert (out["run"], out["round"]) == ("r1", 3)
+
+
+def test_the_carry_set_is_the_summary_blockers(store):
+    """What moves into the next round is decided by the same function as
+    ``summary.blockers`` (claunch-r3j1o): a note, a deferred verify and a
+    followup the session finished block nothing, so they stay sealed with
+    their round; a failed verify and a kept followup not done block the
+    session, so they move."""
+    store.new_round("s1", "s1", run="r1", round=1)
+    write(store, steps=[{"id": "s1", "title": "x", "status": "done"}], closure=[
+        {"id": "n1", "kind": "note", "title": "fyi"},
+        {"id": "v-def", "kind": "verify", "title": "check later"},
+        {"id": "v-fail", "kind": "verify", "title": "check B"},
+        {"id": "f-self", "kind": "followup", "title": "done by me", "status": "done"},
+        {"id": "f-kept", "kind": "followup", "title": "later F"},
+    ])
+    store.decide(P.USER, "s1", "v-def", 1, verdict="deferred")
+    store.decide(P.USER, "s1", "v-fail", 1, verdict="failed", note="broken")
+    store.decide(P.USER, "s1", "f-kept", 1, action="here")
+    blockers = [b["id"] for b in store.get("s1")["summary"]["blockers"]]
+    res = store.new_round("s1", "s1", run="r1", round=2)
+    assert res["carried"] == blockers == ["v-fail", "f-kept"]
+    sealed = store.get_round("s1", "r1/1")
+    assert {n["id"] for n in sealed["closure"]} == {"n1", "v-def", "v-fail", "f-self", "f-kept"}
+
+
+def test_require_disposed_also_refuses_on_what_the_session_owes(store):
+    store.new_round("s1", "s1", run="r1", round=1)
+    write(store, closure=[{"id": "f1", "kind": "followup", "title": "later B"},
+                          {"id": "n1", "kind": "note", "title": "fyi"}])
+    store.decide(P.USER, "s1", "f1", 1, action="here")
+    with pytest.raises(P.Conflict, match="still blocks on: f1 "):
+        store.new_round("s1", "s1", run="r1", round=2, leftover="require_disposed")
+    store.patch("s1", "s1", "f1", status="done")
+    res = store.new_round("s1", "s1", run="r1", round=2, leftover="require_disposed")
+    assert res["opened"] is True and res["carried"] == []

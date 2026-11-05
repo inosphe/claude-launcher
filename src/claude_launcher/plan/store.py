@@ -445,16 +445,33 @@ def _index(doc: Optional[dict]) -> dict:
 LEFTOVER = ("carry", "require_disposed")
 
 
-def _owed(node: dict) -> bool:
-    """A closure node the user (or the session, on the user's word) still
-    owes: a verify not checked or failed, a followup not disposed of or kept
-    and not done. These move into the next round (d-carry)."""
+def closure_blocker(node: dict) -> Optional[tuple]:
+    """(why, who) when this closure node keeps the plan from closing, else
+    None. The one judgement both :func:`summarize` (``blockers``, ``waiting``)
+    and :meth:`PlanStore.new_round` (what moves into the next round, what
+    ``require_disposed`` refuses on) read, so the two cannot drift apart.
+
+    A verify not checked waits on the user, a failed one on the session (fix
+    it and reword it). A deferred one ("보류") is handed over as an issue and
+    waits on nobody. A note waits on nobody (claunch-i0whx). A followup not
+    disposed of waits on the user, unless the session marked it done itself;
+    one the user kept ("here", "issue") waits on the session until it is
+    done."""
+    kind = node.get("kind")
     res = node.get("result") or {}
-    if node["kind"] == "verify":
-        return not res or res.get("verdict") == "failed"
+    if kind == "verify":
+        if not res:
+            return ("not checked yet", "user")
+        if res.get("verdict") == "failed":
+            return ("check failed", "session")
+        return None
+    if kind != "followup":
+        return None
     if not res:
-        return True
-    return res.get("action") != "drop" and node.get("status") != "done"
+        return None if node.get("status") == "done" else ("not disposed of", "user")
+    if res.get("action") != "drop" and node.get("status") != "done":
+        return (f"followup kept ({res.get('action')}) and not done", "session")
+    return None
 
 
 def _round_value(value, name: str = "round") -> int:
@@ -509,22 +526,9 @@ def summarize(doc: dict) -> dict:
         elif not n.get("result"):
             block(n, "decision not taken", "user")
     for n in closure:
-        res = n.get("result") or {}
-        if n["kind"] == "verify":
-            if not res:
-                block(n, "not checked yet", "user")
-            elif res.get("verdict") == "deferred":
-                pass
-            elif res.get("verdict") == "failed":
-                block(n, "check failed", "session")
-        elif n["kind"] == "note":
-            continue
-        else:
-            if not res:
-                if n.get("status") != "done":   # done by the session: it disposed of it itself
-                    block(n, "not disposed of", "user")
-            elif res.get("action") != "drop" and n.get("status") != "done":
-                block(n, f"followup kept ({res.get('action')}) and not done", "session")
+        held = closure_blocker(n)
+        if held:
+            block(n, *held)
     waiting = [b for b in blockers if b["who"] == "user"]
     return {
         "steps": s_total, "done": s_done,
@@ -599,7 +603,7 @@ class PlanStore:
         db.execute("INSERT INTO events (session, node, actor, kind, revision, at, data) VALUES (?,?,?,?,?,?,?)",
                    (session, node, actor, kind, revision, _now(), json.dumps(data or {}, ensure_ascii=False)))
 
-    def _store(self, db, session: str, before: Optional[dict], doc: dict, *, reopen: bool = False) -> dict:
+    def _store(self, db, session: str, before: Optional[dict], doc: dict, *, opens_round: bool = False) -> dict:
         now = _now()
         body = {k: doc[k] for k in DOC_KEYS if k in doc and (k not in ("run", "round") or doc[k] is not None)}
         summary = summarize(body)
@@ -608,7 +612,7 @@ class PlanStore:
                        "VALUES (?,?,?,?,?,?)",
                        (session, 1, json.dumps(body, ensure_ascii=False), json.dumps(summary, ensure_ascii=False),
                         now, now))
-        elif reopen:
+        elif opens_round:
             # A new round: same row, so the revision keeps counting up and a
             # write made against the old round's revision is refused.
             db.execute("UPDATE plans SET revision = revision + 1, doc = ?, summary = ?, created_at = ?, "
@@ -701,7 +705,7 @@ class PlanStore:
             # A node carried from an earlier round that the user still owes
             # stays even when this write leaves it out.
             for old in (before or {}).get("closure") or []:
-                if old.get("from") and old["id"] not in build.ids and _owed(old):
+                if old.get("from") and old["id"] not in build.ids and closure_blocker(old):
                     doc["closure"].append(json.loads(json.dumps(old)))
             after = self._store(db, session, before, doc)
             data = {"nodes": build.count}
@@ -802,11 +806,14 @@ class PlanStore:
         it). After ``clear`` there is no plan to overwrite, so the round opens
         again; its earlier copy stays sealed beside it.
 
-        ``leftover`` says what happens to the closure nodes the user still
-        owes (an unchecked or failed verify, an undisposed followup):
-        ``carry`` (the default) moves them into the new round marked with
-        their round; ``require_disposed`` refuses with :class:`Conflict`
-        naming them, and nothing is sealed or opened."""
+        ``leftover`` says what happens to the closure nodes that still block
+        the plan -- exactly :func:`closure_blocker`'s, the ones ``summarize``
+        lists as ``blockers`` (an unchecked or failed verify, an undisposed
+        followup, a kept one not done; never a note, a deferred verify or a
+        followup the session finished): ``carry`` (the default) moves them
+        into the new round marked with their round; ``require_disposed``
+        refuses with :class:`Conflict` naming them, and nothing is sealed or
+        opened."""
         self._owner(session, actor)
         leftover = leftover or "carry"
         if leftover not in LEFTOVER:
@@ -826,10 +833,10 @@ class PlanStore:
                     (session, run, rnd)).fetchone():
                 return {"plan": before, "opened": False, "sealed": None, "carried": [],
                         "why": f"round {round_key(run, rnd)} was sealed already"}
-            owed = [n["id"] for n in (before or {}).get("closure") or [] if _owed(n)]
+            owed = [n["id"] for n in (before or {}).get("closure") or [] if closure_blocker(n)]
             if owed and leftover == "require_disposed":
-                raise Conflict(f"round {round_key(before.get('run'), before.get('round'))} still owes the "
-                               f"user: {', '.join(owed)} (dispose of them, or open the round with "
+                raise Conflict(f"round {round_key(before.get('run'), before.get('round'))} still blocks "
+                               f"on: {', '.join(owed)} (settle of them, or open the round with "
                                f"leftover=carry)", current=before)
             sealed = None
             carried: list = []
@@ -837,7 +844,7 @@ class PlanStore:
                 sealed = self._seal(db, session, before)
                 origin = {"run": before.get("run") or "", "round": before.get("round")}
                 for node in before.get("closure") or []:
-                    if _owed(node):
+                    if closure_blocker(node):
                         node = json.loads(json.dumps(node))
                         node.setdefault("from", origin)
                         carried.append(node)
@@ -845,7 +852,7 @@ class PlanStore:
                    "goal": goal, "issue": issue,
                    "context": context if context is not None else (before or {}).get("context") or {},
                    "steps": [], "closure": carried, "run": run, "round": rnd}
-            after = self._store(db, session, before, doc, reopen=True)
+            after = self._store(db, session, before, doc, opens_round=True)
             self._event(db, session, actor, "round", after["revision"],
                         data={"run": run, "round": rnd, "sealed": sealed,
                               "carried": [n["id"] for n in carried]})

@@ -172,7 +172,7 @@ id·같은 문구의 다음 회차 결정으로 이어지고, 회차별 기록�
 | 항목 | 내용 | 위치 |
 |---|---|---|
 | 회차 열기 | `new_round(run, round)`는 지금 plan을 봉인해 `plan_rounds`에 보관하고 이 회차의 빈 plan을 연다. 같은 (run, round)로 다시 부르면 아무것도 바꾸지 않는다. revision은 같은 행에서 이어 올라가므로 앞 회차 revision으로 들어온 쓰기는 거절된다 | `src/claude_launcher/plan/store.py` (`new_round`, `_seal`) |
-| 넘어오는 항목 | 앞 회차 closure 가운데 `summary.blockers`에 있는 항목(확인하지 않았거나 실패한 verify, 처분하지 않았거나 처분 뒤 끝내지 않은 followup)이 `from: {run, round}`와 함께 넘어온다. note와 보류한 verify는 막는 항목이 아니므로 넘어오지 않는다. 판정은 `summarize`와 같은 함수(`closure_blockers`)에서 나온다 | `store.closure_blockers` |
+| 넘어오는 항목 | 앞 회차 closure 가운데 `summary.blockers`에 있는 항목(확인하지 않았거나 실패한 verify, 처분하지 않았거나 처분 뒤 끝내지 않은 followup)이 `from: {run, round}`와 함께 넘어온다. note와 보류한 verify는 막는 항목이 아니므로 넘어오지 않는다. 판정은 `summarize`와 같은 함수(`closure_blocker`)에서 나온다 | `store.closure_blocker` |
 | 거절 모드 | `leftover=require_disposed`면 넘어올 항목이 있을 때 409로 거절하고 아무것도 봉인하지 않는다. 기본은 `carry` | `store.new_round` |
 | 트리거 | `intake`에 들어가는 순간 데몬이 `plan-round` 트리거로 회차를 연다. 규칙 `plan-panel`은 plan을 쓰는 노드에 plan_get의 run·round가 이 회차가 아니면 `plan_new_round`를 먼저 부르게 한다 | `src/claude_launcher/daemon/cflow2_triggers.py`, `improv-worker-v2.yaml` |
 | 작업 시작 대기 | 2·4번의 두 대기를 `plan-wait` 하나로 모았다. 계획 단계(`plan-step`: `coding-plan` 또는 `plan-seed`) 뒤, 승인 게이트 앞이다. probe는 `--scope start --notify`이고, `CFLOW2_RUN`·`CFLOW2_ROUND`와 plan의 run·round가 다르면 2(판정 불가)다. 두 축(어느 회차의 plan인가, 무엇을 기다리는가)은 서로 독립이다 | `improv-worker-v2.yaml`, `gates/plan_waiting.py` |
