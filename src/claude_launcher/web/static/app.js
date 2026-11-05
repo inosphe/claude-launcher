@@ -48448,6 +48448,106 @@ function cflow2Duration(seconds) {
   return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
+// The intervals the saved runs waited on a person (claunch-sbfsi.1), clipped
+// to [start, end). Each keeps its gate's callstack depth, which is the bar's
+// height in the chart, and its full wait for the tooltip and the longest-wait
+// tile. A run's gates come from its own journal, so two runs never share one.
+function cflow2GateRows(data, start, end) {
+  const rows = [];
+  for (const run of (data || {}).runs || []) {
+    const live = Date.parse(run.ended) >= Date.parse((data || {}).observed_at);
+    for (const gate of run.gates || []) {
+      const a = Date.parse(gate.opened), b = Date.parse(gate.closed);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b < a || !Number.isInteger(gate.depth)) continue;
+      const lo = Math.max(a, start), hi = Math.min(b, end);
+      if (hi < lo || (hi === lo && a !== b)) continue;
+      rows.push({gate, run: run.run, lo, hi, wait: b - a,
+        state: !gate.open ? "closed" : live ? "open" : "cut"});
+    }
+  }
+  return rows.sort((x, y) => x.lo - y.lo);
+}
+
+const CF2_GATE_KINDS = {ask: "ask", choice: "user choice", visit_limit: "visit limit", loop_limit: "loop limit", move: "move request"};
+
+function cflow2GateChart(data, period) {
+  const box = el("div", "cf2-gates");
+  box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
+  const rows = cflow2GateRows(data, ...period);
+  const saved = ((data || {}).runs || []).reduce((n, r) => n + (r.gates || []).length, 0);
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
+      "No gate waited on a person in the saved runs."));
+    return box;
+  }
+  const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
+  const longest = rows.reduce((m, r) => Math.max(m, r.wait), 0);
+  const tiles = el("div", "cf2-throughput-tiles");
+  const tile = (label, value, note) => {
+    const t = el("div", "cf2-throughput-tile");
+    t.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
+    if (note) t.appendChild(el("div", "cf2-throughput-tile-note", note));
+    return t;
+  };
+  tiles.append(tile("Gates", String(rows.length), "waited in this period"),
+    tile("Waiting time", cflow2Duration(clipped / 1000), "inside this period"),
+    tile("Longest wait", cflow2Duration(longest / 1000), "whole wait"),
+    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null));
+  box.appendChild(tiles);
+
+  // Deeper frames draw higher. The axis spans the depths present, so a run
+  // whose gates all sit 9 to 15 frames down does not spend its height on 0..8.
+  const depths = rows.map(r => r.gate.depth);
+  const lo = Math.min(...depths), hi = Math.max(...depths), levels = hi - lo + 1;
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  const lane = 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Gates that waited on a person, by callstack depth (higher is deeper) over UTC time.");
+  const node = (tag, attrs, text) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e); return e;
+  };
+  const y = depth => T + (hi - depth) * lane;
+  // Label the depths that hold a bar; past eight of them, every few levels.
+  const present = [...new Set(depths)].sort((a, b) => a - b);
+  const every = Math.max(1, Math.ceil(levels / 6));
+  const marks = present.length <= 8 ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
+  for (const d of marks) {
+    node("line", {x1: L, x2: W - R, y1: y(d) + lane / 2, y2: y(d) + lane / 2, class: "cf2-axis-grid"});
+    node("text", {x: L - 4, y: y(d) + lane / 2 + 3, "text-anchor": "end", class: "cf2-axis-label"}, String(d));
+  }
+  const span = period[1] - period[0], x = ms => L + (ms - period[0]) / span * plotW;
+  const tick = ms => {
+    const t = new Date(ms).toISOString();
+    return span > 300 * 86400000 ? t.slice(0, 10) : span > 86400000 ? `${t.slice(5, 10)} ${t.slice(11, 16)}` : t.slice(11, 16);
+  };
+  const iso = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
+  for (const r of rows) {
+    const g = r.gate;
+    const rect = node("rect", {x: x(r.lo), y: y(g.depth) + 3, width: Math.max(2, x(r.hi) - x(r.lo)),
+      height: lane - 6, rx: 2, class: `cf2-gate-${r.state}`});
+    rect.dataset.node = g.node; rect.dataset.depth = g.depth;
+    const name = g.within && g.within !== g.label ? `${g.within} › ${g.label}` : (g.label || g.node);
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `${name} (${CF2_GATE_KINDS[g.kind] || g.kind}) · depth ${g.depth}\n` +
+      `${iso(Date.parse(g.opened))} – ${r.state === "open" ? "waiting now" : iso(Date.parse(g.closed))}\n` +
+      `waited ${cflow2Duration(r.wait / 1000)}` + (r.state === "cut" ? " · the run ended before an answer was recorded" : "") +
+      `\nrun ${r.run} · ${g.node}`;
+    rect.appendChild(title);
+  }
+  node("text", {x: L, y: H - 6, "text-anchor": "start", class: "cf2-axis-label"}, tick(period[0]));
+  node("text", {x: L + plotW / 2, y: H - 6, "text-anchor": "middle", class: "cf2-axis-label"}, tick(period[0] + span / 2));
+  node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
+  box.appendChild(svg);
+  const legend = el("div", "cf2-throughput-legend");
+  legend.append(el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
+    el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
+  box.appendChild(legend);
+  return box;
+}
+
 function cflow2Throughput(data, state) {
   const section = cf2Section("Throughput over time");
   section.classList.add("cf2-throughput");
@@ -48475,6 +48575,7 @@ function cflow2Throughput(data, state) {
   const controls = el("div", "cf2-throughput-controls");
   const custom = el("div", "cf2-throughput-controls cf2-throughput-custom");
   const output = el("div", "cf2-throughput-output");
+  const gates = el("div");
   const compare = el("details", "cf2-throughput-compare"); compare.dataset.cf2Key = "throughput-compare";
   compare.appendChild(el("summary", null, "Compare two periods"));
   const compareInputs = el("div", "cf2-throughput-controls");
@@ -48525,7 +48626,8 @@ function cflow2Throughput(data, state) {
   about.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
   about.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
   if (!hasMerges) about.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
-  section.append(controls, custom, output, compare, about);
+  about.appendChild(el("p", "wf-note", "Human gate waits: a bar runs from the moment a gate was put to a person (a user choice, an ask that fell to a person, a visit or loop limit, a move request) to its answer. Asks routed to agent responders such as reviewers are left out. Height is the gate's callstack depth, the number of frames the Callstack panel draws above it."));
+  section.append(controls, custom, output, gates, compare, about);
 
   const range = (a, b) => [Date.parse(state[a] + "Z"), Date.parse(state[b] + "Z")];
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
@@ -48578,7 +48680,9 @@ function cflow2Throughput(data, state) {
     const unit = state.metric === "runs" ? "completed runs" : "reported merges";
     const period = range("start", "end");
     drawComparison(unit);
+    gates.replaceChildren();
     if (!valid(period)) {output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;}
+    gates.appendChild(cflow2GateChart(data, period));
     const span = period[1] - period[0];
     for (const option of binSelect.options) {
       option.disabled = option.value !== "auto" && span / Number(option.value) > CF2_THROUGHPUT_MAX_BINS;

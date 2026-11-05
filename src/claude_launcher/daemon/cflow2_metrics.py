@@ -32,6 +32,76 @@ def timestamp(value):
         return None
 
 
+def _depth(chart, node_id):
+    try:
+        return len(chart.ancestors(node_id))
+    except Exception:
+        return None
+
+
+def _names(chart, node_id):
+    """The node's label and its nearest labelled ancestor's: a task inside an
+    included procedure (``ask-pose``) reads by the step that called it."""
+    try:
+        node = chart.node(node_id)
+        frames = [chart.node(a) for a in chart.ancestors(node_id)]
+    except Exception:
+        return None, None
+    within = next((f.label for f in frames if getattr(f, "label", None)), None)
+    return getattr(node, "label", None) or None, within
+
+
+#: A gate opens on the event that puts it to a person and closes on the
+#: first event that answers or abandons it. Asks routed to responder
+#: sessions (a reviewer) wait on an agent; they open here only when the
+#: ask falls through to a person.
+_CLOSES = {"ask_answered", "selected", "left", "move_approved", "move_denied",
+           "move_withdrawn", "move_superseded"}
+
+
+def human_gates(chart, events) -> list:
+    """Intervals a run waited on a person, in the order they opened. Each is
+    keyed by the task instance (a move request by its request id); ``closed``
+    is None while nothing in the journal closed it. ``depth`` is the node's
+    callstack depth: its chart ancestors, the frames the Callstack panel draws
+    above it."""
+    open_, out = {}, []
+
+    def start(key, event, node, kind):
+        if key in open_ or not isinstance(event.get("ts"), str):
+            return
+        label, within = _names(chart, node)
+        row = {"node": node, "label": label, "within": within, "kind": kind,
+               "opened": event["ts"], "closed": None, "depth": _depth(chart, node)}
+        open_[key] = row
+        out.append(row)
+
+    def close(key, event):
+        row = open_.pop(key, None)
+        if row is not None and isinstance(event.get("ts"), str):
+            row["closed"] = event["ts"]
+
+    for event in events:
+        name, iid, node = event.get("event"), event.get("instance"), event.get("node")
+        if name == "waiting" and iid and node:
+            kind = event.get("kind")
+            if kind == "choose" and event.get("chooser") == "user":
+                start(iid, event, node, "choice")
+            elif kind in ("visit_limit", "loop_limit"):
+                start(iid, event, node, kind)
+        elif name == "fallback" and event.get("decision") == "ask" and iid and node \
+                and str(event.get("route") or "").startswith("ask -> human"):
+            start(iid, event, node, "ask")
+        elif name == "move_requested" and event.get("request") and node:
+            start("move:" + str(event["request"]), event, node, "move")
+        if name in _CLOSES:
+            if name.startswith("move_"):
+                close("move:" + str(event.get("request")), event)
+            elif iid:
+                close(iid, event)
+    return out
+
+
 def _facts(snap: dict) -> dict:
     """What ``observations`` needs from one saved run, none of it relative
     to the observation time: the identity, the times as saved, which tasks
@@ -53,7 +123,8 @@ def _facts(snap: dict) -> dict:
                and event.get("outcome") in contracts[event["node"]]]
     return {"run": rid, "state": {k: state.get(k) for k in
                                   ("workflow", "status", "started", "finished")},
-            "contracts": bool(contracts), "complete": snap["complete"], "reports": reports}
+            "contracts": bool(contracts), "complete": snap["complete"], "reports": reports,
+            "gates": human_gates(chart, snap["events"])}
 
 
 #: Facts of saved runs by slot directory, valid while its files' stats hold.
@@ -119,6 +190,22 @@ def _cached_facts(source: store.RunStore):
 _UNAVAILABLE = (store.StoreError, OSError, ValueError, KeyError)
 
 
+def _gate_rows(facts, valid, live, now) -> list:
+    """A run's gates for the page. One still open in a live run waits until
+    now; one a finished run never closed in its journal (a journal cut by the
+    scan limit, an abort) ends with the run, so ``open`` tells the two apart."""
+    if not valid:
+        return []
+    out = []
+    for gate in facts.get("gates") or []:
+        row = dict(gate)
+        row["open"] = row["closed"] is None
+        if row["open"]:
+            row["closed"] = now if live else facts["state"].get("finished")
+        out.append(row)
+    return out
+
+
 def observations(st: store.RunStore, *, now: str | None = None) -> dict:
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     until = timestamp(now)
@@ -174,7 +261,7 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
                          "completed_at": state.get("finished") if valid and state.get("status") == "done" else None,
                          "duration_s": finish - start if valid and finish is not None else None,
                          "merge_source": facts["contracts"], "merge_complete": complete,
-                         "merges": merges})
+                         "merges": merges, "gates": _gate_rows(facts, valid, live, now)})
         except _UNAVAILABLE:
             unavailable += 1
     # Re-reports in later runs do not move a merge into a later time bin.
