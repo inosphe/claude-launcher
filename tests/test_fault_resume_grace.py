@@ -128,7 +128,7 @@ def test_the_key_switch_leaves_a_session_inside_its_grace_alone(home, monkeypatc
 # --- the timer line -----------------------------------------------------------
 
 def test_the_grace_is_a_chip_on_the_session_timer_line():
-    session = FakeSession("s1", resumed_at=NOW - 10)
+    session = FakeSession("s1", fault=_limit(), resumed_at=NOW - 10)
     out = st.collect("s1", "", now=NOW, app={"manager": FakeManager(session)},
                      providers={"fault": st.fault_provider})
     assert out["errors"] == []
@@ -140,8 +140,8 @@ def test_the_grace_is_a_chip_on_the_session_timer_line():
 
 
 def test_no_chip_outside_the_grace_or_with_the_pause_off(monkeypatch):
-    manager = FakeManager(FakeSession("over", resumed_at=NOW - 31),
-                          FakeSession("fresh"))
+    manager = FakeManager(FakeSession("over", fault=_limit(), resumed_at=NOW - 31),
+                          FakeSession("fresh", fault=_limit()))
     for name in ("over", "fresh", "missing"):
         out = st.collect(name, "", now=NOW, app={"manager": manager},
                          providers={"fault": st.fault_provider})
@@ -152,6 +152,30 @@ def test_no_chip_outside_the_grace_or_with_the_pause_off(monkeypatch):
     out = st.collect("s1", "", now=NOW, app={"manager": live},
                      providers={"fault": st.fault_provider})
     assert out["timers"] == []
+
+
+class _BrokenFault(FakeSession):
+    def fault(self):
+        raise RuntimeError("no screen")
+
+
+@pytest.mark.parametrize("fault", [
+    None,
+    {"kind": "usage_limit", "active": False, "until": "2026-11-09T00:00:00+00:00"},
+    {"kind": "api_error", "active": True},
+    "broken",
+], ids=["no-fault", "cleared", "another-kind", "broken-reading"])
+def test_no_chip_inside_the_grace_once_the_limit_has_cleared(fault):
+    """The chip stands for a pause the grace is holding off: with no active
+    usage-limit reading there is nothing to hold off, so it goes before the
+    thirty seconds are up (claunch-xn9ir, th-839851)."""
+    if fault == "broken":
+        session = _BrokenFault("s1", resumed_at=NOW - 5)
+    else:
+        session = FakeSession("s1", fault=fault, resumed_at=NOW - 5)
+    out = st.collect("s1", "", now=NOW, app={"manager": FakeManager(session)},
+                     providers={"fault": st.fault_provider})
+    assert out["timers"] == [] and out["errors"] == []
 
 
 def test_the_fault_provider_is_registered():
