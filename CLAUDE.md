@@ -210,6 +210,39 @@
   이 경우 `--with-tail`로 실행하거나 T2 결과를 기다려야 한다. 직접 대응하는
   테스트 모듈을 변경한 경우 꼬리를 유지할지는 정책 결정이 필요하다.
 
+## T0·T1의 실행 모드 — sampling | partial | full
+
+- `tools/changed_tests.py`(T0, 그리고 T1에서 `preview_land.py`가 실행하는 같은 도구)는
+  세 모드 중 하나로 실행한다(claunch-ce872). T2(`tools/sweep.py`)는 이 모드를 읽지
+  않으며 계속 전체를 실행한다.
+
+  | 모드 | 인자 | 실행 범위 |
+  |---|---|---|
+  | `sampling` | `--sampling` | 선택된 모듈마다 대표 테스트와 중요도별 비율의 표본. 실패가 있으면 실패한 노드의 모듈 전체, 그 하위 노드, 그 노드에 의존하는 노드를 2단계로 실행한다 |
+  | `partial` | `--no-sampling` | 선택된 모듈의 테스트 전체(이전 동작) |
+  | `full` | `--full` | `pytest tests` 전체, 느린 꼬리 포함. 측정 창은 sweep 클래스로 잡는다 |
+
+  `--mode sampling|partial|full`도 같은 뜻이다. `preview_land.py`는 `--test-mode`로 넘긴다.
+- 모드를 정하는 순서: 명령줄 인자 → 환경변수 `CLAUNCH_TEST_MODE` → 환경변수 `CI`가
+  참 값이면 `full` → 그 밖(로컬 데몬 세션)은 `sampling`. `CLAUNCH_TEST_MODE`가 모드
+  이름이 아니면 실행하지 않고 exit 2로 끝난다. 실행 출력의 `mode    :` 줄이 고른
+  모드와 그 근거를 적는다.
+- 테스트 트리는 `tests/test_tree.yaml`에 선언한다(형식: `src/claude_launcher/test_tree.py`).
+  노드는 모듈 패턴, 중요도(`critical`·`high`·`normal`·`low`), 대표 테스트(`smoke`),
+  `depends`, 하위 노드를 가진다. 선언에 없는 모듈은 파일 이름 접두사로 노드를 만든다
+  (`tests/test_mesh_wire.py` → `mesh`, `normal`). 표본 비율은 `--sample-rate`(기본 0.25)에
+  중요도 배수를 곱한 값이다: `critical` 전부, `high` 2배, `normal` 1배, `low` 0.5배.
+  모듈마다 최소 1건(대표 테스트)은 실행한다. 지금 선언은 게이트 자신의 테스트
+  (`test_changed_tests.py` 등)를 `critical`로 둔다.
+- 표본의 시드는 기본으로 작업 트리 해시다. 같은 트리에서는 같은 표본이 나오고, 편집할
+  때마다 표본이 바뀐다. `--seed`로 고정할 수 있다.
+- 영수증 키에 모드가 들어간다(`selection_key`의 `variant`). sampling으로 얻은 green은
+  partial·full 실행의 판정으로 재사용되지 않는다. partial의 키는 이전과 같다.
+  `--with-tail`은 sampling을 끄고 partial로 실행한다.
+- sampling의 2단계 영수증은 선택의 sampling 키에 기록되고 `first_pass_failures`,
+  `expanded_nodes`, `expanded_modules`를 싣는다. 1단계의 빨간 영수증은 그 옆에 보존된다.
+- `--list`는 sampling에서 수집만 해서 1단계가 실행할 건수를 모듈별로 출력한다.
+
 ## 브라우저 하네스는 기본으로 skip된다 — 켜는 방법은 `NODE_PATH`
 
 - `tests/web/*_browser.cjs` 71개(`tests/test_web_topology.py`의 `BROWSER_CHECKS`)는
