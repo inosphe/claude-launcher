@@ -1473,9 +1473,13 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         "kimi-web-server": "  (via Kimi Code local server)",
         "fireworks-billing": "  (via Fireworks billing API)",
         "opencode-go": "  (via OpenCode Go usage API)",
+        "commandcode": "  (via Command Code billing API)",
         "opengateway-local": "  (via this machine's request records)",
     }.get(report.source, "")
     print(f"usage for profile {name!r}{suffix}")
+    plan_name = report.raw.get("plan_name") if report.source == "commandcode" else None
+    if plan_name:
+        print(f"  plan: {plan_name}")
     active = [
         w for w in report.windows
         if w.utilization > 0 or w.resets_at or w.detail or w.used_dollars is not None
