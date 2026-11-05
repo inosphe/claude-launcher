@@ -536,8 +536,12 @@ def test_a_target_that_appears_during_the_retries_takes_the_normal_landing_path(
     assert hit["then"]["call"] == "self-merge-arm", hit
     assert hit["then"]["with"]["armed"] is False, hit
     assert hit["then"]["bind"] == "self_merge", hit
-    # a replayed merge-by-agent (still no receiver) goes on without asking
-    assert replayed["if"] == "$data.self_merge.armed == true", replayed
+    # a replayed merge-by-agent goes on without asking only when the three
+    # re-measurements all said "no receiver" (the wait ran out: timeout).
+    # undecidable did not measure that, so it falls to the question below
+    # (claunch-yzwut.1)
+    assert replayed["if"] == ("$data.self_merge.armed == true and "
+                              "$result['landing-target-retry'].outcome == 'timeout'"), replayed
     assert replayed["then"] == [], replayed
     assert "if" not in miss, miss
     ask = _find(miss["else"], "id", "landing-target-ask")

@@ -3535,7 +3535,9 @@ PR은 닫고 브랜치는 지웠다.
 시작 입력 `allow_work_on_main`(bool, 기본 false, `set_by: [user]`)은 이 세션의 작업
 위치를 master로 지정한다. 다른 세션(독립 자식, 스택 자식)에는 적용되지 않는다.
 
-- 규칙 `no-master-merge`(머지·push 금지, `effect`와 `spec.invariants`)는 그대로다.
+- 머지·push 금지(사람이 읽는 규칙 `no-master-merge`와 정적 effect 금지인 조건부
+  규칙 `master-merge-effect` — claunch-yzwut가 조건 없는 `spec.invariants`를 이것으로
+  옮겼다)는 그대로다.
   그 규칙에 있던 「master 체크아웃에서 커밋 금지」는 조건부 규칙
   `no-master-commit`(`when: $result['branch-setup'].value.mode != 'main'`)으로 분리했다.
 - 입력은 branch-setup만 읽는다. 켜져 있으면 조건부 규칙 `branch-on-main`이
