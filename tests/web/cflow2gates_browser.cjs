@@ -21,7 +21,8 @@ const detail = {
         gates: [gate('round/pick', 12, at(10), at(10, 20), false, 'choice'),
           gate('round/item/coding-approval', 15, at(11), at(12), true)]},
       {run: 'c', started: at(12), ended: at(16), completed_at: null, duration_s: null, merge_source: false, merges: [],
-        gates: [gate('settle/end-decision.call/ask-pose', 9, at(14), at(16), true, 'ask', 'end-decision')]},
+        gates: [gate('settle/end-decision.call/ask-pose', 9, at(14), at(16), true, 'ask', 'end-decision')],
+        gates_unended: 2},
     ]},
 };
 const server = http.createServer((req, res) => {
@@ -71,6 +72,9 @@ const server = http.createServer((req, res) => {
     assert.match(open, /waiting now/); assert.match(open, /waited 2h/);
     assert.match(await panel.locator('svg rect.cf2-gate-cut title').textContent(), /run ended before an answer was recorded/);
     assert.match(await panel.locator('.cf2-throughput-legend').textContent(), /Height: callstack depth/);
+    // Gates the daemon could not end are counted on the panel, not dropped unseen (claunch-b6z8m).
+    assert.equal(await panel.locator('.cf2-gates-unended').textContent(),
+      '2 gate waits in the saved runs have no recorded end and are not drawn.');
     // The panel follows the chart's period.
     const section = page.locator('#wf-view .cf2-throughput');
     const set = async (key, value) => {const input = section.locator(`[data-metric-field="${key}"]`); await input.fill(value); await input.dispatchEvent('change');};
@@ -88,6 +92,10 @@ const server = http.createServer((req, res) => {
     for (const run of detail.throughput.runs) run.gates = [];
     await page.locator('body').click({position: {x: 1, y: 1}}); await page.evaluate(() => refreshWf());
     assert.match(await panel.textContent(), /No gate waited on a person in the saved runs/);
+    assert.equal(await panel.locator('.cf2-gates-unended').count(), 1, 'the count stays when nothing is drawn');
+    for (const run of detail.throughput.runs) delete run.gates_unended;
+    await page.evaluate(() => refreshWf());
+    assert.equal(await panel.locator('.cf2-gates-unended').count(), 0, 'no note without a count');
     assert.deepEqual(errors, []);
     console.log('cflow2gates_browser: depth lanes, clipping, open/cut/answered, period follow, empty and mobile passed');
   } finally {await browser.close(); await new Promise(resolve => server.close(resolve));}

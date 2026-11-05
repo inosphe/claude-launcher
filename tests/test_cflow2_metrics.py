@@ -271,6 +271,28 @@ def test_open_gate_waits_until_now_in_a_live_run_and_ends_with_a_finished_one(tm
     assert (gate["closed"], gate["open"]) == ("2026-10-13T11:00:00Z", True)
 
 
+def test_a_gate_without_a_placeable_end_is_counted_not_drawn(tmp_path):
+    # claunch-b6z8m: a finished run that saved no finish time gives an open
+    # gate no end; it used to reach the page as closed=None and vanish there.
+    chart, pick = gated_chart()
+    open_gate = {"node": pick, "label": "pick", "within": None, "kind": "choice",
+                 "opened": at(10), "closed": None, "depth": 1}
+    facts = {"gates": [open_gate], "state": {"finished": None}}
+    assert metrics._gate_rows(facts, True, False, "2026-10-13T12:00:00Z") == ([], 1)
+    closed = dict(open_gate, closed=at(20))
+    assert metrics._gate_rows(dict(facts, gates=[closed, open_gate]), True, True,
+                              "2026-10-13T12:00:00Z")[1] == 0
+    # Through the observations: an opening the journal wrote in no readable
+    # time is left out of the gates and counted on the run.
+    waiting = {"ts": "not-a-time", "event": "waiting", "node": pick, "instance": pick + "@3",
+               "kind": "choose", "chooser": "user"}
+    st = RunStore(str(tmp_path), "s")
+    saved(st, "done", end="2026-10-13T11:00:00Z", status="done", events=[waiting])
+    st.chart_path.write_text(chart.to_json())
+    row = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]
+    assert (row["gates"], row["gates_unended"]) == ([], 1)
+
+
 def test_move_request_is_a_gate_until_decided():
     chart, _ = gated_chart()
     events = [

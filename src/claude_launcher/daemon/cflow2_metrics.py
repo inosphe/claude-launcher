@@ -54,7 +54,9 @@ def _names(chart, node_id):
 #: A gate opens on the event that puts it to a person and closes on the
 #: first event that answers or abandons it. Asks routed to responder
 #: sessions (a reviewer) wait on an agent; they open here only when the
-#: ask falls through to a person.
+#: ask falls through to a person. A ``waiting`` of kind ``pause`` is a loop's
+#: interval timer: the engine resumes it on its own when the interval ends,
+#: so no person is waited on and it opens nothing here.
 _CLOSES = {"ask_answered", "selected", "left", "move_approved", "move_denied",
            "move_withdrawn", "move_superseded"}
 
@@ -190,20 +192,28 @@ def _cached_facts(source: store.RunStore):
 _UNAVAILABLE = (store.StoreError, OSError, ValueError, KeyError)
 
 
-def _gate_rows(facts, valid, live, now) -> list:
-    """A run's gates for the page. One still open in a live run waits until
-    now; one a finished run never closed in its journal (a journal cut by the
-    scan limit, an abort) ends with the run, so ``open`` tells the two apart."""
+def _gate_rows(facts, valid, live, now) -> tuple:
+    """A run's gates for the page and the count left out of them. One still
+    open in a live run waits until now; one a finished run never closed in
+    its journal (a journal cut by the scan limit, an abort) ends with the
+    run, so ``open`` tells the two apart. A gate whose end cannot be placed
+    (the run saved no finish time, or the end falls before the opening) has
+    no interval to draw: it is left out and counted, so the page can say so
+    instead of dropping it unseen (claunch-b6z8m)."""
     if not valid:
-        return []
-    out = []
+        return [], 0
+    out, unended = [], 0
     for gate in facts.get("gates") or []:
         row = dict(gate)
         row["open"] = row["closed"] is None
         if row["open"]:
             row["closed"] = now if live else facts["state"].get("finished")
+        opened, closed = timestamp(row["opened"]), timestamp(row["closed"])
+        if opened is None or closed is None or closed < opened:
+            unended += 1
+            continue
         out.append(row)
-    return out
+    return out, unended
 
 
 def observations(st: store.RunStore, *, now: str | None = None) -> dict:
@@ -255,13 +265,14 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
                 unavailable += 1
             if facts["contracts"] and not complete:
                 incomplete += 1
+            gates, unended = _gate_rows(facts, valid, live, now)
             runs.append({"run": rid, "workflow": state.get("workflow"),
                          "started": state.get("started") if valid else None,
                          "ended": now if live and valid else state.get("finished") if valid else None,
                          "completed_at": state.get("finished") if valid and state.get("status") == "done" else None,
                          "duration_s": finish - start if valid and finish is not None else None,
                          "merge_source": facts["contracts"], "merge_complete": complete,
-                         "merges": merges, "gates": _gate_rows(facts, valid, live, now)})
+                         "merges": merges, "gates": gates, "gates_unended": unended})
         except _UNAVAILABLE:
             unavailable += 1
     # Re-reports in later runs do not move a merge into a later time bin.
