@@ -1422,6 +1422,17 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
     assert args.func(args) == 0
     assert client.paths[-1][1]["force"] is True and "cwd" in client.paths[-1][1]
     assert "sync started" in capsys.readouterr().out
+    # The daemon accepts three kinds; the CLI refused the third and left the
+    # combined corpus unreachable from a shell (claunch-i2i95.1). `all` is not
+    # a board, so no cwd rides with it.
+    args = parser.parse_args(["rag", "reindex", "--kind", "all", "--force"])
+    assert args.func(args) == 0
+    assert client.paths[-1][1]["kind"] == "all" and "cwd" not in client.paths[-1][1]
+    assert "sync started" in capsys.readouterr().out
+    args = parser.parse_args(["search", "who", "--kind", "all"])
+    assert args.func(args) == 0
+    assert "kind=all" in client.paths[-1] and "cwd=" not in client.paths[-1]
+    capsys.readouterr()
 
 
 def test_cli_search_registers_under_claunch():

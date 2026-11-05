@@ -1,9 +1,9 @@
 """``claunch search ...`` and ``claunch rag ...`` — semantic search from a shell.
 
 ``search`` asks the running daemon to rank the board (``--kind beads``, the
-default) or the fleet (``--kind sessions``) for a query: the same
-``GET /api/search`` the dashboard's search boxes call, so an agent looking for
-"the issue about X" gets the answer the operator would. ``rag status`` says
+default), the fleet (``--kind sessions``) or both (``--kind all``) for a
+query: the same ``GET /api/search`` the dashboard's search boxes call, so an
+agent looking for "the issue about X" gets the answer the operator would. ``rag status`` says
 whether the feature is configured and how much of each corpus the index
 covers; ``rag reindex`` starts a sync (``--force`` re-embeds everything).
 
@@ -166,8 +166,8 @@ def register(sub) -> None:
         ),
     )
     p.add_argument("query", nargs="+", help="the query, in any language the model reads")
-    p.add_argument("--kind", choices=("beads", "sessions"), default="beads",
-                   help="what to search (default beads)")
+    p.add_argument("--kind", choices=("beads", "sessions", "all"), default="beads",
+                   help="what to search: this board, the fleet, or both (default beads)")
     p.add_argument("--limit", type=int, default=10, help="results to show (1..50, default 10)")
     p.add_argument("--no-rerank", action="store_true", help="vector ranking only")
     p.add_argument("--wait", type=int, default=2,
@@ -186,7 +186,11 @@ def register(sub) -> None:
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=_cmd_rag_status)
     pr = rsub.add_parser("reindex", help="start an index sync for a corpus")
-    pr.add_argument("--kind", choices=("beads", "sessions"), default="beads")
+    # The daemon's KINDS is the list, not this file: `all` is the combined
+    # corpus, and a CLI that refused it made the whole corpus unreachable from
+    # a shell while `/api/rag/reindex` accepted it (claunch-i2i95.1).
+    pr.add_argument("--kind", choices=("beads", "sessions", "all"), default="beads",
+                    help="which corpus (default beads; all is the combined one)")
     pr.add_argument("--force", action="store_true", help="re-embed every document")
     pr.add_argument("-C", "--cwd", help="a directory inside the repository whose board to index")
     pr.set_defaults(func=_cmd_rag_reindex)
