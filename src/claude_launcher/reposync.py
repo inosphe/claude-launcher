@@ -35,6 +35,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -49,8 +50,106 @@ DEFAULT_BRANCHES = ("master", "main")
 #: way out is the board's own three-way merge (policy a), never a hand edit.
 BOARD_EXPORT = ".beads/issues.jsonl"
 
-#: Seconds one git call may take. Fetch and push talk to a network remote.
+#: Seconds a git call that talks to a remote (fetch, push, ...) may take.
 GIT_TIMEOUT = 300.0
+
+#: Seconds a local-only git call may take. A local call still unanswered after
+#: this long is stuck, not slow: a wedged index lock, a stalled filesystem, or
+#: a helper that never returns. Holding the caller for the network budget made
+#: two ``rev-parse`` calls look like a dead sync for ten minutes
+#: (claunch-jfqhr: local_status and plan both timed out at 300 s).
+LOCAL_TIMEOUT = 30.0
+
+#: git subcommands that talk to a remote; everything else is local.
+NETWORK_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
+
+#: Local subcommands that rewrite the working tree. They are not reads: a
+#: budget that fires mid-update leaves the tree half-updated and an
+#: ``index.lock`` behind, so they keep the long budget. The short budget is
+#: for calls that only look (review of claunch-jfqhr: ``reset --keep`` and
+#: ``merge --ff-only`` would otherwise have dropped to 30 s). ``worktree`` is
+#: not listed here because its read-only half (``worktree list``) is common;
+#: the two call sites that create or delete a worktree pass the long budget
+#: themselves.
+TREE_COMMANDS = frozenset({
+    "am", "apply", "checkout", "cherry-pick", "merge", "rebase", "reset",
+    "restore", "revert", "stash", "switch",
+})
+
+#: git options that consume the next argument, so the subcommand search skips it.
+_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
+
+#: Processes the timeout note names before it summarises the rest as a count.
+PROCESS_LIST_MAX = 5
+#: Seconds the process listing itself may take. It runs while a git call has
+#: already failed, so it must not become a second hang.
+PROCESS_LIST_TIMEOUT = 5.0
+
+
+def _subcommand(args: Sequence[str]) -> str:
+    """The git subcommand among ``args``, past ``-c key=value`` style options."""
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in _VALUE_OPTIONS:
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return ""
+
+
+def timeout_for(args: Sequence[str]) -> float:
+    """The budget one git invocation gets: :data:`GIT_TIMEOUT` when it talks to
+    a remote (:data:`NETWORK_COMMANDS`) or rewrites the working tree
+    (:data:`TREE_COMMANDS`), :data:`LOCAL_TIMEOUT` for a call that only reads."""
+    command = _subcommand(args)
+    if command in NETWORK_COMMANDS or command in TREE_COMMANDS:
+        return GIT_TIMEOUT
+    return LOCAL_TIMEOUT
+
+
+def process_snapshot() -> str:
+    """One line on the ``git`` processes alive right now, for a timeout report.
+
+    A stuck git is rarely alone -- a second one holds the index lock, a parent
+    one left a child behind, an old credential helper waits on a prompt -- so a
+    timeout records what else was running at that moment. Bounded in length and
+    never raising: it is called on the way out of an already failed call, and
+    the listing itself is given :data:`PROCESS_LIST_TIMEOUT`.
+    """
+    caller = f"caller pid {os.getpid()}"
+    try:
+        if os.name == "nt":
+            done = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq git.exe", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=PROCESS_LIST_TIMEOUT,
+            )
+            rows = [_csv_fields(line) for line in done.stdout.splitlines()
+                    if line.startswith('"')]
+            found = [f"pid {cols[1]} {cols[4]}" for cols in rows if len(cols) >= 5]
+        else:
+            done = subprocess.run(
+                ["ps", "-eo", "pid=,etimes=,stat=,comm="],
+                capture_output=True, text=True, timeout=PROCESS_LIST_TIMEOUT,
+            )
+            found = []
+            for line in done.stdout.splitlines():
+                cols = line.split()
+                if len(cols) >= 4 and cols[3].startswith("git"):
+                    found.append(f"pid {cols[0]} {cols[1]}s {cols[2]}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git processes: not listed ({exc}); {caller}"
+    if not found:
+        return f"git processes: none; {caller}"
+    shown = "; ".join(found[:PROCESS_LIST_MAX])
+    more = f"; +{len(found) - PROCESS_LIST_MAX} more" if len(found) > PROCESS_LIST_MAX else ""
+    return f"git processes: {len(found)} ({shown}{more}); {caller}"
+
+
+def _csv_fields(line: str) -> List[str]:
+    """The quoted fields of one ``tasklist /FO CSV`` row."""
+    return line.strip().strip('"').split('","')
 
 
 class SyncError(Exception):
@@ -81,22 +180,37 @@ class RebaseConflict(SyncError):
 # --------------------------------------------------------------------------- #
 # git
 # --------------------------------------------------------------------------- #
-def git(cwd: str, *args: str, check: bool = True, timeout: float = GIT_TIMEOUT) -> str:
+def git(cwd: str, *args: str, check: bool = True,
+        timeout: Optional[float] = None) -> str:
     """Run ``git -C cwd args`` and return stdout stripped.
 
     ``check`` raises :class:`SyncError` carrying git's stderr on a non-zero
-    exit; without it the caller reads the empty string.
+    exit; without it the caller reads the empty string. ``timeout`` defaults to
+    :func:`timeout_for`: the long budget only for a subcommand that talks to a
+    remote, the short one for every local call.
+
+    A call that runs past its budget raises :class:`SyncError` naming the
+    command, the working directory and the elapsed time, with a snapshot of the
+    git processes running at that moment (:func:`process_snapshot`): the
+    timeout is the one point where what else was running is the evidence, and
+    the MCP server writes this message to the session's ``mcp-server.log``.
     """
+    limit = timeout if timeout is not None else timeout_for(args)
     env = dict(os.environ)
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, env=env,
+            timeout=limit, env=env,
         )
     except subprocess.TimeoutExpired:
-        raise SyncError(f"git {' '.join(args)} timed out after {timeout:.0f}s") from None
+        elapsed = time.monotonic() - started
+        raise SyncError(
+            f"git {' '.join(args)} timed out after {elapsed:.1f}s "
+            f"(limit {limit:.0f}s) in {cwd}; {process_snapshot()}"
+        ) from None
     except OSError as exc:
         raise SyncError(f"git could not run: {exc}") from None
     if proc.returncode != 0 and check:
@@ -105,9 +219,12 @@ def git(cwd: str, *args: str, check: bool = True, timeout: float = GIT_TIMEOUT) 
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _ok(cwd: str, *args: str) -> bool:
+def _ok(cwd: str, *args: str, timeout: Optional[float] = None) -> bool:
+    """Whether ``git -C cwd args`` exits 0. A call that cannot run or does not
+    answer within its budget answers ``False``, the same as a refusal."""
+    limit = timeout if timeout is not None else timeout_for(args)
     try:
-        proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True, timeout=GIT_TIMEOUT)
+        proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True, timeout=limit)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0
@@ -505,7 +622,10 @@ def _rebased_tip(p: Plan, scratch: str) -> str:
     os.makedirs(scratch, exist_ok=True)
     where = tempfile.mkdtemp(prefix="reposync-", dir=scratch)
     os.rmdir(where)  # worktree add wants to create it
-    git(p.repo, "worktree", "add", "--detach", "--quiet", where, p.local)
+    # creating a worktree materialises a checkout, which the subcommand alone
+    # cannot distinguish from the read-only `worktree list`
+    git(p.repo, "worktree", "add", "--detach", "--quiet", where, p.local,
+        timeout=GIT_TIMEOUT)
     try:
         if not _ok(where, "rebase", "--rebase-merges", "--quiet", p.upstream):
             files = _conflicts(where) or ["(unknown -- see git status)"]
@@ -513,7 +633,8 @@ def _rebased_tip(p: Plan, scratch: str) -> str:
             raise RebaseConflict(files)
         return git(where, "rev-parse", "HEAD")
     finally:
-        git(p.repo, "worktree", "remove", "--force", where, check=False)
+        git(p.repo, "worktree", "remove", "--force", where, check=False,
+            timeout=GIT_TIMEOUT)
         shutil.rmtree(where, ignore_errors=True)
         git(p.repo, "worktree", "prune", check=False)
 
