@@ -2591,6 +2591,67 @@ def test_ending_the_session_at_an_end_gate_finishes_the_run(tmp_path, monkeypatc
     assert again["finished"] is False
 
 
+def test_hold_keeps_the_run_open_and_asks_again_under_a_new_ask(
+        tmp_path, monkeypatch):
+    """claunch-llfac: hold no longer ends the run. From end-decision it cleans
+    up first (as end does), runs end-hold and poses release-decision; from
+    release-decision it runs end-hold and poses the same question again
+    under a new ask id. The run stays waiting on a person -- so kill-on-end
+    never applies and no keep-alive is needed -- until end or new-task."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["auto-release"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    first = st["asks"][0]["ask"]
+    # hold again at release-decision: end-hold, then the question anew
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    second = st["asks"][0]["ask"]
+    assert second != first
+    # the reposed question is still an end gate: ending the session answers it
+    done = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=5.0)
+    assert done["finished"] is True and done["ask"] == second, done
+    assert runtime.status(**kw)["status"] == "done"
+
+
+def test_end_hold_sends_the_session_to_hold_without_keep_alive():
+    """claunch-llfac: the hold answer means the session hold state (held_at,
+    daemon/hold.py). keep-alive would keep the session out of the idle hold
+    and delivery-hold would leave a woken session unable to be held again, so
+    neither is set; `claunch hold` runs after release-decision is posed."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    text = doc["nodes"]["end-hold"]["prompt"]
+    assert "claunch keep-alive $CLAUNCH_SESSION" not in text
+    assert "delivery-hold $CLAUNCH_SESSION --on" not in text
+    assert "keep-alive와 delivery-hold는 세우지 않는다" in text
+    assert "`claunch hold`는 여기서 실행하지 않는다" in text
+    watch = _find_id(doc["procedures"], "release-watch")
+    release = watch["loop"]["do"][0]
+    assert release["id"] == "release-decision"
+    assert release["cases"]["hold"] == ["end-hold", {"continue": "release-watch"}]
+    assert "`claunch hold`" in release["with"]["nudge"]
+    for topic in (release["with"]["topic"],
+                  _find_id(doc["procedures"], "end-decision")["with"]["topic"]):
+        flat = " ".join(topic.split())
+        assert "세션 hold 상태" in flat and "keep-alive" not in flat
+
+
 def test_ending_the_session_away_from_an_end_gate_leaves_the_run_alone(
         tmp_path, monkeypatch):
     """A question that is not the end gate is somebody's real decision; a
