@@ -10224,6 +10224,37 @@ function termSeriesCostText(price, tokens) {
   return `≈ ${currency}${amount}`;
 }
 
+/* What that estimate breaks down into, as the caption's second line writes
+   it: "read $0.042 · cached read $8.31 · output $0.018". Cache write is
+   named only when the window wrote any — the rule the Stats table set for
+   the same four parts (claunch-60y0d.1). Each part is priced by readingCost
+   over its one bucket, at the same rates the total uses, so a cache-write
+   rate that falls back to the read rate counts the same way in both
+   (claunch-kr3wr). */
+function termSeriesCostParts(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const part = (label, key) => {
+    const cost = readingCost({ [key]: +(tokens[key] || 0) }, price.rates);
+    if (cost === null) return "";
+    const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+    return `${label} ${currency}${amount}`;
+  };
+  const parts = [part("read", "input"), part("cached read", "cache_read")];
+  if (+tokens.cache_write > 0) parts.push(part("cache write", "cache_write"));
+  parts.push(part("output", "output"));
+  return parts.filter(Boolean).join(" · ");
+}
+
+/* The caption: the window's estimate, then the split under it. Both lines
+   are right-aligned to the plot's right edge by `.term-series-cost`. */
+function termSeriesCostBox(cost, parts) {
+  const box = el("div", "term-series-cost");
+  box.appendChild(el("div", "term-series-cost-total", cost));
+  if (parts) box.appendChild(el("div", "term-series-cost-parts", parts));
+  return box;
+}
+
 function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
@@ -10383,6 +10414,7 @@ function termSeriesChart(data, zoom, price) {
      largest of its group, so summing points would undercount. With no rates
      the chart says so in its tooltip rather than writing a $0. */
   const cost = termSeriesCostText(price, data.totals);
+  const costParts = cost ? termSeriesCostParts(price, data.totals) : "";
   const costOf = price && price.model
     ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
   const costLine = cost
@@ -10414,9 +10446,10 @@ function termSeriesChart(data, zoom, price) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. The request's own estimate rides on the first line
-       (claunch-i6xl2): it names a request, so its cost belongs beside the
-       number, and the second line's token figures are the long one. */
+       pointer. It carries no cost: the axis is request order, so the estimate
+       for a slice of it describes no period a reader can act on (the window's
+       own estimate is under the legend), and the user asked for it gone
+       (claunch-kr3wr). */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -10426,9 +10459,7 @@ function termSeriesChart(data, zoom, price) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      const pcost = termSeriesCostText(price, p);
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
-        (pcost ? ` · ${pcost}` : "");
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -10445,10 +10476,10 @@ function termSeriesChart(data, zoom, price) {
     });
     /* The window's estimate under the legend, where it describes the whole
        plot rather than the request under the pointer. */
-    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    const costBox = cost ? termSeriesCostBox(cost, costParts) : null;
     box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
-  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
+  if (!zoom && cost) box.appendChild(termSeriesCostBox(cost, costParts));
   return box;
 }
 

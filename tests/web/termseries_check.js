@@ -104,7 +104,7 @@ new Function(
   "modelPrices",
   '"use strict";\n' + consts + ["termSeriesRead", "termSeriesData", "termSeriesTotal", "termSeriesIndexAt", "termSeriesScale",
     "termSeriesTicks", "termSeriesTick", "termSeriesTickLabelY", "termSeriesPrice",
-    "termSeriesCostText", "termSeriesChart",
+    "termSeriesCostText", "termSeriesCostParts", "termSeriesCostBox", "termSeriesChart",
     "termSeriesPointerCheck", "termSeriesRelease", "termSeriesMaker",
     "priceCurrency", "priceAnyProvider", "priceRateFor", "sessionPriceProvider",
     "cacheWriteRate", "readingCost", "usageCost"].map(slice).join("\n") + `
@@ -396,8 +396,16 @@ const series = (win, start = 1000) => ({
     compactions: [], swaps: [] };
   const priced = ctx.chart(costData, false, price);
   check("the small chart captions what its requests are estimated to cost",
-        [priced.kids.length, priced.kids[1].className, priced.kids[1].textContent],
-        [2, "term-series-cost", "≈ $0.7600"]);
+        [priced.kids.length, priced.kids[1].className,
+         priced.kids[1].kids.map((k) => [k.className, k.textContent])],
+        [2, "term-series-cost",
+         [["term-series-cost-total", "≈ $0.7600"],
+          ["term-series-cost-parts",
+           "read $0.1000 · cached read $0.5000 · cache write $0.1000 · output $0.0600"]]]);
+  check("the split's parts add up to the total it is printed under", (() => {
+    const parts = (priced.kids[1].kids[1].textContent.match(/\d+\.\d+/g) || []).map(Number);
+    return Math.abs(parts.reduce((a, b) => a + b, 0) - 0.76) < 1e-9;
+  })(), true);
   check("the tooltip names the estimate, the request count and where the rates came from",
         [priced.title.includes("≈ $0.7600 estimated for 2 requests at Settings → Model prices"),
          priced.title.includes("for deepseek-v4.1-flash on deepseek")],
@@ -407,12 +415,21 @@ const series = (win, start = 1000) => ({
         pricedZoom.kids.map((k) => k.attrs.class || k.className),
         ["term-series-chart", "term-series-axis", "term-series-legend",
          "term-series-cost", "term-series-readout"]);
-  check("...with the same number as the small one",
-        pricedZoom.kids[3].textContent, "≈ $0.7600");
+  check("...with the same two lines as the small one",
+        pricedZoom.kids[3].kids.map((k) => k.textContent),
+        ["≈ $0.7600",
+         "read $0.1000 · cached read $0.5000 · cache write $0.1000 · output $0.0600"]);
   pricedZoom.kids[0].handlers.mousemove({ clientX: 100 });
-  check("and the request under the pointer carries its own estimate",
+  check("the request under the pointer names itself and what it sent, and carries no cost " +
+        "-- the axis is request order, so a slice's estimate describes no period (claunch-kr3wr)",
         [pricedZoom.kids[4].kids[0].textContent, pricedZoom.kids[4].kids[1].textContent],
-        ["#2 · 5m ago · ≈ $0.0071", "10500 = in 1000 · cached 9000 · write 500"]);
+        ["#2 · 5m ago", "10500 = in 1000 · cached 9000 · write 500"]);
+  /* The Stats table's rule, reused here: cache write is named only when the
+     window wrote any (claunch-60y0d.1). */
+  const noWrite = ctx.chart({ ...costData, totals: { ...costData.totals, cache_write: 0 } }, false, price);
+  check("a window that wrote no cache leaves cache write out of the split",
+        noWrite.kids[1].kids[1].textContent,
+        "read $0.1000 · cached read $0.5000 · output $0.0600");
   const unpriced = ctx.chart(costData, false, unknown);
   check("an unpriced model draws no caption, and the tooltip says where to set rates",
         [unpriced.kids.length, unpriced.title.includes(
