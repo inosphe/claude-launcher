@@ -12974,8 +12974,11 @@ async def _spawn_child_reported(request, parent: str, body: dict, *,
     event on the parent -- the session the person was watching when the work
     was started -- and one warn notice over its terminal (claunch-is4o4).
     """
+    # The keyword goes only when set: everything else calls _spawn_child
+    # exactly as before (tests stand in for it with that signature).
+    extra = {"person_fields": True} if person_fields else {}
     status, payload = await _spawn_child(request, parent, body, created_by=created_by,
-                                         person_fields=person_fields)
+                                         **extra)
     if status >= 400:
         _report_spawn_failure(
             request, parent, payload.get("error") or "", site="api.spawn",
