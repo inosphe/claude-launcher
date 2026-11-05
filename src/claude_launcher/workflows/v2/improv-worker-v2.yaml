@@ -103,7 +103,9 @@ sides:
 #                            피어에게 종료를 예고한다. 게이트 안에 두면 오래 선 세션의
 #                            무효화된 캐시를 다시 prefill 해야 한다 -- claunch-aobd0 /
 #                            claunch-q4cqy.6)
-#   end-hold              -> end-hold (keep-alive + delivery-hold)
+#   end-hold              -> end-hold (보류 사유·상위 fyi. 뒤에 release-decision을 새 ask로
+#                            다시 올리고 그 질문을 연 채 `claunch hold <세션>` — claunch-llfac.
+#                            v1의 keep-alive + delivery-hold는 쓰지 않는다)
 #   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
 #   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
 #                            (코딩 전 사용자 협의 — worker-round의 일감 귀속 뒤,
@@ -4981,10 +4983,12 @@ nodes:
       카드가 실제로 선다. 여기서는 4번의 `AUTO-RELEASE` 줄에 `기한 초과(5분
       무응답)`을 함께 적어, 왜 이 단계가 자동으로 돌았는지 보드에 남긴다.
 
-      이 단계는 세션을 끝내지 않는다. 정리 뒤에 무엇이 오는지는 입구가 둘이다
-      (claunch-q4cqy.6): 기한 초과나 auto-release 선택으로 왔으면 이어서
-      release-decision이 end|hold|new-task를 묻고, end-decision에서 end를 골라
-      왔으면 이 단계 뒤에 곧바로 런이 마감된다(다시 묻지 않는다).
+      이 단계는 세션을 끝내지 않는다. 정리 뒤에 무엇이 오는지는 입구가 셋이다
+      (claunch-q4cqy.6, claunch-llfac): 기한 초과나 auto-release 선택으로 왔으면
+      이어서 release-decision이 end|hold|new-task를 묻고, end-decision에서 hold를
+      골라 왔으면 end-hold를 지나 같은 release-decision이 서며 세션은 그 질문을
+      연 채 hold된다. end-decision에서 end를 골라 왔으면 이 단계 뒤에 곧바로
+      런이 마감된다(다시 묻지 않는다).
     done_when: |
       정리 계획을 조회해 실행했거나(지운 개수·용량), 실행이 예약됐거나
       (`scheduled`, 이번 호출이 만든 것과 `already: true`로 확인한 기존 예약
@@ -5025,36 +5029,48 @@ nodes:
     effects: [mesh.send]
 
   end-hold:
-    title: 종료 보류 (사용자 보류)
+    title: 종료 보류 (세션을 hold 상태로)
     prompt: |
-      사용자가 종료를 보류했다(end-decision 또는 release-decision의 hold). 이
-      세션은 살아 있어야 하므로 먼저
-      `claunch keep-alive $CLAUNCH_SESSION`을 실행해 플래그를 세운다 — 이
-      플래그가 없으면 런이 done이 되는 즉시 데몬이 세션을 끝낸다(플래그는
-      킬만 막고 종결 기록은 그대로 남는다).
-      그리고 **같은 턴에서** `claunch delivery-hold $CLAUNCH_SESSION --on`을
-      실행한다 — 보류는 사람이 깨울 때까지 메시지로도 깨어나지 않는다는 뜻이다.
-      keep-alive만 세우면 살아 있는 유휴 세션에 메시지가 idle일 때 그대로
-      타이핑되어 에이전트가 깨어나고 비용이 든다(daemon/mesh.py의 idle 게이트는
-      delivery-hold만 예외로 둔다). 해제는 `claunch delivery-hold
-      $CLAUNCH_SESSION --off`, 플래그를 내리는 것은 사람 또는 상위의 지시다.
-      그다음 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
-      (`claunch cflow2 journal`); 없으면 터미널 사용자에게 묻는다.
-      사유가 추가 작업이면 그것은 이 회차의
-      범위 밖이다: 이슈로 남기고(`claunch beads create "<제목>" --priority 3
-      --labels handoff --description "<규격>"`) 그 id를 보고에 적는다.
-      이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
-      관계없는 일이면 붙이지 않는다.
-      상위에게는 fyi 한 줄로 이 세션이 keep-alive로 살아 있다는 사실과 그
-      이슈 id를 알린다 — 데몬은 살아남은 세션에 대해서는 아무 통지도 보내지
-      않는다(종료 통지는 실제로 종료된 세션에만 붙는다).
-      이 런은 여기서 done으로 마감하고, 세션은 keep-alive로 다음 지시를
-      기다린다. 플래그를 내리는 것은 사람 또는 상위의 지시다:
-      `claunch keep-alive $CLAUNCH_SESSION off`.
+      사용자가 종료를 보류했다(end-decision 또는 release-decision의 hold).
+      보류는 이 세션을 세션 hold 상태(daemon/hold.py의 held_at,
+      claunch-5l35i)로 보내는 답이다: 프로그램을 내리고 대화·런·워크트리를
+      보존한다. 런은 끝나지 않는다 — 이 노드 뒤에 release-decision이 새
+      질문(새 ask id)으로 다시 서서 end|hold|new-task를 묻고, 그 질문이 열린
+      채로 세션이 hold된다(claunch-llfac).
+
+      keep-alive와 delivery-hold는 세우지 않는다.
+      · keep-alive: 런이 done이 아니므로 kill-on-end가 이 세션을 끝낼 일이
+        없다. 세우면 오히려 유휴 hold의 대상에서 빠진다(daemon/hold.py의
+        `eligible`) — 메시지에 깨어난 세션이 다시 hold되지 않는다.
+      · delivery-hold: hold된 세션은 delivery-hold와 관계없이 메시지가 오면
+        깨어난다(daemon/mesh.py의 `_deliver_to`). 세워 두면 깨어난 뒤의
+        입력만 막혀, 남은 메시지 때문에 다시 hold되지도 않는다.
+      hold된 세션은 질문에 대한 사람의 답, 메시 메시지, cflow 알림, 뷰어
+      접속에 대화를 유지한 채 깨어난다. 깨어나 일을 마친 뒤
+      `hold_idle_minutes`(기본 60분) 동안 조용하면 데몬이 다시 hold한다.
+      사람이나 생성 설정이 세워 둔 keep-alive·delivery-hold는 여기서 내리지
+      않는다 — 사람의 설정이다.
+
+      1. 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
+         (`claunch cflow2 journal`). 없으면 묻지 않고 「사유 없음」으로
+         적는다(곧 hold되므로 답을 받을 턴이 없다).
+         사유가 추가 작업이면 그것은 이 회차의 범위 밖이다: 이슈로
+         남기고(`claunch beads create "<제목>" --priority 3 --labels handoff
+         --description "<규격>"`) 그 id를 보고에 적는다. 이 회차 이슈에서
+         나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고, 관계없는 일이면
+         붙이지 않는다.
+      2. 상위에게 fyi 한 줄을 보낸다: 이 세션이 hold 상태로 들어가고 종료
+         질문이 열린 채 남는다는 사실과 handoff 이슈 id(있다면). 데몬은 hold에
+         대해 상위에게 아무 통지도 보내지 않는다(종료 통지는 실제로 종료된
+         세션에만 붙는다).
+      3. 이 노드를 보고한다. `claunch hold $CLAUNCH_SESSION`은 여기서 실행하지 않는다 — hold는
+         그 즉시 프로그램을 내리므로, 바로 뒤 release-decision의 질문을 올리고
+         nudge까지 마친 다음 그 턴의 마지막 동작으로 실행한다(release-decision의
+         nudge 절이 같은 지시를 싣는다).
     done_when: |
-      keep-alive와 delivery-hold 플래그가 세워졌고(두 명령의 출력을 보고에
-      붙인다), 보류 사유와 그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸
-      fyi의 메시지 id가 보고에 있다.
+      보류 사유(또는 「사유 없음」)와 그에 따라 만든 handoff 이슈 id(있다면),
+      상위에 보낸 fyi의 메시지 id(상위가 없으면 그 사실)가 보고에 있다.
+      keep-alive·delivery-hold 명령은 실행하지 않았다.
     effects: [board.write, mesh.send]
 
   end-new-task:
@@ -8110,6 +8126,10 @@ procedures:
       #   A end-decision — 5분. 답이 없으면 auto-release로 넘어간다.
       #   B auto-release — wrapup과 같은 정리(테스트 산출물)를 먼저 한다.
       #   C release-decision — end|hold|new-task를 사람이 고른다. 기한이 없다.
+      #     hold는 런을 끝내지 않는다(claunch-llfac): end-hold 뒤에 같은 질문을 새
+      #     ask id로 다시 올리고, 그 질문을 연 채 세션을 세션 hold 상태(held_at)로
+      #     보낸다. 사람의 답이 hold된 드라이버를 깨운다(claunch-xxxsx). 런이
+      #     done이 아니므로 kill-on-end도 keep-alive도 끼어들 자리가 없다.
       # 끝낼지는 여전히 사람이 정하고, 기다리는 동안의 정리만 자동이 된다. 정리 뒤에
       # 세션을 그냥 kill해도 C에서 end를 고른 것과 같은 종결 기록이 남는다
       # (daemon/cflow2_clock의 `end_on_session_exit`).
@@ -8171,8 +8191,10 @@ procedures:
                         다시 사람 손이 필요하면 `claunch respawn <세션>`이 있다.
                         auto-release: 지금 정리부터 한다 — 테스트 산출물을 회수하고,
                         그 뒤 release-decision에서 end|hold|new-task를 고른다.
-                        hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께
-                        세워 세션을 살려 두고, 메시지로 깨어나지 않게 한다.
+                        hold: 종료를 보류한다 — 정리(auto-release) 뒤 이 세션을 세션
+                        hold 상태로 보낸다: 프로그램을 내리고 대화·런·워크트리를
+                        보존하며, end|hold|new-task 질문은 새 번호로 열린 채 남는다.
+                        답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채 깨어난다.
                         new-task: 이 세션에 새 작업을 맡긴다 — 이 런을 마감하고 같은
                         세션에서 그 작업의 이슈로 새 런(목표 수립부터)을 시작한다.
                         사용자가 이 질문에 답하지 않고 터미널에 새 작업을 주었다면 그
@@ -8198,7 +8220,10 @@ procedures:
                       # 지나지 않았다(claunch-q4cqy.6). 정리가 끝나면 이 런은
                       # 마감되고 release-decision은 묻지 않는다.
                       end: {seq: [auto-release, {break: end-watch}]}
-                      hold: [end-hold, {break: end-watch}]
+                      # hold는 end처럼 정리를 먼저 지나고, 루프를 끝내지 않는다 —
+                      # 이 단계를 빠져나가 아래 release-watch가 질문을 다시 올린다
+                      # (claunch-llfac). 그 질문의 end는 정리를 다시 하지 않는다.
+                      hold: {seq: [auto-release, end-hold]}
                       new-task: [end-new-task, {break: end-watch}]
                       self-improve:
                         # 리뷰 → 논의 → 합의 게이트(사람만) → 등록은 공용
@@ -8220,49 +8245,72 @@ procedures:
                   # 기한 초과: 답이 없는 것이 auto-release를 고른 것과 같다.
                   - auto-release
             # C. 정리 뒤의 릴리스 질문 — 기한 없다. 사람이 고를 때까지 선다.
-            - id: release-decision
-              call: ask-user
-              bind: release_decision
-              with:
-                require_reason: true
-                # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
-                # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
-                # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
-                # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
-                # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
-                # 영향받지 않는다.
-                criteria: [deferrable]
-                # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
-                # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
-                nudge: |
-                  이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 세션은
-                  살아 있는 채로 선다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
-                  `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
-                  무엇을 정해야 하는지와 답하는 명령
-                  (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
-                  **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
-                  그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
-                  진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
-                  않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
-                  REPEAT_AFTER).
-                topic: |
-                  회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
-                  이 질문에는 기한이 없다 — 답이 없으면 세션은 살아 있는 채로 선다.
+            # hold 답은 end-hold를 지나 이 질문을 새 ask id로 다시 올린다
+            # (claunch-llfac) — 그래서 질문만 따로 루프로 감싼다. end-decision의
+            # 5분 기한은 다시 돌지 않는다. end·new-task는 바깥 루프를 끝낸다.
+            - id: release-watch
+              loop:
+                while: "true"
+                max: 100
+                do:
+                  - id: release-decision
+                    call: ask-user
+                    bind: release_decision
+                    with:
+                      require_reason: true
+                      # 이 질문은 회차가 이미 끝난 뒤에 서고, 답이 늦어도 잃는 것이
+                      # 없다(런은 이 자리에서 기다린다). 그래서 알림에 `deferrable`을
+                      # 선언한다 — 대시보드는 이 말을 읽어 창의 「Waiting on you」가
+                      # 접혀 있을 때 이 질문을 접는다(스레드 th-3b3470, 2026-10-30
+                      # 사용자 결정). 순위가 아니라 선언이므로 다른 워크플로의 게이트는
+                      # 영향받지 않는다.
+                      criteria: [deferrable]
+                      # 같은 이유(claunch-q4cqy.4): 이 질문은 기한이 없어 사용자가 자리를
+                      # 비우면 무한정 선다. 드라이버가 알림을 올려야 사용자가 안다.
+                      # $CLAUNCH_SESSION을 그대로 싣기 위해 lit로 감싼다 — 맨 문자열의 $는
+                      # 식으로 읽힌다(claunch-llfac TRIED).
+                      nudge:
+                        lit: |
+                          이 질문은 사람의 답을 기다리고, 기한이 없다 — 답이 없으면 질문은
+                          열린 채로 남는다. 질문 brief를 쓴 뒤, 턴을 끝내기 전에 MCP
+                          `flow_nudge(message)`를 **한 번** 부른다. 메시지는 한두 줄로
+                          무엇을 정해야 하는지와 답하는 명령
+                          (`claunch cflow2 approve <instance> --option <선택지>`)을 담는다.
+                          **앞의 auto-release를 end-decision의 5분 무응답 때문에 지나왔다면
+                          그 사실을 메시지에 담는다** — 사람이 자리를 비운 사이 자동으로
+                          진행됐다는 기록이 알림에 남는다. 답이 오지 않으면 다시 부르지
+                          않는다(5분 안 재호출은 같은 카드, daemon/flow_nudge.py의
+                          REPEAT_AFTER).
+                          **이 질문 바로 앞에서 end-hold를 보고했으면**(hold 답으로 다시
+                          선 질문이다, claunch-llfac) `flow_nudge` 뒤 그 턴의 **마지막
+                          동작으로** `claunch hold $CLAUNCH_SESSION`을 실행한다(세션 인자는 생략할 수
+                          없다 — 인자 없는 `claunch hold`는 `error: no session given`으로 끝난다). hold는
+                          그 즉시 프로그램을 내리므로 그 뒤에 글을 쓰지 않는다 — 대화는
+                          보존되고, 답이 오면 깨어나 이 질문의 결과부터 이어 간다. 바로
+                          앞이 auto-release였으면 실행하지 않는다(그때는 사람이 아직
+                          보류를 고르지 않았다). keep-alive·delivery-hold는 세우지 않는다.
+                      topic: |
+                        회차 정리(auto-release)가 끝났다. 이 세션을 어떻게 할지 고른다.
+                        이 질문에는 기한이 없다 — 답이 없으면 질문은 열린 채로 남는다.
+                        hold 답으로 다시 선 질문이면 세션은 이미 hold 상태다(번호가 바뀐
+                        같은 질문이다).
 
-                  end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤
-                  세션을 종료한다(archive는 별도 단계다). 브랜치와 beads 이슈는 남는다.
-                  hold: 종료를 보류한다 — keep-alive와 `delivery-hold`를 함께 세워
-                  세션을 살리고, 메시지로 깨어나지 않게 한다.
-                  new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
+                        end: 세션을 끝낸다. 이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤
+                        세션을 종료한다(archive는 별도 단계다). 브랜치와 beads 이슈는 남는다.
+                        hold: 종료를 보류한다 — 세션을 세션 hold 상태로 보낸다: 프로그램을
+                        내리고 대화·런·워크트리를 보존하며, 이 질문은 새 번호로 열린 채
+                        남는다. 답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채
+                        깨어난다.
+                        new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
 
-                  이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
-                  데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
-              cases:
-                # 정리는 이미 auto-release가 했다 — 노드 없이 런을 마감한다
-                # (claunch-q4cqy.6). 예고는 게이트 앞에서 이미 나갔다.
-                end: [{break: end-watch}]
-                hold: [end-hold, {break: end-watch}]
-                new-task: [end-new-task, {break: end-watch}]
+                        이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
+                        데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
+                    cases:
+                      # 정리는 이미 auto-release가 했다 — 노드 없이 런을 마감한다
+                      # (claunch-q4cqy.6). 예고는 게이트 앞에서 이미 나갔다.
+                      end: [{break: end-watch}]
+                      hold: [end-hold, {continue: release-watch}]
+                      new-task: [end-new-task, {break: end-watch}]
 
 body:
   try:

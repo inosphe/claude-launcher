@@ -2591,6 +2591,84 @@ def test_ending_the_session_at_an_end_gate_finishes_the_run(tmp_path, monkeypatc
     assert again["finished"] is False
 
 
+def test_hold_keeps_the_run_open_and_asks_again_under_a_new_ask(
+        tmp_path, monkeypatch):
+    """claunch-llfac: hold no longer ends the run. From end-decision it cleans
+    up first (as end does), runs end-hold and poses release-decision; from
+    release-decision it runs end-hold and poses the same question again
+    under a new ask id. The run stays waiting on a person -- so kill-on-end
+    never applies and no keep-alive is needed -- until end or new-task."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["auto-release"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    first = st["asks"][0]["ask"]
+    # hold again at release-decision: end-hold, then the question anew
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    # the driver reads the hold command off the waiting task, session included
+    assert "`claunch hold $CLAUNCH_SESSION`" in st["asks"][0]["task_prompt"]
+    second = st["asks"][0]["ask"]
+    assert second != first
+    # the reposed question is still an end gate: ending the session answers it
+    done = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=5.0)
+    assert done["finished"] is True and done["ask"] == second, done
+    assert runtime.status(**kw)["status"] == "done"
+
+
+def test_end_hold_sends_the_session_to_hold_without_keep_alive():
+    """claunch-llfac: the hold answer means the session hold state (held_at,
+    daemon/hold.py). keep-alive would keep the session out of the idle hold
+    and delivery-hold would leave a woken session unable to be held again, so
+    neither is set; `claunch hold` runs after release-decision is posed."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    text = doc["nodes"]["end-hold"]["prompt"]
+    assert "claunch keep-alive $CLAUNCH_SESSION" not in text
+    assert "delivery-hold $CLAUNCH_SESSION --on" not in text
+    assert "keep-alive와 delivery-hold는 세우지 않는다" in text
+    watch = _find_id(doc["procedures"], "release-watch")
+    release = watch["loop"]["do"][0]
+    assert release["id"] == "release-decision"
+    assert release["cases"]["hold"] == ["end-hold", {"continue": "release-watch"}]
+    # `lit` keeps $CLAUNCH_SESSION as text; a bare with: string reads $ as an expression
+    nudge = release["with"]["nudge"]["lit"]
+    # every hold command the driver is told to run must name the session:
+    # `claunch hold` has no CLAUNCH_SESSION fallback (error: no session given)
+    import re
+    from claude_launcher.cli import build_parser
+    from claude_launcher.cli_sessions import _resolve_target
+    commands = re.findall(r"`(claunch hold[^`]*)`", text + nudge)
+    assert commands, "no hold command in end-hold / release-decision"
+    for cmd in commands:
+        if cmd == "claunch hold":
+            continue  # quoted as the failing form, not as an instruction
+        argv = cmd.replace("$CLAUNCH_SESSION", "s1").split()[1:]
+        args = build_parser().parse_args(argv)
+        assert _resolve_target(args) and args.session == "s1", cmd
+    assert "`claunch hold $CLAUNCH_SESSION`을 실행한다" in nudge
+    assert "`claunch hold $CLAUNCH_SESSION`은 여기서 실행하지 않는다" in text
+    for topic in (release["with"]["topic"],
+                  _find_id(doc["procedures"], "end-decision")["with"]["topic"]):
+        flat = " ".join(topic.split())
+        assert "세션 hold 상태" in flat and "keep-alive" not in flat
+
+
 def test_ending_the_session_away_from_an_end_gate_leaves_the_run_alone(
         tmp_path, monkeypatch):
     """A question that is not the end gate is somebody's real decision; a
