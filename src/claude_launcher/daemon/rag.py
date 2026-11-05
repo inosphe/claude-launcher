@@ -606,6 +606,55 @@ def _collection_dims(col) -> int:
     return 0
 
 
+#: A collection that finished creating holds a ``manifest.*`` file; a create
+#: that failed in the id map (below) leaves ``idmap.0`` and nothing else.
+_MANIFEST_GLOB = "manifest.*"
+#: Attempts at ``create_and_open`` and the pause before each retry. On Windows
+#: the engine's id map (RocksDB) renames ``000005.dbtmp`` to ``CURRENT`` in the
+#: new directory, and that rename fails with "access denied" (code 5) when
+#: another process holds a handle on the file for a moment, which happens
+#: under parallel load (claunch-etcs6: 3 failures in 1200 creates with 8
+#: processes, each on its own path, none in 600 creates in one process).
+_CREATE_ATTEMPTS = 5
+_CREATE_BACKOFF = 0.05
+
+
+def _is_partial_collection(path: Path) -> bool:
+    """A directory a failed ``create_and_open`` left behind."""
+    try:
+        return path.is_dir() and not any(path.glob(_MANIFEST_GLOB))
+    except OSError:
+        return False
+
+
+def _remove_partial_collection(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _create_collection(zvec, path: Path, schema):
+    """``zvec.create_and_open``, retried when the engine fails transiently.
+
+    A failed create leaves the directory behind, and the engine then refuses
+    both another create (the path exists) and an open (no version file), so
+    each retry starts from a removed directory.
+    """
+    last: Optional[RuntimeError] = None
+    for attempt in range(_CREATE_ATTEMPTS):
+        if attempt:
+            time.sleep(_CREATE_BACKOFF * attempt)
+        try:
+            return zvec.create_and_open(path=str(path), schema=schema)
+        except RuntimeError as exc:
+            last = exc
+            _remove_partial_collection(path)
+            log.warning("rag: create of %s failed (attempt %d/%d): %s", path.name, attempt + 1, _CREATE_ATTEMPTS, exc)
+    assert last is not None
+    raise last
+
+
+
 class VectorIndex:
     """One corpus's vectors, held in a zvec collection.
 
@@ -707,6 +756,12 @@ class VectorIndex:
         if self._closed:
             return None
         zvec = _zvec()
+        if self.path.is_dir() and _is_partial_collection(self.path):
+            # A create that died part-way (see ``_create_collection``) leaves
+            # the directory behind without the files ``open`` needs, and
+            # ``create_and_open`` refuses an existing path: the directory is
+            # neither openable nor creatable until it is removed.
+            _remove_partial_collection(self.path)
         if self.path.is_dir():
             try:
                 self._col = zvec.open(path=str(self.path))
@@ -738,7 +793,7 @@ class VectorIndex:
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dims),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._col = zvec.create_and_open(path=str(self.path), schema=schema)
+        self._col = _create_collection(zvec, self.path, schema)
         return self._col
 
     def _learn_index_dims(self, col) -> int:
