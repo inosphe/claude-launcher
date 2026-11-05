@@ -17,7 +17,11 @@
 # - watch-gate waits on `claunch operators watch` (exit 0 = the operator's
 #   watch is on, 1 = off). With watch off the loop stays here, so an operator
 #   that is not watching only answers. The probe reads the record file, not
-#   the daemon.
+#   the daemon, and re-reads it every 30s; the wait has no upper bound
+#   (claunch-ca6j7.1): a `seconds: 3600` plus `timeout: continue` here only
+#   tore the same wait down and re-entered it once an hour, which moved the
+#   run without ever opening a task, so nothing was typed or posted and the
+#   undecided counter restarted.
 # - observe is one poll-judge-post pass; rest is the 180s timer between passes
 #   (v1 operator.yaml's `every: 180`).
 #
@@ -238,12 +242,9 @@ body:
               wait:
                 probe: [claunch, operators, watch]
                 poll: 30
-                seconds: 3600
                 undecided_max: 5
                 describe: 이 operator의 감시(watch)가 켜져 있다
               on:
-                # 감시가 꺼진 채 한 시간이 지났다: 같은 대기를 새로 시작한다.
-                timeout: {continue: null}
                 undecidable:
                   seq:
                     - probe-failed

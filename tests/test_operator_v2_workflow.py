@@ -176,6 +176,34 @@ def test_watch_off_holds_the_gate_and_watch_on_observes(tmp_path):
     assert run.tasks() == ["observe"]
 
 
+def test_the_gate_has_no_hourly_upper_bound(tmp_path):
+    """claunch-ca6j7.1: the wait carries no ``seconds``.
+
+    A ``seconds: 3600`` with ``timeout: continue`` here only tore the same
+    wait down and re-entered it once an hour. The run moved, but no task
+    opened, so the daemon typed nothing (:func:`cflow2_clock._waits_on_driver`
+    is false for a wait) and the undecided counter restarted with the new
+    instance. The wait must stay one instance until the probe decides.
+    """
+    gate = next(n for n in _chart().nodes.values() if n.label == "watch-gate")
+    assert gate.props.get("seconds") is None
+    assert "timeout" not in gate.on
+    assert gate.props.get("poll") == 30
+    assert gate.props.get("undecided_max") == 5
+
+    run = Run(tmp_path)
+    run.report("greet", {"handled": 0}, T0 + 1)
+    run.tick(T0 + 40, 1)
+    opened = run.st["waits"][0]["instance"]
+    assert opened.startswith("watch-gate@")
+    run.tick(T0 + 3700, 1)        # past the old 3600s bound
+    run.tick(T0 + 7200, 1)        # and a second hour
+    assert run.st["waits"][0]["instance"] == opened
+    assert run.tasks() == [] and run.st["status"] == "running"
+    run.tick(T0 + 7230, 0)        # the same wait still sees the watch turn on
+    assert run.tasks() == ["observe"]
+
+
 def test_an_undecidable_probe_reports_and_backs_off(tmp_path):
     run = Run(tmp_path)
     run.report("greet", {"handled": 0}, T0 + 1)
