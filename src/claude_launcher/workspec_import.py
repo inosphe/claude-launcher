@@ -465,11 +465,16 @@ class Importer:
             return
         body = self._spawn_body(act, handle)
         if act["parent"] is None:
-            if not self.profile:
+            # A top-level session: an own leader, or an agent with
+            # ``parent: none`` (a fleet's coordinator). Its own profile
+            # wins over the import's.
+            own = self.agents.get(act["agent"]) or {}
+            profile = own.get("profile") or self.profile
+            if not profile:
                 raise SpecImportError(
-                    "an own leader is a new top-level session and needs a "
+                    f"{act['agent']} is a new top-level session and needs a "
                     "profile: pass --profile")
-            body["profile"] = self.profile
+            body["profile"] = profile
             parent = None
         else:
             parent = self.sessions[act["parent"]]
@@ -486,6 +491,14 @@ class Importer:
         body["workflow"] = act.get("workflow") or "-"
         if self.doc.get("workspace"):
             body["workspace"] = self.doc["workspace"]
+        if act["parent"] is None and self.doc.get("project"):
+            # A child inherits its parent's project; a top-level session
+            # is placed in the spec's.
+            body["project"] = self.doc["project"]
+        if act.get("inputs"):
+            # A v2 run's start inputs (relation: independent | stacked ...),
+            # checked against the chart by the daemon's preflight.
+            body["cflow_inputs"] = dict(act["inputs"])
         if act["agent"] == workspec.LEADER_ID:
             own = (self.doc.get("leader") or {}).get("own") or {}
             if own.get("name"):
@@ -498,11 +511,17 @@ class Importer:
         for key in ("profile", "model", "worktree"):
             if a.get(key):
                 body[key] = a[key]
+        if act["parent"] is None:
+            body.pop("profile", None)  # _do_spawn settles it
         if "worktree" not in body and act["kind"] != "reviewer":
             # Two code-editing children in one checkout overwrite each other.
             body["worktree"] = f"spec-{self.doc['name']}-{a['id']}"
         if act.get("issue"):
             body["issue"] = self.ids[act["issue"]]
+        elif act.get("start_issue") == "pending":
+            # No issue yet, and none minted: the parent names one later
+            # (the daemon's ISSUE_PENDING answer, claunch-5p2j4).
+            body["beads"] = "existing-pending"
         else:
             # The API's spelling. ``no_issue`` is the MCP tool's, renamed to
             # this before it reaches the daemon (mesh_mcp._SPAWN_RENAMED);
@@ -532,7 +551,8 @@ class Importer:
         mine = [k for k, i in self.issues.items()
                 if i.get("assignee") == a["id"]]
         lines = [f"{head} 너는 에이전트 {a['id']}({act['kind']})다. "
-                 f"부모: {self.handle(act['parent'])}."]
+                 + (f"부모: {self.handle(act['parent'])}." if act["parent"]
+                    else "최상위 세션이다.")]
         if mine:
             lines.append("큐(우선순위 순서): " + ", ".join(
                 f"{self.ids.get(k, k)} {self.issues[k]['title']}"
@@ -547,20 +567,53 @@ class Importer:
             lines.append("리뷰 대상: " + (", ".join(
                 f"{self.ids.get(k, k)} ({self.handle(self.issues[k]['assignee'])})"
                 for k in mine_r) or "없음") + ".")
+        kids = [x for x in self.agents.values() if x.get("parent") == a["id"]]
         if act["kind"] == "sub-lead":
-            kids = [self.handle(x["id"]) for x in self.agents.values()
-                    if x.get("parent") == a["id"]]
+            names = [self.handle(x["id"]) for x in kids]
+            if str(act.get("workflow") or "").endswith("-v2"):
+                how = ("첫 stacked 자식이 생겼으므로 stack side 런을 세운다"
+                       "(flow_start, side: stack)")
+            else:
+                how = "첫 회차에 stack 서브 런을 연다(cflow start workflow: stack, sub: stack)"
             lines.append(
-                "너는 2nd leader 다. 첫 회차에 stack 서브 런을 연다(cflow "
-                "start workflow: stack, sub: stack). 자식"
-                + (f"({', '.join(kids)})" if kids else "")
+                f"너는 2nd leader 다. {how}. 자식"
+                + (f"({', '.join(names)})" if names else "")
                 + "의 착지 요청은 네가 받아 <너>-stack 브랜치로 모으고, 리더에게는 "
                 "그 브랜치 하나를 착지 요청한다. 자식에게 기준 브랜치를 "
                 "<너>-stack 으로 알린다.")
+        if kids:
+            lines.append(self._roster(kids))
+        if a.get("start_issue") == "pending" and not mine:
+            lines.append(
+                "너는 시작 이슈 없이 대기한다. 부모가 일감 이슈 id를 알려 주면 "
+                "flow_input(name issue)으로 런의 시작 입력에 적고 그 이슈를 잡는다.")
         if a.get("task"):
             lines.append(str(a["task"]).strip())
         parts.append("\n".join(lines))
         return "\n\n".join(parts)
+
+    def _roster(self, kids: List[dict]) -> str:
+        """The members this import already started under an agent: who
+        they are, what they hold, and what an idle one is waiting for."""
+        rows = []
+        for x in kids:
+            held = [self.ids.get(k, k) for k, i in self.issues.items()
+                    if i.get("assignee") == x["id"]]
+            rel = (x.get("inputs") or {}).get("relation")
+            what = (f"이슈 {', '.join(held)}" if held
+                    else "시작 이슈 대기" if x.get("start_issue") == "pending"
+                    else "이슈 없음")
+            rows.append(f"- {self.handle(x['id'])} ({x.get('kind', 'worker')}"
+                        + (f", relation {rel}" if rel else "") + f"): {what}")
+        idle = any(not any(i.get("assignee") == x["id"]
+                           for i in self.issues.values())
+                   and x.get("start_issue") == "pending" for x in kids)
+        out = "import가 미리 띄운 자식:\n" + "\n".join(rows)
+        if idle:
+            out += ("\n시작 이슈를 기다리는 자식에게는 일감 이슈를 (네 이슈의 "
+                    "자식으로) 만들어 배정하고 id를 메시로 알린다. 새 자식을 "
+                    "띄우기 전에 이 자식들을 먼저 쓴다.")
+        return out
 
     def _do_assign(self, act):
         iid, session = self.ids[act["issue"]], self.sessions[act["agent"]]

@@ -1470,6 +1470,7 @@ class SessionManager:
         identity: str = "",
         warnings: Optional[List[str]] = None,
         exempt_depth: bool = False,
+        person_fields: bool = False,
         place_under: Optional[str] = None,
         created_by: Optional[dict] = None,
     ) -> Session:
@@ -1534,6 +1535,7 @@ class SessionManager:
             children=len(self.live_children(placed)) if placed else 0,
             warnings=warnings,
             exempt_depth=exempt_depth,
+            person_fields=person_fields,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
         # worktree is named after the child (``<parent>-<child>``) and the

@@ -42,9 +42,26 @@ KINDS: Dict[str, tuple] = {
     "sub-lead": ("worker", "improv-worker"),
     "worker": ("worker", "improv-worker"),
     "reviewer": ("reviewer", ""),
+    # A coordinator runs improv-coordinator-v2: a worker-role session that
+    # keeps the user's requirements and hands each job to a member. Like a
+    # sub-lead it holds children and an epic; unlike one it is usually the
+    # top of its tree (``parent: none``) -- the fleet presets' root.
+    "coordinator": ("worker", "improv-coordinator-v2"),
 }
+#: Kinds that hold children (and so may hold an epic).
+HOLDERS = ("leader", "sub-lead", "coordinator")
 LEADER_ID = "leader"
-LEADER_MODES = ("ask", "own", "shared")
+#: ``agents[].parent`` value for a top-level session: the import creates it
+#: the way the New session form does (a profile, no parent).
+TOP = "none"
+#: ``agents[].start_issue``: what an agent with no queued issue starts on --
+#: ``none`` (no issue, wait for instructions) or ``pending`` (an issue its
+#: parent names later; the daemon's ``existing-pending``, claunch-5p2j4).
+START_ISSUES = ("none", "pending")
+#: ``none``: the spec has no leader of its own (a fleet whose root is a
+#: top-level coordinator). Independent landings go to the mesh's leader, if
+#: it has one.
+LEADER_MODES = ("ask", "own", "shared", "none")
 MESH_MODES = ("new", "attach")
 ISSUE_TYPES = ("epic", "task", "bug", "doc", "chore", "feature")
 REF_KINDS = ("file", "url", "text", "issue")
@@ -59,13 +76,14 @@ _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 _TOP = {
-    "spec", "name", "title", "source", "workspace", "mesh", "leader",
+    "spec", "name", "title", "source", "workspace", "project", "mesh", "leader",
     "roles", "subroles", "agents", "references", "contracts", "issues",
     "decisions", "human_steps",
 }
 _AGENT = {
     "id", "kind", "parent", "handle", "role", "subroles", "workflow",
     "profile", "model", "harness", "worktree", "task", "connect",
+    "inputs", "start_issue",
 }
 _ISSUE = {
     "key", "type", "title", "priority", "parent", "goal", "scope",
@@ -158,7 +176,8 @@ _STR_LISTS = {
 #: there (``kind: [worker]``) is unhashable in a set lookup and crashed with
 #: TypeError; it is reported here instead. ``priority`` alone is an integer
 #: (bool excluded -- ``True`` is an int to Python, not a priority).
-_STR_TOP = {"name": "name", "title": "title", "workspace": "workspace"}
+_STR_TOP = {"name": "name", "title": "title", "workspace": "workspace",
+            "project": "project"}
 _STR_NESTED = {
     "mesh": ("mode", "name"),
     "leader": ("mode",),
@@ -166,7 +185,8 @@ _STR_NESTED = {
     "leader.shared": ("handle",),
 }
 _STR_ITEMS = {
-    "agents": ("id", "kind", "parent", "role", "handle", "workflow"),
+    "agents": ("id", "kind", "parent", "role", "handle", "workflow",
+               "profile", "model", "start_issue"),
     "references": ("id", "kind", "file", "url", "text", "issue"),
     "contracts": ("id", "kind", "title", "text"),
     "issues": ("key", "type", "title", "parent", "assignee", "review",
@@ -248,6 +268,10 @@ def _shape(doc: dict) -> List[str]:
                     isinstance(v, list) and all(isinstance(x, str) for x in v)
                 ):
                     errs.append(f"{block}[{i}].{f}: must be a list of strings")
+    for i, a in enumerate(doc.get("agents") if isinstance(doc.get("agents"), list) else []):
+        if isinstance(a, dict) and a.get("inputs") is not None \
+                and not isinstance(a["inputs"], dict):
+            errs.append(f"agents[{i}].inputs: must be a mapping")
     for i, it in enumerate(doc.get("issues") if isinstance(doc.get("issues"), list) else []):
         if isinstance(it, dict) and it.get("contract") is not None \
                 and not isinstance(it["contract"], dict):
@@ -327,9 +351,20 @@ def validate(doc: dict) -> List[str]:
             continue
         kind_of[aid] = kind
         parent = str(a.get("parent") or LEADER_ID)
-        if parent not in known_agents:
+        if parent == TOP:
+            if kind == "reviewer":
+                errs.append(f"{where}.parent: a reviewer answers asks in "
+                            "someone's tree; it cannot be a top-level session")
+        elif parent not in known_agents:
             errs.append(f"{where}.parent: unknown agent {parent!r}")
+        elif parent == LEADER_ID and mode == "none":
+            errs.append(f"{where}.parent: leader.mode is none -- there is no "
+                        f"leader to hang it under (parent: {TOP} makes it a "
+                        "top-level session)")
         parents[aid] = parent
+        start = a.get("start_issue")
+        if start is not None and start not in START_ISSUES:
+            errs.append(f"{where}.start_issue: one of {', '.join(START_ISSUES)}")
         role = a.get("role") or KINDS[kind][0]
         if roleset is not None:
             try:
@@ -350,18 +385,19 @@ def validate(doc: dict) -> List[str]:
             if peer not in known_agents:
                 errs.append(f"{where}.connect: unknown agent {peer!r}")
     for aid, parent in parents.items():
-        if parent in kind_of and kind_of[parent] not in ("leader", "sub-lead"):
+        if parent in kind_of and kind_of[parent] not in HOLDERS:
             errs.append(
                 f"agents.{aid}.parent: {parent!r} is a {kind_of[parent]}; "
-                "only the leader or a sub-lead holds children"
+                "only the leader or a sub-lead holds children (or a coordinator)"
             )
     loop = _cycle({k: [v] for k, v in parents.items()})
     if loop:
         errs.append(f"agents: parent cycle {' -> '.join(loop)}")
     else:
         for aid in parents:
+            # A top-level agent is its tree's root (depth 0), as the leader is.
             depth, node = 0, aid
-            while node != LEADER_ID and node in parents:
+            while node in parents and parents[node] != TOP:
                 node, depth = parents[node], depth + 1
             if depth > MAX_DEPTH:
                 errs.append(
@@ -426,9 +462,10 @@ def validate(doc: dict) -> List[str]:
         if typ == "doc" and assignee not in (None, ""):
             errs.append(f"{where}.assignee: a doc is not assigned")
         if (typ == "epic" and assignee not in (None, "")
-                and kind_of.get(assignee) != "sub-lead"):
+                and kind_of.get(assignee) not in ("sub-lead", "coordinator")):
             errs.append(f"{where}.assignee: an epic is held only by a "
-                        "sub-lead (its stack collects the children)")
+                        "sub-lead (its stack collects the children) or a "
+                        "coordinator (it hands the children out)")
         review = it.get("review")
         if review is not None:
             if review not in agent_ids:
@@ -477,6 +514,10 @@ def resolve_leader(doc: dict, choice: str = "") -> dict:
     """
     leader = doc.get("leader") or {}
     raw = (choice or leader.get("mode") or "ask").strip()
+    if raw == "none":
+        # No leader managed by this import: nothing is spawned, joined or
+        # checked for it. Agents then hang from a top-level agent.
+        return {"mode": "none"}
     if (doc.get("mesh") or {}).get("mode") == "attach":
         # An existing mesh already has its leader, and joining anyone else
         # as leader is refused by the mesh's exclusive check — so on attach
@@ -703,14 +744,16 @@ def preview(doc: dict) -> dict:
         children.setdefault(a.get("parent") or LEADER_ID, []).append(a)
 
     own = leader.get("own") or {}
-    sessions: List[dict] = [{
-        "id": LEADER_ID, "kind": "leader", "depth": 0, "parent": None,
-        "role": "leader", "subroles": [],
-        "workflow": own.get("workflow") or "improv-leader",
-        "mode": "existing" if (doc.get("mesh") or {}).get("mode") == "attach"
-        else leader.get("mode", "ask"),
-        "queue": [], "reviews": [], "connect": [],
-    }]
+    sessions: List[dict] = []
+    if leader.get("mode") != "none":
+        sessions.append({
+            "id": LEADER_ID, "kind": "leader", "depth": 0, "parent": None,
+            "role": "leader", "subroles": [],
+            "workflow": own.get("workflow") or "improv-leader",
+            "mode": "existing" if (doc.get("mesh") or {}).get("mode") == "attach"
+            else leader.get("mode", "ask"),
+            "queue": [], "reviews": [], "connect": [],
+        })
 
     def walk(parent: str, depth: int) -> None:
         for a in children.get(parent, []):
@@ -718,17 +761,22 @@ def preview(doc: dict) -> dict:
             queue = sorted(owned.get(a["id"], []),
                            key=lambda i: i.get("priority", 2))
             sessions.append({
-                "id": a["id"], "kind": kind, "depth": depth, "parent": parent,
+                "id": a["id"], "kind": kind, "depth": depth,
+                "parent": None if parent == TOP else parent,
                 "handle": a.get("handle") or a["id"],
                 "role": a.get("role") or KINDS[kind][0],
                 "subroles": list(a.get("subroles") or []),
                 "workflow": a.get("workflow") or KINDS[kind][1],
+                "profile": a.get("profile") or "",
+                "inputs": dict(a.get("inputs") or {}),
+                "start_issue": "" if queue else (a.get("start_issue") or "none"),
                 "queue": [i["key"] for i in queue],
                 "reviews": reviews.get(a["id"], []),
                 "connect": list(a.get("connect") or []),
             })
             walk(a["id"], depth + 1)
 
+    walk(TOP, 0)
     walk(LEADER_ID, 1)
 
     gates: Dict[str, List[str]] = {}
@@ -771,7 +819,7 @@ def mesh_name(doc: dict) -> str:
 
 def _agent_order(agents: List[dict]) -> List[dict]:
     """Agents parents-first, so every spawn names a parent that exists."""
-    placed = {LEADER_ID}
+    placed = {LEADER_ID, TOP}
     out: List[dict] = []
     pending = list(agents)
     while pending:
@@ -799,6 +847,13 @@ def plan(doc: dict, leader_choice: str = "") -> List[dict]:
     if errs:
         raise SpecError("invalid spec:\n- " + "\n- ".join(errs))
     lead = resolve_leader(doc, leader_choice)
+    if lead["mode"] == "none":
+        under = sorted(a["id"] for a in _list(doc, "agents")
+                       if (a.get("parent") or LEADER_ID) == LEADER_ID)
+        if under:
+            raise SpecError(
+                "no leader was chosen, but these agents hang under it: "
+                + ", ".join(under))
     name = doc["name"]
     mesh = mesh_name(doc)
     tag = f"spec:{name}"
@@ -854,14 +909,21 @@ def plan(doc: dict, leader_choice: str = "") -> List[dict]:
         kind = a.get("kind", "worker")
         queue = sorted(owned.get(a["id"], []),
                        key=lambda i: i.get("priority", 2))
-        acts.append({
+        parent = a.get("parent") or LEADER_ID
+        act = {
             "do": "spawn", "agent": a["id"], "kind": kind, "mesh": mesh,
-            "parent": a.get("parent") or LEADER_ID,
+            # None: a top-level session, created with a profile.
+            "parent": None if parent == TOP else parent,
             "role": a.get("role") or KINDS[kind][0],
             "subroles": list(a.get("subroles") or []),
             "workflow": a.get("workflow") or KINDS[kind][1],
             "issue": queue[0]["key"] if queue else None,
-        })
+        }
+        if not queue and a.get("start_issue") == "pending":
+            act["start_issue"] = "pending"
+        if a.get("inputs"):
+            act["inputs"] = dict(a["inputs"])
+        acts.append(act)
         for it in queue[1:]:
             acts.append({"do": "assign", "issue": it["key"], "agent": a["id"]})
         if kind == "sub-lead":

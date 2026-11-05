@@ -166,7 +166,7 @@ def test_check_answers_the_preview_and_the_line_of_each_error(home):
         row = next(i for i, l in enumerate(bad.splitlines(), 1)
                    if "kind: reviewr" in l)
         assert out["lines"][out["errors"].index(
-            "agents.rv1.kind: one of sub-lead, worker, reviewer")] == row
+            "agents.rv1.kind: one of sub-lead, worker, reviewer, coordinator")] == row
         out = await post("check", {"yaml": "spec: 1\nagents: [\n"}, 400)
         assert out["lines"][0] and "preview" not in out
 
