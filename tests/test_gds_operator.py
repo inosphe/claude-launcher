@@ -47,6 +47,47 @@ def test_the_loop_is_operator_v2s_with_a_ledger_pass():
     assert inputs["gds6_url"]["default"] == "http://localhost:8888"
 
 
+def test_the_gate_has_no_hourly_upper_bound(tmp_path):
+    """claunch-5c5ap: the wait carries no ``seconds``.
+
+    This file kept ``seconds: 3600`` with ``timeout: continue`` after
+    operator-v2 dropped it (claunch-ca6j7.1). Here it only tore the same wait
+    down and re-entered it once an hour: the run moved, but no task opened,
+    so nothing was typed or posted and the undecided counter restarted with
+    the new instance. The wait must stay one instance until the probe decides.
+    """
+    from claude_launcher.cflow2 import runtime
+
+    gate = next(n for n in _chart().nodes.values() if n.label == "watch-gate")
+    assert gate.props.get("seconds") is None
+    assert "timeout" not in gate.on
+    assert gate.props.get("poll") == 30
+    assert gate.props.get("undecided_max") == 5
+
+    cwd, scope = str(tmp_path), "op"
+    st = runtime.start(_chart(), cwd=cwd, scope=scope, caps={},
+                       inputs={"operator": "0123456789ab", "gds6_url": "http://gds:8888"}, now=1_000_000.0)
+    inst = [t["instance"] for t in st["tasks"] if t["label"] == "greet"][0]
+    runtime.report(inst, "ok", {"handled": 0}, cwd=cwd, scope=scope, now=1_000_001.0)
+
+    def runner(probe, cwd):
+        return (1, "")      # watch off
+
+    st = runtime.wait_tick(1_000_040.0, runner, cwd=cwd, scope=scope)
+    opened = st["waits"][0]["instance"]
+    assert opened.startswith("watch-gate@")
+    st = runtime.wait_tick(1_003_700.0, runner, cwd=cwd, scope=scope)   # past the old 3600s bound
+    st = runtime.wait_tick(1_007_200.0, runner, cwd=cwd, scope=scope)   # and a second hour
+    assert st["waits"][0]["instance"] == opened
+    assert [t["label"] for t in st["tasks"]] == [] and st["status"] == "running"
+
+    def watch_on(probe, cwd):
+        return (0, "")
+
+    st = runtime.wait_tick(1_007_230.0, watch_on, cwd=cwd, scope=scope)
+    assert [t["label"] for t in st["tasks"]] == ["observe"]
+
+
 def test_the_observe_task_reads_the_ledger_and_nudges_from_it(tmp_path):
     """The probes, the order and the nudge rules ride the one task that acts."""
     from claude_launcher.cflow2 import runtime
