@@ -23,7 +23,10 @@
      8. picking List again brings back the list and the filters and empties
         the rail chart;
      9. the #/chart page still draws its own Project picker while the rail
-        is on its Chart view. */
+        is on its Chart view;
+    10. rows run parent-before-child: a child sits right under its parent,
+        stepped in with a branch mark, in the rail and on the page, and the
+        toolbar's 위계 box turns that off and on (claunch-h0wi6.2). */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -38,6 +41,7 @@ const CURRENT = [
   { name: "alpha", status: "running", created_at: ago(2), project: "default", cwd: "F:/w/repo1", role: "worker" },
   { name: "beta", status: "exited", created_at: ago(30), exited_at: ago(20), project: "default", cwd: "F:/w/repo2" },
   { name: "gamma", status: "running", created_at: ago(5), project: "other", cwd: "F:/w/repo3" },
+  { name: "delta", parent: "alpha", status: "running", created_at: ago(1), project: "default", cwd: "F:/w/repo1" },
 ];
 const PROJECTS = [{ name: "default" }, { name: "other" }];
 
@@ -90,8 +94,8 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
 
     // 2. Chart: the rail chart replaces the list; the filters go, the tabs stay.
     await page.click('#session-view input[value="chart"] + span');
-    await page.waitForFunction((sel) => document.querySelectorAll(sel).length >= 3, ROWS, { timeout: 15000 });
-    assert.deepEqual(await railRows(page), ["alpha", "beta", "gamma"]);
+    await page.waitForFunction((sel) => document.querySelectorAll(sel).length >= 4, ROWS, { timeout: 15000 });
+    assert.deepEqual(await railRows(page), ["alpha", "beta", "delta", "gamma"]);
     assert.equal(await shown(page, "#session-chart"), true, "the rail chart is shown");
     assert.equal(await shown(page, "#session-list"), false, "the list is hidden");
     assert.equal(await shown(page, "#session-grid"), false, "the grid is hidden");
@@ -122,7 +126,33 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
       [...document.querySelectorAll(sel + " .chart-name-text")].map((e) => e.textContent).join() === "gamma",
     ROWS, { timeout: 5000 });
     await page.click('#project-tabs .project-tab[data-project=""]');
-    await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 3, ROWS, { timeout: 5000 });
+    await page.waitForFunction((sel) => document.querySelectorAll(sel).length === 4, ROWS, { timeout: 5000 });
+
+    // 10. Parent before child: delta (the newest) sits right under alpha,
+    // stepped in; the 위계 box gives the flat newest-first order back.
+    const order = (root) => page.$$eval(`${root} .chart-row:not(.chart-axis):not(.chart-series-row)`,
+      (rows) => rows.map((r) => {
+        const n = r.querySelector(".chart-name");
+        return { name: r.dataset.name, child: n.classList.contains("chart-child"),
+                 branch: !!n.querySelector(".chart-branch"),
+                 pad: parseFloat(getComputedStyle(n).paddingLeft) };
+      }));
+    let rows = await order("#session-chart");
+    assert.deepEqual(rows.map((r) => r.name), ["alpha", "delta", "gamma", "beta"], JSON.stringify(rows));
+    const child = rows.find((r) => r.name === "delta");
+    const root = rows.find((r) => r.name === "alpha");
+    assert.ok(child.child && child.branch && child.pad > root.pad, JSON.stringify(rows));
+    assert.ok(rows.filter((r) => r.name !== "delta").every((r) => !r.child));
+    const treeBox = "#session-chart .chart-tree input";
+    assert.equal(await page.$eval(treeBox, (e) => e.checked), true, "위계 is on by default");
+    await page.click(treeBox);
+    await page.waitForFunction(() => !document.querySelector("#session-chart .chart-name.chart-child"),
+      null, { timeout: 5000 });
+    rows = await order("#session-chart");
+    assert.deepEqual(rows.map((r) => r.name), ["delta", "alpha", "gamma", "beta"], JSON.stringify(rows));
+    await page.click(treeBox);
+    await page.waitForSelector('#session-chart .chart-row[data-name="delta"] .chart-name.chart-child',
+      { timeout: 5000 });
 
     // 5. The toolbar's own grouping acts on the rail chart.
     await page.click('#session-chart .chart-seg[aria-label="Group by"] .chart-seg-btn:has-text("Workspace")');
@@ -138,7 +168,7 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
 
     // 7. The view survives a reload.
     await page.goto(`http://127.0.0.1:${port}/#/`);
-    await page.waitForFunction((sel) => document.querySelectorAll(sel).length >= 3, ROWS, { timeout: 15000 });
+    await page.waitForFunction((sel) => document.querySelectorAll(sel).length >= 4, ROWS, { timeout: 15000 });
     assert.equal(await page.$eval('input[name="session-view"][value="chart"]', (e) => e.checked), true);
     assert.equal(await shown(page, "#session-filters"), false);
 
@@ -149,6 +179,11 @@ const shown = (page, sel) => page.$eval(sel, (el) => {
       (els) => els.map((e) => e.textContent));
     assert.ok(pageLabels.includes("Project"), pageLabels.join(" | "));
     assert.ok(await page.$("#chart-view .wf-head"), "the page keeps its head");
+    // 10, on the page: the same order and the child stepped in.
+    await page.waitForSelector('#chart-view .chart-row[data-name="delta"] .chart-name.chart-child',
+      { timeout: 5000 });
+    const pageRows = await order("#chart-view");
+    assert.deepEqual(pageRows.map((r) => r.name), ["alpha", "delta", "gamma", "beta"]);
 
     // 8. Back to List: the list and the filters return, the rail chart empties.
     await page.click('#session-view input[value="list"] + span');
