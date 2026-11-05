@@ -9796,6 +9796,16 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-legend-known::before, .cf2-legend-unknown::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
 .cf2-legend-known::before { background: #58a6ff; }
 .cf2-legend-unknown::before { border: 1px dashed #8b949e; }
+.cf2-gates { margin-top: 12px; }
+.cf2-gates-title { font-size: 12px; font-weight: 600; color: #9da5b0; margin: 0 0 4px; }
+.cf2-gates svg { width: 100%; display: block; }
+.cf2-gate-closed { fill: #d29922; }
+.cf2-gate-open { fill: #f85149; }
+.cf2-gate-cut { fill: #8b949e; }
+.cf2-legend-gate-closed::before, .cf2-legend-gate-open::before, .cf2-legend-gate-cut::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+.cf2-legend-gate-closed::before { background: #d29922; }
+.cf2-legend-gate-open::before { background: #f85149; }
+.cf2-legend-gate-cut::before { background: #8b949e; }
 .cf2-throughput details { margin-top: 6px; }
 .cf2-throughput summary { cursor: pointer; font-size: 12px; color: #9da5b0; }
 .cf2-throughput-compare > .cf2-throughput-controls { margin: 6px 0; }
