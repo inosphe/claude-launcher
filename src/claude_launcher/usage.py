@@ -27,6 +27,13 @@ that key when the launcher can tell, else the console's own key name
 An OpenCode Go provider (``opencode.ai/zen/go``) reports its plan windows --
 the rolling 5 hours, the week and the month, each a percentage and a reset
 time -- at ``/zen/go/v1/usage``, read with the profile's API key.
+A Command Code provider (``api.commandcode.ai``) is read the way its own CLI
+reads ``/usage``: ``/alpha/whoami`` for the org, then the billing credits and
+subscription, with the profile's API key (claunch-j43qd). Every plan has the
+monthly credit pool; the plans the CLI runs under (Go, Pro, Max, ...) add the
+rolling 5-hour and weekly limits, which a Provider-plan account reports as
+absent (``windowLimits.limited`` false). The reading has the windows the
+account reports, so two keys of one pool on different plans read differently.
 An OpenGateway provider (``apis.opengateway.ai``) has no endpoint a key can
 read: its management surface answers ``401`` to a data-plane key and the data
 plane carries no usage route (claunch-firtc). Its reading is therefore what
@@ -85,6 +92,36 @@ _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 #: OpenCode Go's window names, and the names a reading gives them.
 _OPENCODE_GO_WINDOWS = (("rolling", "five_hour"), ("weekly", "weekly"), ("monthly", "monthly"))
 _OPENGATEWAY_HOSTS = {"apis.opengateway.ai", "apis.opengateway.ai:443"}
+_COMMANDCODE_HOSTS = {"api.commandcode.ai", "api.commandcode.ai:443"}
+_COMMANDCODE_API = "https://api.commandcode.ai"
+#: Monthly credits (USD) each Command Code plan grants, by plan-id prefix,
+#: longest first so ``individual-pro-v1`` is not read as ``individual-pro``.
+#: The table is the one the ``command-code`` CLI (1.88.3) uses for its own
+#: ``/usage`` bar; a plan missing from it is measured by its balance alone.
+_COMMANDCODE_PLAN_CREDITS = {
+    "individual-go-v1": 10.0,
+    "individual-go": 10.0,
+    "individual-goat": 70.0,
+    "individual-pro-v1": 80.0,
+    "individual-pro": 30.0,
+    "individual-provider": 15.0,
+    "individual-max": 150.0,
+    "individual-ultra": 300.0,
+    "teams-pro": 40.0,
+}
+_COMMANDCODE_PLAN_NAMES = {
+    "individual-go-v1": "Go",
+    "individual-go": "Go",
+    "individual-goat": "Goat",
+    "individual-pro-v1": "Pro",
+    "individual-pro": "Pro",
+    "individual-provider": "Provider",
+    "individual-max": "Max",
+    "individual-ultra": "Ultra",
+    "teams-pro": "Teams Pro",
+}
+#: ``windowLimits`` keys of a credits reply, and the names a reading gives them.
+_COMMANDCODE_WINDOWS = (("fiveHour", "five_hour"), ("weekly", "weekly"))
 #: What :func:`metering.load` matches in a record's ``upstream``: the shim
 #: records the endpoint it forwarded to, with whatever path the harness used.
 _OPENGATEWAY_UPSTREAM = "apis.opengateway.ai"
@@ -605,6 +642,228 @@ def _fetch_opencode_go(profile: Profile, token: str) -> UsageReport:
     except json.JSONDecodeError as exc:
         raise UsageError(f"unexpected (non-JSON) OpenCode Go usage response: {exc}") from exc
     return UsageReport(windows=_opencode_go_windows(payload), raw=payload, source="opencode-go")
+
+
+def _commandcode_context(profile: Profile) -> Optional[str]:
+    """The bearer credential of a profile whose provider is Command Code, or
+    ``None`` when its provider is another backend.
+
+    The provider is recognised by any endpoint it declares on
+    ``api.commandcode.ai`` -- the OpenAI one a translated provider has
+    (``anthropic_translation: openai``) as well as an Anthropic base URL --
+    because the usage API is the account's, whichever protocol the harness
+    speaks to it.
+    """
+    provider = providers.resolve_name(profile)
+    if provider == providers.DEFAULT_PROVIDER:
+        return None
+    declared_env = providers.provider_env(provider)
+    declared_env.update(lineage.effective_env(profile))
+    candidates = [str(declared_env.get("ANTHROPIC_BASE_URL") or "")]
+    try:
+        candidates.extend(str(v or "") for v in providers.spec(provider).endpoints.values())
+    except providers.ProviderError:
+        pass
+    if not any(_is_commandcode_url(url) for url in candidates):
+        return None
+    # Not ``runner.child_env(with_token=True)``: a translated provider starts
+    # the routing shim for a harness, and a listing must not.
+    stored = lineage.stored_auth_token(profile)
+    try:
+        declared_key = providers.auth_token(provider)
+    except providers.ProviderError:
+        declared_key = None
+    return str(
+        stored
+        or declared_key
+        or declared_env.get("ANTHROPIC_AUTH_TOKEN")
+        or declared_env.get("ANTHROPIC_API_KEY")
+        or ""
+    ).strip()
+
+
+def _is_commandcode_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "https" and parsed.netloc.lower() in _COMMANDCODE_HOSTS
+
+
+def _commandcode_get(profile: Profile, path: str, token: str, query: Optional[dict] = None) -> dict:
+    params = {k: v for k, v in (query or {}).items() if v is not None}
+    url = _COMMANDCODE_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "claude-launcher",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        if exc.code in (401, 403):
+            raise UsageError(
+                f"Command Code rejected the API key ({exc.code}); "
+                f"run 'claunch set-token {profile.name}' with a current key"
+            ) from exc
+        raise UsageError(f"Command Code {path} request failed ({exc.code}): {detail[:200]}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise UsageError(f"could not reach the Command Code API: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"unexpected (non-JSON) Command Code {path} response: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise UsageError(f"unexpected Command Code {path} response: {json.dumps(payload)[:200]}")
+    return payload
+
+
+def _commandcode_plan(plan_id: object) -> Optional[str]:
+    """The key of :data:`_COMMANDCODE_PLAN_CREDITS` a plan id falls under."""
+    text = str(plan_id or "").strip().lower().replace("_", "-")
+    if not text:
+        return None
+    for prefix in sorted(_COMMANDCODE_PLAN_CREDITS, key=len, reverse=True):
+        if text.startswith(prefix):
+            return prefix
+    return None
+
+
+def _commandcode_reset(value: object) -> Optional[str]:
+    """A window's ``resetAt`` as ISO 8601. The CLI compares it with
+    ``Date.now()``, so a number is epoch milliseconds; a value small enough
+    to be seconds is read as seconds, and a string is passed through."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return None
+    return str(value)
+
+
+def _commandcode_windows(
+    credits_reply: dict, subscription: Optional[dict], spent: Optional[float] = None
+) -> List[UsageWindow]:
+    """The windows of one Command Code account: 5-hour and weekly when its
+    plan has them, then the monthly credit pool.
+
+    The pool is computed the way the CLI's ``/usage`` bar computes it: an
+    active subscription's pool is its plan's grant (or the remaining monthly
+    credits, if larger) plus purchased and free credits; without one, what is
+    left plus what the period has spent is all the reply allows.
+    """
+    windows: List[UsageWindow] = []
+    limits = credits_reply.get("windowLimits")
+    exceeded = ""
+    if isinstance(limits, dict):
+        exceeded = str(limits.get("exceeded") or "").strip()
+        for key, name in _COMMANDCODE_WINDOWS:
+            row = limits.get(key)
+            if not isinstance(row, dict):
+                continue
+            used = _number(row.get("used"))
+            cap = _number(row.get("cap"))
+            if used is None or cap is None:
+                continue
+            pct = 0.0 if cap <= 0 else max(0.0, min(100.0, used / cap * 100.0))
+            windows.append(UsageWindow(
+                name=name,
+                utilization=pct,
+                resets_at=_commandcode_reset(row.get("resetAt")),
+                status="exceeded" if exceeded in (key, name) else None,
+            ))
+
+    balance = credits_reply.get("credits")
+    if isinstance(balance, dict):
+        monthly = max(0.0, _number(balance.get("monthlyCredits")) or 0.0)
+        purchased = max(0.0, _number(balance.get("purchasedCredits")) or 0.0)
+        free = max(0.0, _number(balance.get("freeCredits")) or 0.0)
+        remaining = monthly + purchased + free
+        sub = subscription if isinstance(subscription, dict) else {}
+        plan = _commandcode_plan(sub.get("planId") or balance.get("planId"))
+        grant = _COMMANDCODE_PLAN_CREDITS.get(plan) if plan else None
+        if sub.get("status") == "active" and grant is not None:
+            pool = max(grant, monthly) + purchased + free
+        else:
+            pool = remaining + max(0.0, spent or 0.0)
+        used = max(0.0, pool - remaining)
+        pct = 0.0 if pool <= 0 else max(0.0, min(100.0, used / pool * 100.0))
+        status = None
+        if remaining <= 0 and pool > 0:
+            status = "exceeded"
+        elif balance.get("belowThreshold") is True:
+            status = "low"
+        end = sub.get("currentPeriodEnd")
+        windows.append(UsageWindow(
+            name="monthly",
+            utilization=pct,
+            resets_at=str(end) if end else None,
+            used_dollars=round(used, 4),
+            limit_dollars=round(pool, 4),
+            remaining_dollars=round(remaining, 4),
+            status=status,
+        ))
+    if not windows:
+        raise UsageError(
+            f"unexpected Command Code credits response: {json.dumps(credits_reply)[:200]}"
+        )
+    return windows
+
+
+def _fetch_commandcode(profile: Profile, token: str) -> UsageReport:
+    if not token:
+        raise credentials.CredentialsError(
+            f"no Command Code API key for profile {profile.name!r}; "
+            f"run 'claunch set-token {profile.name}' first"
+        )
+    whoami = _commandcode_get(profile, "/alpha/whoami", token, {"limits": "1"})
+    org = whoami.get("org") if isinstance(whoami.get("org"), dict) else None
+    org_id = org.get("id") if org else None
+    credits_reply = _commandcode_get(profile, "/alpha/billing/credits", token, {"orgId": org_id})
+    try:
+        sub_reply = _commandcode_get(
+            profile, "/alpha/billing/subscriptions", token, {"orgId": org_id}
+        )
+    except UsageError:
+        # The CLI shows the balance without a subscription too; a plan we
+        # cannot name only loses the pool's plan grant, not the reading.
+        sub_reply = {}
+    subscription = sub_reply.get("data") if isinstance(sub_reply.get("data"), dict) else None
+    spent = None
+    if not (subscription and subscription.get("status") == "active"):
+        # Without an active plan the pool is "left + spent this period", so
+        # the period's spend is needed; with one, the plan grant fixes it.
+        since = subscription.get("currentPeriodStart") if subscription else None
+        try:
+            summary = _commandcode_get(
+                profile, "/alpha/usage/summary", token, {"orgId": org_id, "since": since}
+            )
+            spent = _number(summary.get("totalCost"))
+        except UsageError:
+            spent = None
+    windows = _commandcode_windows(credits_reply, subscription, spent)
+    plan = _commandcode_plan(subscription.get("planId") if subscription else None)
+    limits = credits_reply.get("windowLimits")
+    raw = {
+        "plan": plan,
+        "plan_name": _COMMANDCODE_PLAN_NAMES.get(plan) if plan else None,
+        "plan_status": subscription.get("status") if subscription else None,
+        # "provider" when the account reports no rolling limits: the
+        # Provider plan, measured by its monthly credits alone.
+        "mode": (
+            "windowed"
+            if isinstance(limits, dict) and limits.get("limited")
+            else "provider" if plan == "individual-provider" else "credits"
+        ),
+        "credits": credits_reply.get("credits"),
+        "windowLimits": limits,
+    }
+    return UsageReport(windows=windows, raw=raw, source="commandcode")
 
 
 def _opengateway_context(profile: Profile) -> Optional[str]:
@@ -1433,6 +1692,8 @@ def reader(profile: Profile) -> str:
             return "fireworks-billing"
         if _opencode_go_context(profile) is not None:
             return "opencode-go"
+        if _commandcode_context(profile) is not None:
+            return "commandcode"
         if _opengateway_context(profile) is not None:
             return "opengateway-local"
         provider = providers.resolve_name(profile)
@@ -1469,6 +1730,11 @@ def fetch(profile: Profile) -> UsageReport:
         if token is None:
             raise UsageError(f"profile {profile.selector!r} no longer selects OpenCode Go")
         return _fetch_opencode_go(profile, token)
+    if kind == "commandcode":
+        token = _commandcode_context(profile)
+        if token is None:
+            raise UsageError(f"profile {profile.selector!r} no longer selects Command Code")
+        return _fetch_commandcode(profile, token)
     if kind == "opengateway-local":
         return _fetch_opengateway(profile)
     if kind == "anthropic":
@@ -1482,7 +1748,9 @@ def fetch(profile: Profile) -> UsageReport:
 #: Readers that measure usage *per key*: the token the pool holds is the
 #: credential the endpoint authenticates, so spreading launches over several
 #: keys spreads the usage the strategy compares.
-KEYED_READERS = ("anthropic", "kimi-provider", "fireworks-billing", "opencode-go")
+KEYED_READERS = (
+    "anthropic", "kimi-provider", "fireworks-billing", "opencode-go", "commandcode",
+)
 
 #: Readers whose usage belongs to the harness login, with the sentence a
 #: usage strategy quotes when it falls back to rotation. Rotating keys cannot
@@ -1535,6 +1803,8 @@ def report_for_token(profile: Profile, token: str) -> Optional[UsageReport]:
         return _fetch_fireworks(profile, token)
     if kind == "opencode-go":
         return _fetch_opencode_go(profile, token)
+    if kind == "commandcode":
+        return _fetch_commandcode(profile, token)
     return None
 
 
@@ -1624,11 +1894,20 @@ def tie_break_key(health: "KeyHealth") -> tuple:
 
     Shorter window first, then the next: a key lower on the 5-hour plan is
     free sooner, which is what a restart is being spent on.
+
+    The comparison is made rung by rung of the 5-hour / week / month ladder,
+    so two keys whose accounts report different windows still compare like
+    with like (claunch-j43qd): a pool can hold a Command Code Provider-plan
+    key, which has only the monthly pool, beside a key on a plan with 5-hour
+    and weekly limits. A rung a key does not report is ``0`` -- that account
+    has no limit there to run into -- and several windows on one rung (a
+    per-model bucket) count by the highest.
     """
-    ranked = sorted(
-        (window_rank(name), float(value)) for name, value in health.windows
-    )
-    return (health.peak, tuple(ranked))
+    rungs = [0.0] * 4
+    for name, value in health.windows:
+        rank = window_rank(name)
+        rungs[rank] = max(rungs[rank], float(value))
+    return (health.peak, tuple(rungs))
 
 
 def health_for_report(report: Optional[UsageReport]) -> Optional[KeyHealth]:

@@ -564,6 +564,7 @@ def test_every_keyed_reader_kind_has_a_branch_in_utilization_for_token(
     monkeypatch.setattr(usage, "_fetch_claude", lambda prof, token=None: report)
     monkeypatch.setattr(usage, "_fetch_fireworks", lambda prof, token: report)
     monkeypatch.setattr(usage, "_fetch_opencode_go", lambda prof, token: report)
+    monkeypatch.setattr(usage, "_fetch_commandcode", lambda prof, token: report)
     monkeypatch.setattr(
         usage, "_kimi_provider_context", lambda prof, token=None: ("a", "b")
     )

@@ -43,6 +43,7 @@
     "kimi-web-server": "via Kimi Code local server",
     "fireworks-billing": "via Fireworks billing API",
     "opencode-go": "via OpenCode Go usage API",
+    "commandcode": "via Command Code billing API",
     "opengateway-local": "via this machine's request records",
   };
   // Statuses `claunch usage` leaves out: the ones that say nothing is wrong.
