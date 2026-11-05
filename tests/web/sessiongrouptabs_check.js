@@ -121,19 +121,37 @@ function storage(seed) {
 /* The state block and the tab helpers, sliced from app.js and bound to a
    browser storage of the harness's choosing. `project` seeds the rail's
    currentProject: "" is "All projects", a name is a picked project — the
-   ⊕ demands one (claunch-teipq). */
-function load(seed, project = "") {
+   ⊕ demands one (claunch-teipq).
+
+   The open tab is this browser tab's alone (claunch-9thjl.1): it is read
+   from the address and this tab's sessionStorage, never from localStorage,
+   which every tab of the origin shares. `opts.session` seeds sessionStorage
+   and `opts.hash` the address, the way a reload carries them. */
+function load(seed, project = "", opts = {}) {
   const localStorage = storage(seed);
+  const sessionStorage = storage(opts.session || {});
+  const location = { hash: opts.hash || "#/" };
+  const history = {
+    state: null, replaced: [],
+    replaceState(state, _title, url) {
+      this.state = state;
+      if (url !== undefined) { this.replaced.push(url); location.hash = url; }
+    },
+  };
   const ctx = { redraws: [], went: [] };
   new Function(
-    "exports", "document", "$", "localStorage", "BASE", "refreshSessions", "go",
+    "exports", "document", "$", "localStorage", "sessionStorage", "location",
+    "history", "BASE", "refreshSessions", "go",
     constLine("SESSION_GROUP_KEY") + constLine("SESSION_GROUP_ORDER_KEY") +
     constLine("SESSION_GROUPS") + letBlock("sessionGroupOrder") + "\n" +
     constLine("RAIL_SCROLL_TOP_ANIM_MS") + "\n" +
     constLine("SESSION_GROUP_TAB_KEY") + letBlock("sessionGroupTab") + "\n" +
+    slice("parseGroupParam") + slice("rememberSessionGroupTab") +
+    slice("hashWithGroup") + slice("syncGroupHash") + slice("hashQuery") + "\n" +
     constLine("SESSION_ORIGIN_FILTERS") + constLine("SESSION_ORIGIN_KEY") +
     letBlock("sessionOriginFilter") + "\n" +
     "let sessionGroupTabScrollReset = false;\n" +
+    slice("syncRouteGroup") + "\n" +
     "let sessionFilter = 'current', sessionSearch = {q: ''};\n" +
     `let currentProject = ${JSON.stringify(project)};\n` +
     "function sessionMatchesSearch(s) { return !sessionSearch.q || s.name.includes(sessionSearch.q); }\n" +
@@ -162,9 +180,15 @@ Object.assign(exports, {
   origin: () => sessionOriginFilter,
   byOrigin: filterSessionOrigin,
   setProject: (v) => { currentProject = v; },
-});`)(ctx, document, $, localStorage, "/t/local/",
-      (opts) => ctx.redraws.push(opts), (hash) => ctx.went.push(hash));
+  route: syncRouteGroup,
+  hash: () => location.hash,
+  replaced: () => history.replaced,
+});`)(ctx, document, $, localStorage, sessionStorage, location, history,
+      "/t/local/", (opts) => ctx.redraws.push(opts), (hash) => ctx.went.push(hash));
   ctx.writes = localStorage.writes;
+  ctx.sessionWrites = sessionStorage.writes;
+  ctx.location = location;
+  ctx.history = history;
   return ctx;
 }
 
@@ -175,12 +199,23 @@ check("a saved nested order keeps its outer grouping",
 check("the former mesh-only checkbox still reads as mesh",
       load({ "claunch_session_group:/t/local/": "true" }).order(), ["mesh"]);
 check("nothing saved is ungrouped", load({}).order(), []);
+const TAB_KEY = "claunch_session_group_tab:/t/local/";
 check("a saved tab pick is read back per grouping",
-      load({ "claunch_session_group_tab:/t/local/": '{"mesh":"m2","workspace":7}' }).tab(),
+      load({}, "", { session: { [TAB_KEY]: '{"mesh":"m2","workspace":7}' } }).tab(),
       { mesh: "m2" });
+check("the pick is not read from localStorage, which every tab shares",
+      load({ [TAB_KEY]: '{"mesh":"m2"}' }).tab(), {});
+check("the address outranks this tab's memory",
+      load({}, "", { session: { [TAB_KEY]: '{"mesh":"m2"}' }, hash: "#/?group=mesh:m9" }).tab(),
+      { mesh: "m9" });
+check("...and a workspace path keeps its own colons",
+      load({}, "", { hash: "#/?group=workspace:F%3A%5Cworks%5Ca" }).tab(),
+      { workspace: "F:\\works\\a" });
+check("a group the page does not group by is no pick",
+      load({}, "", { hash: "#/?group=team:x" }).tab(), {});
 
 /* ---- the split ---- */
-const ctx = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"m2"}' }, "proj1");
+const ctx = load({}, "proj1", { session: { [TAB_KEY]: '{"mesh":"m2"}' } });
 const session = (name) => ({ type: "session", session: { name }, depth: 0 });
 const shadow = (name) => ({ type: "shadow", shadow: { session: name, machine: "x" }, depth: 0 });
 const ROWS = [
@@ -268,13 +303,40 @@ tabs()[1].handlers.click();
 check("pressing another tab opens it and redraws from the records in hand",
       [ctx.tab().mesh, ctx.redraws, ctx.scrollReset()],
       ["m1", [{ cached: true }], true]);
-check("the pick is remembered in this browser",
-      ctx.writes.at(-1), ["claunch_session_group_tab:/t/local/", '{"mesh":"m1"}']);
+check("the pick is never written to localStorage, which every tab shares",
+      ctx.writes.filter((w) => w[0] === TAB_KEY), []);
+check("...it is this tab's sessionStorage",
+      ctx.sessionWrites, [[TAB_KEY, '{"mesh":"m1"}']]);
+check("...and it rides the address (the separator arrives encoded)",
+      [ctx.hash(), ctx.replaced().at(-1)],
+      ["#/?group=mesh%3Am1", "#/?group=mesh%3Am1"]);
 let prevented = 0;
 tabs()[0].handlers.keydown({ key: "Enter", preventDefault() { prevented++; } });
 check("Enter on a tab presses it", [ctx.tab().mesh, prevented], ["(no mesh)", 1]);
 tabs()[0].handlers.keydown({ key: "x", preventDefault() { prevented++; } });
 check("other keys are left alone", prevented, 1);
+
+/* ---- the address ---- */
+const GROUPED = { "claunch_session_group_order:/t/local/": '["mesh"]' };
+const routed = load(GROUPED, "", { session: { [TAB_KEY]: '{"mesh":"m2"}' }, hash: "#/s/x" });
+routed.route();
+check("an address that names no pick is given this tab's back, in place",
+      routed.hash(), "#/s/x?group=mesh%3Am2");
+check("...with no request", routed.redraws, []);
+const obeyed = load(GROUPED, "", { session: { [TAB_KEY]: '{"mesh":"m2"}' }, hash: "#/s/x" });
+obeyed.location.hash = "#/s/x?group=mesh%3Am9";   // a link, or Back
+obeyed.route();
+check("an address that names a pick is obeyed, from the records in hand",
+      [obeyed.tab().mesh, obeyed.redraws, obeyed.scrollReset()],
+      ["m9", [{ cached: true }], true]);
+const already = load(GROUPED, "", { session: { [TAB_KEY]: '{"mesh":"m9"}' },
+                                hash: "#/?group=mesh%3Am9" });
+already.route();
+check("...a reload whose address and memory agree asks for nothing",
+      [already.tab().mesh, already.redraws], ["m9", []]);
+const ungrouped = load({}, "", { session: { [TAB_KEY]: '{"mesh":"m2"}' }, hash: "#/s/x" });
+ungrouped.route();
+check("ungrouped, there is no tab to name", ungrouped.hash(), "#/s/x");
 
 /* ---- the header row's press ---- */
 list.scrollTop = 300;
@@ -390,7 +452,7 @@ check("ungrouped retains the selected origin and clears the old group metadata",
 /* ---- counts follow status and search without a rail rebuild (claunch-3n6ml) ---- */
 const counts = () => tabs().map((t) => t.querySelector(".session-group-count").textContent);
 const headerCount = () => head.querySelector(".session-group-count").textContent;
-const counted = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"claunch"}' });
+const counted = load({}, "", { session: { [TAB_KEY]: '{"mesh":"claunch"}' } });
 const record = (name, extra = {}) => ({ type: "session", session: { name, status: "busy", ...extra } });
 const dead = (name) => record(name, { status: "exited" });
 const screenTabs = [

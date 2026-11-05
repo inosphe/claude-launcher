@@ -104,6 +104,13 @@ option:disabled { color: #6b7280; }
   font-size: 14px; line-height: 1; padding: 2px 5px;
 }
 #refresh-archived { margin-left: 0; font-size: 11px; }
+/* Beside the title, not with the buttons on the right: it names this window. */
+#tab-title-edit {
+  flex: none; align-self: center; cursor: pointer;
+  background: none; border: none; color: #7d8590;
+  font-size: 13px; line-height: 1; padding: 2px 4px;
+}
+#tab-title-edit:hover, #tab-title-edit.custom { color: #58a6ff; }
 #refresh-all:hover, #refresh-archived:hover { color: #58a6ff; }
 #refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

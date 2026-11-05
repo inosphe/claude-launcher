@@ -650,6 +650,7 @@ CHECKS = [
         "prwizard_check.js",
         "railmeshgroup_check.js",
         "projects_check.js",
+        "tabtitle_check.js",
         "searchclear_check.js",
         "modalgitwait_check.js",
         "floworphans_check.js",

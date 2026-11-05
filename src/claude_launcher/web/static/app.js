@@ -2699,26 +2699,55 @@ function shadowGroupValue(group, row) {
   return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
 }
 
-/* Which group's tab is open, per grouping, remembered per browser.
+/* Which group's tab is open, per grouping, remembered per browser tab
+   (claunch-9thjl.1).
 
    The rail is a poll and rebuilds whenever the fleet changes, so the pick
    lives here and every rebuild reads it back. A saved value that is not
    among the groups right now (the mesh ended, the filter emptied it) is
    kept rather than overwritten: the first tab stands in for it until that
-   group is back. */
+   group is back.
+
+   The pick belongs to one browser tab, so it stays out of localStorage:
+   every tab of this origin shares that, and a pick in one window would move
+   the rail -- and the automatic title that names its open group -- in the
+   others on their next load. It rides the address as `?group=<group>:<value>`
+   beside `?project=` and `?title=` -- a reload, a bookmark and a duplicated
+   tab keep it -- and sessionStorage, which the browser keeps per tab, holds
+   it for an address that names none (every link inside the page is written
+   without it). */
 const SESSION_GROUP_TAB_KEY = `claunch_session_group_tab:${BASE}`;
+
+/* `mesh:mesh-0826` -> {group, value}. Only the first colon separates: a
+   workspace value is a path and keeps its own (`F:\works\...`). */
+function parseGroupParam(raw) {
+  const text = String(raw || "");
+  const at = text.indexOf(":");
+  if (at < 0) return null;
+  const group = text.slice(0, at);
+  const value = text.slice(at + 1);
+  if (!value || !SESSION_GROUPS.includes(group)) return null;
+  return { group, value };
+}
+
 let sessionGroupTab = (() => {
+  let out = {};
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
+    const saved = JSON.parse(sessionStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      const out = {};
       for (const group of SESSION_GROUPS) {
         if (typeof saved[group] === "string") out[group] = saved[group];
       }
-      return out;
     }
   } catch {}
-  return {};
+  // The address outranks this tab's memory: it is what a reload carries.
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const named = parseGroupParam(new URLSearchParams(q < 0 ? "" : h.slice(q + 1)).get("group"));
+    if (named) out[named.group] = named.value;
+  } catch {}
+  return out;
 })();
 
 /* The tab that is open: the saved one when it is among `values`, else the
@@ -2728,13 +2757,58 @@ function sessionGroupActiveTab(group, values) {
   return values.includes(saved) ? saved : (values[0] ?? null);
 }
 
+/* This tab's memory of the pick, for an address that names none. */
+function rememberSessionGroupTab() {
+  if (typeof sessionStorage === "undefined") return;   // a reduced harness
+  try { sessionStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab)); } catch {}
+}
+
+/* The same address with the open tab set to `group:value`, or taken out. */
+function hashWithGroup(h, group, value) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (value) params.set("group", `${group}:${value}`);
+  else params.delete("group");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+/* Write the open tab into the address in place -- replaced, not pushed: a
+   pick narrows the rail, it is not a place to go Back to. */
+function syncGroupHash(group, value) {
+  if (typeof location === "undefined" || typeof history === "undefined") return;
+  const want = hashWithGroup(location.hash, group, value);
+  if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
+}
+
 function setSessionGroupTab(group, value, remember = true) {
   sessionGroupTab[group] = value;
-  if (remember) {
-    try {
-      localStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab));
-    } catch {}
+  if (!remember) return;
+  // Guarded: reduced harnesses slice this without the two helpers.
+  if (typeof rememberSessionGroupTab === "function") rememberSessionGroupTab();
+  if (typeof syncGroupHash === "function") syncGroupHash(group, value);
+}
+
+/* The open tab rides the address as `?group=`. An address that names one is
+   obeyed -- a reload, a bookmark, Back -- and one that names none (every
+   link inside the page is written without it) is given the current pick
+   back, in place. Called by route() before anything else. */
+function syncRouteGroup() {
+  const named = hashQuery(location.hash);
+  if (named.has("group")) {
+    const pick = parseGroupParam(named.get("group"));
+    if (pick && sessionGroupTab[pick.group] !== pick.value) {
+      setSessionGroupTab(pick.group, pick.value, false);
+      rememberSessionGroupTab();
+      sessionGroupTabScrollReset = true;
+      if (typeof refreshSessions === "function") refreshSessions({ cached: true });
+    }
+    return;
   }
+  const group = sessionGroupOrder[0];
+  if (group && sessionGroupTab[group]) syncGroupHash(group, sessionGroupTab[group]);
+  else if (group) syncGroupHash(group, "");
 }
 
 /* Which side of a mesh the rail shows, chosen on the mesh header
@@ -4678,6 +4752,10 @@ function renderSessionGroupTabs(group, tabs, active) {
   bar.classList.toggle("hidden", !group || !tabs.length);
   bar.textContent = "";
   bar.dataset.active = active ?? "";
+  // Guarded: reduced harnesses slice this without the title state.
+  if (typeof noteRailOpenGroup === "function") {
+    noteRailOpenGroup(group || "", group && tabs.length ? active : null);
+  }
   if (!group) {
     renderSessionGroupHeader("", null);
     return;
@@ -4808,6 +4886,11 @@ function setSessionGroup(group, enabled, remember = true) {
   if (remember) {
     localStorage.setItem(SESSION_GROUP_ORDER_KEY, JSON.stringify(sessionGroupOrder));
     localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
+    // The address names the open tab of the grouping in force; switching the
+    // grouping switches which pick it names.
+    if (typeof syncGroupHash === "function") {
+      syncGroupHash(group, sessionGroupTab[group] || "");
+    }
   }
   syncSessionGroupMode();
   refreshSessions();
@@ -14416,6 +14499,7 @@ function setCurrentProject(name) {
     applyProjectDefaultCwd(form);
   }
   if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
+  if (typeof syncTabTitle === "function") syncTabTitle();
   // Both lists hold every project already: redraw them from the cache now,
   // with no request, so the pick shows the moment it is made.
   refreshSessions({ cached: true });
@@ -14437,6 +14521,102 @@ function syncRouteProject() {
     const want = named.get("project") || "";
     if (want !== currentProject) setCurrentProject(want);
   } else if (currentProject) syncProjectHash();
+}
+
+/* The browser tab's title (claunch-9thjl). Several windows on one daemon are
+   common, and every one of them used to read "claunch sessions" in the
+   browser's tab strip. By default the title names what the rail is looking
+   at: the open group tab (a mesh, or a workspace) and the picked project. A
+   person can name a window instead (the ✎ beside the rail's title).
+
+   That name belongs to one browser tab, so it is kept out of localStorage:
+   every tab of this origin shares that, and naming one window would rename
+   the others on their next load. It rides the address as `?title=` beside
+   `?project=` -- a reload, a bookmark and a duplicated tab keep it -- and
+   sessionStorage, which the browser keeps per tab, holds it for an address
+   that names none (every link inside the page is written without it). */
+const TAB_TITLE_KEY = `claunch_tab_title:${BASE}`;
+const TAB_TITLE_DEFAULT = "claunch sessions";
+let customTabTitle = (() => {
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const params = new URLSearchParams(q < 0 ? "" : h.slice(q + 1));
+    if (params.has("title")) return (params.get("title") || "").trim();
+  } catch {}
+  try { return (sessionStorage.getItem(TAB_TITLE_KEY) || "").trim(); } catch { return ""; }
+})();
+// The rail's open group tab, as renderSessionGroupTabs last drew it.
+let railOpenGroup = { group: "", value: null };
+function noteRailOpenGroup(group, value) {
+  if (railOpenGroup.group === group && railOpenGroup.value === value) return;
+  railOpenGroup = { group, value };
+  syncTabTitle();
+}
+
+/* The title the rail's state gives: the open group tab, then the project,
+   each left out when there is none. The `(no mesh)` bucket is not a name. */
+function autoTabTitle(project, group, value) {
+  const parts = [];
+  if (group && value && value !== "(no mesh)") {
+    parts.push(group === "workspace" ? sessionWorkspaceLabel(value) : value);
+  }
+  if (project) parts.push(project);
+  return parts.length ? `${parts.join(" · ")} · claunch` : TAB_TITLE_DEFAULT;
+}
+
+/* The same address with the custom title set to `name`, or taken out. */
+function hashWithTitle(h, name) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (name) params.set("title", name);
+  else params.delete("title");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+function syncTabTitle() {
+  if (typeof document === "undefined") return;
+  const want = customTabTitle
+    || autoTabTitle(currentProject, railOpenGroup.group, railOpenGroup.value);
+  if (document.title !== want) document.title = want;
+  const btn = typeof $ === "function" ? $("tab-title-edit") : null;
+  if (btn) {
+    btn.classList.toggle("custom", !!customTabTitle);
+    btn.title = customTabTitle
+      ? `browser tab named "${customTabTitle}" — click to rename or clear`
+      : "name this browser tab (now follows the open mesh and project)";
+  }
+}
+
+/* Name this browser tab; "" goes back to the automatic title. Written into
+   the address in place, like the project: a name is not a place to go Back
+   to. */
+function setCustomTabTitle(name) {
+  const next = String(name || "").trim();
+  customTabTitle = next;
+  try {
+    if (next) sessionStorage.setItem(TAB_TITLE_KEY, next);
+    else sessionStorage.removeItem(TAB_TITLE_KEY);
+  } catch {}
+  if (typeof location !== "undefined" && typeof history !== "undefined") {
+    const want = hashWithTitle(location.hash, next);
+    if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
+  }
+  syncTabTitle();
+}
+
+/* The custom title rides the address as `?title=`, the way the project
+   does (syncRouteProject): an address that names one is obeyed, and one
+   that names none is given the current name back. Called by route(). */
+function syncRouteTitle() {
+  const named = hashQuery(location.hash);
+  if (named.has("title")) {
+    const want = (named.get("title") || "").trim();
+    if (want !== customTabTitle) setCustomTabTitle(want);
+  } else if (customTabTitle) setCustomTabTitle(customTabTitle);
+  syncTabTitle();
 }
 
 /* Opening a session while the rail is narrowed to another project moves the
@@ -19841,6 +20021,14 @@ window.claunchNotices = {
   shown: (id) => noticeSourceShown(id),
   record: (entry) => noticeRecord(Object.assign({ kind: "" }, entry)),
 };
+
+// Guarded: reduced harnesses slice this stretch without the rail's header.
+const tabTitleEdit = $("tab-title-edit");
+if (tabTitleEdit) tabTitleEdit.addEventListener("click", () => {
+  const got = prompt("Name this browser tab (empty: follow the open mesh and project)",
+    customTabTitle);
+  if (got !== null) setCustomTabTitle(got);
+});
 
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
@@ -29367,6 +29555,9 @@ function route() {
   r.detail = hashDetail(location.hash);
   // Guarded: reduced harnesses slice route() without the project state.
   if (typeof syncRouteProject === "function") syncRouteProject();
+  // Guarded: reduced harnesses slice route() without the group tab state.
+  if (typeof syncRouteGroup === "function") syncRouteGroup();
+  if (typeof syncRouteTitle === "function") syncRouteTitle();
   // An open rail follows the terminal: the rail describes the session on
   // screen, and one left pointing at the session we came *from* quietly
   // mislabels everything in it, its cflow run most of all. The links that
