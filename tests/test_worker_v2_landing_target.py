@@ -195,11 +195,13 @@ def test_no_target_asks_the_person_and_does_not_route_upward():
 # --------------------------------------------------------------------------- #
 # the person's gate
 # --------------------------------------------------------------------------- #
-def test_the_person_gets_three_named_choices():
+def test_the_person_gets_four_named_choices():
     """Named here rather than left to the prompt: the ``cases`` keys are the
-    answers, so these words are the interface a person answers through."""
+    answers, so these words are the interface a person answers through.
+    claunch-yzwut added the fourth, ``merge-by-agent``."""
     choices = {key for n in _gate_subtree() for key in (n.get("cases") or [])}
-    assert choices == {"rebase-and-repost", "merge-by-person", "freeze-and-close"}
+    assert choices == {"rebase-and-repost", "merge-by-person", "freeze-and-close",
+                       "merge-by-agent"}
 
 
 def test_the_three_choices_map_onto_lands_declared_outcomes():
@@ -225,6 +227,10 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     # measured on s6086 across two rounds (claunch-i8cj4 30083 -> 30727 ->
     # 30737). Every answer the gate gives now ends the round.
     assert raised == {"blocked", "held"}, raised
+    # claunch-yzwut: merge-by-agent is the one answer that does not end the
+    # round -- the gate returns ok and land carries on to its own landing
+    # steps, so land's returns do not grow.
+    assert _the_ask()["cases"]["merge-by-agent"]["return"] == "ok"
     # the declaration's shape is what makes these land's answers, not the
     # ask procedure's: each carries the fields land declares for it. The
     # optionals are the recorded decision (claunch-1aj1a.1) -- decision, its
@@ -329,7 +335,12 @@ def test_the_same_question_is_not_asked_twice_for_the_same_place():
     cases = replay["cases"]
     # every answer the gate can give has a case, and the unanswered key asks
     assert set(cases) == {"merge-by-person", "rebase-and-repost",
-                          "freeze-and-close", "ask-again"}, cases
+                          "freeze-and-close", "merge-by-agent", "ask-again"}, cases
+    # claunch-yzwut: a replayed merge-by-agent does not end the round; it marks
+    # the round as a self-landing and the seq goes on (re-measure, then on)
+    arm = cases["merge-by-agent"]
+    assert arm["call"] == "self-merge-arm" and arm["bind"] == "self_merge", arm
+    assert arm["with"]["armed"] is True, arm
     # the replayed answers go to the same outcomes the gate returns for them
     assert cases["merge-by-person"]["return"] == "blocked"
     assert cases["rebase-and-repost"]["return"] == "blocked"
@@ -450,7 +461,8 @@ def test_the_gate_is_still_asked_when_nothing_is_recorded():
                    "landing-target-reroute"], ids
     # ...and the gate is still reached on that seq: the ask is the else of the
     # re-route, so a run that never sees a target still ends at the person
-    assert _find(seq[-1]["cond"][1]["else"], "call", "landing-target-gate") is not None
+    # (the middle branch is the replayed merge-by-agent, claunch-yzwut)
+    assert _find(seq[-1]["cond"][-1]["else"], "call", "landing-target-gate") is not None
 
 
 def _land_no_target_retry() -> dict:
@@ -516,9 +528,17 @@ def test_a_target_that_appears_during_the_retries_takes_the_normal_landing_path(
     """
     reroute = _find(_land_no_target(), "id", "landing-target-reroute")
     assert reroute is not None, "no branch between the re-measure and the gate"
-    [hit, miss] = reroute["cond"]
+    [hit, replayed, miss] = reroute["cond"]
     assert hit["if"] == "$result['landing-target-retry'].outcome == 'ok'", hit
-    assert hit["then"] == [], hit
+    # claunch-yzwut: the only work on that path is to clear the self-landing
+    # mark a replayed merge-by-agent may have set -- a round with a receiver
+    # lands through the request, never through the agent's own merge
+    assert hit["then"]["call"] == "self-merge-arm", hit
+    assert hit["then"]["with"]["armed"] is False, hit
+    assert hit["then"]["bind"] == "self_merge", hit
+    # a replayed merge-by-agent (still no receiver) goes on without asking
+    assert replayed["if"] == "$data.self_merge.armed == true", replayed
+    assert replayed["then"] == [], replayed
     assert "if" not in miss, miss
     ask = _find(miss["else"], "id", "landing-target-ask")
     assert ask is not None and ask.get("call") == "landing-target-gate", miss
@@ -624,7 +644,8 @@ def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
     # is no ``rework`` any more: claunch-1aj1a.1 made every choice end the
     # round (rework could only re-run the batch), so the declaration would
     # name an outcome nothing raises.
-    assert set(proc["returns"]) == {"blocked", "held"}
+    # claunch-yzwut: ok is merge-by-agent's, the one answer that goes on.
+    assert set(proc["returns"]) == {"blocked", "held", "ok"}
     # ...and the try's catch handles it
     choice = _find(proc["body"], "id", "landing-target-choice")
     assert choice is not None and "try" in choice, choice
