@@ -251,6 +251,35 @@ def test_the_gate_answer_arms_the_round():
     assert [c["value"]["decision"] for c in ok_returns] == ["merge-by-agent"]
 
 
+def test_the_record_step_marks_the_unrun_sweep_and_tells_the_leader():
+    """D4: the worker does not run T2, and says so where it is read back --
+    the issue (two markers) and the leader (one fyi). The markers avoid the
+    three words the landing's fourth check reads as a brake."""
+    node = _doc()["nodes"]["self-merge-record"]
+    prompt = " ".join(node["prompt"].split())
+    assert "merged <머지 해시>" in prompt
+    assert "SWEEP NOT RUN: self-merge <머지 해시>" in prompt
+    assert "leader 역할 세션이 있으면 그 세션에 fyi" in prompt
+    assert "「SWEEP NOT RUN」" in prompt
+    done = " ".join(node["done_when"].split())
+    assert "`SWEEP NOT RUN: self-merge <머지 해시>`" in done
+    assert "fyi의 메시지 id나 리더가 없다는 사실" in done
+    assert set(node["effects"]) >= {"board.write", "mesh.send"}, node["effects"]
+    assert "마커에 BLOCKED·HOLD·CHANGES REQUESTED를 넣지 않는다" in prompt
+
+
+def test_the_apply_step_declares_a_merge_without_a_fixed_target():
+    """claunch-yzwut.1: the merge target is ``$data.landing.base`` -- a stacked
+    child's is its parent's stack branch -- and an effect target is a static
+    string. An untargeted ``git.merge`` hits every target in the check
+    (``_effect_hits``), so the master ban still warns on this node."""
+    from claude_launcher.cflow2 import check
+    effects = _doc()["nodes"]["self-merge-apply"]["effects"]
+    merges = [e for e in effects if check.split_effect(e)[0] == "git.merge"]
+    assert merges == ["git.merge"], effects
+    assert check._effect_hits("git.merge", "git.merge", "master")
+
+
 def test_the_merge_step_is_compare_and_swap():
     prompt = " ".join(_doc()["nodes"]["self-merge-apply"]["prompt"].split())
     assert "--match-head-commit" in prompt
@@ -261,3 +290,80 @@ def test_the_merge_step_is_compare_and_swap():
     assert "항상 `git rebase T`" in prep
     assert "git range-diff" in prep
     assert "claunch gate landing-target --json" in prep
+
+
+# --------------------------------------------------------------------------- #
+# claunch-yzwut.1: a replayed merge-by-agent goes on only on a measured "none"
+# --------------------------------------------------------------------------- #
+def _retry_chart(tmp_path):
+    """The packaged ``landing-target-retry`` wait and ``landing-target-reroute``
+    cond after a replayed ``merge-by-agent`` has armed the round. The gate the
+    else asks is a stand-in that answers ``merge-by-agent`` (the one answer
+    that comes back ok); ``after`` marks that the branch finished ok."""
+    doc = _doc()
+    land = doc["procedures"]["land"]["body"]
+    retry = _find(land, "id", "landing-target-retry")
+    reroute = _find(land, "id", "landing-target-reroute")
+    assert retry is not None and reroute is not None
+    # a bare ``on:`` loads as True under YAML 1.1; put the key back for the re-dump
+    retry = {("on" if k is True else k): v for k, v in retry.items()}
+    nodes = {"gate-asked": _stub("gate asked", {"ok": {"decision": "str", "reason": "str"}}),
+             "after": _stub("after", {"ok": {}})}
+    flow = {
+        "cflow": 2, "name": "self-merge-retry-drive",
+        "inputs": {"relation": {"type": "string", "default": "stacked"}},
+        "data": {"self_merge": {"armed": False, "reason": None},
+                 "landing_route": {"decision": None, "reason": None}},
+        "procedures": {
+            "self-merge-arm": doc["procedures"]["self-merge-arm"],
+            "landing-target-gate": {
+                "params": {"relation": {"type": "str", "default": "stacked"}},
+                "returns": {"ok": {"decision": "str", "reason": "str"}},
+                "body": [{"id": "gate-call", "seq": ["gate-asked"]},
+                         {"return": "ok",
+                          "value": {"decision": "merge-by-agent",
+                                    "reason": "person picked merge-by-agent"}}]},
+        },
+        "nodes": nodes,
+        "body": [{"id": "replay-arm", "call": "self-merge-arm",
+                  "with": {"armed": True, "reason": "replayed"}, "bind": "self_merge"},
+                 retry, reroute, "after"],
+    }
+    return frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                 resolve_include=layers.resolver(str(tmp_path)))
+
+
+def _drive_retry(tmp_path, monkeypatch, exit_code: int):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "r"}
+    st = runtime.start(_retry_chart(tmp_path), caps={}, now=1.0, **kw)
+    path: List[str] = []
+    for t in (1.0, 61.0, 121.0, 181.0, 241.0):
+        st = runtime.wait_tick(t, probe_runner=lambda probe, cwd, *a, **k: (exit_code, ""), **kw)
+    for _ in range(10):
+        if not st.get("tasks"):
+            break
+        task = st["tasks"][0]
+        label = task["label"].rsplit("/", 1)[-1]
+        path.append(label)
+        st = runtime.report(task["instance"], "ok",
+                            {"decision": "merge-by-agent", "reason": "r"} if label == "gate-asked" else {},
+                            now=300.0, **kw)
+    return path, runtime.status(**kw)
+
+
+def test_a_replayed_answer_goes_on_unasked_when_every_re_measure_says_none(
+        tmp_path, monkeypatch):
+    """Three 1s run the clock out (timeout): "no receiver" was measured this
+    round, which is the premise the person's merge-by-agent rests on."""
+    path, st = _drive_retry(tmp_path, monkeypatch, 1)
+    assert path == ["after"], path
+
+
+def test_a_replayed_answer_is_asked_again_when_the_re_measure_cannot_decide(
+        tmp_path, monkeypatch):
+    """Three 2s end the wait undecidable: "no receiver" was not measured, so
+    the round does not merge on the stored answer -- it asks the person, and a
+    renewed merge-by-agent arms it again."""
+    path, st = _drive_retry(tmp_path, monkeypatch, 2)
+    assert path == ["gate-asked", "after"], path
