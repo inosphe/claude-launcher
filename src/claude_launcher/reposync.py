@@ -63,6 +63,19 @@ LOCAL_TIMEOUT = 30.0
 #: git subcommands that talk to a remote; everything else is local.
 NETWORK_COMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
 
+#: Local subcommands that rewrite the working tree. They are not reads: a
+#: budget that fires mid-update leaves the tree half-updated and an
+#: ``index.lock`` behind, so they keep the long budget. The short budget is
+#: for calls that only look (review of claunch-jfqhr: ``reset --keep`` and
+#: ``merge --ff-only`` would otherwise have dropped to 30 s). ``worktree`` is
+#: not listed here because its read-only half (``worktree list``) is common;
+#: the two call sites that create or delete a worktree pass the long budget
+#: themselves.
+TREE_COMMANDS = frozenset({
+    "am", "apply", "checkout", "cherry-pick", "merge", "rebase", "reset",
+    "restore", "revert", "stash", "switch",
+})
+
 #: git options that consume the next argument, so the subcommand search skips it.
 _VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
 
@@ -88,8 +101,12 @@ def _subcommand(args: Sequence[str]) -> str:
 
 def timeout_for(args: Sequence[str]) -> float:
     """The budget one git invocation gets: :data:`GIT_TIMEOUT` when it talks to
-    a remote, :data:`LOCAL_TIMEOUT` otherwise."""
-    return GIT_TIMEOUT if _subcommand(args) in NETWORK_COMMANDS else LOCAL_TIMEOUT
+    a remote (:data:`NETWORK_COMMANDS`) or rewrites the working tree
+    (:data:`TREE_COMMANDS`), :data:`LOCAL_TIMEOUT` for a call that only reads."""
+    command = _subcommand(args)
+    if command in NETWORK_COMMANDS or command in TREE_COMMANDS:
+        return GIT_TIMEOUT
+    return LOCAL_TIMEOUT
 
 
 def process_snapshot() -> str:
@@ -605,19 +622,19 @@ def _rebased_tip(p: Plan, scratch: str) -> str:
     os.makedirs(scratch, exist_ok=True)
     where = tempfile.mkdtemp(prefix="reposync-", dir=scratch)
     os.rmdir(where)  # worktree add wants to create it
-    # a worktree checkout and a rebase are local but long operations: a slow
-    # one that is still making progress is not the hang LOCAL_TIMEOUT is for
+    # creating a worktree materialises a checkout, which the subcommand alone
+    # cannot distinguish from the read-only `worktree list`
     git(p.repo, "worktree", "add", "--detach", "--quiet", where, p.local,
         timeout=GIT_TIMEOUT)
     try:
-        if not _ok(where, "rebase", "--rebase-merges", "--quiet", p.upstream,
-                   timeout=GIT_TIMEOUT):
+        if not _ok(where, "rebase", "--rebase-merges", "--quiet", p.upstream):
             files = _conflicts(where) or ["(unknown -- see git status)"]
             git(where, "rebase", "--abort", check=False)
             raise RebaseConflict(files)
         return git(where, "rev-parse", "HEAD")
     finally:
-        git(p.repo, "worktree", "remove", "--force", where, check=False)
+        git(p.repo, "worktree", "remove", "--force", where, check=False,
+            timeout=GIT_TIMEOUT)
         shutil.rmtree(where, ignore_errors=True)
         git(p.repo, "worktree", "prune", check=False)
 

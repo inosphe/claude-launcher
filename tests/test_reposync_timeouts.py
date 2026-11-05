@@ -45,10 +45,49 @@ def test_a_remote_subcommand_keeps_the_long_budget_and_a_local_one_does_not(args
     assert reposync.timeout_for(args) == budget
 
 
+@pytest.mark.parametrize("args", [
+    # the three call sites the review named (claunch-jfqhr, s996 @ 11f44c6f)
+    ("reset", "--keep", "0" * 40),                                   # reposync._move_branch
+    ("merge", "--ff-only", "--quiet", "0" * 40),                     # reposync.receive_branch
+    ("merge", "--ff-only", "--no-edit", "origin/master"),            # local_sync
+    # the rest of the family: a budget that fires mid-update leaves the tree
+    # half-updated and an index.lock behind
+    ("checkout", "--quiet", "master"),
+    ("switch", "-c", "branch", "master"),
+    ("rebase", "--rebase-merges", "--quiet", "upstream"),
+    ("cherry-pick", "abc123"),
+    ("stash", "push"),
+])
+def test_a_subcommand_that_rewrites_the_tree_keeps_the_long_budget(args):
+    assert reposync.timeout_for(args) == reposync.GIT_TIMEOUT
+
+
+def test_a_tree_updating_call_site_passes_the_long_budget_to_git(monkeypatch):
+    """The classification is what the call sites rely on, so one of them is
+    measured end to end: `reset --keep` on a checked-out branch moves a
+    working tree, and the rev-parse that guards it stays a short read."""
+    seen: list = []
+
+    def run(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        stdout = "a" * 40 if "rev-parse" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(reposync.subprocess, "run", run)
+    plan = reposync.Plan(repo="C:/repo", remote="origin", branch="master",
+                         local="a" * 40, upstream="b" * 40,
+                         action=reposync.FAST_FORWARD, ahead=1, behind=0,
+                         checkout="C:/tree")
+    reposync._move_branch(plan, "b" * 40)
+    assert seen == [reposync.LOCAL_TIMEOUT, reposync.GIT_TIMEOUT]
+
+
 def test_a_git_option_before_the_subcommand_does_not_hide_it():
-    # window_borrow runs merges as `git -c user.name=... -c user.email=... merge`
+    # window_borrow runs git with `-c user.name=... -c user.email=...` in front
     assert reposync.timeout_for(("-c", "user.name=x", "-c", "user.email=y",
-                                 "merge", "--no-ff")) == reposync.LOCAL_TIMEOUT
+                                 "rev-parse", "HEAD")) == reposync.LOCAL_TIMEOUT
+    assert reposync.timeout_for(("-c", "user.name=x", "merge", "--no-ff")) \
+        == reposync.GIT_TIMEOUT
     assert reposync.timeout_for(("--git-dir", "/somewhere", "fetch")) == reposync.GIT_TIMEOUT
 
 
