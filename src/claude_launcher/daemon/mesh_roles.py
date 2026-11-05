@@ -502,8 +502,9 @@ roles:
     aliases: []
     stance: |
       Execute only the repository integration assigned by reposync-merge-push-v2.
-      Delegation is not merge or publish approval. Revalidate exact refs, policy
-      and independent review before every write. Managed targets require PRs.
+      Delegation is not merge or publish approval. Revalidate exact refs and
+      policy before every write, and get independent review again whenever the
+      candidate's content changed since the last review. Managed targets require PRs.
       Delegate conflict repair to reposync-conflict-v2; never deploy or restart.
 
   local-sync-manager:
