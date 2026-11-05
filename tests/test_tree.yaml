@@ -1,0 +1,15 @@
+# Test tree for tools/changed_tests.py's sampling mode (claunch-ce872).
+# Format and rules: src/claude_launcher/test_tree.py. A module no node
+# matches gets a derived node named by its file-name prefix, importance
+# normal -- so this file only lists what differs from that default.
+nodes:
+  # The gate's own tests. A sampled gate that is itself sampled can pass on
+  # a broken selection rule, so these always run in full.
+  - name: test-gates
+    importance: critical
+    modules:
+      - tests/test_changed_tests.py
+      - tests/test_sweep.py
+      - tests/test_merge_ready.py
+      - tests/test_test_tiers.py
+      - tests/test_test_tree.py

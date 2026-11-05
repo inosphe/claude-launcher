@@ -71,6 +71,19 @@ _REAL_ENVIRONMENT_IDENTITY = changed_tests.environment_identity
 
 
 @pytest.fixture(autouse=True)
+def _partial_mode(monkeypatch):
+    """These cases pin the ``partial`` gate; the sampling ones say ``--sampling``.
+
+    Without this the mode would follow the shell running the suite --
+    ``sampling`` in a local session, ``full`` under CI (claunch-ce872) --
+    and a receipt key, a command line or a run count asserted below would
+    change with where the suite happened to run.
+    """
+    monkeypatch.setenv("CLAUNCH_TEST_MODE", "partial")
+    monkeypatch.delenv("CI", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _fixed_environment(monkeypatch):
     monkeypatch.setattr(
         changed_tests, "environment_identity", lambda repo: dict(FAKE_ENVIRONMENT)
@@ -3524,7 +3537,7 @@ def test_the_receipt_names_each_skipped_node_and_its_reason(repo, tmp_path):
         {"nodeid": "tests/test_skip.py::test_harness[a.cjs]", "reason": reason},
         {"nodeid": "tests/test_skip.py::test_harness[b.cjs]", "reason": reason},
     ]
-    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse"}
+    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse", "variant"}
     assert receipt["command"] == cmd, "the junit request rides in the environment"
     assert receipt["counts"] == {"passed": 1, "skipped": 2}
     assert str(basetemp) not in json.dumps(receipt["skips"])
@@ -3538,7 +3551,7 @@ def test_a_run_without_a_basetemp_files_skips_as_unknown(repo, tmp_path):
     receipt = json.loads(changed_tests.receipt_path(
         repo, "u" * 40, files, receipts).read_text(encoding="utf-8"))
     assert receipt["skips"] is None
-    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse"}
+    assert set(receipt) - _RECEIPT_KEYS == {"skips", "reuse", "variant"}
 
 
 def test_deselect_flag_reaches_the_real_pytest_command():
@@ -3568,3 +3581,128 @@ def test_the_base_run_keeps_this_trees_environment(tmp_path):
 )
 def test_failed_nodeids_keep_the_id_and_drop_the_message(line, nodeid):
     assert changed_tests.failed_nodeids(f"...\n{line}\n1 failed\n") == [nodeid]
+
+
+# -- sampling mode (claunch-ce872) -----------------------------------------
+
+
+@pytest.fixture
+def sampled_gate(repo, tmp_path, monkeypatch):
+    """``main --sampling`` with stand-ins for collection and for pytest.
+
+    Collection answers twenty node ids for each selected module; the stand-in
+    run records its argv and, while ``fail`` names node ids, prints them as
+    pytest's FAILED lines and exits 1 -- but only on a pass that ran them
+    from an ``@argsfile`` (pass 1). A module-wide run (pass 2) passes unless
+    ``fail_again`` is set.
+    """
+    log = tmp_path / "runs.jsonl"
+    state = {"fail": [], "fail_again": False}
+
+    def collect(repo_, files, *, deselect=(), environment=None):
+        return [f"{f}::test_{i:02d}" for f in files for i in range(20)]
+
+    def stub(files, *, basetemp=None, args=None, **_):
+        sampled = bool(args)
+        lines = state["fail"] if (sampled or state["fail_again"]) else []
+        body = (
+            f"import json; open(r{str(log)!r}, 'a').write(json.dumps("
+            f"{{'files': {list(files)!r}, 'args': {list(args or [])!r}}}) + '\\n'); "
+            + "".join(f"print('FAILED {n} - AssertionError: boom'); " for n in lines)
+            + ("print('1 failed'); raise SystemExit(1)" if lines else "print('1 passed')")
+        )
+        return [sys.executable, "-c", body]
+
+    monkeypatch.setattr(changed_tests, "collect_nodeids", collect)
+    monkeypatch.setattr(changed_tests, "build_command", stub)
+
+    class Gate:
+        receipts = tmp_path / "receipts"
+
+        def __call__(self, *extra):
+            return changed_tests.main(
+                ["--repo", str(repo), "--base", "master", "--no-compare-base",
+                 "--receipts", str(self.receipts), *extra]
+            )
+
+        def runs(self):
+            if not log.exists():
+                return []
+            return [json.loads(l) for l in log.read_text().splitlines()]
+
+    gate = Gate()
+    gate.state = state
+    return gate
+
+
+def test_sampling_green_first_pass_is_the_verdict(repo, sampled_gate, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert sampled_gate("--sampling") == 0
+    runs = sampled_gate.runs()
+    assert len(runs) == 1 and runs[0]["args"][0].startswith("@")
+    out = capsys.readouterr().out
+    assert "mode    : sampling  (cli;" in out
+    assert "first pass runs 6 of 20 test(s)" in out      # 1 + ceil(19 * 0.25)
+    assert "first pass green" in out
+    receipt = next(sampled_gate.receipts.rglob("*.json"))
+    body = json.loads(receipt.read_text())
+    assert body["variant"] == "sampling:0.25" and body["sample"]["picked"] == 6
+
+
+def test_sampling_red_first_pass_expands_to_the_failed_node(repo, sampled_gate, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    sampled_gate.state["fail"] = ["tests/test_mesh.py::test_00"]
+    assert sampled_gate("--sampling") == 0, "pass 2 is green, and is the verdict"
+    first, second = sampled_gate.runs()
+    assert first["args"] and not second["args"]
+    assert "tests/test_mesh.py" in second["files"]
+    out = capsys.readouterr().out
+    assert "first pass red (1 failing node id(s))" in out
+    found = changed_tests.find_receipt(
+        repo, changed_tests.worktree_tree(repo), ["tests/test_mesh.py"],
+        sampled_gate.receipts, (), "sampling:0.25",
+    )
+    assert found is not None and found["pass"] == 2
+    assert found["first_pass_failures"] == ["tests/test_mesh.py::test_00"]
+
+
+def test_sampling_red_second_pass_fails_the_gate(repo, sampled_gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    sampled_gate.state["fail"] = ["tests/test_mesh.py::test_00"]
+    sampled_gate.state["fail_again"] = True
+    assert sampled_gate("--sampling") == 1
+    assert len(sampled_gate.runs()) == 2
+
+
+def test_a_sampled_green_is_not_reused_by_a_partial_run(repo, sampled_gate, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert sampled_gate("--sampling") == 0
+    assert sampled_gate("--sampling") == 0
+    assert len(sampled_gate.runs()) == 1, "the same mode stands on its receipt"
+    assert sampled_gate("--no-sampling") == 0
+    assert len(sampled_gate.runs()) == 2, "partial must not stand on a sampled green"
+    assert sampled_gate("--check", "--no-sampling") == 0
+
+
+def test_with_tail_turns_sampling_off(repo, sampled_gate):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert sampled_gate("--sampling", "--with-tail") == 0
+    (run,) = sampled_gate.runs()
+    assert not run["args"]
+
+
+def test_full_mode_runs_the_suite_with_the_tail(repo, gate, monkeypatch, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    monkeypatch.setenv("CLAUNCH_TEST_MODE", "full")
+    assert gate("--list") == 0
+    out = capsys.readouterr().out
+    assert "mode    : full  (env;" in out
+    assert "running the whole suite" in out
+
+
+def test_ci_without_a_mode_runs_full(repo, gate, monkeypatch, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    monkeypatch.delenv("CLAUNCH_TEST_MODE")
+    monkeypatch.setenv("CI", "true")
+    assert gate("--list") == 0
+    assert "mode    : full  (ci;" in capsys.readouterr().out
