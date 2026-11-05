@@ -3618,10 +3618,29 @@ nodes:
         남기고 스폰 없이 넘어간다. 넘어간 peer-review가 명단을 못 읽으면
         review-unrouted 선택으로 온다.
 
+      ── 재활용: 앞 런의 리뷰어를 되살렸는가 (claunch-phkt1) ──
+      1이 나왔으면 스폰하기 전에 이 런의 이슈(`claunch beads comments
+      ${data.claim.issue}`)에 앞 런의 end-new-task가 남긴 `REVIEWER RECYCLE:
+      <리뷰어> resume-request <요청 id>`가 있는지 본다. 없으면 위 1대로
+      스폰한다. 있으면 MCP `resume_session`에 `request: <요청 id>`만 주어
+      처분을 읽는다:
+      · approved — 그 리뷰어가 다시 살아 있다. 응답자 명령을 다시 돌린다.
+        0이면 스폰하지 않는다(그 리뷰어는 여전히 내 직속 자식이고 role
+        reviewer다). 그래도 1이면 위 1대로 스폰한다.
+      · pending — `withdraw: true`로 요청을 거둔 뒤 위 1대로 스폰한다.
+        기다리지 않는다(되살리기는 기한이 없고, 리뷰를 그 답에 묶으면 런이
+        사람 앞에 선다). 거두지 않고 스폰하면 승인이 늦게 났을 때 리뷰어가
+        둘이 된다.
+      · rejected·failed·withdrawn·moot — 위 1대로 스폰한다.
+      어느 경우든 처분과 그 결과(재활용한 리뷰어 이름 또는 새로 세운
+      리뷰어)를 보고에 적는다. 이 절은 런마다 첫 1에서 한 번이다 — 같은
+      런의 다음 회차는 살아 있는 리뷰어로 0이 나온다.
+
       이 런이 세운 자식 리뷰어는 런이 끝날 때까지 산다 — 재리뷰(changes
       → work → … → peer-review)와 다음 회차의 리뷰에 다시 쓴다. 끝내는
       자리는 settle-check다(queue-recheck가 done을 낸 뒤라 남은 리뷰가
-      없다). 거기서 끝내지 못한 리뷰어는 데몬이 종료한다 — 런이 done이
+      없다). auto-release가 그 상태를 확인하고, 그래도 남은 리뷰어만 kill을
+      요청한다(claunch-phkt1). 거기서 끝내지 못한 리뷰어는 데몬이 종료한다 — 런이 done이
       된 뒤 이 세션을 끝내기 직전(kill-on-end, claunch-du6mx.1), keep-alive나
       사람의 재기동으로 이 세션이 남을 때도 런이 done이면 그때, 그리고 이
       세션이 런 done 이외의 이유(kill, wind-down, 크래시)로 끝날 때다
@@ -4921,6 +4940,33 @@ nodes:
          이미 마쳤으면 `wrapup 완료, 재호출 없음`을 적는다. 이슈가 없으면
          `$CLAUNCH_SCRATCH/auto-release-<런 id>.md`에 같은 내용을 쓰고 그
          경로를 보고에 적는다.
+      5. **자식 리뷰어 정리 (claunch-phkt1).** 이 세션의 직속 자식 리뷰어를
+         찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
+         children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
+         맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
+         메시> --state all`에서 role 열(둘째 열)에 reviewer가 든 행의 셋째
+         열과 같은 것이 직속 자식 리뷰어다. 역할이 여럿이면 그 열은
+         `worker+reviewer`처럼 `+`로 이어지므로 `+`로 나눈 조각 가운데
+         reviewer가 있는지 본다(데몬도 role·roles 중 하나가 reviewer면 고른다). 셋째 열은 `<데몬>/<세션>`(예:
+         `shared-daemon-main/s1011`)이므로 `/` 뒤의 세션 이름과 비교한다 —
+         첫 열 핸들과도, 셋째 열 전체와도 비교하지 않는다. 살아 있는지는
+         `children` 행의 status로 읽는다. 데몬이 직속 리뷰어를 고르는 기준도
+         같다(직속 자식 + 메시 role reviewer, `cflow_clock._reviewer_children`).
+         명부를 읽지 못하면 추측하지 않고 `reviewer: 명부 없음`으로 적는다.
+         데몬은 이 런이 settle에
+         들어설 때 그 리뷰어를 이미 종료했으므로(settle-reap, claunch-5aysr)
+         정상 경로에서는 전부 exited다 — 그 이름을 4번의 `AUTO-RELEASE` 줄에
+         `reviewer: <이름> exited`로 덧붙이고 아무것도 호출하지 않는다.
+         살아 있는 리뷰어가 남아 있으면(그 리뷰어 앞으로 열린 질문이 있어
+         데몬이 종료를 미룬 경우) MCP `kill`로 끝낸다. 에이전트의 kill은 사람의
+         승인 카드를 거치는 요청이다(`daemon/kill_gate.py`; 도구 설명이 말하는
+         「워크플로가 남긴 리뷰어」가 이 경우다) — 응답의 요청 id를
+         `reviewer: <이름> kill-request <id>`로 같은 줄에 적고, 답을 기다리지
+         않는다(답은 `[claunch kill-request]` 블록으로 온다). 승인되지 않아도
+         런이 done이 되면 데몬이 kill-on-end에서 그 리뷰어를 끝낸다. 리뷰어가
+         아닌 자식과 퀵포크(`quick_fork_of`)는 이 단계의 대상이 아니다.
+         종료된 리뷰어는 지우지 않는다 — 기록이 남아 있어야 new-task의 새 런이
+         그 리뷰어를 되살려 다시 쓸 수 있다(end-new-task의 3번).
 
       ── 기한 초과로 들어왔다면 (claunch-q4cqy.4) ──
       이 스텝에 end-decision의 5분 무응답으로 들어왔는지는 터미널 사용자가
@@ -4942,10 +4988,12 @@ nodes:
       (`scheduled`, 이번 호출이 만든 것과 `already: true`로 확인한 기존 예약
       모두), 실행하지 못한 사유가 cleanup_pending으로 남아 있거나, wrapup이
       이미 마쳐 이 단계가 호출하지 않았다는 판정이 있고, 그 결과가 이슈
-      코멘트나 scratch 기록으로 남았다.
+      코멘트나 scratch 기록으로 남았다. 같은 기록에 직속 자식 리뷰어의 상태
+      (`reviewer: <이름> exited` 또는 `kill-request <id>`, 리뷰어가 없었으면
+      `reviewer: 없음`)가 있다.
     returns:
       ok: {}
-    effects: [fs.read, fs.write, board.write]
+    effects: [fs.read, fs.write, board.write, session.kill]
 
   end-notice:
     title: 세션 종료 예고 (종료 결정 전)
@@ -5031,15 +5079,42 @@ nodes:
       2. 이 작업을 보고한다(value에 issue). 런이 done이 된 뒤 **같은 턴에서**
          `flow_start`로 새 런을 시작한다: `workflow`는 이 런과 같은 정의,
          `inputs: {issue: <그 id>}`. 끝난 런은 시작이 보관한다.
+      3. **리뷰어 재활용 (claunch-phkt1).** 이 런의 자식 리뷰어는 settle에서
+         데몬이 종료했다(auto-release 5번이 그 상태를 기록했다). 새 런의 리뷰도
+         그 리뷰어가 맡도록, 2의 `flow_start`로 새 런이 선 **뒤에** 같은 턴에서
+         되살리기를 요청한다. 보고 전에 요청하지 않는다 — 이 런이 아직 settle에
+         있는 동안 승인되면 데몬의 settle-reap이 되살아난 리뷰어를 곧바로 다시
+         종료하고(`daemon/cflow_clock.py`의 `_queue_settle_reap`, 런이 done이 될
+         때까지 매 확인마다 돈다), 재활용은 아무 표시 없이 새 스폰으로
+         떨어진다. 새 런이 서면 끝난 런의 kill-on-end는 리뷰어까지 취소된다
+         (`_finish_end`의 successor 갈래). 대상은 auto-release 5번과 같은
+         방법(`children` 자식 이름 ∩ 메시 명부의 role reviewer 세션 이름)으로
+         찾은 직속 자식 리뷰어 가운데 status가 exited인 것이다. 둘 이상이면 이
+         런의 auto-release 5번이 이슈의 `AUTO-RELEASE` 줄에 `reviewer: <이름>`으로
+         적은 이름을 고른다 — `claunch cflow2 status`는 2의 `flow_start` 뒤에는
+         새 런을 읽으므로 끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다.
+         그래도 하나로 좁혀지지 않으면 추측하지 않고 건너뛴다. 없으면 이 항목은
+         건너뛰고 새 런의 reviewer-ensure가 지금처럼 새로 세운다. 그 세션에 MCP
+         `resume_session`을 부른다 — reason에는 「<내 세션>의 새 런(이슈 <그
+         id>)의 peer-review를 이전 런의 리뷰 맥락으로 맡길 리뷰어」를 적는다.
+         되살리기는 사람의 승인 카드를 거치는 요청이고 기한이 없다
+         (`daemon/resume_gate.py`); 사용자가 방금 new-task를 고른 자리라 바로
+         답할 수 있다. `claunch respawn`과 `/api/sessions/<이름>/respawn`은
+         operator의 경로이므로 쓰지 않는다. 결과를 새 이슈에 한 줄 남긴다:
+         `REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>`(요청이
+         거절되면 — 이미 요청이 있거나 대상이 살아 있음 — 그 사유를 같은 줄에).
+         답을 기다리지 않는다. 그 요청의 처분은 새 런의 reviewer-ensure가
+         읽는다.
       상위에게는 fyi 한 줄로 이 세션이 새 이슈로 다음 런을 시작한다는 사실과
       그 id를 알린다.
     done_when: |
       새 작업의 이슈 id가 정해졌고(기존 id 또는 새로 만든 id), 상위 fyi의
-      메시지 id가 보고에 있다(상위가 없으면 그 사실). 새 런 시작은 이 보고 뒤
-      같은 턴에서 한다.
+      메시지 id가 보고에 있다(상위가 없으면 그 사실). 새 런 시작과 리뷰어
+      되살리기 요청(종료된 자식 리뷰어가 있었으면 새 이슈의 `REVIEWER
+      RECYCLE:` 코멘트)은 이 보고 뒤 같은 턴에서, 그 순서로 한다.
     returns:
       ok: {issue: str}
-    effects: [board.write, mesh.send]
+    effects: [board.write, mesh.send, session.spawn]
 
   landing-target-evidence:
     title: 착지 대상 없음의 근거 (라우팅 판정 원문)
@@ -8026,6 +8101,13 @@ procedures:
       # 끝낼지는 여전히 사람이 정하고, 기다리는 동안의 정리만 자동이 된다. 정리 뒤에
       # 세션을 그냥 kill해도 C에서 end를 고른 것과 같은 종결 기록이 남는다
       # (daemon/cflow2_clock의 `end_on_session_exit`).
+      # 자식 리뷰어의 불변식(claunch-phkt1): end를 고른 경로와 세션이 이 질문
+      # 도중 kill된 경로에서 자식 리뷰어는 이미 종료되어 있다. settle에 들어설
+      # 때 데몬이 끝냈고(settle-reap, claunch-5aysr), 열린 질문 때문에 남은
+      # 리뷰어는 auto-release가 kill을 요청하며, 그래도 남으면 런 done 뒤의
+      # kill-on-end나 세션 exit의 parent-exited가 끝낸다(claunch-472wq.1).
+      # new-task만 리뷰어를 되살린다 — end-new-task가 resume을 요청하고 새 런의
+      # reviewer-ensure가 그 처분을 읽는다.
       # self-improve(claunch-c4e6f)는 종료 대신 고르는 답이다: 자기 회고를 두
       # 갈래(일반·cflow v2)로 보고하고 사용자와 합의한 항목만 이슈로 등록한 뒤
       # 이 질문으로 돌아온다 — 그래서 질문을 루프로 감싼다. 나머지 답은 각자의

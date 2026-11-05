@@ -2335,6 +2335,46 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
     assert node["returns"] == {"ok": {"issue": "str"}}
 
 
+def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
+    """claunch-phkt1: auto-release records the child reviewer the settle reap
+    already ended and asks to kill only one still alive; end-new-task asks to
+    resume that reviewer (a person's card, resume_gate) and leaves a
+    REVIEWER RECYCLE marker the next run's reviewer-ensure reads -- withdrawing
+    a still-pending request before it spawns, so two reviewers never stand."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    nodes = doc["nodes"]
+    release = _words(nodes["auto-release"]["prompt"])
+    assert "settle-reap" in release and "MCP `kill`" in release
+    assert "reviewer: <이름> exited" in release
+    assert "reviewer: <이름> kill-request <id>" in release
+    assert "session.kill" in nodes["auto-release"]["effects"]
+    # the children rows carry no role: the reviewer is found by matching the
+    # mesh roster's session column, as the daemon's own reap does
+    assert "`children`의 자식 행에는 role이 없다" in release
+    assert "claunch mesh members <이 런의 메시> --state all" in release
+    assert "`cflow_clock._reviewer_children`" in release
+    # the roster's third column is <daemon>/<session>: compare the part after '/'
+    assert "`/` 뒤의 세션 이름과 비교한다" in release
+    assert "`+`로 나눈 조각 가운데 reviewer가 있는지 본다" in release
+    new_task = _words(nodes["end-new-task"]["prompt"])
+    assert "MCP `resume_session`" in new_task
+    assert "REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>" in new_task
+    assert "operator의 경로이므로 쓰지 않는다" in new_task
+    # filed after the new run stands: a resume approved while this run is
+    # still in settle would be reaped again by settle-reap
+    assert "새 런이 선 **뒤에** 같은 턴에서 되살리기를 요청한다" in new_task
+    assert "보고 전에 요청하지 않는다" in new_task
+    # a tie is broken by the name auto-release wrote, read before the new run
+    # replaces what cflow2 status shows
+    assert "`AUTO-RELEASE` 줄에 `reviewer: <이름>`으로 적은 이름을 고른다" in new_task
+    assert "끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다" in new_task
+    assert "session.spawn" in nodes["end-new-task"]["effects"]
+    ensure = _words(nodes["reviewer-ensure"]["prompt"])
+    assert "REVIEWER RECYCLE:" in ensure
+    assert "`withdraw: true`로 요청을 거둔 뒤" in ensure
+    assert "rejected·failed·withdrawn·moot" in ensure
+
+
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
 #: The self-improve nodes are the library's own (self-improve-common).
 #: end-notice is not here: it runs before the gate, in settle (claunch-q4cqy.6).
