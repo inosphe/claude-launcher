@@ -116,6 +116,15 @@ REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide", "nudge"})
 #: travels in :data:`REF_KEY`, which the mesh carries and does not interpret.
 INTENT_TYPES = frozenset({"say", "ask", "decide"}) | REPLY_OPTIONAL_TYPES
 
+#: Intents that owe the recipient an ACTION while owing no thread reply.
+#: ``decide`` is one by its definition above: the decision is recorded where
+#: the message points (its :data:`REF_KEY`), not in the thread. This is the
+#: distinction ``REPLY_OPTIONAL_TYPES`` alone cannot draw — under the bare fyi
+#: note a decide read as "nothing is owed", and routed asks were drained past
+#: until they timed out to the next responder group
+#: (claunch-ask-decide-needs-reply-zaxct).
+ACTION_OPTIONAL_REPLY_TYPES = frozenset({"decide"})
+
 #: An opaque pointer a sender may attach so a reader can follow a message back
 #: to whatever it is about. The mesh stores and relays it verbatim: knowing its
 #: shape would mean the mesh learning every schema that ever rides on it.
@@ -136,6 +145,17 @@ def expects_reply(message_type) -> bool:
     still classify correctly.
     """
     return str(message_type or "say").strip().lower() not in REPLY_OPTIONAL_TYPES
+
+
+def expects_action(message_type) -> bool:
+    """Whether a message of this ``type`` owes the recipient an action.
+
+    Separate from :func:`expects_reply` on purpose: a ``decide`` owes an
+    action and no reply, an ``ask`` owes both, an ``fyi`` owes neither. The
+    delivery block tells the recipient which of the three it received; a
+    single boolean could only say "reply or nothing".
+    """
+    return str(message_type or "say").strip().lower() in ACTION_OPTIONAL_REPLY_TYPES
 
 
 def type_notice(message_type) -> Optional[str]:
@@ -10474,6 +10494,38 @@ _Dumper.add_representer(
 )
 
 
+def _delivery_note(mesh_name: str, needs_reply: bool, needs_action: bool) -> str:
+    """The one line a delivery block carries about what the reader owes.
+
+    Three debts, three sentences. ``needs_reply`` wins when both are set — a
+    ``say`` in the batch must be answered, and its sentence already tells the
+    reader to act before replying — but the block still carries
+    ``needs_action: true`` so the decide is not read as advisory.
+    """
+    if needs_reply:
+        # The ack clause lives HERE, not only in the skill: this is the one
+        # surface every member sees at the moment the duty applies, whatever
+        # its role and whether or not it ever ran /mesh.
+        return (
+            "mesh messages delivered to your terminal — reply with: "
+            f'claunch mesh send {mesh_name} <handle|*> "..."'
+            " — if this puts work on you, answer NOW with a brief --type ack "
+            "and --reply-to the message id, then send the outcome when it is done; "
+            "silence reads as not received"
+        )
+    if needs_action:
+        # A `decide` is answered where its `ref` points (for a cflow2 ask, the
+        # run's flow_answer). Under the bare fyi wording it read as "nothing is
+        # owed" and the responder drained past a routed ask until it expired to
+        # the next group (claunch-ask-decide-needs-reply-zaxct).
+        return (
+            "action required — no reply in this thread: this batch asks you to "
+            "decide. Record your decision where the message points (the entry's "
+            "`ref`), then continue; do not drain past it"
+        )
+    return "fyi/ack only — no reply expected; drain and continue"
+
+
 def format_delivery(
     mesh_name: str,
     handle: str,
@@ -10498,6 +10550,7 @@ def format_delivery(
     remains the way to ask who else received one (claunch-mesh-drop-batch-to-8lqg1).
     """
     batch = []
+    intents = []
     for m in msgs:
         body = recipient_body(m, handle)
         if len(body) > MAX_DELIVERY_BODY:
@@ -10507,32 +10560,27 @@ def format_delivery(
         if origin is not None:
             entry["machine"] = "local" if not origin else f"{origin} (remote)"
         intent = str(msg_type_for(m, handle)).strip().lower() or "say"
+        intents.append(intent)
         if intent != "say":
             entry["type"] = intent
         if m.get("reply_to"):
             entry["reply_to"] = m["reply_to"]
         entry["body"] = _Literal(body) if "\n" in body else body
         batch.append(entry)
-    needs_reply = any(expects_reply(msg_type_for(m, handle)) for m in msgs)
-    doc = {
+    needs_reply = any(expects_reply(t) for t in intents)
+    needs_action = any(expects_action(t) for t in intents)
+    doc: dict = {
         "mesh": mesh_name,
         "to": handle,
         "messages": len(batch),
         "needs_reply": needs_reply,
-        "batch": batch,
-        "note": (
-            # The ack clause lives HERE, not only in the skill: this is the one
-            # surface every member sees at the moment the duty applies, whatever
-            # its role and whether or not it ever ran /mesh.
-            "mesh messages delivered to your terminal — reply with: "
-            f'claunch mesh send {mesh_name} <handle|*> "..."'
-            " — if this puts work on you, answer NOW with a brief --type ack "
-            "and --reply-to the message id, then send the outcome when it is done; "
-            "silence reads as not received"
-            if needs_reply
-            else "fyi/ack only — no reply expected; drain and continue"
-        ),
     }
+    # Written only when true: most batches owe nothing, and the line would
+    # otherwise ride every delivery into every member's terminal.
+    if needs_action:
+        doc["needs_action"] = True
+    doc["batch"] = batch
+    doc["note"] = _delivery_note(mesh_name, needs_reply, needs_action)
     dumped = yaml.dump(
         doc, Dumper=_Dumper, sort_keys=False, allow_unicode=True, width=100
     )

@@ -72,6 +72,11 @@ Then catch up: `claunch mesh history MESH -n 20`.
 
 Reading a delivery block:
 
+- `needs_action: true` — the batch asks you to **decide**. There is nothing
+  to send back in this thread: the decision is recorded where the message
+  points (the entry's `ref` — for a cflow2 ask, `flow_answer` on the run).
+  Decide before you continue. Draining past it is how a routed ask expired
+  unanswered and fell to the next responder.
 - `needs_reply: false` — the batch is fyi/ack only: absorb it and continue
   your work; do NOT reply (that is the point of those intents).
 - otherwise — act on it and/or answer the sender. Each entry shows `from`,
@@ -90,7 +95,9 @@ Sending — `claunch mesh send MESH <handle|*> "..."` (the sender is resolved
 from your session automatically):
 
 - **Intent, not label**: `--type say` (default) or `ask` invite an answer;
-  `--type fyi` / `ack` explicitly do not. Never put your role or a topic in
+  `--type fyi` / `ack` explicitly do not; `--type decide` (what cflow2 asks
+  are sent as) owes the recipient an action recorded somewhere other than
+  the thread, which delivery marks `needs_action: true`. Never put your role or a topic in
   `--type` — an unknown type reads as reply-expected and invites reply-all.
   Never dress an INSTRUCTION as `fyi`/`ack` either: it tells the recipient it
   owes you nothing, and the daemon will not chase a member who owes nothing.

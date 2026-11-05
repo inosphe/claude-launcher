@@ -129,7 +129,13 @@ Kept (as concepts or ported logic):
   (`expects_reply` is derived on read, never stored — interconnect's
   contract); unknown types are accepted but draw a reply-all advisory.
   A delivery batch of only no-reply intents is marked `needs_reply: false`
-  ("no reply expected"), and such deliveries never arm the heartbeat
+  ("no reply expected"), and such deliveries never arm the heartbeat.
+  Reply-optional is not the same as "nothing is owed": `decide` (the intent
+  cflow2 asks travel as) requires an action recorded where the message's
+  `ref` points. A batch containing one is marked `needs_action: true` and
+  its note says so — under the bare no-reply wording responders drained past
+  routed asks until they expired to the next group
+  (claunch-ask-decide-needs-reply-zaxct)
 - per-member delivery cursors into the log (durable "what was delivered")
 - settle-based burst coalescing before delivery
 - (phase 3) heartbeat / task-poll / stall-warning *policies*, running in the

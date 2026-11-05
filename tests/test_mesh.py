@@ -175,6 +175,12 @@ def test_message_intents():
     assert mesh_mod.expects_reply("worker") is True      # unknown -> reply-expected
     for t in ("fyi", "ack", "ping", "Ack", " FYI "):     # normalised on read
         assert mesh_mod.expects_reply(t) is False
+    # Actions and replies are separate debts: a decide owes one and not the
+    # other, an ask owes both, an fyi owes neither.
+    assert mesh_mod.expects_action("decide") is True
+    assert mesh_mod.expects_action(" Decide ") is True    # normalised on read
+    for t in (None, "say", "ask", "fyi", "ack", "ping", "nudge"):
+        assert mesh_mod.expects_action(t) is False
     assert mesh_mod.type_notice("ask") is None
     assert mesh_mod.type_notice(None) is None
     # a role leaked into 'type' draws the reply-all advisory
@@ -220,6 +226,37 @@ def test_format_delivery_no_reply_batch():
     assert "--type ack" in block
     # ...and never on a batch that explicitly owes nothing.
     assert "--type ack" not in format_delivery("m1", "leader", fyi_only)
+
+
+def test_format_delivery_a_decide_owes_an_action_but_no_reply():
+    """(claunch-ask-decide-needs-reply-zaxct) A routed cflow2 ask arrives as
+    `type: decide`. That type is reply-optional by design — the decision is
+    recorded where the message points — so the old note read the whole batch
+    as "fyi/ack only" and the responder drained past an ask that then expired
+    to the next responder group. Delivery has to say which debt it carries."""
+    decide = [
+        {"from": "w1", "to": "rev", "type": "decide", "body": "pick one",
+         "ref": {"kind": "cflow2.ask", "id": "ask2-1", "task": "peer-review"}},
+    ]
+    block = format_delivery("m1", "rev", decide)
+    assert "needs_action: true" in block      # the action is stated
+    assert "needs_reply: false" in block      # ...and no thread reply is asked
+    assert "no reply in this thread" in block
+    assert "do not drain past it" in block    # names the failure it prevents
+    assert "`ref`" in block                   # where the decision is recorded
+
+    # A batch that owes nothing grows neither the flag nor the wording.
+    fyi = [{"from": "w1", "to": "rev", "type": "fyi", "body": "stall: w2"}]
+    quiet = format_delivery("m1", "rev", fyi)
+    assert "needs_action" not in quiet
+    assert "fyi/ack only" in quiet
+
+    # A reply-expecting message still owns the note, but the decide in the
+    # same batch stays marked — a reader must not take it as reply-only.
+    mixed = decide + [{"from": "w2", "to": "rev", "body": "question?"}]
+    block = format_delivery("m1", "rev", mixed)
+    assert "needs_reply: true" in block and "reply with" in block
+    assert "needs_action: true" in block
 
 
 def test_format_delivery_block():
@@ -1682,6 +1719,9 @@ def test_mesh_install_project(tmp_path, home):
     # the protocol essentials the briefing points at
     assert "CLAUNCH_SESSION" in skill          # self-identification
     assert "needs_reply" in skill              # reading delivery blocks
+    # ...including the batch that owes an action and no thread reply
+    # (claunch-ask-decide-needs-reply-zaxct)
+    assert "needs_action" in skill
     assert "--section" in skill                # batch fan-out discipline
     assert "--reply-to" in skill               # threading
     assert "Recovery" in skill                 # compaction recovery
