@@ -368,7 +368,9 @@ globalThis.SearchAnything = (() => {
     submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren(); filters.replaceChildren();
     offered = null; apply.hidden = true; rerankNote = "";
     try {
-      const response = await api("api/search/stream?kind=all&limit=30&mode=" + searchMode + "&q=" + encodeURIComponent(query),
+      // `unified` is the combined corpus; `all` was its name and the daemon
+      // still accepts it as a deprecated alias (claunch-7aujp).
+      const response = await api("api/search/stream?kind=unified&limit=30&mode=" + searchMode + "&q=" + encodeURIComponent(query),
         {signal: controller.signal, noBatch: true});
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -979,7 +981,7 @@ globalThis.SearchAnything = (() => {
       // Selecting a preset only loads its values. Activation -- the daemon
       // restart and the backfill it starts -- happens on save, so peeking at
       // another preset costs nothing (search_anything.py restarts the service
-      // and enqueues "all" on the settings PUT).
+      // and enqueues "unified" on the settings PUT).
       presetSelect.onchange = () => {
         rename.box.hidden = true;
         loadPreset(presets.find(p => p.id === presetSelect.value));

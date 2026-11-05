@@ -80,9 +80,11 @@ new Function("exports",
   "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n")(api);
 
 const cardApi = {};
-new Function("exports",
+new Function("exports, beadsCache",
   sliceFrom(app, "ragBucketState") + "\n" + sliceFrom(app, "ragQueueLine") + "\n" +
-  "exports.bucketState = ragBucketState; exports.queueLine = ragQueueLine;")(cardApi);
+  sliceFrom(app, "ragBucketLabel") + "\n" + sliceFrom(app, "beadsNameOfRoot") + "\n" +
+  "exports.bucketState = ragBucketState; exports.queueLine = ragQueueLine;\n" +
+  "exports.bucketLabel = ragBucketLabel;")(cardApi, null);
 
 let failures = 0;
 function check(label, got, want) {
@@ -117,6 +119,11 @@ check("an unmodelled preset says so rather than omitting the model",
       "d1 — 모델 미지정 (custom endpoint)");
 
 /* ---- per-bucket state on the RAG card (app.js) --------------------------- */
+check("the combined corpus is named by what it holds, under either of its names",
+      [cardApi.bucketLabel({ kind: "unified" }), cardApi.bucketLabel({ kind: "all" })],
+      ["Search anything (통합: 이슈·코멘트·세션)", "Search anything (통합: 이슈·코멘트·세션)"]);
+check("the fleet bucket keeps its own name",
+      cardApi.bucketLabel({ kind: "sessions" }), "sessions (세션)");
 check("a bucket with no problem reads as normal",
       cardApi.bucketState({ kind: "sessions", indexed: 2906, total: 2906, pending: 0 }),
       { state: "ok", text: "정상" });

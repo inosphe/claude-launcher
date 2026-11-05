@@ -1271,7 +1271,26 @@ class Progress:
         }
 
 
-KINDS = ("beads", "sessions", "all")
+#: The corpora, under the names they are read and written by now. ``unified``
+#: is the combined one (issues and their comments plus every session's
+#: records); it was called ``all`` before the rename (claunch-7aujp).
+KINDS = ("beads", "sessions", "unified")
+
+#: Names a caller may still use. Every boundary — the HTTP routes, the MCP
+#: tool, the CLI — normalizes through :func:`canonical`, so a script written
+#: against ``all`` keeps working while the CLI says it is deprecated.
+ALIASES = {"all": "unified"}
+
+#: The name each corpus uses on disk. The combined collection is ``all.zvec``
+#: and stays so until it is moved in its own round (claunch-7aujp.1): taking
+#: the new name here would open a second, empty collection and re-embed the
+#: documents the existing one holds.
+STORAGE_NAMES = {"unified": "all"}
+
+
+def canonical(kind: str) -> str:
+    """``kind`` under its current name: a deprecated alias maps to its corpus."""
+    return ALIASES.get(kind, kind)
 
 #: The watcher's sleep while the feature is off or ``watch_interval`` is 0:
 #: it still ticks, because a ``rag:`` block filled in later is noticed by
@@ -1391,10 +1410,22 @@ class RagService:
 
     # -- corpora -------------------------------------------------------- #
     def _key(self, kind: str, root: Optional[Path]) -> str:
+        kind = canonical(kind)
         if kind == "beads":
             digest = hashlib.sha1(str(root or "").encode("utf-8", "replace")).hexdigest()[:12]
             return f"beads-{digest}"
-        return kind
+        return STORAGE_NAMES.get(kind, kind)
+
+    @staticmethod
+    def _kind_of_key(key: str) -> str:
+        """The corpus a collection key belongs to, under its current name.
+
+        A board key carries a hash; the combined corpus's key is its on-disk
+        name (``all``), which is the alias of ``unified``.
+        """
+        if key.startswith("beads-"):
+            return "beads"
+        return canonical(key)
 
     async def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
         """The corpus's index, opened and loaded in a worker thread.
@@ -1555,7 +1586,8 @@ class RagService:
         return prog
 
     async def _docs(self, kind: str, root: Optional[Path]) -> List[Doc]:
-        if kind == "all":
+        kind = canonical(kind)
+        if kind == "unified":
             return await self.all_docs() if self.all_docs else []
         if kind == "beads":
             if self.board is None or root is None:
@@ -1777,9 +1809,10 @@ class RagService:
         waiting, so it queues again and runs once more after the current
         pass: a change that landed mid-sync gets its own pass.
         """
+        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
-        if kind in ("sessions", "all"):
+        if kind in ("sessions", "unified"):
             root = None
         elif root is None:
             return False
@@ -1811,13 +1844,13 @@ class RagService:
             pass
         self.enqueue("beads", root)
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def on_sessions_changed(self, *_args) -> None:
         """The registry's and the briefing cache's hook (either signature)."""
         self.enqueue("sessions")
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def watch(self, root: Optional[Path]) -> None:
         """Have the watcher stat ``root``'s board from now on."""
@@ -1862,7 +1895,7 @@ class RagService:
                 queued += 1
         if self.enqueue("sessions"):
             queued += 1
-        if self.all_docs and self.enqueue("all"):
+        if self.all_docs and self.enqueue("unified"):
             queued += 1
         return queued
 
@@ -2052,19 +2085,19 @@ class RagService:
                 invalidate(root)
         self.enqueue("beads", root)
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def queue_view(self) -> dict:
         return {
             "depth": self._queue.qsize(),
-            "pending": sorted(self._pending),
+            "pending": sorted(canonical(key) for key in self._pending),
             "consumer": bool(self._consumer is not None and not self._consumer.done()),
             "watcher": bool(self._watcher is not None and not self._watcher.done()),
             "watch_interval": self.watch_interval(),
             "watched": sorted(self._watched),
             "consumed": self.consumed,
             "last_consumed_at": self.last_consumed_at,
-            "last_consumed_key": self.last_consumed_key,
+            "last_consumed_key": canonical(self.last_consumed_key) if self.last_consumed_key else None,
         }
 
     # -- search --------------------------------------------------------- #
@@ -2111,10 +2144,11 @@ class RagService:
         ``ranked`` says whether a second event is coming (``rerank_pending``),
         so a reader knows whether to keep listening.
         """
+        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
-        if mode not in ("general", "active") or (mode == "active" and kind != "all"):
-            raise ValueError("mode must be general, or active with kind=all")
+        if mode not in ("general", "active") or (mode == "active" and kind != "unified"):
+            raise ValueError("mode must be general, or active with kind=unified")
         cfg = self.config()
         if not store.rag_configured(cfg):
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
@@ -2143,7 +2177,7 @@ class RagService:
         # Retrieve enough passages to avoid spending the candidate budget on
         # one issue's comments. Bound widening to keep vector lookup predictable.
         passages = {}
-        if kind == "all":
+        if kind == "unified":
             window = candidates
             while True:
                 ranked = await asyncio.to_thread(index.rank, qvec, window, **rank_args)
@@ -2233,15 +2267,16 @@ class RagService:
 
         The last value :meth:`search_stream` yields, for a caller that wants
         one answer. A reranker failure raises for a corpus of one kind and
-        falls back to the ranked list for ``all``, which mixes kinds and so
+        falls back to the ranked list for ``unified``, which mixes kinds and so
         has an exact-match head worth showing on its own.
         """
+        kind = canonical(kind)
         last: Optional[dict] = None
         async for event, view in self.search_stream(
             kind, query, root=root, limit=limit, rerank=rerank, wait=wait, mode=mode,
         ):
             if event == "error":
-                if kind != "all":
+                if kind != "unified":
                     raise RagError(view["error"])
                 view = {k: v for k, v in view.items() if k != "error"}
             last = view
@@ -2455,6 +2490,7 @@ class RagService:
         cfg = self.config()
         if not store.rag_configured(cfg):
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
+        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
         try:
@@ -2527,7 +2563,7 @@ class RagService:
             prog = self._progress_of(key)
             row = {
                 "key": key,
-                "kind": key if key in ("sessions", "all") else "beads",
+                "kind": self._kind_of_key(key),
                 "root": str(self._roots.get(key)) if self._roots.get(key) else None,
                 "documents": len(index.entries),
                 "dims": index.dims,
