@@ -133,9 +133,13 @@ async def sweep(manager, cfg: Optional[dict] = None) -> List[str]:
     limit = retries(cfg)
     if limit <= 0:
         return []
-    from .fault_pause import fault_to_pause
+    from .fault_pause import fault_to_pause, resume_grace
     from . import session_input
 
+    # A session inside its resume grace (claunch-x9agn) is not switched
+    # either: the relaunch this clock would make is the very thing the grace
+    # gives the session's new key or profile time to prove.
+    grace = resume_grace(cfg)
     out: List[str] = []
     for session in list(manager.list()):
         name = session.sdef.name
@@ -146,7 +150,7 @@ async def sweep(manager, cfg: Optional[dict] = None) -> List[str]:
                 # No token is injected at all, so there is no key to move to;
                 # ``set_key`` refuses these and the pause is the only answer.
                 continue
-            record = fault_to_pause(session)
+            record = fault_to_pause(session, grace=grace)
             if record is None:
                 continue
             fault_key = _fault_key(record)

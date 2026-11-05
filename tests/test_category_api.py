@@ -352,7 +352,7 @@ def test_tree_lists_the_workspace_sessions_not_yet_placed(home, tmp_path):
 
 
 def test_tree_details_carry_the_session_partition(home, tmp_path):
-    """The page's status chips and its show killed/archived boxes read `life`."""
+    """The page's status chips and its per-partition filter boxes read `life`."""
     from types import SimpleNamespace
 
     (tmp_path / "repo").mkdir()

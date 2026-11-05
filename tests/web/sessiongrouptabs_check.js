@@ -142,7 +142,8 @@ function load(seed, project = "") {
     "function enableTabDragScroll() {}\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
-     slice("scrollSessionListTop"), slice("selectSessionGroupTab"),
+     slice("scrollSessionListTop"), slice("railPressMark"),
+     slice("selectSessionGroupTab"),
      slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader"),
      slice("filterSessionOrigin"), slice("setSessionOriginFilter"),
      slice("sessionGroupRowVisible"), slice("sessionCategory"), slice("sessionMatchesFilter"),
@@ -458,8 +459,8 @@ check("the header row sits right under the tab strip, above the list",
 check("the header row is wired to scroll the list to its top",
       /\$\("session-group-header"\)\?\.addEventListener\("click", scrollSessionListTop\)/.test(src),
       true);
-check("the header row is hidden with the strip in grid view",
-      /groupHeader\.classList\.toggle\("view-hidden", grid\)/.test(src) &&
+check("the header row is hidden with the strip in the grid and chart views",
+      /groupHeader\.classList\.toggle\("view-hidden", grid \|\| chart\)/.test(src) &&
       /\.session-group-header\.view-hidden\s*\{\s*display: none/.test(css), true);
 check("the tabs have their own styling, open and matched",
       [/\.session-group-tab\.active\s*\{/.test(css),

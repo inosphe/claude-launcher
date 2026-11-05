@@ -31,10 +31,15 @@ BACKOFF = 3.0
 CAPTURE_TIMEOUT = 15.0
 #: The capture command, run by the guest's shell. The temp file is the
 #: guest's own and goes away in the same command.
+#: ``%(tag)s`` is the VM's id, filled in by :func:`capture_argv`: the guest's
+#: ``/tmp`` is the guest's alone, but a fixed name on a command line this
+#: repository executes is what ``tools/check_tmp_paths.py`` refuses, and a
+#: name per VM also keeps one VM's interrupted capture from matching another's.
 #: (Not a dot-file name: screencapture refuses to write one, measured on t03.)
 #: Files an earlier capture left (its tart exec was killed on a timeout) are
 #: removed first: one poller runs per VM, so none of them is in use.
-CAPTURE = ('/bin/rm -f /tmp/claunch-frame-*.jpg; f=/tmp/claunch-frame-$$.jpg; '  # tmp-paths: guest
+CAPTURE = ('/bin/rm -f /tmp/claunch-frame-%(tag)s-*.jpg; '
+           'f=/tmp/claunch-frame-%(tag)s-$$.jpg; '
            '/usr/sbin/screencapture -x -t jpg "$f" && /bin/cat "$f"; rc=$?; /bin/rm -f "$f"; exit $rc')
 
 BytesResult = Tuple[int, bytes, str]
@@ -54,8 +59,11 @@ def run_bytes(argv: Sequence[str], timeout: float) -> BytesResult:
 
 def capture_argv(vm) -> list:
     """The capture runs in the guest through ``tart exec`` (~0.14 s a frame
-    after the first, measured on t03)."""
-    return [TART, "exec", "--", vm.tart_name, "/bin/sh", "-c", CAPTURE]
+    after the first, measured on t03). The temp name carries the VM's id,
+    which is a checked name (letters, digits, ``_``, ``.``, ``-``) — safe to
+    put in a shell word as it stands."""
+    return [TART, "exec", "--", vm.tart_name, "/bin/sh", "-c",
+            CAPTURE % {"tag": vm.id}]
 
 
 @dataclass

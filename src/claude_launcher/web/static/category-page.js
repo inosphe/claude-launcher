@@ -24,6 +24,19 @@ async function categoryRequest(path, method = "GET", body) {
 
 const categoryKey = (item) => item.kind + ":" + item.ref;
 const categoryAliases = (text) => String(text || "").split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+/* The lifecycle partitions the daemon reports for a session
+   (daemon/session.py session_category), in the order the filter bar shows
+   them. The set a page holds is what it shows: every box is one partition and
+   no box overrides another. The default keeps the working set (everything but
+   the two partitions that are done for good) -- finished sessions are most of
+   a long-lived tree and are not what the index is read for. */
+const CATEGORY_LIVES = ["running", "hold", "paused", "delayed", "failed", "killed", "archived"];
+const CATEGORY_LIVE_DEFAULT = ["running", "hold", "paused", "delayed", "failed"];
+/* The "running only (hold 포함)" preset: not a mode beside the boxes but the
+   same set narrowed to these two. It reads pressed while the set is exactly
+   this, the way the session rail derives its own presets (app.js
+   syncSessionFilters). */
+const CATEGORY_LIVE_ONLY = ["running", "hold"];
 
 /* Ancestors of a node id, nearest first, ending with null (the root). */
 function categoryAncestors(byId, id) {
@@ -71,14 +84,12 @@ function makeCategoryView({root, workspace: fixed = ""}) {
   let workspace = fixed, workspaces = [], data = null, events = [];
   let error = "", notice = "", busy = false, tab = "tree", seq = 0;
   let picked = new Set(), pickedNodes = new Set(), collapsed = new Set();
-  // Finished sessions are most of a long-lived tree and are not what the
-  // index is read for, so the page hides them until asked: one box per
-  // partition (daemon/session.py session_category).
-  let showKilled = false, showArchived = false;
-  // "running only": the opposite read — hide every session the daemon does
-  // not report as live (running, or hold: ended but parked for its next
-  // round). Off by default.
-  let showLiveOnly = false;
+  // One box per lifecycle partition (daemon/session.py session_category) and
+  // each box carries exactly its own partition: the page hides a session when
+  // the daemon reports a partition this set does not hold. Finished sessions
+  // are most of a long-lived tree, so the default hides the two that are done
+  // for good (killed, archived) and keeps the rest.
+  let shownLives = new Set(CATEGORY_LIVE_DEFAULT);
   let form = null;   // {kind, ...}: the one inline form open, if any
   let proposalDrafts = {};
   const url = (path, params = {}) => path + (path.includes("?") ? "&" : "?") + new URLSearchParams({workspace, ...params});
@@ -265,16 +276,14 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return out;
   }
 
-  /* Sessions the page is hiding. `life` is the daemon's partition; a session
-     the daemon no longer has a record of has none and stays visible. The
-     "running only" mode hides everything not live instead — running itself,
-     or hold (parked for its next round); killed/archived boxes cannot re-add
-     a session that mode hides. */
+  /* Sessions the page is hiding: the daemon's `life` partition is one the
+     filter's set does not hold. A session the daemon cannot partition (no
+     record of it, or a record with no `exited`) belongs to no box and the
+     filter has no basis to judge it, so it stays visible. */
   function hiddenSession(item) {
     if (item.kind !== "session") return false;
     const life = ((data?.details || {})[categoryKey(item)] || {}).life;
-    if (showLiveOnly && life !== "running" && life !== "hold") return true;
-    return (life === "killed" && !showKilled) || (life === "archived" && !showArchived);
+    return CATEGORY_LIVES.includes(life) && !shownLives.has(life);
   }
 
   function itemRow(item, tag = "li") {
@@ -383,9 +392,10 @@ function makeCategoryView({root, workspace: fixed = ""}) {
     return f;
   }
 
-  /* "running only (hold 포함)" is a mode that hides everything not live; the
-     "show killed"/"show archived" boxes re-add finished partitions. All off
-     by default. */
+  /* One box per partition, each carrying only its own, plus the "running only"
+     preset. The preset is derived from the set rather than layered over it:
+     pressing it narrows to running + hold, and any change to those two boxes
+     updates whether it reads pressed. No control here can contradict another. */
   function filters() {
     const bar = node("div", null, "category-filters");
     const one = (key, label, on, set) => {
@@ -397,9 +407,20 @@ function makeCategoryView({root, workspace: fixed = ""}) {
       wrap.append(box, node("span", label));
       bar.append(wrap);
     };
-    one("live", "running only (hold 포함)", showLiveOnly, (v) => { showLiveOnly = v; });
-    one("killed", "show killed", showKilled, (v) => { showKilled = v; });
-    one("archived", "show archived", showArchived, (v) => { showArchived = v; });
+    const preset = node("button", "running only (hold 포함)", "category-preset");
+    preset.type = "button";
+    preset.id = "category-show-live";
+    preset.title = "running과 hold만 남깁니다";
+    const live = shownLives.size === CATEGORY_LIVE_ONLY.length
+      && CATEGORY_LIVE_ONLY.every(life => shownLives.has(life));
+    preset.setAttribute("aria-pressed", String(live));
+    preset.onclick = () => { shownLives = new Set(CATEGORY_LIVE_ONLY); render(); };
+    bar.append(preset);
+    for (const life of CATEGORY_LIVES) {
+      one(life, life, shownLives.has(life), (on) => {
+        if (on) shownLives.add(life); else shownLives.delete(life);
+      });
+    }
     return bar;
   }
 

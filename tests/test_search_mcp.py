@@ -65,7 +65,9 @@ def test_search_defaults_to_the_unified_corpus_and_compacts_rows(monkeypatch):
     answer = search_mcp.call_tool("search", {"query": "grid view"})
 
     params = _params(client.calls[0])
-    assert params == {"q": "grid view", "kind": "all", "limit": "10", "rerank": "1", "wait": "2"}
+    assert params == {"q": "grid view", "kind": "all", "mode": "general",
+                      "limit": "10", "rerank": "1", "wait": "2"}
+    assert answer["mode"] == "general"
     assert answer["coverage"] == "90/100 indexed, sync in progress"
     assert answer["reranked"] is True
     comment, session = answer["results"]
@@ -112,12 +114,33 @@ def test_search_sessions_corpus_rows_read_as_sessions(monkeypatch):
                    "excerpt": "did x", "read": "session:s355"}
 
 
+def test_search_mode_active_rides_on_the_unified_corpus(monkeypatch):
+    client = _use(monkeypatch, {"/api/search?": {
+        "kind": "all", "index": {}, "results": []}})
+    answer = search_mcp.call_tool("search", {"query": "x", "kind": "all", "mode": "active"})
+    params = _params(client.calls[0])
+    assert params["kind"] == "all" and params["mode"] == "active"
+    assert answer["mode"] == "active"
+
+
+def test_search_rejects_active_with_a_narrower_kind_before_asking(monkeypatch):
+    client = _use(monkeypatch, {})
+    for kind in ("beads", "sessions"):
+        with pytest.raises(search_mcp.SearchMcpError,
+                           match="mode must be general, or active with kind=all"):
+            search_mcp.call_tool("search", {"query": "a", "kind": kind, "mode": "active"})
+    assert client.calls == []
+
+
 def test_search_rejects_bad_input(monkeypatch):
-    _use(monkeypatch, {})
+    client = _use(monkeypatch, {})
     with pytest.raises(search_mcp.SearchMcpError):
         search_mcp.call_tool("search", {"query": "  "})
     with pytest.raises(search_mcp.SearchMcpError):
         search_mcp.call_tool("search", {"query": "a", "kind": "files"})
+    with pytest.raises(search_mcp.SearchMcpError):
+        search_mcp.call_tool("search", {"query": "a", "kind": "all", "mode": "fuzzy"})
+    assert client.calls == []
 
 
 def test_search_unconfigured_names_the_fallback(monkeypatch):

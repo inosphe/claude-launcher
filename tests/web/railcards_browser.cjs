@@ -158,10 +158,10 @@ const READ = `(() => {
         seen: shown(li.querySelector(".rail-seen")),
         actions: shown(li.querySelector(".rail-actions")),
         /* Measure session action buttons separately from their container.
-           On a compact card the container stays the full-width buttons
-           line (the base .rail-actions rule, flex-basis: 100%) and holds
-           only the spawn+pin pair (claunch-g6ecv), so both the box and the
-           buttons are read painted or not. */
+           The buttons line is the expanded card's (claunch-5b12o.1, the
+           operator withdrawing the spawn+pin exception claunch-g6ecv added
+           to the compact card), so on a compact card both the box and every
+           button in it are read as unpainted. */
         actionButtons: [...li.querySelectorAll(
           ".sess-plus, .sess-pin, .sess-observe, .sess-note-edit, .sess-info")]
           .filter((b) => b.getBoundingClientRect().width > 0).length,
@@ -250,19 +250,14 @@ const READ = `(() => {
         meta: false, card: false, checks: false, actionX: {} },
       "a one-line card draws the name and the role, nothing else");
     assert.deepEqual(by("lead").lines,
-      { brief: true, cwd: false, ctx: false, seen: false, actions: true,
-        actionButtons: 2, rowRefreshes: 0,
-        meta: true, card: false, checks: true,
-        /* actionX is positional: asserted on its own lines below. */
-        actionX: by("lead").lines.actionX },
-      "a compact card draws the briefing one-line and the chips");
-    assert.equal(by("lead").lines.actionButtons, 2,
-      "a compact card draws the spawn+pin pair and nothing else");
-    const leadX = by("lead").lines.actionX;
-    assert.deepEqual(Object.keys(leadX).sort(), ["sess-pin", "sess-plus"],
-      "the painted pair on a compact card is exactly the spawn + and the pin");
-    assert.ok(leadX["sess-plus"] < leadX["sess-pin"],
-      "the spawn + sits directly left of the pin on a compact card (claunch-g6ecv)");
+      { brief: true, cwd: false, ctx: false, seen: false, actions: false,
+        actionButtons: 0, rowRefreshes: 0,
+        meta: true, card: false, checks: true, actionX: {} },
+      "a compact card draws the briefing one-line and the chips — no buttons line");
+    assert.equal(by("lead").lines.actionButtons, 0,
+      "a compact card draws no session action button (claunch-5b12o.1)");
+    assert.deepEqual(by("lead").lines.actionX, {},
+      "neither the spawn + nor the pin is painted on a compact card");
     const compactKey = page.locator('#session-list li[data-name="w1"] .sess-key');
     await compactKey.waitFor({ state: "attached" });
     assert.equal(await compactKey.isVisible(), false,
@@ -498,6 +493,14 @@ const READ = `(() => {
     assert.equal(opened.lines.ctx, true, "and the context gauge");
     assert.equal(opened.lines.seen, true, "and the attention line");
     assert.equal(opened.lines.actions, true, "and the buttons line — expanded is where they live");
+    /* The spawn+pin pair lives here now that the compact card no longer
+       draws a buttons line (claunch-5b12o.1): the `+` still sits directly
+       left of the 📌, the arrangement the operator asked for on the
+       default card in claunch-g6ecv. */
+    assert.deepEqual(Object.keys(opened.lines.actionX).sort(), ["sess-pin", "sess-plus"],
+      "the expanded card paints exactly the spawn + and the pin");
+    assert.ok(opened.lines.actionX["sess-plus"] < opened.lines.actionX["sess-pin"],
+      "the spawn + sits directly left of the pin (claunch-g6ecv, on the expanded card)");
     assert.equal(opened.lines.card, true, "and the briefing card");
     assert.equal(opened.lines.brief, true, "the one-line is still there too");
     assert.equal(opened.lines.checks, false,

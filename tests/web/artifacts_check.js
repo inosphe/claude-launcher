@@ -141,4 +141,52 @@ assert.deepStrictEqual(summary(plan([{ path: '/t/b', status: 'cleanup_pending' }
 assert.deepStrictEqual(summary(plan([{ path: '/t/a', status: 'ready' }], { attempts: 1 })), [1, 0, false]);
 assert.deepStrictEqual(summary(plan([])), [0, 0, false]);
 assert.deepStrictEqual(summary(null), [0, 0, false]);
+
+// What one row says about its measurement: four different answers, in the
+// order the page decides them. A walk running now outranks the size the row
+// still carries from a previous visit, and a recorded error outranks it too --
+// an error is an answer, not a missing measurement. (The vm context has its
+// own Object.prototype, so the status is compared by its fields.)
+const status = (value) => {
+  const s = page.rowStatus(value);
+  return [s.key, s.label];
+};
+assert.deepStrictEqual(status({ path: '/t/a', running: true, bytes: 9 }), ['running', '측정 중']);
+assert.deepStrictEqual(status({ path: '/t/a', error: 'denied', bytes: 9 }), ['failed', '실패']);
+assert.deepStrictEqual(status({ path: '/t/a', bytes: 9 }), ['done', '완료']);
+assert.deepStrictEqual(status({ path: '/t/a', exists: false }), ['missing', '없음']);
+assert.deepStrictEqual(status({ path: '/t/a' }), ['unmeasured', '미측정']);
+assert.deepStrictEqual(status(null), ['unmeasured', '미측정']);
+
+// The card's tally counts its own rows (scratch plus items) by that status;
+// it is what the session head shows while a walk runs.
+const counts = (value) => {
+  const c = page.sessionCounts(value);
+  return [c.total, c.running, c.done, c.failed, c.missing, c.unmeasured];
+};
+assert.deepStrictEqual(counts({
+  scratch: { path: '/t/s', running: true },
+  items: [{ path: '/t/a', bytes: 1 }, { path: '/t/b', error: 'x' }],
+}), [3, 1, 1, 1, 0, 0]);
+assert.deepStrictEqual(counts({ scratch: { path: '/t/s', exists: false }, items: [] }),
+  [1, 0, 0, 0, 1, 0]);
+assert.deepStrictEqual(counts({ scratch: null, items: [] }), [0, 0, 0, 0, 0, 0]);
+assert.deepStrictEqual(counts(null), [0, 0, 0, 0, 0, 0]);
+
+// What the card shows while a walk runs. The total is the paths the walk can
+// report on: one that is not there has no size to watch, and counting it
+// would read as a walk that is stuck.
+assert.strictEqual(page.measureStateText({
+  scratch: { path: '/t/s', exists: false },
+  items: [{ path: '/t/a', running: true }, { path: '/t/b' }],
+}), '측정 중 1/2');
+assert.strictEqual(page.measureStateText({
+  scratch: { path: '/t/s', running: true },
+  items: [{ path: '/t/a', error: 'denied' }],
+}), '측정 중 1/2 · 실패 1');
+assert.strictEqual(page.measureStateText({
+  scratch: { path: '/t/s', bytes: 1 }, items: [{ path: '/t/a', error: 'x' }],
+}), '실패 1');
+assert.strictEqual(page.measureStateText({ scratch: { path: '/t/s', bytes: 1 }, items: [] }), '');
+assert.strictEqual(page.measureStateText(null), '');
 console.log('ok');

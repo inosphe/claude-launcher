@@ -269,8 +269,25 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   (`daemon/fault_pause.py`, 30초 주기, `ended_by`는 `daemon`/`usage-limit`).
   pause된 세션은 입력을 받지 않고, 리더면 아래 카드도 내려간다. 바쁜 세션은
   pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
-  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
+  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 그 기억은 세션 디렉터리의
+  `fault-pause.json`에 `pause_key`(판독의 `until`, 하네스가 리셋 시각을 적지
+  않았으면 빈 문자열)로 함께 남아 데몬 재기동을 넘긴다 — 메모리 맵만 있던 동안은
+  재기동 뒤 첫 pass가 사람이 되돌린 결정을 다시 pause로 덮었다(claunch-ijot0.1).
+  기록이 `until`을 추정해 채운 경우 그 값은 신원이 아니므로, 옛 기록은 하네스가
+  시각을 적었을 때만 `until`로 맞춘다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+- 재개 후 유예 (claunch-x9agn): 세션이 pause·hold·kill에서 다시 실행되거나
+  (respawn·wake·resume) 키 변경·borrow·redefine으로 재시작되면, 데몬은 그 시각을
+  `Session.resumed_at`에 남기고 그 뒤 `daemon.fault_resume_grace`초(기본 30, 0이면
+  끔) 동안 그 세션을 자동 pause하지도 자동 키 전환하지도 않는다. 재개한 대화가
+  이전 실행이 멈춘 한도 문구를 화면에 다시 그리면, 그 문구가 새 키·프로필이
+  응답하기 전에 세션을 다시 pause했다. 유예 중에는 세션 상단 timer line에
+  `fault`/`grace` chip(⛨ `usage-limit grace`)이 남은 시간을 보인다. chip은 세션이
+  active `usage_limit` 판독을 내는 동안에만 보이고, 한도가 해소되면 유예 시간이
+  남아 있어도 사라진다(claunch-xn9ir). 유예가 끝난
+  뒤의 pass에서 한도 문구가 아직 화면 하단에 있으면 이전처럼 pause한다(pass가
+  30초 주기라 재개부터 최대 약 60초). 데몬 재기동 뒤의 자동 복원은 유예 대상이
+  아니다(`resumed_at`은 메모리에만 있다).
 - 자동 키 전환 (claunch-d2t79): 키 풀을 가진 프로필의 세션이 `usage_limit`을
   맞으면, 그 세션이 스스로 켜 둔 경우(`SessionDef.auto_key_switch`, 기본 꺼짐)
   pause 전에 다른 키로 갈아탄다(`daemon/key_switch.py`). 같은 pass에서 이 전환이
@@ -293,9 +310,9 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
     입력을 받을 수 있게 되면 `continue`를 한 줄 넣는다(`key_switch.CONTINUE`).
   - 한 fault당 시도 횟수는 설정 키 `daemon.fault_key_switch_retries`(기본 1, 0이면
     전 기능 끔)로 제한한다. 시도 횟수는 세션 디렉터리의 `key-switch.json`에
-    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다(메모리에만 두던
-    `FaultPauseClock.paused`가 재기동 뒤 같은 한도로 다시 pause하던 문제
-    claunch-ijot0.1과 같은 자리다). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
+    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다 — pause 쪽의
+    같은 문제(claunch-ijot0.1)도 이제 `fault-pause.json`의 `pause_key`로 같은
+    방식으로 넘긴다(위 「자동 pause」 절). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
     pause한다. 갈 곳이 없다는 판정은 10분간 유지해, 며칠짜리 한도 동안 30초마다
     provider에 키마다 묻지 않는다(`key_switch.RECONSULT`).
 - pause는 beads 이슈를 open으로 돌리지 않는다. hold와 같이 in_progress로

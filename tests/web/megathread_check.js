@@ -272,6 +272,18 @@ assert.ok(meta.includes("worker"), "the roster's role is on the row");
 assert.ok(meta.includes("claunch"), "the project and the mesh are on the row");
 assert.ok(meta.includes("improv-worker-v2") && meta.includes("work"), "the cflow run is on the row");
 assert.equal(ctx.metaLine({ name: "s9" }, {}, {}), "", "no joins, no line — not a row of separators");
+
+/* The run's mark on the row (claunch-hbmhk.1): `gated` is true for a run
+   held on a person and for one holding only choices that do not stop it.
+   `⚑` is the first; `○` is the second, the rail chip's own glyph. */
+const marked = (run) => ctx.metaLine({ name: "s9" }, {}, { s9: { status: "running", ...run } });
+assert.ok(marked({ gated: true }).includes("⚑"), "a held gate keeps the flag");
+assert.ok(!marked({ gated: true }).includes("○"), "...and does not wear the optional mark");
+assert.ok(marked({ gated: true, blocking: false }).includes("○"), "an optional-only run marks ○");
+assert.ok(!marked({ gated: true, blocking: false }).includes("⚑"),
+  "...and does not claim the flag");
+assert.ok(!marked({ gated: false }).includes("○") && !marked({ gated: false }).includes("⚑"),
+  "an ungated run carries neither mark");
 assert.equal(ctx.briefLine(rich), "정렬 UI를 만든다", "the one-line summary, not `now`");
 assert.equal(ctx.briefLine({ briefing: { one_line: "", state: "working", now: "지금 하는 일" } }),
   "지금 하는 일", "an empty one-liner falls back to now");

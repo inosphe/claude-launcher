@@ -113,6 +113,45 @@ m = build({ range: 'all', groupPick: 'm2' });
 assert.strictEqual(m.groups.length, 0);
 assert.strictEqual(m.rows.length, 4);
 
+// Lineage order (claunch-h0wi6.2): with `tree` every parent comes before its
+// children, depth-first, and each row carries its depth. Siblings keep the
+// sort's order; a parent outside the rows makes its child a root; a cycle or
+// a self-parent drops no row.
+const fam = [
+  { name: 'lead', status: 'running', created_at: iso(now - 5 * H), mesh: 'm1' },
+  { name: 'w1', parent: 'lead', status: 'running', created_at: iso(now - 4 * H), mesh: 'm1' },
+  { name: 'w1a', parent: 'w1', status: 'running', created_at: iso(now - 3 * H), mesh: 'm1' },
+  { name: 'w2', parent: 'lead', status: 'running', created_at: iso(now - 1 * H), mesh: 'm2' },
+  { name: 'solo', status: 'running', created_at: iso(now - 2 * H), mesh: 'm1' },
+  { name: 'stray', parent: 'gone', status: 'running', created_at: iso(now - 0.5 * H), mesh: 'm1' },
+  { name: 'self', parent: 'self', status: 'running', created_at: iso(now - 0.2 * H), mesh: 'm1' },
+  { name: 'cx', parent: 'cy', status: 'running', created_at: iso(now - 6 * H), mesh: 'm1' },
+  { name: 'cy', parent: 'cx', status: 'running', created_at: iso(now - 7 * H), mesh: 'm1' },
+];
+const fbuild = (o) => C.buildModel(fam, Object.assign({ now, range: 'all', groupValue }, o));
+const tree = (m) => Array.from(m.rows, (r) => `${r.name}:${r.depth}`);
+// Off by default: the flat order, newest first, every depth 0.
+assert.deepStrictEqual(names(fbuild({})),
+  ['self', 'stray', 'w2', 'solo', 'w1a', 'w1', 'lead', 'cx', 'cy']);
+assert.ok(fbuild({}).rows.every((r) => r.depth === 0));
+m = fbuild({ tree: true });
+assert.deepStrictEqual(tree(m), ['self:0', 'stray:0', 'solo:0', 'lead:0', 'w2:1', 'w1:1',
+  'w1a:2', 'cx:0', 'cy:1']);
+assert.strictEqual(m.rows.length, fam.length, 'no row is dropped');
+// The sort orders siblings: longest-lived first puts w1 before w2 under
+// lead. The cycle has no root, so its rows follow the rooted ones.
+assert.deepStrictEqual(tree(fbuild({ tree: true, sort: 'lifetime' })),
+  ['lead:0', 'w1:1', 'w1a:2', 'w2:1', 'solo:0', 'stray:0', 'self:0', 'cy:0', 'cx:1']);
+// A parent filtered out of the rows (here by the group pick) makes a root.
+assert.deepStrictEqual(tree(fbuild({ tree: true, group: 'mesh', groupPick: 'm2' })), ['w2:0']);
+// Grouped: the tree is built inside each group, so w2 (mesh m2) is a root
+// of its own group rather than a child drawn among m1's rows.
+m = fbuild({ tree: true, group: 'mesh' });
+assert.deepStrictEqual(tree(m), ['self:0', 'stray:0', 'solo:0', 'lead:0', 'w1:1', 'w1a:2',
+  'cx:0', 'cy:1', 'w2:0']);
+assert.deepStrictEqual(Array.from(m.rows, (r) => r.group),
+  ['m1', 'm1', 'm1', 'm1', 'm1', 'm1', 'm1', 'm1', 'm2']);
+
 // Summary: per-category counts, alive count, cflow tallies, median lifetime.
 m = build({ range: 'all', archived: true });
 assert.strictEqual(m.summary.total, 5);

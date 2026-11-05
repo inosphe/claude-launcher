@@ -28,6 +28,9 @@ not typed into by default -- they read the thread with thread_read -- so a
 reply reaches a guest's terminal only by naming it; with no mention the
 message goes to the owner alone, as in a thread without guests. A name that
 is no participant of the thread is returned in ``unknown_mentions``.
+``@user`` (claunch-ikcvw) names the person reading the thread and no
+session: it is what a guest writes to answer the user alone, and a message
+carrying only ``@user`` is typed into nobody.
 """
 
 from __future__ import annotations
@@ -92,6 +95,8 @@ TOOLS = [
                     "with 'images' (file paths); a message may be images alone. Name who the message is for "
                     "with @<session> or @all (the thread's owner and every guest): a thread's guests are not "
                     "typed into unless a message names them, and naming a session is how a reply reaches it. "
+                    "@user names the person reading the thread and no session: as a guest, write it to answer "
+                    "the user alone without typing the message into the owner. "
                     "A name that is no participant of the thread is returned in 'unknown_mentions' and "
                     "delivered to nobody. Replying to a "
                     "closed thread reopens it, except as a guest (the thread stays closed). Only for the thread's own topic: when the text is about "

@@ -26,6 +26,9 @@ The measurement is ``uv sync`` plus ``tools/changed_tests.py`` run on the
 scratch worktree, both halves with ``--repo``/``--directory`` for the reason
 ``merge_ready.py`` gives (claunch-873ys). ``--measure-cmd`` replaces it with one
 shell command run in the worktree.
+``--test-mode`` passes ``--mode`` to ``changed_tests.py``; without it the gate
+picks its own (``CLAUNCH_TEST_MODE``, else ``full`` under ``CI``, else
+``sampling`` -- claunch-ce872).
 """
 
 from __future__ import annotations
@@ -53,13 +56,17 @@ def _rev(repo: str, ref: str) -> Optional[str]:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
-def _measure(wt: str, base_tip: str, custom: Optional[str]) -> int:
+def _measure(wt: str, base_tip: str, custom: Optional[str],
+             test_mode: Optional[str] = None) -> int:
     if custom:
         return subprocess.run(custom, shell=True, cwd=wt).returncode
+    gate = ["uv", "run", "--directory", wt, "--no-sync", "python", "tools/changed_tests.py",
+            "--repo", wt, "--base", base_tip]
+    if test_mode:
+        gate += ["--mode", test_mode]
     steps: List[List[str]] = [
         ["uv", "sync", "--extra", "test", "--directory", wt],
-        ["uv", "run", "--directory", wt, "--no-sync", "python", "tools/changed_tests.py",
-         "--repo", wt, "--base", base_tip],
+        gate,
     ]
     for step in steps:
         code = subprocess.run(step).returncode
@@ -79,6 +86,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="directory for the worktree (default: $CLAUNCH_SCRATCH)")
     ap.add_argument("--measure-cmd", default=None,
                     help="shell command run in the worktree instead of the changed-tests measurement")
+    ap.add_argument("--test-mode", choices=("sampling", "partial", "full"), default=None,
+                    help="changed_tests.py --mode for the measurement (default: its own: "
+                         "CLAUNCH_TEST_MODE, else full under CI, else sampling)")
     args = ap.parse_args(argv)
 
     top = _git(args.repo, "rev-parse", "--show-toplevel")
@@ -110,7 +120,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"conflict: {args.branch} does not merge onto {args.base} ({base_tip[:12]})")
             return CONFLICT
         head = _git(wt, "rev-parse", "HEAD").stdout.strip()
-        code = _measure(wt, base_tip, args.measure_cmd)
+        code = _measure(wt, base_tip, args.measure_cmd, args.test_mode)
         if code != 0:
             print(f"measure failed: exit {code} on the merge of {args.branch} onto "
                   f"{args.base} ({base_tip[:12]}); no preview ref left")

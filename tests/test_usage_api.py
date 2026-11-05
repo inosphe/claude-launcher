@@ -371,6 +371,64 @@ def test_usage_keys_names_a_usage_pick_from_the_readings_it_already_has(monkeypa
     assert [row["next"] for row in doc["keys"]] == [False, True]
 
 
+def test_usage_keys_leaves_a_spent_key_out_of_the_next_pick(monkeypatch):
+    """claunch-hego3: the form names a key the launch would actually take.
+
+    A key any of whose windows is spent is not a candidate of the launch's
+    pick (``usage.health_for_report``), so the preview must not hand the
+    comparison its peak and let a usage-min pick name it.
+    """
+    prof = SimpleNamespace(name="work")
+    keys = [{"id": "k-1", "masked": "sk-A…1111", "current": True},
+            {"id": "k-2", "masked": "sk-B…2222", "current": False}]
+    monkeypatch.setattr(
+        api.profile_keys,
+        "view",
+        lambda _p: _view(pooled=True, owner="work", strategy="usage-min", keys=keys),
+    )
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": "work",
+            "keys": {
+                "k-2": {
+                    "key_id": "k-2",
+                    "windows": [
+                        {"name": "five_hour", "utilization": 0.0, "status": "ok"},
+                        {"name": "seven_day", "utilization": 100.0,
+                         "status": "rate_limited"},
+                    ],
+                    "source": "oauth-usage",
+                    "updated_at": 950.0,
+                    "error": None,
+                }
+            },
+            "unmeasurable": None,
+        },
+    )
+    seen = {}
+
+    def peek(_p, readings=None):
+        seen.update(readings or {})
+        return SimpleNamespace(
+            key=SimpleNamespace(id="k-1"), strategy="usage-min", fallback=None,
+            exact=False,
+        )
+
+    monkeypatch.setattr(api.profile_keys, "peek", peek)
+
+    doc = api._credential_preview(prof, "work", False)
+
+    # k-2's five-hour window is lower than the current key's, so a peak-only
+    # comparison would have named the rate-limited key as the next launch's.
+    assert seen == {"k-1": 12.5, "k-2": None}
+    assert doc["next"]["key_id"] == "k-1"
+
+
 def test_usage_keys_explains_a_usage_strategy_that_cannot_be_compared(monkeypatch):
     """No key is measurable: the strategy falls back, and the form says why."""
     prof = SimpleNamespace(name="work")

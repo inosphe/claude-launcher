@@ -909,6 +909,14 @@ class Session:
         #: person's request goes down; the next boot re-judges from
         #: scratch, same as it always did.
         self.resumed_by_human = False
+        #: Epoch seconds when :class:`SessionManager` brought this incarnation
+        #: back from an exited record (respawn, wake, resume out of a pause,
+        #: hold or kill) or restarted it under a changed definition (a key
+        #: switch, a borrow) -- None for a fresh session and for a restore
+        #: after a daemon restart. The fault pause leaves the session alone
+        #: for a grace after it (``fault_pause.GRACE``, claunch-x9agn). In
+        #: memory only.
+        self.resumed_at: Optional[float] = None
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()

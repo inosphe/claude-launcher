@@ -41,7 +41,8 @@ const PLAN_ACTIONS = [
   {id: "issue", label: "이슈로 넘김"},
   {id: "drop", label: "버림"},
 ];
-const PLAN_ACTION_LABEL = Object.fromEntries(PLAN_ACTIONS.map(a => [a.id, a.label]));
+const NOTE_ACTIONS = ["here", "issue"];   // a note's optional picks (claunch-i0whx)
+const PLAN_ACTION_LABEL =Object.fromEntries(PLAN_ACTIONS.map(a => [a.id, a.label]));
 const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
 
 function planNode(tag, text, cls) {
@@ -318,11 +319,19 @@ function makePlanPane({root, session, request, onChange, nested}) {
     return li;
   }
 
-  /* A note (th-62379d): for the record, read once at the end; no controls. */
+  /* A note (th-62379d): for the record, read once at the end; it waits on
+     nobody. The user may still take it into this round or hand it over as
+     an issue (claunch-i0whx) -- optional buttons, no "버림": leaving it
+     alone already does nothing. */
   function noteItem(n) {
     const li = node("li", null, "ptree-node ptree-closure ptree-st-skipped plan-item plan-note-item");
     li.append(label("·", "참고", n.title, n.id));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
+    const row = node("div", null, "plan-actions");
+    for (const a of PLAN_ACTIONS.filter(a => NOTE_ACTIONS.includes(a.id)))
+      row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`), null, `act:${n.id}:${a.id}`));
+    li.append(noteBox(n, "메모 (선택 사항 · 누르지 않아도 종료를 막지 않습니다)"), row);
+    tail(n, li);
     return li;
   }
 

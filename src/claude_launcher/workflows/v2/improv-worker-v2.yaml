@@ -106,9 +106,11 @@ sides:
 #   (v2 전용)              -> consult-check(choose), pre-coding-consult-hold
 #                            (코딩 전 사용자 협의 — worker-round의 일감 귀속 뒤,
 #                            작업 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞.
-#                            요청이 저장소를 바꾸는 작업인지 에이전트가 판정하고,
-#                            질문·협의면 브랜치도 만들지 않고 협의 단계에서 사용자의
-#                            작업 지시를 기다린다. claunch-xpnae)
+#                            요청이 저장소를 바꾸는 작업인지 에이전트가 판정한다.
+#                            기본은 work이고, 사용자 결정이 필요한 갈림은 plan
+#                            decision으로 묻는다. hold는 협의만 하자는 명시나 바꿀
+#                            대상을 특정할 수 없는 경우로 한정한다. claunch-xpnae,
+#                            claunch-tcczr)
 #   (v2 전용)              -> feasibility-check(choose), feasibility-gate(ask: 사람),
 #                            feasibility-hold
 #                            (착수 정당성 점검 — worker-round의 batch 첫 자리, 일감·코딩
@@ -1288,21 +1290,31 @@ nodes:
 
   pre-coding-consult-hold:
     title: 코딩 전 사용자 협의 — 작업 지시를 기다린다
-    # claunch-xpnae: consult-check가 consult를 골랐을 때만 선다. 이 작업이 열린
+    # claunch-xpnae: consult-check가 consult를 골랐을 때만 선다(claunch-tcczr 뒤로는
+    # 협의만 하자는 명시, 또는 바꿀 대상을 특정할 수 없는 경우). 이 작업이 열린
     # 채 남아 있는 것이 hold다 — 사용자의 다음 말이 같은 작업을 다시 깨우므로,
     # 답을 마친 턴은 보고 없이 끝낸다(tests/test_worker_v2_pre_coding_consult.py).
     # hold 동안 저장소는 바뀌지 않는다: 브랜치·커밋·착지 요청·wrapup이 모두
     # 일감 처리에서 나오고, 이 자리는 일감 처리 앞이다.
     prompt: |
-      이번 요청은 저장소를 바꾸는 작업이 아니라 질문·확인·협의로 판정됐다.
-      판정 근거는 앞 선택 consult-check의 reason에 있다(`claunch cflow2 journal
-      -n 5`). 이 작업은 사용자가 실제 작업을 지시할 때까지 이 자리에서 기다린다.
+      이번 회차는 협의 단계에서 기다리는 것으로 판정됐다. 경우(사용자가 협의만
+      하자고 명시함 / 바꿀 대상을 특정할 수 없음)와 근거는 앞 선택
+      consult-check의 reason에 있다(`claunch cflow2 journal -n 5`). 이 작업은
+      사용자가 실제 작업을 지시할 때까지 이 자리에서 기다린다.
 
-      1. 질문에 답한다. 근거는 코드·보드·명령 출력으로 대고, 확인한 파일 경로와
-         명령을 함께 적는다. 답은 터미널에 쓰고, 이 회차 이슈가 있으면
-         `claunch beads comments add ${data.claim.issue} -f <본문 파일>`로 같은
-         내용을 보드에도 남긴다. 고칠 것이 보이더라도 이 자리에서는 바꾸지
-         않는다 — 사용자가 지시하면 3이 그 작업을 이어받는다.
+      1. 사용자에게 답한다. 협의만 하자는 요청이면 그 협의 주제에 답한다. 바꿀
+         대상을 특정할 수 없는 경우면 무엇을 확인했는지와 대상을 정하는 데
+         필요한 것(어느 파일·동작·문구인지)을 묻는다. 근거는 코드·보드·명령
+         출력으로 대고, 확인한 파일 경로와 명령을 함께 적는다. 고칠 것이
+         보이더라도 이 자리에서는 바꾸지 않는다 — 사용자가 지시하면 3이 그
+         작업을 이어받는다.
+         답은 사용자 스레드에 쓴다. 이 협의에 해당하는 스레드가 있으면
+         `thread_reply`, 없으면 `thread_open`(제목: 회차 이슈 id와 협의 주제)으로
+         쓰고, 마지막 줄에 「작업 지시를 기다린다 — 무엇을 바꿀지 알려 주면 이
+         회차가 이어진다」를 적는다. 터미널 출력과 이슈 코멘트는 대시보드 알림을
+         만들지 않으므로, 스레드에 쓰지 않으면 사용자는 이 세션이 기다린다는
+         것을 알 수 없다. 이 회차 이슈가 있으면 `claunch beads comments add
+         ${data.claim.issue} -f <본문 파일>`로 같은 내용을 보드에도 남긴다.
       2. 답을 마치면 보고하지 않고 턴을 끝낸다. 이 작업이 열린 채 남아 있는 것이
          곧 hold이고, 사용자의 다음 말이 이 작업을 다시 깨운다. 추가 질문에는 1을
          다시 하고 같은 방식으로 기다린다. 코드·테스트·문서·브랜치는 이 단계에서
@@ -1323,7 +1335,7 @@ nodes:
       보고에 있다).
     returns:
       ok: {work: str}
-    effects: [board.write, fs.read]
+    effects: [board.write, fs.read, thread.write]
 
   feasibility-gate:
     title: 착수 정당성 부정 — 사용자 승인
@@ -1939,6 +1951,13 @@ nodes:
       그 사유를 보고에 적고 스레드 없이 진행한다 — 전달은 필수이나 게이트를
       세우는 승인이 아니므로 이 작업의 실패로 보고하지 않는다.
 
+      ── 사용자 결정 갈림 (claunch-tcczr) ──
+      이 회차의 consult-check reason(`claunch cflow2 journal`)이 사용자의 결정이
+      필요한 갈림(대상·방식·범위)을 적었으면 그 갈림을 plan에 `default` 없는
+      decision으로 쓴다. plan이 이미 있으면 plan_get으로 읽고 id를 유지한 채
+      plan_set으로 더한다. 이 decision이 다음 plan-wait에서 work를 세운다 —
+      승인 게이트의 유무와 관계없다.
+
       ── plan_waiting: 계획에 남은 결정 수 (claunch-rzepk) ──
       plan_set(또는 plan_node)의 응답에 있는 `summary.waiting_decisions`을 plan_waiting에
       그대로 적는다(그 키가 없는 이전 데몬이면 `summary.waiting`). 지난 회차의
@@ -1966,13 +1985,18 @@ nodes:
       미결정이 남아 있으면 work를 시작하지 않는다(claunch-rzepk 규칙 1).
 
       `plan_get`으로 이 세션의 plan을 읽는다.
-      · plan이 이미 있으면 손대지 않는다. 지금 `summary.waiting_decisions` 값을
-        plan_waiting에 적는다.
+      · plan이 이미 있으면 아래 셋째 항목의 갈림 decision을 더하는 것 말고는
+        손대지 않는다. 지금 `summary.waiting_decisions` 값을 plan_waiting에 적는다.
       · plan이 없으면 지금 쓴다. `plan_set`으로 이 회차의 계획을 한 번 쓰고
         (title은 목표 요지, goal은 목표·범위 한두 줄, issue는 회차 이슈, steps는
         이번 일감의 단계), 그 응답의 `summary.waiting_decisions`을 plan_waiting에 적는다.
         work가 계획을 처음 쓰는 자리를 이 노드가 대신하는 것이다 — work는
         그 뒤 `plan_get`으로 읽은 것을 이어 쓴다(id를 유지한다).
+      · 어느 쪽이든, 이 회차의 consult-check reason(`claunch cflow2 journal`)이
+        사용자의 결정이 필요한 갈림(대상·방식·범위)을 적었으면 그 갈림이 plan에
+        `default` 없는 decision으로 있어야 한다(claunch-tcczr). 없으면 plan_get으로
+        읽고 id를 유지한 채 plan_set으로 더한 뒤 그 응답의 값을 plan_waiting에
+        적는다. 이 decision이 다음 plan-wait에서 work를 세운다.
       plan_get·plan_set이 없거나 데몬이 거절하면 plan_waiting을 비우지 말고
       -1을 적고, 그 사유를 보고에 한 줄 남긴다. 모르는 값을 「결정 없음」으로
       적지 않는다.
@@ -4970,7 +4994,9 @@ nodes:
     prompt: |
       이 런의 착지 요청을 받을 세션이 없다는 판정이 났다(landing의 여섯째
       확인, 종료 코드 1). 이제 그 판정의 근거를 모은다 — 요약하지 말고
-      명령의 출력을 옮긴다:
+      명령의 출력을 옮긴다. 이 노드는 갈래의 재측정(landing-target-retry,
+      1분 간격 3회)이 모두 1로 끝났거나 판정 불가로 끝났을 때만 온다 —
+      질문의 근거는 그 마지막 측정이다:
       1. `claunch gate landing-target --json` — 데몬의 Router가 낸 답이다.
          `why`가 탈락 사유 전체이고, `passed`는 지나온 세션과 그 이유,
          `refused`는 거절된 후보, `undecidable`은 판정 불가 여부다.
@@ -6425,8 +6451,20 @@ procedures:
             후보 그룹을 차례로 비우고 사람 앞에 서며, 그동안 런은 상한까지
             돈다(지금 상한은 5회·약 50분이고, 25회 상한 때의 실측이 25회·약
             4시간이다, claunch-od1mx). 없는 대상을 상위에
-            물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 곧바로
-            사람이다.
+            물으면 같은 벽을 한 번 더 만난다. 그래서 여섯째가 1이면 사람이
+            정한다 — 다만 그 자리에서가 아니라 재측정 세 번이 끝난 뒤다
+            (claunch-sp0ut.1).
+            **1은 순간값이다.** 이 판정은 리더 세션이 선언한 landing 큐를
+            읽으므로, 리더가 회차 사이에 있으면 답이 바뀐다 — 실측: 한 회차가
+            21:51에 1을 냈고 22:13에 리더의 새 런이 뜨자 같은 명령이 0이 됐는데,
+            그 사이에 열린 사람 질문은 하루 동안 그대로 남았다(claunch-sp0ut).
+            그래서 no-target 갈래는 질문을 열기 전에 1분 간격으로 세 번 더 잰다
+            (landing-target-retry). 그 사이에 한 번이라도 0이 나오면 갈래를 떠나
+            평소의 request 경로(submit: 정렬 → 동료 리뷰 → 착지 요청)로 가고,
+            세 번 다 1일 때만 사람이 고른다. 재측정이 판정 불가(2)로 끝난 때도
+            사람에게 간다 — 이 갈래는 이미 1을 잰 뒤이고, 지금 잴 수 없다는 것이
+            그 근거를 지우지는 않는다. 재측정은 이 세션의 턴을 쓰지 않는다 —
+            엔진이 명령을 돌리는 대기다.
             **2면 escalate다.** 모르는 것을 request로 밀지 않는다 — 그 규칙은
             여섯째에도 그대로다. 다만 2를 1로 읽지도 않는다: 판정 불가는
             「아무도 없다」가 아니고, 사람에게 올릴 근거가 서지 않았다는 뜻이다.
@@ -6538,13 +6576,48 @@ procedures:
                           owner: "$data.landing_route.owner"
                           issue: "$data.landing_route.issue"
                           relation: "$data.landing_route.relation"
-                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 묻는다.
+                      # 기록이 없거나 사람이 답한 자리가 바뀌었다 — 잰다.
                       ask-again: []
-                  # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
-                  - id: landing-target-ask
-                    call: landing-target-gate
-                    with: {relation: "$data.inputs.relation"}
-                    bind: landing_route
+                  # claunch-sp0ut.1: 여섯째 확인의 1은 그 순간의 값이다. 이 갈래에
+                  # 섰다는 것은 방금 1을 쟀다는 뜻이고, 그 1은 리더의 landing 큐가
+                  # 회차 사이에 비어 있었다는 것일 뿐이다(실측: 21:51 exit 1 ->
+                  # 22:13 리더 런 583이 뜨자 exit 0, 그 사이에 열린 질문이 하루를
+                  # 남았다). 사람을 세우기 전에 1분 간격으로 세 번 더 잰다.
+                  # poll 60 x 3 = seconds 180: 첫 폴이 진입 즉시(t=0), 다음이
+                  # 60·120초라 재측정이 정확히 세 번이고, 180초에 시간이 다 된다.
+                  # probe는 여섯째 확인과 같은 명령이다 — 다른 명령을 재면
+                  # 판정과 재측정이 서로 다른 것을 잰다.
+                  - id: landing-target-retry
+                    wait:
+                      probe: [claunch, gate, landing-target, --json]
+                      poll: 60
+                      seconds: 180
+                      undecided_max: 3
+                      describe: "착지 요청을 받을 세션이 생겼는지 1분 간격으로 세 번 더 잰다 — 하나라도 0이면 평소 착지 경로로 간다"
+                    # 두 실패 갈래를 빈 트리로 받아 둔다: 여기서 갈래를 끝내면
+                    # 아래 cond가 서지 못하고 timeout·undecidable이 이 seq 밖으로
+                    # 새어 나가는데, 그 둘은 land가 선언하지 않은 결과다(fail로
+                    # 회차 루프를 탈출한다 — claunch-improver-integration-request-
+                    # blocked-o6paj와 같은 사고 경로). 판정은 아래 cond가 한다.
+                    on:
+                      timeout: []
+                      undecidable: []
+                  - id: landing-target-reroute
+                    cond:
+                      # exit 0 — 3분 사이에 대상이 생겼다. then을 빈 트리로 두면
+                      # 이 cond가 ok로 끝나고, cond가 이 seq의 마지막 노드이므로
+                      # no-target 옵션의 트리도 ok로 끝난다. 그러면 choose가 ok로
+                      # 완결되고 land의 seq가 submit(정렬 → 동료 리뷰 → 착지
+                      # 요청)으로 이어진다 — 그것이 평소의 착지 경로다.
+                      - if: "$result['landing-target-retry'].outcome == 'ok'"
+                        then: []
+                      # 세 번 다 1(또는 판정 불가) — 지금처럼 사람이 정한다.
+                      - else:
+                          # 답은 landing_route로 묶여 다음 회차의 replay가 읽는다.
+                          - id: landing-target-ask
+                            call: landing-target-gate
+                            with: {relation: "$data.inputs.relation"}
+                            bind: landing_route
             escalate:
               description: 확인이 하나라도 깨졌다 — 착지 여부를 상위 세션에 묻는다
               when: "'escalate' in $params.allow"
@@ -7040,8 +7113,10 @@ procedures:
   worker-round:
     description: >-
       회차 하나: 목표 수립 -> 일감 귀속(resolve-issue) -> 코딩 전 사용자
-      협의(pre-coding-consult; 질문·협의 요청이면 브랜치도 코드도 만들지 않고
-      협의 단계에서 사용자의 작업 지시를 기다린다) -> 작업 위치(workspace) ->
+      협의(pre-coding-consult; 사용자가 협의만 하자고 했거나 바꿀 대상을 특정할
+      수 없으면 브랜치도 코드도 만들지 않고 협의 단계에서 사용자의 작업 지시를
+      기다린다. 그 밖에는 work로 가고 사용자 결정은 plan decision으로 묻는다)
+      -> 작업 위치(workspace) ->
       브랜치 준비 -> 큐의 일감마다 item(배치 상한 10) -> 착지(land; rework면 배치를
       다시 돈다) -> 마감·회차 보고서. mode stack-only는 위임 전용 회차다(v1
       stack-round): 목표 수립과 일감 루프 없이 스택 컷만 착지시킨다.
@@ -7117,8 +7192,10 @@ procedures:
               - id: resolve
                 call: resolve-issue
                 bind: claim
-              # 코딩 전 사용자 협의(claunch-xpnae): 회차의 요청이 저장소를 바꾸는
-              # 작업인지 질문·협의인지 여기서 판정한다. 일감 귀속 뒤이면서 작업
+              # 코딩 전 사용자 협의(claunch-xpnae): 회차의 요청을 work로 진행할지
+              # 협의 단계에서 기다릴지 여기서 판정한다. 기본은 work이고 hold는 두
+              # 경우로 한정한다(claunch-tcczr, th-8d1c24: 사람이 확인할 것은
+              # plan decision과 require_coding_approval이 받는다). 일감 귀속 뒤이면서 작업
               # 위치·브랜치 준비·일감 처리·코딩 승인 게이트 앞이다 — 협의 요청은
               # 브랜치를 만들지 않고 그 자리에서 기다린다. stack-only 회차는 이
               # 갈래에 오지 않고(위의 then), land-only 회차는 코딩이 없으므로
@@ -7133,41 +7210,41 @@ procedures:
                         require_reason: true
                         prompt: |
                           코딩 전 사용자 협의 단계다. 목표·이슈가 정해졌고 아직
-                          브랜치를 만들지 않았으며 코드도 바꾸지 않았다. 이번 요청이
-                          저장소를 바꾸는 작업인지, 질문·확인·협의인지 판정한다.
+                          브랜치를 만들지 않았으며 코드도 바꾸지 않았다. 이 회차를
+                          work로 진행할지, 협의 단계(hold)에서 사용자의 작업 지시를
+                          기다릴지 판정한다. 기본은 **work**다.
                           판정 재료는 intake·prior-context·intake-issue의 보고,
                           이슈 본문과 코멘트(`claunch beads show
                           ${data.claim.issue} --json`, `claunch beads comments
                           ${data.claim.issue}`), 오프닝 태스크와 사용자의 말이다.
-                          항목마다 확인한 것과 결과를 reason에 한 줄씩 적는다.
 
-                          다음이면 **consult**다 — 그 요청의 완료가 답이면 된다.
-                          · 의문문이거나 「알려 달라·확인해 달라·어떻게 생각하는가」의
-                            형태이고, 바꿀 대상(파일·동작·문구)이 지목되지 않았다.
-                          · 사용자가 조사·측정·원인 설명을 요청했고, 그 결과를
-                            고치라는 지시를 함께 주지 않았다.
-                          · 사용자가 이번에는 작업하지 말고 협의만 하자고 말했다.
+                          **consult**는 다음 두 경우에만 고른다.
+                          1. 사용자가 이번에는 작업하지 말고 협의만 하자고 명시했다.
+                          2. 요청에서 바꿀 대상(파일·동작·문구)을 하나도 특정할 수
+                             없어서, plan decision의 선택지조차 쓸 수 없다.
 
-                          다음이면 **work**다 — 그 요청의 완료가 저장소의 변경이다.
-                          diff와 커밋이 결과물이고, 완료 기준을 테스트나 명령으로
-                          옮길 수 있다.
-                          · 고치기·추가하기·만들기·바꾸기·지우기 가운데 하나가
-                            지시됐다.
-                          · 이슈 본문의 범위·완료 기준이 동작이나 파일의 변경을 적고
-                            있다.
-                          · 질문 형태이지만 답이 「지금 코드가 틀렸다」로 끝나고,
-                            사용자가 그 수정을 함께 요청했다.
+                          그 밖에는 **work**다. 다음도 work다.
+                          · 질문·조사·측정·원인 설명 요청. work가 근거를 대어
+                            답하고, 바꿀 것이 없으면 그 사실을 보고한다.
+                          · 대상·방식·범위가 둘 이상으로 갈려 사용자의 결정이
+                            필요한 요청. 그 갈림을 reason에 적는다. plan을 처음
+                            쓰는 단계(coding-plan, 그것이 없으면 plan-seed)가 그
+                            갈림을 `default`가 없는 decision으로 쓰고, 작업 시작
+                            대기(plan-wait)가 work 앞에서 그 결정을 기다린다.
+                            사용자는 계획 패널에서 고른다. 이 갈림을 이유로
+                            consult를 고르지 않는다.
+                          · 판단이 서지 않는 경우. 사람이 확인해야 하는 런은 시작
+                            입력 `require_coding_approval`로 승인 게이트를 세운다.
 
-                          판단이 서지 않으면 **consult**다. 이 자리의 consult는 작업을
-                          잃지 않는다: 사용자 협의 단계가 열려 있고, 사용자가 작업을
-                          지시하면 그 자리에서 이 회차가 이어진다. work를 잘못 고르면
-                          질문 하나에 브랜치·커밋·착지 요청이 따라온다.
+                          reason에는 확인한 재료와 결과를 한 줄씩 적는다. consult를
+                          골랐으면 1·2 가운데 어느 경우인지와 그 근거(사용자의 말
+                          인용, 또는 대상을 특정하려고 확인한 것)를 적는다.
                         options:
                           work:
-                            description: 저장소를 바꾸는 작업이다 — 착수 정당성 점검과 일감 처리(코딩 승인 게이트·작업)로 간다
+                            description: 기본 갈래다 — 착수 정당성 점검과 일감 처리(plan 결정 대기·코딩 승인 게이트·작업)로 간다. 사용자 결정이 필요한 갈림은 plan decision으로 묻는다
                             then: []
                           consult:
-                            description: 질문·확인·협의다 — 코드를 바꾸지 않고 사용자 협의 단계에서 답한 뒤, 사용자가 작업을 지시할 때까지 기다린다
+                            description: 사용자가 협의만 하자고 명시했거나 바꿀 대상을 특정할 수 없다 — 코드를 바꾸지 않고 사용자 협의 단계에서 기다린다
                             then: [pre-coding-consult-hold]
                   - else: []
               # 코딩 전 카테고리 배치(claunch-06fwj): intake가 일감 귀속을

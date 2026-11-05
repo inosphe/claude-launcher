@@ -20,7 +20,14 @@
      8. a two-hundred `cleanup_pending` (window refused, retry record could
         not be written) is reported as "not started" with its reason, the
         plan stays on screen and 적용 stays enabled -- it is not a deletion;
-     9. no page errors. */
+     9. a ready row has a 지우기 button that submits its position in the plan
+        (`rows`) and never a path; the answer is the plan minus that row, so
+        the rows left alone stay on screen under the same plan_id, and a
+        cleanup_pending row has no such button;
+    10. a row apply refused for a busy window says "not started" and keeps
+        the plan -- the page never reports it as scheduled, because a
+        schedule would replan the whole set;
+    11. no page errors. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -244,6 +251,47 @@ const INVENTORY = {
     assert.doesNotMatch(await notice().textContent(), /정리 완료/);
     assert.equal(await card("s1").locator(".ar-plan-row").count(), 2, "the unapplied plan stays on screen");
     assert.equal(await card("s1").locator("button:text-is('적용')").isEnabled(), true);
+
+    // 9. One row at a time: the button submits the row's position in the plan
+    //    (no path), and the daemon answers with the plan minus that row.
+    const readyRow = card("s1").locator(".ar-plan-row").first();
+    assert.equal(await readyRow.locator("button:text-is('지우기')").count(), 1);
+    assert.equal(await card("s1").locator(".ar-plan-row").nth(1)
+      .locator("button:text-is('지우기')").count(), 0, "a kept row cannot be deleted");
+    applyReply = () => ({ doc: { plan_id: "tok1", session: "s1", created_at: 1,
+      removed: 1, cleanup_pending: 0, items: [
+        { path: "/t/s1w", status: "removed", bytes: 5000000, kind: "test", fingerprint: "f1" },
+        { path: "/t/s1/scratch", status: "cleanup_pending", bytes: 100,
+          reason: "test run receipt is not a regular file" }] } });
+    await readyRow.locator("button:text-is('지우기')").click();
+    await page.waitForFunction(() => {
+      const n = document.querySelector("#artifacts-view .wt-notice");
+      return n && n.textContent.includes("삭제 1개");
+    }, null, { timeout: 15000 });
+    assert.deepEqual(calls[calls.length - 1], { session: "s1", plan_id: "tok1", rows: [0] },
+      "a row apply names a position in the plan, never a path");
+    assert.equal(await card("s1").locator(".ar-plan-row").count(), 2,
+      "the rows left alone stay on screen under the same plan");
+    assert.match(await card("s1").locator(".ar-plan-row").first().textContent(), /삭제됨/);
+    assert.equal(await card("s1").locator("button:text-is('적용')").isDisabled(), true,
+      "nothing ready is left in this plan");
+
+    // 10. A row apply with the window busy is "not started", not scheduled:
+    //     keeping the plan is what lets the reader press again.
+    planReply = (session) => ({ doc: plans.find((p) => p.session === session) });
+    applyReply = (session) => ({ doc: { status: "cleanup_pending", plan_id: "tok2",
+      session, reason: "measurement window unavailable" } });
+    await card("s4").locator("button:text-is('정리')").click();
+    await card("s4").locator(".ar-plan-row button:text-is('지우기')").click();
+    await page.waitForFunction(() => {
+      const n = document.querySelector("#artifacts-view .wt-notice");
+      return n && n.textContent.includes("s4: 정리를 시작하지 못했다");
+    }, null, { timeout: 15000 });
+    assert.deepEqual(calls[calls.length - 1], { session: "s4", plan_id: "tok2", rows: [0] });
+    assert.match(await notice().textContent(), /s4: 정리를 시작하지 못했다 — measurement window unavailable/);
+    assert.doesNotMatch(await notice().textContent(), /예약했다/);
+    assert.equal(await card("s4").locator(".ar-plan-row").count(), 1, "the plan stays for another press");
+    assert.equal(await card("s4").locator(".ar-plan-row button:text-is('지우기')").count(), 1);
 
     assert.deepEqual(errors, [], `page errors: ${errors.join("; ")}`);
     console.log("Artifacts cleanup flow: plan, apply, scheduled and refused paths passed");

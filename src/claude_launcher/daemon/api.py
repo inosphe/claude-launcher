@@ -1550,6 +1550,7 @@ def build_app(
     r.add_get("/api/search/stream", h_search_stream)
     r.add_get("/api/rag/status", h_rag_status)
     r.add_post("/api/rag/reindex", h_rag_reindex)
+    r.add_post("/api/rag/cancel", h_rag_cancel)
     # The GitHub CLI as the daemon sees it (ghcli.py): installed, signed in
     # to each host the registered repositories push to, and what to run when
     # not -- the Settings card behind improv-worker-remote's remote-setup.
@@ -3931,19 +3932,19 @@ def _credential_preview(prof, selector: str, manual: bool) -> dict:
     # the same number ``usage.utilization_for_token`` returns at launch
     # (max over the reading's windows). ``None`` means "this key cannot be
     # compared", which the usage strategies skip rather than score as zero.
+    # A key any of whose windows is spent is ``None`` here too: the launch
+    # leaves that key out of its pick (``usage.health_for_report``), so naming
+    # it as "next launch takes" would point at a key the launch cannot take
+    # (claunch-hego3).
     peaks: Dict[str, Optional[float]] = {}
     for key in keys:
         reading = readings.get("keys", {}).get(key["id"])
         if reading is None and key.get("current") and body is not None:
             reading = {"windows": body["windows"]}
-        windows = (reading or {}).get("windows") or []
-        values = [
-            window.get("utilization")
-            for window in windows
-            if isinstance(window.get("utilization"), (int, float))
-            and not isinstance(window.get("utilization"), bool)
-        ]
-        peaks[key["id"]] = float(max(values)) if values else None
+        health = usage.health_for_rows((reading or {}).get("windows") or [])
+        peaks[key["id"]] = (
+            health.peak if health is not None and health.usable else None
+        )
 
     next_key = None
     next_unknown = None
@@ -11297,7 +11298,7 @@ async def h_pr_detail(request: web.Request) -> web.Response:
 async def h_pr_merge(request: web.Request) -> web.Response:
     """Merge one PR -- the user's action from the dashboard, and only that.
 
-    Two gates before gh is run at all:
+    Three gates before gh is run at all:
 
     - **The dashboard's cookie.** A bearer token is how a shell and a managed
       session reach this API, and merging master is not something an agent
@@ -11306,6 +11307,9 @@ async def h_pr_merge(request: web.Request) -> web.Response:
       (``daemon/actors.py``), not on who it claims to be.
     - **``confirm: true``.** The page asks once more before it sends this;
       a lone POST does not merge.
+    - **The delayed queue's pause.** A repository whose sweep failed admits
+      only its repair issue's merge, and this route asks the same queue
+      before gh runs (``pr_actions.admit_state``, claunch-0r2m2).
 
     What this closes is the path an agent normally takes -- CLI, MCP, the
     daemon client all authenticate with the token. What it does NOT close is
@@ -11333,15 +11337,43 @@ async def h_pr_merge(request: web.Request) -> web.Response:
     method = str(body.get("method") or "auto").strip().lower()
     if method not in _PR_METHODS:
         return json_error(400, f"method 는 {', '.join(_PR_METHODS)} 가운데 하나여야 합니다.")
+    # The commit the page showed the person. Optional so an older page still
+    # merges, but a page that sends it makes the merge act on what was read
+    # (claunch-ijkge.3.1); a malformed value is refused rather than ignored.
+    pin = str(body.get("match_head_commit") or "").strip().lower()
+    if pin and not pr_actions.SHA_PATTERN.fullmatch(pin):
+        return json_error(400, "match_head_commit 은 40자 커밋 SHA 여야 합니다.")
+    # The queue's pause is the repository's own verdict on merging right now:
+    # a failed delayed sweep stops every merge but the repair issue's
+    # (claunch-0r2m2). The merge asks it before gh runs, and the refusal is
+    # written to the ledger the same way a skipped sweep is, so "attempted and
+    # nothing merged" is readable afterwards.
+    recorded = await asyncio.to_thread(
+        _recorded_pr, request.app["manager"], host, owner, name, number)
     result = await asyncio.to_thread(
-        pr_actions.merge, host, owner, name, number, method)
+        pr_actions.merge, host, owner, name, number, method,
+        match_head_commit=pin or None, issues=recorded.get("issues") or ())
     if result.get("ok"):
+        sweep = await asyncio.to_thread(
+            pr_actions.sweep_after_merge, host, owner, name, number,
+            issues=recorded.get("issues") or (),
+            owner_label=str(recorded.get("session") or "daemon"))
         await asyncio.to_thread(
             pr_actions.record_merge, host, owner, name, number, result.get("method", method),
-            actors.from_request(request) or {}, remote=request.remote or "")
-        return json_response({**result, "repo": pr_actions.slug(host, owner, name),
+            actors.from_request(request) or {}, remote=request.remote or "", sweep=sweep)
+        return json_response({**result, "sweep": sweep,
+                              "repo": pr_actions.slug(host, owner, name),
                               "number": number})
     kind = str((result.get("error") or {}).get("kind") or "other")
+    if kind == "paused":
+        admit = result.get("admit") or {}
+        await asyncio.to_thread(
+            pr_actions.record_merge, host, owner, name, number,
+            str(result.get("method") or method), actors.from_request(request) or {},
+            remote=request.remote or "",
+            refused={"kind": "paused", "issue": str(admit.get("issue") or ""),
+                     "job": str(admit.get("job") or ""),
+                     "why": str(admit.get("why") or "")})
     status = {"permission": 403, "network": 502, "no-gh": 503,
               "not-found": 404}.get(kind, 409)
     return json_response(
@@ -13005,7 +13037,8 @@ async def h_session_detach(request: web.Request) -> web.Response:
 
 async def h_sessions_clear(request: web.Request) -> web.Response:
     """Drop the records of all exited sessions (``?logs=1`` also deletes their
-    captured output). Running sessions are untouched.
+    session directories — captured output, scratch and uploads). Running
+    sessions are untouched.
 
     The daemon keeps exited sessions around indefinitely so they stay
     respawnable, so this is the explicit cleanup — nothing else discards them
@@ -15321,15 +15354,22 @@ async def h_session_migrate(request: web.Request) -> web.Response:
                 os.path.abspath(manager.get(child).sdef.cwd or "")
             ) == old_key
         ]
-    migrated, carried = await manager.migrate(name, new_cwd, project=project)
+    migrated, carried, slots_moved = await manager.migrate(
+        name, new_cwd, project=project
+    )
     children = []
     for child in followers:
         try:
             # a follower's project is its own filing, not the parent's —
             # only the directory follows
-            _, child_carried = await manager.migrate(child, new_cwd)
+            _, child_carried, child_slots = await manager.migrate(child, new_cwd)
             children.append(
-                {"name": child, "ok": True, "transcript_moved": child_carried}
+                {
+                    "name": child,
+                    "ok": True,
+                    "transcript_moved": child_carried,
+                    "slots_moved": child_slots,
+                }
             )
         except (ManagerError, HarnessError, ProfileError) as exc:
             children.append({"name": child, "ok": False, "error": str(exc)})
@@ -15337,6 +15377,9 @@ async def h_session_migrate(request: web.Request) -> web.Response:
         {
             **migrated.info(),
             "transcript_moved": carried,
+            # the scopes whose run slots travelled — an empty list is the
+            # ordinary answer for a session driving no cflow run
+            "slots_moved": slots_moved,
             "worktree": (
                 {
                     "name": wt.name,
@@ -17937,12 +17980,23 @@ async def h_beads_issue(request: web.Request) -> web.Response:
             linked.append({
                 "name": sdef.name, "status": session.status(), "via": matches[0]["via"],
             })
+    try:
+        family = await board.family(root, issue.get("id") or issue_id)
+    except Exception:  # a family is drawn beside an issue that already answered
+        log.exception("beads: family read failed for %s", issue_id)
+        family = {"ancestors": [], "children": []}
     return json_response({
         # The board this issue is on, by name as well as by root: an issue id
         # is unique on its own board and nowhere else, so the panel says which
         # one rather than leaving it to the tab the reader arrived through.
         **board.board_head(root),
         "issue": issue,
+        # Where the issue sits in its family, read from its own parent-child
+        # edges. It cannot come from the listing the page holds: that listing
+        # is paged, so a parent and a child are usually on different pages or
+        # filtered out, and the pane would say nothing about a family that is
+        # there (claunch-3hubh).
+        "hierarchy": family,
         "sessions": linked,
         "reports": reports_mod.for_issue(issue_id),
         # Derived here rather than re-parsed in the page: the front matter's
@@ -18201,7 +18255,12 @@ async def h_gh_status(request: web.Request) -> web.Response:
 async def h_rag_reindex(request: web.Request) -> web.Response:
     """Start (or restart) an index sync. Body: ``kind`` (beads|sessions,
     default beads), ``cwd`` for the board, ``force`` to re-embed everything.
-    Returns 202 with the sync's progress; the work continues in the daemon.
+
+    Returns 202 with the sync's progress and, in ``started`` / ``running`` /
+    ``force_applied`` / ``force_pending``, what the request actually did. The
+    card used to send this request and read none of it, so a Rebuild clicked
+    during a sync looked like it had worked while the pass dropped its force
+    (claunch-i2i95).
     """
     service: rag_mod.RagService = request.app["rag"]
     try:
@@ -18221,10 +18280,54 @@ async def h_rag_reindex(request: web.Request) -> web.Response:
         root = await service.resolve_root(cwd)
         if root is None:
             return json_error(404, f"no board for {cwd}")
-    prog = service.ensure_sync(kind, root, force=bool(body.get("force")))
+    force = bool(body.get("force"))
+    before = service.progress(kind, root).task
+    running = before is not None and not before.done()
+    prog = service.ensure_sync(kind, root, force=force)
+    started = prog.task is not None and not prog.task.done() and prog.task is not before
     return json_response(
-        {"kind": kind, "root": str(root) if root else None, "index": prog.view()},
+        {
+            "kind": kind,
+            "root": str(root) if root else None,
+            "index": prog.view(),
+            "started": started,
+            "running": running and not started,
+            "force": force,
+            "force_applied": bool(force and started),
+            "force_pending": bool(prog.force_pending),
+        },
         status=202,
+    )
+
+
+async def h_rag_cancel(request: web.Request) -> web.Response:
+    """Stop the pass a corpus is running. Body: ``kind``, ``cwd`` for beads.
+
+    Cooperative: the pass stops before its next embedding group and keeps
+    what it already wrote, so the collection can be partial — the status row
+    says so. Before this route a running rebuild had no stop at all outside a
+    daemon restart (claunch-i2i95).
+    """
+    service: rag_mod.RagService = request.app["rag"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    kind = str(body.get("kind") or "beads").strip()
+    if kind not in rag_mod.KINDS:
+        return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
+    root = None
+    if kind == "beads":
+        cwd = str(body.get("cwd") or "") or os.getcwd()
+        root = await service.resolve_root(cwd)
+        if root is None:
+            return json_error(404, f"no board for {cwd}")
+    result = service.cancel_sync(kind, root)
+    return json_response(
+        {"kind": kind, "root": str(root) if root else None, **result},
+        status=200 if result.get("running") else 409,
     )
 
 

@@ -537,18 +537,32 @@ class Cleanup:
         os.replace(temporary, target)
         return str(target)
 
-    def apply(self, session, token):
+    def apply(self, session, token, only=None):
+        """Delete every ready row of a plan, or just the rows ``only`` names.
+
+        ``only`` is a list of positions in the plan's ``items``. A caller never
+        names a path: a row is chosen by where it sits in the daemon's own
+        plan, so a request cannot widen the set of files it can reach. A whole
+        apply spends the plan; a partial one keeps it for the rows it did not
+        touch, so the reader can delete another row without walking every file
+        again. Every row still passes the ownership, fingerprint and evidence
+        checks before anything is deleted.
+        """
         repo, scratch, root = self._context(session)
         with self._plans_lock:
             plan = self.plans.get(token)
             if not plan or plan["session"] != session or time.time() - plan["created_at"] >= 600:
                 raise CleanupError("unknown, expired or foreign plan; request a new plan")
-            self.plans.pop(token)
+            chosen = _chosen_rows(plan["items"], only)
+            if only is None:
+                self.plans.pop(token)
         # Recompute ownership and candidates before any deletion.
         allowed = {str(p): why for p, why in self._candidates(session, scratch, root, repo)}
         document = {**plan, "items": [dict(row) for row in plan["items"]]}
         document["receipt"] = self._save(document)  # failure prevents every deletion
-        for row in document["items"]:
+        attempted = [document["items"][index] for index in chosen]
+        taken = 0
+        for row in attempted:
             if row["status"] != "ready":
                 continue
             path = Path(row["path"])
@@ -570,15 +584,52 @@ class Cleanup:
                     # a reason to change permissions or retry through another tool.
                     shutil.rmtree(path)
                 row["status"] = "removed"
+                taken += 1
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 row.update(status="cleanup_pending",
                            reason=str(exc) + open_files.exhaustion_note(exc))
             self._save(document)  # stop on recording failure before another item
-        document["removed"] = sum(r["status"] == "removed" for r in document["items"])
-        document["cleanup_pending"] = sum(r["status"] != "removed" for r in document["items"])
+        # The counts describe this call, so a row apply does not report the
+        # rows it left alone as pending, and a row an earlier call already
+        # took is not counted as removed twice (``taken``).
+        document["removed"] = taken
+        document["cleanup_pending"] = sum(r["status"] != "removed" for r in attempted)
         self._save(document)
+        if only is not None:
+            with self._plans_lock:
+                standing = self.plans.get(token)
+                if standing is not None:
+                    standing["items"] = [dict(row) for row in document["items"]]
         # A direct apply served whatever the schedule was waiting for; leaving
-        # it would have the clock replan work that just ran.
+        # it would have the clock replan work that just ran. A row apply drops
+        # it for the same reason: the reader is choosing rows by hand, and the
+        # clock would replan the whole plan over that choice.
         if self._schedule_record(session):
             self.unschedule(session, "applied directly")
         return document
+
+
+def _chosen_rows(items, only):
+    """The positions in ``items`` an apply covers.
+
+    ``only`` comes from a reader who named rows of the plan. Anything else --
+    an index the plan does not have, a string, a bool, the same position twice
+    -- is refused instead of guessed at: a deletion cannot be undone, so an
+    ambiguous request deletes nothing.
+    """
+    if only is None:
+        return list(range(len(items)))
+    if isinstance(only, (str, bytes)) or not isinstance(only, (list, tuple)):
+        raise CleanupError("rows must be a list of plan item positions")
+    chosen = []
+    for value in only:
+        # ``type(...) is int`` also keeps True/False out: they are positions
+        # 1 and 0 to ``int()``, which would delete a row nobody named.
+        if type(value) is not int or not 0 <= value < len(items):
+            raise CleanupError("rows must be plan item positions")
+        if value in chosen:
+            raise CleanupError("rows names the same item twice")
+        chosen.append(value)
+    if not chosen:
+        raise CleanupError("rows must name at least one item")
+    return chosen

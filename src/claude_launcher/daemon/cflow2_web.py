@@ -920,6 +920,15 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     the plan-waiting gate -- the round is stopped there until the user
     decides in the plan panel (claunch-rzepk).
 
+    ``optional`` is the other half (claunch-hbmhk): open user choices the
+    run is NOT stopped on -- a branch of a ``settle: race``/``any`` region,
+    which the engine cancels when a sibling finishes
+    (``runtime.optional_choice``). They belong to the person all the same
+    (``gated``) and keep their cards, but a row is amber (``blocking``)
+    only for the ones that hold the run, and the chip says which is which:
+    a stopping gate must not read the same as a door nobody has to take.
+    ``owed`` therefore stays the blocking list alone.
+
     ``started``/``updated``/``entered_at`` are the run's own clocks
     (claunch-c2emv): the dashboard's Chart page reads them to tell a run that
     is still moving from one that has sat in the same task, which ``current``
@@ -935,12 +944,20 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         chart = st.load_chart()
     except Exception as exc:  # noqa: BLE001 - shown, not raised
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
-                "workflow": None, "current": [], "owed": [], "gated": False,
+                "workflow": None, "current": [], "owed": [], "optional": [],
+                "gated": False, "blocking": False,
                 "answers": [], "urgent_asks": [], "started": None, "updated": None,
                 "entered_at": None, "round": None, "round_now": None}
     inst = state.get("inst") or {}
     current = []
     owed = []
+    # Choices nobody has to take (claunch-hbmhk): the region around them
+    # settles without their branch and cancels them, so the run goes on
+    # whether or not the person answers. They are kept apart from ``owed``
+    # -- which is what the row is amber for -- and carried in their own
+    # list, because the door is still worth showing: it is the one thing
+    # the reader may do to this run right now.
+    optional = []
     # The oldest active instance: how long the run has been in the tasks it
     # is in now. A run that advances replaces this instance, so the stamp
     # moves with it.
@@ -963,7 +980,11 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         except Exception:  # noqa: BLE001
             continue
         if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
-            owed.append(f"choose: {node.get('title') or node.label or node.id}")
+            label = node.get("title") or node.label or node.id
+            if runtime.optional_choice(inst, chart, iid):
+                optional.append(f"optional: {label}")
+            else:
+                owed.append(f"choose: {label}")
     status = state.get("status")
     if status == runtime.ST_WAITING:
         for a in state.get("approvals") or []:
@@ -992,7 +1013,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
             # (claunch-rzepk). Nobody else releases it, so it is owed, and
             # owed is what makes the rail row raise a card at all.
             owed.append(f"plan: {node.id}")
-    answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
+    answers = _rail_answers(str(st.cwd), st.scope, state) if (owed or optional) else []
     return {
         "cwd": str(st.cwd),
         "scope": st.scope,
@@ -1014,7 +1035,14 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "entered_at": entered_at,
         "current": current,
         "owed": owed,
-        "gated": bool(owed),
+        "optional": optional,
+        # ``gated`` is what raises the card, so it counts the optional doors
+        # too: the person can still answer them, and the card is where that
+        # answer lives (claunch-hbmhk). ``blocking`` is the narrower fact --
+        # is the run actually stopped on this row -- and it alone paints the
+        # row amber.
+        "gated": bool(owed or optional),
+        "blocking": bool(owed),
         "answers": answers,
         "urgent_asks": _rail_urgent(state),
         # The start inputs the run was launched with (runtime.status carries
@@ -1266,6 +1294,10 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             "label": c.get("label") or c.get("node"),
             "prompt": _rail_prompt(c.get("prompt")),
             "require_reason": bool(c.get("require_reason")),
+            # A door the run is not stopped on (claunch-hbmhk): the card says
+            # so, and its age reads as how long the door has been open
+            # rather than how long the person has held the run.
+            "optional": bool(c.get("optional")),
             "options": [{"name": o.get("name"), "description": o.get("description") or ""}
                         for o in c.get("options") or []],
             **_rail_opened(c.get("opened_at")),

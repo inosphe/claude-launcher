@@ -260,6 +260,30 @@ def _cmd_caps(args: argparse.Namespace) -> int:
 # -- runs ---------------------------------------------------------------------
 
 
+def _parent_hand(scope: Optional[str]) -> tuple:
+    """``(caller, by)`` for a person's command run from a session's shell.
+
+    A shell outside any session is the person. A shell inside the run's own
+    session is refused by :func:`_refuse_own_session`. Between those sits the
+    one session that may answer this run's person gates without being the
+    person: the driver's parent (claunch-vjp4y), and its answer is journaled
+    under its own name so the run can tell the two hands apart.
+    """
+    from .cflow2 import runtime, store
+
+    session = os.environ.get(store.SESSION_ENV, "").strip()
+    if not session:
+        return runtime.CALLER_USER, None
+    st = store.RunStore(os.getcwd(), scope)
+    try:
+        state = st.load_state()
+    except (store.StoreError, OSError):
+        return runtime.CALLER_USER, None
+    if runtime.gate_authority(state, session) == runtime.CALLER_PARENT:
+        return runtime.CALLER_PARENT, session
+    return runtime.CALLER_USER, None
+
+
 def _refuse_own_session(scope: Optional[str], what: str) -> None:
     """A person's command run from the shell of the session that drives the
     run is the agent answering its own gate: refused."""
@@ -518,8 +542,11 @@ def _cmd_move(args: argparse.Namespace) -> int:
             raise runtime.FlowError("--approve/--deny answer the pending request; it names "
                                     "its node already (give a node without them to move "
                                     "somewhere else, which supersedes the request)")
+        caller, by = _parent_hand(args.scope)
         payload = runtime.resolve_move("approve" if args.approve else "deny",
-                                       reason=args.reason, cwd=os.getcwd(), scope=args.scope)
+                                       reason=args.reason, cwd=os.getcwd(),
+                                       scope=args.scope, caller=caller,
+                                       **({"by": by} if by else {}))
         req = payload.get("move_request") or {}
         what = ("the report of" if req.get("kind") == runtime.MOVE_KIND_REPORT
                 else "the move to")
@@ -598,7 +625,8 @@ def _cmd_select(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
     _refuse_own_session(args.scope, "select")
-    payload = runtime.select(args.node, args.option, args.reason, caller=runtime.CALLER_USER,
+    caller, by = _parent_hand(args.scope)
+    payload = runtime.select(args.node, args.option, args.reason, caller=caller, by=by,
                              cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
     note = runtime.person_pick_words(payload, args.option)["note"]

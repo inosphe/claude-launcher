@@ -184,7 +184,7 @@ function enableTabDragScroll() {}
 const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
   "sessionGroupActiveTab", "setSessionGroupTab", "sessionGroupTabRows",
-  "scrollSessionListTop", "selectSessionGroupTab", "renderSessionGroupTabs",
+  "scrollSessionListTop", "railPressMark", "selectSessionGroupTab", "renderSessionGroupTabs",
   "renderSessionGroupHeader", "syncSessionGroupTabSearch", "sessionGroupRowVisible",
   "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",

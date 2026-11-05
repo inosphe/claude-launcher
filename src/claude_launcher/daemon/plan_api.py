@@ -122,6 +122,19 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
         }.get(res.get("verdict"),
               "It failed by hand. Fix what the note says, then reword the item with plan_node so the user "
               "checks it again (a changed item asks again).")
+    elif kind == "note":
+        # claunch-i0whx: an optional pick on a note. It gates nothing either
+        # way, so there is no status to close -- the record of what was done
+        # goes into the note's detail (rewording keeps the user's result).
+        action = res.get("action")
+        head = f"{PREFIX} The user picked up your plan's note {node['id']}: {action}."
+        body = _what(node)
+        then = {
+            "here": "Take it into this round: add its steps to the plan (plan_set, keep the ids) and do them. "
+                    "The note itself waits on nobody; write what became of it into its detail with plan_node.",
+            "issue": "Hand it over: file it as a beads issue (claunch beads create ... --parent <your issue>) "
+                     "and name the issue id in the note's detail with plan_node (the result stays).",
+        }.get(action, "")
     else:
         action = res.get("action")
         head = f"{PREFIX} The user disposed of your plan's followup {node['id']}: {action}."

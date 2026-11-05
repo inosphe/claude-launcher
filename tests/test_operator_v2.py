@@ -555,6 +555,46 @@ def test_operator_of_session_names_the_bound_record(world):
     assert world.ops.operator_of_session(None) is None
 
 
+def test_bind_takes_the_session_from_a_stale_record(world):
+    """One session, one operator (claunch-786zn.1).
+
+    A record keeps its ``session`` after that session ends, and an older
+    record can name a session it never bound. ``bind`` is the one writer of
+    the claim, so it releases the name from every other record; ``bound``
+    and ``operator_of_session`` then answer with the operator the session was
+    really created for, whichever ids the files happen to have.
+    """
+    ops = world.ops
+    stale = ops.create({"name": "Stale", "projects": ["alpha"]})
+    ops.bind(stale, "opa")  # alpha held "opa" until this call
+
+    assert ops.bound("opa")["id"] == stale["id"]
+    assert ops.operator_of_session("opa")["id"] == stale["id"]
+    assert ops.get(world.alpha["id"])["session"] is None
+    claimers = [r["id"] for r in ops.records().values() if r.get("session") == "opa"]
+    assert claimers == [stale["id"]]
+
+
+def test_two_hand_made_claims_read_in_id_order(world):
+    """A second claim can only come from a record written around ``bind``.
+
+    ``bind`` leaves one owner per session, so this is the legacy path: two
+    files that name the same session without one being bound over the other.
+    The answer is the smallest id, which makes it deterministic rather than
+    dependent on which record the reader met first (claunch-786zn).
+    """
+    ops = world.ops
+    first = ops.create({"name": "First", "projects": ["alpha"]})
+    second = ops.create({"name": "Second", "projects": ["alpha"]})
+    for rec in (first, second):
+        rec["session"] = "shared"
+        ops.save(rec)
+
+    expected = min(first["id"], second["id"])
+    assert ops.bound("shared")["id"] == expected
+    assert ops.operator_of_session("shared")["id"] == expected
+
+
 def test_an_operator_session_is_offered_no_session_qa(monkeypatch):
     """qa_* is not part of an operator session's surface (claunch-4278b.1).
 

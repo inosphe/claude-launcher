@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .. import ghcli
@@ -49,9 +51,13 @@ METHODS = ("auto", "merge", "squash", "rebase")
 #: What the page needs and nothing more. A field added here is a field the
 #: normaliser below must carry, or the page silently loses it.
 FIELDS = (
-    "number,title,state,isDraft,url,baseRefName,headRefName,mergeable,"
+    "number,title,state,isDraft,url,baseRefName,headRefName,headRefOid,mergeable,"
     "mergeStateStatus,reviewDecision,statusCheckRollup,author,updatedAt,mergeCommit"
 )
+
+#: A commit SHA a merge may be pinned to. ``gh pr merge --match-head-commit``
+#: and the comparison before it use the same full, lower-case form.
+SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 #: gh's own words, in the page's language, for each failure class.
 SENTENCES = {
@@ -63,6 +69,10 @@ SENTENCES = {
     "not-found": "그 PR이나 저장소를 찾지 못했습니다.",
     "not-mergeable": "지금 상태로는 머지할 수 없습니다.",
     "bad-output": "gh의 응답을 읽지 못했습니다.",
+    "head-moved": ("판정을 받은 뒤 PR에 새 커밋이 올라왔습니다 — 화면이 보여 준 커밋과 다른 커밋이 "
+                   "머지될 뻔했습니다. PR을 다시 열어 새 head를 확인한 뒤 머지하세요."),
+    "paused": ("지연 스윕 큐가 이 저장소의 머지를 정지시켰습니다 — 회귀 검증에 실패해, 그 실패를 "
+               "고치는 수리 이슈의 머지만 받습니다."),
     "other": "gh가 실패했습니다. 아래 원문을 확인하세요.",
 }
 
@@ -207,6 +217,7 @@ def _normalize(raw: dict) -> dict:
         "url": str(raw.get("url") or ""),
         "base": str(raw.get("baseRefName") or ""),
         "head": str(raw.get("headRefName") or ""),
+        "head_sha": str(raw.get("headRefOid") or ""),
         "mergeable": str(raw.get("mergeable") or "").upper(),
         "merge_state": str(raw.get("mergeStateStatus") or "").upper(),
         "review": str(raw.get("reviewDecision") or "").upper(),
@@ -348,22 +359,156 @@ def resolve_method(host: str, owner: str, name: str, *, run=None) -> str:
     return ""
 
 
+def head_sha(host: str, owner: str, name: str, number: int, *, run=None) -> str:
+    """The commit the PR's head branch points at right now, or ``""``.
+
+    The dashboard reads this with the detail view and sends it back with the
+    merge, so the merge acts on what the person saw (``claunch-ijkge.3.1``).
+    An unreadable answer is ``""`` -- the caller then refuses rather than
+    merging whatever happens to be there."""
+    run = run or _run
+    gh = _gh_path()
+    if not gh:
+        return ""
+    code, out, _err = run(
+        [gh, "pr", "view", str(number), "-R", slug(host, owner, name),
+         "--json", "headRefOid"],
+        timeout=READ_TIMEOUT,
+    )
+    if code != 0:
+        return ""
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("headRefOid") or "").strip().lower()
+
+
+def admit_state(host: str, owner: str, name: str, number: int, *,
+                issues: Iterable[str] = (), root: Optional[str] = None) -> dict:
+    """Whether the delayed sweep queue admits a merge into this repository now.
+
+    ``{"state": "admitted"|"refused"|"unknown", "issue", "job", "why"}``. The
+    queue pauses a repository whose delayed sweep failed, and while the pause
+    stands only the repair issue's merge is admitted
+    (``delayed_sweep.Queue.admit``). A merge made from the PR page is the same
+    merge the queue would reject, so its route asks here before gh runs
+    (``claunch-0r2m2``).
+
+    The recorded issues of the PR are tried one by one, because the pause
+    names a single repair issue and the PR row may name several; a PR that
+    names none is asked about under the ledger name the sweep would use.
+
+    ``unknown`` is the honest answer when the pause cannot be read -- no local
+    checkout of the repository, or a queue file that will not open. It is not
+    a refusal: the merge path refuses only what the queue is seen to reject."""
+    answer = {"state": "unknown", "issue": "", "job": "", "why": ""}
+    path = root or find_checkout(host, owner, name)
+    if not path:
+        answer["why"] = "이 데몬에 그 저장소의 로컬 체크아웃이 없어 정지 상태를 읽지 못했습니다."
+        return answer
+    named = [str(i).strip() for i in issues if str(i or "").strip()]
+    candidates = named or [f"pr-tab:{number}"]
+    answer["issue"] = candidates[0]
+    try:
+        from ..delayed_sweep import Queue
+
+        queue = Queue()
+        refused: List[str] = []
+        for issue in candidates:
+            try:
+                queue.admit(str(path), issue)
+            except ValueError as exc:
+                refused.append(str(exc))
+                continue
+            answer.update(state="admitted", issue=issue)
+            return answer
+        pauses = queue.status(str(path))["pauses"]
+        pause = pauses[0] if pauses else {}
+        answer.update(state="refused", job=str(pause.get("job") or ""),
+                      why="; ".join(dict.fromkeys(refused)))
+    except Exception as exc:  # noqa: BLE001 -- an unreadable queue refuses nothing
+        answer.update(state="unknown", why=f"{type(exc).__name__}: {exc}")
+    return answer
+
+
+def default_branch(host: str, owner: str, name: str, *, run=None) -> str:
+    """The repository's default branch, or ``""`` when it cannot be read.
+
+    What a delayed sweep answers for. A merge into any other branch (a release
+    branch, a maintenance line) is a different history, so queueing it would
+    report a verdict about a tree nobody asked about (``claunch-c9h9w``)."""
+    run = run or _run
+    gh = _gh_path()
+    if not gh:
+        return ""
+    code, out, _err = run(
+        [gh, "repo", "view", slug(host, owner, name), "--json", "defaultBranchRef"],
+        timeout=READ_TIMEOUT,
+    )
+    if code != 0:
+        return ""
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        return ""
+    ref = raw.get("defaultBranchRef") if isinstance(raw, dict) else None
+    if not isinstance(ref, dict):
+        return ""
+    return str(ref.get("name") or "").strip()
+
+
 def merge(host: str, owner: str, name: str, number: int, method: str = "auto", *,
+          match_head_commit: Optional[str] = None, issues: Iterable[str] = (),
           run=None) -> dict:
     """``gh pr merge``, with the answer classified.
 
     Returns ``{"ok", "merged", "method", "output", "error"}``. A refused
     merge is ``ok: False`` with ``error.kind`` one of :data:`SENTENCES`'
-    keys -- the page shows that sentence beside gh's own words."""
+    keys -- the page shows that sentence beside gh's own words.
+
+    ``match_head_commit`` pins the merge to the commit the page showed the
+    person. gh enforces it too (``--match-head-commit``), but the comparison
+    here runs first so the refusal says *why* instead of echoing gh: between
+    the verdict and the click someone may have pushed to the branch, and a
+    merge that silently lands a different commit is the defect this closes
+    (``claunch-ijkge.3.1``).
+
+    ``issues`` are the board issues the PR is recorded under; the queue's
+    pause admits only its repair issue, so :func:`admit_state` is asked with
+    them and a paused repository refuses here, before gh runs
+    (``claunch-0r2m2``)."""
     run = run or _run
     wanted = str(method or "auto").lower()
     if wanted not in METHODS:
         return {"ok": False, "merged": False, "method": wanted, "output": "",
                 "error": _failure("other", "", f"머지 방식은 {', '.join(METHODS)} 가운데 하나여야 합니다.")}
+    pin = str(match_head_commit or "").strip().lower()
+    if pin and not SHA_PATTERN.fullmatch(pin):
+        return {"ok": False, "merged": False, "method": wanted, "output": "",
+                "error": _failure("other", "",
+                                  "머지 대상 커밋(match_head_commit)은 40자 SHA여야 합니다.")}
     gh = _gh_path()
     if not gh:
         return {"ok": False, "merged": False, "method": wanted, "output": "",
                 "error": _failure("no-gh", "", "이 데몬의 PATH에 gh가 없어 머지를 실행하지 못했습니다.")}
+    admit = admit_state(host, owner, name, number, issues=issues)
+    if admit["state"] == "refused":
+        return {"ok": False, "merged": False, "method": wanted, "output": "",
+                "error": _failure("paused", "", f"{SENTENCES['paused']} ({admit['why']})"),
+                "admit": admit}
+    if pin:
+        current = head_sha(host, owner, name, number, run=run)
+        if not current:
+            return {"ok": False, "merged": False, "method": wanted, "output": "",
+                    "error": _failure("other", "",
+                                      "지금 PR head를 읽지 못해 머지 대상을 고정하지 못했습니다. 다시 시도하세요.")}
+        if current != pin:
+            return {"ok": False, "merged": False, "method": wanted, "output": "",
+                    "error": _failure("head-moved", "",
+                                      SENTENCES["head-moved"] + f" (화면: {pin[:12]}… / 지금: {current[:12]}…)")}
     chosen = wanted
     if chosen == "auto":
         chosen = resolve_method(host, owner, name, run=run)
@@ -371,10 +516,10 @@ def merge(host: str, owner: str, name: str, number: int, method: str = "auto", *
             return {"ok": False, "merged": False, "method": wanted, "output": "",
                     "error": _failure("other", "",
                                       "저장소가 허용하는 머지 방식을 확인하지 못했습니다. 방식을 직접 고르세요.")}
-    code, out, err = run(
-        [gh, "pr", "merge", str(number), "-R", slug(host, owner, name), "--" + chosen],
-        timeout=MERGE_TIMEOUT,
-    )
+    argv = [gh, "pr", "merge", str(number), "-R", slug(host, owner, name), "--" + chosen]
+    if pin:
+        argv += ["--match-head-commit", pin]
+    code, out, err = run(argv, timeout=MERGE_TIMEOUT)
     if code != 0:
         return {"ok": False, "merged": False, "method": chosen, "output": out.strip(),
                 "error": _failure(classify(err, out), err or out)}
@@ -382,19 +527,123 @@ def merge(host: str, owner: str, name: str, number: int, method: str = "auto", *
             "error": None}
 
 
+def sweep_after_merge(host: str, owner: str, name: str, number: int, *,
+                      issues: Iterable[str] = (), owner_label: str = "daemon",
+                      run=None) -> dict:
+    """Queue the post-merge sweep for a merge the dashboard just made.
+
+    The repository's landing rule is "a merge into master is swept once, by
+    the delayed queue": the leader workflow enqueues every merge it makes and
+    the queue batches them. A merge started from the PR page went straight to
+    master with nothing queued, so its full-suite answer only existed if a
+    person remembered to ask for one (``claunch-ijkge.3.2``).
+
+    Returns ``{"state", "job", "ref", "issue", "why"}``. ``state`` is
+    ``queued`` when the job is in the queue, ``skipped`` otherwise -- and a
+    skip always carries ``why``, because "not enqueued and no reason" is the
+    defect this closes. Nothing here raises: the merge already happened, and
+    a failure to queue must not turn it into a failed merge.
+
+    Only a merge into the repository's default branch is queued: the queue
+    answers for the tree a delayed sweep rebuilds, and a merge into a release
+    or maintenance branch is a different history (``claunch-c9h9w``). A base
+    or default branch that cannot be read is a skip with that reason -- a
+    sweep placed on the wrong branch is worse than a stated gap."""
+    answer = {"state": "skipped", "job": "", "ref": "", "issue": "", "why": ""}
+    run = run or _run
+    gh = _gh_path()
+    if not gh:
+        answer["why"] = "이 데몬의 PATH에 gh가 없어 머지 커밋을 읽지 못했습니다."
+        return answer
+    code, out, _err = run(
+        [gh, "pr", "view", str(number), "-R", slug(host, owner, name),
+         "--json", "mergeCommit,baseRefName"],
+        timeout=READ_TIMEOUT,
+    )
+    merge_sha = ""
+    base = ""
+    if code == 0:
+        try:
+            raw = json.loads(out)
+        except ValueError:
+            raw = None
+        if isinstance(raw, dict):
+            if isinstance(raw.get("mergeCommit"), dict):
+                merge_sha = str(raw["mergeCommit"].get("oid") or "").strip().lower()
+            base = str(raw.get("baseRefName") or "").strip()
+    if not SHA_PATTERN.fullmatch(merge_sha):
+        answer["why"] = "머지 커밋 SHA를 읽지 못했습니다."
+        return answer
+    if not base:
+        answer["why"] = "머지 대상 기준 브랜치(base)를 읽지 못했습니다."
+        return answer
+    target = default_branch(host, owner, name, run=run)
+    if not target:
+        answer["why"] = ("저장소의 기본 브랜치를 읽지 못해 이 머지가 스윕 대상인지 "
+                         "판단하지 못했습니다.")
+        return answer
+    if base != target:
+        answer["why"] = (f"기준 브랜치가 {base}입니다 — 지연 스윕은 기본 브랜치"
+                         f"({target})로의 머지만 검증합니다.")
+        return answer
+    root = find_checkout(host, owner, name)
+    if not root:
+        answer["why"] = "이 데몬에 그 저장소의 로컬 체크아웃이 없습니다."
+        return answer
+    tool = Path(root) / "tools" / "delayed_sweep.py"
+    if not tool.exists():
+        answer["why"] = f"로컬 체크아웃에 {tool} 가 없습니다."
+        return answer
+    named = [str(i) for i in issues if str(i or "").strip()]
+    issue = named[0] if named else f"pr-tab:{number}"
+    label = re.sub(r"[^A-Za-z0-9_.-]", "-", str(owner_label or "daemon")) or "daemon"
+    answer["issue"] = issue
+    # The queue checks the SHA against the local object store, and a checkout
+    # that has not fetched since the merge does not have the merge commit yet.
+    # A failed fetch is not fatal: enqueue then reports what it could not see.
+    run(["git", "-C", root, "fetch", "--quiet"], timeout=FETCH_TIMEOUT)
+    try:
+        from ..delayed_sweep import Queue
+
+        row = Queue().enqueue(str(root), merge_sha, issue, label, str(tool))
+    except Exception as exc:  # noqa: BLE001 -- recorded, never fatal
+        answer["why"] = f"{type(exc).__name__}: {exc}"
+        return answer
+    answer.update(state="queued", job=str(row.get("id") or ""),
+                  ref=str(row.get("ref") or ""), why="")
+    return answer
+
+
 def record_merge(host: str, owner: str, name: str, number: int, method: str,
-                 actor: dict, *, remote: str = "") -> None:
+                 actor: dict, *, remote: str = "", sweep: Optional[dict] = None,
+                 refused: Optional[dict] = None) -> None:
     """Append one line to the daemon's merge ledger.
 
     There is one login on this daemon, so "who" is what the request declared
     (``daemon/actors.py``) together with the address it came from -- enough
     to answer "who merged this and when" after the fact. A failure to write
-    the line never fails the merge that already happened."""
+    the line never fails the merge that already happened.
+
+    ``sweep`` is what :func:`sweep_after_merge` answered: whether the
+    post-merge verification job is queued, and if not, why. A merge that was
+    swept and one that was not must be distinguishable afterwards without
+    replaying the request, so the skip reason is written with the merge.
+
+    ``refused`` is the other line this ledger keeps (``claunch-0r2m2``): a
+    merge the queue's pause rejected before gh ran. It is written as
+    ``merged: false`` plus the queue's own reason, so "a merge was attempted
+    here and nothing merged" is readable afterwards; a success row carries no
+    ``merged`` key and no ``refused``."""
     row = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "repo": slug(host, owner, name), "number": int(number), "method": method,
         "actor": actor, "remote": remote,
     }
+    if refused is not None:
+        row["merged"] = False
+        row["refused"] = refused
+    if sweep:
+        row["sweep"] = sweep
     try:
         path = paths.daemon_dir() / "pr-merges.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

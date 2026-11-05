@@ -760,16 +760,21 @@ def _rotation_index(pool: Pool) -> int:
     return 0
 
 
-def _utilization_reader(
+def _health_reader(
     source: Profile,
-) -> Tuple[Callable[[Key], Optional[float]], Optional[str]]:
+) -> Tuple[Callable[[Key], Optional["usage.KeyHealth"]], Optional[str]]:
     """A per-key usage lookup for the profile's provider, and why it may be blind.
 
     The reader is chosen once (it depends on the provider and harness, not on
-    the key) and then asked about each key's own token. When the provider's
-    usage cannot be measured per key the lookup finds ``None`` for every key
-    -- which makes the caller fall back to rotation -- and the second value
-    carries the reason, quoted in the fallback note. The reason comes from
+    the key) and then asked about each key's own token. It answers a
+    :class:`usage.KeyHealth` rather than a bare peak because the pick needs
+    both halves: the peak orders the keys, and ``blocked`` takes a key out --
+    a window already spent is not a launch this pool can make, however low the
+    key's other windows are (claunch-hego3, the same rule
+    :func:`switch_candidate` applies). When the provider's usage cannot be
+    measured per key the lookup finds ``None`` for every key -- which makes
+    the caller fall back to rotation -- and the second value carries the
+    reason, quoted in the fallback note. The reason comes from
     :func:`usage.unmeasurable_reason`, one table for every reader, so a
     provider that is unmeasurable is named there rather than at each call
     site (claunch-wllke.4).
@@ -794,9 +799,9 @@ def _utilization_reader(
     if reason is not None:
         return (lambda key: None), reason
 
-    def measure(key: Key) -> Optional[float]:
+    def measure(key: Key) -> Optional["usage.KeyHealth"]:
         try:
-            return usage.utilization_for_token(source, key.token)
+            return usage.health_for_token(source, key.token)
         except (
             usage.UsageError,
             credentials.CredentialsError,
@@ -899,18 +904,35 @@ def _pick(
                     "key-based usage reader)"
                 )
         else:
-            measure, unmeasurable = _utilization_reader(source)
+            from . import usage
+
+            measure, unmeasurable = _health_reader(source)
             scored = []
+            spent = 0
             for position, key in enumerate(pool.keys):
-                value = measure(key)
-                if value is not None:
-                    scored.append((value, position))
+                health = measure(key)
+                if health is None:
+                    continue
+                if not health.usable:
+                    # A window on this key is already spent: the launch that
+                    # lands on it walks straight into the same stop, whatever
+                    # its other windows say (claunch-hego3).
+                    spent += 1
+                    continue
+                order = (
+                    usage.tie_break_key(health)
+                    if strategy == "usage-min"
+                    else (health.peak,)
+                )
+                scored.append((order, position))
             index = None
             if scored:
                 index = (min(scored) if strategy == "usage-min" else max(scored))[1]
             else:
                 unmeasurable = unmeasurable or (
-                    f"no key's usage could be read ({strategy} needs a "
+                    "every key's usage is spent (no window is left on any key)"
+                    if spent
+                    else f"no key's usage could be read ({strategy} needs a "
                     "key-based usage reader)"
                 )
         if index is not None:

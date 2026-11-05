@@ -9,6 +9,12 @@ creates no branch, changes nothing in the repository, and keeps the task open
 until the user's next message. A work instruction reported from the hold
 continues the round into the branch setup and the coding gate.
 
+claunch-tcczr (th-8d1c24) narrowed the judgement: ``work`` is the default, a
+choice the user must make goes into the plan as a decision (plan-wait holds
+work for it), and ``consult`` is kept for two cases only — the user said to
+discuss without working, or no target can be named at all. The hold answers
+in the user's thread, since a terminal answer raises no dashboard notice.
+
 The runtime tests run the real node from the canon with its surroundings
 stubbed, the pattern ``tests/test_worker_v2_feasibility_channel_gates.py``
 uses for ``feasibility`` and the landing channel.
@@ -107,7 +113,7 @@ def test_the_hold_task_moves_nothing_in_the_repository():
 def test_the_judgement_names_its_evidence_and_the_hold():
     prompt = " ".join(_find(_doc()["procedures"]["worker-round"]["body"],
                             "consult-check")["choose"]["prompt"].split())
-    for anchor in ("claunch beads show", "claunch beads comments", "판단이 서지 않으면"):
+    for anchor in ("claunch beads show", "claunch beads comments", "판단이 서지 않는 경우"):
         assert anchor in prompt
     assert "**consult**" in prompt and "**work**" in prompt
     hold = " ".join(_doc()["nodes"]["pre-coding-consult-hold"]["prompt"].split())
@@ -120,6 +126,40 @@ def test_the_judgement_names_its_evidence_and_the_hold():
     assert "사용자의 새 말이 없으면 답을 다시 쓰지 않고" in hold
     # the release path continues into the round's coding steps
     assert "코딩 승인 게이트로 이어진다" in hold
+
+
+def test_work_is_the_default_and_the_hold_has_two_cases():
+    """claunch-tcczr: an unsure call, a question and a fork the user must
+    decide all go to work; the fork becomes a plan decision, not a hold."""
+    prompt = " ".join(_find(_doc()["procedures"]["worker-round"]["body"],
+                            "consult-check")["choose"]["prompt"].split())
+    assert "기본은 **work**다" in prompt
+    assert "**consult**는 다음 두 경우에만 고른다" in prompt
+    assert "협의만 하자고 명시했다" in prompt
+    assert "plan decision의 선택지조차 쓸 수 없다" in prompt
+    # a fork the user decides goes to the plan, held by plan-wait before work
+    assert "`default`가 없는 decision" in prompt and "plan-wait" in prompt
+    # plan-seed adds that fork even over a plan already there
+    seed = " ".join(_doc()["nodes"]["plan-seed"]["prompt"].split())
+    assert "consult-check reason" in seed and "`default` 없는 decision" in seed
+    assert "갈림 decision을 더하는 것 말고는 손대지 않는다" in seed
+    # coding-plan, the other step that writes the plan first, carries it too
+    plan = " ".join(_doc()["nodes"]["coding-plan"]["prompt"].split())
+    assert "consult-check reason" in plan and "`default` 없는 decision" in plan
+    assert "이 갈림을 이유로 consult를 고르지 않는다" in prompt
+    # questions and research are work; an unsure call is work
+    assert "질문·조사·측정·원인 설명 요청" in prompt
+    assert "require_coding_approval" in prompt
+    # the old tie-break is gone
+    assert "판단이 서지 않으면 **consult**다" not in prompt
+
+
+def test_the_hold_tells_the_user_in_a_thread():
+    hold = _doc()["nodes"]["pre-coding-consult-hold"]
+    text = " ".join(hold["prompt"].split())
+    assert "thread_reply" in text and "thread_open" in text
+    assert "작업 지시를 기다린다" in text
+    assert "thread.write" in hold["effects"]
 
 
 # --------------------------------------------------------------------------- #

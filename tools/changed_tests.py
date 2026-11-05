@@ -120,6 +120,25 @@ for a green receipt filed under that hash *and* this selection. If one is
 there it prints what it stood on and runs nothing; when it does run, it
 leaves the receipt behind.
 
+Between that lookup and the run sits the test window, and the wait can last
+up to its cap (1800 s). So the hash the receipt is filed under is taken
+again *after* the window is granted: a commit made during the wait would
+otherwise leave a green receipt for a tree the run never read, which is the
+false green ``--check`` carries to the next session (claunch-1cn7l). The
+reuse decision is not remade there -- standing on a receipt starts no run --
+and a tree that cannot be measured after the wait leaves no receipt at all.
+
+The selection is read the same way and for the same reason. It is derived
+from the change before the wait, so a test module committed in the wait was
+missing from the run *and* from the receipt filed under the new tree: the
+tree was right and the module list was the old one, which is the harder
+half to notice (claunch-s8o59). When the tree moved, the change and the
+selection are derived again from it and the run uses that list; when it did
+not move the derivation is skipped, because the selection is a function of
+the change and the checkout and an unmoved tree cannot have moved it. A
+re-derivation that comes back empty ends the gate without running pytest --
+an empty path list is not "run nothing" to pytest, it is "run everything".
+
 The file name carries those two. Two more elements of the key live in the
 receipt body (:data:`REUSE_FIELD`): the merge base the selection was derived
 from, and the interpreter and installed packages pytest runs under
@@ -250,7 +269,7 @@ from typing import List, Optional, Tuple
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_launcher import pytest_basetemp, test_tiers, test_window
+from claude_launcher import pytest_basetemp, test_tiers, test_tree, test_window
 
 
 def _load_sweep():
@@ -1357,7 +1376,7 @@ def worktree_tree(repo: Path) -> str:
         return _git(repo, "write-tree", env=env)
 
 
-def selection_key(files: List[str], deselect: tuple = ()) -> str:
+def selection_key(files: List[str], deselect: tuple = (), variant: str = "") -> str:
     """Which modules a receipt speaks for -- part of the key, not a detail.
 
     Two runs over the same tree that selected different modules are two
@@ -1366,8 +1385,15 @@ def selection_key(files: List[str], deselect: tuple = ()) -> str:
     key makes that impossible rather than merely discouraged. A deselected
     node id narrows the run the same way, so it is folded in too; with none
     the key is what it always was.
+
+    ``variant`` is the run mode when it is not ``partial`` (``sampling:<rate>``,
+    ``full``): a sampled green ran a share of these modules and must never
+    answer for a run of all of them (claunch-ce872). Empty for ``partial``, so
+    the keys every receipt already on disk was filed under do not move.
     """
     parts = sorted(files) + [f"!{d}" for d in sorted(set(deselect))]
+    if variant:
+        parts.append(f"@{variant}")
     return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -1390,8 +1416,11 @@ def receipt_path(
     files: List[str],
     override: Optional[Path] = None,
     deselect: tuple = (),
+    variant: str = "",
 ) -> Path:
-    return receipts_dir(repo, override) / f"{tree}-{selection_key(files, deselect)}.json"
+    return receipts_dir(repo, override) / (
+        f"{tree}-{selection_key(files, deselect, variant)}.json"
+    )
 
 
 def receipt_passes(receipt: dict) -> bool:
@@ -1476,6 +1505,7 @@ def find_receipt(
     files: List[str],
     override: Optional[Path] = None,
     deselect: tuple = (),
+    variant: str = "",
 ) -> Optional[dict]:
     """The green receipt that already answers for this tree and selection.
 
@@ -1505,9 +1535,12 @@ def find_receipt(
     could leave the key empty (``claunch-23r7d.1.1.1.1.2``), and the verdict it
     stranded is still sitting beside it.
     """
-    path = receipt_path(repo, tree, files, override, deselect)
+    path = receipt_path(repo, tree, files, override, deselect, variant)
     if not path.is_file():
-        return find_archived_receipt(path, tree, files, deselect)
+        found = find_archived_receipt(path, tree, files, deselect)
+        if found is not None and (found.get("variant") or "") != variant:
+            return None
+        return found
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -1527,6 +1560,7 @@ def find_receipt(
         receipt.get("tree") != tree
         or sorted(receipt.get("selection") or []) != sorted(files)
         or sorted(set(receipt.get("deselected") or [])) != sorted(set(deselect))
+        or (receipt.get("variant") or "") != variant
     ):
         return None                       # a hash collision, or a hand-edited file
     return receipt if receipt_passes(receipt) else None
@@ -1589,6 +1623,7 @@ def reuse_key(
     files: List[str],
     deselect: tuple,
     environment: Optional[dict],
+    variant: str = "",
 ) -> dict:
     """Everything a verdict stood on, as the receipt records it.
 
@@ -1599,7 +1634,7 @@ def reuse_key(
     parts = {
         "tree": tree,
         "base_commit": base_commit,
-        "selection": selection_key(files, deselect),
+        "selection": selection_key(files, deselect, variant),
         "environment": environment,
     }
     digest = hashlib.sha1(
@@ -1763,19 +1798,25 @@ def build_command(
     workers: Optional[int] = None,
     deselect: tuple = (),
     with_tail: bool = False,
+    args: Optional[List[str]] = None,
+    units: Optional[int] = None,
 ) -> List[str]:
     """pytest over exactly ``files``, parallel only when it pays.
 
     The slow tail (``claude_launcher/test_tiers.py``) is left to the full
-    sweep unless ``with_tail``.
+    sweep unless ``with_tail``. ``args`` replaces ``files`` as pytest's
+    positional arguments (a sampled pass hands it ``@<argsfile>``), and
+    ``units`` how many parallel units the run has when that is not
+    ``len(files)`` (``full`` runs one path, ``tests``, of the whole suite).
     """
     session = os.environ.get("CLAUNCH_SESSION", "worker")
-    cmd = ["uv", "run", "--no-sync", "pytest", *files, "-q"]
+    cmd = ["uv", "run", "--no-sync", "pytest", *(files if args is None else args), "-q"]
     if not with_tail:
         cmd += ["-m", test_tiers.CORE_EXPR]
-    if len(files) > 1:
+    count = len(files) if units is None else units
+    if count > 1:
         width = MAX_WORKERS if workers is None else max(1, workers)
-        cmd += ["-n", str(min(width, len(files)))]
+        cmd += ["-n", str(min(width, count))]
     for nodeid in deselect:
         cmd += ["--deselect", nodeid]
     cmd += [f"--basetemp={basetemp or session_basetemp(session)}"]
@@ -2185,6 +2226,9 @@ def run_and_record(
     compare_at: Optional[str] = None,
     reuse: Optional[dict] = None,
     with_tail: bool = False,
+    variant: str = "",
+    extra: Optional[dict] = None,
+    output_lines: Optional[List[str]] = None,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -2222,6 +2266,8 @@ def run_and_record(
         sys.stdout.flush()
         lines.append(line)
     code = proc.wait()
+    if output_lines is not None:
+        output_lines.extend(lines)
     tail_excluded = test_tiers.CORE_EXPR in cmd
     if (
         code == _PYTEST_NO_TESTS
@@ -2288,14 +2334,18 @@ def run_and_record(
         "skips": sweep.parse_skips(junit) if junit else None,
         # What the file name does not say; see ``reuse_mismatch``.
         REUSE_FIELD: reuse,
+        # The run mode when it is not partial; part of the key (selection_key).
+        "variant": variant,
     }
+    if extra:
+        receipt.update(extra)
     if comparison is not None:
         receipt.update(comparison)
     try:
         receipt["commit"] = _git(repo, "rev-parse", "HEAD")
     except LookupError:
         receipt["commit"] = None          # an address for the reader, not the key
-    dest = receipt_path(repo, tree, files, override, deselect)
+    dest = receipt_path(repo, tree, files, override, deselect, variant)
     tmp = None
     kept = None
     try:
@@ -2405,6 +2455,202 @@ def compare_with_base(
             repo, commit, files, override, deselect, with_tail
         )),
     }
+
+
+def collect_nodeids(
+    repo: Path,
+    files: List[str],
+    *,
+    deselect: tuple = (),
+    environment: Optional[dict] = None,
+) -> Optional[List[str]]:
+    """The core-tier node ids of ``files``, by ``pytest --collect-only -q``.
+
+    None when pytest could not collect (exit other than 0 and 5): the caller
+    then runs the whole selection, which is what the gate did before sampling
+    existed -- a sample of an unknown collection is no sample.
+    """
+    cmd = [
+        "uv", "run", "--no-sync", "pytest", *files, "--collect-only", "-q",
+        "-m", test_tiers.CORE_EXPR, "-p", "no:cacheprovider",
+    ]
+    for nodeid in deselect:
+        cmd += ["--deselect", nodeid]
+    done = subprocess.run(
+        cmd, cwd=str(repo), capture_output=True, text=True, errors="replace",
+        env=environment,
+    )
+    if done.returncode not in (0, _PYTEST_NO_TESTS):
+        tail = (done.stdout + done.stderr).strip().splitlines()[-5:]
+        print(
+            f"WARNING: collection for the sample failed (exit {done.returncode}); "
+            f"running the whole selection instead:\n  " + "\n  ".join(tail),
+            file=sys.stderr,
+        )
+        return None
+    return [
+        line.strip() for line in done.stdout.splitlines()
+        if "::" in line and not line.startswith(" ")
+    ]
+
+
+def sampling_variant(rate: float, seed: Optional[str]) -> str:
+    """The receipt-key variant of a sampled run (see :func:`selection_key`).
+
+    The default seed is the tree, which the key already holds, so only an
+    explicit ``--seed`` is spelled into the variant.
+    """
+    return f"{test_tree.SAMPLING}:{rate:g}" + (f":{seed}" if seed else "")
+
+
+def describe_sample(smp, tree, rate: float, seed: str) -> None:
+    modules = len(smp.modules)
+    print(
+        f"sampling: first pass runs {len(smp.picked)} of {smp.total} test(s) "
+        f"in {modules} module(s) (rate {rate:g}, seed {seed[:12]})"
+    )
+    for module, (node, picked, total) in sorted(smp.modules.items()):
+        importance = tree.nodes[node].importance
+        print(f"  {module}  {picked}/{total}  [node {node}, {importance}]")
+
+
+def write_argsfile(nodeids: List[str]) -> Path:
+    """The first pass's node ids as a pytest ``@argsfile``, in the session scratch.
+
+    Not on the command line: a module-wide sample is thousands of node ids
+    and Windows caps a command line at 32k characters. Not in the basetemp
+    either -- pytest empties that at startup.
+    """
+    scratch = os.environ.get("CLAUNCH_SCRATCH") or None
+    fd, name = tempfile.mkstemp(prefix="sample-", suffix=".args", dir=scratch)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(nodeids) + "\n")
+    return Path(name)
+
+
+def run_sampled(
+    repo: Path,
+    files: List[str],
+    *,
+    grant,
+    measured: Optional[str],
+    base: str,
+    receipts: Optional[Path],
+    basetemp: Optional[str],
+    deselect: tuple,
+    included: tuple,
+    known_failures: Optional[str],
+    compare_at: Optional[str],
+    reuse: Optional[dict],
+    rate: float,
+    seed: Optional[str],
+) -> int:
+    """The ``sampling`` mode: a sampled pass, then the failed nodes in full.
+
+    Pass 1 runs :func:`test_tree.sample` of the selection's core tests. Green
+    is the verdict. Red names the failing node ids; pass 2 runs every module
+    of their nodes, the nodes below them and the nodes that depend on them
+    (:func:`test_tree.expansion`, over the whole ``tests/`` directory), and
+    its exit is the verdict. Pass 2 files its receipt under the selection's
+    sampling key, so ``--check`` and ``merge_ready`` read the final verdict;
+    pass 1's red receipt is kept beside it (``keep_earlier_receipt``).
+    """
+    variant = sampling_variant(rate, seed)
+    environment = grant.child_env()
+    try:
+        tree = test_tree.load_tree(repo)
+    except (ValueError, OSError) as exc:
+        print(f"cannot tell: {test_tree.TREE_FILE}: {exc}")
+        return CANNOT_TELL
+    nodeids = collect_nodeids(repo, files, deselect=deselect, environment=environment)
+    used_seed = seed or measured or "0"
+    smp = test_tree.sample(nodeids, tree, rate=rate, seed=used_seed) if nodeids else None
+    if smp is not None:
+        describe_sample(smp, tree, rate, used_seed)
+    if smp is None or smp.complete:
+        if smp is not None:
+            print("sampling: the sample is the whole selection; one pass.")
+        cmd = apply_worker_advice(
+            build_command(files, basetemp=basetemp, deselect=deselect), grant.advisory_n,
+        )
+        print(f"$ {' '.join(cmd)}", flush=True)
+        return run_and_record(
+            repo, files, cmd, measured, base, receipts,
+            environment=environment, window=grant.receipt(), deselect=deselect,
+            included=included, known_failures=known_failures,
+            compare_at=compare_at, reuse=reuse, variant=variant,
+            extra={"mode": test_tree.SAMPLING, "sample": None},
+        )
+
+    sample_record = {
+        "rate": rate, "seed": used_seed, "picked": len(smp.picked),
+        "collected": smp.total,
+        "modules": {m: list(v) for m, v in sorted(smp.modules.items())},
+    }
+    argsfile = write_argsfile(smp.picked)
+    lines: List[str] = []
+    try:
+        cmd1 = apply_worker_advice(
+            build_command(
+                files, basetemp=basetemp, deselect=deselect,
+                args=[f"@{argsfile}"], units=len(smp.modules),
+            ),
+            grant.advisory_n,
+        )
+        print(f"$ {' '.join(cmd1)}", flush=True)
+        code1 = run_and_record(
+            repo, files, cmd1, measured, base, receipts,
+            environment=environment, window=grant.receipt(), deselect=deselect,
+            included=included, known_failures=known_failures,
+            # Red pass 1 is answered by pass 2, not by a base run of the
+            # whole selection; pass 2 makes the comparison.
+            compare_at=None, reuse=reuse, variant=variant,
+            extra={"mode": test_tree.SAMPLING, "pass": 1, "sample": sample_record},
+            output_lines=lines,
+        )
+    finally:
+        try:
+            argsfile.unlink()
+        except OSError:
+            pass
+    if code1 == 0:
+        print(
+            f"sampling: first pass green ({len(smp.picked)} of {smp.total} "
+            f"test(s)); no node failed, nothing to expand."
+        )
+        return 0
+
+    failed = failed_nodeids("".join(lines))
+    if failed:
+        nodes, modules = test_tree.expansion(failed, tree, test_tree.repo_modules(repo))
+    else:
+        # Red with no node id to follow (a crash, an interrupted run): the
+        # whole selection is what the first pass stood for.
+        nodes, modules = [], list(files)
+    print(
+        f"sampling: first pass red ({len(failed)} failing node id(s)); second "
+        f"pass runs {len(modules)} module(s) of {len(nodes)} node(s) "
+        f"(the failing nodes, the nodes below them, the nodes depending on them):"
+    )
+    for name in nodes:
+        print(f"  node {name}")
+    for module in modules:
+        print(f"  {module}")
+    cmd2 = apply_worker_advice(
+        build_command(modules, basetemp=basetemp, deselect=deselect), grant.advisory_n,
+    )
+    print(f"$ {' '.join(cmd2)}", flush=True)
+    return run_and_record(
+        repo, files, cmd2, measured, base, receipts,
+        environment=environment, window=grant.receipt(), deselect=deselect,
+        included=included, known_failures=known_failures,
+        compare_at=compare_at, reuse=reuse, variant=variant,
+        extra={
+            "mode": test_tree.SAMPLING, "pass": 2, "sample": sample_record,
+            "first_pass_failures": failed, "expanded_nodes": nodes,
+            "expanded_modules": modules,
+        },
+    )
 
 
 def relations_tried(rel: str) -> str:
@@ -2554,13 +2800,69 @@ def main(argv: Optional[list] = None) -> int:
             "split preexisting failures from new ones (claunch-wuaup)"
         ),
     )
+    modes = ap.add_mutually_exclusive_group()
+    modes.add_argument(
+        "--mode",
+        choices=test_tree.MODES,
+        default=None,
+        help=(
+            "sampling: representatives plus a seeded sample of each selected "
+            "module, then the failing nodes (and the nodes below and depending "
+            "on them) in full; partial: every test of the selected modules; "
+            "full: pytest tests, the slow tail included. Default: "
+            f"${test_tree.MODE_ENV}, else full when ${test_tree.CI_ENV} is set, "
+            "else sampling (claunch-ce872)"
+        ),
+    )
+    modes.add_argument(
+        "--sampling", dest="mode", action="store_const", const=test_tree.SAMPLING,
+        help="same as --mode sampling",
+    )
+    modes.add_argument(
+        "--no-sampling", dest="mode", action="store_const", const=test_tree.PARTIAL,
+        help="same as --mode partial: run every test of the selected modules",
+    )
+    modes.add_argument(
+        "--full", dest="mode", action="store_const", const=test_tree.FULL,
+        help="same as --mode full: run the whole suite, slow tail included",
+    )
+    ap.add_argument(
+        "--sample-rate",
+        type=float,
+        default=test_tree.DEFAULT_RATE,
+        help=(
+            "share of a normal-importance module's non-representative tests "
+            f"the sampled pass runs (default {test_tree.DEFAULT_RATE:g})"
+        ),
+    )
+    ap.add_argument(
+        "--seed",
+        default=None,
+        help="sample seed (default: the tree hash, so each edit moves the sample)",
+    )
     args = ap.parse_args(argv)
+    try:
+        mode, how_mode = test_tree.resolve_mode(args.mode, os.environ)
+    except ValueError as exc:
+        print(f"cannot tell: {exc}")
+        return CANNOT_TELL
+    if not 0.0 <= args.sample_rate <= 1.0:
+        print(f"cannot tell: --sample-rate {args.sample_rate} is outside 0..1")
+        return CANNOT_TELL
+    with_tail = args.with_tail or mode == test_tree.FULL
+    if mode == test_tree.SAMPLING and not with_tail:
+        variant = sampling_variant(args.sample_rate, args.seed)
+    elif mode == test_tree.FULL:
+        variant = test_tree.FULL
+    else:
+        variant = ""
 
     repo, how_repo = _resolve_repo(args.repo)
     # Printed before anything is measured, because every number below is
     # about this directory and a reader who assumes it is the working
     # directory reads the whole report as being about a different tree.
     print(f"tree    : {repo}  ({how_repo})")
+    print(f"mode    : {mode}  ({how_mode}; {test_tree.env_mode_note()})")
     elsewhere = foreign_cwd(repo, how_repo)
     if elsewhere is not None:
         print(
@@ -2683,6 +2985,14 @@ def main(argv: Optional[list] = None) -> int:
     else:
         print("no test module sits one import hop outside this selection.")
 
+    if mode == test_tree.FULL:
+        # The selection above is printed for the reader; the run is the suite.
+        print(
+            f"full: running the whole suite (pytest tests, slow tail included) "
+            f"instead of the {len(files)} selected module(s)."
+        )
+        files, included = ["tests"], []
+
     if not files:
         print(
             f"no test modules map to this change ({len(paths)} path(s) touched "
@@ -2691,8 +3001,10 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 0                          # a pass, for --check too: see below
 
+    units = MAX_WORKERS if mode == test_tree.FULL else None
     cmd = build_command(
-        files, basetemp=args.basetemp, deselect=deselect, with_tail=args.with_tail,
+        files, basetemp=args.basetemp, deselect=deselect, with_tail=with_tail,
+        units=units,
     )
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
@@ -2731,7 +3043,7 @@ def main(argv: Optional[list] = None) -> int:
     # stands on one: a green without the tail must not answer for a run that
     # asks for it.
     found = (
-        find_receipt(repo, tree, files, args.receipts, deselect)
+        find_receipt(repo, tree, files, args.receipts, deselect, variant)
         if tree is not None and not args.with_tail
         else None
     )
@@ -2742,7 +3054,8 @@ def main(argv: Optional[list] = None) -> int:
     key_now: Optional[dict] = None
     if tree is not None and not args.list_only:
         key_now = reuse_key(
-            tree, merge_base(repo, base), files, deselect, environment_identity(repo)
+            tree, merge_base(repo, base), files, deselect,
+            environment_identity(repo), variant,
         )
     refusal: Optional[str] = None
     if found is not None and key_now is not None:
@@ -2778,6 +3091,21 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     if args.list_only:
+        if mode == test_tree.SAMPLING and not with_tail:
+            # Collection only: what the first pass would run, so the mode's
+            # cost can be read before anything is paid for it.
+            try:
+                ltree = test_tree.load_tree(repo)
+            except (ValueError, OSError) as exc:
+                print(f"cannot tell: {test_tree.TREE_FILE}: {exc}")
+                return CANNOT_TELL
+            nodeids = collect_nodeids(repo, files, deselect=deselect)
+            if nodeids:
+                seed = args.seed or tree or "0"
+                describe_sample(
+                    test_tree.sample(nodeids, ltree, rate=args.sample_rate, seed=seed),
+                    ltree, args.sample_rate, seed,
+                )
         print(f"$ {' '.join(cmd)}", flush=True)
         return 0
 
@@ -2796,7 +3124,7 @@ def main(argv: Optional[list] = None) -> int:
         print(
             f"not running: tree {tree[:12]} with this selection is already "
             f"green.\n  {describe(found)}\n"
-            f"  receipt: {receipt_path(repo, tree, files, args.receipts, deselect)}\n"
+            f"  receipt: {receipt_path(repo, tree, files, args.receipts, deselect, variant)}\n"
             f"  (--no-reuse runs it anyway; any edit changes the tree and so "
             f"the key)"
         )
@@ -2809,7 +3137,7 @@ def main(argv: Optional[list] = None) -> int:
     # a report quoting the run that got overwritten -- which is the whole
     # subject of ``keep_earlier_receipt``.
     if tree is not None:
-        earlier = receipt_path(repo, tree, files, args.receipts, deselect)
+        earlier = receipt_path(repo, tree, files, args.receipts, deselect, variant)
         if earlier.is_file():
             print(
                 f"NOTE: tree {tree[:12]} with this {len(files)}-module "
@@ -2841,32 +3169,136 @@ def main(argv: Optional[list] = None) -> int:
     # Ask for the width the run will use, so the machine's worker budget is
     # charged what this selection spends (claunch-8kald): one module runs
     # serially and costs one worker, not the class ceiling.
-    wanted = min(MAX_WORKERS, len(files)) if len(files) > 1 else 1
+    count = units or len(files)
+    wanted = min(MAX_WORKERS, count) if count > 1 else 1
     try:
         grant = test_window.acquire(
-            test_window.TARGETED,
-            label=f"changed_tests.py ({len(files)} modules)",
+            # The whole suite is a sweep's load and queues as one.
+            test_window.SWEEP if mode == test_tree.FULL else test_window.TARGETED,
+            label=f"changed_tests.py {mode} ({len(files)} modules)",
             workers=wanted,
         )
     except test_window.WindowUnavailable as exc:
         print(f"cannot run selected tests: {exc}", file=sys.stderr)
         return CANNOT_TELL
 
+    # What pytest is about to read, measured after the wait. The key above was
+    # taken before the window for the reuse decision -- standing on a receipt
+    # starts no run, so it must not hold a slot. But the wait can run to the
+    # window's cap (1800 s), and a commit made inside it left this run's
+    # receipt filed under the pre-wait tree: ``--check`` answered "green" for
+    # content nobody read (claunch-1cn7l). So the key is re-measured here, and
+    # the run is filed under what it reads. A failed measurement is no answer,
+    # not the earlier one: the run then leaves no receipt at all.
+    measured = tree
+    try:
+        measured = worktree_tree(repo)
+    except (LookupError, OSError) as exc:
+        print(
+            f"WARNING: no tree hash after the window wait ({exc}); running "
+            f"without a receipt.",
+            file=sys.stderr,
+        )
+        measured = None
+    if measured != tree:
+        print(
+            f"NOTE: the working tree moved while waiting for a window "
+            f"({(tree or '?')[:12]} -> {(measured or '?')[:12]}); this run's "
+            f"receipt is filed under the tree it reads.",
+            file=sys.stderr,
+        )
+        # The tree the run reads is also the tree the selection was derived
+        # from, and that derivation happened before the wait. A test module
+        # committed in the wait was missing from the run, and the receipt
+        # filed under the new tree spelled out the old module list -- a wrong
+        # selection wearing a right tree is the harder half of claunch-1cn7l
+        # to see (claunch-s8o59). Gated on the move, not done on every run:
+        # the selection is a function of the change and the checkout, so an
+        # unmoved tree cannot have moved it.
+        try:
+            late_paths = changed_paths(repo, base)
+            late_files = select(repo, late_paths)
+        except (LookupError, OSError) as exc:
+            print(
+                f"WARNING: cannot re-derive the selection after the window "
+                f"wait ({exc}); running the one measured before it.",
+                file=sys.stderr,
+            )
+        else:
+            late_derived = set(late_files)
+            late_files = sorted(late_derived | set(named))
+            if mode == test_tree.FULL:
+                late_files = files        # the suite does not move with the diff
+            if late_files != files:
+                added = sorted(set(late_files) - set(files))
+                dropped = sorted(set(files) - set(late_files))
+                print(
+                    f"NOTE: the selection moved with it "
+                    f"(+{len(added)} -{len(dropped)} module(s)); this run uses "
+                    f"the one this tree gives:",
+                    file=sys.stderr,
+                )
+                for rel in added:
+                    print(f"  + {rel}", file=sys.stderr)
+                for rel in dropped:
+                    print(f"  - {rel}", file=sys.stderr)
+                files = late_files
+                included = [f for f in named if f not in late_derived]
+                if not files:
+                    # Selected nothing, so there is nothing to run -- and an
+                    # empty ``files`` must never reach pytest, which reads it
+                    # as "no path arguments" and runs the whole suite. The
+                    # window was taken for a run this gate no longer has, so
+                    # it is handed back here rather than held to the end.
+                    grant.release()
+                    print(
+                        f"no test modules map to this change any more "
+                        f"({len(late_paths)} path(s) touched vs "
+                        f"{base}{_base_note(how)}) -- nothing for this gate "
+                        f"to run."
+                    )
+                    return 0
+
+    reuse = key_now
+    if measured != tree:
+        reuse = (
+            None if measured is None
+            else reuse_key(
+                measured, merge_base(repo, base), files, deselect,
+                environment_identity(repo), variant,
+            )
+        )
+
+    compare_at = None if args.no_compare_base else merge_base(repo, base)
+    if mode == test_tree.SAMPLING and not with_tail:
+        try:
+            return run_sampled(
+                repo, files, grant=grant, measured=measured, base=args.base,
+                receipts=args.receipts, basetemp=args.basetemp,
+                deselect=deselect, included=tuple(included),
+                known_failures=(
+                    str(args.known_failures)
+                    if args.known_failures is not None else None
+                ),
+                compare_at=compare_at, reuse=reuse,
+                rate=args.sample_rate, seed=args.seed,
+            )
+        finally:
+            grant.release()
     cmd = apply_worker_advice(
         build_command(
             files, basetemp=args.basetemp, deselect=deselect,
-            with_tail=args.with_tail,
+            with_tail=with_tail, units=units,
         ),
         grant.advisory_n,
     )
-    compare_at = None if args.no_compare_base else merge_base(repo, base)
     print(f"$ {' '.join(cmd)}", flush=True)
     try:
         return run_and_record(
             repo,
             files,
             cmd,
-            tree,
+            measured,
             args.base,
             args.receipts,
             environment=grant.child_env(),
@@ -2877,8 +3309,10 @@ def main(argv: Optional[list] = None) -> int:
                 str(args.known_failures) if args.known_failures is not None else None
             ),
             compare_at=compare_at,
-            reuse=key_now,
-            with_tail=args.with_tail,
+            reuse=reuse,
+            with_tail=with_tail,
+            variant=variant,
+            extra={"mode": mode},
         )
     finally:
         grant.release()

@@ -50,7 +50,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from . import config, credentials, harnesses, lineage, metering, providers, runner, store
 from . import profile as profile_mod
@@ -1681,3 +1681,33 @@ def health_for_token(profile: Profile, token: str) -> Optional[KeyHealth]:
     belongs to the login.
     """
     return health_for_report(report_for_token(profile, token))
+
+
+def health_for_rows(
+    windows: Optional[Iterable[dict]],
+) -> Optional[KeyHealth]:
+    """:func:`health_for_report` for a reading already serialized as rows.
+
+    The create form's per-key answer (``profile_usage.key_usage``) is a list of
+    dicts rather than a :class:`UsageReport`. The selection rule -- a spent
+    window makes the key unusable -- is the same one the launch applies, so it
+    is applied here instead of being retyped in the caller that builds the
+    form's preview (claunch-hego3).
+    """
+    rows = []
+    for window in windows or ():
+        if not isinstance(window, dict):
+            continue
+        rows.append(
+            UsageWindow(
+                name=str(window.get("name") or ""),
+                utilization=window.get("utilization"),
+                resets_at=window.get("resets_at"),
+                used_dollars=window.get("used_dollars"),
+                limit_dollars=window.get("limit_dollars"),
+                status=window.get("status"),
+                remaining_dollars=window.get("remaining_dollars"),
+                detail=window.get("detail"),
+            )
+        )
+    return health_for_report(UsageReport(windows=rows, raw={}))

@@ -134,6 +134,15 @@ def _old_record(root, op_id="0123456789ab", session="opa"):
 
 
 def test_an_older_feed_moves_into_one_thread_with_a_backup(world):
+    # The world's own operator is bound to 'opa' as well, and the legacy
+    # record below claims that session; ``bound('opa')`` answers with
+    # whichever record comes first by id, so this test's inbox read a
+    # different operator whenever the fixture's random id sorted before
+    # '0123456789ab' (claunch-786zn). Unbind it: 'opa' is the legacy
+    # operator's here.
+    alpha = world.ops.get(world.alpha["id"])
+    alpha["session"] = None
+    world.ops.save(alpha)
     original = _old_record(world.root)
     ops = operators_v2.OperatorsV2(world.root, world.manager, FakeObserver())
     rec = ops.get("0123456789ab")

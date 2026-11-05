@@ -19,7 +19,8 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require(process.env.CLAUNCH_PLAYWRIGHT || "playwright");
-const root = path.join(__dirname, "../../src/claude_launcher/web/static");
+const root = process.env.CLAUNCH_WEB_ROOT
+  || path.join(__dirname, "../../src/claude_launcher/web/static");
 
 const ROWS = 200;
 const TARGET = `s${ROWS - 20}`;            // twenty rows above the foot
@@ -227,6 +228,83 @@ const landing = (page, name) => page.evaluate((name) => {
     // And it stays where it landed once the skip is back.
     const after = await landing(page, TARGET);
     assert.ok(after.inView, `the row is still on screen after the rail is handed back (error ${after.error}px)`);
+
+    /* The press's smooth scroll survives a pass that lands mid-flight
+       (claunch-7vd4v.1): "여전히 세션 카드 이동 (#term-goto) 시 끊기는 상황이
+       있네. 끊긴 상태에서 다시 누르면 찾아가긴해."
+
+       A pass that ran while the animation was moving wrote the position with
+       an instant `scrollTop` -- the kept number, or the anchor restore -- and
+       an instant write aborts a smooth scroll (CSSOM View). It also emptied
+       the list, which takes the row being scrolled to out of the page. The
+       pass here is forced rather than waited for, so the check is deterministic:
+       `revealSessionCard` returns before the animation has run, so the mark it
+       lays down cannot have been released by a `scrollend` yet.
+
+       The rail is first moved by the reader, so the row is drawn (the press
+       then travels rather than re-aiming) and off-centre. */
+    const midFlight = await page.evaluate(async (name) => {
+      const list = document.querySelector("#session-list");
+      const sel = `li[data-name="${CSS.escape(name)}"]`;
+      const centreGap = () => {
+        const row = list.querySelector(sel);
+        if (!row) return null;
+        const lr = list.getBoundingClientRect();
+        const rr = row.getBoundingClientRect();
+        return Math.round((rr.top + rr.height / 2) - (lr.top + lr.height / 2));
+      };
+      list.scrollTop = list.scrollTop + 380;         // the reader, on her way down
+      await new Promise((r) => setTimeout(r, 120));  // let the slice catch up
+      if (!list.querySelector(sel)) return { skipped: "the row is not drawn" };
+      const gapBefore = centreGap();
+      const rowsBefore = list._railRows;
+      const rowBefore = list.querySelector(sel);
+      // Count the JS writes to the position, forwarding them to the real setter
+      // so the geometry stays honest; the smooth animation updates the pixel
+      // value natively and never comes through here. `scrollTop` is on
+      // Element.prototype, not on the list's own prototype.
+      let proto = null;
+      for (let at = Object.getPrototypeOf(list); at && !proto;
+           at = Object.getPrototypeOf(at)) {
+        proto = Object.getOwnPropertyDescriptor(at, "scrollTop");
+      }
+      let writes = 0;
+      Object.defineProperty(list, "scrollTop", {
+        configurable: true,
+        get: () => proto.get.call(list),
+        set: (v) => { writes += 1; proto.set.call(list, v); },
+      });
+      const answered = revealSessionCard(name);
+      const marked = list._railScrollTopUntil > Date.now();
+      // Exactly what the rail's scroll handler asks for, and what a poll with
+      // a changed fleet asks for.
+      refreshSessions._forceRebuild = true;
+      await refreshSessions({ cached: true });
+      const out = {
+        answered, marked, gapBefore, writes,
+        sameModel: list._railRows === rowsBefore,
+        sameRow: list.querySelector(sel) === rowBefore,
+      };
+      delete list.scrollTop;
+      return out;
+    }, TARGET);
+    assert.ok(!midFlight.skipped, midFlight.skipped);
+    assert.equal(midFlight.answered, true, "the press answers that it found the row");
+    assert.ok(Math.abs(midFlight.gapBefore) > 40,
+      `the press has somewhere to travel from (${midFlight.gapBefore}px off centre)`);
+    assert.equal(midFlight.writes, 0,
+      `a pass mid-flight writes no position (${midFlight.writes} write(s))`);
+    assert.equal(midFlight.sameModel, true,
+      "a pass mid-flight does not tear the rows down");
+    assert.equal(midFlight.sameRow, true,
+      "the row the scroll is travelling to stays in the page");
+    assert.equal(midFlight.marked, true,
+      "the press marks the rail before its animation starts");
+
+    await page.waitForTimeout(2000);
+    const landedAfterPass = await landing(page, TARGET);
+    assert.ok(landedAfterPass.found && Math.abs(landedAfterPass.error) < landedAfterPass.railHeight / 2,
+      `the animation runs on to the row (error ${landedAfterPass.error}px, rail ${landedAfterPass.railHeight}px)`);
 
     assert.deepEqual(errors, [], "no page errors");
 

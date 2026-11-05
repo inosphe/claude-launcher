@@ -425,13 +425,28 @@
     return `${rest}m`;
   }
 
-  /* "2h16m" as `claunch usage` writes it (cli._fmt_reset): whole minutes,
-     hours without days. */
+  /* A span of minutes under one unit rule, so a 5h countdown and a month
+     countdown are read at the same scale: minutes below an hour, hours
+     below a day, days above it (claunch-hz9ma). The create form's readout
+     carries the same rule as `newUsageSpan` in app.js — the two surfaces
+     show the same accounts, so the same number may not read two ways. */
+  function spanMinutes(minutes) {
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+    const days = Math.floor(hours / 24);
+    const rest = hours % 24;
+    return rest ? `${days}d ${rest}h` : `${days}d`;
+  }
+
+  /* The page's countdown. It used to mirror `claunch usage` (hours only,
+     cli._fmt_reset) and so read "430h32m" beside a 5h window's "4h47m";
+     the page and the create form now share the day/hour rule above, while
+     the CLI keeps its own output. */
   function resetText(resets, now) {
     const minutes = Math.floor((resets.valueOf() - now) / 60000);
     if (minutes <= 0) return "resetting";
-    if (minutes < 60) return `resets in ${minutes}m`;
-    return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+    return `resets in ${spanMinutes(minutes)}`;
   }
 
   /* The windows `claunch usage` prints: the ones with use or a reset time,

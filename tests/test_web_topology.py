@@ -513,6 +513,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "planwaitcard_check.js",
+        "optionalgate_check.js",
         "leaderfault_check.js",
         "faultreset_check.js",
         "restartgate_check.js",
@@ -535,6 +536,8 @@ CHECKS = [
         "briefmodel_check.js",
         "model_settings_check.js",
         "modeltiers_check.js",
+        "modeltierscard_check.js",
+        "settingscards_check.js",
         "modelprice_check.js",
         "faqsettings_check.js",
         "briefrow_check.js",
@@ -707,7 +710,9 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "railchart_browser.cjs",
     "artifactscleanup_browser.cjs",
+    "artifactsmeasure_browser.cjs",
     "hive_browser.cjs",
     "megathread_browser.cjs",
     "resendactions_browser.cjs",
@@ -720,6 +725,7 @@ BROWSER_CHECKS = [
     "cflow2gentle_browser.cjs",
     "cflow2throughput_browser.cjs",
     "glossary_browser.cjs",
+    "retrospection_browser.cjs",
     "flows_browser.cjs",
         "diagramviewport_browser.cjs",
         "sessionform_browser.cjs",
@@ -771,6 +777,7 @@ BROWSER_CHECKS = [
         "noticecost_browser.cjs",
         "noticewrap_browser.cjs",
         "noticefold_browser.cjs",
+        "noticeload_browser.cjs",
         "sessiontooltip_browser.cjs",
         "skipconfirm_browser.cjs",
 ]

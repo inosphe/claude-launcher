@@ -1125,6 +1125,17 @@ def _stored_meta(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) and data.get("format") == FORMAT else None
 
 
+def _path_identity(path: Path) -> str:
+    """The DB a collection directory belongs to: ``<corpus>.<db>.zvec`` -> ``db``.
+
+    A pre-preset ``<corpus>.zvec`` has no identity; it is in no named DB and
+    is read only through the legacy adoption rule. Empty, never a guess.
+    """
+    stem = path.name[: -len(".zvec")] if path.name.endswith(".zvec") else path.name
+    _corpus, _, identity = stem.partition(".")
+    return identity
+
+
 def rag_stores(base: Path) -> List[dict]:
     """Every collection directory under ``base``, as the DB panel reads them.
 
@@ -1235,6 +1246,15 @@ class Progress:
         #: How many sync passes ran for this corpus — the number the queue's
         #: coalescing is measured by (five enqueues of one key is one run).
         self.runs = 0
+        #: A forced request that arrived while a pass was running. It is not
+        #: dropped: the pass that is running finishes, and one more pass with
+        #: ``force`` follows it (claunch-i2i95). Before this flag a Rebuild
+        #: clicked mid-sync returned the running progress and was lost.
+        self.force_pending = False
+        #: Cooperative cancellation: the running pass stops at its next group
+        #: boundary and keeps what it already embedded. A rebuild has no other
+        #: stop — there was no route for it at all (claunch-i2i95).
+        self.cancel_requested = False
 
     def view(self) -> dict:
         return {
@@ -1246,6 +1266,8 @@ class Progress:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "runs": self.runs,
+            "force_pending": self.force_pending,
+            "cancel_requested": self.cancel_requested,
         }
 
 
@@ -1572,17 +1594,47 @@ class RagService:
 
     # -- syncing -------------------------------------------------------- #
     def ensure_sync(self, kind: str, root: Optional[Path], *, force: bool = False) -> Progress:
-        """Start a sync for the corpus unless one is running; return its progress."""
+        """Start a sync for the corpus unless one is running; return its progress.
+
+        A forced request that arrives while a pass is running is remembered on
+        the progress (``force_pending``) and runs as one more pass when the
+        current one ends — returning the running progress unchanged was how a
+        Rebuild clicked mid-sync disappeared without a trace (claunch-i2i95).
+        """
         cfg = self.config()
         key = self._key(kind, root)
         prog = self._progress_of(key)
         if prog.task is not None and not prog.task.done():
+            if force:
+                prog.force_pending = True
             return prog
         if not store.rag_configured(cfg):
             prog.error = "rag: block not configured"
             return prog
+        prog.force_pending = False
+        prog.cancel_requested = False
         prog.task = asyncio.create_task(self._sync(kind, root, cfg, prog, force))
         return prog
+
+    def progress(self, kind: str, root: Optional[Path] = None) -> Progress:
+        """The progress object a route reads before and after asking for a pass."""
+        return self._progress_of(self._key(kind, root))
+
+    def cancel_sync(self, kind: str, root: Optional[Path] = None) -> dict:
+        """Stop the pass a corpus is running, at its next group boundary.
+
+        A rebuild could not be stopped before this: the only pause route holds
+        the *next* corpus and the running pass finishes (claunch-i2i95). What
+        was embedded so far is kept — the pass saves before it returns — and
+        the collection may be partial, which the status row shows.
+        """
+        key = self._key(kind, root)
+        prog = self._progress_of(key)
+        if prog.task is None or prog.task.done():
+            return {"key": key, "running": False, "cancelled": False}
+        prog.cancel_requested = True
+        prog.force_pending = False
+        return {"key": key, "running": True, "cancelled": True}
 
     async def _sync(self, kind: str, root: Optional[Path], cfg: dict, prog: Progress, force: bool) -> None:
         prog.error = None
@@ -1614,12 +1666,17 @@ class RagService:
             chunks = 0
             limit = int(cfg.get("rate_limit") or 0)
             for doc in stale:
+                # The cancel is cooperative: a group already embedding is not
+                # torn mid-request, the pass stops before the next one and
+                # keeps what it wrote (claunch-i2i95).
+                if prog.cancel_requested:
+                    break
                 if group and chunks + len(doc.chunks) > batch:
                     await self._embed_group(client, index, group, prog, limit)
                     group, chunks = [], 0
                 group.append(doc)
                 chunks += len(doc.chunks)
-            if group:
+            if group and not prog.cancel_requested:
                 await self._embed_group(client, index, group, prog, limit)
             await index.save_soon()
         except RagError as exc:
@@ -1646,6 +1703,20 @@ class RagService:
                 await index.save_soon()
         finally:
             prog.finished_at = _now_iso()
+            # A forced request that arrived during this pass is not dropped:
+            # it runs as one more pass now that this one is over. The flag is
+            # cleared first so the follow-up pass cannot re-arm itself. A
+            # cancel discards a forced pass queued behind the one it stopped
+            # — the two requests are opposite, and leaving the flag set would
+            # draw "재색인 예약" on a row no pass is going to visit.
+            if prog.cancel_requested:
+                prog.force_pending = False
+            elif prog.force_pending and not self._closed:
+                prog.force_pending = False
+                cfg_now = self.config()
+                if store.rag_configured(cfg_now):
+                    prog.task = asyncio.create_task(
+                        self._sync(kind, root, cfg_now, prog, True))
 
     @staticmethod
     def _reconcile(index: VectorIndex, docs: List[Doc], force: bool, dims: int) -> List[Doc]:
@@ -2462,6 +2533,16 @@ class RagService:
                 "dims": index.dims,
                 "updated_at": index.updated_at,
                 "path": str(index.path),
+                # The store this row is physically in: ``<corpus>.<db>.zvec``
+                # gives ``db``, a pre-preset ``<corpus>.zvec`` gives "". The
+                # card groups rows under this, so a reader never has to infer
+                # the DB from a path (claunch-i2i95).
+                "db": _path_identity(index.path),
+                # The DB the preset resolves to. A row whose path has no
+                # identity is being read through the legacy adoption rule, and
+                # that difference is the one the two screens disagreed about.
+                "db_configured": str(cfg.get("db") or ""),
+                "legacy": not _path_identity(index.path),
             }
             row.update(prog.view())
             indexes.append(row)

@@ -608,15 +608,18 @@ class BorrowRunner:
         state: dict = {}
         try:
             await self._run(run, workdir, state)
+        # The terminal status is settled before the give-back is awaited: a
+        # second cancel landing inside that await must not leave the run
+        # without one (claunch-whm4e.1.1.1.1).
         except asyncio.CancelledError:
             reason = self._stop_reason.pop(run["id"], "the daemon is stopping")
+            state["final"] = {"status": "aborted", "error": reason}
             if not run.get("revoked"):
                 await self._give_back(run, reason)
-            self._set(run, status="aborted", error=reason, finished_at=_utcnow())
         except Exception as exc:  # noqa: BLE001 — any failure gives the waiter back
             log.warning("window borrow %s failed: %s", run["id"], exc)
+            state["final"] = {"status": "failed", "error": str(exc)[:500]}
             await self._give_back(run, str(exc)[:200])
-            self._set(run, status="failed", error=str(exc)[:500], finished_at=_utcnow())
         finally:
             beat.cancel()
             proc = state.get("proc")
@@ -626,8 +629,17 @@ class BorrowRunner:
             if grant:
                 with contextlib.suppress(Exception):
                     self._window.release(grant)
-            await asyncio.to_thread(self._cleanup, run, workdir)
-            self._tasks.pop(run["id"], None)
+            try:
+                await _uncancelled(asyncio.to_thread(self._cleanup, run, workdir))
+            finally:
+                # The terminal status is written only once the grant is back
+                # and the checkout is gone (claunch-whm4e.1.1.1): a reader
+                # that sees a finished run must not still find its worktree
+                # or its window holder.
+                final = state.get("final")
+                if final:
+                    self._set(run, **final, finished_at=_utcnow())
+                self._tasks.pop(run["id"], None)
 
     def _cleanup(self, run: dict, workdir: Path) -> None:
         checkout = workdir / "checkout"
@@ -735,12 +747,11 @@ class BorrowRunner:
         }
         self._set(run, status="reporting", exit_code=code, duration=round(seconds, 1))
         verdict = await self._send_result(run, payload)
+        # _drive writes it after the cleanup.
         if verdict == "ok":
-            self._set(run, status="passed" if code == 0 else "failed-tests",
-                      finished_at=_utcnow())
+            state["final"] = {"status": "passed" if code == 0 else "failed-tests"}
         else:
-            self._set(run, status="discarded", error=f"lender answered {verdict}",
-                      finished_at=_utcnow())
+            state["final"] = {"status": "discarded", "error": f"lender answered {verdict}"}
 
     async def _send_result(self, run: dict, payload: dict) -> str:
         """Post the result, retrying while the lender may still accept it."""
@@ -797,9 +808,11 @@ class BorrowRunner:
         stale = [r for r in self._runs if r.get("status") in ACTIVE]
         for run in stale:
             await self._give_back(run, "the borrower's daemon restarted")
-            self._set(run, status="aborted", error="the borrower's daemon restarted",
-                      finished_at=_utcnow())
-            await asyncio.to_thread(self._cleanup, run, self._root / run["id"])
+            try:
+                await asyncio.to_thread(self._cleanup, run, self._root / run["id"])
+            finally:
+                self._set(run, status="aborted", error="the borrower's daemon restarted",
+                          finished_at=_utcnow())
 
     async def close(self) -> None:
         for run_id, task in list(self._tasks.items()):
@@ -815,6 +828,35 @@ def _kill(proc) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
+
+
+async def _uncancelled(awaitable):
+    """Await ``awaitable`` to its end even if the caller is cancelled
+    meanwhile, then pass the cancel on. The cleanup thread cannot be stopped
+    anyway; returning early would let the run's terminal status be written
+    while its checkout is still being removed (claunch-whm4e.1.1.1.1).
+
+    Once a cancel has arrived the await ends in CancelledError whatever the
+    awaitable ended with: an error it raised is logged and kept as the
+    cancel's ``__context__``, and does not replace the cancel
+    (claunch-whm4e.1.1.1.1.1). ``asyncio.wait`` leaves ``inner`` running
+    when the waiter is cancelled, as ``shield`` did, without leaving a
+    cancelled shield whose late error asyncio reports as never retrieved."""
+    inner = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not inner.done():
+        try:
+            await asyncio.wait({inner})
+        except asyncio.CancelledError:
+            cancelled = True
+    if not cancelled:
+        return inner.result()
+    try:
+        inner.result()
+    except Exception as exc:  # noqa: BLE001 — the cancel wins; keep the error
+        log.warning("cleanup failed after a cancel: %s", exc)
+        raise asyncio.CancelledError
+    raise asyncio.CancelledError
 
 
 def _arg_paths(args: list) -> "list[tuple[str, str]]":

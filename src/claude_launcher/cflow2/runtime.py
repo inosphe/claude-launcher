@@ -163,6 +163,21 @@ MAX_ROSTER_DEFERRALS = 4
 
 CALLER_AGENT = "agent"
 CALLER_USER = "user"
+#: The driving session's parent session, answering a person's gate on its
+#: child's run (claunch-vjp4y). A person's gate -- a ``chooser: user`` choice,
+#: the driver's move/report request, a forced report -- is normally answered
+#: by a person; in a parent/child hierarchy the parent is the one who was
+#: going to be asked anyway, and it answers inside its own turn instead of
+#: waiting for somebody to look at the dashboard. The driver itself never
+#: counts (a grant the asker can give itself is not a grant), and neither
+#: does a sibling or any other session: the parent edge is read from the
+#: session registry and copied into the run (``DRIVER_PARENT``).
+CALLER_PARENT = "parent"
+
+#: State key: the session that spawned the driver (``SessionDef.parent``),
+#: recorded at start and refreshed by the daemon's v2 scan. Empty means the
+#: run has no delegating parent -- the person answers every gate.
+DRIVER_PARENT = "driver_parent"
 
 #: State key of the driver's move request (:func:`request_move`): one per run,
 #: pending until a person answers; a refusal stays until the driver files
@@ -351,6 +366,34 @@ def driver_of(state: Dict[str, Any]) -> str:
         return str(state.get("driver") or "")
     scope = str(state.get("scope") or "")
     return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
+
+
+def driver_parent_of(state: Dict[str, Any]) -> str:
+    """The session that spawned the run's driver (``DRIVER_PARENT``), or "".
+
+    Written at start (``flow_start`` asks the daemon) and refreshed by the
+    daemon's v2 scan, so a reparent moves the delegation with it. An empty
+    value means nobody is delegated: the run's gates are a person's alone.
+    """
+    return str(state.get(DRIVER_PARENT) or "").strip()
+
+
+def gate_authority(state: Dict[str, Any], session: str) -> str:
+    """Who may answer this run's person gates: ``CALLER_USER`` when the
+    caller is a terminal outside the run's session, ``CALLER_PARENT`` when it
+    is the driver's parent session, "" when it is nobody.
+
+    The driver is never included, whoever asks: an agent answering its own
+    gate defeats the reason the gate exists. A gate an agent cannot take
+    stays a person's, so a run with no parent loses nothing.
+    """
+    session = str(session or "").strip()
+    if not session:
+        return CALLER_USER
+    if session == driver_of(state).strip():
+        return ""
+    parent = driver_parent_of(state)
+    return CALLER_PARENT if parent and session == parent else ""
 
 
 def _cap_on(value: Any) -> bool:
@@ -1164,6 +1207,60 @@ def _par_child_done(r: Run, iid: str, role: str, outcome: str, value: Any) -> No
     frame["decided"] = True
     _cancel_children(r, iid, f"par settled ({node.get('settle')})")
     _complete(r, iid, decided[0], decided[1])
+
+
+def optional_choice(inst: Dict[str, Dict[str, Any]], chart, iid: str) -> bool:
+    """Whether the choice instance ``iid`` is a door nobody has to take.
+
+    A choice parked in a branch of a region that settles without that
+    branch runs on by itself: :func:`_par_child_done` calls
+    :func:`_cancel_children` the moment the settle is satisfied, so
+    leaving the door alone changes nothing. ``improv-worker-v2``'s
+    ``test-skip-gate`` -- a ``skip`` button racing the targeted-test loop
+    under ``settle: race`` -- is the case this exists for
+    (claunch-dsr4o, claunch-hbmhk): the rail used to draw it exactly like
+    a gate the run was stopped on.
+
+    The nearest enclosing ``par`` answers it. ``race`` and ``any`` decide
+    on the first branch, so every branch is skippable while there are two
+    or more (with one branch they behave like ``all``). ``quorum:K``
+    decides on K, so a branch is skippable while K is below the number of
+    branches. ``all`` and ``allSettled`` need every branch. Everything
+    this cannot prove -- no enclosing par, an unreadable node, a settle
+    mode it does not know -- answers ``False``: a gate that really does
+    stop the run must never be drawn as optional.
+
+    Takes the run's instance map (``Run.inst``, or the ``inst`` document
+    of a saved state) and its chart, so the daemon's rail asks the same
+    question without building a :class:`Run` (``daemon/cflow2_web.py``
+    ``rail_entry`` reads the saved state directly).
+    """
+    seen = set()
+    cur = (inst.get(iid) or {}).get("parent")
+    while cur is not None and cur not in seen:
+        seen.add(cur)
+        rec = inst.get(cur)
+        if not rec:
+            return False
+        try:
+            node = chart.node(rec.get("node"))
+        except ir.IRError:
+            return False
+        if node.type == ir.T_PAR:
+            names = list((node.get("branches") or {}).keys())
+            if len(names) < 2:
+                return False
+            base, _, k = str(node.get("settle") or ir.SETTLE_ALL).partition(":")
+            if base in (ir.SETTLE_RACE, ir.SETTLE_ANY):
+                return True
+            if base == ir.SETTLE_QUORUM:
+                try:
+                    return int(k or 1) < len(names)
+                except (TypeError, ValueError):
+                    return False
+            return False
+        cur = rec.get("parent")
+    return False
 
 
 def _group_child_done(r: Run, iid: str, child: str, role: str, outcome: str, value: Any) -> None:
@@ -2292,7 +2389,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
              inputs: Optional[Dict[str, Any]] = None,
              previous: Optional[Dict[str, Any]] = None,
              side: Optional[Dict[str, Any]] = None,
-             mesh: Optional[str] = None) -> Run:
+             mesh: Optional[str] = None,
+             driver_parent: str = "") -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -2307,6 +2405,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
         "probe": {}, "outcome": None, "value": None,
         "scope": st.scope, "cwd": str(st.cwd), "driver": driver or "",
         "mesh": str(mesh or "").strip(),
+        DRIVER_PARENT: str(driver_parent or "").strip(),
         store_mod.DAEMON_KEY: store_mod.daemon_of(st.scope),
     }
     if parent:
@@ -2457,7 +2556,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           inputs: Optional[Dict[str, Any]] = None,
           side: Optional[Dict[str, Any]] = None,
           next_round_of: Optional[str] = None,
-          mesh: Optional[str] = None, catalog: Any = None) -> Dict[str, Any]:
+          mesh: Optional[str] = None, catalog: Any = None,
+          driver_parent: Optional[str] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
 
     ``catalog`` checks the start inputs that declare ``options:`` (see
@@ -2474,6 +2574,11 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     ``next_round_of`` (:func:`start_next_round`): the run whose auto
     next-round request this start fulfils; under the lock the slot must still
     hold that run with the request, or the start is refused.
+
+    ``driver_parent`` is the session that spawned ``driver``
+    (``DRIVER_PARENT``): the one agent-side hand that may answer this run's
+    person gates (claunch-vjp4y). The MCP start asks the daemon for it; empty
+    means no parent is known and every gate stays a person's.
 
     ``driver`` is the session that drives the run -- its identity for asks
     and for the MCP tools' authority (default :func:`default_driver`). A
@@ -2531,7 +2636,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
                      driver=who, now=now, inputs=input_values,
                      previous=previous if (previous or {}).get("workflow") == chart.name
-                     else None, side=side, mesh=mesh)
+                     else None, side=side, mesh=mesh,
+                     driver_parent=str(driver_parent or "").strip())
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -2620,18 +2726,30 @@ def may_drive(state: Dict[str, Any], session: str) -> bool:
     return False
 
 
-def authorize(*, cwd: Optional[str], scope: Optional[str], session: str) -> None:
+def authorize(*, cwd: Optional[str], scope: Optional[str], session: str,
+              gate: bool = False) -> str:
     """Refuse an agent's call on a run it does not drive (no run: nothing to
-    refuse; starting is checked by the caller)."""
+    refuse; starting is checked by the caller).
+
+    ``gate=True`` widens the door to the one case a non-driver has over a run
+    that is not its own: the driver's parent session reading the gates its
+    child waits on (``gate_authority``). Returns the authority the call
+    stands on -- ``CALLER_AGENT`` for the driver, ``CALLER_PARENT`` for the
+    parent -- so the caller can journal which hand answered.
+    """
     st = RunStore(cwd, scope)
     if not st.exists():
-        return
+        return CALLER_AGENT
     try:
         state = st.load_state()
     except StoreError:
-        return
+        return CALLER_AGENT
     if may_drive(state, session):
-        return
+        return CALLER_AGENT
+    if gate:
+        authority = gate_authority(state, session)
+        if authority == CALLER_PARENT:
+            return CALLER_PARENT
     drv = driver_of(state) or "no session"
     raise FlowError(
         f"the cflow2 run in {st.cwd} scope {st.scope!r} is driven by {drv}; "
@@ -3248,20 +3366,49 @@ NUDGE_HINT = ("The user may not be watching this terminal. The dashboard already
 
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
            caller: str = CALLER_AGENT, cwd: Optional[str] = None,
-           scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
-    """Pick an option of an active ``choose``."""
+           scope: Optional[str] = None, now: Optional[float] = None,
+           by: Optional[str] = None) -> Dict[str, Any]:
+    """Pick an option of an active ``choose``.
+
+    ``caller`` is the authority the pick stands on: ``CALLER_USER`` for a
+    person, ``CALLER_PARENT`` for the driver's parent session answering a
+    ``chooser: user`` choice (claunch-vjp4y), ``CALLER_AGENT`` for the driver.
+    ``by`` names the hand that picked -- the session name for a parent pick,
+    the caller kind otherwise -- and is what ``person_picks`` and the journal
+    record.
+
+    A parent pick delegates the answer only: the person still may answer, the
+    pacing window still holds, and a reason is still required where the choice
+    demands one. Apart from the chooser check the parent is treated as an
+    agent, not as a person.
+    """
+    person = caller == CALLER_USER
+    who = str(by or "").strip() or caller
+
     def op(r: Run) -> None:
         _require_progress(r)
-        if caller != CALLER_USER:
+        if not person:
             _require_no_move_request(r)
+        if caller == CALLER_PARENT and gate_authority(r.state, who) != CALLER_PARENT:
+            # the parent's hand is the one grant an agent-side caller has;
+            # check it here too, so a caller that names the wrong hand is
+            # refused at the engine and not only by the surface that called it
+            raise FlowError(
+                f"{who or 'this caller'} may not answer this run's person gate: only the "
+                f"driving session's parent ({driver_parent_of(r.state) or 'none'}) answers "
+                f"it in the hierarchy")
         iid = _find(r, node, (AW_CHOOSE,), "choice")
         n = r.node_of(iid)
         chooser = n.get("chooser") or ir.CHOOSER_AGENT
-        if chooser == ir.CHOOSER_USER and caller != CALLER_USER:
+        if chooser == ir.CHOOSER_USER and caller not in (CALLER_USER, CALLER_PARENT):
+            parent = driver_parent_of(r.state)
+            extra = (f" Its parent {parent!r} may answer it too, with "
+                     f"flow_select(scope={r.state.get('scope')!r})." if parent else "")
             raise FlowError(
                 f"choice {n.label or n.id} is the user's (chooser: user). Present the "
                 f"options and your recommendation to the user; they pick with "
-                f"'claunch cflow2 select {iid} <option>' or on the run page. {NUDGE_HINT}"
+                f"'claunch cflow2 select {iid} <option>' or on the run page.{extra} "
+                f"{NUDGE_HINT}"
             )
         opts = {o["name"]: o for o in n.get("options") or []}
         if option not in opts:
@@ -3275,13 +3422,13 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
         # a person may always answer without a reason (docs 2.11); the
         # requirement is the agent's
-        if (n.get("require_reason") and caller != CALLER_USER
+        if (n.get("require_reason") and not person
                 and not (reason or "").strip()):
             raise FlowError(f"choice {n.label or n.id} requires a reason")
         frame = r.inst[iid]["frame"]
         held = frame.get("held")
         opens = _window_opens(r, n, opt)
-        if caller != CALLER_USER and opens is not None and r.now < opens:
+        if not person and opens is not None and r.now < opens:
             if held and held.get("option") == option:
                 held["reason"] = reason
                 held["updated"] = r.now
@@ -3290,9 +3437,9 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             else:
                 if held:
                     r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
-                           why=f"{caller} chose {option}")
+                           why=f"{who} chose {option}")
                 frame["held"] = {"option": option, "reason": reason, "opens_at": opens,
-                                 "since": r.now, "by": caller}
+                                 "since": r.now, "by": who}
                 r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
                        opens_at=opens)
             out["held"] = dict(frame["held"])
@@ -3300,9 +3447,10 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
         if held:
             frame.pop("held", None)
             r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
-                   why=f"{caller} chose {option}")
-        override = caller == CALLER_USER and opens is not None and r.now < opens
-        _take_option(r, iid, n, opt, reason, caller, override=override)
+                   why=f"{who} chose {option}")
+        override = person and opens is not None and r.now < opens
+        _take_option(r, iid, n, opt, reason, who, override=override,
+                     delegated=caller == CALLER_PARENT)
     out: Dict[str, Any] = {}
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -3392,7 +3540,7 @@ def _batch_status(r: Run, opt: Dict[str, Any], opens: Optional[float]) -> Dict[s
 
 
 def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
-                 by: str, override: bool = False) -> None:
+                 by: str, override: bool = False, delegated: bool = False) -> None:
     option = opt["name"]
     r.inst[iid]["await"] = None
     r.inst[iid]["frame"]["option"] = option
@@ -3403,11 +3551,16 @@ def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Opti
     if opt.get("interval"):
         r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
     r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
-           override=True if override else None)
-    if by == CALLER_USER:
+           override=True if override else None,
+           **({"delegated": True} if delegated else {}))
+    if by == CALLER_USER or delegated:
+        # a person's pick, or the driver's parent answering for the person
+        # (claunch-vjp4y): both are instructions the driver must see, and the
+        # ``by``/``delegated`` pair says which hand it came from.
         picks = r.state.setdefault(PERSON_PICKS, [])
         picks.append({"instance": iid, "node": n.id, "label": n.label or n.id,
-                      "option": option, "reason": reason, "at": _iso(r.now)})
+                      "option": option, "reason": reason, "at": _iso(r.now),
+                      "by": by, "delegated": bool(delegated)})
         del picks[:-PERSON_PICKS_KEPT]
     if opt.get("child"):
         _enter_child(r, iid, opt["child"], "option")
@@ -4752,8 +4905,9 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
     for its end decision -- and without this door the driver's only way
     forward was to do the work outside the run (claunch-kgfr5). A person
     answers with :func:`resolve_move` (the run page, ``claunch cflow2 move
-    --approve|--deny``), or moves the run elsewhere with :func:`force_move`,
-    which supersedes the request.
+    --approve|--deny``, or -- when the driver has a parent session -- that
+    parent with ``flow_move``, claunch-vjp4y), or moves the run elsewhere with
+    :func:`force_move`, which supersedes the request.
 
     With ``outcome`` the request is of the other kind (claunch-vwmoj): a
     person reports the active task ``target`` with ``outcome``/``value`` --
@@ -4876,10 +5030,18 @@ def cancel_move_request(*, by: str, cwd: Optional[str] = None, scope: Optional[s
 def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] = None,
                  cwd: Optional[str] = None, scope: Optional[str] = None,
                  now: Optional[float] = None,
-                 verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
-    """A person answers the driver's pending move request. CLI / dashboard
-    only -- not exposed over MCP, for the reason ``approve`` is not: a grant
-    the asker can give itself is not a grant.
+                 verify_runner: Optional[VerifyRunner] = None,
+                 caller: str = CALLER_USER) -> Dict[str, Any]:
+    """Answer the driver's pending move request.
+
+    ``caller`` is the authority the answer stands on. ``CALLER_USER`` is a
+    person -- the CLI outside the driving session and the dashboard -- and
+    needs no check. ``CALLER_PARENT`` is the driver's parent session
+    (claunch-vjp4y); it is the one agent-side grade of grant, and it is
+    checked here rather than by its caller: the grant is the thing a bad
+    caller would most want to fake. The driver itself never qualifies -- a
+    grant the asker can give itself is not a grant -- and neither does any
+    session that is not the parent recorded on the run.
 
     ``approve`` performs the move asked for (:func:`_move_run`, journaled
     ``move_approved`` then ``forced`` with ``granted``); ``deny`` leaves the
@@ -4894,6 +5056,11 @@ def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] 
     job: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
+        if caller != CALLER_USER and gate_authority(r.state, by) != CALLER_PARENT:
+            raise FlowError(
+                f"{by or 'this caller'} may not answer this run's move request: it is the "
+                f"user's, and only the driving session's parent "
+                f"({driver_parent_of(r.state) or 'none'}) answers it in the hierarchy")
         pending = pending_move(r.state)
         if pending is None:
             raise FlowError("no pending move request on this run")
@@ -5818,6 +5985,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 # the node entered and started waiting on this pick then; the
                 # notification's age is this stamp (claunch-l9znm.1)
                 "opened_at": inst.get("entered_at"),
+                # nobody has to take this door: the region around it settles
+                # without it and cancels it (claunch-hbmhk). False when the
+                # structure cannot prove that, so a stopping gate is never
+                # drawn as a choice.
+                "optional": optional_choice(r.inst, r.chart, iid),
             })
             held = inst["frame"].get("held")
             if held:
@@ -5910,6 +6082,8 @@ def describe(r: Run) -> Dict[str, Any]:
         out["waiting_window"] = windows
     if asks:
         out["asks"] = asks
+    if driver_parent_of(s):
+        out["driver_parent"] = driver_parent_of(s)
     out["data"] = s.get("data")
     # Completed nodes' {outcome, value}, keyed by node label/id. The driver
     # reads its own status to decide what to do next, and a value can carry
@@ -5937,8 +6111,12 @@ def describe(r: Run) -> Dict[str, Any]:
     users = [c.get("instance") for c in choices
              if (c.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER]
     if users:
+        parent = driver_parent_of(s)
         hints.append(f"{', '.join(map(str, users))}: the user's choice (chooser: user) -- "
-                     f"brief them and stop your turn. {NUDGE_HINT}")
+                     + (f"brief them and your parent {parent} (flow_gates answers it from "
+                        f"there), then stop your turn. " if parent else "brief them and stop "
+                        f"your turn. ")
+                     + NUDGE_HINT)
     if any(d.get("status") == "pending" for d in dels):
         hints.append("run each pending delegation's brief in a sub-agent, then "
                      "flow_delegate(delegation, outcome, value)")
@@ -7167,7 +7345,10 @@ def start_side(name: str, *, cwd: Optional[str] = None, main: Optional[str] = No
     return start(chart, cwd=str(mst.cwd), scope=store_mod.side_scope(main, name),
                  params=params, caps=caps, force=force, now=now, driver=who, caller=caller,
                  inputs=inputs, side={"name": name, "main": main,
-                                      "main_run": mstate.get("run_id")})
+                                      "main_run": mstate.get("run_id")},
+                 # the side run belongs to the same session, so its person
+                 # gates are the same parent's to answer
+                 driver_parent=driver_parent_of(mstate))
 
 
 def abort_sides(session: str, cwd: str, reason: str,

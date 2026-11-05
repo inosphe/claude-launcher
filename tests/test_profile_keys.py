@@ -348,13 +348,13 @@ def test_the_pick_is_written_only_for_the_strategies_that_read_it(home):
 
 def test_usage_min_and_max_pick_the_measured_extremes(home, monkeypatch):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
-    usage_by_token = {
-        "sk-AAAA1111BBBB": 40.0,
-        "sk-CCCC2222DDDD": 10.0,
-        "sk-EEEE3333FFFF": 90.0,
+    health_by_token = {
+        "sk-AAAA1111BBBB": usage.KeyHealth(peak=40.0),
+        "sk-CCCC2222DDDD": usage.KeyHealth(peak=10.0),
+        "sk-EEEE3333FFFF": usage.KeyHealth(peak=90.0),
     }
     monkeypatch.setattr(
-        usage, "utilization_for_token", lambda prof, token: usage_by_token[token]
+        usage, "health_for_token", lambda prof, token: health_by_token[token]
     )
 
     profile_keys.set_strategy(p, "usage-min")
@@ -368,9 +368,12 @@ def test_usage_strategy_skips_keys_without_a_reading(home, monkeypatch):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD", "sk-EEEE3333FFFF")
     monkeypatch.setattr(
         usage,
-        "utilization_for_token",
-        lambda prof, token: {"sk-AAAA1111BBBB": 5.0, "sk-CCCC2222DDDD": None,
-                             "sk-EEEE3333FFFF": 55.0}[token],
+        "health_for_token",
+        lambda prof, token: {
+            "sk-AAAA1111BBBB": usage.KeyHealth(peak=5.0),
+            "sk-CCCC2222DDDD": None,
+            "sk-EEEE3333FFFF": usage.KeyHealth(peak=55.0),
+        }[token],
     )
     profile_keys.set_strategy(p, "usage-max")
 
@@ -381,7 +384,7 @@ def test_usage_strategy_falls_back_to_rotation_when_nothing_is_measurable(
     home, monkeypatch
 ):
     p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
-    monkeypatch.setattr(usage, "utilization_for_token", lambda prof, token: None)
+    monkeypatch.setattr(usage, "health_for_token", lambda prof, token: None)
     profile_keys.set_strategy(p, "usage-min")
 
     selection = profile_keys.select_for_launch(p)
@@ -389,6 +392,66 @@ def test_usage_strategy_falls_back_to_rotation_when_nothing_is_measurable(
     assert selection.key.token == "sk-AAAA1111BBBB"
     assert selection.strategy == "rotation"
     assert "could be read" in selection.fallback
+
+
+def test_usage_min_leaves_out_a_key_with_a_spent_window(home, monkeypatch):
+    """claunch-hego3: a spent window takes the key out of the pick.
+
+    The blocked key here is the *lowest* peak of the two, which is what the
+    old peak-only comparison ordered first — the defect the operator saw, a
+    restart landing on the key that just hit its limit.
+    """
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    health_by_token = {
+        "sk-AAAA1111BBBB": usage.KeyHealth(
+            peak=10.0,
+            blocked="seven_day",
+            windows=(("five_hour", 0.0), ("seven_day", 100.0)),
+        ),
+        "sk-CCCC2222DDDD": usage.KeyHealth(
+            peak=35.0, windows=(("five_hour", 35.0), ("seven_day", 20.0))
+        ),
+    }
+    monkeypatch.setattr(
+        usage, "health_for_token", lambda prof, token: health_by_token[token]
+    )
+    profile_keys.set_strategy(p, "usage-min")
+
+    assert profile_keys.select_for_launch(p).key.token == "sk-CCCC2222DDDD"
+
+
+def test_usage_min_breaks_a_peak_tie_on_the_shorter_window(home, monkeypatch):
+    """The 5-hour plan comes back within hours; the monthly one does not."""
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    health_by_token = {
+        "sk-AAAA1111BBBB": usage.KeyHealth(
+            peak=50.0, windows=(("five_hour", 50.0), ("seven_day", 10.0))
+        ),
+        "sk-CCCC2222DDDD": usage.KeyHealth(
+            peak=50.0, windows=(("five_hour", 10.0), ("seven_day", 50.0))
+        ),
+    }
+    monkeypatch.setattr(
+        usage, "health_for_token", lambda prof, token: health_by_token[token]
+    )
+    profile_keys.set_strategy(p, "usage-min")
+
+    assert profile_keys.select_for_launch(p).key.token == "sk-CCCC2222DDDD"
+
+
+def test_usage_strategy_falls_back_when_every_key_is_spent(home, monkeypatch):
+    p = _pooled("sk-AAAA1111BBBB", "sk-CCCC2222DDDD")
+    monkeypatch.setattr(
+        usage,
+        "health_for_token",
+        lambda prof, token: usage.KeyHealth(peak=100.0, blocked="seven_day"),
+    )
+    profile_keys.set_strategy(p, "usage-min")
+
+    selection = profile_keys.select_for_launch(p)
+
+    assert selection.strategy == "rotation"
+    assert "spent" in selection.fallback
 
 
 def test_peek_compares_the_readings_it_is_given_instead_of_the_account(
@@ -407,7 +470,7 @@ def test_peek_compares_the_readings_it_is_given_instead_of_the_account(
     def no_measure(_profile, _token):
         raise AssertionError("peek must not read the accounts it was given")
 
-    monkeypatch.setattr(usage, "utilization_for_token", no_measure)
+    monkeypatch.setattr(usage, "health_for_token", no_measure)
 
     selection = profile_keys.peek(
         p, readings={ids[0]: 80.0, ids[1]: 5.0, ids[2]: None}
@@ -436,7 +499,8 @@ def test_usage_reader_does_not_measure_harness_login_readers(home, monkeypatch):
     monkeypatch.setattr(usage, "reader", lambda prof: "codex-app-server")
     called = []
     monkeypatch.setattr(
-        usage, "utilization_for_token", lambda prof, token: called.append(token) or 1.0
+        usage, "health_for_token",
+        lambda prof, token: called.append(token) or usage.KeyHealth(peak=1.0)
     )
     profile_keys.set_strategy(p, "usage-min")
 
@@ -540,8 +604,10 @@ def test_a_keyed_reader_selects_by_usage_instead_of_rotating(home, monkeypatch):
     monkeypatch.setattr(usage, "reader", lambda prof: "opencode-go")
     monkeypatch.setattr(
         usage,
-        "utilization_for_token",
-        lambda prof, token: {"sk-AAAA1111BBBB": 80.0, "sk-CCCC2222DDDD": 20.0}[token],
+        "health_for_token",
+        lambda prof, token: usage.KeyHealth(
+            peak={"sk-AAAA1111BBBB": 80.0, "sk-CCCC2222DDDD": 20.0}[token]
+        ),
     )
     profile_keys.set_strategy(p, "usage-min")
 

@@ -2738,7 +2738,9 @@ class SessionManager:
         Running sessions are untouched. This is the *only* thing that makes a
         session unresumable, which is why the daemon never does it on its own —
         it happens when a human asks (``claunch clear-sessions``, or the web
-        UI's clear button). ``logs`` also deletes their captured output.
+        UI's clear button). ``logs`` also deletes their session directories —
+        captured output, scratch and uploads, the same clean :meth:`archive`
+        performs.
 
         Neither answer frees a name: session numbers come from a counter that
         only moves forward (:mod:`session_seq`), so a cleared session's ``sN``
@@ -2950,6 +2952,7 @@ class SessionManager:
         # restore_all's unattended relaunch after a daemon restart. See
         # Session.resumed_by_human for what this buys the session.
         relaunched.resumed_by_human = True
+        relaunched.resumed_at = time.time()
         action = "resume" if session.paused_at else "respawn"
         if getattr(session, "delayed_at", None):
             self.events.record(relaunched, "resume", "대기 중이던 세션 복원")
@@ -2964,9 +2967,21 @@ class SessionManager:
     def archive(self, name: str, *, reason: Optional[str] = None) -> AnySession:
         """Move an exited record out of the working fleet while retaining it.
 
-        The definition, conversation id, output log and lineage remain in
-        place, so archive is reversible through :meth:`respawn`. Repeating
-        the operation is idempotent and preserves the original archive time.
+        The definition, conversation id and lineage remain in place, so
+        archive is reversible through :meth:`respawn`. Repeating the
+        operation is idempotent and preserves the original archive time.
+
+        Filing a record is also the clean that ``clear-sessions --logs``
+        performs (claunch-i0vje.2): the session directory -- captured output,
+        scratch, uploads -- is removed and only the record stays. Doing it
+        here rather than in a route is what makes every way of filing take
+        it: a person's archive, :meth:`stop_and_archive`, and the clock in
+        :mod:`.auto_archive` all reach this method. :meth:`respawn` recreates
+        the directory (``Session.__init__``) and starts a fresh output log,
+        so resume still works; what the deleted directory held does not come
+        back. The removal is retried by a later archive of the same record --
+        a file still open on Windows, or a record filed before this rule
+        existed, leaves the rest to be taken then.
 
         This is the filing half alone, so it refuses a session that is still
         running: a record written as archived while its program runs would
@@ -2988,12 +3003,27 @@ class SessionManager:
         # Filing a held record away is its real ending: settle what it owed.
         self.unhold(name)
         self.settle_pause(name)
-        if not session.archived_at:
+        first_filing = not session.archived_at
+        if first_filing:
             session.archived_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
             )
             self.persist()
+        # The clean rides on the filing itself (claunch-i0vje.2). It runs on
+        # every call, not only the first: a second archive takes what an open
+        # file or an older daemon left behind, and doing it here is what makes
+        # stop_and_archive and the auto archive clock clean on the same terms.
+        taken = paths.session_dir(name)
+        shutil.rmtree(taken, ignore_errors=True)
+        cleaned = not taken.exists()
+        if not cleaned:
+            log.warning(
+                "archive of %s left part of %s in place (open file or "
+                "permissions); a later archive tries again", name, taken,
+            )
+        if first_filing:
             self.events.record(session, "archive", "세션 보관",
+                               cleaned=cleaned,
                                **({"reason": reason} if reason else {}))
             self._run_filed_hooks(session, "archived")
         return session
@@ -3108,7 +3138,7 @@ class SessionManager:
         """
         del self._sessions[name]
         try:
-            return self.create(
+            relaunched = self.create(
                 new_def,
                 restoring=True,
                 created_at=session.created_at,
@@ -3120,6 +3150,12 @@ class SessionManager:
             self._sessions[name] = session  # keep the record, as it was
             self.persist()
             raise
+        # A restart under a changed definition (a key switch, a borrow) is a
+        # resume as far as the fault pause is concerned: the new key or
+        # profile gets the grace before an old limit line pauses it again
+        # (claunch-x9agn).
+        relaunched.resumed_at = time.time()
+        return relaunched
 
     async def reborrow(
         self, name: str, borrow: Optional[str], *, null_token: bool = False,
@@ -3242,8 +3278,11 @@ class SessionManager:
         reads (``profile_keys.owner`` — a child holding no token of its own
         pins a key of its nearest ancestor's pool). For a borrowing session
         that is the lender's pool, since the lender's token is what it
-        authenticates with (claunch-e48es). ``None`` unpins, and the pool's
-        strategy picks from the next launch on.
+        authenticates with (claunch-e48es). ``None`` unpins and runs the pool's
+        strategy now: this relaunch is a restore, which keeps the key already
+        in the token file, so the strategy has to pick before it — otherwise
+        "No pin — let the pool's strategy pick" would restart the session on
+        the key it was pinned to (claunch-hego3).
 
         Refused while nothing has been stopped: a session with no profile, a
         ``--null`` session (no token is injected, so there is no key to
@@ -3285,6 +3324,20 @@ class SessionManager:
                 if key_id
                 else f"session {name!r} is not pinned to a key — nothing to clear"
             )
+        if key_id is None:
+            # Clearing the pin is a launch decision, not a restore: the
+            # relaunch below goes through the restore path, which deliberately
+            # keeps the key the session was already using, so without this the
+            # "No pin — let the pool's strategy pick" choice would hand the
+            # session straight back to the token file's key — the key it was
+            # pinned to, which may be the one that just hit its usage limit
+            # (claunch-hego3). Run the strategy now; the restore keeps what it
+            # writes. A failure here stops nothing: the old process is still
+            # running and the pin is untouched.
+            try:
+                profile_keys.select_for_launch(prof)
+            except (profile_keys.KeysError, credentials.CredentialsError) as exc:
+                raise ManagerError(str(exc)) from exc
         relaunched = await self.redefine(name, key_id=key_id)
         self.events.record(
             relaunched, "key", "세션 키 전환",
@@ -3407,7 +3460,9 @@ class SessionManager:
             )
         return await self.redefine(name, env=env)
 
-    async def migrate(self, name: str, new_cwd: str, project: Optional[str] = None) -> Tuple[Session, bool]:
+    async def migrate(
+        self, name: str, new_cwd: str, project: Optional[str] = None
+    ) -> Tuple[Session, bool, List[str]]:
         """Move a session to another directory: stop it, carry its claude
         conversation's transcript, and relaunch it there.
 
@@ -3441,10 +3496,12 @@ class SessionManager:
         and the record keeps its old definition — so the failure mode is
         "still where it was", not "half-moved".
 
-        Returns the relaunched session and whether a transcript was actually
+        Returns the relaunched session, whether a transcript was actually
         carried (``False`` for other harnesses, and for a conversation that
         never wrote one — resuming that was already broken, and is reported
-        rather than refused because the move changes nothing about it).
+        rather than refused because the move changes nothing about it), and
+        the scope names of the cflow v2 run slots that moved with it (empty
+        when there was nothing to move).
         """
         session = self.get(name)
         old = session.sdef
@@ -3507,7 +3564,7 @@ class SessionManager:
                            transcript_moved=moved is not None,
                            slots_moved=moved_slots,
                            project=old.project if new_project != old.project else None)
-        return relaunched, moved is not None
+        return relaunched, moved is not None, list(moved_slots)
 
     async def shutdown_all(self, mode: str = "stop", *, reason: str = "stop") -> None:
         """End every live session, the daemon going down.

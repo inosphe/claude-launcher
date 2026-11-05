@@ -358,6 +358,227 @@ def test_the_merge_ledger_keeps_who_merged_what(home):
     assert rows[0]["actor"]["via"] == "web"
 
 
+# -- the merge is pinned to the head the page showed (claunch-ijkge.3.1) -----
+def test_the_merge_is_pinned_to_the_head_the_page_showed():
+    pin = "a" * 40
+    run = _runner((0, json.dumps({"headRefOid": pin}), ""), (0, "Merged", ""))
+    result = pr_actions.merge(*REPO, 805, "merge", match_head_commit=pin, run=run)
+    assert result["ok"] is True
+    assert run.calls[1]["argv"][-2:] == ["--match-head-commit", pin]
+
+
+def test_a_head_that_moved_after_the_verdict_is_refused_before_gh_merges():
+    run = _runner((0, json.dumps({"headRefOid": "b" * 40}), ""))
+    result = pr_actions.merge(*REPO, 805, "merge", match_head_commit="a" * 40, run=run)
+    assert result["ok"] is False and result["merged"] is False
+    assert result["error"]["kind"] == "head-moved"
+    assert len(run.calls) == 1, "the merge itself must not run on a moved head"
+    assert "a" * 12 in result["error"]["message"] and "b" * 12 in result["error"]["message"]
+
+
+def test_a_pin_that_cannot_be_verified_refuses_rather_than_merging_unpinned():
+    run = _runner((1, "", "boom"))
+    result = pr_actions.merge(*REPO, 805, "merge", match_head_commit="a" * 40, run=run)
+    assert result["ok"] is False and result["merged"] is False
+    assert "고정" in result["error"]["message"]
+    assert len(run.calls) == 1
+
+
+def test_a_malformed_pin_is_refused_before_gh_runs():
+    run = _runner()
+    result = pr_actions.merge(*REPO, 805, "merge", match_head_commit="abc", run=run)
+    assert result["ok"] is False
+    assert run.calls == []
+
+
+def test_the_detail_carries_the_head_sha_the_page_pins_to():
+    assert pr_actions._normalize({"headRefOid": "c" * 40,
+                                  "number": 1})["head_sha"] == "c" * 40
+
+
+# -- a paused repository refuses the merge before gh (claunch-0r2m2) -------
+def test_a_paused_repository_refuses_the_merge_before_gh_runs(monkeypatch, tmp_path):
+    from claude_launcher import delayed_sweep as queue_module
+
+    class _Queue:
+        def admit(self, repo, issue):
+            raise ValueError("repository paused by job-7; only repair issue "
+                             "claunch-r1 may merge")
+
+        def status(self, repo):
+            return {"jobs": [], "pauses": [{"common": repo, "job": "job-7",
+                                            "repair_issue": "claunch-r1"}]}
+
+    monkeypatch.setattr(queue_module, "Queue", lambda *a, **k: _Queue())
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(tmp_path))
+    run = _runner()
+    result = pr_actions.merge(*REPO, 805, "merge", run=run)
+    assert result["ok"] is False and result["merged"] is False
+    assert result["error"]["kind"] == "paused"
+    assert "claunch-r1" in result["admit"]["why"], "the queue's own words are carried"
+    assert result["admit"]["job"] == "job-7"
+    assert run.calls == [], "a paused repository never reaches gh"
+
+
+def test_the_repair_issue_is_admitted(monkeypatch, tmp_path):
+    from claude_launcher import delayed_sweep as queue_module
+
+    class _Queue:
+        def admit(self, repo, issue):
+            assert issue == "claunch-r1", "the recorded issue is the one asked about"
+
+        def status(self, repo):
+            return {"jobs": [], "pauses": []}
+
+    monkeypatch.setattr(queue_module, "Queue", lambda *a, **k: _Queue())
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(tmp_path))
+    run = _runner((0, "Merged", ""))
+    result = pr_actions.merge(*REPO, 805, "merge", issues=["claunch-r1"], run=run)
+    assert result["ok"] is True, "the repair issue's merge goes through"
+    assert run.calls and run.calls[-1]["argv"][1:3] == ["pr", "merge"]
+
+
+def test_an_unreadable_queue_refuses_nothing(monkeypatch, tmp_path):
+    """No local checkout means the pause cannot be read; the merge proceeds."""
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: None)
+    run = _runner((0, "Merged", ""))
+    result = pr_actions.merge(*REPO, 805, "merge", run=run)
+    assert result["ok"] is True
+
+
+# -- the post-merge sweep is queued, or says why it was not (claunch-ijkge.3.2)
+def _merged_commit(sha, base="master"):
+    return (0, json.dumps({"mergeCommit": {"oid": sha}, "baseRefName": base}), "")
+
+
+def _default_branch(name="master"):
+    return (0, json.dumps({"defaultBranchRef": {"name": name}}), "")
+
+
+def test_a_merge_with_no_local_checkout_says_why_it_was_not_swept(monkeypatch):
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: None)
+    run = _runner(_merged_commit("d" * 40), _default_branch())
+    answer = pr_actions.sweep_after_merge(*REPO, 805, issues=["claunch-x"], run=run)
+    assert answer["state"] == "skipped" and answer["job"] == ""
+    assert "로컬 체크아웃" in answer["why"]
+
+
+def test_the_sweep_is_queued_under_the_recorded_issue(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    (root / "tools").mkdir(parents=True)
+    (root / "tools" / "delayed_sweep.py").write_text("")
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
+    calls = []
+
+    class _Queue:
+        def enqueue(self, repo, sha, issue, owner, tool):
+            calls.append((repo, sha, issue, owner, tool))
+            return {"id": "job1", "ref": f"refs/heads/delayed-sweep/{owner}/{sha}"}
+
+    from claude_launcher import delayed_sweep as queue_module
+    monkeypatch.setattr(queue_module, "Queue", lambda *a, **k: _Queue())
+    answer = pr_actions.sweep_after_merge(
+        *REPO, 805, issues=["claunch-x"], owner_label="s1",
+        run=_runner(_merged_commit("d" * 40), _default_branch()))
+    assert answer == {"state": "queued", "job": "job1",
+                      "ref": f"refs/heads/delayed-sweep/s1/{'d' * 40}",
+                      "issue": "claunch-x", "why": ""}
+    assert calls == [(str(root), "d" * 40, "claunch-x", "s1",
+                      str(root / "tools" / "delayed_sweep.py"))]
+
+
+def test_a_queued_sweep_leaves_a_real_job_in_the_queue(monkeypatch, home, tmp_path):
+    """The end of the chain the other tests stop short of: a real ``Queue``
+    and a real merge commit, so "queued" means a row the daemon will run."""
+    import subprocess
+
+    from claude_launcher import delayed_sweep as queue_module
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (root / "base").write_text("b")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("branch", "-M", "master")
+    git("switch", "-qc", "side")
+    (root / "side").write_text("s")
+    git("add", ".")
+    git("commit", "-qm", "side")
+    git("switch", "-q", "master")
+    git("merge", "--no-ff", "-qm", "merge side", "side")
+    merge_sha = git("rev-parse", "HEAD")
+    (root / "tools").mkdir()
+    (root / "tools" / "delayed_sweep.py").write_text("")
+
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
+    monkeypatch.setattr(queue_module, "default_database", lambda: tmp_path / "jobs.sqlite3")
+    answer = pr_actions.sweep_after_merge(
+        *REPO, 805, issues=["claunch-x"], owner_label="s1",
+        run=_runner(_merged_commit(merge_sha), _default_branch()))
+    assert answer["state"] == "queued" and answer["job"]
+    jobs = queue_module.Queue(tmp_path / "jobs.sqlite3").status(str(root))["jobs"]
+    assert [job["sha"] for job in jobs] == [merge_sha]
+    assert jobs[0]["issue"] == "claunch-x" and jobs[0]["owner"] == "s1"
+
+
+def test_an_unreadable_merge_commit_is_a_skip_with_its_reason(monkeypatch):
+    monkeypatch.setattr(pr_actions, "find_checkout",
+                        lambda *a, **k: pytest.fail("no checkout is read without a SHA"))
+    answer = pr_actions.sweep_after_merge(*REPO, 805, run=_runner((1, "", "boom")))
+    assert answer["state"] == "skipped" and "SHA" in answer["why"]
+
+
+def test_a_merge_into_a_branch_other_than_the_default_is_not_swept(monkeypatch):
+    """A release-branch merge is a different history; the delayed sweep answers
+    for the default branch only (claunch-c9h9w)."""
+    from claude_launcher import delayed_sweep as queue_module
+
+    monkeypatch.setattr(queue_module, "Queue",
+                        lambda *a, **k: pytest.fail("a non-default merge is never queued"))
+    monkeypatch.setattr(pr_actions, "find_checkout",
+                        lambda *a, **k: pytest.fail("nothing is fetched for a skip"))
+    answer = pr_actions.sweep_after_merge(
+        *REPO, 805, issues=["claunch-x"],
+        run=_runner(_merged_commit("d" * 40, base="release-1.0"), _default_branch("master")))
+    assert answer["state"] == "skipped" and answer["job"] == ""
+    assert "release-1.0" in answer["why"] and "master" in answer["why"]
+
+
+def test_an_unreadable_default_branch_is_a_skip_with_its_reason(monkeypatch):
+    monkeypatch.setattr(pr_actions, "find_checkout",
+                        lambda *a, **k: pytest.fail("nothing is fetched without a target"))
+    answer = pr_actions.sweep_after_merge(
+        *REPO, 805, run=_runner(_merged_commit("d" * 40), (1, "", "boom")))
+    assert answer["state"] == "skipped"
+    assert "기본 브랜치" in answer["why"]
+
+
+def test_a_merge_the_queue_refuses_is_a_skip_with_that_reason(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    (root / "tools").mkdir(parents=True)
+    (root / "tools" / "delayed_sweep.py").write_text("")
+    monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
+
+    class _Queue:
+        def enqueue(self, *a, **k):
+            raise ValueError("verification checkpoint must be a two-parent merge")
+
+    from claude_launcher import delayed_sweep as queue_module
+    monkeypatch.setattr(queue_module, "Queue", lambda *a, **k: _Queue())
+    answer = pr_actions.sweep_after_merge(
+        *REPO, 805, run=_runner(_merged_commit("d" * 40), _default_branch()))
+    assert answer["state"] == "skipped"
+    assert "two-parent merge" in answer["why"], "a squash merge cannot be swept, and the ledger says so"
+
+
 # -- the conflicts ----------------------------------------------------------
 def test_conflict_files_without_a_checkout_are_unknown_not_empty(monkeypatch):
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: None)
@@ -481,6 +702,8 @@ def test_the_merge_route_needs_the_second_confirmation(monkeypatch):
 def test_the_merge_route_runs_gh_and_writes_the_ledger(monkeypatch, home):
     monkeypatch.setattr(pr_actions, "merge", lambda *a, **k: {
         "ok": True, "merged": True, "method": "squash", "output": "Merged", "error": None})
+    monkeypatch.setattr(pr_actions, "sweep_after_merge", lambda *a, **k: {
+        "state": "skipped", "job": "", "ref": "", "issue": "", "why": "test"})
     resp = asyncio.run(api.h_pr_merge(_Req({"method": "auto", "confirm": True})))
     body = _body_of(resp)
     assert resp.status == 200 and body["merged"] is True
@@ -488,11 +711,61 @@ def test_the_merge_route_runs_gh_and_writes_the_ledger(monkeypatch, home):
     assert ledger and ledger[-1]["number"] == 805
     assert ledger[-1]["actor"]["kind"] == "user"
     assert ledger[-1]["actor"]["via"] == "web"
+    assert ledger[-1]["sweep"]["why"] == "test", "the ledger keeps why a merge was not swept"
+
+
+def test_the_merge_route_passes_the_pin_and_records_the_queued_sweep(monkeypatch, home):
+    seen = {}
+
+    def merge(*a, **k):
+        seen["pin"] = k.get("match_head_commit")
+        return {"ok": True, "merged": True, "method": "merge", "output": "Merged", "error": None}
+
+    monkeypatch.setattr(pr_actions, "merge", merge)
+    monkeypatch.setattr(pr_actions, "sweep_after_merge", lambda *a, **k: {
+        "state": "queued", "job": "job1", "ref": "refs/x", "issue": "claunch-x", "why": ""})
+    resp = asyncio.run(api.h_pr_merge(
+        _Req({"method": "merge", "confirm": True, "match_head_commit": "A" * 40})))
+    body = _body_of(resp)
+    assert resp.status == 200
+    assert seen["pin"] == "a" * 40, "the pin reaches gh in the lower-case form gh compares"
+    assert body["sweep"]["state"] == "queued"
+    assert pr_actions.merged_rows()[-1]["sweep"]["job"] == "job1"
+
+
+def test_the_merge_route_records_a_paused_refusal_in_the_ledger(monkeypatch, home):
+    """A refusal is an attempt the ledger keeps: nothing merged, and why."""
+    ran = []
+    monkeypatch.setattr(pr_actions, "merge", lambda *a, **k: ran.append(a) or {
+        "ok": False, "merged": False, "method": "merge", "output": "",
+        "error": {"kind": "paused", "message": "정지 중입니다.", "raw": ""},
+        "admit": {"state": "refused", "issue": "claunch-x", "job": "job-7",
+                  "why": "repository paused by job-7; only repair issue claunch-r1 may merge"}})
+    monkeypatch.setattr(
+        pr_actions, "sweep_after_merge",
+        lambda *a, **k: pytest.fail("a refused merge is never swept"))
+    resp = asyncio.run(api.h_pr_merge(_Req({"method": "merge", "confirm": True})))
+    body = _body_of(resp)
+    assert resp.status == 409 and body["error"]["kind"] == "paused"
+    assert ran, "the merge path decided, and the route wrote the line"
+    row = pr_actions.merged_rows()[-1]
+    assert row["merged"] is False and row["number"] == 805
+    assert row["refused"]["job"] == "job-7" and "claunch-r1" in row["refused"]["why"]
+
+
+def test_the_merge_route_refuses_a_malformed_pin(monkeypatch):
+    ran = []
+    monkeypatch.setattr(pr_actions, "merge", lambda *a, **k: ran.append(a) or {"ok": True})
+    for pin in ("abc", "z" * 40, "a" * 39):
+        resp = asyncio.run(api.h_pr_merge(
+            _Req({"method": "auto", "confirm": True, "match_head_commit": pin})))
+        assert resp.status == 400
+    assert ran == [], "a malformed pin is refused before the merge runs"
 
 
 @pytest.mark.parametrize("kind,status", [
     ("conflict", 409), ("protected", 409), ("permission", 403),
-    ("network", 502), ("not-found", 404),
+    ("network", 502), ("not-found", 404), ("head-moved", 409),
 ])
 def test_a_refused_merge_maps_its_kind_to_a_status(monkeypatch, kind, status):
     monkeypatch.setattr(pr_actions, "merge", lambda *a, **k: {
