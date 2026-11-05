@@ -1191,6 +1191,22 @@ def test_nudge_tells_a_waiting_job_to_stay_put(repo, tmp_path):
     assert "Nothing needs doing" in out.stdout or "nothing needs doing" in out.stdout
 
 
+def test_the_done_nudge_names_the_packaged_command_not_a_checkout_path(repo, tmp_path):
+    """A sweep-watching session in a repository without the wrapper would run a
+    file that is not there (claunch-sr6ex, found in peer review): every message
+    nudge_text writes is an instruction a session follows, so the DONE one names
+    the installed command like the workflow prose does."""
+    from claude_launcher import delayed_sweep_cli
+
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.finish(job["id"], "passed", "receipt")
+    text = delayed_sweep_cli.nudge_text(q, job["id"])
+    assert text.startswith("DONE")
+    assert "claunch delayed-sweep status" in text
+    assert "tools/delayed_sweep.py" not in text
+
+
 def test_a_queue_file_without_the_batch_columns_is_upgraded(tmp_path):
     import sqlite3
     path = tmp_path / "old.sqlite3"

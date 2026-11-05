@@ -239,7 +239,7 @@ def nudge_text(queue, ident):
     row = queue.get(state["tip"])
     head = f"sweep job {row['id']} ({row['sha'][:12]}, {1 + len(queue.members(row['id']))} merge(s))"
     if state["done"]:
-        return (f"DONE: {head} is {state['status']}. Read tools/delayed_sweep.py status for the "
+        return (f"DONE: {head} is {state['status']}. Read claunch delayed-sweep status for the "
                 "receipt and report it; there is nothing left to wait for.")
     window = window_entries(row["sha"], row["ref"])
     if row["status"] == "running" and window and window[0]:
