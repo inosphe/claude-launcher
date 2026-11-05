@@ -14,7 +14,7 @@ from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
 from claude_launcher.daemon.mesh import Member, MeshManager
-from claude_launcher.daemon.session import DeadSession
+from claude_launcher.daemon.session import DeadSession, Session
 
 
 def manager() -> SessionManager:
@@ -93,6 +93,67 @@ def test_archive_retains_the_record_across_restart_and_respawn_clears_it(
     monkeypatch.setattr(restarted, "create", fake_create)
     live = restarted.respawn("old")
     assert live.archived_at is None
+
+
+def test_archive_takes_the_session_directory_and_keeps_the_record(home):
+    # Filing is also the clean (claunch-i0vje.2): the same removal
+    # `clear-sessions --logs` makes, reached from every way of filing.
+    mgr = manager()
+    add_dead(mgr, "old")
+    taken = paths.session_dir("old")
+    (taken / "scratch" / "proof").mkdir(parents=True)
+    (taken / "scratch" / "proof" / "note.txt").write_text("x", encoding="utf-8")
+    (taken / "output.log").write_text("captured\n", encoding="utf-8")
+    (taken / "uploads").mkdir()
+    (taken / "uploads" / "a.txt").write_text("y", encoding="utf-8")
+
+    archived = mgr.archive("old")
+
+    assert archived.archived_at
+    assert not taken.exists()
+    assert [s.sdef.name for s in mgr.list()] == ["old"]
+    assert db.open_default().load_all()[0]["archived_at"] == archived.archived_at
+
+
+def test_a_second_archive_takes_what_an_earlier_filing_left(home):
+    # A record filed before this rule existed -- or one whose removal hit a
+    # file still open on Windows -- keeps its directory until it is archived
+    # again. The archive time does not move when it does.
+    mgr = manager()
+    add_dead(mgr, "legacy", archived_at="2026-08-27T00:00:00+00:00")
+    taken = paths.session_dir("legacy")
+    taken.mkdir(parents=True)
+    (taken / "output.log").write_text("old\n", encoding="utf-8")
+
+    assert mgr.archive("legacy").archived_at == "2026-08-27T00:00:00+00:00"
+    assert not taken.exists()
+
+
+def test_a_resumed_record_gets_an_empty_directory_back(home):
+    # The clean does not make the record unresumable: the session constructor
+    # makes the directory and the scratch again and starts a fresh log. What
+    # the clean took is the output that used to be there.
+    mgr = manager()
+    add_dead(mgr, "revived")
+    taken = paths.session_dir("revived")
+    taken.mkdir(parents=True)
+    (taken / "output.log").write_text("old\n", encoding="utf-8")
+    mgr.archive("revived")
+    assert not taken.exists()
+
+    async def run():
+        live = Session(
+            SessionDef(name="revived", harness="claude", cwd="C:/work"),
+            idle_threshold=0.5, scrollback=200,
+        )
+        try:
+            assert taken.is_dir()
+            assert paths.session_scratch_dir("revived").is_dir()
+            assert (taken / "output.log").read_text(encoding="utf-8") == ""
+        finally:
+            live._log.close()
+
+    asyncio.run(run())
 
 
 def test_archived_records_are_not_swept_at_boot(home):

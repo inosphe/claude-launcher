@@ -4153,9 +4153,10 @@ def register(sub) -> None:
         "--logs",
         action="store_true",
         help=(
-            "also delete their captured output logs. Names are not freed: the "
-            "session-name counter only moves forward, so a deleted session's "
-            "number is never assigned again"
+            "also delete their session directories — the captured output, "
+            "scratch and uploads (the same clean `archive` performs). Names "
+            "are not freed: the session-name counter only moves forward, so a "
+            "deleted session's number is never assigned again"
         ),
     )
     p_clear.set_defaults(func=_cmd_clear_sessions)

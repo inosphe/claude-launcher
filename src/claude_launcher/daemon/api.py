@@ -13033,7 +13033,8 @@ async def h_session_detach(request: web.Request) -> web.Response:
 
 async def h_sessions_clear(request: web.Request) -> web.Response:
     """Drop the records of all exited sessions (``?logs=1`` also deletes their
-    captured output). Running sessions are untouched.
+    session directories — captured output, scratch and uploads). Running
+    sessions are untouched.
 
     The daemon keeps exited sessions around indefinitely so they stay
     respawnable, so this is the explicit cleanup — nothing else discards them

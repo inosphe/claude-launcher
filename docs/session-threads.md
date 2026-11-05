@@ -41,7 +41,7 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
   데몬 restore로 다시 launch되면 launch 훅이 큐를 오래된 순서로 타이핑하고 `sent`(또는 `failed`)로 기록한다.
   데몬이 재기동돼도 journal이 큐 그대로라 남는다. 응답은 `delivered`가 `true`, `hold`가 `"exited"`이고, 패널이
   「다시 시작하면 전달된다」고 표시한다. 잠든(held) 세션은 자동으로 깨어나므로 큐에 넣지 않고 `hold`가 `"asleep"`이다.
-  세션을 지우면(`clear-sessions`) 그 디렉터리와 함께 큐도 사라진다.
+  세션 디렉터리를 지우면(`clear-sessions --logs`, 또는 archive) 그 디렉터리와 함께 큐도 사라진다.
 - 게스트 전달은 `asyncio.to_thread`를 지나므로 `Session.queue_delivery`가 워커 스레드에서
   불린다. 그 함수는 보내기 task를 세션 자신의 이벤트 루프에 만들고, 루프가 없거나 닫혀
   있으면 메시지를 접수하지 않고 `False`를 돌려준다 — 조용히 접수해 두고 아무도 타이핑하지

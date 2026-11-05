@@ -47,6 +47,19 @@ def test_spawn_help_says_which_board_a_moved_child_reads():
     assert "does not follow the directory" in project.help
 
 
+def test_clear_sessions_logs_help_names_what_it_deletes():
+    """`--logs` takes the whole session directory, not just the captured
+    output (claunch-i0vje.2). It is the same clean `archive` performs, so a
+    reader who only sees "captured output" under-counts what the flag does —
+    scratch and uploads go with it."""
+    p = cli.build_parser()
+    clear = p._subparsers._group_actions[0].choices["clear-sessions"]
+    logs = next(a for a in clear._actions if a.dest == "logs")
+    assert "session directories" in logs.help, logs.help
+    for part in ("scratch", "uploads", "archive"):
+        assert part in logs.help, (part, logs.help)
+
+
 def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypatch):
     import pytest
 

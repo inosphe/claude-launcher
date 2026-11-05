@@ -1818,7 +1818,8 @@ function syncBulkActions(sessions, filter = "current") {
       "relaunch every unarchived exited session under its own name and conversation");
   set("archive-exited", dead, `archive ${dead} exited`,
       "move exited sessions into the archive while retaining their records, "
-      + "conversations and resume capability");
+      + "conversations and resume capability — each session's captured "
+      + "output, scratch and uploads are deleted");
   set("cleanup-exited", ended, `⌫ clean ${ended} exited`,
       "permanently drop the record of every exited session — paused and "
       + "archived ones included — and optionally delete the output each one "
@@ -19482,7 +19483,13 @@ if ($("term-idle-hold")) $("term-idle-hold").addEventListener("click", () => hol
    one call, with no wind-down in between (see h_session_archive). That makes
    it destructive in a way archiving an already-ended record is not, so a
    running session is confirmed first and an exited one goes straight
-   through, exactly as it always did. */
+   through, exactly as it always did.
+
+   Filing is also the clean (claunch-i0vje.2): manager.archive removes the
+   session directory, so the record is what a person keeps — the captured
+   output, scratch and uploads it wrote are gone, and a resume starts from
+   an empty directory. The confirmation says so, because that half cannot be
+   undone. */
 async function archiveSession(name) {
   const record = sessionsCache.find((s) => s.name === name) || {};
   if (record.status !== "exited" && !(await modalConfirm(
@@ -19490,7 +19497,8 @@ async function archiveSession(name) {
     `It is still running. Archiving ends the program now — the board ` +
     `wind-down that a kill offers is skipped — and files the record in the ` +
     `same step. The record itself stays, so it can be resumed from the ` +
-    `archive afterwards.`,
+    `archive afterwards; its captured output, scratch and uploads are ` +
+    `deleted with it and do not come back.`,
     "End and archive"
   ))) return false;
   const resp = await api(
