@@ -3481,8 +3481,11 @@ class SessionManager:
         under ``new_cwd`` — left behind, the session's ``flow_*`` calls would
         resolve the run store under the new cwd and find nothing. And when
         ``project`` is given, ``sdef.project`` is re-filed under it (validated
-        against the registry) — the mesh and the listings read the project
-        live from the definition, so nothing else needs re-keying. Archived
+        against the registry) — the listings read the project live from the
+        definition, so nothing else here needs re-keying. A mesh *mirror* is
+        the exception: its row stores the project it was filed under at join
+        time, so the route that calls this (``h_session_migrate``) re-files it
+        through ``MeshManager.refile_mirrors_for`` after the move. Archived
         (finished) runs and the beads board's already-minted issues stay on
         the old board; only where *new* issues mint moves, with the cwd.
 

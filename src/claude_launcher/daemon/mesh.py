@@ -7033,6 +7033,52 @@ class MeshManager:
         self._persist_def(mesh)
         return {"mesh": mesh.name, "project": mesh.project or projects.DEFAULT}
 
+    def refile_mirrors_for(self, session: str, project: str) -> List[dict]:
+        """Re-file the mirrors filed where ``session`` used to be.
+
+        :meth:`join` seeds the mirror it builds from the joining session's
+        project (:meth:`_session_project`) and nothing recomputed it after
+        that, so a session re-filed by ``SessionManager.migrate(project=...)``
+        left its mirror under the project it came from — the mesh drew in a
+        tab whose only local member no longer stands there, and
+        ``/api/mesh?project=`` hid it from the one it moved to. The migrate
+        route asks this after the move; ``project`` is the session's new
+        one (blank = the default).
+
+        Two guards keep the filing where it is not this session's to
+        change: only a mirror — a mesh whose authority is another daemon,
+        since one this daemon owns is filed by :meth:`create` and moved by
+        :meth:`set_project` — and only while this session is its one local
+        member. With a second local member the filing is theirs too, and
+        the single value cannot serve both. Local bookkeeping, like
+        :meth:`set_project`: nothing is sent to the peers.
+
+        Returns one row per mirror actually changed (``mesh``, ``was``,
+        ``now``), in name order; an empty list is the ordinary answer.
+        """
+        now = projects.normalize(project)
+        now = "" if now == projects.DEFAULT else now
+        changed: List[dict] = []
+        for mesh in self.list():
+            if not mesh.primary:
+                continue
+            ours = [
+                member for member in mesh.members.values()
+                if self._is_local(mesh, member)
+            ]
+            if len(ours) != 1 or ours[0].session != session:
+                continue
+            if mesh.project == now:
+                continue
+            changed.append({
+                "mesh": mesh.name,
+                "was": mesh.project or projects.DEFAULT,
+                "now": now or projects.DEFAULT,
+            })
+            mesh.project = now
+            self._persist_def(mesh)
+        return changed
+
     def _session_project(self, session: str) -> str:
         """The project ``session`` is filed under, "" when unknown."""
         try:
