@@ -9985,7 +9985,7 @@ def _reposync_pause(app, repo: str) -> dict:
 
 async def h_reposync_pause(request: web.Request) -> web.Response:
     """Whether a Workspaces sync agent holds the merge pause on ``?repo=``'s
-    repository (:mod:`daemon.reposync_pause`). ``tools/delayed_sweep.py admit``
+    repository (:mod:`daemon.reposync_pause`). ``claunch delayed-sweep admit``
     reads this and refuses every candidate but the sync's own issue."""
     repo = request.query.get("repo") or ""
     if not repo or not os.path.isabs(repo):

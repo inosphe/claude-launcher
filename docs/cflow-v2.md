@@ -3583,7 +3583,7 @@ PR은 닫고 브랜치는 지웠다.
 ### 리더의 단계별 사후 검증 (claunch-61xvf)
 
 `improv-leader-v2`는 각 성공한 PR/로컬 머지 직후 그 누적 결과를
-`tools/delayed_sweep.py enqueue`로 기록한다. 예를 들어 A, B, C를 순서대로
+`claunch delayed-sweep enqueue`로 기록한다. 예를 들어 A, B, C를 순서대로
 머지하면 A, A+B, A+B+C의 SHA마다 고정 브랜치가 생긴다. 브랜치는
 `delayed-sweep/<리더>/<40자 SHA>`이며 이후 머지로 이동하지 않는다.
 `merges` 반환값은 `{issue, tip, merge_sha}` 행들의 목록이다. 동일 SHA를
@@ -3592,7 +3592,7 @@ PR은 닫고 브랜치는 지웠다.
 실행되어 다음 머지 회차를 지연시키지 않는다. 라이브 반영은 아래 입력이 제어한다.
 
 머지 보고는 **머지 SHA당 한 행**이다. 같은 브랜치·tip을 공유하는 다른 이슈는
-행의 `also: [...]`에 적는다(`tools/delayed_sweep.py check-merges`가 형태를
+행의 `also: [...]`에 적는다(`claunch delayed-sweep check-merges`가 형태를
 읽기 전용으로 확인한다). 검증 작업의 issue는 소유 귀속이라 한 SHA를 다른
 이슈로 다시 등록하지 못하고, 강한 관문(`check-enqueued --env`)은 이 불변식을
 그대로 지킨다. 그래서 한 SHA를 두 이슈의 행으로 나눠 보고하면 관문을 통과할 수
@@ -3651,7 +3651,7 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   돌리지 않는다.
 - 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
   데몬 clock이 드라이버에 「the run moved」 블록을 보내 idle hold된 자식도 깨운다(6.5).
-  깨어난 자식은 `tools/delayed_sweep.py nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
+  깨어난 자식은 `claunch delayed-sweep nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
   TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
   (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
   좁히기 후 리더에게 한 줄을 보낸다.
@@ -3720,16 +3720,18 @@ IR은 변경되지 않으므로 기존 run에는 정의 재로드가 확인된 �
 조회와 수동 복구 명령:
 
 ```sh
-uv run --no-sync python tools/delayed_sweep.py status --repo <repo>
-uv run --no-sync python tools/delayed_sweep.py admit --repo <repo> --issue <issue>
-uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
-uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
-uv run --no-sync python tools/delayed_sweep.py remeasure --repo <repo> --job <failed-job> --reason <why>
-uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
-uv run --no-sync python tools/delayed_sweep.py unbatch --job <failed-tip>
-uv run --no-sync python tools/delayed_sweep.py job-state --job <job>   # 0 판정 있음, 1 대기
-uv run --no-sync python tools/delayed_sweep.py nudge --job <job>
+claunch delayed-sweep status --repo <repo>
+claunch delayed-sweep admit --repo <repo> --issue <issue>
+claunch delayed-sweep enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
+claunch delayed-sweep repair --repo <repo> --job <failed-job> --issue <repair-issue>
+claunch delayed-sweep remeasure --repo <repo> --job <failed-job> --reason <why>
+claunch delayed-sweep release --repo <repo> --job <failed-job> --reason <사유>
+claunch delayed-sweep unbatch --job <failed-tip>
+claunch delayed-sweep job-state --job <job>   # 0 판정 있음, 1 대기
+claunch delayed-sweep nudge --job <job>
 ```
+
+큐 도구는 패키지에 들어 있다(`claunch delayed-sweep`, claunch-sr6ex) — 저장소마다 사본을 두지 않는다. 체크아웃의 `tools/delayed_sweep.py`는 같은 동작의 위임 wrapper이고, `enqueue`가 기록하는 스윕 모듈은 검증 대상 저장소의 `tools/sweep.py`다(`--tool`로 지정할 수도 있다).
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.
 기본 명령은 claunch 전체 스위트다. enqueue의 Python은 큐 실행기를 시작하는 데

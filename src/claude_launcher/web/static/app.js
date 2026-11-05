@@ -41797,7 +41797,7 @@ function sweepBatchSettingCard() {
     "Largest group of merges one sweep covers; a group this large closes at " +
     "once. Raising it means fewer sweeps (less test-window time) but a failed " +
     "sweep implicates more merges, and the failed batch has to be split " +
-    "(tools/delayed_sweep.py unbatch) to find the merge. 0 turns batching off: " +
+    "(claunch delayed-sweep unbatch) to find the merge. 0 turns batching off: " +
     "every merge is swept alone. Range 0-100."));
   card.appendChild(sweepBatchField("settle", "Settle time", "seconds",
     "How long the oldest queued merge waits for company before its group is " +
