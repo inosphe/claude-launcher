@@ -1433,6 +1433,22 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
     assert args.func(args) == 0
     assert "kind=all" in client.paths[-1] and "cwd=" not in client.paths[-1]
     capsys.readouterr()
+    # The daemon takes `mode` (`_search_args`), and `active` only with
+    # `all`; the CLI had no way to send either, so the dashboard's
+    # active-search was unreachable from a shell (claunch-1uyy1).
+    assert "mode=general" in client.paths[-1]
+    args = parser.parse_args(["search", "who", "--kind", "all", "--mode", "active"])
+    assert args.func(args) == 0
+    assert "kind=all" in client.paths[-1] and "mode=active" in client.paths[-1]
+    assert "cwd=" not in client.paths[-1]
+    capsys.readouterr()
+    before = len(client.paths)
+    args = parser.parse_args(["search", "who", "--mode", "active"])
+    with pytest.raises(SystemExit) as exc:
+        args.func(args)
+    assert exc.value.code == 2
+    assert len(client.paths) == before, "a refused pairing must not reach the daemon"
+    assert "--mode active is only valid with --kind all" in capsys.readouterr().err
 
 
 def test_cli_search_registers_under_claunch():

@@ -3,9 +3,13 @@
 ``search`` asks the running daemon to rank the board (``--kind beads``, the
 default), the fleet (``--kind sessions``) or both (``--kind all``) for a
 query: the same ``GET /api/search`` the dashboard's search boxes call, so an
-agent looking for "the issue about X" gets the answer the operator would. ``rag status`` says
-whether the feature is configured and how much of each corpus the index
-covers; ``rag reindex`` starts a sync (``--force`` re-embeds everything).
+agent looking for "the issue about X" gets the answer the operator would.
+``--mode active`` (only with ``--kind all``) drops the documents of sessions
+that are no longer live, which is what the dashboard's active-search box asks
+for; the daemon enforces the same pairing, so this file refuses it first.
+``rag status`` says whether the feature is configured and how much of each
+corpus the index covers; ``rag reindex`` starts a sync (``--force`` re-embeds
+everything).
 
 The daemon does the work because the index lives in its directory and the
 endpoint key in its config; this file only formats. Nothing here reads the
@@ -63,6 +67,11 @@ def _fmt_row(row: dict, kind: str) -> str:
 
 
 def _cmd_search(args) -> int:
+    # The daemon answers 400 for this pairing; refusing it here means the
+    # shell never reaches the network with a request that cannot succeed
+    # (daemon/api.py ``_search_args``, daemon/rag.py ``search_stream``).
+    if args.mode == "active" and args.kind != "all":
+        args.parser.error("--mode active is only valid with --kind all")
     client = _client()
     if client is None:
         return 2
@@ -73,6 +82,7 @@ def _cmd_search(args) -> int:
     params = {
         "q": query,
         "kind": args.kind,
+        "mode": args.mode,
         "limit": str(args.limit),
         "rerank": "0" if args.no_rerank else "1",
         "wait": str(args.wait),
@@ -168,13 +178,18 @@ def register(sub) -> None:
     p.add_argument("query", nargs="+", help="the query, in any language the model reads")
     p.add_argument("--kind", choices=("beads", "sessions", "all"), default="beads",
                    help="what to search: this board, the fleet, or both (default beads)")
+    p.add_argument("--mode", choices=("general", "active"), default="general",
+                   help="general, or active to drop documents of sessions that are no "
+                        "longer live (only with --kind all)")
     p.add_argument("--limit", type=int, default=10, help="results to show (1..50, default 10)")
     p.add_argument("--no-rerank", action="store_true", help="vector ranking only")
     p.add_argument("--wait", type=int, default=2,
                    help="seconds to give a running index sync before answering (default 2)")
     p.add_argument("-C", "--cwd", help="a directory inside the repository whose board to search")
     p.add_argument("--json", action="store_true", help="print the daemon's answer as JSON")
-    p.set_defaults(func=_cmd_search)
+    # The parser rides along so the kind/mode pairing is refused the way any
+    # other bad argument is: usage on stderr, exit 2, no request sent.
+    p.set_defaults(func=_cmd_search, parser=p)
 
     p_rag = sub.add_parser(
         "rag",
