@@ -1011,8 +1011,10 @@ ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
 #: shows a notice because it carries one of them, never because it scored
 #: above another one (thread th-3b3470, 2026-10-30). ``deferrable`` means the
 #: question can wait — the run stands still, nothing else is blocked by the
-#: answer — so a folded "Waiting on you" leaves it out while the run is
-#: otherwise busy. ``fatal``, ``blocking`` and ``expiring`` are derived by the
+#: answer. The dashboard reads it into the notice's criteria
+#: (``noticeCriteriaOf``); the "Waiting on you" fold that hid deferrable
+#: requests was replaced by the panel's sub tabs (claunch-slab3), so no
+#: surface acts on it today. ``fatal``, ``blocking`` and ``expiring`` are derived by the
 #: dashboard from what the notice already is (a stopped leader, a gate, a
 #: deadline) and are not declared here.
 ASK_CRITERIA = ("deferrable",)

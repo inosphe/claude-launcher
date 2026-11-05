@@ -63513,11 +63513,11 @@ function noticeNewerFirst(a, b) {
    `fatal`, `blocking` and `expiring` are read off the notice; `urgent` and
    `deferrable` are declared by the step. `deferrable` is the one
    subtraction: a question that can wait is still `blocking` — the run
-   stands on it — but a folded list leaves it out, because nothing else is
-   waiting on that answer. */
+   stands on it — but nothing else is waiting on that answer. (The panel's
+   "Waiting on you" fold that read these words to hide the deferrable ones
+   was replaced by the panel's sub tabs, claunch-slab3; the vocabulary
+   stays.) */
 const NOTICE_CRITERIA = ["fatal", "blocking", "urgent", "expiring", "deferrable"];
-/* What a folded "Waiting on you" keeps: fatal ∪ urgent ∪ (blocking − deferrable). */
-const NOTICE_FOLD_KEEPS = ["fatal", "urgent", "blocking"];
 /* How near a deadline has to be to count as `expiring`. */
 const NOTICE_EXPIRING_MS = 30 * 60 * 1000;
 
@@ -63543,21 +63543,6 @@ function noticeCriteriaOf(entry) {
     if (!isNaN(dead) && dead - Date.now() <= NOTICE_EXPIRING_MS) out.add("expiring");
   }
   return out;
-}
-
-/* Whether a folded list shows this notice: it carries one of the kept words
-   and none of the dropped ones. A notice with no criteria at all is not
-   shown — it is what the "외 N건" line stands for.
-
-   `deferrable` loses to the words that say otherwise: a step that marks a
-   question deferrable and also `urgent` (or a notice that is `fatal`) is
-   still shown, because those two are declarations that it cannot wait and
-   the fold must not overturn one declaration with another. */
-function noticeFoldedShows(criteria) {
-  if (criteria.has("deferrable") && !criteria.has("urgent") && !criteria.has("fatal")) {
-    return false;
-  }
-  return NOTICE_FOLD_KEEPS.some((w) => criteria.has(w));
 }
 
 /* Whether this reader asked the page not to animate. A person who set
@@ -63942,18 +63927,22 @@ function noticeFilterOf(value) {
 }
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
-/* Whether the panel's "Waiting on you" list is folded (thread th-3b3470).
-   Folded keeps only the notices whose criteria say they cannot wait
-   (noticeFoldedShows) and puts everything else behind one "N more" line.
-   The choice is this browser's, like the history filter, and it defaults to
-   expanded: a list that hides requests by default is a list that hides the
-   one that mattered. */
-const NOTICE_WAITING_FOLDED_KEY = "claunch.noticeWaitingFolded";
-let noticeWaitingFolded = noticeLoad(NOTICE_WAITING_FOLDED_KEY, false) === true;
+/* Which of the panel's two sub tabs is open (claunch-slab3): "waiting" —
+   the requests waiting on you, unread then "Read, still open" — or
+   "history", the past notices with their filters. The tabs replace the
+   fold the "Waiting on you" list had (thread th-3b3470): one list at a
+   time, each whole, instead of one long page whose first part could be
+   folded. "Waiting on you" is the first tab, and its tab carries the count
+   of unread waiting requests as a badge, so the number is in sight from
+   the History tab too. Which tab an open starts on is noticePanelToggle's
+   rule (Waiting when something waits, History otherwise); a press switches
+   it until the panel closes, so nothing is kept in storage. */
+const NOTICE_PANEL_TABS = ["waiting", "history"];
 
-function noticeWaitingFoldSet(folded) {
-  noticeWaitingFolded = !!folded;
-  noticeSave(NOTICE_WAITING_FOLDED_KEY, noticeWaitingFolded);
+let noticePanelTab = "waiting";
+
+function noticePanelTabSet(tab) {
+  noticePanelTab = NOTICE_PANEL_TABS.includes(tab) ? tab : "waiting";
   noticePanelPaint();
 }
 /* The pending requests of each gate as its last poll answered them. */
@@ -64607,7 +64596,15 @@ function noticePanelOpen() {
 function noticePanelToggle(force) {
   const panel = $("notice-panel");
   if (!panel) return;
-  const open = force === undefined ? !noticePanelOpen() : !!force;
+  const was = noticePanelOpen();
+  const open = force === undefined ? !was : !!force;
+  // Opening picks the sub tab (claunch-slab3): "Waiting on you" when any
+  // request of a shown kind is waiting — unread or read and still open —
+  // and History otherwise, so the panel does not open on an empty list.
+  // The tab stays as it is while the panel is open (a press, or a request
+  // that arrives, does not move the reader off the list they are reading;
+  // the badge says when something new waits).
+  if (open && !was) noticePanelTab = gatePendingCount() > 0 ? "waiting" : "history";
   panel.classList.toggle("hidden", !open);
   // While the panel is open the corner strip is hidden: the panel already
   // lists every notice and every waiting request with its buttons, so a card
@@ -64689,6 +64686,37 @@ function noticePanelButton(label, cls, title, onClick) {
     onClick(btn);
   });
   return btn;
+}
+
+/* The panel's sub tab bar (claunch-slab3): "Waiting on you" first, then
+   History. The open tab is `active`; the Waiting tab carries the number of
+   unread waiting requests as a badge (the same count the bell's "waiting"
+   colour stands for), and the badge is left out at zero so an empty tab
+   does not read as a count to act on. */
+function noticePanelTabsRow(waitingCount) {
+  const bar = el("div", "notice-tabs");
+  if (bar.setAttribute) bar.setAttribute("role", "tablist");
+  for (const [name, label, title] of [
+    ["waiting", "Waiting on you",
+     "the requests waiting on you, unread first, then the ones read and still open"],
+    ["history", "History", "every notice shown in this browser, with its filters"],
+  ]) {
+    const on = noticePanelTab === name;
+    const tab = noticePanelButton(
+      label, `notice-tab${on ? " active" : ""}`, title, () => noticePanelTabSet(name)
+    );
+    if (tab.dataset) tab.dataset.tab = name;
+    if (tab.setAttribute) {
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    if (name === "waiting" && waitingCount > 0) {
+      tab.appendChild(el("span", "notice-tab-badge", String(waitingCount)));
+      tab.title = `${waitingCount} unread request(s) waiting on you — ${title}`;
+    }
+    bar.appendChild(tab);
+  }
+  return bar;
 }
 
 /* One waiting request in the panel: what the card says, with its buttons.
@@ -65201,9 +65229,9 @@ function noticePanelState() {
     [...gateRemindIds],
     [...noticeSourcesHidden],
     noticeFilter,
-    // Folding "Waiting on you" changes what the open panel draws and nothing
-    // else in this list moves with it (thread th-3b3470), so it belongs here.
-    noticeWaitingFolded,
+    // The open sub tab changes what the open panel draws and nothing else in
+    // this list moves with it (claunch-slab3), so it belongs here.
+    noticePanelTab,
     runGateNudgeNotes,
     restartGateStale,
   ]);
@@ -65263,136 +65291,112 @@ function noticePanelPaint() {
   if (shownHidden) keep(shownHidden.key, () => shownHidden.node);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
-  // Folded, the list shows only what its criteria say cannot wait and puts
-  // the rest behind one line (thread th-3b3470). The unfurled list is
-  // unchanged, and so is the order in both (noticeNewerFirst).
-  const criteriaOf = ([type, rec]) => noticeCriteriaOf(Object.assign(
-    { gateType: type }, rec
-  ));
-  const shownUnread = noticeWaitingFolded
-    ? unread.filter((one) => noticeFoldedShows(criteriaOf(one)))
-    : unread;
-  const keptBack = unread.length - shownUnread.length;
-  // Its own row class rather than notice-panel-section-row: the History head
-  // below carries the filter presses, and a second row of that class would
-  // make "the section head" name two nodes (tests/web/noticehistory_check.js
-  // reads the first one for its All/Kept/Not read presses).
-  const foldHead = el("div", "notice-waiting-head");
-  foldHead.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
-  foldHead.appendChild(noticePanelButton(
-    noticeWaitingFolded ? "Expand" : "Fold",
-    noticeWaitingFolded ? "fold-open" : "fold",
-    noticeWaitingFolded
-      ? `show all ${unread.length} waiting request(s) again`
-      : "show only the ones that cannot wait — the rest stay counted here",
-    () => noticeWaitingFoldSet(!noticeWaitingFolded)
-  ));
-  keep(`head:waiting:${unread.length}:${noticeWaitingFolded ? "folded" : "open"}`,
-       () => foldHead);
-  if (!waiting.length) {
-    keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
-  } else if (!unread.length) {
-    keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
-  }
-  for (const [type, rec] of shownUnread) {
-    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
-         () => noticePanelGateRow(type, rec));
-  }
-  if (keptBack > 0) {
-    // One line for what folding keeps back, so nothing is hidden silently and
-    // the count is still the count: the heading said how many there are.
-    keep(`note:folded:${keptBack}`, () => el(
-      "p", "wf-note notice-folded-note",
-      `${keptBack} more waiting — Expand shows them; each is answerable from here`
-    ));
-  }
-  if (read.length) {
-    keep(`head:read:${read.length}`, () => el(
-      "h3", "notice-panel-section", `Read, still open (${read.length})`
-    ));
-    for (const [type, rec] of read) {
-      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
+  // The two sub tabs (claunch-slab3): "Waiting on you" first, with the
+  // unread count as its badge, then History. Only the open tab's list is
+  // drawn; the badge is drawn on both, so a request that arrives while
+  // History is open still shows its number.
+  keep(`tabs:${noticePanelTab}:${unread.length}`, () => noticePanelTabsRow(unread.length));
+  const paintWaiting = () => {
+    if (!waiting.length) {
+      keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
+    } else if (!unread.length) {
+      keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
+    }
+    for (const [type, rec] of unread) {
+      keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
            () => noticePanelGateRow(type, rec));
     }
-  }
-
-  const past = noticeHistory.filter(
-    (e) => !(e.gate && e.status === "pending") && noticeEntryShown(e)
-  );
-  const markedCount = past.filter((e) => e.marked).length;
-  const unreadCount = past.filter(noticeUnread).length;
-  // History is the same feed the corner strip draws, newest first, by the
-  // one ordering rule (noticeNewerFirst). `noticeHistory` is already
-  // newest-first, so this sort is what says so here rather than leaving the
-  // order to depend on how the array happens to be held.
-  const shown = (noticeFilter === "marked" ? past.filter((e) => e.marked)
-    : noticeFilter === "unread" ? past.filter(noticeUnread) : past.slice())
-    .sort(noticeNewerFirst);
-  const sectionHead = el("div", "notice-panel-section-row");
-  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
-  const filters = el("div", "notice-filter");
-  for (const [name, label, title] of [
-    ["all", "All", `every row (${past.length})`],
-    ["marked", "Kept", `only the ★ rows (${markedCount})`],
-    ["unread", "Not read", `only the unread rows (${unreadCount})`],
-  ]) {
-    filters.appendChild(noticePanelButton(
-      label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
-    ));
-  }
-  sectionHead.appendChild(filters);
-  const unreadIds = shown.filter(noticeUnread).map((e) => e.id);
-  if (unreadIds.length) {
-    sectionHead.appendChild(noticePanelButton(
-      "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
-      () => noticeMarkRead(unreadIds, true)
-    ));
-  }
-  // Clear only in the All view: in Kept or Not read it would forget rows
-  // the view does not show (claunch-knuet.1).
-  if (noticeFilter === "all" && past.length > markedCount) {
-    sectionHead.appendChild(noticePanelButton(
-      "Clear", "clear",
-      "forget the history in this browser (waiting requests, ★ rows and " +
-        "the rows of hidden kinds stay)",
-      () => {
-        for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
-          const e = noticeHistory[i];
-          if (!(e.gate && e.status === "pending") && !e.marked && noticeEntryShown(e)) {
-            noticeHistory.splice(i, 1);
-          }
-        }
-        noticeHistorySave();
-        noticePanelPaint();
-        noticeBellPaint();
+    if (read.length) {
+      keep(`head:read:${read.length}`, () => el(
+        "h3", "notice-panel-section", `Read, still open (${read.length})`
+      ));
+      for (const [type, rec] of read) {
+        keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
+             () => noticePanelGateRow(type, rec));
       }
-    ));
-  }
-  // The section head carries the filter buttons' active state and the two
-  // count-driven presses, so its key carries all of that: a rebuild that
-  // changes any of it builds the head again instead of keeping one whose
-  // buttons say the old thing. It never moves (it is the first row of its
-  // list), so rebuilding it costs no animation.
-  const headKey = [
-    "section-head", noticeFilter, past.length, markedCount, unreadCount,
-    unreadIds.length, shown.length,
-  ].join(":");
-  keep(headKey, () => sectionHead);
-  if (!shown.length) {
-    keep("note:none-shown", () => el("p", "wf-note", noticeFilter === "marked"
-      ? "no row is kept — ☆ on a row keeps it here"
-      : noticeFilter === "unread" ? "every row has been read"
-      : "nothing has been shown in this browser yet"));
-  }
-  for (const entry of shown) {
-    // The key carries what the row draws, not only its identity: a row that
-    // is rebuilt because its own state moved (read, ★, settled) must be a
-    // new key, or the kept node would keep the old wording. What a key does
-    // NOT carry is anything the panel state does not already list — that is
-    // why the clock is excluded (noticePanelState says why).
-    keep(`history:${entry.id}:${noticeRowShape(entry)}`,
-         () => noticePanelHistoryRow(entry));
-  }
+    }
+  };
+
+  const paintHistory = () => {
+    const past = noticeHistory.filter(
+      (e) => !(e.gate && e.status === "pending") && noticeEntryShown(e)
+    );
+    const markedCount = past.filter((e) => e.marked).length;
+    const unreadCount = past.filter(noticeUnread).length;
+    // History is the same feed the corner strip draws, newest first, by the
+    // one ordering rule (noticeNewerFirst). `noticeHistory` is already
+    // newest-first, so this sort is what says so here rather than leaving the
+    // order to depend on how the array happens to be held.
+    const shown = (noticeFilter === "marked" ? past.filter((e) => e.marked)
+      : noticeFilter === "unread" ? past.filter(noticeUnread) : past.slice())
+      .sort(noticeNewerFirst);
+    const sectionHead = el("div", "notice-panel-section-row");
+    sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
+    const filters = el("div", "notice-filter");
+    for (const [name, label, title] of [
+      ["all", "All", `every row (${past.length})`],
+      ["marked", "Kept", `only the ★ rows (${markedCount})`],
+      ["unread", "Not read", `only the unread rows (${unreadCount})`],
+    ]) {
+      filters.appendChild(noticePanelButton(
+        label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
+      ));
+    }
+    sectionHead.appendChild(filters);
+    const unreadIds = shown.filter(noticeUnread).map((e) => e.id);
+    if (unreadIds.length) {
+      sectionHead.appendChild(noticePanelButton(
+        "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
+        () => noticeMarkRead(unreadIds, true)
+      ));
+    }
+    // Clear only in the All view: in Kept or Not read it would forget rows
+    // the view does not show (claunch-knuet.1).
+    if (noticeFilter === "all" && past.length > markedCount) {
+      sectionHead.appendChild(noticePanelButton(
+        "Clear", "clear",
+        "forget the history in this browser (waiting requests, ★ rows and " +
+          "the rows of hidden kinds stay)",
+        () => {
+          for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
+            const e = noticeHistory[i];
+            if (!(e.gate && e.status === "pending") && !e.marked && noticeEntryShown(e)) {
+              noticeHistory.splice(i, 1);
+            }
+          }
+          noticeHistorySave();
+          noticePanelPaint();
+          noticeBellPaint();
+        }
+      ));
+    }
+    // The section head carries the filter buttons' active state and the two
+    // count-driven presses, so its key carries all of that: a rebuild that
+    // changes any of it builds the head again instead of keeping one whose
+    // buttons say the old thing. It never moves (it is the first row of its
+    // list), so rebuilding it costs no animation.
+    const headKey = [
+      "section-head", noticeFilter, past.length, markedCount, unreadCount,
+      unreadIds.length, shown.length,
+    ].join(":");
+    keep(headKey, () => sectionHead);
+    if (!shown.length) {
+      keep("note:none-shown", () => el("p", "wf-note", noticeFilter === "marked"
+        ? "no row is kept — ☆ on a row keeps it here"
+        : noticeFilter === "unread" ? "every row has been read"
+        : "nothing has been shown in this browser yet"));
+    }
+    for (const entry of shown) {
+      // The key carries what the row draws, not only its identity: a row that
+      // is rebuilt because its own state moved (read, ★, settled) must be a
+      // new key, or the kept node would keep the old wording. What a key does
+      // NOT carry is anything the panel state does not already list — that is
+      // why the clock is excluded (noticePanelState says why).
+      keep(`history:${entry.id}:${noticeRowShape(entry)}`,
+           () => noticePanelHistoryRow(entry));
+    }
+  };
+  if (noticePanelTab === "history") paintHistory(); else paintWaiting();
   noticePanelPlace(body, rows);
   // The panel's rows fold the way the corner cards do (claunch-qf41a.1): a
   // row above the threshold keeps its head and shows a five-line preview of
