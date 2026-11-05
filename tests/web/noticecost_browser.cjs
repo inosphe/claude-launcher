@@ -15,11 +15,12 @@
 
    Three things are held, and three premises that make them mean anything:
 
-   0. **The window held polls.** The fixture counts every rail request it
-      serves, and the window must contain at least two. Without this the
-      quiet feed below is true of a stopped timer and of a lengthened poll
-      interval alike — an empty window writes nothing no matter what the
-      page does (s404-rev, s1262-rev).
+   0. **The window held polls.** The window ends when the page has received
+      two rail answers, and the fixture's own count of what it served is
+      reported beside it. Without this the quiet feed below is true of a
+      stopped timer and of a lengthened poll interval alike — an empty
+      window writes nothing no matter what the page does (s404-rev,
+      s1262-rev).
    1. **A settled feed does not keep rewriting history.** Once the panel has
       drawn the pending gates, further polls of the same set write nothing
       to `claunch.noticeHistory`. Before claunch-qnq1c a pending row trimmed
@@ -68,18 +69,20 @@ const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
 // Past NOTICE_HISTORY_MAX (100) by a third, so the cap actually bites.
 const N = 133;
-// How long the feed is polled after it has settled.
-//
-// This is the page's own timer, and the window has to span more than one
-// tick of it or "nothing was written" proves nothing: an empty window writes
-// nothing. The page polls every `DASHBOARD_POLL_MS` (5000 in app.js today),
-// and this window is four of those. The arithmetic above is not what holds
-// the assertion up — the harness counts the fixture's rail requests and
-// asserts the window held at least two of them, so a changed interval fails
-// here instead of passing quietly.
-const WINDOW_MS = 20000;
 // The fewest polls a window can hold and still describe a working feed.
 const MIN_WINDOW_POLLS = 2;
+// How long the harness waits for those polls.
+//
+// The window ends when the page has received MIN_WINDOW_POLLS rail answers,
+// not after a fixed duration. Both halves of that matter: a window spanning
+// no tick writes nothing whatever the page does, so it proves nothing, and
+// a window padded long enough to span two ticks spends its whole length
+// every run — 20s of the 60s `test_browser_harness` allows each harness —
+// even when the feed is healthy. Waiting for the answers costs two poll
+// intervals (10s at the `DASHBOARD_POLL_MS` of 5000 in app.js today), and a
+// page whose interval grows past this budget fails here rather than
+// quietly describing a shorter window than it claims.
+const POLL_WAIT_MS = 30000;
 
 // Every /api/cflow2/rail answer the fixture serves, so the window can be
 // described in polls rather than assumed to have had any.
@@ -161,7 +164,21 @@ function ageSeconds(text) {
     // two hosts the channel draws into.
     await page.addInitScript(() => {
       localStorage.setItem("claunch_token:/", "fixture-token");
-      window.__cost = { writes: 0, bytes: 0, added: 0, removed: 0, records: 0 };
+      window.__cost = { writes: 0, bytes: 0, added: 0, removed: 0, records: 0, polls: 0 };
+      // Count the rail answers the page receives. The window ends on this
+      // counter, so a page that stopped polling never reaches it: the wait
+      // times out and says what it saw instead of describing an empty
+      // window as a quiet one.
+      const realFetch = window.fetch;
+      window.fetch = async function (...args) {
+        const resp = await realFetch.apply(window, args);
+        try {
+          const first = args[0];
+          const target = new URL(typeof first === "string" ? first : first.url, location.href);
+          if (target.pathname === "/api/cflow2/rail") window.__cost.polls += 1;
+        } catch { /* not a request this file reads */ }
+        return resp;
+      };
       const si = Storage.prototype.setItem;
       Storage.prototype.setItem = function (k, v) {
         if (k === "claunch.noticeHistory") {
@@ -217,16 +234,43 @@ function ageSeconds(text) {
       window.__cost.added = 0;
       window.__cost.removed = 0;
       window.__cost.records = 0;
+      window.__cost.polls = 0;
     });
     // Counted on the server, so it cannot be reset from inside the page —
     // record where the counter stood when the window opened and subtract.
+    // This is the fixture's count; the window itself ends on the page's, and
+    // the two are reported side by side.
     const railAtWindowStart = railRequests;
 
-    // Let the page poll on its own timer, untouched, for the window.
-    await page.waitForTimeout(WINDOW_MS);
+    // Let the page poll on its own timer, untouched, until it has received
+    // the answers the window needs. The wait is the premise: when it fails,
+    // nothing below has been measured, so it says so instead of reporting
+    // the quiet feed of a page that stopped polling.
+    const windowStarted = Date.now();
+    try {
+      await page.waitForFunction(
+        (n) => window.__cost.polls >= n, MIN_WINDOW_POLLS, { timeout: POLL_WAIT_MS },
+      );
+    } catch {
+      throw new Error(
+        `the page received fewer than ${MIN_WINDOW_POLLS} rail answer(s) within `
+        + `${POLL_WAIT_MS}ms (the fixture served ${railRequests - railAtWindowStart}) `
+        + `— the feed stopped polling, so nothing below would have been measured `
+        + `over a working feed. The page polls every DASHBOARD_POLL_MS; if that `
+        + `interval grew past ${POLL_WAIT_MS / MIN_WINDOW_POLLS}ms, raise POLL_WAIT_MS`
+      );
+    }
+    // One paint after the last answer: the poll that ends the window has to
+    // have drawn, or a page that rebuilds the list on every poll could
+    // change the DOM after this harness stopped looking.
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+    );
 
+    const windowMs = Date.now() - windowStarted;
     const windowPolls = railRequests - railAtWindowStart;
     const after = await page.evaluate(() => ({
+      polls: window.__cost.polls,
       writes: window.__cost.writes,
       bytes: window.__cost.bytes,
       added: window.__cost.added,
@@ -249,8 +293,9 @@ function ageSeconds(text) {
       settled_cards: settled.cards,
       settled_history_writes: settled.writes,
       settled_history_bytes: settled.bytes,
-      window_ms: WINDOW_MS,
-      window_polls: windowPolls,
+      window_wait_ms: windowMs,
+      window_polls: after.polls,
+      window_fixture_polls: windowPolls,
       window_history_writes: after.writes,
       window_history_bytes: after.bytes,
       window_dom_records: after.records,
@@ -265,24 +310,25 @@ function ageSeconds(text) {
 
     assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
 
-    // 0. The window actually held polls. This comes first because every
-    //    other number below is read inside it: a window with no poll in it
-    //    writes nothing whatever the page does, so "no writes" would be
-    //    true of a broken page, a stopped timer and a changed interval
-    //    alike. Measured on the fixture, so the page cannot fake it.
+    // 0. The window actually held polls. The wait above ends on the page's
+    //    own count; this reads that count where every other number below is
+    //    read, so a window with no poll in it cannot be described as a quiet
+    //    one. A window with no poll in it writes nothing whatever the page
+    //    does, so "no writes" would be true of a broken page, a stopped
+    //    timer and a changed interval alike.
     assert.ok(
-      windowPolls >= MIN_WINDOW_POLLS,
-      `the ${WINDOW_MS}ms window held ${windowPolls} rail poll(s), fewer than `
-      + `the ${MIN_WINDOW_POLLS} this file needs — nothing below was measured `
-      + `over a working feed. The page polls every DASHBOARD_POLL_MS; if that `
-      + `interval grew past ${WINDOW_MS / MIN_WINDOW_POLLS}ms, widen WINDOW_MS`
+      after.polls >= MIN_WINDOW_POLLS,
+      `the window held ${after.polls} rail answer(s), fewer than the `
+      + `${MIN_WINDOW_POLLS} this file needs — nothing below was measured over `
+      + `a working feed. The page polls every DASHBOARD_POLL_MS; if that `
+      + `interval grew past ${POLL_WAIT_MS / MIN_WINDOW_POLLS}ms, raise POLL_WAIT_MS`
     );
 
     // 1. A settled feed is quiet: no history write for the same pending set.
     assert.equal(
       after.writes, 0,
       `a settled feed rewrote claunch.noticeHistory ${after.writes} time(s) over `
-      + `${WINDOW_MS}ms / ${windowPolls} poll(s) (${after.bytes} bytes) — the `
+      + `${windowMs}ms / ${after.polls} poll(s) (${after.bytes} bytes) — the `
       + `trim-and-re-record loop is back (claunch-qnq1c). Cards: ${after.cards}`
     );
 
@@ -293,13 +339,13 @@ function ageSeconds(text) {
     assert.equal(
       after.added, 0,
       `${after.added} node(s) were added under #notices/#notice-panel-body over `
-      + `${windowPolls} poll(s) of an unchanged pending set — the feed is `
+      + `${after.polls} poll(s) of an unchanged pending set — the feed is `
       + `rebuilding what did not change (${after.records} mutation record(s))`
     );
     assert.equal(
       after.removed, 0,
       `${after.removed} node(s) were removed under #notices/#notice-panel-body `
-      + `over ${windowPolls} poll(s) of an unchanged pending set — the feed is `
+      + `over ${after.polls} poll(s) of an unchanged pending set — the feed is `
       + `tearing down and redrawing (${after.records} mutation record(s))`
     );
 
