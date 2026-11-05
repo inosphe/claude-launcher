@@ -459,6 +459,14 @@ def test_an_abandoned_composer_is_cleared_rather_than_typed_into(monkeypatch):
 
     So the stale line is discarded with ``C-u`` first. Clearing it loses
     text typed at least ``DRAFT_GUARD`` ago; submitting it would run it.
+
+    ``C-u`` alone is not enough for this line, and that is the second half
+    of the bug: the ``!`` opened a *mode*, and a mode is not a line — the
+    ``!`` never entered the query, so emptying the query leaves the mode
+    on and the paste below is still run as a shell script (s954-rev2's
+    review of claunch-n8tji). A backspace in the emptied query is the key
+    that closes it, and it is the only one of the three that does not also
+    cut off the session's own turn.
     """
     monkeypatch.setattr(session_mod, "DRAFT_GUARD", 0.1)
     monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
@@ -471,10 +479,38 @@ def test_an_abandoned_composer_is_cleared_rather_than_typed_into(monkeypatch):
     assert s._draft_chars == 1, "but the line is still in the composer"
 
     assert asyncio.run(s.deliver("mesh: hello")) is True
-    # C-u empties the composer, and only then is the message pasted and sent.
-    assert writes == [b"\x15", b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+    # C-u empties the composer, the backspace leaves bash mode, and only
+    # then is the message pasted and sent.
+    assert writes == [
+        b"\x15",
+        b"\x7f",
+        b"\x1b[200~[T]\rmesh: hello\x1b[201~",
+        b"\r",
+    ]
     assert s._draft_chars == 0
     assert s.draft_open() is False
+
+
+def test_an_abandoned_line_that_did_not_open_bash_mode_gets_no_extra_key(
+    monkeypatch,
+):
+    """The mode-exit key is for the line that needs it.
+
+    ``!`` opens bash mode; an ordinary abandoned line does not. Sending a
+    backspace there would be a keystroke nobody asked for in a harness whose
+    composer is already empty, so the head of the line decides.
+    """
+    monkeypatch.setattr(session_mod, "DRAFT_GUARD", 0.1)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"an old thought")
+    time.sleep(0.15)
+    assert s.draft_open() is False
+
+    assert asyncio.run(s.deliver("mesh: hello")) is True
+    assert writes == [b"\x15", b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+    assert s._draft_head == ""
 
 
 def test_a_live_draft_is_still_refused_rather_than_cleared(monkeypatch):
