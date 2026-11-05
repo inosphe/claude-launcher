@@ -628,7 +628,7 @@ def _within_this_checkout(node, base):
     return _resolves_here(_path_text(node), base)
 
 
-def _run_cwd_default():
+def _run_cwd_default(text=None):
     """The directory ``_run`` runs in when its caller omits ``cwd``.
 
     Read from ``_run``'s own definition rather than restated here: the guard's
@@ -637,16 +637,21 @@ def _run_cwd_default():
     this, ``_cwd_of`` returned the literal ``_HERE`` and the two facts lived
     in two places with nothing holding them together (claunch-o5il6.1).
 
-    ``_run`` writes ``cwd=str(cwd or ROOT)``. Three shapes are read: that
-    ``or`` default, a plain ``ROOT``/``_HERE`` name, and the ``str(...)``
-    wrapper around either. Anything else answers ``None`` -- an unreadable
-    default leaves relative paths exempt rather than guessed at.
+    The default is whatever :func:`_run_default_in` reads, so the two agree by
+    construction -- and an unreadable default still answers ``None``, which
+    leaves relative paths exempt rather than guessed at.
+
+    ``text`` is the source to read. It exists for the test: with the source
+    fixed, the only thing an assertion here can see is the answer, and
+    ``return _HERE`` gives that same answer. Handing in a source whose ``_run``
+    defaults elsewhere is what tells a derived default from a copied one
+    (claunch-o5il6.1.1).
 
     This reads *this* module's ``_run``. A sibling's is a different function
     with its own default (:func:`_sibling_run_default`), because applying this
     answer to every module that happens to define a ``_run`` turned unrelated
     ``git`` wrappers into violations (s597-rev, s404-rev, s1262-rev)."""
-    return _run_default_in(_SELF.read_text(encoding="utf-8"))
+    return _run_default_in(_SELF.read_text(encoding="utf-8") if text is None else text)
 
 
 #: What :func:`_sibling_run_default` answers when the source has no ``_run``
@@ -658,8 +663,16 @@ _NO_RUN = object()
 def _run_default_in(text):
     """``_run``'s default ``cwd``, read from a source, or ``None``.
 
-    Same three shapes as :func:`_run_cwd_default`; separated so a sibling's
-    ``_run`` can be read through the same rules."""
+    The value is read by :func:`_path_text`, the same function that reads an
+    explicit ``cwd=``, so every idiom that one knows is a default this one
+    knows. Before that the two disagreed: a sibling writing
+    ``cwd=cwd or Path(__file__).resolve().parents[1]`` -- how a test module
+    reaches the checkout -- came back ``None``, and ``None`` exempts every
+    relative path through that ``_run`` (claunch-o5il6.1.1).
+
+    ``ROOT`` is checked before :func:`_path_text` only because the name
+    ``_HERE`` is this file's own spelling of the same directory: the other
+    function maps ``ROOT`` and leaves ``_HERE`` unread."""
     for node in ast.walk(ast.parse(text)):
         if not isinstance(node, ast.FunctionDef) or node.name != "_run":
             continue
@@ -667,13 +680,19 @@ def _run_default_in(text):
             if not (isinstance(kw, ast.keyword) and kw.arg == "cwd"):
                 continue
             value = kw.value
-            if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "str" and value.args:
-                value = value.args[0]
-            if isinstance(value, ast.BoolOp):
-                # ``cwd or ROOT``: the right-hand side is the default.
-                value = value.values[-1]
+            # ``cwd=str(cwd or X)`` and ``cwd=cwd or str(X)`` both name ``X``:
+            # strip whichever wrapper each level carries.
+            while True:
+                if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "str" and value.args:
+                    value = value.args[0]
+                elif isinstance(value, ast.BoolOp):
+                    # ``cwd or ROOT``: the right-hand side is the default.
+                    value = value.values[-1]
+                else:
+                    break
             if isinstance(value, ast.Name) and value.id in ("ROOT", "_HERE"):
                 return _HERE
+            return _path_text(value)
         return None
     return None
 
@@ -1374,7 +1393,59 @@ ROOT = Path(__file__).resolve().parents[1]
 def _run(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=str(cwd or Path("/elsewhere")))
 '''
-    assert _run_default_in(moved) is None, "a moved default must not still answer _HERE"
+    assert _run_default_in(moved) == "/elsewhere", (
+        "a moved default must answer the directory it names"
+    )
+
+    # The derivation asserted above is *this function's*, not a constant it
+    # returns. Before this, ``_run_cwd_default`` could be replaced by
+    # ``return _HERE`` and every assertion in this test still passed: ``moved``
+    # was read through ``_run_default_in`` directly, so the sample never
+    # reached the function whose derivation this test claims to hold
+    # (claunch-o5il6.1.1). Handing the sample in is what closes that.
+    assert _run_cwd_default(text=moved) != _HERE, (
+        "_run_cwd_default answered this checkout for a source whose ``_run`` "
+        "defaults elsewhere -- its answer is not derived from the source"
+    )
+
+
+def test_a_siblings_cwd_default_is_read_wherever_an_explicit_one_is():
+    """A sibling's ``_run`` default is read by the same rules as a ``cwd=``.
+
+    ``_run_default_in`` knew three spellings: ``str(cwd or ROOT)``, a bare
+    ``ROOT``/``_HERE``, and the ``str(...)`` wrapper. A sibling that named the
+    checkout another way -- ``cwd=cwd or Path(__file__).resolve().parents[1]``,
+    which is how a test module reaches it from a test directory -- came back
+    ``None``, and ``None`` exempts every relative path through that ``_run``.
+    The call below reads this repository without a window and passed the guard
+    (the under-blocking half of claunch-o5il6.1.1).
+
+    Held end to end rather than on the helper's return value: what has to be
+    true is that the call site is collected *and* read as this checkout, so
+    this fails whenever the reader of a default drifts from the reader of an
+    explicit ``cwd=``.
+    """
+    sample = '''
+import subprocess, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+
+def _run(*args, cwd=None):
+    return subprocess.run([sys.executable, str(ROOT / "tools" / "related_surfaces.py"), *args],
+                          cwd=cwd or Path(__file__).resolve().parents[1])
+
+def test_a():
+    out = _run("--repo", ".")
+'''
+    assert _run_default_in(sample) == _HERE, _run_default_in(sample)
+    found = _tool_invocations(sample)
+    assert len(found) == 1, found
+    _lineno, argv, reads_here = found[0]
+    assert argv == ["--repo", "."], argv
+    assert reads_here is True, (
+        "a _run whose default is written Path(__file__).resolve().parents[1] "
+        "left the call exempt -- the default was not read"
+    )
 
 
 def test_help_exits_before_the_tool_reads_history():
