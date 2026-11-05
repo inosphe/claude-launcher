@@ -29,7 +29,9 @@ the first attempt succeeds and the retry loop is never entered.
 
 from __future__ import annotations
 
+import errno
 import os
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -75,6 +77,50 @@ def replace(src: _PathLike, dest: _PathLike) -> None:
     # Last attempt, outside the loop: whatever it raises is what the caller sees,
     # and a success here is as good as a success on the first try.
     os.replace(src, dest)
+
+
+def _read_refused(exc: OSError) -> bool:
+    """Whether a failed open is the refusal a replace in flight causes.
+
+    ``open()`` reaches the file through the C runtime, which reports a sharing
+    refusal as ``EACCES`` with no ``winerror`` at all -- the sweep's traceback
+    reads ``[Errno 13] Permission denied`` and nothing more. So the Windows
+    code list that :func:`replace` keys on never matches a read, and an
+    ``EACCES`` on Windows is accepted here as well. The retry is still
+    bounded, so a real ACL refusal costs 0.31s and is then raised unchanged.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in TRANSIENT
+    return sys.platform == "win32" and exc.errno == errno.EACCES
+
+
+def read_text(path: _PathLike, encoding: str = "utf-8") -> str:
+    """``Path.read_text``, retrying the refusals :func:`replace` causes a reader.
+
+    The other side of :func:`replace`. While a writer's ``MoveFileEx`` is
+    swapping the scratch file over the destination, a reader that opens the
+    destination in that window gets ``PermissionError`` ``[WinError 5]`` (or
+    ``[WinError 32]``): the old file is delete-pending and the new one is not
+    yet under the name. The reader holds no lock the writer could have
+    honoured, and the document is whole before and after, so the refusal is
+    transient by construction. A full sweep (``-n 8``) hit it in
+    ``profile_keys.owner``, which reads the key pool outside the pool lock
+    while twelve launches replace it (claunch-labxh.1).
+
+    Same budget and same transient set as :func:`replace`. ``FileNotFoundError``
+    and every other error are raised at once, and the last attempt's error is
+    raised untouched.
+    """
+    target = Path(path)
+    for delay in BACKOFF:
+        try:
+            return target.read_text(encoding=encoding)
+        except OSError as exc:
+            if not _read_refused(exc):
+                raise
+            time.sleep(delay)
+    return target.read_text(encoding=encoding)
 
 
 @contextmanager
