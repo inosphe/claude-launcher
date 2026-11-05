@@ -49,6 +49,48 @@ WATCH_WORKFLOW = "sweep-job-v2"
 #: the two spellings equal.
 WATCH_ROLE = "oneshot"
 
+#: The queue tool's module inside the package. The runner used to be the
+#: verified repository's ``tools/delayed_sweep.py``; that file is now only a
+#: wrapper, and a repository needs no copy of it (claunch-sr6ex).
+QUEUE_MODULE = "claude_launcher.delayed_sweep_cli"
+
+
+def package_root():
+    """The directory that has to be on ``sys.path`` to import the package.
+
+    With an installed (or editable) package this is ``site-packages`` (or the
+    checkout's ``src``); it is what the runner's bootstrap inserts, because the
+    job's interpreter need not have the package installed."""
+    import claude_launcher
+
+    return Path(claude_launcher.__file__).resolve().parent.parent
+
+
+def runner_argv(python, ident, database, scratch):
+    """The argv that runs one job under the job's interpreter.
+
+    The interpreter stays the job's own (``row["python"]``, the one the
+    enqueueing checkout recorded): the runner has always run under it, and the
+    sweep it starts uses the checkout's venv from inside ``run_one``. The
+    package is made importable with ``-c`` rather than ``PYTHONPATH`` — a
+    ``PYTHONPATH`` would also reach the sweep's pytest children and shadow the
+    snapshot's own ``claude_launcher``, which is the tree being judged."""
+    bootstrap = (
+        "import sys; sys.path.insert(0, {root!r}); "
+        "from {module} import main; raise SystemExit(main())"
+    ).format(root=str(package_root()), module=QUEUE_MODULE)
+    return [python, "-c", bootstrap, "--database", str(database),
+            "run-one", "--job", ident, "--scratch", str(scratch)]
+
+
+def queue_command(database):
+    """The command a watcher session runs to read the queue.
+
+    The action comes first: ``claunch delayed-sweep`` passes everything after
+    the command name through, and that pass-through starts at the first
+    positional, so the options follow the action."""
+    return f"claunch delayed-sweep <action> ... --database {database}"
+
 
 def _one_line(text: str, limit: int = 300) -> str:
     """A log line and a refusal body from a message that may run to a traceback.
@@ -167,15 +209,16 @@ class Clock:
                              if job["status"] == "failed" else "")
                           # The watching session ends at its wait cap and may not
                           # be alive to unbatch (claunch-1rsgm).
-                          + (f"If this tip covered other merges, run 'tools/delayed_sweep.py "
+                          + (f"If this tip covered other merges, run 'claunch delayed-sweep "
                              f"unbatch --job {job['id']}' to sweep them one by one and narrow "
                              "the cause; no watching session does it for you. "
                              if job["status"] in ("failed", "stuck") else "")
-                          + "protocol: call flow_status, read tools/delayed_sweep.py status "
-                          "for this repository. A failed active pause requires the "
+                          + "protocol: call flow_status, read 'claunch delayed-sweep status "
+                          "--repo <this repository>' for its queue. A failed active pause "
+                          "requires the "
                           "leader's handle-regression route and a repair child. "
                           + ("A stuck job ran out of retries without a verdict: fix what "
-                             "the detail names, then 'tools/delayed_sweep.py requeue "
+                             "the detail names, then 'claunch delayed-sweep requeue "
                              "--job <id>', or 'cancel --job <id> --reason ...'. "
                              if job["status"] == "stuck" else "")
                           + "Live deployment is separate.\n---")
@@ -202,7 +245,6 @@ class Clock:
         scratch = Path(origin["scratch"])
         scratch.mkdir(parents=True, exist_ok=True)
         logfile = scratch / ("delayed-sweep-" + job["id"] + ".log")
-        script = Path(job["tool"]).with_name("delayed_sweep.py")
         env = dict(os.environ)
         # The runner is the job's venv python, not the daemon's interpreter: a GIL
         # build dies in preinit on the free-threading daemon's PYTHON_GIL=0
@@ -248,8 +290,7 @@ class Clock:
         try:
             with logfile.open("ab") as output:
                 self.runner = await asyncio.create_subprocess_exec(
-                    job["python"], str(script), "--database", str(queue.database),
-                    "run-one", "--job", job["id"], "--scratch", str(scratch),
+                    *runner_argv(job["python"], job["id"], queue.database, scratch),
                     stdout=output, stderr=output, env=env)
             queue.spawned(job["id"], self.runner.pid)
         except Exception as exc:
@@ -259,12 +300,11 @@ class Clock:
         """Spawn request for the session that watches a batch tip."""
         queue = self.queue or Queue()
         members = len(queue.members(job["id"]))
-        tool = Path(job["tool"]).with_name("delayed_sweep.py")
         task = (f"스윕 작업 {job['id']}({job['sha'][:12]}, 머지 {1 + members}건)를 지켜보는 일회성 세션이다.\n"
                 "스윕은 데몬이 테스트 창에서 단위 테스트보다 낮은 우선순위로 돌린다. 직접 테스트를 "
                 "돌리지 않는다. 워크플로(sweep-job-v2)가 대기와 주기 알림을 몬다 — flow_status로 "
                 "시작한다.\n"
-                f"큐 도구: {job['python']} {tool} --database {queue.database}")
+                f"큐 도구: {queue_command(queue.database)}")
         return {"task": task, "workflow": WATCH_WORKFLOW, "workflow_version": 2,
                 # The role the run declares (``default_role`` in
                 # workflows/v2/sweep-job-v2.yaml). The daemon builds this body
@@ -274,8 +314,7 @@ class Clock:
                 # parent's main mesh as ``oneshot`` rather than falling to the
                 # handle's default.
                 "role": WATCH_ROLE,
-                "cflow_inputs": {"job": job["id"], "python": job["python"], "tool": str(tool),
-                                 "database": str(queue.database)},
+                "cflow_inputs": {"job": job["id"], "database": str(queue.database)},
                 "beads": False}
 
     async def attend(self, queue, policy):
@@ -446,7 +485,7 @@ class Clock:
                       "cannot change, so it will not try again. The sweep itself still "
                       "runs; only the watching session is missing. Fix the cause named "
                       "above, then ask for the watcher again with "
-                      f"'tools/delayed_sweep.py retry-watcher --job {job['id']}' — the "
+                      f"'claunch delayed-sweep retry-watcher --job {job['id']}' — the "
                       "job keeps its status, its verdict and its covered merges, and the "
                       f"daemon gives it a watcher on the next tick. To drop the job "
                       f"instead: 'cancel --job {job['id']} --reason ...'.\n---")

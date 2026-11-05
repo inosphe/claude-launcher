@@ -466,7 +466,7 @@ def test_a_merge_with_no_local_checkout_says_why_it_was_not_swept(monkeypatch):
 def test_the_sweep_is_queued_under_the_recorded_issue(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     (root / "tools").mkdir(parents=True)
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
     calls = []
 
@@ -484,7 +484,7 @@ def test_the_sweep_is_queued_under_the_recorded_issue(monkeypatch, tmp_path):
                       "ref": f"refs/heads/delayed-sweep/s1/{'d' * 40}",
                       "issue": "claunch-x", "why": ""}
     assert calls == [(str(root), "d" * 40, "claunch-x", "s1",
-                      str(root / "tools" / "delayed_sweep.py"))]
+                      str(root / "tools" / "sweep.py"))]
 
 
 def test_a_queued_sweep_leaves_a_real_job_in_the_queue(monkeypatch, home, tmp_path):
@@ -516,7 +516,7 @@ def test_a_queued_sweep_leaves_a_real_job_in_the_queue(monkeypatch, home, tmp_pa
     git("merge", "--no-ff", "-qm", "merge side", "side")
     merge_sha = git("rev-parse", "HEAD")
     (root / "tools").mkdir()
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
 
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
     monkeypatch.setattr(queue_module, "default_database", lambda: tmp_path / "jobs.sqlite3")
@@ -564,7 +564,7 @@ def test_an_unreadable_default_branch_is_a_skip_with_its_reason(monkeypatch):
 def test_a_merge_the_queue_refuses_is_a_skip_with_that_reason(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     (root / "tools").mkdir(parents=True)
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
 
     class _Queue:

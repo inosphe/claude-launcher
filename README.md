@@ -3316,7 +3316,7 @@ work-branch push; the line under the picker says what the chosen mode does:
 For A or B, choose a live or held **parent session**. When a mesh leader works
 in this repository, only its leaders are offered: while the child's
 `reposync-merge-push-v2` run stands in `prepare` through `execute`, ordinary
-merges into the repository pause (`tools/delayed_sweep.py admit` refuses every
+merges into the repository pause (`claunch delayed-sweep admit` refuses every
 candidate but the sync's own issue, naming the sync session and its base local
 commit). The pause ends at `receipt`, when the run ends or is aborted, or when
 the child session ends; it lasts at most until the approval card's deadline

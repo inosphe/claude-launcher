@@ -17,6 +17,8 @@ from claude_launcher.daemon.delayed_sweep import Clock
 from claude_launcher.daemon import delayed_sweep as daemon_sweep, instance_manifest as im, paths
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
+#: The queue tool's module inside the package (claunch-sr6ex).
+QUEUE_MODULE = daemon_sweep.QUEUE_MODULE
 
 
 @pytest.fixture(autouse=True)
@@ -1189,6 +1191,22 @@ def test_nudge_tells_a_waiting_job_to_stay_put(repo, tmp_path):
     assert "Nothing needs doing" in out.stdout or "nothing needs doing" in out.stdout
 
 
+def test_the_done_nudge_names_the_packaged_command_not_a_checkout_path(repo, tmp_path):
+    """A sweep-watching session in a repository without the wrapper would run a
+    file that is not there (claunch-sr6ex, found in peer review): every message
+    nudge_text writes is an instruction a session follows, so the DONE one names
+    the installed command like the workflow prose does."""
+    from claude_launcher import delayed_sweep_cli
+
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.finish(job["id"], "passed", "receipt")
+    text = delayed_sweep_cli.nudge_text(q, job["id"])
+    assert text.startswith("DONE")
+    assert "claunch delayed-sweep status" in text
+    assert "tools/delayed_sweep.py" not in text
+
+
 def test_a_queue_file_without_the_batch_columns_is_upgraded(tmp_path):
     import sqlite3
     path = tmp_path / "old.sqlite3"
@@ -1630,3 +1648,96 @@ def test_the_result_notice_of_a_failed_tip_names_unbatch(repo, tmp_path, monkeyp
     clock = Clock(reporting_manager(delivered), q, batch=True, spawn=spawner([])[1], policy=(5, 3600))
     asyncio.run(clock.tick())
     assert any(f"unbatch --job {tip}" in text and "delayed-sweep: result" in text for text in delivered)
+
+
+# --------------------------------------------------------------------------- #
+# the queue tool ships in the package (claunch-sr6ex)
+# --------------------------------------------------------------------------- #
+def test_the_runner_is_the_packaged_module_not_a_checkout_copy(tmp_path):
+    """The daemon no longer derives the runner from ``job["tool"]``: that made
+    the verified repository carry ``tools/delayed_sweep.py``. The interpreter is
+    still the job's, and the package is made importable with ``-c`` rather than
+    ``PYTHONPATH`` (which would reach the sweep's pytest children)."""
+    python = sys.executable
+    db, scratch = tmp_path / "jobs.sqlite3", tmp_path / "scratch"
+    argv = daemon_sweep.runner_argv(python, "job1", db, scratch)
+
+    assert argv[:2] == [python, "-c"]
+    assert QUEUE_MODULE in argv[2] and str(daemon_sweep.package_root()) in argv[2]
+    assert "tools/delayed_sweep.py" not in " ".join(argv)
+    assert argv[3:] == ["--database", str(db), "run-one", "--job", "job1",
+                        "--scratch", str(scratch)]
+
+
+def test_the_queue_tool_runs_in_a_repository_without_a_tools_directory(repo, tmp_path):
+    """The evidence for the issue: the repo fixture is a git repository with no
+    ``tools/`` at all, and the packaged command still answers."""
+    out = subprocess.run([sys.executable, "-m", QUEUE_MODULE, "--database",
+                          str(tmp_path / "jobs.sqlite3"), "status", "--repo", str(repo)],
+                         capture_output=True, text=True, cwd=str(tmp_path))
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["jobs"] == []
+
+
+def test_the_checkout_wrapper_and_the_package_run_the_same_command(repo, tmp_path):
+    """``tools/delayed_sweep.py`` stays as a wrapper, so the old spelling in
+    workflows and notices keeps the very same stdout and exit code."""
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    enqueue(q, repo, "a")
+    args = ["--database", str(db), "status", "--repo", str(repo)]
+    wrapper = subprocess.run([sys.executable, str(TOOL.with_name("delayed_sweep.py")), *args],
+                             capture_output=True, text=True)
+    packaged = subprocess.run([sys.executable, "-m", QUEUE_MODULE, *args],
+                              capture_output=True, text=True)
+    assert (wrapper.returncode, packaged.returncode) == (0, 0)
+    assert wrapper.stdout == packaged.stdout != ""
+
+
+def test_enqueue_records_the_repositories_own_sweep_module(repo, tmp_path):
+    """Inside the package ``__file__`` is not a checkout, so the sweep module is
+    resolved from ``--repo`` — the repository whose merge is being verified."""
+    (repo / "tools").mkdir()
+    (repo / "tools" / "sweep.py").write_text("")
+    sha, _ = merge(repo, "a")
+    out = subprocess.run([sys.executable, "-m", QUEUE_MODULE, "--database",
+                          str(tmp_path / "jobs.sqlite3"), "enqueue", "--repo", str(repo),
+                          "--merge", sha, "--issue", "a", "--owner", "leader"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["tool"] == str((repo / "tools" / "sweep.py").resolve())
+
+
+def test_enqueue_without_a_sweep_module_is_refused_with_the_flag_to_pass(repo, tmp_path):
+    """A recorded path the runner cannot import retried forever; the missing
+    module is refused where the operator can still act on it."""
+    sha, _ = merge(repo, "a")
+    out = subprocess.run([sys.executable, "-m", QUEUE_MODULE, "--database",
+                          str(tmp_path / "jobs.sqlite3"), "enqueue", "--repo", str(repo),
+                          "--merge", sha, "--issue", "a", "--owner", "leader"],
+                         capture_output=True, text=True)
+    assert out.returncode == 2 and out.stdout == ""
+    assert "sweep.py" in out.stderr and "--tool" in out.stderr
+
+
+def test_the_claunch_subcommand_runs_the_same_tool(repo, tmp_path, capsys):
+    from claude_launcher import cli
+
+    db = tmp_path / "jobs.sqlite3"
+    mod.Queue(db)
+    # ``claunch delayed-sweep`` passes everything after the command name through,
+    # and that pass-through starts at the first positional: the action comes
+    # first, options (including --database) follow it.
+    assert cli.main(["delayed-sweep", "status", "--repo", str(repo),
+                     "--database", str(db)]) == 0
+    assert json.loads(capsys.readouterr().out)["jobs"] == []
+
+
+def test_the_watcher_body_names_the_packaged_command(repo, tmp_path):
+    q = queue(tmp_path)
+    jobs = merges(q, repo, list("abcde"))
+    tip = q.claim(batch=(5, 3600))
+    body = Clock(live_manager(), q).watch_body(q.get(tip["id"]))
+    assert "claunch delayed-sweep" in body["task"]
+    assert "tools/delayed_sweep.py" not in body["task"]
+    assert body["cflow_inputs"] == {"job": tip["id"], "database": str(q.database)}

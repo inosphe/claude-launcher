@@ -24,6 +24,7 @@ from . import (
     cli_commits,
     cli_cflow,
     cli_cflow2,
+    cli_delayed_sweep,
     cli_connections,
     cli_gate,
     cli_keys,
@@ -1941,6 +1942,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_plugins.register(sub)
     cli_report.register(sub)
     cli_gate.register(sub)
+    cli_delayed_sweep.register(sub)
     cli_spec.register(sub)
     cli_sim.register(sub)
     cli_shell.register(sub)
