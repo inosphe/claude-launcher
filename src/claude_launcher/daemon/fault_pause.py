@@ -463,8 +463,10 @@ def grace_timer(session, cfg: Optional[dict] = None,
                 now: Optional[float] = None) -> Optional[dict]:
     """The timer-line chip for ``session``'s resume grace, or None.
 
-    Shown while the grace runs and the automatic pause is on (with the pause
-    off there is nothing for the grace to hold back).
+    Shown while the grace runs, the automatic pause is on and the session
+    still reads an active usage-limit fault: with the pause off, or once the
+    limit has cleared, there is nothing for the grace to hold back, so the
+    chip goes before its countdown ends (claunch-xn9ir).
     """
     from . import session_timers
 
@@ -473,6 +475,12 @@ def grace_timer(session, cfg: Optional[dict] = None,
         return None
     grace = resume_grace(cfg)
     if not in_grace(session, grace, now):
+        return None
+    try:
+        record = session.fault()
+    except Exception:  # noqa: BLE001 -- a broken reading shows no chip
+        return None
+    if not record or not record.get("active") or record.get("kind") not in KINDS:
         return None
     until = grace_until(session, grace)
     return session_timers.timer(
