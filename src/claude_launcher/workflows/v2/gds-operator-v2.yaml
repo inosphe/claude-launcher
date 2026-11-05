@@ -18,7 +18,12 @@
 #
 # - watch-gate waits on `claunch operators watch` (exit 0 = the operator's
 #   watch is on, 1 = off), the same probe operator-v2 uses: it reads the
-#   record file, not the daemon.
+#   record file, not the daemon. The wait has no upper bound — operator-v2
+#   dropped its `seconds: 3600` in claunch-ca6j7.1, and this copy kept it
+#   until claunch-5c5ap: a timer plus `timeout: continue` here only tore the
+#   same wait down and re-entered it once an hour, which moved the run
+#   without ever opening a task, so nothing was typed or posted and the
+#   undecided counter restarted.
 # - observe is one pass: answer the user's input, poll the scope, read the
 #   gds6 ledger, then post — a review of what finished, and the one next
 #   action with its evidence. Nothing to say means nothing posted.
@@ -401,12 +406,9 @@ body:
               wait:
                 probe: [claunch, operators, watch]
                 poll: 30
-                seconds: 3600
                 undecided_max: 5
                 describe: 이 operator의 감시(watch)가 켜져 있다
               on:
-                # 감시가 꺼진 채 한 시간이 지났다: 같은 대기를 새로 시작한다.
-                timeout: {continue: null}
                 undecidable:
                   seq:
                     - probe-failed
