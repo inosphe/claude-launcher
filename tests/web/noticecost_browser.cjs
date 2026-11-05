@@ -13,7 +13,7 @@
    out of a board comment; this file is the same measurement where the
    repository can run it.
 
-   Three things are held, and two premises that make them mean anything:
+   Three things are held, and three premises that make them mean anything:
 
    0. **The window held polls.** The fixture counts every rail request it
       serves, and the window must contain at least two. Without this the
@@ -30,16 +30,18 @@
       being asserted, so a page that detached and re-attached all 133 cards
       on every poll printed `added 133 / removed 133` and still exited 0
       (s490-rev).
-   3. **A card's age does not restart.** The age a card shows is the run's
+   3. **The steady state is bounded — the history side.** Over the window
+      the history stays at the pending set's size — `NOTICE_HISTORY_MAX`
+      rows, plus the rows of requests still waiting that noticeTrim keeps
+      past the cap — and does not climb with the poll count.
+   4. **A card's age does not restart.** The age a card shows is the run's
       own `opened` stamp, not when this browser first saw it, so it counts
       up across polls instead of falling back to 0s. Held as "the age is at
       least what the fixture's stamp implies", which is the shape the bug
       broke.
-   4. **The steady state is bounded.** Over the window the history stays at
-      the pending set's size — `NOTICE_HISTORY_MAX` rows, plus the rows of
-      requests still waiting that noticeTrim keeps past the cap — and does
-      not climb with the poll count. The cards under #notices stay equal to
-      the pending set's size.
+   5. **The steady state is bounded — the card side.** The cards under
+      #notices stay equal to the pending set's size, so nothing adds a card
+      per poll.
 
    The first, third and fourth are not first held here. `noticehistory_check.js`
    holds them against a sliced `app.js` and a fake DOM (the cap and the
@@ -263,7 +265,7 @@ function ageSeconds(text) {
 
     assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
 
-    // 1. The window actually held polls. This comes first because every
+    // 0. The window actually held polls. This comes first because every
     //    other number below is read inside it: a window with no poll in it
     //    writes nothing whatever the page does, so "no writes" would be
     //    true of a broken page, a stopped timer and a changed interval
@@ -276,7 +278,7 @@ function ageSeconds(text) {
       + `interval grew past ${WINDOW_MS / MIN_WINDOW_POLLS}ms, widen WINDOW_MS`
     );
 
-    // 2. A settled feed is quiet: no history write for the same pending set.
+    // 1. A settled feed is quiet: no history write for the same pending set.
     assert.equal(
       after.writes, 0,
       `a settled feed rewrote claunch.noticeHistory ${after.writes} time(s) over `
@@ -284,7 +286,7 @@ function ageSeconds(text) {
       + `trim-and-re-record loop is back (claunch-qnq1c). Cards: ${after.cards}`
     );
 
-    // 3. And it leaves the DOM alone. The counts above are reported either
+    // 2. And it leaves the DOM alone. The counts above are reported either
     //    way, so without this they would look like evidence while asserting
     //    nothing: a page that detached and re-attached all 133 cards on every
     //    poll prints added 133 / removed 133 and still exits 0 (s490-rev).
@@ -301,7 +303,7 @@ function ageSeconds(text) {
       + `tearing down and redrawing (${after.records} mutation record(s))`
     );
 
-    // 2. The history stays bounded while the feed keeps polling.
+    // 3. The history stays bounded while the feed keeps polling.
     //
     //    The bound is the pending set plus the one row noticeTrim allows past
     //    the cap, and NOT the cap itself: noticeTrim deliberately keeps the
@@ -321,7 +323,7 @@ function ageSeconds(text) {
       + `feed above proves nothing`
     );
 
-    // 5. A card's age is the run's stamp, and it keeps counting. The fixture
+    // 4. A card's age is the run's stamp, and it keeps counting. The fixture
     //    opened these at least 60s ago and at most 133*60s ago; a card that
     //    restarted at 0s reads under 60.
     const ages = after.ages.map(ageSeconds).filter((v) => v !== null);
@@ -335,7 +337,7 @@ function ageSeconds(text) {
       );
     }
 
-    // 6. The card count is the pending set's size, not the poll count.
+    // 5. The card count is the pending set's size, not the poll count.
     assert.equal(
       after.cards, settled.cards,
       `cards went ${settled.cards} -> ${after.cards} while the pending set stayed `
