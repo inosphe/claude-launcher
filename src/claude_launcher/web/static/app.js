@@ -48474,10 +48474,17 @@ function cflow2GateChart(data, period) {
   const box = el("div", "cf2-gates");
   box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
   const rows = cflow2GateRows(data, ...period);
-  const saved = ((data || {}).runs || []).reduce((n, r) => n + (r.gates || []).length, 0);
+  const runs = (data || {}).runs || [];
+  const saved = runs.reduce((n, r) => n + (r.gates || []).length, 0);
+  // Gates the daemon could not give an end (claunch-b6z8m): they have no
+  // interval to draw, so the panel says how many it left out.
+  const unended = runs.reduce((n, r) => n + (Number.isInteger(r.gates_unended) ? r.gates_unended : 0), 0);
+  const unendedNote = () => el("p", "wf-note cf2-gates-unended",
+    `${unended} gate wait${unended === 1 ? "" : "s"} in the saved runs ${unended === 1 ? "has" : "have"} no recorded end and ${unended === 1 ? "is" : "are"} not drawn.`);
   if (!rows.length) {
     box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
       "No gate waited on a person in the saved runs."));
+    if (unended) box.appendChild(unendedNote());
     return box;
   }
   const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
@@ -48545,6 +48552,7 @@ function cflow2GateChart(data, period) {
   legend.append(el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
     el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
   box.appendChild(legend);
+  if (unended) box.appendChild(unendedNote());
   return box;
 }
 
