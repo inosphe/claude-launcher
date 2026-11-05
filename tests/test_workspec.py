@@ -365,7 +365,7 @@ def test_locate_points_each_error_at_its_line():
                      "    blocked_by: [nope]\n    colour: red"))
     errs = ws.validate(ws.load(text))
     where = dict(zip(errs, ws.locate(text, errs)))
-    assert where["agents.rev.kind: one of sub-lead, worker, reviewer"] == \
+    assert where["agents.rev.kind: one of sub-lead, worker, reviewer, coordinator"] == \
         _line_of(text, "kind: reviewr")
     # an unknown key: the key itself, not the item
     assert where["issues.client: unknown key(s) colour"] == \
@@ -439,3 +439,49 @@ def test_preview_of_an_attach_spec_names_the_existing_leader(doc):
     doc["mesh"] = {"mode": "attach", "name": "team"}
     doc["leader"]["mode"] = "shared"
     assert ws.preview(doc)["sessions"][0]["mode"] == "existing"
+
+
+# G: a tree with no mesh leader (the fleet's shape, docs/fleet.md) ----------
+
+def _coordinated() -> dict:
+    return {"spec": 1, "name": "c", "leader": {"mode": "none"}, "mesh": {"mode": "new"},
+            "agents": [
+                {"id": "co", "kind": "coordinator", "parent": "none", "profile": "sr",
+                 "workflow": "improv-coordinator-v2"},
+                {"id": "l1", "kind": "sub-lead", "parent": "co", "inputs": {"relation": "independent"}},
+                {"id": "w1", "kind": "worker", "parent": "l1", "start_issue": "pending",
+                 "inputs": {"relation": "stacked"}}],
+            "issues": [{"key": "root", "title": "r", "type": "epic", "assignee": "co"},
+                       {"key": "lane", "title": "l", "type": "epic", "assignee": "l1",
+                        "parent": "root"}]}
+
+
+def test_a_coordinator_holds_a_tree_with_no_mesh_leader():
+    doc = _coordinated()
+    assert ws.validate(doc) == []
+    acts = ws.plan(doc)
+    spawns = [a for a in acts if a["do"] == "spawn"]
+    assert [(a["agent"], a["parent"]) for a in spawns] == [("co", None), ("l1", "co"), ("w1", "l1")]
+    assert spawns[2]["start_issue"] == "pending"
+    assert spawns[1]["inputs"] == {"relation": "independent"}
+    assert not any(a.get("agent") == ws.LEADER_ID for a in acts)
+    rows = ws.preview(doc)["sessions"]
+    assert [(r["id"], r["depth"]) for r in rows] == [("co", 0), ("l1", 1), ("w1", 2)]
+
+
+def test_no_leader_refuses_an_agent_under_the_leader_and_a_top_level_reviewer():
+    doc = _coordinated()
+    doc["agents"][1]["parent"] = "leader"
+    assert "leader" in _errs(doc)
+    doc = _coordinated()
+    doc["agents"].append({"id": "r", "kind": "reviewer", "parent": "none"})
+    assert "reviewer" in _errs(doc)
+
+
+def test_start_issue_and_inputs_are_checked():
+    doc = _coordinated()
+    doc["agents"][2]["start_issue"] = "later"
+    assert "start_issue" in _errs(doc)
+    doc = _coordinated()
+    doc["agents"][2]["inputs"] = ["relation"]
+    assert "inputs" in _errs(doc)

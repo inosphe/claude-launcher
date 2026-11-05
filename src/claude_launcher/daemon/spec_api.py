@@ -78,8 +78,15 @@ def _summary(doc: dict) -> dict:
     }
 
 
-def _default_backend(doc: dict, board: str) -> workspec_import.Backend:
+def _default_backend(doc: dict, board: str, person: Optional[dict] = None) -> workspec_import.Backend:
+    """The import's backend. A person's import (the page, not an agent)
+    creates each child with the profile/model its spec names, as the Fleet
+    page's launch does (:class:`fleet_api.FleetBackend`); an agent's goes
+    through the HTTP spawn route and its policy."""
     from ..daemon_client import ensure_running
+    if person is not None:
+        from .fleet_api import FleetBackend
+        return FleetBackend(ensure_running(auto_start=False), board, **person)
     return workspec_import.DaemonBackend(ensure_running(auto_start=False), board)
 
 
@@ -179,9 +186,18 @@ def install(app, backend: Optional[
         if board["board_error"]:
             return fail(400, board["board_error"], workspace_error=True)
 
+        from . import actors
+        actor = actors.from_request(request)
+        person = None
+        if backend is None and actor.get("kind") != actors.AGENT:
+            person = {"app": request.app, "loop": asyncio.get_running_loop(),
+                      "actor": actor}
+
         def work():
+            built = (make_backend(doc, board["board_dir"], person) if person
+                     else make_backend(doc, board["board_dir"]))
             return workspec_import.execute(
-                doc, make_backend(doc, board["board_dir"]),
+                doc, built,
                 leader_choice=body.get("leader") or "",
                 profile=profile, base_dir=board["board_dir"])
 

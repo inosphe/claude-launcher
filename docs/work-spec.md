@@ -54,6 +54,7 @@ name: <slug>            # 메시 이름·외부 참조의 접두사
 title: <한 줄>
 source: {...}           # 출처 기록(generator, workspace, frame, scan, origin_board) — 동작에 영향 없음
 workspace: <이름>       # 세션 cwd·보드가 있는 등록 워크스페이스
+project: <이름>         # 최상위 세션(own 리더, parent: none 에이전트)의 프로젝트
 mesh: {mode, name}
 leader: {mode, own, shared}
 roles: {...}            # 메시 역할 어휘 업로드 문서
@@ -85,7 +86,7 @@ human_steps: [...]
 
 | 키 | 의미 |
 |---|---|
-| `mode` | `ask`(기본) / `own` / `shared`. import 가 선택을 주지 않을 때 쓰는 값이다. `ask` 는 기본값이 없으므로 선택 없이 import 하면 거절된다 |
+| `mode` | `ask`(기본) / `own` / `shared` / `none`. import 가 선택을 주지 않을 때 쓰는 값이다. `ask` 는 기본값이 없으므로 선택 없이 import 하면 거절된다. `none` 은 메시 리더를 만들거나 합류시키지 않는다 — 트리의 뿌리는 `parent: none` 에이전트다(아래 「리더 없는 트리」) |
 | `own` | 새 리더 세션 정의(`name`, `profile`, `model`, `workflow` — 기본 `improv-leader`) |
 | `shared.candidates` | 공유를 허용하는 기존 세션 목록. 비우면 어느 세션이든 지정할 수 있다. 하나뿐이면 `--leader shared` 만으로 그 세션이 선택된다 |
 | `shared.handle` | 공유 리더가 이 메시에서 쓰는 핸들(기본 `leader`). 메시마다 다른 핸들을 쓸 수 있다 |
@@ -110,13 +111,26 @@ human_steps: [...]
 | 키 | 의미 |
 |---|---|
 | `id` | 명세 안의 이름(slug). `leader` 는 예약어다 |
-| `kind` | `sub-lead` / `worker`(기본) / `reviewer` |
-| `parent` | `leader`(기본) 또는 `sub-lead` 인 에이전트의 id |
+| `kind` | `sub-lead` / `worker`(기본) / `reviewer` / `coordinator` |
+| `parent` | `leader`(기본), `sub-lead`·`coordinator` 인 에이전트의 id, 또는 `none`(최상위 세션) |
+| `inputs` | 그 세션의 v2 런 시작 입력(spawn 바디 `cflow_inputs`). 예: `{relation: independent}` |
+| `start_issue` | `pending` 이면 이슈 없이 시작하고 부모가 이슈 id 를 알려 줄 때까지 기다린다(바디 `beads: "existing-pending"`). 큐가 빈 에이전트에만 적용된다. 생략하면 이전 동작(`beads: false`) |
 | `handle`, `profile`, `model`, `harness`, `worktree`, `task` | spawn 인자로 그대로 전달된다 |
 | `role` | kind 의 기본 역할을 바꿀 때만 쓴다. exclusive 역할(leader)은 거절된다 |
 | `workflow` | kind 의 기본 워크플로를 바꿀 때만 쓴다 |
 | `subroles` | `subroles` 블록에 정의된 이름 |
 | `connect` | 부모·자식 외에 직접 대화할 에이전트 id |
+
+#### 리더 없는 트리 — `leader: none` 과 `parent: none`
+
+`coordinator` kind 는 worker 역할로 `improv-coordinator-v2` 를 돌리는 세션이다. 그 워크플로가
+`filter_roles: [worker]` 이므로 메시 역할은 worker 다. `parent: none` 인 에이전트는
+`POST /api/sessions` 로 만드는 최상위 세션이고 `profile`(또는 import 의 `--profile`)이
+필요하다. `project` 가 있으면 그 세션의 프로젝트가 된다. reviewer 는 최상위가 될 수 없다.
+`leader: none` 에서는 `parent: leader` 가 오류다. 깊이는 최상위 에이전트를 0 으로 센다.
+epic 은 sub-lead 와 coordinator 가 가질 수 있다. 미리 띄운 자식이 있는 부모의 오프닝
+태스크에는 그 자식 목록(핸들, 이슈 또는 「시작 이슈 대기」)이 실린다. 이 형태는 Fleet
+페이지(`docs/fleet.md`)가 만든다.
 
 에이전트 큐는 `agents` 에 적지 않는다. `issues[].assignee` 에만 적는다. 큐의 정본은 보드
 하나이고, 두 자리에 적으면 서로 달라질 수 있기 때문이다.
@@ -293,6 +307,10 @@ check 는 오류마다 그 오류가 가리키는 YAML 줄(`lines`, `errors` 와
 선택하며, 리더를 고르기 전에 미리보기를 보여 준다. `GET /api/spec/template` 은 검증을 통과하는
 예시 템플릿(`workspec.TEMPLATE`)을 돌려준다. 같은 템플릿과 작성 규칙이 `claunch install` 이
 설치하는 `work-spec` skill 에 실린다(`workspec_skill.py`).
+사람(에이전트가 아닌 호출자)이 페이지에서 import 하면 자식 spawn 은 데몬 안에서
+`api.spawn_child_as_person` 으로 실행되어, 명세의 `profile`·`model` 이 `spawn.allow_profile`
+설정과 무관하게 적용된다(`spawn.check(person_fields=True)`). 에이전트 호출자와 CLI 는 이전처럼
+spawn 정책을 따른다.
 
 | 항목 | 동작 |
 |---|---|
@@ -310,6 +328,7 @@ check 는 오류마다 그 오류가 가리키는 YAML 줄(`lines`, `errors` 와
 |---|---|
 | 형식, 검증(`validate`), 리더 결정(`resolve_leader`), 실행 순서(`plan`) | 구현됨, `tests/test_workspec.py` |
 | 실행기(보드 쓰기, 메시 생성, spawn, 연결)와 `claunch spec check/plan/import` CLI | 구현됨, `src/claude_launcher/workspec_import.py`, `tests/test_workspec_import.py` |
+| 리더 없는 트리(`leader: none`, `parent: none`, `coordinator`, `inputs`, `start_issue`, `project`) | 구현됨, `tests/test_workspec.py` G 절, `tests/test_fleet.py` |
 | 웹 UI 에서 명세 검증·plan·import | 구현됨. 대시보드 `#/spec`(`web/static/spec-page.js`), API `POST /api/spec/check·plan·import`(`daemon/spec_api.py`), `tests/test_spec_api.py`, `tests/web/specpage_check.js` |
 | 서브롤 stance 를 브리핑에 싣기(현재는 태스크 앞 prompt 로 대신함) | 후속 작업. 관련: `claunch-a6azt` |
 | gds6 issue-gen 이 이 명세를 직접 내보내는 출력기 | gds6 브랜치 `s90-gds6-workspec-export` 에 있음, gds6 master 미머지(`claunch-j8hhs`) |

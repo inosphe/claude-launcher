@@ -306,7 +306,7 @@ def test_cli_check_names_the_line_and_preview_shows_the_tree(tmp_path, capsys):
     assert cli_spec._cmd_check(argparse.Namespace(file=str(bad))) == 1
     out = capsys.readouterr().out.splitlines()[0]  # rv1's issue errs too
     assert out.startswith(f"{bad}:") and out.endswith(
-        ": agents.rv1.kind: one of sub-lead, worker, reviewer")
+        ": agents.rv1.kind: one of sub-lead, worker, reviewer, coordinator")
     line = int(out[len(str(bad)) + 1:].split(":", 1)[0])
     assert "kind: reviewr" in bad.read_text(encoding="utf-8").splitlines()[line - 1]
 
