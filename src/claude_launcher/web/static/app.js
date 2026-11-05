@@ -28354,6 +28354,7 @@ function mobileTitle() {
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
+    case "fleet": return "fleet";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -28531,6 +28532,7 @@ const VIEWS = {
   retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
+  fleet: "fleet-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -29373,6 +29375,8 @@ function parseHash(h) {
   }
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
+  // #/fleet launches from a preset; #/fleet/presets opens the editor.
+  if (parts[0] === "fleet") return { page: "fleet", tab: parts[1] || "" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -29453,6 +29457,7 @@ function route() {
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
+  if (r.page !== "fleet") globalThis.FleetPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -29549,6 +29554,7 @@ function route() {
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
+    case "fleet": showView("fleet"); globalThis.FleetPage.open(r.tab); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes

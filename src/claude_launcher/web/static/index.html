@@ -328,6 +328,7 @@
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
+      <a href="#/fleet" data-page="fleet"><span>⋔</span>Fleet</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
       <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
@@ -1804,6 +1805,9 @@
     <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
          drawn by spec-page.js. -->
     <div id="spec-view" class="hidden"></div>
+    <!-- Fleet presets: launch an agent tree from a preset, and edit the
+         presets (docs/fleet.md); drawn by fleet-page.js. -->
+    <div id="fleet-view" class="hidden"></div>
   </main>
 
   <!-- #sess-view is moved in here, to the right of #main, on a wide screen:
@@ -1898,6 +1902,7 @@
 <script src="static/knowledge-page.js"></script>
 <script src="static/retrospection-page.js"></script>
 <script src="static/spec-page.js"></script>
+<script src="static/fleet-page.js"></script>
 <script src="static/sim-page.js"></script>
 <script src="static/category-page.js"></script>
 <script src="static/packs-pane.js"></script>
