@@ -409,15 +409,30 @@ not asserted against a fake that answers more than the real tool does.
 ## CLI
 
 ```
-claunch search "<query>" [--kind beads|sessions] [--limit N] [--no-rerank] [--wait S] [-C dir] [--json]
+claunch search "<query>" [--kind beads|sessions|all] [--mode general|active] [--limit N] [--no-rerank] [--wait S] [-C dir] [--json]
 claunch rag status [--json]
-claunch rag reindex [--kind beads|sessions] [--force] [-C dir]
+claunch rag reindex [--kind beads|sessions|all] [--force] [-C dir]
 ```
+
+`--kind` takes the same three values as the daemon's `KINDS`: `beads` (this
+board, the default), `sessions` (the fleet) and `all` (both). Only `beads`
+sends a `cwd` — the other two answer for the whole fleet, so `-C` changes
+nothing there.
+
+`--mode` picks how much of the index the query reads. `general` (the
+default) searches all of it; `active` drops the documents whose records name
+no live session (a session that is exited, paused or archived). `active`
+pairs only with `--kind all`, and the pairing is refused twice: the daemon
+answers 400 `mode must be general, or active with kind=all`, and the command
+line refuses it first with an argparse error (exit 2), so an impossible
+request never reaches the daemon.
 
 `claunch search` is what an agent's "is there already an issue about X"
 should become; the workflows' `claunch beads search` line is `br`'s own
 substring search and is untouched here (changing the canonical workflow
-text is its own change — see follow-ups).
+text is its own change — see follow-ups). The MCP `search` tool is the same
+endpoint seen from a session; it carries the same `kind` and `mode` values
+(`src/claude_launcher/search_mcp.py`).
 
 ## UI plan
 
