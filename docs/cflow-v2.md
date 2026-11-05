@@ -91,6 +91,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
 | `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
 | `sides` | side 런 선언 `{<이름>: <정의 이름>}`(2.9). IR의 `meta.sides` |
+| `gates` | 런 수준 gate의 위임 선언 `{move\|report: {from, timeout, delegate}}`(2.11). IR의 `meta.gates` |
 | `recur` | `true` 또는 `{auto: true}`. 끝난 회차 뒤에 다음 회차를 요청한다(아래 「recur」). IR의 `meta.recur`(`{auto: bool}`) |
 
 #### recur
@@ -2195,6 +2196,88 @@ ask:
 - **공용 프로시저**: `ask-common`의 `ask-user`가 `delegate`·`timeout` 파라미터를
   그대로 받는다. 파라미터로 준 허용 목록은 ask가 열릴 때 그 질문의 선택지와 대조되어
   (`_brief_ask`), 없는 이름이면 그 ask가 `fail`로 끝난다.
+
+#### 선택지 게이트의 허용 목록과 기한 (claunch-vjp4y.2.1)
+
+앞 두 절은 위임의 **권한**과 ask의 **허용 목록**을 정했다. 이 절은 `chooser: user`
+선택과 드라이버의 이동·보고 요청에도 선택지 단위 허용 목록·후보·기한을 붙인다. 구조는
+새로 만들지 않고 ask 라우팅을 그대로 쓴다 — 후보 그룹·기한·escalate·허용 목록 강제가
+한 벌만 존재하고, 게이트와 ask가 같은 규칙으로 답한다.
+
+```yaml
+# 노드의 선택지 게이트: 선택지가 그 노드의 것이므로 노드 안에 선언한다
+choose:
+  chooser: user
+  prompt: …
+  from: [{role: parent}]
+  timeout: 600
+  delegate: {allow: [end]}
+  options: {new-task: …, hold: …, end: …}
+```
+
+```yaml
+# 런 수준 gate: 선택지가 approve/deny로 고정이므로 정의에 한 번 선언한다
+gates:
+  move:
+    from: [{role: parent}]
+    timeout: 900
+    delegate: {allow: [approve]}
+  report:            # 없으면 move 선언을 쓴다(둘 다 resolve_move의 판정이다)
+    from: [{role: parent}]
+    delegate: {allow: [approve, deny]}
+```
+
+| 요소 | 선택지 게이트(`choose`) | 런 수준 gate(`gates.move`/`gates.report`) |
+|---|---|---|
+| 선언 자리 | 그 `choose`의 `from`·`timeout`·`delegate` | 정의 최상위 `gates:` |
+| 후보 | `from`의 그룹. `{role: parent}`는 `driver_parent` | 같다 |
+| 허용 목록 | 노드의 선택지 이름만 (`frontend._choose_gate`) | `approve`/`deny`만 |
+| 답의 적용 | `select`와 같은 검사(`_select_check`) 후 `_take_option` | `resolve_move`와 같은 경로(`_apply_move_verdict`) |
+| 선언 조건 | `chooser: user`여야 한다 | 없다 |
+
+- **언제 열리는가**: 선택지는 `chooser: user` 선택이 `waiting_choice`에 들어설 때
+  (`_en_choose` → `_gate_open_choice`), 이동·보고 요청은 `move_request`가 설 때
+  (`request_move`·`_request_report` → `_gate_open_move`)다. 지금 답할 수 있는 후보가
+  없으면 열지 않는다 — 부모가 없는 런의 `{role: parent}`는 그 그룹이 「no parent
+  session」으로 건너뛰어져 사람 상태 그대로이므로, 게이트 레코드를 만들지 않는다
+  (`_gate_routable`).
+- **레코드**: 게이트는 보통의 ask 레코드(`state.asks`의 `ask2-…`)이고 `gate`
+  필드가 무엇에 대한 답인지 가리킨다(`{id, target: choice|move, instance, node}`).
+  선택지 게이트의 `instance`는 그 `choose` 인스턴스, 이동·보고 게이트의 `instance`는
+  `move_request`의 id다. 그래서 `asks.route`·`_expire_asks`·`_ask_escalate`·
+  `_delegated_refusal`·`flow_asks`·응답자 색인이 모두 그대로 동작한다. 저널에는
+  열릴 때 `gate_delegated`(후보·기한·허용 목록)가 남는다.
+- **답의 적용**: `flow_answer`가 부모의 답을 받으면 그 선택지를 그대로 적용한다.
+  선택지는 `select`와 같은 검사(옵션 존재, `when` guard, `require_reason`, 간격 창)를
+  거치고(`_select_check`를 두 경로가 함께 쓴다), 이동·보고는 `resolve_move`와 같은
+  함수(`_apply_move_verdict`)를 지난다. 그래서 부모의 답도 저널에 `by`(부모 세션),
+  `delegated: true`로 남고 `person_picks`에도 실린다. 간격 창이 아직 열리지 않은
+  선택지에 대한 답은 적용하지 않고 거절한다 — 질문은 열린 채 남는다.
+- **허용 목록 밖**: ask와 같은 규칙이다. 적용하지 않고 `ask_delegated_refused`로
+  남긴 뒤 그 응답자의 추상으로 기록되어, 그룹이 비면 다음 후보로, 후보가 다하면
+  사람에게 내려간다. 사람은 제한되지 않고, `abstain`은 언제나 허용된다.
+- **기한**: `timeout`이 지나면 `_expire_asks`가 그룹을 실패로 기록하고 다음 후보로
+  넘긴다(저널 `ask_timeout`). 후보가 다하면 게이트는 사람 몫으로 돌아간다
+  (`resolution: human`) — 선택·이동 요청은 그대로 서 있고, 사람이 지금처럼 답한다.
+  기한이 없으면 부모가 답할 때까지 선다.
+- **닫히는 때**: 게이트가 더 이상 서 있지 않으면 게이트 ask도 닫힌다
+  (`_gate_close`, 저널 `ask_closed`). 사람이 직접 답한 경우(`select`의
+  `caller: user`나 `resolve_move`)→ `_take_option`/`resolve_move`가 닫고, 드라이버가
+  요청을 철회하거나(`cancel_move_request`) 런이 옮겨졌거나(`_move_run`) 선택 인스턴스가
+  사라진 경우는 `_tick_time`의 `_gate_sweep`이 닫는다. 부모가 답한 경우는 그 답이
+  곧 닫힘이다.
+- **보이는 곳**: `flow_status`의 `choices[*].gate`와 `move_request.gate`에 후보·지금
+  물어본 세션·기한·허용 목록·건너뛴 그룹이 실린다. 응답자 쪽(`flow_asks`,
+  `asks.pending_for`)에는 `delegate.allow`가 실려 부모가 어느 선택지가 자기 것인지
+  본다.
+- **선언을 지키는 곳**: `frontend._choose_gate`·`frontend._gates`가 컴파일할 때
+  검사한다 — `chooser: user`, `otherwise: human`, 후보 최소 1개, 허용 목록 이름이 그
+  게이트가 실제로 답하는 선택지(`move`/`report`는 `approve`/`deny`)일 것, 중복 없음.
+  이 넷은 모두 컴파일 오류다.
+- **변하지 않은 것**: `gate_authority`(사람 | 부모, 드라이버 제외), 부모의
+  `flow_select`·`flow_move`, 데몬의 `child-gate` 알림, 중첩 런(`calls`·위임 슬롯)이
+  부모 위임의 범위 밖이라는 경계가 모두 그대로다. 게이트가 선언을 갖지 않으면 지금과
+  똑같이 사람만 답한다.
 
 ### 2.12 동적 호출: `calls`와 `flow_call` (claunch-z17c9)
 

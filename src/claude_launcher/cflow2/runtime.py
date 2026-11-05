@@ -204,6 +204,20 @@ NUDGE_NOTE_LIMIT = 1500
 MOVE_KIND_MOVE = "move"
 MOVE_KIND_REPORT = "report"
 
+#: What a *gate ask* answers (claunch-vjp4y.2.1): a ``chooser: user`` choice,
+#: or the driver's move/report request. A gate ask is an ordinary ask record
+#: (``kind: "gate"`` in its ``gate`` field) opened when the gate stands, so
+#: the candidate groups, deadline, ``_ask_escalate`` and ``delegate.allow``
+#: rules the ask path already has are the ones the gate is answered by; its
+#: answer applies as the pick or the move verdict rather than as a task's
+#: outcome. It exists only while the gate has somewhere to route: with no
+#: candidate that can answer, the gate is the person's alone, as before.
+GATE_CHOICE = "choice"
+GATE_MOVE = "move"
+GATE_TARGETS = (GATE_CHOICE, GATE_MOVE)
+#: The options a move/report gate is answered with (``resolve_move``).
+MOVE_VERDICTS = ("approve", "deny")
+
 #: Probe poll interval when a wait declares none.
 DEFAULT_POLL = 60.0
 
@@ -834,6 +848,8 @@ def _en_choose(r: Run, iid: str, node: ir.Node) -> None:
     r.inst[iid]["await"] = AW_CHOOSE
     r.emit("waiting", node=node.id, instance=iid, kind="choose",
            chooser=node.get("chooser") or ir.CHOOSER_AGENT)
+    if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
+        _gate_open_choice(r, iid, node)
 
 
 def _en_par(r: Run, iid: str, node: ir.Node) -> None:
@@ -3370,6 +3386,59 @@ NUDGE_HINT = ("The user may not be watching this terminal. The dashboard already
               "flow_nudge(message) once to put its one-line summary on that card, then wait")
 
 
+def _select_check(r: Run, node: Optional[str], option: str, *, caller: str, who: str,
+                  reason: Optional[str],
+                  person: Optional[bool] = None) -> Tuple[str, ir.Node, Dict[str, Any]]:
+    """The checks every pick passes before it is taken: the caller's authority
+    over a person's choice, the choice's own gate, the option and its guard,
+    and the reason the choice asks for.
+
+    Shared by :func:`select` (a person, the parent, the driver) and by a gate
+    ask's answer (:func:`_gate_apply`), so a pick that arrives as a reply to
+    the parent is judged by the same rules as one typed into ``flow_select``."""
+    if person is None:
+        person = caller == CALLER_USER
+    if not person:
+        _require_no_move_request(r)
+    if caller == CALLER_PARENT and gate_authority(r.state, who) != CALLER_PARENT:
+        # the parent's hand is the one grant an agent-side caller has;
+        # check it here too, so a caller that names the wrong hand is
+        # refused at the engine and not only by the surface that called it
+        raise FlowError(
+            f"{who or 'this caller'} may not answer this run's person gate: only the "
+            f"driving session's parent ({driver_parent_of(r.state) or 'none'}) answers "
+            f"it in the hierarchy")
+    iid = _find(r, node, (AW_CHOOSE,), "choice")
+    n = r.node_of(iid)
+    chooser = n.get("chooser") or ir.CHOOSER_AGENT
+    if chooser == ir.CHOOSER_USER and caller not in (CALLER_USER, CALLER_PARENT):
+        parent = driver_parent_of(r.state)
+        extra = (f" Its parent {parent!r} may answer it too, with "
+                 f"flow_select(scope={r.state.get('scope')!r})." if parent else "")
+        raise FlowError(
+            f"choice {n.label or n.id} is the user's (chooser: user). Present the "
+            f"options and your recommendation to the user; they pick with "
+            f"'claunch cflow2 select {iid} <option>' or on the run page.{extra} "
+            f"{NUDGE_HINT}"
+        )
+    opts = {o["name"]: o for o in n.get("options") or []}
+    if option not in opts:
+        raise FlowError(f"no option {option!r} (options: {', '.join(opts)})")
+    opt = opts[option]
+    try:
+        allowed = _guard(r, iid, opt.get("guard"))
+    except expr_mod.ExprError as exc:
+        raise FlowError(f"option {option!r} guard could not be evaluated: {exc}")
+    if not allowed:
+        raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
+    # a person may always answer without a reason (docs 2.11); the
+    # requirement is the agent's
+    if (n.get("require_reason") and not person
+            and not (reason or "").strip()):
+        raise FlowError(f"choice {n.label or n.id} requires a reason")
+    return iid, n, opt
+
+
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
            caller: str = CALLER_AGENT, cwd: Optional[str] = None,
            scope: Optional[str] = None, now: Optional[float] = None,
@@ -3393,44 +3462,8 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
 
     def op(r: Run) -> None:
         _require_progress(r)
-        if not person:
-            _require_no_move_request(r)
-        if caller == CALLER_PARENT and gate_authority(r.state, who) != CALLER_PARENT:
-            # the parent's hand is the one grant an agent-side caller has;
-            # check it here too, so a caller that names the wrong hand is
-            # refused at the engine and not only by the surface that called it
-            raise FlowError(
-                f"{who or 'this caller'} may not answer this run's person gate: only the "
-                f"driving session's parent ({driver_parent_of(r.state) or 'none'}) answers "
-                f"it in the hierarchy")
-        iid = _find(r, node, (AW_CHOOSE,), "choice")
-        n = r.node_of(iid)
-        chooser = n.get("chooser") or ir.CHOOSER_AGENT
-        if chooser == ir.CHOOSER_USER and caller not in (CALLER_USER, CALLER_PARENT):
-            parent = driver_parent_of(r.state)
-            extra = (f" Its parent {parent!r} may answer it too, with "
-                     f"flow_select(scope={r.state.get('scope')!r})." if parent else "")
-            raise FlowError(
-                f"choice {n.label or n.id} is the user's (chooser: user). Present the "
-                f"options and your recommendation to the user; they pick with "
-                f"'claunch cflow2 select {iid} <option>' or on the run page.{extra} "
-                f"{NUDGE_HINT}"
-            )
-        opts = {o["name"]: o for o in n.get("options") or []}
-        if option not in opts:
-            raise FlowError(f"no option {option!r} (options: {', '.join(opts)})")
-        opt = opts[option]
-        try:
-            allowed = _guard(r, iid, opt.get("guard"))
-        except expr_mod.ExprError as exc:
-            raise FlowError(f"option {option!r} guard could not be evaluated: {exc}")
-        if not allowed:
-            raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
-        # a person may always answer without a reason (docs 2.11); the
-        # requirement is the agent's
-        if (n.get("require_reason") and not person
-                and not (reason or "").strip()):
-            raise FlowError(f"choice {n.label or n.id} requires a reason")
+        iid, n, opt = _select_check(r, node, option, caller=caller, who=who, reason=reason,
+                                    person=person)
         frame = r.inst[iid]["frame"]
         held = frame.get("held")
         opens = _window_opens(r, n, opt)
@@ -3548,6 +3581,10 @@ def _batch_status(r: Run, opt: Dict[str, Any], opens: Optional[float]) -> Dict[s
 def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
                  by: str, override: bool = False, delegated: bool = False) -> None:
     option = opt["name"]
+    # the gate stands only while nobody has taken it: a pick -- a person's,
+    # the parent's through flow_select, a paced window's -- closes the gate
+    # ask the parent may still be holding (claunch-vjp4y.2.1)
+    _gate_close(r, target=GATE_CHOICE, instance=iid, why=f"{by} took {option!r}", by=by)
     r.inst[iid]["await"] = None
     r.inst[iid]["frame"]["option"] = option
     # the chooser's reason travels with the option: an ask opened under it
@@ -4648,6 +4685,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         r.emit("move_superseded", request=pending.get("id"), node=pending.get("node"),
                forced_to=tid, by=by)
     r.state.pop(MOVE_REQUEST, None)
+    _gate_close(r, target=GATE_MOVE, why=f"the run moved ({by})", by=by)
     r.emit("forced", node=tid, label=node.label or None, by=by, reason=reason or None,
            at=r.inst[cur]["node"], left=left,
            **({"granted": granted.get("id"), "asked_by": granted.get("by")}
@@ -4954,6 +4992,9 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
         r.emit("move_requested", request=request["id"], node=tid, label=node.label or None,
                by=by, reason=note, left=request["from"],
                **({"replaces": previous.get("id")} if previous else {}))
+        # the request is a person's gate: the run's ``gates.move`` may route it
+        # to the parent too, with the verdicts it allows (claunch-vjp4y.2.1)
+        _gate_open_move(r, request)
         filed.update(request)
 
     _mutate(cwd, scope, now, op)
@@ -5002,6 +5043,7 @@ def _request_report(target: str, reason: str, outcome: str, value: Any, *, by: s
         r.emit("move_requested", request=request["id"], kind=MOVE_KIND_REPORT, node=n.id,
                instance=iid, label=n.label or None, by=by, reason=note, outcome=outcome,
                **({"replaces": previous.get("id")} if previous else {}))
+        _gate_open_move(r, request)
         filed.update(request)
 
     _mutate(cwd, scope, now, op)
@@ -5026,6 +5068,8 @@ def cancel_move_request(*, by: str, cwd: Optional[str] = None, scope: Optional[s
             raise FlowError("no pending move request on this run")
         r.state.pop(MOVE_REQUEST, None)
         r.emit("move_withdrawn", request=pending.get("id"), node=pending.get("node"), by=by)
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why="the driver withdrew the request", by=by)
 
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -5070,42 +5114,61 @@ def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] 
         pending = pending_move(r.state)
         if pending is None:
             raise FlowError("no pending move request on this run")
-        if verdict == "approve":
-            _require_progress(r)
-            if pending.get("kind") == MOVE_KIND_REPORT:
-                iid = str(pending.get("instance") or "")
-                if (r.inst.get(iid) or {}).get("await") != AW_TASK:
-                    raise FlowError(f"task {pending.get('label') or pending.get('node')} "
-                                    f"({iid}) is no longer waiting for a report; refuse the "
-                                    f"request (--deny) and let the driver ask again")
-                r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
-                       by=by, reason=note or None)
-                r.state.pop(MOVE_REQUEST, None)
-                text = (f"reported by a person on {pending.get('by') or 'the driver'}'s "
-                        f"request ({pending.get('id')}): {pending.get('reason')}"
-                        + (f" -- {note}" if note else ""))
-                _report_task(r, iid, pending["outcome"], pending.get("value"), text, by,
-                             verify_runner, now, job)
-                out.update(move_request={**pending, "decision": "approved"})
-                return
-            r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
-                   by=by, reason=note or None)
-            moved: Dict[str, Any] = {}
-            _move_run(r, pending["node"], note or pending.get("reason"), by, moved,
-                      granted=pending)
-            out.update(forced=moved, move_request={**pending, "decision": "approved"})
-            return
-        decided = {**pending, "decision": "denied", "decided_by": by,
-                   "decided_reason": note, "decided_at": _iso(r.now)}
-        r.state[MOVE_REQUEST] = decided
-        r.emit("move_denied", request=pending.get("id"), node=pending.get("node"), by=by,
-               reason=note or None)
-        out.update(move_request=decided)
+        out.update(_apply_move_verdict(r, pending, verdict, by=by, note=note,
+                                       verify_runner=verify_runner, now=now, job=job))
+        # a person's or the parent's own answer closes the gate ask that
+        # asked the parent too (claunch-vjp4y.2.1); it is one record per
+        # request, so no ``skip`` is needed here
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why=f"answered by {by}: {verdict}", by=by)
 
     _mutate(cwd, scope, now, op)
     payload = _with_verify_note(status(cwd=cwd, scope=scope, now=now, tick=False), job)
     payload.update(out)
     return payload
+
+
+def _apply_move_verdict(r: Run, pending: Dict[str, Any], verdict: str, *, by: str,
+                        note: str, verify_runner: Optional[VerifyRunner],
+                        now: Optional[float], job: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply an ``approve``/``deny`` verdict to the pending request.
+
+    Shared by :func:`resolve_move` (a person, or the parent typing the
+    answer) and by a gate ask's answer (:func:`_gate_apply`), so the two
+    doors do the same thing and journal it the same way."""
+    out: Dict[str, Any] = {}
+    if verdict == "approve":
+        _require_progress(r)
+        if pending.get("kind") == MOVE_KIND_REPORT:
+            iid = str(pending.get("instance") or "")
+            if (r.inst.get(iid) or {}).get("await") != AW_TASK:
+                raise FlowError(f"task {pending.get('label') or pending.get('node')} "
+                                f"({iid}) is no longer waiting for a report; refuse the "
+                                f"request (--deny) and let the driver ask again")
+            r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
+                   by=by, reason=note or None)
+            r.state.pop(MOVE_REQUEST, None)
+            text = (f"reported by a person on {pending.get('by') or 'the driver'}'s "
+                    f"request ({pending.get('id')}): {pending.get('reason')}"
+                    + (f" -- {note}" if note else ""))
+            _report_task(r, iid, pending["outcome"], pending.get("value"), text, by,
+                         verify_runner, now, job)
+            out.update(move_request={**pending, "decision": "approved"})
+            return out
+        r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
+               by=by, reason=note or None)
+        moved: Dict[str, Any] = {}
+        _move_run(r, pending["node"], note or pending.get("reason"), by, moved,
+                  granted=pending)
+        out.update(forced=moved, move_request={**pending, "decision": "approved"})
+        return out
+    decided = {**pending, "decision": "denied", "decided_by": by,
+               "decided_reason": note, "decided_at": _iso(r.now)}
+    r.state[MOVE_REQUEST] = decided
+    r.emit("move_denied", request=pending.get("id"), node=pending.get("node"), by=by,
+           reason=note or None)
+    out.update(move_request=decided)
+    return out
 
 # -- time and probes ---------------------------------------------------------
 
@@ -5421,6 +5484,8 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                 fired = True
                 break
         if not fired and _expire_asks(r):
+            fired = True
+        if not fired and _gate_sweep(r):
             fired = True
         if not fired:
             break
@@ -6003,6 +6068,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 "optional": optional_choice(r.inst, r.chart, iid),
             })
             held = inst["frame"].get("held")
+            gate_view = _gate_view(s, GATE_CHOICE, iid)
+            if gate_view:
+                # the gate is also with the parent (claunch-vjp4y.2.1): who was
+                # asked, until when, and which options it may take
+                choices[-1]["gate"] = gate_view
             if held:
                 held_opens = _held_opens(r, node, held)
                 choices[-1]["held"] = {**held, "opens_at": _iso(held_opens)}
@@ -6113,6 +6183,9 @@ def describe(r: Run) -> Dict[str, Any]:
                 and r.status in LIVE_STATUSES:
             # measured now, not when filed: the card shows what a grant does
             move_req = {**move_req, "plan": move_plan(r, str(move_req.get("node") or ""))}
+        gate_view = _gate_view(s, GATE_MOVE, str(move_req.get("id") or ""))
+        if gate_view:
+            move_req = {**move_req, "gate": gate_view}
         out["move_request"] = move_req
     hints = []
     if tasks:
@@ -6650,6 +6723,259 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         _ask_fall(r, rec, "the ask declares no 'from' candidates")
 
 
+# -- gate asks: a person's gate routed to the parent ------------------------
+#
+# A ``chooser: user`` choice and the driver's move/report request are gates
+# only a person may pass (docs 2.11). In a parent/child hierarchy the parent
+# is the one who would have been asked anyway (claunch-vjp4y); this is where
+# a gate declares *which of its options* that parent may take, for how long
+# it is asked, and what happens when it does not answer (claunch-vjp4y.2.1).
+#
+# The mechanism is the ask machinery, not a second copy of it: the gate is
+# opened as an ordinary ask record (its ``gate`` field says what its answer
+# applies to), so ``asks.route`` resolves the candidate groups, a
+# ``{role: parent}`` candidate is typed into the parent's terminal,
+# ``_expire_asks`` / ``_ask_escalate`` move the question on at the deadline,
+# ``_delegated_refusal`` enforces ``delegate.allow``, and a person's answer is
+# still the gate's own (``select`` / ``resolve_move``), never restricted.
+
+
+def _gate_decl(r: Run, target: str) -> Optional[Dict[str, Any]]:
+    """The run's ``gates:`` declaration for a move/report gate.
+
+    A ``report`` gate without its own entry is answered by the ``move`` one:
+    both are ``resolve_move`` verdicts (``approve`` / ``deny``), and a
+    definition that delegates the move gate has said how the run's off-route
+    requests are answered."""
+    gates = (r.chart.meta or {}).get("gates") or {}
+    kind = MOVE_KIND_REPORT if target == MOVE_KIND_REPORT else MOVE_KIND_MOVE
+    decl = gates.get(kind)
+    if decl is None and kind == MOVE_KIND_REPORT:
+        decl = gates.get(MOVE_KIND_MOVE)
+    return dict(decl) if isinstance(decl, dict) else None
+
+
+def _gate_spec(r: Run, target: str,
+               node: Optional[ir.Node] = None) -> Optional[Dict[str, Any]]:
+    """The gate's delegation, normalised: ``{from, timeout, delegate}`` or
+    ``None`` when the gate declares none (it is then the person's alone, as
+    before)."""
+    decl = (node.get("gate") if node is not None else None) if target == GATE_CHOICE \
+        else _gate_decl(r, target)
+    if not isinstance(decl, dict) or not decl:
+        return None
+    timeout = decl.get("timeout")
+    return {
+        "from": [{"role": str((c or {}).get("role") or "").lower(),
+                  "scope": str((c or {}).get("scope") or "any").lower(),
+                  "connect": bool((c or {}).get("connect"))}
+                 for c in decl.get("from") or []],
+        "timeout": float(timeout) if timeout else None,
+        "delegate": _ask_delegate(decl.get("delegate")),
+    }
+
+
+def _gate_routable(r: Run, spec: Dict[str, Any]) -> bool:
+    """Whether any declared candidate could answer now. A ``{role: parent}``
+    candidate needs the run to have a parent; with none, the gate would open
+    an ask that falls to a person on the spot, which is the state the gate is
+    in already."""
+    parent = driver_parent_of(r.state)
+    for c in spec.get("from") or []:
+        if c.get("role") != PARENT_ROLE or parent:
+            return True
+    return False
+
+
+def _gate_open_for(r: Run, target: str, instance: str) -> Optional[Dict[str, Any]]:
+    """The open gate ask of ``instance`` for ``target``, if one is."""
+    for rec in (r.state.get("asks") or {}).values():
+        g = rec.get("gate") or {}
+        if rec.get("status") == "open" and g.get("target") == target \
+                and g.get("instance") == instance:
+            return rec
+    return None
+
+
+def _gate_view(state: Dict[str, Any], target: str,
+               instance: str) -> Optional[Dict[str, Any]]:
+    """What ``status`` shows about a gate that is also with the parent: the
+    ask it is, its candidate groups, who was asked, the deadline, and the
+    options the parent may take. ``None`` when the gate declares nothing --
+    the run then behaves exactly as it did before delegation."""
+    rec = None
+    for cand in (state.get("asks") or {}).values():
+        g = cand.get("gate") or {}
+        if g.get("target") == target and str(g.get("instance") or "") == str(instance):
+            rec = cand
+    if rec is None:
+        return None
+    return {
+        "ask": rec.get("id"), "status": rec.get("status"),
+        "resolution": rec.get("resolution"),
+        "from": [_cand_text(c) for c in rec.get("from") or []],
+        "asked": [e.get("handle") for e in rec.get("asked") or []],
+        "deadline": rec.get("deadline"),
+        "allow": (rec.get("delegate") or {}).get("allow"),
+        **({"skipped": [s.get("reason") for s in rec.get("skipped") or []]}
+           if rec.get("skipped") else {}),
+    }
+
+
+def _gate_prompt(asked: str, chosen: List[str], options: List[str], why: str) -> str:
+    allowed = ", ".join(chosen) if chosen else "(none)"
+    names = ", ".join(options)
+    return (f"{asked}\n\nAs the run's parent you may take: {allowed}. "
+            f"Its options are: {names}. Any other option is recorded and the question "
+            f"goes on to the person -- so pick only what you would answer for them."
+            + (f"\n\n{why}" if why else ""))
+
+
+def _gate_open(r: Run, target: str, *, instance: str, node_id: str, label: str,
+               spec: Dict[str, Any], options: List[Dict[str, Any]], prompt: str,
+               require_reason: bool = False) -> Dict[str, Any]:
+    """Open the gate as an ask record routed by the ask machinery."""
+    aid = f"ask2-{secrets.token_hex(4)}"
+    rec: Dict[str, Any] = {
+        "id": aid, "instance": instance, "node": node_id, "label": label,
+        "kind": "decision",
+        "gate": {"id": f"g-{secrets.token_hex(3)}", "target": target,
+                 "instance": instance, "node": node_id},
+        "prompt": prompt, "require_reason": bool(require_reason),
+        "from": spec["from"], "otherwise": ASK_OTHERWISE_HUMAN,
+        "default_option": None, "timeout": spec.get("timeout"),
+        "on_decline": None, "on_unroutable": None, "urgent": False, "criteria": [],
+        "delegate": spec.get("delegate"),
+        "options": list(options), "status": "open",
+        "resolution": RES_ROUTING, "group": 0, "asked": [], "skipped": [],
+        "deadline": None, "deferrals": 0, "retry_at": None,
+        "opened": store_mod.utcnow(), "opened_at": r.now,
+        "visit": int((r.state.get("visits") or {}).get(node_id) or 0),
+    }
+    r.state.setdefault("asks", {})[aid] = rec
+    r.emit("gate_delegated", node=node_id, instance=instance, target=target, ask=aid,
+           candidates=[_cand_text(c) for c in spec["from"]],
+           timeout=spec.get("timeout"),
+           allow=(spec.get("delegate") or {}).get("allow") or None)
+    return rec
+
+
+def _gate_open_choice(r: Run, iid: str, node: ir.Node) -> Optional[Dict[str, Any]]:
+    """A ``chooser: user`` choice stood: ask the parent too, if the choice
+    declared candidates and one of them can answer now."""
+    spec = _gate_spec(r, GATE_CHOICE, node)
+    if not spec or not spec["from"] or not _gate_routable(r, spec):
+        return None
+    if _gate_open_for(r, GATE_CHOICE, iid) is not None:
+        return None
+    options = [{"name": o["name"], "outcome": None,
+                "description": o.get("description") or ""}
+               for o in node.get("options") or []]
+    label = shown_label(r.chart, node) or node.id
+    body = (render(node.get("prompt"), r.env(iid)) or "").strip()
+    asked = f"The choice {label!r} stands on a person" + (f":\n\n{body}" if body else ".")
+    allow = (spec.get("delegate") or {}).get("allow") or [o["name"] for o in options]
+    return _gate_open(r, GATE_CHOICE, instance=iid, node_id=node.id, label=label,
+                      spec=spec, options=options,
+                      prompt=_gate_prompt(asked, allow, [o["name"] for o in options], ""),
+                      require_reason=bool(node.get("require_reason")))
+
+
+def _gate_open_move(r: Run, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The driver filed a move/report request: ask the parent too, if the run
+    declares ``gates.move`` (or ``gates.report``) and a candidate can answer."""
+    if pending_move(r.state) is not request:
+        return None
+    target = GATE_MOVE
+    spec = _gate_spec(r, MOVE_KIND_REPORT if request.get("kind") == MOVE_KIND_REPORT
+                      else MOVE_KIND_MOVE)
+    if not spec or not spec["from"] or not _gate_routable(r, spec):
+        return None
+    if _gate_open_for(r, target, str(request["id"])) is not None:
+        return None
+    label = request.get("label") or request.get("node") or ""
+    what = ("report the task" if request.get("kind") == MOVE_KIND_REPORT
+            else "move the run to")
+    asked = (f"{request.get('by') or 'The driver'} asks you to {what} {label!r}:\n\n"
+             f"{request.get('reason') or ''}".rstrip())
+    options = [{"name": "approve", "outcome": None,
+                "description": "grant it: the run does what the request asks"},
+               {"name": "deny", "outcome": None,
+                "description": "refuse it: the run stays where it stands"}]
+    allow = (spec.get("delegate") or {}).get("allow") or list(MOVE_VERDICTS)
+    return _gate_open(r, target, instance=str(request["id"]), node_id=str(request.get("node") or ""),
+                      label=label, spec=spec, options=options,
+                      prompt=_gate_prompt(asked, allow, list(MOVE_VERDICTS), ""))
+
+
+def _gate_close(r: Run, *, target: Optional[str] = None, instance: Optional[str] = None,
+                why: str = "", by: Optional[str] = None,
+                skip: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The gate is answered or gone: its ask is closed with ``why``, and the
+    responders still holding it are told. ``skip`` leaves one record alone
+    (the answer being applied)."""
+    closed = []
+    for rec in (r.state.get("asks") or {}).values():
+        if rec.get("status") != "open" or not rec.get("gate"):
+            continue
+        g = rec["gate"]
+        if target is not None and g.get("target") != target:
+            continue
+        if instance is not None and str(g.get("instance") or "") != str(instance):
+            continue
+        if skip is not None and rec.get("id") == skip:
+            continue
+        _withdraw(r, rec, why or "the gate is answered")
+        rec["status"] = "closed"
+        rec["closed"] = store_mod.utcnow()
+        rec["closed_why"] = why
+        r.emit("ask_closed", ask=rec["id"], node=rec.get("node"),
+               instance=g.get("instance"), target=g.get("target"),
+               why=why or None, by=by)
+        closed.append(rec)
+    return closed
+
+
+def _gate_apply(r: Run, rec: Dict[str, Any], choice: str, *, by: str,
+                reason: Optional[str], job: Dict[str, Any]) -> None:
+    """Apply a gate ask's answer as the gate's own answer.
+
+    The pick is judged by the same rules a typed ``flow_select`` is
+    (:func:`_select_check`), and the move verdict by the code path a person's
+    ``resolve_move`` takes (:func:`_apply_move_verdict`) -- the answer's
+    authority is the routing, the application is the gate's."""
+    g = rec.get("gate") or {}
+    target = g.get("target")
+    if target == GATE_CHOICE:
+        iid = str(g.get("instance") or "")
+        inst = r.inst.get(iid) or {}
+        if inst.get("await") != AW_CHOOSE:
+            raise FlowError(
+                f"the choice {rec.get('label') or iid!r} is no longer waiting for a pick; "
+                f"nothing was applied -- refuse it instead ({ASK_ABSTAIN})")
+        _iid, n, opt = _select_check(r, iid, choice, caller=CALLER_PARENT, who=by,
+                                     reason=reason)
+        opens = _window_opens(r, n, opt)
+        if opens is not None and r.now < opens:
+            raise FlowError(
+                f"option {choice!r} is paced (interval); its window opens at "
+                f"{_iso(opens)} -- answer again then")
+        _take_option(r, iid, n, opt, reason, by, delegated=True)
+        return
+    if target == GATE_MOVE:
+        pending = pending_move(r.state)
+        if pending is None or str(pending.get("id")) != str(g.get("instance")):
+            raise FlowError(
+                f"the request {g.get('instance')!r} is no longer pending; nothing was "
+                f"applied -- refuse it instead ({ASK_ABSTAIN})")
+        _apply_move_verdict(r, pending, choice, by=by, note=(reason or "").strip(),
+                            verify_runner=None, now=r.now, job=job)
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why=f"answered by {by}: {choice}", by=by, skip=rec.get("id"))
+        return
+    raise FlowError(f"unknown gate {target!r}: nothing was applied")
+
+
 def _ask_because(r: Run, iid: str) -> Optional[Dict[str, Any]]:
     """Why the run reached the ask ``iid``: the nearest enclosing choice whose
     option it sits under, with the reason its chooser gave (``None`` when no
@@ -6891,6 +7217,33 @@ def _expire_asks(r: Run) -> bool:
                               f"{float(rec.get('timeout') or 0):g}s")
         moved = True
     return moved
+
+
+def _gate_sweep(r: Run) -> bool:
+    """Close the gate asks whose gate is gone: the choice was taken or
+    dropped, the request was answered, withdrawn or superseded. A gate ask is
+    a question about a gate, and a question about something that no longer
+    stands has no answer left to give -- its responders are told."""
+    closed = False
+    for rec in list((r.state.get("asks") or {}).values()):
+        g = rec.get("gate") or {}
+        if rec.get("status") != "open" or not g:
+            continue
+        target = g.get("target")
+        why = None
+        if target == GATE_CHOICE:
+            inst = r.inst.get(str(g.get("instance") or ""))
+            if not inst or inst.get("await") != AW_CHOOSE:
+                why = "the choice is no longer waiting for a pick"
+        elif target == GATE_MOVE:
+            pending = pending_move(r.state)
+            if pending is None or str(pending.get("id")) != str(g.get("instance")):
+                why = "the request is no longer pending"
+        else:
+            why = f"the gate {target!r} is not one this build knows"
+        if why and _gate_close(r, target=target, instance=str(g.get("instance")), why=why):
+            closed = True
+    return closed
 
 
 def asks_to_route(r: Run) -> List[Dict[str, Any]]:
@@ -7194,6 +7547,28 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                 receipt["note"] = (f"{choice!r} is not one of the options this answerer may "
                                    f"take ({', '.join((rec.get('delegate') or {}).get('allow') or [])}); "
                                    f"nothing was applied. " + receipt["note"])
+            return
+        if rec.get("gate"):
+            # A gate ask is answered by the gate itself: the pick (or the move
+            # verdict) is applied under the same rules as a typed answer, and
+            # the question closes with it (claunch-vjp4y.2.1).
+            job: Dict[str, Any] = {}
+            _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
+            _gate_apply(r, rec, choice, by=handle, reason=reason, job=job)
+            rec["status"] = "answered"
+            rec["closed"] = store_mod.utcnow()
+            rec["answer"] = {"decision": choice, "by": handle, "reason": reason,
+                             "channel": "responder"}
+            r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                                    if not (a.get("kind") == "ask"
+                                            and a.get("ask") == rec["id"])]
+            r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
+                   decision=choice, by=handle, by_session=session, reason=reason,
+                   channel="responder")
+            receipt["note"] = ("recorded; the gate is answered and the run continues from "
+                               "it")
+            if job:
+                receipt["verify"] = job
             return
         _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
         _ask_resolve(r, rec, choice, by=handle, reason=reason, channel="responder")

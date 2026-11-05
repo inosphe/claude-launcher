@@ -190,7 +190,7 @@ TOP_KEYS = (
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
     "inputs", "input_constraints", "collections", "collection_types", "question_types",
-    "sides", "recur",
+    "sides", "recur", "gates",
     # ad-hoc layout metadata (cflow2/layouts.py): a reference to a separate
     # layout file, never the layout itself -- the workflow stays readable
     "layout",
@@ -1526,7 +1526,8 @@ def _b_cond(ctx, sc, node, value, m, line):
 def _b_choose(ctx, sc, node, value, m, line):
     node.type = ir.T_CHOOSE
     spec = _need_map(ctx, sc.file, value, "choose", line)
-    _check_keys(ctx, sc.file, spec, ("prompt", "chooser", "require_reason", "options"), "choose")
+    _check_keys(ctx, sc.file, spec, ("prompt", "chooser", "require_reason", "options",
+                                     "from", "otherwise", "timeout", "delegate"), "choose")
     chooser = spec.get("chooser", ir.CHOOSER_AGENT)
     if chooser not in ir.CHOOSERS:
         raise ctx.err(sc.file, line, f"choose.chooser must be one of {', '.join(ir.CHOOSERS)}")
@@ -1573,6 +1574,148 @@ def _b_choose(ctx, sc, node, value, m, line):
         options.append(entry)
     if not options:
         raise ctx.err(sc.file, line, "choose needs at least one option")
+    gate = _choose_gate(ctx, sc, spec, options, chooser, line)
+    if gate:
+        node.props.update(gate)
+
+
+GATE_KEYS = ("from", "otherwise", "timeout", "delegate")
+
+
+def _gate_allow(ctx, file: str, raw: Any, what: str, line: int) -> Dict[str, Any]:
+    """``delegate: {allow: [...]}`` of a gate: the options a delegated answerer
+    (the driver's parent) may take. Names are checked against the gate's own
+    options where it has them (a ``choose``); the run-level ``gates:`` list is
+    checked against what those gates answer (``approve``/``deny``)."""
+    raw = _need_map(ctx, file, raw, f"{what} delegate", line)
+    _check_keys(ctx, file, raw, ("allow",), f"{what} delegate")
+    allow = raw.get("allow")
+    if not isinstance(allow, list) or not allow or not all(
+            isinstance(a, str) and a.strip() for a in allow):
+        raise ctx.err(file, line, f"{what}: delegate.allow must be a non-empty list of "
+                                     f"option names")
+    names = [a.strip() for a in allow]
+    if len({n.casefold() for n in names}) != len(names):
+        raise ctx.err(file, line, f"{what}: delegate.allow repeats a name (answers are "
+                                     f"matched without regard to case)")
+    return {"allow": names}
+
+
+def _choose_gate(ctx, sc, spec: Dict[str, Any], options: List[Dict[str, Any]],
+                 chooser: str, line: int) -> Dict[str, Any]:
+    """The delegation a ``choose`` may declare (claunch-vjp4y.2.1).
+
+    A gate whose candidates are declared is routed through the ask machinery:
+    the question goes to those candidates with the option list, a deadline and
+    a ``delegate.allow`` list, and the answer applies as the pick itself. A
+    gate that declares nothing behaves exactly as before -- a person's alone.
+    """
+    declared = [k for k in GATE_KEYS if spec.get(k) is not None]
+    if not declared:
+        return {}
+    if chooser != ir.CHOOSER_USER:
+        raise ctx.err(sc.file, line, f"choose: {', '.join(declared)} delegates a person's gate; "
+                                     f"it needs chooser: user")
+    from ..cflow import model as v1
+
+    what = "choose"
+    try:
+        parsed = v1._parse_delegate({"from": spec.get("from"), "otherwise": spec.get("otherwise"),
+                                     "timeout": spec.get("timeout")}, what)
+    except v1.WorkflowError as exc:
+        raise ctx.err(sc.file, line, str(exc)) from None
+    if parsed.otherwise != v1.OTHERWISE_HUMAN:
+        raise ctx.err(sc.file, line, "choose: a gate's fallback is the person -- declare "
+                                     "'otherwise: human' or leave it out")
+    gate: Dict[str, Any] = {
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in parsed.candidates],
+        "timeout": parsed.timeout,
+    }
+    if not gate["from"]:
+        raise ctx.err(sc.file, line, "choose: from must name at least one candidate (a parent "
+                                     "gate with no candidate keeps the person as its only door)")
+    if spec.get("delegate") is not None:
+        allow = _gate_allow(ctx, sc.file, spec.get("delegate"), what, line)
+        names = allow["allow"]
+        known = {o["name"].casefold() for o in options}
+        missing = [n for n in names if n.casefold() not in known]
+        if missing:
+            raise ctx.err(sc.file, line, f"{what}: delegate.allow names {', '.join(missing)}, "
+                                         f"which the options do not have "
+                                         f"({', '.join(o['name'] for o in options)})")
+        gate["delegate"] = allow
+    return {"gate": gate}
+
+
+#: The run-level gates a definition may delegate (docs 2.11): the driver's
+#: move request and its report request. Both are ``resolve_move`` verdicts --
+#: ``approve`` / ``deny`` -- so ``report`` without its own entry is answered
+#: by the ``move`` one at run time.
+GATE_TARGETS = ("move", "report")
+GATE_VERDICTS = ("approve", "deny")
+
+
+def _gates(ctx, file: str, doc: Any) -> Optional[Dict[str, Any]]:
+    """``gates:`` -- the delegation of the gates that are a run's own, not a
+    node's: the driver's move and report requests (claunch-vjp4y.2.1).
+
+    A ``choose`` declares its own gate inline (``frontend._choose_gate``),
+    because its options are its own. These gates have a fixed pair of
+    verdicts, so they are declared once for the whole definition.
+    """
+    raw = doc.get("gates")
+    if raw is None:
+        return None
+    line = _key_line(doc, "gates", 1)
+    raw = _need_map(ctx, file, raw, "gates", line)
+    _check_keys(ctx, file, raw, GATE_TARGETS, "gates")
+    out: Dict[str, Any] = {}
+    for target in GATE_TARGETS:
+        if raw.get(target) is None:
+            continue
+        out[target] = _move_gate(ctx, file, raw[target], target,
+                                 _key_line(raw, target, line))
+    if not out:
+        raise ctx.err(file, line, f"gates: declare at least one of "
+                                  f"{', '.join(GATE_TARGETS)}")
+    return out
+
+
+def _move_gate(ctx, file: str, spec: Any, target: str,
+               line: int) -> Dict[str, Any]:
+    """One run-level gate: ``from``/``otherwise``/``timeout``/``delegate``,
+    read by the same parser a v1 ``delegate:`` is."""
+    what = f"gates.{target}"
+    spec = _need_map(ctx, file, spec, what, line)
+    _check_keys(ctx, file, spec, GATE_KEYS, what)
+    from ..cflow import model as v1
+
+    parse = {"from": spec.get("from"), "otherwise": spec.get("otherwise"),
+             "timeout": spec.get("timeout")}
+    try:
+        parsed = v1._parse_delegate(parse, what)
+    except v1.WorkflowError as exc:
+        raise ctx.err(file, line, str(exc)) from None
+    if parsed.otherwise != v1.OTHERWISE_HUMAN:
+        raise ctx.err(file, line, f"{what}: a gate's fallback is the person -- declare "
+                                  f"'otherwise: human' or leave it out")
+    if not parsed.candidates:
+        raise ctx.err(file, line, f"{what}: from must name at least one candidate")
+    gate: Dict[str, Any] = {
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in parsed.candidates],
+        "timeout": parsed.timeout,
+    }
+    if spec.get("delegate") is not None:
+        allow = _gate_allow(ctx, file, spec.get("delegate"), what, line)
+        missing = [n for n in allow["allow"] if n.casefold() not in GATE_VERDICTS]
+        if missing:
+            raise ctx.err(file, line, f"{what}: delegate.allow names {', '.join(missing)}, "
+                                      f"which the gate does not answer "
+                                      f"({', '.join(GATE_VERDICTS)})")
+        gate["delegate"] = allow
+    return gate
 
 
 def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
@@ -2469,6 +2612,7 @@ def compile_text(text: str, *, source: str = "",
 
     collections = _collection_decls(ctx, file, doc)
     recur = _recur(ctx, file, doc, kind)
+    gates = _gates(ctx, file, doc)
     sides = doc.get("sides")
     if sides is not None or ctx.included_sides:
         sline = _key_line(doc, "sides", 1)
@@ -2540,6 +2684,9 @@ def compile_text(text: str, *, source: str = "",
                if ctx.question_types else {}),
             # recur: {"auto": bool} when declared (docs 2.1, recur)
             **({"recur": recur} if recur is not None else {}),
+            # gates: the move/report gates delegated to the parent
+            # (claunch-vjp4y.2.1, docs 2.11)
+            **({"gates": gates} if gates is not None else {}),
             # layout metadata (cflow2/layouts.py): the workflow's reference,
             # the per-node references, and the resolved files themselves --
             # everything a view model needs, snapshotted with the chart
