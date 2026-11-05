@@ -149,6 +149,17 @@ def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
     if rec.get("deadline"):
         lines.append(f"If you do not answer within {float(rec.get('timeout') or 0):g}s, it "
                      f"moves on without you.")
+    allow = (rec.get("delegate") or {}).get("allow") or []
+    if allow:
+        # Shown on purpose (user decision, thread th-ea5c7c): a delegated
+        # answerer that sees the bound answers inside it, and a pick outside
+        # it would be a mistake rather than a judgement.
+        lines.append("")
+        lines.append("This ask is delegated to you with a limit: you may answer "
+                     + ", ".join(repr(a) for a in allow)
+                     + ". The other options are shown so you can judge the question, but "
+                       "picking one is recorded as your abstention and the question goes to "
+                       "a person. 'abstain' and 'reframe' are always yours.")
     return "\n".join(lines)
 
 
@@ -254,8 +265,25 @@ def _asks_one(cand: Any) -> bool:
     return str(cand.role).lower() in SINGLE_RESPONDER_ROLES
 
 
-def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
-    """Which group of ``rec`` answers, read off one roster (``pool``)."""
+def _is_parent(cand: Dict[str, Any]) -> bool:
+    """A ``{role: parent}`` candidate: the driver's own parent session
+    (``runtime.driver_parent_of``), not a mesh role (claunch-vjp4y.2).
+
+    The parent is a *session relationship*, so the roster cannot resolve it:
+    such a candidate never reaches the pool. When the driver has no parent the
+    group is skipped with that reason, and the ask falls through to whatever
+    comes after it -- a person, under ``otherwise: human``."""
+    return str(cand.get("role") or "").strip().lower() == runtime.PARENT_ROLE
+
+
+def plan_route(rec: Dict[str, Any], pool: Any, *, parent: str = "") -> Dict[str, Any]:
+    """Which group of ``rec`` answers, read off one roster (``pool``).
+
+    ``parent`` is the driving session's parent (``runtime.driver_parent_of``),
+    which is what a ``{role: parent}`` candidate names (claunch-vjp4y.2). That
+    group is resolved against the session hierarchy, never the roster, and is
+    asked directly (:func:`route`): its answer comes back with ``flow_answer``
+    like any responder's."""
     from ..cflow import model as v1
 
     cands = rec.get("from") or []
@@ -269,6 +297,21 @@ def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
     passed = rec.get("passed") or {}
     while group < len(cands):
         c = cands[group]
+        if _is_parent(c):
+            if parent:
+                plan["asked"] = [{"session": parent, "handle": parent}]
+                # Not ``single``: that flag also decides how the group moves
+                # on when its member abstains (``runtime._ask_escalate`` asks
+                # the next *member* of a single group), and the parent has no
+                # next member -- a spent parent group goes to the group after
+                # it, or to a person.
+                plan["direct"] = "parent"
+                break
+            plan["skipped"].append({"group": group,
+                                    "candidate": f"{runtime.PARENT_ROLE} (driver's parent)",
+                                    "reason": "the driving session has no parent session"})
+            group += 1
+            continue
         cand = v1.Candidate(role=c["role"], scope=c.get("scope") or v1.SCOPE_ANY,
                             connect=bool(c.get("connect")))
         one = _asks_one(cand)
@@ -330,9 +373,17 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
     pool = (pool_fn or default_pool)(session=_driver(st, snap.state), mesh=mesh,
                                      cwd=str(st.cwd))
     wanted = role.strip().lower()
+    parent = runtime.driver_parent_of(snap.state)
     groups = []
     for c in spec["from"]:
         if wanted and c["role"] != wanted:
+            continue
+        if _is_parent(c):
+            entry = {"candidate": f"{runtime.PARENT_ROLE} (driver's parent)",
+                     "asks": [parent] if parent else [], "relations": {}}
+            if not parent:
+                entry["reason"] = "the driving session has no parent session"
+            groups.append(entry)
             continue
         cand = v1.Candidate(role=c["role"], scope=c["scope"] or v1.SCOPE_ANY,
                             connect=c["connect"])
@@ -362,7 +413,8 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
 
 def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
           now: Optional[float] = None, pool_fn: Optional[PoolFn] = None,
-          deliver_fn: Optional[DeliverFn] = None) -> List[Dict[str, Any]]:
+          deliver_fn: Optional[DeliverFn] = None,
+          nudge_fn: Optional[NudgeFn] = None) -> List[Dict[str, Any]]:
     """Route every ask waiting for its next group. Returns the routed plans."""
     st = RunStore(cwd, scope)
     if not st.exists():
@@ -376,9 +428,10 @@ def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
     if not todo:
         return []
     session = _driver(st, snap.state)
+    parent = runtime.driver_parent_of(snap.state)
     mesh = str(todo[0].get("mesh") or "") or runtime.mesh_of(snap.state)
     pool = (pool_fn or default_pool)(session=session, mesh=mesh, cwd=str(st.cwd))
-    plans = [plan_route(rec, pool) for rec in todo]
+    plans = [plan_route(rec, pool, parent=parent) for rec in todo]
     routed = runtime.ask_apply_route(plans, cwd=cwd, scope=scope, now=now)
     deliver = deliver_fn or default_deliver
     failures = []
@@ -389,7 +442,22 @@ def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
         ctx = {"mesh": rec.get("mesh") or plan.get("mesh") or "",
                "sender": getattr(pool, "me", "") or session, "workflow": plan.get("workflow"),
                "cwd": str(st.cwd), "scope": st.scope}
-        why = deliver(rec, ctx)
+        if plan.get("direct"):
+            # The parent is a session, not a roster member: there is no mesh
+            # channel to post a ``decide`` message into, so the question is
+            # typed into its terminal. Its answer comes back through
+            # ``flow_answer`` like any responder's (the index above names it).
+            text = question_text(rec, workflow=ctx["workflow"] or "", sender=ctx["sender"],
+                                 cwd=ctx["cwd"], scope=ctx["scope"])
+            target = str((rec.get("asked") or [{}])[0].get("session") or "")
+            try:
+                (nudge_fn or default_nudge)(target, text, str(st.cwd))
+            except Exception as exc:  # noqa: BLE001 - recorded, the ask stands
+                why = f"the question could not be delivered to the parent: {exc}"
+            else:
+                why = None
+        else:
+            why = deliver(rec, ctx)
         if why:
             failures.append((rec, why))
     for rec, why in failures:
@@ -506,6 +574,7 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
             "ask_id": rec["id"], "kind": rec.get("kind"), "prompt": rec.get("prompt"),
             "because": rec.get("because"),
             "options": [o["name"] for o in runtime._ask_choices(rec)] + [runtime.ASK_ABSTAIN],
+            "delegate": rec.get("delegate"),
             "deadline": rec.get("deadline"), "workflow": state.get("workflow"),
             "task": rec.get("label") or rec.get("node"),
             "from_session": runtime.driver_of(state) or entry["scope"],
