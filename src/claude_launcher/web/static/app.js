@@ -39310,6 +39310,14 @@ function keyHelpCard() {
     ["On a focused rail card", RAIL_CARD_KEYS.map((b) => ({
       label: b.label, what: b.what, when: b.when,
     }))],
+    // The Chart view's rows take the same table less the keys the row keeps
+    // for itself (chartRowKey), so this group is derived the same way.
+    ["On a focused Chart row", [
+      { label: "Enter / Space", what: "open the session (rail) or select the row (#/chart)",
+        when: "any row" },
+      ...RAIL_CARD_KEYS.filter((b) => !b.keys.some((k) => CHART_ROW_SKIPS.has(k)))
+        .map((b) => ({ label: b.label, what: b.what, when: b.when })),
+    ]],
     ["Elsewhere on the page", KEY_HELP_EXTRA],
   ];
   for (const [heading, rows] of groups) {
