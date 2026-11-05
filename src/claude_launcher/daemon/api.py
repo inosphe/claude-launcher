@@ -792,6 +792,10 @@ def build_app(
     fault_pause.install(app)
     from . import spec_api
     spec_api.install(app)
+    # Fleet presets (daemon/fleet_api.py, claunch-d0hji): agent trees that
+    # expand into a work spec and launch through its import.
+    from . import fleet_api
+    fleet_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
     # ownership (released by an exit hook it adds), rounds, owner notices.
     from . import sim_api
@@ -12825,6 +12829,32 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     return json_response(payload, status=status)
 
 
+class _PersonRequest:
+    """What :func:`_spawn_child` reads off a request, for a child a person's
+    fleet launch creates with no HTTP request of its own in hand."""
+
+    def __init__(self, app, actor: dict) -> None:
+        self.app = app
+        self.headers = {actors.HEADER: actors.header_value(actors.USER, actor.get("name"))}
+        self.match_info: dict = {}
+
+    def get(self, key, default=None):
+        return default
+
+
+async def spawn_child_as_person(app, parent: str, body: dict, *,
+                                actor: dict) -> Tuple[int, dict]:
+    """A child of ``parent`` that a PERSON asked for, member by member, in
+    the dashboard's fleet launch (``daemon/fleet_api``): the spawn path an
+    agent takes, with the profile/model gates lifted
+    (:data:`claude_launcher.spawn.PERSON_FIELDS`). Every other policy check
+    -- enabled, depth, the other field gates -- is the agent's. Never
+    reached from a request body: the fleet route refuses an agent caller
+    before it gets here."""
+    return await _spawn_child_reported(_PersonRequest(app, actor), parent, dict(body),
+                                       created_by=actor, person_fields=True)
+
+
 def spawn_gate_exempt(body: dict) -> bool:
     """Whether an agent's child spawn skips the spawn-request gate: a
     ``reviewer`` child (the user's decision, th-17c48c)."""
@@ -12895,13 +12925,16 @@ def _first_line(text) -> str:
 
 
 async def _spawn_child(request, parent: str, body: dict, *,
-                       created_by: Optional[dict]) -> Tuple[int, dict]:
+                       created_by: Optional[dict],
+                       person_fields: bool = False) -> Tuple[int, dict]:
     """Stage, enrol and launch a child of ``parent`` -- the agent's spawn,
-    and the spawn gate's create of a child it approved."""
+    and the spawn gate's create of a child it approved. ``person_fields``
+    is the fleet launch's (see :func:`spawn_child_as_person`)."""
     manager: SessionManager = request.app["manager"]
     warnings: list = []
     try:
-        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by)
+        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by,
+                                      person_fields=person_fields)
     except spawn_mod.SpawnDenied as exc:
         return 403, {"error": str(exc)}
     except worktree_mod.WorktreeError as exc:
@@ -12930,7 +12963,8 @@ async def _spawn_child(request, parent: str, body: dict, *,
 
 
 async def _spawn_child_reported(request, parent: str, body: dict, *,
-                                created_by: Optional[dict]) -> Tuple[int, dict]:
+                                created_by: Optional[dict],
+                                person_fields: bool = False) -> Tuple[int, dict]:
     """:func:`_spawn_child`, with a refused creation recorded for the user.
 
     A spawn that answers 4xx/5xx has no session to look at afterwards: the
@@ -12940,7 +12974,8 @@ async def _spawn_child_reported(request, parent: str, body: dict, *,
     event on the parent -- the session the person was watching when the work
     was started -- and one warn notice over its terminal (claunch-is4o4).
     """
-    status, payload = await _spawn_child(request, parent, body, created_by=created_by)
+    status, payload = await _spawn_child(request, parent, body, created_by=created_by,
+                                         person_fields=person_fields)
     if status >= 400:
         _report_spawn_failure(
             request, parent, payload.get("error") or "", site="api.spawn",
