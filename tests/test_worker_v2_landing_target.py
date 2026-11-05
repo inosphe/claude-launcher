@@ -621,14 +621,27 @@ def test_the_question_carries_the_routing_reason_verbatim():
     assert "그대로" in evidence
 
 
-def test_the_gate_asks_nobody_but_a_person():
-    """The three answers all belong to a person. No ``from:`` list and no
-    ``otherwise`` other than the human default: a worker that could answer
-    this itself would be choosing its own landing path, which is the rule
-    this workflow keeps everywhere else."""
-    ask = _the_ask()
-    assert "from" not in ask["with"], "the gate may not delegate this to a session"
-    assert "otherwise" not in ask["with"]
+def test_the_gate_asks_a_person_and_only_the_parent_within_the_allow_list():
+    """The three answers belong to a person, and the driving session's
+    **parent** may take one of them on its behalf (claunch-vjp4y.2): the
+    answer that needs nobody to receive the request, ``merge-by-agent``.
+    Everything else still falls back to the person -- ``delegate.allow``
+    limits what the parent may land, and the deadline (900s) sends an
+    unanswered question there too.
+
+    The worker still cannot answer its own: ``{role: parent}`` resolves to
+    the driver's parent from ``driver_parent``, never to the driver, which
+    is the rule this workflow keeps everywhere else."""
+    with_ = _the_ask()["with"]
+    assert with_["from"] == [{"role": "parent"}], (
+        "only the driver's parent may take this answer; a mesh role would "
+        "let the worker choose its own landing path")
+    assert with_["delegate"] == {"allow": ["merge-by-agent"]}, (
+        "the parent may land merge-by-agent only; any other answer goes "
+        "back to the person")
+    assert with_["timeout"] == 900, (
+        "an unanswered question has to reach the person")
+    assert "otherwise" not in with_
 
 
 def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
