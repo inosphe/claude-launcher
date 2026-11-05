@@ -96,8 +96,10 @@ _COMMANDCODE_HOSTS = {"api.commandcode.ai", "api.commandcode.ai:443"}
 _COMMANDCODE_API = "https://api.commandcode.ai"
 #: Monthly credits (USD) each Command Code plan grants, by plan-id prefix,
 #: longest first so ``individual-pro-v1`` is not read as ``individual-pro``.
-#: The table is the one the ``command-code`` CLI (1.88.3) uses for its own
-#: ``/usage`` bar; a plan missing from it is measured by its balance alone.
+#: The table and the longest-prefix lookup are the ones the ``command-code``
+#: CLI (1.88.3, ``getPlanInfo``) uses for its own ``/usage`` bar. A plan id
+#: that no prefix matches has no grant; its pool is the balance left plus what
+#: the period has spent (``/alpha/usage/summary``), as the CLI computes it.
 _COMMANDCODE_PLAN_CREDITS = {
     "individual-go-v1": 10.0,
     "individual-go": 10.0,
@@ -785,7 +787,7 @@ def _commandcode_windows(
         free = max(0.0, _number(balance.get("freeCredits")) or 0.0)
         remaining = monthly + purchased + free
         sub = subscription if isinstance(subscription, dict) else {}
-        plan = _commandcode_plan(sub.get("planId") or balance.get("planId"))
+        plan = _commandcode_plan(sub.get("planId"))
         grant = _COMMANDCODE_PLAN_CREDITS.get(plan) if plan else None
         if sub.get("status") == "active" and grant is not None:
             pool = max(grant, monthly) + purchased + free
@@ -835,9 +837,16 @@ def _fetch_commandcode(profile: Profile, token: str) -> UsageReport:
         sub_reply = {}
     subscription = sub_reply.get("data") if isinstance(sub_reply.get("data"), dict) else None
     spent = None
-    if not (subscription and subscription.get("status") == "active"):
-        # Without an active plan the pool is "left + spent this period", so
-        # the period's spend is needed; with one, the plan grant fixes it.
+    granted = (
+        subscription is not None
+        and subscription.get("status") == "active"
+        and _commandcode_plan(subscription.get("planId")) is not None
+    )
+    if not granted:
+        # Without an active plan whose grant is known, the pool is "left +
+        # spent this period", so the period's spend is needed; with one, the
+        # plan grant fixes it. An active plan the table does not name lands
+        # here too, as it does in the CLI (whose plan info is then null).
         since = subscription.get("currentPeriodStart") if subscription else None
         try:
             summary = _commandcode_get(

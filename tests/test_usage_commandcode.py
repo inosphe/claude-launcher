@@ -183,6 +183,39 @@ def test_without_an_active_plan_the_pool_is_balance_plus_period_spend(home, monk
     assert month.resets_at is None
 
 
+def test_an_active_plan_the_table_does_not_name_is_measured_by_period_spend(home, monkeypatch):
+    # The CLI's getPlanInfo returns null for such a plan id, and its pool is
+    # then "spent this period + left" from /alpha/usage/summary. Skipping the
+    # summary here would read the key as 0% used.
+    account = json.loads(json.dumps(PROVIDER_ACCOUNT))
+    account["/alpha/billing/subscriptions"]["data"]["planId"] = "teams-enterprise"
+    account["/alpha/usage/summary"] = {"totalCost": 4.0}
+    p = _commandcode_profile()
+    seen = []
+    _serve(monkeypatch, {"user_provider_key": account}, seen)
+
+    report = usage.fetch(usage.resolve_target(p))
+    month = report.windows[0]
+
+    assert (month.limit_dollars, month.remaining_dollars, month.used_dollars) == (16.0, 12.0, 4.0)
+    assert month.utilization == pytest.approx(25.0)
+    assert report.raw["plan"] is None
+    assert (
+        "user_provider_key", "/alpha/usage/summary", {"since": "2026-11-05T09:10:23.000Z"}
+    ) in seen
+
+
+def test_plan_lookup_is_the_clis_longest_prefix_match():
+    # command-code 1.88.3 getPlanInfo: Object.keys(Ir) sorted by length,
+    # longest first, matched with startsWith on the lowercased, '-' joined id.
+    assert usage._commandcode_plan("individual-pro-v1") == "individual-pro-v1"
+    assert usage._commandcode_plan("INDIVIDUAL_PRO_V1") == "individual-pro-v1"
+    assert usage._commandcode_plan("individual-pro-v2") == "individual-pro"
+    assert usage._commandcode_plan("individual-go-annual") == "individual-go"
+    assert usage._commandcode_plan("teams-enterprise") is None
+    assert usage._commandcode_plan("") is None
+
+
 def test_without_a_key_names_set_token(home, monkeypatch):
     p = _commandcode_profile(token=None)
     monkeypatch.setattr(usage.urllib.request, "urlopen", lambda req, timeout: pytest.fail("no request"))
