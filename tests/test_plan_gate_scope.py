@@ -250,11 +250,11 @@ def test_a_notice_that_cannot_be_sent_changes_nothing(tmp_path):
 def test_the_start_gates_wait_on_decisions_and_the_settle_gate_on_everything():
     text = WORKER.read_text(encoding="utf-8")
     probes = [line.strip() for line in text.splitlines() if "probe: [claunch, gate, plan-waiting" in line]
-    assert len(probes) == 4
+    assert len(probes) == 3
     start = [p for p in probes if "--scope, start" in p]
-    assert len(start) == 2
+    assert len(start) == 1   # one start wait on every path (claunch-r3j1o.2)
     assert all("--notify" in p for p in probes)
-    for gate_id in ("plan-wait-before-gate", "plan-wait-after-seed"):
+    for gate_id in ("plan-wait",):
         at = text.index(f"id: {gate_id}")
         assert "--scope, start" in text[at:at + 300]
     at = text.index("id: closure-wait\n")

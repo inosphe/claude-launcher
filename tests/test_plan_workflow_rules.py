@@ -14,7 +14,7 @@ V2 = Path(plan_mcp.__file__).resolve().parent / "workflows" / "v2"
 
 
 @pytest.mark.parametrize("name, rule, nodes, tools", [
-    ("improv-worker-v2", "plan-panel", ["coding-plan", "work", "wrapup"], ["plan_set", "plan_node", "plan_get"]),
+    ("improv-worker-v2", "plan-panel", ["coding-plan", "plan-seed", "work", "wrapup"], ["plan_set", "plan_node", "plan_get"]),
     ("improv-leader-v2", "worker-plans", ["intake", "integrate-preflight"], ["plan_get"]),
 ])
 def test_rule_is_delivered_and_names_real_tools(name, rule, nodes, tools):
