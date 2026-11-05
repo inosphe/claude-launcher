@@ -457,6 +457,16 @@ class StreamTranslator:
     the Anthropic events those bytes complete. :meth:`close` ends the message
     (``message_delta`` + ``message_stop``) — call it once the upstream stream
     is over, whether or not it sent ``[DONE]``.
+
+    An upstream error chunk becomes an ``error`` event and ends the stream:
+    Anthropic clients treat ``error`` as terminal, so nothing follows it, not
+    even the closing events.
+
+    Tool calls: the first call streams live. Anthropic content blocks cannot
+    reopen, while OpenAI may interleave argument fragments across calls, so
+    once that first call is open every later block (other calls, text,
+    thinking) is held and emitted whole when the stream ends. Fragments for
+    the live call keep streaming; nothing is dropped.
     """
 
     def __init__(self, model: Optional[str] = None) -> None:
@@ -471,6 +481,10 @@ class StreamTranslator:
         self._usage: dict = {}
         self._id: Optional[str] = None
         self._saw_tool = False
+        self._errored = False
+        self._live: Optional[int] = None  # position of the call streaming live
+        self._pending: List[dict] = []  # held blocks, in the order they began
+        self._held_tools: Dict[int, dict] = {}
 
     # -- events --------------------------------------------------------------
     def _start(self, out: List[bytes]) -> None:
@@ -521,7 +535,7 @@ class StreamTranslator:
         return out
 
     def _line(self, line: bytes, out: List[bytes]) -> None:
-        if not line.startswith(b"data:"):
+        if self._errored or not line.startswith(b"data:"):
             return
         payload = line[5:].strip()
         if not payload or payload == b"[DONE]":
@@ -538,6 +552,7 @@ class StreamTranslator:
             err = doc["error"]
             out.append(sse("error", {"type": "error", "error": {
                 "type": "api_error", "message": str(err.get("message") or err)}}))
+            self._errored = True
             return
         self._id = self._id or doc.get("id")
         if doc.get("model") and not self.model:
@@ -553,45 +568,83 @@ class StreamTranslator:
         reasoning = _reasoning_of(delta)
         if reasoning:
             self._start(out)
-            if self._open != "thinking":
-                self._open_block(out, "thinking",
-                                 {"type": "thinking", "thinking": "", "signature": ""})
-            self._delta(out, {"type": "thinking_delta", "thinking": reasoning})
+            if self._live is not None:
+                self._hold_text("thinking", reasoning)
+            else:
+                if self._open != "thinking":
+                    self._open_block(out, "thinking",
+                                     {"type": "thinking", "thinking": "", "signature": ""})
+                self._delta(out, {"type": "thinking_delta", "thinking": reasoning})
         text = delta.get("content")
         if isinstance(text, str) and text:
             self._start(out)
-            if self._open != "text":
-                self._open_block(out, "text", {"type": "text", "text": ""})
-            self._delta(out, {"type": "text_delta", "text": text})
+            if self._live is not None:
+                self._hold_text("text", text)
+            else:
+                if self._open != "text":
+                    self._open_block(out, "text", {"type": "text", "text": ""})
+                self._delta(out, {"type": "text_delta", "text": text})
         for call in delta.get("tool_calls") or []:
             if isinstance(call, dict):
                 self._tool_call(call, out)
         if choice.get("finish_reason"):
             self._finish = str(choice["finish_reason"])
 
+    def _hold_text(self, kind: str, text: str) -> None:
+        last = self._pending[-1] if self._pending else None
+        if last is not None and last["kind"] == kind:
+            last["text"] += text
+        else:
+            self._pending.append({"kind": kind, "text": text})
+
     def _tool_call(self, call: dict, out: List[bytes]) -> None:
         self._start(out)
         position = call.get("index")
         position = position if isinstance(position, int) else len(self._tools)
         fn = call.get("function") if isinstance(call.get("function"), dict) else {}
-        kind = f"tool:{position}"
+        arguments = fn.get("arguments")
+        arguments = arguments if isinstance(arguments, str) else ""
         if position not in self._tools:
             self._saw_tool = True
-            self._open_block(out, kind, {
+            self._tools[position] = position
+            block = {
                 "type": "tool_use",
                 "id": str(call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"),
                 "name": str(fn.get("name") or ""),
                 "input": {},
-            })
-            self._tools[position] = self._index
-        elif self._open != kind:
-            # Interleaved arguments for an earlier call: Anthropic blocks do
-            # not reopen, so these fragments are dropped. Backends seen so far
-            # stream one call's arguments before the next call's header.
+            }
+            if self._live is None:
+                self._live = position
+                self._open_block(out, f"tool:{position}", block)
+            else:
+                held = {"kind": "tool", "block": block, "args": ""}
+                self._held_tools[position] = held
+                self._pending.append(held)
+        if position == self._live:
+            if arguments:
+                self._delta(out, {"type": "input_json_delta", "partial_json": arguments})
             return
-        arguments = fn.get("arguments")
-        if isinstance(arguments, str) and arguments:
-            self._delta(out, {"type": "input_json_delta", "partial_json": arguments})
+        held = self._held_tools[position]
+        if fn.get("name") and not held["block"]["name"]:
+            held["block"]["name"] = str(fn["name"])
+        held["args"] += arguments
+
+    def _flush_pending(self, out: List[bytes]) -> None:
+        for held in self._pending:
+            if held["kind"] == "tool":
+                self._open_block(out, "tool", held["block"])
+                if held["args"]:
+                    self._delta(out, {"type": "input_json_delta",
+                                      "partial_json": held["args"]})
+            elif held["kind"] == "thinking":
+                self._open_block(out, "thinking",
+                                 {"type": "thinking", "thinking": "", "signature": ""})
+                self._delta(out, {"type": "thinking_delta", "thinking": held["text"]})
+            else:
+                self._open_block(out, "text", {"type": "text", "text": ""})
+                self._delta(out, {"type": "text_delta", "text": held["text"]})
+        self._pending = []
+        self._stop_block(out)
 
     def close(self) -> List[bytes]:
         out: List[bytes] = []
@@ -601,8 +654,11 @@ class StreamTranslator:
         if self._buffer.strip():
             self._line(self._buffer.strip(), out)
             self._buffer = b""
+        if self._errored:
+            return out
         self._start(out)
         self._stop_block(out)
+        self._flush_pending(out)
         stop = STOP_REASONS.get(self._finish or "", "end_turn")
         if stop == "end_turn" and self._saw_tool:
             stop = "tool_use"

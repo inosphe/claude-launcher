@@ -347,6 +347,10 @@ async def _proxy_counted(request: web.Request) -> web.StreamResponse:
         body = json.dumps(translated, ensure_ascii=False).encode()
         path = "/chat/completions"
         _translated_headers(headers)
+    # A translated request goes through this too, on purpose: the routing
+    # field (``provider``) is OpenRouter's Chat Completions field, and the
+    # model alias names the upstream's model -- the same rewrites a Chat
+    # Completions caller (pi) gets on the same upstream (claunch-1tcgq.1).
     if request.method in ("POST", "PUT", "PATCH") and _is_json(
         request.headers.get("content-type", "")
     ):
