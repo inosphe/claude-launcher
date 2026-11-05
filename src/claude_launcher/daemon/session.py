@@ -1858,6 +1858,29 @@ class Session:
                 )
                 await self.write_bytes(b"\r")
                 await asyncio.sleep(FORCE_DRAFT_SETTLE)
+            else:
+                # A composer the guard let go of is not an empty composer:
+                # DRAFT_GUARD ends the *hold*, it cannot delete what is in the
+                # line, and pasting into that line is the splice the refusal
+                # above exists to prevent — worse, when the line opens with
+                # the harness's bash-mode marker (``!``) the Enter that
+                # submits the paste runs the delivery as a shell script
+                # (claunch-n8tji). C-u is the keystroke the human would press;
+                # the count goes to the log because the only thing this loses
+                # is text typed at least DRAFT_GUARD ago.
+                stale = int(getattr(self, "_draft_chars", 0) or 0)
+                if stale > 0 and not self.draft_open():
+                    log.info(
+                        "delivery to %r cleared an abandoned composer (%d chars, "
+                        "left on screen for longer than DRAFT_GUARD); a paste "
+                        "would have been submitted into that line",
+                        self.sdef.name,
+                        stale,
+                    )
+                    await self.write_bytes(b"\x15")
+                    self._draft_open = False
+                    self._draft_chars = 0
+                    self._draft_uncommitted = False
             # State-dependent reminders resolve after readiness and draft
             # waits, so a newer user rating can replace or cancel them.
             if before is not None:

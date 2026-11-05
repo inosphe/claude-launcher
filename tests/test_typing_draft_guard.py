@@ -447,6 +447,49 @@ def test_deliver_refuses_rather_than_splicing_into_an_unsent_line(monkeypatch):
     assert writes == [], "pasted into a line the human had not sent"
 
 
+def test_an_abandoned_composer_is_cleared_rather_than_typed_into(monkeypatch):
+    """The hold lapsing does not empty the composer.
+
+    ``DRAFT_GUARD`` stops the *hold* after a while; the text somebody typed
+    is still sitting in the line. Pasting over it splices the delivery into
+    a line nobody is writing, and the Enter that submits the paste carries
+    that line with it — which is what turned a nudge into a shell script:
+    the abandoned line was ``!``, the harness's bash-mode marker, so the
+    submitting Enter ran the pasted block as a command (claunch-n8tji).
+
+    So the stale line is discarded with ``C-u`` first. Clearing it loses
+    text typed at least ``DRAFT_GUARD`` ago; submitting it would run it.
+    """
+    monkeypatch.setattr(session_mod, "DRAFT_GUARD", 0.1)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"!")
+    assert s.draft_open() is True
+    time.sleep(0.15)
+    assert s.draft_open() is False, "the hold should have lapsed by now"
+    assert s._draft_chars == 1, "but the line is still in the composer"
+
+    assert asyncio.run(s.deliver("mesh: hello")) is True
+    # C-u empties the composer, and only then is the message pasted and sent.
+    assert writes == [b"\x15", b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+    assert s._draft_chars == 0
+    assert s.draft_open() is False
+
+
+def test_a_live_draft_is_still_refused_rather_than_cleared(monkeypatch):
+    """Clearing is only for a line the human has left. One they are still
+    writing is refused, as before — nothing is discarded behind their back."""
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.2)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"!")
+
+    assert asyncio.run(s.deliver("mesh: hello")) is False
+    assert writes == [], "cleared a line the human was still writing"
+    assert s._draft_chars == 1
+
+
 def test_the_delivery_lands_the_moment_the_human_sends_their_own_line(
     monkeypatch,
 ):
