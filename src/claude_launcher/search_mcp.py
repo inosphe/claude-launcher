@@ -36,6 +36,12 @@ from . import daemon_client, mcp_rpc
 
 KINDS = ("all", "beads", "sessions")
 
+#: How much of the index a query reads. ``active`` -- the dashboard's
+#: active-search box -- drops documents whose records name no live session,
+#: and pairs only with the unified corpus (``daemon/api.py`` ``_search_args``
+#: enforces the same pairing with a 400).
+MODES = ("general", "active")
+
 #: Characters of a hit's passage kept on the row. Enough to judge relevance;
 #: the rest is one ``search_read`` away.
 EXCERPT_CHARS = 360
@@ -77,6 +83,17 @@ TOOLS = [
                         "'all' (default): the unified corpus. 'beads': issues of "
                         "this session's board only, one row per issue. "
                         "'sessions': one row per session."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": list(MODES),
+                    "description": (
+                        "'general' (default): search the whole index. 'active': "
+                        "drop the documents whose records name no live session "
+                        "(exited, paused or archived). 'active' pairs only with "
+                        "kind 'all' -- the daemon refuses the other pairings and "
+                        "so does this tool, before it sends anything."
                     ),
                 },
                 "limit": {
@@ -210,13 +227,20 @@ def search(args: dict) -> dict:
     kind = str(args.get("kind") or "all")
     if kind not in KINDS:
         raise SearchMcpError(f"kind must be one of {', '.join(KINDS)}")
+    mode = str(args.get("mode") or "general")
+    if mode not in MODES:
+        raise SearchMcpError(f"mode must be one of {', '.join(MODES)}")
+    if mode == "active" and kind != "all":
+        # The daemon answers 400 for this pairing; refusing it here means no
+        # request goes out for an answer that cannot come back.
+        raise SearchMcpError("mode must be general, or active with kind=all")
     try:
         limit = int(args.get("limit") or 10)
     except (TypeError, ValueError):
         raise SearchMcpError("limit must be an integer 1..50")
     limit = max(1, min(50, limit))
     params = {
-        "q": query, "kind": kind, "limit": str(limit),
+        "q": query, "kind": kind, "mode": mode, "limit": str(limit),
         "rerank": "0" if args.get("rerank") is False else "1", "wait": "2",
     }
     if kind == "beads":
@@ -238,6 +262,7 @@ def search(args: dict) -> dict:
     answer = {
         "query": query,
         "kind": kind,
+        "mode": mode,
         "coverage": coverage,
         "reranked": bool(view.get("reranked")),
         "results": [
