@@ -247,6 +247,58 @@ def test_a_mid_stream_error_chunk_becomes_an_error_event():
         in _events(raw)
 
 
+def test_an_error_chunk_ends_the_stream_without_closing_events():
+    """Anthropic treats ``error`` as terminal: no message_delta/stop after it."""
+    t = ao.StreamTranslator()
+    raw = b"".join(t.feed(_chunk({"content": "a"}) + b'data: {"error": {"message": "x"}}\n\n'
+                          + _chunk({"content": "late"})))
+    raw += b"".join(t.close())
+    names = [e for e, _ in _events(raw)]
+    assert names[-1] == "error"
+    assert "message_delta" not in names and "message_stop" not in names
+    assert "late" not in raw.decode()
+
+
+def test_interleaved_tool_arguments_are_all_kept():
+    """OpenAI may interleave fragments across calls; Anthropic blocks cannot reopen."""
+    t = ao.StreamTranslator(model="m")
+    stream = b"".join([
+        _chunk({"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+                                "function": {"name": "Read", "arguments": '{"pa'}}]}),
+        _chunk({"tool_calls": [{"index": 1, "id": "call_b", "type": "function",
+                                "function": {"name": "Ls", "arguments": '{"d'}}]}),
+        _chunk({"tool_calls": [{"index": 0, "function": {"arguments": 'th":"a"}'}}]}),
+        _chunk({"content": "after"}),
+        _chunk({"tool_calls": [{"index": 1, "function": {"arguments": 'ir":"b"}'}}]}),
+        _chunk({}, finish="tool_calls"),
+    ])
+    events = _events(b"".join(t.feed(stream)) + b"".join(t.close()))
+    blocks: dict = {}
+    for name, doc in events:
+        if name == "content_block_start":
+            blocks[doc["index"]] = [doc["content_block"], ""]
+        elif name == "content_block_delta":
+            d = doc["delta"]
+            blocks[doc["index"]][1] += d.get("partial_json", "") + d.get("text", "")
+    got = [(b["type"], b.get("name"), body) for b, body in
+           (blocks[i] for i in sorted(blocks))]
+    assert got == [("tool_use", "Read", '{"path":"a"}'),
+                   ("tool_use", "Ls", '{"dir":"b"}'),
+                   ("text", None, "after")]
+    names = [e for e, _ in events]
+    assert names.count("content_block_start") == names.count("content_block_stop") == 3
+    # every block is closed before the next opens
+    open_index = None
+    for name, doc in events:
+        if name == "content_block_start":
+            assert open_index is None
+            open_index = doc["index"]
+        elif name == "content_block_stop":
+            assert doc["index"] == open_index
+            open_index = None
+    assert events[-2][1]["delta"]["stop_reason"] == "tool_use"
+
+
 # --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
@@ -358,12 +410,12 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _with_shim(fake: _FakeOpenAI, provider: str, fn):
+async def _with_shim(fake: _FakeOpenAI, provider: str, fn, spec=None):
     upstream_server = TestServer(fake.app)
     await upstream_server.start_server()
     try:
         base = str(upstream_server.make_url("/provider/v1"))
-        shim = routing_shim.build_app(base, {}, "fp-test", provider=provider)
+        shim = routing_shim.build_app(base, spec or {}, "fp-test", provider=provider)
         async with TestClient(TestServer(shim)) as client:
             return await fn(client)
     finally:
@@ -490,3 +542,22 @@ def test_shim_refuses_a_malformed_key_with_502(home):
     status, doc = _run(_with_shim(fake, "cmdc", go))
     assert status == 502 and "anthropic_translation" in doc["error"]["message"]
     assert fake.requests == []
+
+
+def test_translated_body_gets_the_routing_field_like_a_chat_completions_caller(home):
+    """``provider`` is OpenRouter's Chat Completions field: the translated
+    body carries it, as pi's untranslated body to the same upstream does."""
+    _translating(home)
+    fake = _FakeOpenAI()
+    spec = {"order": ["deepinfra"]}
+
+    async def go(client):
+        await client.post("/v1/messages", json={
+            "model": "m", "max_tokens": 5, "messages": [{"role": "user", "content": "x"}]})
+        await client.post("/chat/completions", json={
+            "model": "m", "messages": [{"role": "user", "content": "x"}]})
+
+    _run(_with_shim(fake, "cmdc", go, spec=spec))
+    translated, passthrough = (r["body"] for r in fake.requests)
+    assert fake.requests[0]["path"].endswith("/chat/completions")
+    assert translated["provider"] == passthrough["provider"] == spec
