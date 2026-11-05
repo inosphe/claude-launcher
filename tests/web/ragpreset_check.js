@@ -48,7 +48,8 @@ const src = fs.readFileSync(
    status, the queue line and the pause control there, under the DB heading
    the settings card also names), so its pure helpers are read from there. */
 const app = fs.readFileSync(
-  path.join(root, "src", "claude_launcher", "web", "static", "app.js"), "utf8");
+  path.join(root, "src", "claude_launcher", "web", "static", "app.js"), "utf8",
+).replace(/\r\n/g, "\n"); // a Windows checkout (core.autocrlf) has CRLF
 const css = fs.readFileSync(
   path.join(root, "src", "claude_launcher", "web", "static", "style.css"), "utf8");
 
