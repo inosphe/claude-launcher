@@ -1,10 +1,12 @@
 """``claunch search ...`` and ``claunch rag ...`` — semantic search from a shell.
 
 ``search`` asks the running daemon to rank the board (``--kind beads``, the
-default), the fleet (``--kind sessions``) or both (``--kind all``) for a
-query: the same ``GET /api/search`` the dashboard's search boxes call, so an
+default), the fleet (``--kind sessions``) or the combined corpus
+(``--kind unified``; its deprecated name ``all`` still parses and prints one
+deprecation line) for a query: the same ``GET /api/search`` the dashboard's
+search boxes call, so an
 agent looking for "the issue about X" gets the answer the operator would.
-``--mode active`` (only with ``--kind all``) drops the documents of sessions
+``--mode active`` (only with ``--kind unified``) drops the documents of sessions
 that are no longer live, which is what the dashboard's active-search box asks
 for; the daemon enforces the same pairing, so this file refuses it first.
 ``rag status`` says whether the feature is configured and how much of each
@@ -66,12 +68,29 @@ def _fmt_row(row: dict, kind: str) -> str:
     return f"{score_s}  {head}{meta}  {line}{tag}"
 
 
+def _kind_of(args) -> str:
+    """The corpus the caller named, under its current name.
+
+    ``all`` is the deprecated name of the combined corpus. The daemon owns the
+    mapping (``daemon/rag.py`` ``ALIASES``); it is imported here rather than
+    restated so the two cannot drift, and the caller is told once on stderr.
+    """
+    from .daemon import rag as rag_mod
+
+    kind = rag_mod.canonical(args.kind)
+    if kind != args.kind:
+        print(f"claunch: --kind {args.kind} is deprecated; use --kind {kind}",
+              file=sys.stderr)
+    return kind
+
+
 def _cmd_search(args) -> int:
+    kind = _kind_of(args)
     # The daemon answers 400 for this pairing; refusing it here means the
     # shell never reaches the network with a request that cannot succeed
     # (daemon/api.py ``_search_args``, daemon/rag.py ``search_stream``).
-    if args.mode == "active" and args.kind != "all":
-        args.parser.error("--mode active is only valid with --kind all")
+    if args.mode == "active" and kind != "unified":
+        args.parser.error("--mode active is only valid with --kind unified")
     client = _client()
     if client is None:
         return 2
@@ -81,13 +100,13 @@ def _cmd_search(args) -> int:
         return 2
     params = {
         "q": query,
-        "kind": args.kind,
+        "kind": kind,
         "mode": args.mode,
         "limit": str(args.limit),
         "rerank": "0" if args.no_rerank else "1",
         "wait": str(args.wait),
     }
-    if args.kind == "beads":
+    if kind == "beads":
         params["cwd"] = _cwd(args)
     try:
         view = client.get("/api/search?" + urllib.parse.urlencode(params), timeout=180.0)
@@ -104,10 +123,10 @@ def _cmd_search(args) -> int:
         coverage += ", sync in progress"
     if index.get("error"):
         coverage += f", last sync error: {index['error']}"
-    print(f"{args.kind}: {len(results)} result(s) for {query!r} ({coverage}"
+    print(f"{kind}: {len(results)} result(s) for {query!r} ({coverage}"
           f"{', reranked' if view.get('reranked') else ''})")
     for row in results:
-        print("  " + _fmt_row(row, args.kind))
+        print("  " + _fmt_row(row, kind))
     return 0
 
 
@@ -147,11 +166,12 @@ def _cmd_rag_status(args) -> int:
 
 
 def _cmd_rag_reindex(args) -> int:
+    kind = _kind_of(args)
     client = _client()
     if client is None:
         return 2
-    body = {"kind": args.kind, "force": bool(args.force)}
-    if args.kind == "beads":
+    body = {"kind": kind, "force": bool(args.force)}
+    if kind == "beads":
         body["cwd"] = _cwd(args)
     try:
         view = client.post("/api/rag/reindex", body)
@@ -159,8 +179,11 @@ def _cmd_rag_reindex(args) -> int:
         print(f"rag: {exc}", file=sys.stderr)
         return 1
     index = view.get("index") or {}
-    print(f"rag: {args.kind} sync started — {index.get('indexed', 0)}/{index.get('total', 0)} "
+    print(f"rag: {kind} sync started — {index.get('indexed', 0)}/{index.get('total', 0)} "
           f"current, {index.get('pending', 0)} pending; `claunch rag status` follows it")
+    if kind == "unified":
+        print("rag: this sync rebuilds only the combined corpus; board buckets "
+              "(kind beads) are separate and are not touched", file=sys.stderr)
     return 0
 
 
@@ -176,11 +199,13 @@ def register(sub) -> None:
         ),
     )
     p.add_argument("query", nargs="+", help="the query, in any language the model reads")
-    p.add_argument("--kind", choices=("beads", "sessions", "all"), default="beads",
-                   help="what to search: this board, the fleet, or both (default beads)")
+    p.add_argument("--kind", choices=("beads", "sessions", "unified", "all"),
+                   default="beads",
+                   help="what to search: this board, the fleet, or the combined corpus "
+                        "(default beads; 'all' is the deprecated name of unified)")
     p.add_argument("--mode", choices=("general", "active"), default="general",
                    help="general, or active to drop documents of sessions that are no "
-                        "longer live (only with --kind all)")
+                        "longer live (only with --kind unified)")
     p.add_argument("--limit", type=int, default=10, help="results to show (1..50, default 10)")
     p.add_argument("--no-rerank", action="store_true", help="vector ranking only")
     p.add_argument("--wait", type=int, default=2,
@@ -201,11 +226,14 @@ def register(sub) -> None:
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=_cmd_rag_status)
     pr = rsub.add_parser("reindex", help="start an index sync for a corpus")
-    # The daemon's KINDS is the list, not this file: `all` is the combined
+    # The daemon's KINDS is the list, not this file: `unified` is the combined
     # corpus, and a CLI that refused it made the whole corpus unreachable from
-    # a shell while `/api/rag/reindex` accepted it (claunch-i2i95.1).
-    pr.add_argument("--kind", choices=("beads", "sessions", "all"), default="beads",
-                    help="which corpus (default beads; all is the combined one)")
+    # a shell while `/api/rag/reindex` accepted it (claunch-i2i95.1). `all` is
+    # its deprecated name and still parses (claunch-7aujp).
+    pr.add_argument("--kind", choices=("beads", "sessions", "unified", "all"),
+                    default="beads",
+                    help="which corpus (default beads; unified is the combined one, "
+                         "and 'all' is its deprecated name)")
     pr.add_argument("--force", action="store_true", help="re-embed every document")
     pr.add_argument("-C", "--cwd", help="a directory inside the repository whose board to index")
     pr.set_defaults(func=_cmd_rag_reindex)

@@ -1422,24 +1422,36 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
     assert args.func(args) == 0
     assert client.paths[-1][1]["force"] is True and "cwd" in client.paths[-1][1]
     assert "sync started" in capsys.readouterr().out
-    # The daemon accepts three kinds; the CLI refused the third and left the
-    # combined corpus unreachable from a shell (claunch-i2i95.1). `all` is not
-    # a board, so no cwd rides with it.
+    # The daemon accepts three corpora; the CLI refused the third and left the
+    # combined one unreachable from a shell (claunch-i2i95.1). It is `unified`
+    # now; `all` is its deprecated name and still parses, with one line on
+    # stderr (claunch-7aujp). It is not a board, so no cwd rides with it.
+    args = parser.parse_args(["rag", "reindex", "--kind", "unified", "--force"])
+    assert args.func(args) == 0
+    assert client.paths[-1][1]["kind"] == "unified" and "cwd" not in client.paths[-1][1]
+    assert "sync started" in capsys.readouterr().out
     args = parser.parse_args(["rag", "reindex", "--kind", "all", "--force"])
     assert args.func(args) == 0
-    assert client.paths[-1][1]["kind"] == "all" and "cwd" not in client.paths[-1][1]
-    assert "sync started" in capsys.readouterr().out
+    assert client.paths[-1][1]["kind"] == "unified" and "cwd" not in client.paths[-1][1]
+    captured = capsys.readouterr()
+    assert "sync started" in captured.out, "the deprecation line must not dirty stdout"
+    assert "--kind all is deprecated; use --kind unified" in captured.err
+    args = parser.parse_args(["search", "who", "--kind", "unified"])
+    assert args.func(args) == 0
+    assert "kind=unified" in client.paths[-1] and "cwd=" not in client.paths[-1]
+    capsys.readouterr()
     args = parser.parse_args(["search", "who", "--kind", "all"])
     assert args.func(args) == 0
-    assert "kind=all" in client.paths[-1] and "cwd=" not in client.paths[-1]
-    capsys.readouterr()
-    # The daemon takes `mode` (`_search_args`), and `active` only with
-    # `all`; the CLI had no way to send either, so the dashboard's
+    assert "kind=unified" in client.paths[-1], "the alias is normalized before the request"
+    assert "cwd=" not in client.paths[-1]
+    assert "--kind all is deprecated; use --kind unified" in capsys.readouterr().err
+    # The daemon takes `mode` (`_search_args`), and `active` only with the
+    # combined corpus; the CLI had no way to send either, so the dashboard's
     # active-search was unreachable from a shell (claunch-1uyy1).
     assert "mode=general" in client.paths[-1]
-    args = parser.parse_args(["search", "who", "--kind", "all", "--mode", "active"])
+    args = parser.parse_args(["search", "who", "--kind", "unified", "--mode", "active"])
     assert args.func(args) == 0
-    assert "kind=all" in client.paths[-1] and "mode=active" in client.paths[-1]
+    assert "kind=unified" in client.paths[-1] and "mode=active" in client.paths[-1]
     assert "cwd=" not in client.paths[-1]
     capsys.readouterr()
     before = len(client.paths)
@@ -1448,7 +1460,7 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
         args.func(args)
     assert exc.value.code == 2
     assert len(client.paths) == before, "a refused pairing must not reach the daemon"
-    assert "--mode active is only valid with --kind all" in capsys.readouterr().err
+    assert "--mode active is only valid with --kind unified" in capsys.readouterr().err
 
 
 def test_cli_search_registers_under_claunch():

@@ -65,7 +65,7 @@ def test_search_defaults_to_the_unified_corpus_and_compacts_rows(monkeypatch):
     answer = search_mcp.call_tool("search", {"query": "grid view"})
 
     params = _params(client.calls[0])
-    assert params == {"q": "grid view", "kind": "all", "mode": "general",
+    assert params == {"q": "grid view", "kind": "unified", "mode": "general",
                       "limit": "10", "rerank": "1", "wait": "2"}
     assert answer["mode"] == "general"
     assert answer["coverage"] == "90/100 indexed, sync in progress"
@@ -117,17 +117,26 @@ def test_search_sessions_corpus_rows_read_as_sessions(monkeypatch):
 def test_search_mode_active_rides_on_the_unified_corpus(monkeypatch):
     client = _use(monkeypatch, {"/api/search?": {
         "kind": "all", "index": {}, "results": []}})
-    answer = search_mcp.call_tool("search", {"query": "x", "kind": "all", "mode": "active"})
+    answer = search_mcp.call_tool("search", {"query": "x", "kind": "unified", "mode": "active"})
     params = _params(client.calls[0])
-    assert params["kind"] == "all" and params["mode"] == "active"
+    assert params["kind"] == "unified" and params["mode"] == "active"
     assert answer["mode"] == "active"
+
+
+def test_search_accepts_the_deprecated_all_alias(monkeypatch):
+    # `all` was the combined corpus's name; a caller written against it is
+    # answered, and the request carries the current name (claunch-7aujp).
+    client = _use(monkeypatch, {"/api/search?": UNIFIED})
+    answer = search_mcp.call_tool("search", {"query": "x", "kind": "all"})
+    assert _params(client.calls[0])["kind"] == "unified"
+    assert answer["kind"] == "unified"
 
 
 def test_search_rejects_active_with_a_narrower_kind_before_asking(monkeypatch):
     client = _use(monkeypatch, {})
     for kind in ("beads", "sessions"):
         with pytest.raises(search_mcp.SearchMcpError,
-                           match="mode must be general, or active with kind=all"):
+                           match="mode must be general, or active with kind=unified"):
             search_mcp.call_tool("search", {"query": "a", "kind": kind, "mode": "active"})
     assert client.calls == []
 

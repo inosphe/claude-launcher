@@ -409,21 +409,37 @@ not asserted against a fake that answers more than the real tool does.
 ## CLI
 
 ```
-claunch search "<query>" [--kind beads|sessions|all] [--mode general|active] [--limit N] [--no-rerank] [--wait S] [-C dir] [--json]
+claunch search "<query>" [--kind beads|sessions|unified] [--mode general|active] [--limit N] [--no-rerank] [--wait S] [-C dir] [--json]
 claunch rag status [--json]
-claunch rag reindex [--kind beads|sessions|all] [--force] [-C dir]
+claunch rag reindex [--kind beads|sessions|unified] [--force] [-C dir]
 ```
 
 `--kind` takes the same three values as the daemon's `KINDS`: `beads` (this
-board, the default), `sessions` (the fleet) and `all` (both). Only `beads`
-sends a `cwd` — the other two answer for the whole fleet, so `-C` changes
-nothing there.
+board, the default), `sessions` (the fleet) and `unified` (the combined
+corpus). Only `beads` sends a `cwd` — the other two answer for the whole
+fleet, so `-C` changes nothing there.
+
+`unified` is a corpus of its own, not a filter that runs the other two and
+merges them. It holds every known board's issues **and each comment as its
+own passage**, plus every session's identity, note, summary and archived
+records. The per-board and per-session collections hold the issues and the
+session definitions respectively; neither holds the comments or the session
+records. So `rag reindex --kind unified` does not rebuild a board's index —
+those are separate collections, one per board.
+
+`all` was the name of that corpus before it became `unified`. Everything that
+accepted it still does: the daemon, the MCP `search` tool and both `--kind`
+options normalize it to `unified`, and the CLI prints
+`claunch: --kind all is deprecated; use --kind unified` on stderr. The
+collection on disk keeps the old name (`rag/all.zvec`) until it is moved in
+its own round, so `/api/rag/dbs` still reports `corpus: all` for it while
+`/api/rag/status` reports `kind: unified`.
 
 `--mode` picks how much of the index the query reads. `general` (the
 default) searches all of it; `active` drops the documents whose records name
 no live session (a session that is exited, paused or archived). `active`
-pairs only with `--kind all`, and the pairing is refused twice: the daemon
-answers 400 `mode must be general, or active with kind=all`, and the command
+pairs only with `--kind unified`, and the pairing is refused twice: the daemon
+answers 400 `mode must be general, or active with kind=unified`, and the command
 line refuses it first with an argparse error (exit 2), so an impossible
 request never reaches the daemon.
 

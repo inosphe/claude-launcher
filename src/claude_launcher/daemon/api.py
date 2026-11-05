@@ -18085,12 +18085,15 @@ async def _search_args(request: web.Request):
     """The query string a search reads, validated the same way for the JSON
     answer and the stream. ``(args, error_response)``."""
     service: rag_mod.RagService = request.app["rag"]
-    kind = (request.query.get("kind") or "beads").strip()
+    # ``all`` is the deprecated name of the combined corpus; it normalizes to
+    # ``unified`` here, so every answer below — and the index it reads — names
+    # the corpus by its current name (claunch-7aujp).
+    kind = rag_mod.canonical((request.query.get("kind") or "beads").strip())
     if kind not in rag_mod.KINDS:
         return None, json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     mode = request.query.get("mode", "general")
-    if mode not in ("general", "active") or (mode == "active" and kind != "all"):
-        return None, json_error(400, "mode must be general, or active with kind=all")
+    if mode not in ("general", "active") or (mode == "active" and kind != "unified"):
+        return None, json_error(400, "mode must be general, or active with kind=unified")
     query = (request.query.get("q") or "").strip()
     if not query:
         return None, json_error(400, "q is required")
@@ -18111,8 +18114,8 @@ async def _search_args(request: web.Request):
 
 
 async def h_search(request: web.Request) -> web.Response:
-    """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions``
-    (default beads), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
+    """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions|unified``
+    (default beads; ``all`` is ``unified``'s deprecated name), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
     the reranker, ``?wait=`` seconds to give a running index sync (0..30,
     default 2), and for the board ``?cwd=`` or ``?parent=`` as the
     candidates picker takes them.
@@ -18249,8 +18252,8 @@ async def h_gh_status(request: web.Request) -> web.Response:
 
 
 async def h_rag_reindex(request: web.Request) -> web.Response:
-    """Start (or restart) an index sync. Body: ``kind`` (beads|sessions,
-    default beads), ``cwd`` for the board, ``force`` to re-embed everything.
+    """Start (or restart) an index sync. Body: ``kind`` (beads|sessions|unified,
+    default beads; ``all`` is ``unified``'s deprecated name), ``cwd`` for the board, ``force`` to re-embed everything.
 
     Returns 202 with the sync's progress and, in ``started`` / ``running`` /
     ``force_applied`` / ``force_pending``, what the request actually did. The
@@ -18265,7 +18268,7 @@ async def h_rag_reindex(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = str(body.get("kind") or "beads").strip()
+    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     if not service.configured():
@@ -18311,7 +18314,7 @@ async def h_rag_cancel(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = str(body.get("kind") or "beads").strip()
+    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     root = None

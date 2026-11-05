@@ -34,7 +34,16 @@ import urllib.parse
 
 from . import daemon_client, mcp_rpc
 
-KINDS = ("all", "beads", "sessions")
+#: The corpora, under their current names. ``unified`` is the combined one;
+#: ``all`` is its deprecated alias and stays accepted (``ALIASES``), so a
+#: caller that still names it is answered rather than refused.
+KINDS = ("unified", "beads", "sessions")
+ALIASES = {"all": "unified"}
+
+
+def canonical(kind: str) -> str:
+    """``kind`` under its current name: the deprecated ``all`` maps to ``unified``."""
+    return ALIASES.get(kind, kind)
 
 #: How much of the index a query reads. ``active`` -- the dashboard's
 #: active-search box -- drops documents whose records name no live session,
@@ -78,11 +87,13 @@ TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "enum": list(KINDS),
+                    "enum": list(KINDS) + list(ALIASES),
                     "description": (
-                        "'all' (default): the unified corpus. 'beads': issues of "
-                        "this session's board only, one row per issue. "
-                        "'sessions': one row per session."
+                        "'unified' (default): the combined corpus -- every board's "
+                        "issues and comments plus every session's records. 'beads': "
+                        "issues of this session's board only, one row per issue. "
+                        "'sessions': one row per session. 'all' is the deprecated "
+                        "name of 'unified' and is still accepted."
                     ),
                 },
                 "mode": {
@@ -92,7 +103,7 @@ TOOLS = [
                         "'general' (default): search the whole index. 'active': "
                         "drop the documents whose records name no live session "
                         "(exited, paused or archived). 'active' pairs only with "
-                        "kind 'all' -- the daemon refuses the other pairings and "
+                        "kind 'unified' -- the daemon refuses the other pairings and "
                         "so does this tool, before it sends anything."
                     ),
                 },
@@ -224,16 +235,16 @@ def search(args: dict) -> dict:
     query = str(args.get("query") or "").strip()
     if not query:
         raise SearchMcpError("query is required")
-    kind = str(args.get("kind") or "all")
+    kind = canonical(str(args.get("kind") or "unified"))
     if kind not in KINDS:
-        raise SearchMcpError(f"kind must be one of {', '.join(KINDS)}")
+        raise SearchMcpError(f"kind must be one of {', '.join(KINDS)} (or its alias 'all')")
     mode = str(args.get("mode") or "general")
     if mode not in MODES:
         raise SearchMcpError(f"mode must be one of {', '.join(MODES)}")
-    if mode == "active" and kind != "all":
+    if mode == "active" and kind != "unified":
         # The daemon answers 400 for this pairing; refusing it here means no
         # request goes out for an answer that cannot come back.
-        raise SearchMcpError("mode must be general, or active with kind=all")
+        raise SearchMcpError("mode must be general, or active with kind=unified")
     try:
         limit = int(args.get("limit") or 10)
     except (TypeError, ValueError):
@@ -306,7 +317,7 @@ def read(args: dict) -> dict:
         except daemon_client.DaemonClientError as exc:
             raise SearchMcpError(
                 f"session {name!r} is no longer registered ({exc}); its archived "
-                f"records stay searchable -- search for {name!r} with kind 'all'"
+                f"records stay searchable -- search for {name!r} with kind 'unified'"
             ) from exc
         return {k: info.get(k) for k in _SESSION_FIELDS if info.get(k) not in (None, "")}
     if handle.startswith("api/search/records/"):
