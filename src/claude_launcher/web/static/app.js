@@ -5269,6 +5269,23 @@ function railCardKey(ev, name) {
   return binding.act(name);
 }
 
+/* The same keys on a row of the Chart view (the rail's and the #/chart
+   page's, chart-page.js sessionRow), while the row itself holds the
+   keyboard -- the card's rule, for the card's reason (claunch-h0wi6.2.1).
+   Two of the card's keys are the row's own business and are left to it:
+   Enter and Space, which the row binds itself (the rail's opens the session,
+   the page's selects the row), and c, whose details live on the list card
+   and not on a chart row. */
+const CHART_ROW_SKIPS = new Set(["Enter", " ", "Spacebar", "c"]);
+
+function chartRowKey(ev, name) {
+  if (!ev) return false;
+  const raw = String(ev.key || "");
+  const pressed = raw.length === 1 ? raw.toLowerCase() : raw;
+  if (CHART_ROW_SKIPS.has(pressed)) return false;
+  return railCardKey(ev, name);
+}
+
 /* Bound on the document rather than per row: the rows are rebuilt by every
    poll that changes the fleet, and a listener on each of them would go with
    it. `focusout` fires BEFORE the new element takes focus, so it reads the
@@ -39293,6 +39310,14 @@ function keyHelpCard() {
     ["On a focused rail card", RAIL_CARD_KEYS.map((b) => ({
       label: b.label, what: b.what, when: b.when,
     }))],
+    // The Chart view's rows take the same table less the keys the row keeps
+    // for itself (chartRowKey), so this group is derived the same way.
+    ["On a focused Chart row", [
+      { label: "Enter / Space", what: "open the session (rail) or select the row (#/chart)",
+        when: "any row" },
+      ...RAIL_CARD_KEYS.filter((b) => !b.keys.some((k) => CHART_ROW_SKIPS.has(k)))
+        .map((b) => ({ label: b.label, what: b.what, when: b.when })),
+    ]],
     ["Elsewhere on the page", KEY_HELP_EXTRA],
   ];
   for (const [heading, rows] of groups) {
