@@ -2738,7 +2738,9 @@ class SessionManager:
         Running sessions are untouched. This is the *only* thing that makes a
         session unresumable, which is why the daemon never does it on its own —
         it happens when a human asks (``claunch clear-sessions``, or the web
-        UI's clear button). ``logs`` also deletes their captured output.
+        UI's clear button). ``logs`` also deletes their session directories —
+        captured output, scratch and uploads, the same clean :meth:`archive`
+        performs.
 
         Neither answer frees a name: session numbers come from a counter that
         only moves forward (:mod:`session_seq`), so a cleared session's ``sN``
