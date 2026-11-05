@@ -213,6 +213,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-
 html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
 html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term-strong); }
+html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(--term-muted); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
@@ -11439,11 +11440,14 @@ a.category-ref:hover { text-decoration: underline; }
    prices (claunch-i6xl2). A caption under the small chart, and under the
    zoomed chart's legend; the number is right-aligned so its last digit sits
    over the plot's right edge. Nothing is drawn where the table has no rates
-   for the session's model -- the chart's tooltip says so instead. */
+   for the session's model -- the chart's tooltip says so instead. The second
+   line splits that total by what was billed -- read, cached read, output,
+   and cache write when the window wrote any (claunch-kr3wr). */
 #term-tps-overlay .term-series-cost {
   font-size: 10px; line-height: 12px; color: #c9d1d9; text-align: right;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
+#term-tps-overlay .term-series-cost-parts { color: #8b949e; }
 /* The zoomed chart is exactly as wide as its plot, and two fixed rows under
    the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
    The readout's text changes as the pointer moves, and it used to widen the
