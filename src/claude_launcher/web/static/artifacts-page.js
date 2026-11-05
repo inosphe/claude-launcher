@@ -445,20 +445,24 @@ globalThis.ArtifactsPage = (() => {
     }
   }
 
-  /* Submit the plan the reader is looking at. The plan_id is what makes this
-     an apply: the daemon re-judges ownership and every fingerprint first, so
-     an artifact that changed since the plan is kept with a reason instead of
-     being deleted. Two answers are not deletions and must not be read as
-     one: `scheduled` (the window was busy and a run is now waiting) and
-     `cleanup_pending` (two hundred, but the window was refused and even the
-     schedule could not be written -- apply() never ran). */
-  async function applyPlan(session, token) {
+  /* Submit the plan the reader is looking at -- all of it, or with `rows`
+     just the positions they pressed. The plan_id is what makes this an apply:
+     the daemon re-judges ownership and every fingerprint first, so an
+     artifact that changed since the plan is kept with a reason instead of
+     being deleted. A row apply answers with the plan minus the rows it took,
+     so the rest stay on screen under the same plan_id. Two answers are not
+     deletions and must not be read as one: `scheduled` (the window was busy
+     and a run is now waiting) and `cleanup_pending` (two hundred, but the
+     window was refused and even the schedule could not be written -- apply()
+     never ran). */
+  async function applyPlan(session, token, rows = null) {
     const current = cleanupState(session) || {};
     setCleanup(session, { plan: current.plan || null, busy: "apply", error: "" });
     try {
       const response = await api("/api/artifact-cleanup", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session, plan_id: token }),
+        body: JSON.stringify(rows ? { session, plan_id: token, rows }
+          : { session, plan_id: token }),
       });
       const body = await response.json();
       if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
@@ -470,10 +474,11 @@ globalThis.ArtifactsPage = (() => {
         return;
       }
       if (body.status === "cleanup_pending") {
-        // Nothing was deleted and nothing was scheduled: the daemon refused
-        // the window and its own record of the retry could not be written.
-        // apply() never ran, so it still holds this plan until it expires;
-        // keep it on screen so the reader can submit it again (or cancel).
+        // Nothing was deleted: either the daemon refused the window and its
+        // own record of the retry could not be written, or a row apply found
+        // the window busy and declined to schedule (a schedule would replan
+        // the whole set). apply() never ran, so it still holds this plan
+        // until it expires; keep it on screen so the reader can press again.
         notice = `${session}: 정리를 시작하지 못했다 — ${body.reason || "사유 없음"}`;
         setCleanup(session, { plan: current.plan || null, busy: "", error: "" });
         render();
@@ -483,6 +488,14 @@ globalThis.ArtifactsPage = (() => {
       const pending = Number(body.cleanup_pending) || 0;
       notice = `${session}: 정리 완료 · 삭제 ${removed}개` +
         (pending ? ` · 보류 ${pending}개` : "");
+      if (rows) {
+        // The answer is the plan with those rows marked removed: the rows the
+        // reader left alone are still offered under the same plan_id.
+        setCleanup(session, { plan: body && body.items ? body : (current.plan || null),
+          busy: "", error: "" });
+        render();
+        return;
+      }
       cleanups.delete(session);
       load();
     } catch (exc) {
@@ -618,11 +631,12 @@ globalThis.ArtifactsPage = (() => {
     if (!(plan.items || []).length) {
       rows.appendChild(node("p", "ar-muted", "정리할 항목이 없다"));
     }
-    for (const row of plan.items || []) {
+    (plan.items || []).forEach((row, index) => {
       const item = node("div", "ar-row ar-plan-row");
+      const removed = row.status === "removed";
       const ready = row.status === "ready";
-      item.appendChild(node("span", `wt-chip ${ready ? "ar-plan-ready" : "ar-why"}`,
-        ready ? "준비" : "보류"));
+      item.appendChild(node("span", `wt-chip ${ready || removed ? "ar-plan-ready" : "ar-why"}`,
+        removed ? "삭제됨" : ready ? "준비" : "보류"));
       const path = node("code", "ar-path", row.path);
       path.title = row.path;
       item.appendChild(path);
@@ -633,8 +647,21 @@ globalThis.ArtifactsPage = (() => {
         why.title = row.reason;
         item.appendChild(why);
       }
+      if (ready) {
+        // One row at a time, by its position in the plan this page is
+        // showing: the request names no path, and the daemon deletes only
+        // what its own plan put there.
+        const drop = node("button", "wf-btn ar-plan-drop", "지우기");
+        drop.type = "button";
+        drop.disabled = !!plan.scheduled;
+        drop.title = plan.scheduled
+          ? "이미 예약된 정리가 있어 이 항목을 지우지 않는다"
+          : "이 항목만 삭제한다 (되돌릴 수 없다)";
+        drop.onclick = () => applyPlan(session.name, plan.plan_id, [index]);
+        item.appendChild(drop);
+      }
       rows.appendChild(item);
-    }
+    });
     box.appendChild(rows);
     box.appendChild(node("div", "ar-cleanup-line ar-muted",
       "계획은 10분 뒤 만료된다 — 그 뒤에는 다시 계획을 세워야 한다."));

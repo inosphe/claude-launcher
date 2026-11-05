@@ -59,14 +59,25 @@ def install(app):
     async def handle(request):
         try:
             body = await request.json()
-            if not isinstance(body, dict) or set(body) - {"session", "plan_id"}:
-                raise CleanupError("only session and plan_id are accepted; paths are not accepted")
+            if not isinstance(body, dict) or set(body) - {"session", "plan_id", "rows"}:
+                raise CleanupError("only session, plan_id and rows are accepted; paths are not accepted")
             session = body.get("session")
             token = body.get("plan_id")
+            rows = body.get("rows")
             if not isinstance(session, str) or not session:
                 raise CleanupError("a managed session is required")
             if token is not None and (not isinstance(token, str) or not token):
                 raise CleanupError("plan_id must be a nonempty string")
+            if rows is not None:
+                # A row is chosen by its position in the daemon's plan; the
+                # deeper checks (range, duplicates) are ``apply``'s, so a
+                # caller of the service and a caller of the route agree.
+                if token is None:
+                    raise CleanupError("rows need a plan_id")
+                if not isinstance(rows, list):
+                    raise CleanupError("rows must be a list of plan item positions")
+                if not all(type(value) is int for value in rows):
+                    raise CleanupError("rows must be a list of plan item positions")
             if token is None:
                 # Single flight: a caller that gave up leaves its walk running,
                 # so its retry joins that walk instead of queueing a second.
@@ -83,11 +94,18 @@ def install(app):
                                              bound=True, label=f"artifact cleanup: {session}",
                                              workers=1, wait=0)
                 if not grant.get("granted"):
+                    reason = grant.get("reason", "measurement window unavailable")
+                    if rows is not None:
+                        # A schedule replans and applies the *whole* plan when
+                        # the window frees, which would delete the rows this
+                        # reader left alone. The plan is still held, so the
+                        # answer is "not now" and the row waits for a press.
+                        return web.json_response({"status": "cleanup_pending",
+                                                  "plan_id": token, "reason": reason})
                     # Nobody will ask again: the caller's turn ends here, and
                     # auto-release is exactly the step that runs with no person
                     # at the terminal (claunch-q4cqy.2). Keep the request and
                     # let scheduled_clock() run it when the window frees up.
-                    reason = grant.get("reason", "measurement window unavailable")
                     already = service.scheduled_record(session) is not None
                     try:
                         service.schedule(session, reason)
@@ -98,7 +116,7 @@ def install(app):
                     return web.json_response({"status": status, "plan_id": token,
                                               "reason": reason, "already": already})
                 try:
-                    job = asyncio.create_task(pools.background(service.apply, session, token))
+                    job = asyncio.create_task(pools.background(service.apply, session, token, rows))
                     try:
                         result = await asyncio.shield(job)
                     except asyncio.CancelledError:
