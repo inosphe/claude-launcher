@@ -795,6 +795,11 @@ v1 `checklist:`의 대응:
   `integrate`가 쓴다(`size: 5`, `interval: 300`, `expire: 1800`) — 후속 스윕 배치(`delayed_sweep_batch_*`,
   기본 5건·300초)와 같은 규칙이다. 두 값은 워크플로 정본과 데몬 설정 기본값에 각각
   적혀 있고 `tests/test_cflow2_improv_leader.py`가 둘이 같은지 잰다.
+  운전자가 아직 고르지 않은 choose에서도 batch 창이 열리면(항목이 `size`건이거나 가장 이른
+  항목 + `interval`이 지났으면) 데몬 시계가 운전자에게 「the run moved」 알림을 창마다 한 번
+  보낸다(`Cflow2Clock._batch_open`, claunch-1brxe). 항목이 들어와도 그 choose는 같은 대기라
+  재알림(대기마다 한 번)이 이미 끝났으면 알릴 경로가 없었고, idle hold된 리더는 알림을 받아야만
+  깨어난다. 같은 이유로 그 옵션에 대기 항목이 있는 choose는 `runtime.quiescent`가 아니다.
 
 #### 명령 안의 값 참조
 
