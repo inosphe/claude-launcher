@@ -31424,6 +31424,17 @@ const RAG_POLL_MS = 3000;
    waiting for the status refresh to draw it left the reader with no feedback
    at all (peer review of claunch-i2i95). */
 let ragBusy = false;
+/* The collections that exist on disk (/api/rag/dbs), so the card can draw the
+   ones no index has opened yet as placeholders (claunch-c7vjm). Kept off the
+   3-second status poll: /api/rag/dbs walks every collection to total its
+   files, and that walk is not worth repeating every RAG_POLL_MS. It rides a
+   minute-long clock instead, and it is read without the sizes (?sizes=0) —
+   the card draws no size. */
+let ragDisk = null;
+let ragDiskError = "";
+let ragDiskAt = 0;
+let ragDiskBusy = false;
+const RAG_DISK_POLL_MS = 60000;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31494,6 +31505,7 @@ function openSettings(section) {
   refreshPrompterSettings();
   refreshStatusChecks();
   refreshRagStatus();
+  refreshRagDisk();
   refreshGhStatus();
   refreshRelaySettings();
   refreshWslRegStub();
@@ -31630,8 +31642,39 @@ async function refreshRagStatus() {
   } catch (err) {
     ragError = String(err);
   }
+  // The disk listing the placeholder rows come from is re-read on this same
+  // refresh, but at most once per RAG_DISK_POLL_MS: the status poll fires
+  // every 3 seconds and the listing is the expensive half (claunch-c7vjm).
+  if (wsOpen && wsSection === "" && ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)) {
+    refreshRagDisk();
+  }
   if (wsOpen) renderWorkspaces();
   ragSchedulePoll();
+}
+
+/* Whether the disk listing is due. Split out so the harness can hold the
+   interval: the card must not put /api/rag/dbs on the 3-second clock
+   (claunch-c7vjm). */
+function ragDiskDue(now, last, interval) {
+  return !last || now - last >= interval;
+}
+
+async function refreshRagDisk() {
+  if (ragDiskBusy) return;
+  ragDiskBusy = true;
+  try {
+    const resp = await api("/api/rag/dbs?sizes=0");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragDisk = Array.isArray(data.dbs) ? data.dbs : [];
+    ragDiskAt = Date.now();
+    ragDiskError = "";
+  } catch (err) {
+    ragDiskError = String(err);
+  } finally {
+    ragDiskBusy = false;
+  }
+  if (wsOpen) renderWorkspaces();
 }
 
 /* Whether the status payload has anything left to watch. A reindex request
@@ -31808,21 +31851,65 @@ async function ragReindex(row, force) {
    collection still on a pre-preset directory carries no identity of its own —
    it is read through the legacy adoption rule — and the row says so, because
    that is the fact the two screens disagreed about (claunch-i2i95). */
-function ragDbGroups(st) {
+function ragDbGroups(st, placeholders) {
   const rows = st.indexes || [];
   const db = st.db || "(이름 없는 DB)";
   const groups = new Map();
-  for (const row of rows) {
-    const name = row.db_configured || db;
+  const add = (name, row) => {
     let g = groups.get(name);
     if (!g) {
-      g = { name, dims: 0, rows: [] };
+      g = { name, dims: [], rows: [] };
       groups.set(name, g);
     }
     g.rows.push(row);
-    if (row.dims && !g.dims) g.dims = row.dims;
-  }
+    // Every collection's width is kept: the header used to take the first
+    // row's and call it the DB's, which hid a DB whose corpora were built at
+    // different widths (claunch-rk0od).
+    if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);
+  };
+  for (const row of rows) add(row.db_configured || db, row);
+  // A collection on disk that no index has opened yet sits under the DB its
+  // identity names, so the reader sees it beside the ones that are running
+  // rather than in a second list with a second heading (claunch-c7vjm).
+  for (const row of placeholders || []) add(row.identity || db, { ...row, placeholder: true });
   return [...groups.values()];
+}
+
+/* The collections on disk that no open index accounts for. Both payloads
+   name a collection by the directory it lives in, so the two are compared by
+   that path and nothing else: ``/api/rag/status`` lists what the daemon has
+   opened, ``/api/rag/dbs`` lists everything that exists (claunch-c7vjm). */
+function ragPlaceholderRows(st, diskRows) {
+  const opened = new Set();
+  for (const row of (st && st.indexes) || []) {
+    if (row && row.path) opened.add(String(row.path));
+  }
+  return (diskRows || []).filter(row => row && row.path && !opened.has(String(row.path)));
+}
+
+/* What a placeholder row calls itself. The corpus is the part the card does
+   not otherwise draw — a board corpus is keyed ``beads-<hash>`` per root, so
+   it is shown as such and the hash stays reachable in the title. */
+function ragPlaceholderLabel(row) {
+  const corpus = String((row && row.corpus) || "");
+  if (corpus === "unified" || corpus === "all") return "Search anything (통합: 이슈·코멘트·세션)";
+  if (corpus === "sessions") return "sessions (세션)";
+  if (corpus.startsWith("beads-")) return `board ${corpus}`;
+  return corpus || "(코퍼스 미상)";
+}
+
+/* A placeholder row's state line. A width that differs from the model now
+   configured means the collection cannot serve a query when it opens — the
+   same fact the DB panel's preset warning names, said here before the cost
+   is paid (claunch-c7vjm). Says nothing when either width is unknown. */
+function ragPlaceholderState(row, st) {
+  const parts = ["아직 열리지 않음"];
+  const width = Number((row && row.dims) || 0);
+  const current = Number((st && st.dimensions) || 0);
+  if (width && current && width !== current) {
+    parts.push(`열리면 실패 예상 — 지금 설정은 ${current}차원`);
+  }
+  return { state: "unopened", text: parts.join(" · ") };
 }
 
 function ragBucketLabel(row) {
@@ -31864,6 +31951,9 @@ async function ragDbAction(st, group, force) {
   const outcomes = [];
   try {
     for (const row of group.rows) {
+      // A placeholder is a disk listing, not a bucket the daemon knows: it
+      // has no kind to name and nothing opened to reindex (claunch-c7vjm).
+      if (row.placeholder) continue;
       const data = await ragReindex(row, force);
       if (!data) {
         outcomes.push(`${ragBucketLabel(row)}: 오류`);
@@ -31985,26 +32075,58 @@ function ragCard() {
   queueRow.append(" ", pause);
   card.appendChild(queueRow);
 
-  for (const group of ragDbGroups(st)) {
+  const placeholders = ragPlaceholderRows(st, ragDisk);
+  if (ragDiskError) {
+    card.appendChild(el("p", "wf-note",
+      `디스크의 컬렉션 목록을 읽지 못했습니다 — 열리지 않은 컬렉션은 표시되지 않습니다 · ${ragDiskError}`));
+  } else if (placeholders.length) {
+    card.appendChild(el("p", "wf-note",
+      "회색 행은 디스크에 있지만 아직 열리지 않은 컬렉션입니다 — 검색·색인이 한 번 닿으면 정상 행이 됩니다."));
+  }
+  for (const group of ragDbGroups(st, placeholders)) {
     const box = el("div", "rag-db-block");
     const head = el("div", "rag-db-head");
     head.appendChild(el("strong", null, `DB ${group.name}`));
-    head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
-    const sync = el("button", "wf-btn clear", "Sync");
-    sync.type = "button";
-    sync.disabled = ragBusy;
-    sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
-    sync.addEventListener("click", () => ragDbAction(st, group, false));
-    const force = el("button", "wf-btn clear", "Rebuild");
-    force.type = "button";
-    force.disabled = ragBusy;
-    force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
-    force.addEventListener("click", () => ragDbAction(st, group, true));
-    head.append(sync, force);
+    head.appendChild(el("span", "beads-bits", group.dims.length ? ` · ${group.dims.join("/")}차원` : ""));
+    // Sync/Rebuild act on the DB's open collections. A group drawn only from
+    // the disk listing has none to act on, and a click there would ask the
+    // daemon to reindex a collection the card never opened (claunch-c7vjm).
+    if (group.rows.some(row => !row.placeholder)) {
+      const sync = el("button", "wf-btn clear", "Sync");
+      sync.type = "button";
+      sync.disabled = ragBusy;
+      sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
+      sync.addEventListener("click", () => ragDbAction(st, group, false));
+      const force = el("button", "wf-btn clear", "Rebuild");
+      force.type = "button";
+      force.disabled = ragBusy;
+      force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
+      force.addEventListener("click", () => ragDbAction(st, group, true));
+      head.append(sync, force);
+    }
     box.appendChild(head);
 
     const list = el("div", "rag-index-list");
     for (const row of group.rows) {
+      if (row.placeholder) {
+        const item = el("div", "rag-index-row rag-row-unopened");
+        const text = el("div", "rag-index-text");
+        const label = el("strong", null, ragPlaceholderLabel(row));
+        label.title = `corpus ${row.corpus}${row.identity ? ` · DB ${row.identity}` : ""}`;
+        text.appendChild(label);
+        const bits = [
+          row.dims ? `${row.dims}차원` : "차원 미상",
+          row.model || "모델 미상",
+          row.identity ? "이름 있음" : "이전 형식",
+        ];
+        text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+        const state = ragPlaceholderState(row, st);
+        text.appendChild(el("span", "rag-badge rag-badge-unopened", "미개방"));
+        text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+        item.appendChild(text);
+        list.appendChild(item);
+        continue;
+      }
       const item = el("div", "rag-index-row");
       const text = el("div", "rag-index-text");
       text.appendChild(el("strong", null, ragBucketLabel(row)));
@@ -32034,8 +32156,9 @@ function ragCard() {
     card.appendChild(box);
   }
   if (!(st.indexes || []).length) {
-    card.appendChild(el("p", "wf-note",
-      "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
+    card.appendChild(el("p", "wf-note", placeholders.length
+      ? "열린 색인이 아직 없습니다 — 위의 회색 행이 디스크에 있는 컬렉션입니다."
+      : "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
   }
   return card;
 }

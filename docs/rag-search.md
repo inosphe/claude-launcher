@@ -376,7 +376,7 @@ write-up matches on any part.
 | `GET /api/search?q=&kind=beads\|sessions&cwd=\|parent=&limit=&rerank=&wait=` | ranked results + `index: {total, indexed, pending, syncing, error}` + `timing` |
 | `GET /api/beads/{id}/related?cwd=&limit=` | nearest issues |
 | `GET /api/rag/status` | configured, host, models, each loaded index's coverage, root, and the DB it belongs to (`db` from the collection's path, `db_configured` from the preset, `legacy` when the path predates presets), the queue (depth, pending keys, last consume, watcher interval) |
-| `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1) |
+| `GET /api/rag/dbs` | every collection on disk: name, corpus, identity, width, model, bytes, the presets that read it, and which one is in use (claunch-fhs7f.1). `?sizes=0` returns the same rows with `bytes` 0 and skips the per-collection walk that totals their files — the Semantic search card lists them to find collections no index has opened yet, on a timer (claunch-c7vjm) |
 | `POST /api/rag/dbs/delete` | `{"name": "<stem>"}` — removes a collection and its sidecar; refused (400) when a preset or the active config reads it ; `{"db": "<db>"}` removes every collection of that DB name (claunch-r4796) |
 | `POST /api/rag/dbs/rename` | `{"from": "<db>", "to": "<name>"}` — moves every collection of a DB to the slugged new name and re-points the presets that read it; 400 for unknown/empty/same names and for a name taken on disk or by another preset (claunch-r4796) |
 | `POST /api/rag/reindex` `{kind, cwd, force}` | 202, starts a sync and says what the request did: `started`, `running` (a pass was already going), `force_applied`, `force_pending` (a forced request that arrived mid-pass and will run as one more pass) — claunch-i2i95 |
@@ -427,13 +427,22 @@ session definitions respectively; neither holds the comments or the session
 records. So `rag reindex --kind unified` does not rebuild a board's index —
 those are separate collections, one per board.
 
-`all` was the name of that corpus before it became `unified`. Everything that
-accepted it still does: the daemon, the MCP `search` tool and both `--kind`
-options normalize it to `unified`, and the CLI prints
-`claunch: --kind all is deprecated; use --kind unified` on stderr. The
-collection on disk keeps the old name (`rag/all.zvec`) until it is moved in
-its own round, so `/api/rag/dbs` still reports `corpus: all` for it while
-`/api/rag/status` reports `kind: unified`.
+`all` was the name of that corpus before the rename (claunch-7aujp.1). It is
+no longer a value anyone accepts: the daemon answers 400 `kind must be one of
+beads, sessions, unified`, the MCP `search` tool raises the same list, and
+both `--kind` options refuse it at argparse (exit 2) before a request is
+sent.
+
+The collection on disk keeps the old name until it is moved in a window the
+operator opens (a daemon stop). Until that move, the service opens
+`rag/all.zvec` as the `unified` corpus — it reads the pre-rename name rather
+than starting a second, empty collection — so `/api/rag/status` reports
+`kind: unified` with `key: unified` while `/api/rag/dbs` still reports
+`corpus: all` for that directory. After the move both report `unified`.
+
+The rename did not change what the corpus holds, so the directory is moved,
+not rebuilt: the vectors are read from the moved directory without re-embedding
+the documents.
 
 `--mode` picks how much of the index the query reads. `general` (the
 default) searches all of it; `active` drops the documents whose records name
@@ -468,7 +477,7 @@ few, so typing narrows by substring at once and Enter asks by meaning.
 | **Issue detail pane** | "Related by meaning" block | the focused issue's nearest neighbours, score-chipped, fetched with the detail |
 | **New-session form picker** | the existing "filter the board" box | typing stays substring; Enter asks the board of the chosen directory (or the parent session's) by meaning and lists the daemon's ranking first, then the substring matches it did not name; lead row says "by meaning" |
 | **Spawn modal picker** | the same box | same behaviour, asked of the board the candidates came from |
-| **Settings** | "Semantic search (RAG)" card | configured or not (with the yaml to fill in), endpoint host, models, TLS; the queue line with pause/resume; then one block per DB holding the collections it reads (`Search anything`, `sessions`, one row per board) with a state badge (정상/색인 중/실패/대기), the row's own progress, and its physical path when it is the pre-preset form. `Sync` and `Rebuild` act on the whole DB; a syncing row offers `취소`. A click reports what the daemon answered, and the card re-reads the status every 3 s while work remains (bounded at 200 polls) — claunch-i2i95 |
+| **Settings** | "Semantic search (RAG)" card | configured or not (with the yaml to fill in), endpoint host, models, TLS; the queue line with pause/resume; then one block per DB holding the collections it reads (`Search anything`, `sessions`, one row per board) with a state badge (정상/색인 중/실패/대기), the row's own progress, and its physical path when it is the pre-preset form. `Sync` and `Rebuild` act on the whole DB; a syncing row offers `취소`. A click reports what the daemon answered, and the card re-reads the status every 3 s while work remains (bounded at 200 polls) — claunch-i2i95. A collection that exists on disk but that no index has opened yet is drawn greyed as a placeholder under the DB its identity names: its corpus, width, model, whether it predates presets, the badge `미개방` and the line `아직 열리지 않음`, plus `열리면 실패 예상` when its width differs from the configured one. It carries no `Sync`/`Rebuild`/`취소`, and a DB drawn only from placeholders gets no buttons on its heading. The disk listing behind those rows comes from `GET /api/rag/dbs?sizes=0` and is read when the card opens and at most once a minute — never on the 3-second status poll, which the file-walking size would make expensive (claunch-c7vjm) |
 
 Interaction rules the code keeps: a search box that is focused pauses the
 page's poll-driven re-render (`formInUse`), so Enter blurs the box before

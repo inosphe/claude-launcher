@@ -4869,6 +4869,12 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .rag-state-text { font-size: 11px; color: #9da5b0; overflow-wrap: anywhere; }
 .rag-state-failed { color: #f85149; }
 .rag-state-busy { color: #58a6ff; }
+/* A collection on disk that no index has opened yet: drawn, not offered.
+   Greyed so it reads as "there, but not running" beside the rows that are
+   (claunch-c7vjm). */
+.rag-row-unopened { opacity: 0.6; }
+.rag-badge-unopened { border-style: dashed; }
+.rag-state-unopened { color: #9da5b0; }
 /* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
 .gh-head { display: flex; align-items: center; gap: 10px; }
 .gh-head h3 { flex: 1 1 auto; margin: 0; }
@@ -8893,7 +8899,11 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings .rag-db-table { width: 100%; min-width: 600px; border-collapse: collapse; font-size: 12px; }
 .search-settings .rag-db-table th { text-align: left; font-weight: 600; color: #9da5b0; padding: 4px 6px; border-bottom: 1px solid #30363d; white-space: nowrap; }
 .search-settings .rag-db-table td { padding: 4px 6px; border-bottom: 1px solid #21262d; vertical-align: middle; overflow-wrap: anywhere; }
-.search-settings .rag-db-entry td:nth-child(2), .search-settings .rag-db-entry td:nth-child(5) { white-space: nowrap; }
+/* Named by class, not nth-child: a DB's rows share the first and last cells
+   by rowspan, so a row's positions differ from the group's first one. */
+.search-settings .rag-db-entry .rag-db-corpus, .search-settings .rag-db-entry .rag-db-dims,
+.search-settings .rag-db-entry .rag-db-form { white-space: nowrap; }
+.search-settings .rag-db-entry .rag-db-model { color: #9da5b0; }
 .search-settings .rag-db-use { white-space: nowrap; background: none; border: none; padding: 0; margin: 0; color: #58a6ff; cursor: pointer; font: inherit; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .search-settings .rag-db-use:hover:not(:disabled) { text-decoration: underline; }
 .search-settings .rag-db-use:disabled { color: inherit; cursor: default; }

@@ -76,7 +76,7 @@ def test_the_corpus_is_built_off_the_event_loop(tmp_path, monkeypatch):
 def test_a_pass_does_not_queue_another_pass_for_its_own_writes(tmp_path):
     """The records a pass writes are read back later in the same pass, so
     they are already in what it returns. Firing the change hook for them --
-    whose production handler is enqueue("all") -- queued a second full pass
+    whose production handler is enqueue("unified") -- queued a second full pass
     that found nothing new: 26 hook calls on a twelve-session fixture before
     this change, 0 after, with identical documents."""
     corpus, _ = _world(tmp_path)
@@ -417,20 +417,20 @@ def test_all_search_uses_reranker_and_rebuilds_for_endpoint_change(tmp_path):
             return search_anything.documents("a", "record", "relay needle", kind="checks", sessions=[{"name": "s1"}])
         service.all_docs = docs
         try:
-            result = await service.search("all", "relay", wait=10)
+            result = await service.search("unified","relay", wait=10)
             assert result["results"][0]["kind"] == "checks"
             assert result["reranked"] and endpoint.rerank_calls
             class FailedRerank(rag.RagClient):
                 async def rerank(self, *args):
                     raise rag.RagError("provider rerank unavailable")
             service._client_factory = FailedRerank
-            fallback = await service.search("all", "relay", wait=10)
+            fallback = await service.search("unified","relay", wait=10)
             assert fallback["results"] and not fallback["reranked"]
             assert fallback["warnings"]
-            index = await service._index("all", None, cfg)
+            index = await service._index("unified",None, cfg)
             assert index.dims == 8 and index.entries
             cfg["base_url"] += "/changed"
-            assert not (await service._index("all", None, cfg)).entries
+            assert not (await service._index("unified",None, cfg)).entries
         finally:
             await service.shutdown()
             await server.close()
@@ -478,7 +478,7 @@ def test_search_answer_reports_the_sessions_state_read_now(tmp_path):
 
         service.all_docs = docs
         try:
-            result = await service.search("all", "relay", wait=10, rerank=False)
+            result = await service.search("unified","relay", wait=10, rerank=False)
             session_row = next(r for r in result["results"] if r["kind"] == "session")
             assert session_row["name"] == "s1"
             assert (session_row["status"], session_row["paused"], session_row["archived"]) == ("busy", False, False)
@@ -496,7 +496,7 @@ def test_search_answer_reports_the_sessions_state_read_now(tmp_path):
             # from the query-vector cache.
             embedded = len(endpoint.embed_calls)
             sessions[0]._status = "idle"
-            again = await service.search("all", "relay", wait=10, rerank=False)
+            again = await service.search("unified","relay", wait=10, rerank=False)
             assert next(r for r in again["results"] if r["kind"] == "session")["status"] == "idle"
             assert len(endpoint.embed_calls) == embedded
             assert again["timing"]["embed_cached"] is True
@@ -551,7 +551,7 @@ def test_rerank_candidates_are_cut_to_rerank_chars(tmp_path):
 
         service.all_docs = docs
         try:
-            result = await service.search("all", "relay", wait=10)
+            result = await service.search("unified","relay", wait=10)
             assert result["reranked"] is True
             sent = endpoint.rerank_calls[-1]["documents"]
             assert len(sent) == 2
@@ -597,7 +597,7 @@ def test_body_keyword_rescues_a_document_outside_the_vector_candidates(tmp_path)
 
         service.all_docs = docs
         try:
-            view = await service.search("all", "issues.jsonl", limit=3, wait=10)
+            view = await service.search("unified","issues.jsonl", limit=3, wait=10)
             assert view["results"][0]["id"] == "target:0"
             assert view["results"][0]["lexical"] is True
             assert "직접 수정 금지" in view["results"][0]["excerpt"]
@@ -606,7 +606,7 @@ def test_body_keyword_rescues_a_document_outside_the_vector_candidates(tmp_path)
             service = rag.RagService(config=lambda: _cfg(server, candidates=3, rerank_model=""),
                                      root_dir=tmp_path / "index")
             service.all_docs = docs
-            again = await service.search("all", "issues.jsonl", limit=3, wait=10)
+            again = await service.search("unified","issues.jsonl", limit=3, wait=10)
             assert again["results"][0]["id"] == "target:0"
         finally:
             await service.shutdown()
@@ -635,7 +635,7 @@ def test_grouped_search_has_diverse_candidates_before_and_after_reranking(tmp_pa
 
         service.all_docs = docs
         try:
-            events = [v async for v in service.search_stream("all", "relay", limit=3, wait=10)]
+            events = [v async for v in service.search_stream("unified","relay", limit=3, wait=10)]
             assert [event for event, _ in events] == ["ranked", "reranked"]
             for _, view in events:
                 rows = view["results"]
@@ -676,9 +676,9 @@ def test_search_stream_answers_ranked_before_the_reranker_returns(tmp_path):
 
         service._client_factory = HeldRerank
         try:
-            await service.search("all", "relay", wait=10, rerank=False)  # build the index
+            await service.search("unified","relay", wait=10, rerank=False)  # build the index
             embeds = len(endpoint.embed_calls)
-            stream = service.search_stream("all", "relay", wait=10)
+            stream = service.search_stream("unified","relay", wait=10)
             event, ranked = await asyncio.wait_for(stream.__anext__(), 5)
             assert event == "ranked"
             assert ranked["results"] and ranked["rerank_pending"] is True
@@ -717,15 +717,15 @@ def test_search_stream_keeps_the_ranked_answer_when_the_reranker_fails(tmp_path)
                 raise rag.RagError("provider rerank unavailable")
 
         try:
-            await service.search("all", "relay", wait=10, rerank=False)
+            await service.search("unified","relay", wait=10, rerank=False)
             service._client_factory = FailedRerank
-            events = [e async for e in service.search_stream("all", "relay", wait=10)]
+            events = [e async for e in service.search_stream("unified","relay", wait=10)]
             assert [name for name, _ in events] == ["ranked", "error"]
             ranked, failed = events[0][1], events[1][1]
             assert failed["results"] == ranked["results"]
             assert failed["error"] == "provider rerank unavailable"
             assert failed["warnings"] and failed["rerank_pending"] is False
-            fallback = await service.search("all", "relay", wait=10)
+            fallback = await service.search("unified","relay", wait=10)
             assert "error" not in fallback and fallback["warnings"] and not fallback["reranked"]
         finally:
             await service.shutdown()
@@ -743,7 +743,7 @@ def test_search_without_a_reranker_streams_one_event(tmp_path):
         service = rag.RagService(config=lambda: cfg, root_dir=tmp_path / "index")
         _stream_corpus(service)
         try:
-            events = [e async for e in service.search_stream("all", "relay", wait=10)]
+            events = [e async for e in service.search_stream("unified","relay", wait=10)]
             assert [name for name, _ in events] == ["ranked"]
             assert events[0][1]["rerank_pending"] is False
             assert not endpoint.rerank_calls
@@ -796,17 +796,17 @@ def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
             return out
         service.all_docs = docs
         try:
-            general = await service.search("all", "relay", limit=50, wait=10, rerank=False)
+            general = await service.search("unified","relay", limit=50, wait=10, rerank=False)
             assert any(r["id"].startswith("dead") for r in general["results"])
-            active = await service.search("all", "relay", limit=3, mode="active", wait=10)
+            active = await service.search("unified","relay", limit=3, mode="active", wait=10)
             assert {r["id"] for r in active["results"]} == {"live-task:0", "board:0", "comment:0"}
             assert all("dead" not in text for text in endpoint.rerank_calls[-1]["documents"])
-            partial = await service.search("all", "relay unmatched-title-word", limit=2, mode="active", wait=0)
+            partial = await service.search("unified","relay unmatched-title-word", limit=2, mode="active", wait=0)
             assert len(partial["results"]) == 2
             # BM25 admits the matching term even when another query term is absent.
             assert all(r["lexical"] and r["id"] in {"live-task:0", "board:0", "comment:0"}
                        for r in partial["results"])
-            stream = service.search_stream("all", "relay", limit=3, mode="active", wait=0)
+            stream = service.search_stream("unified","relay", limit=3, mode="active", wait=0)
             _, first = await stream.__anext__()
             assert any(r["id"] == "live-task:0" for r in first["results"])
             live.exited = True
@@ -814,17 +814,17 @@ def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
             assert reranked["results"] == []
             await stream.aclose()
             # Reusing the same index must reflect process exit without a sync.
-            active = await service.search("all", "relay", limit=3, mode="active", wait=0)
+            active = await service.search("unified","relay", limit=3, mode="active", wait=0)
             assert active["results"] == []
             live.exited = False
             live.archived_at = "now"
-            active = await service.search("all", "relay", mode="active", wait=0)
+            active = await service.search("unified","relay", mode="active", wait=0)
             assert active["results"] == []
             live.archived_at = None
-            restored = await service.search("all", "relay", mode="active", wait=0)
+            restored = await service.search("unified","relay", mode="active", wait=0)
             assert {r["id"] for r in restored["results"]} == {"live-task:0", "board:0", "comment:0"}
             service.manager = None
-            active = await service.search("all", "relay", mode="active", wait=0)
+            active = await service.search("unified","relay", mode="active", wait=0)
             assert active["results"] == []
         finally:
             await service.shutdown()
@@ -849,11 +849,11 @@ def test_active_beads_ownership_changes_without_text_changes(tmp_path):
         service.all_docs = corpus.docs
 
         async def board_results():
-            await service.wait_sync(service.ensure_sync("all", None), 10)
-            result = await service.search("all", "board", mode="active", limit=50, wait=10, rerank=False)
+            await service.wait_sync(service.ensure_sync("unified",None), 10)
+            result = await service.search("unified","board", mode="active", limit=50, wait=10, rerank=False)
             # Search starts another background pass on a populated index.
             # Finish it before the fixture mutates the next ownership field.
-            await service.wait_sync(service.ensure_sync("all", None), 10)
+            await service.wait_sync(service.ensure_sync("unified",None), 10)
             return [r for r in result["results"] if r["kind"] in ("beads", "comment")]
 
         async def assert_owned_group():
@@ -904,30 +904,33 @@ def test_search_stream_route_speaks_server_sent_events(tmp_path):
         await client.start_server()
         try:
             response = await client.get("/api/search/stream",
-                                        params={"q": "relay", "kind": "all", "wait": "10"})
+                                        params={"q": "relay", "kind": "unified", "wait": "10"})
             assert response.status == 200
             assert response.headers["Content-Type"].startswith("text/event-stream")
             events = _read_sse(await response.text())
             assert [name for name, _ in events] == ["ranked", "reranked"]
             assert events[0][1]["rerank_pending"] is True
             assert events[1][1]["reranked"] is True
-            # The combined corpus is `unified`; `all` is its deprecated name
-            # and every answer names the corpus it read by the current one
-            # (claunch-7aujp).
-            for asked in ("unified", "all"):
-                response = await client.get("/api/search", params={"q": "relay", "kind": asked})
-                assert response.status == 200
-                assert (await response.json())["kind"] == "unified"
-            response = await client.get("/api/search/stream", params={"q": "", "kind": "all"})
+            # The combined corpus is `unified`; `all` was its name before the
+            # rename and is refused now, with the 400 listing the names that
+            # answer (claunch-7aujp.1).
+            response = await client.get("/api/search", params={"q": "relay", "kind": "unified"})
+            assert response.status == 200
+            assert (await response.json())["kind"] == "unified"
+            for route in ("/api/search", "/api/search/stream"):
+                response = await client.get(route, params={"q": "relay", "kind": "all"})
+                assert response.status == 400
+                assert (await response.json())["error"] == "kind must be one of beads, sessions, unified"
+            response = await client.get("/api/search/stream", params={"q": "", "kind": "unified"})
             assert response.status == 400 and (await response.json())["error"] == "q is required"
             response = await client.get("/api/search/stream", params={"q": "x", "kind": "nope"})
             assert response.status == 400
             for route in ("/api/search", "/api/search/stream"):
-                response = await client.get(route, params={"q": "relay", "kind": "all", "mode": "active"})
+                response = await client.get(route, params={"q": "relay", "kind": "unified", "mode": "active"})
                 assert response.status == 200
                 views = [v for _, v in _read_sse(await response.text())] if route.endswith("stream") else [await response.json()]
                 assert views and all(v["results"] == [] for v in views)
-                for params in ({"kind": "all", "mode": "invalid"}, {"kind": "sessions", "mode": "active"}):
+                for params in ({"kind": "unified", "mode": "invalid"}, {"kind": "sessions", "mode": "active"}):
                     response = await client.get(route, params={"q": "relay", **params})
                     assert response.status == 400
         finally:
@@ -1751,6 +1754,52 @@ def _write_store(base, name, *, dims, model, model_key=""):
     meta = {"format": rag.FORMAT, "model": model, "model_key": model_key,
             "dims": dims, "signature": "", "updated_at": "2026-11-02T00:00:00Z"}
     path.with_suffix(".meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_the_dbs_route_can_skip_the_size_walk_the_search_card_does_not_draw(tmp_path):
+    """The card lists these to find collections no index has opened yet.
+
+    ``/api/rag/dbs`` walks every collection to total its files, which is what
+    the DB panel shows and what a listing read on a timer cannot afford.
+    ``?sizes=0`` answers the same rows with ``bytes`` 0 and never walks them,
+    and the facts the card does draw — the path, the width, the model, the
+    identity — are unchanged (claunch-c7vjm).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        (base / "sessions.kept.zvec" / "part.parquet").write_bytes(b"x" * 4096)
+        _write_store(base, "unified.kept", dims=768, model="emb-a", model_key="kept")
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            full = await client.get("/api/rag/dbs")
+            thin = await client.get("/api/rag/dbs?sizes=0")
+            assert full.status == 200 and thin.status == 200
+            counted = {row["name"]: row for row in (await full.json())["dbs"]}
+            light = {row["name"]: row for row in (await thin.json())["dbs"]}
+            assert counted["sessions.kept"]["bytes"] == 4096
+            assert light["sessions.kept"]["bytes"] == 0
+            # Same rows, same facts: only the size is left out.
+            assert set(light) == set(counted)
+            for name in counted:
+                assert {k: v for k, v in light[name].items() if k != "bytes"} == \
+                       {k: v for k, v in counted[name].items() if k != "bytes"}
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
 
 
 def test_renaming_a_preset_carries_the_saved_secret_and_stores_no_hint(tmp_path):

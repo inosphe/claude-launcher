@@ -184,7 +184,7 @@ claunch run work:claude                  # explicit Claude selector
 | `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claude-launcher/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claude-launcher/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
-| `search <query> [--kind beads\|sessions\|unified]` | Rank the repository board or the daemon's sessions by meaning, or both corpora with `unified` (`all` is that corpus's deprecated name and is still accepted with a warning; needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
+| `search <query> [--kind beads\|sessions\|unified]` | Rank the repository board or the daemon's sessions by meaning, or both corpora with `unified` (`all` was that corpus's name before the rename and is refused now; needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
 | `rag status\|reindex`  | The semantic-search index: configuration, coverage, and a sync. |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
 | `usage <name[:harness]>` | Query Claude, Codex, or managed Kimi subscription usage (`--json` for the raw response). |

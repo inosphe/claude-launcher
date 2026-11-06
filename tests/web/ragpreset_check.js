@@ -75,16 +75,25 @@ new Function("exports",
   slice("ragPresetDb") + "\n" +
   slice("ragPresetIdProblem") + "\n" +
   slice("ragDbGroups") + "\n" +
+  slice("ragCorpusLabel") + "\n" +
   "exports.dbSlug = ragDbSlug; exports.presetDb = ragPresetDb;\n" +
   "exports.idProblem = ragPresetIdProblem; exports.dbGroups = ragDbGroups;\n" +
+  "exports.corpusLabel = ragCorpusLabel;\n" +
   "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n")(api);
 
 const cardApi = {};
 new Function("exports, beadsCache",
   sliceFrom(app, "ragBucketState") + "\n" + sliceFrom(app, "ragQueueLine") + "\n" +
   sliceFrom(app, "ragBucketLabel") + "\n" + sliceFrom(app, "beadsNameOfRoot") + "\n" +
+  sliceFrom(app, "ragDiskDue") + "\n" + sliceFrom(app, "ragPlaceholderRows") + "\n" +
+  sliceFrom(app, "ragPlaceholderLabel") + "\n" + sliceFrom(app, "ragPlaceholderState") + "\n" +
+  sliceFrom(app, "ragDbGroups") + "\n" +
   "exports.bucketState = ragBucketState; exports.queueLine = ragQueueLine;\n" +
-  "exports.bucketLabel = ragBucketLabel;")(cardApi, null);
+  "exports.bucketLabel = ragBucketLabel; exports.diskDue = ragDiskDue;\n" +
+  "exports.placeholderRows = ragPlaceholderRows;\n" +
+  "exports.placeholderLabel = ragPlaceholderLabel;\n" +
+  "exports.placeholderState = ragPlaceholderState;\n" +
+  "exports.dbGroups = ragDbGroups;")(cardApi, null);
 
 let failures = 0;
 function check(label, got, want) {
@@ -159,6 +168,63 @@ check("a queue that never ran says so, and a paused watch says it is off",
 check("waiting buckets keep their order on the line",
       cardApi.queueLine({ depth: 2, pending: ["sessions", "beads-abc"], watch_interval: 30 }),
       "대기 2 · 순서: sessions → beads-abc · 아직 sync 없음 · 보드 확인 30초");
+
+/* ---- claunch-c7vjm: collections on disk that no index has opened ---------- */
+/* The card drew only /api/rag/status's indexes, so a collection on disk that
+   no search or reindex pass had touched yet was invisible there while the DB
+   panel listed it. The placeholder rows close that gap, and the disk listing
+   they come from must not ride the 3-second status poll -- /api/rag/dbs walks
+   every collection to total its files. */
+const statusWithOneOpen = {
+  db: "embed", dimensions: 768,
+  indexes: [{ kind: "sessions", path: "/idx/sessions.embed.zvec", db: "embed",
+              db_configured: "embed", dims: 768, indexed: 5, total: 5 }],
+};
+const diskRows = [
+  { name: "sessions.embed", corpus: "sessions", identity: "embed",
+    path: "/idx/sessions.embed.zvec", dims: 768, model: "embed" },
+  { name: "unified.embed", corpus: "unified", identity: "embed",
+    path: "/idx/unified.embed.zvec", dims: 4096, model: "embed" },
+  { name: "beads-abc123.sessions", corpus: "beads-abc123", identity: "sessions",
+    path: "/idx/beads-abc123.sessions.zvec", dims: 0, model: "" },
+];
+const unopened = cardApi.placeholderRows(statusWithOneOpen, diskRows);
+check("only the collections no index has opened become placeholders",
+      unopened.map(r => r.name), ["unified.embed", "beads-abc123.sessions"]);
+check("the difference is taken by directory, so a legacy path is not counted twice",
+      cardApi.placeholderRows(
+        { indexes: [{ path: "/idx/all.embed.zvec", kind: "unified" }] },
+        [{ name: "all.embed", path: "/idx/all.embed.zvec" }]).length, 0);
+check("a placeholder names its corpus, not the DB it folds under",
+      unopened.map(r => cardApi.placeholderLabel(r)),
+      ["Search anything (통합: 이슈·코멘트·세션)", "board beads-abc123"]);
+check("a width the running model cannot use is said before the open, not after",
+      [cardApi.placeholderState(unopened[0], statusWithOneOpen),
+       cardApi.placeholderState(unopened[1], statusWithOneOpen)],
+      [{ state: "unopened", text: "아직 열리지 않음 · 열리면 실패 예상 — 지금 설정은 768차원" },
+       { state: "unopened", text: "아직 열리지 않음" }]);
+const placeholderGroups = cardApi.dbGroups(statusWithOneOpen, unopened);
+check("a placeholder sits under its own DB beside the rows that are running",
+      placeholderGroups.map(g => [g.name, g.rows.map(r => Boolean(r.placeholder))]),
+      [["embed", [false, true]], ["sessions", [true]]]);
+check("a DB drawn only from the disk listing carries no Sync/Rebuild",
+      placeholderGroups.filter(g => !g.rows.some(r => !r.placeholder)).map(g => g.name),
+      ["sessions"]);
+check("the disk listing rides its own minute, never the status poll's 3 seconds",
+      [cardApi.diskDue(30, 10, 60), cardApi.diskDue(70, 10, 60), cardApi.diskDue(1, 0, 60),
+       /RAG_POLL_MS = 3000/.test(app), /RAG_DISK_POLL_MS = 60000/.test(app),
+       // the 3-second refresh only asks the disk for a listing when the
+       // minute is up -- the call itself lives outside it
+       sliceFrom(app, "refreshRagStatus")
+         .includes("ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)"),
+       sliceFrom(app, "refreshRagStatus").includes("rag/dbs")],
+      [false, true, true, true, true, true, false]);
+check("the disk listing asks for the rows without the size walk",
+      sliceFrom(app, "refreshRagDisk").includes('"/api/rag/dbs?sizes=0"'), true);
+check("the two listings are compared by the directory, the only name they share",
+      [sliceFrom(app, "ragPlaceholderRows").includes("row.path"),
+       sliceFrom(app, "ragPlaceholderRows").includes("row.name")],
+      [true, false]);
 
 /* ---- claunch-r4796: DB names, preset ids and the DB panel's rows ---------- */
 check("a DB name slugs the way the daemon stores it",
@@ -296,9 +362,11 @@ check("every control is disabled while a request is in flight",
        app.includes("cancel.disabled = Boolean(row.cancel_requested) || ragBusy;")],
       [true, true, true, true]);
 check("the card draws one block per DB, with Sync and Rebuild on its heading",
-      [app.includes("for (const group of ragDbGroups(st))"), app.includes("`DB ${group.name}`"),
+      [app.includes("for (const group of ragDbGroups(st, placeholders))"), app.includes("`DB ${group.name}`"),
        app.includes('el("button", "wf-btn clear", "Sync")'), app.includes('el("button", "wf-btn clear", "Rebuild")')],
       [true, true, true, true]);
+check("the two buttons hang off a DB that has an open collection to act on",
+      sliceFrom(app, "ragCard").includes("group.rows.some(row => !row.placeholder)"), true);
 check("the selftest button posts threshold/top_k/sample and renders its own line",
       [card.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'),
        card.includes('node("p", "", "rag-selftest-result")')],
@@ -326,8 +394,33 @@ check("a DB rename posts from/to and the field follows the DB the edited preset 
       [true, true]);
 check("a DB delete asks first, takes the whole named DB and is disabled while read",
       [card.includes("window.confirm(`DB ${g.name}"), card.includes("g.legacy ? { name: g.name } : { db: g.name }"),
-       card.includes("del.disabled = occupied;"), card.includes("이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다")],
+       card.includes("del.disabled = occupied;"), card.includes("이 DB를 읽는 프리셋이 있어 삭제할 수 없습니다")],
       [true, true, true, true]);
+/* The table used to be one row per DB with a single "쓰는 프리셋" cell holding
+   the union of its collections' readers, which read as "the presets that
+   write into this DB". A preset adopts one collection per corpus, so the same
+   presets appear on each of that DB's rows; the table now draws one row per
+   collection and names the cell for what it answers (claunch-rk0od). */
+check("a board collection's corpus key shows as beads, the rest as themselves",
+      [api.corpusLabel("sessions"), api.corpusLabel("unified"),
+       api.corpusLabel("beads-0123456789ab"), api.corpusLabel(""), api.corpusLabel(undefined)],
+      ["sessions", "unified", "beads", "?", "?"]);
+check("the table's header names corpus, 형식 and the adopting presets",
+      card.includes('["DB 이름", "corpus", "형식", "이 컬렉션을 채택하는 프리셋", "폭", "모델", ""]'),
+      true);
+check("each collection gets its own row, its own presets and its own width",
+      [card.includes("const rows = g.collections.length ? g.collections : ["),
+       card.includes('row.presets.length ? row.presets.join(", ")'),
+       card.includes('row.dims ? String(row.dims) : "—"')],
+      [true, true, true]);
+check("the DB cell and the actions span the group's rows, and rename opens under the last",
+      [card.includes("nameCell.rowSpan = rows.length"), card.includes("actions.rowSpan = rows.length"),
+       card.includes("renameDbRow(rows.length > 1 ? lastTr : tr, g)")],
+      [true, true, true]);
+check("the RAG card's DB header lists every width, not the first row's",
+      [app.includes("if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);"),
+       app.includes('group.dims.length ? ` · ${group.dims.join("/")}차원` : ""')],
+      [true, true]);
 check("no node() call passes a class name as its text (the 'rag-preset-db' label leak)",
       /node\("(?:p|div|span)", "rag-[a-z-]+"\)/.test(src), false);
 check("the stylesheet ships the card's rules",
