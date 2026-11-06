@@ -538,9 +538,12 @@ data:
   claim: {issue: null, how: null}
   # 이 회차의 착지 매체(landing-medium이 회차 시작에, pr-publish가 PR을 연 뒤
   # 채운다). integration-request의 push trigger가 pr_url·pr_number를 착지
-  # 큐 레코드에 싣는다(claunch-yq80p.5).
+  # 큐 레코드에 싣는다(claunch-yq80p.5). `at`은 착지 시각이다 — PR 탭이 이
+  # 값으로 날짜 타임라인을 세우므로, 컬렉션 항목이 정산 뒤 빠져도 행은 날짜를
+  # 잃지 않는다(claunch-ijkge.4.1.3). `title`은 PR을 여는 단계가 이미 아는
+  # 제목이고, 모르는 갈래(로컬 착지)에서는 null로 남긴다 — 지어내지 않는다.
   landing: {medium: local, reason: "", remote: null, repo: null, base: null,
-            pr_url: null, pr_number: null}
+            pr_url: null, pr_number: null, at: null, title: null}
   work_report: {}
   # 이번 일감을 누가 구현하는가(claunch-yl0to). route-* 작업이 확정할 때마다
   # 덮어쓴다: mode는 direct(이 세션) | delegate(하위 설정 자식). 위임 작업의
@@ -1774,9 +1777,12 @@ nodes:
     done_when: |
       `git ls-remote <remote> refs/heads/<브랜치>`의 SHA가 HEAD와 같고, OPEN PR이
       그 tip(headRefOid == HEAD)을 가리키며, PR url·번호가 반환값에 있다. bare
-      push는 쓰지 않았다. 연관 PR이 있었으면 양쪽 링크가 있다.
+      push는 쓰지 않았다. 연관 PR이 있었으면 양쪽 링크가 있다. 열거나 갱신한
+      PR의 제목을 `title`로 함께 보고한다(`gh pr view <번호> -R <repo> --json title`이
+      주는 값 그대로) — 착지 기록이 그 값을 실어 PR 탭의 행이 제목을 갖는다.
     returns:
-      ok: {url: str, number: int, branch: str, base: str, tip: str, issues: list}
+      ok: {url: str, number: int, branch: str, base: str, tip: str, issues: list,
+           title: "str?"}
       failed: {reason: str}
     do:
       - push: {to: prs, item: {number: "$result['pr-open'].value.number",
@@ -5486,12 +5492,12 @@ procedures:
       reason: {type: str, required: true}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?"}
     body:
       seq:
         - local-landing-policy
         - return: ok
-          value: {medium: local, reason: "$params.reason"}
+          value: {medium: local, reason: "$params.reason", at: {expr: "now()"}}
 
   pr-or-local:
     description: >-
@@ -5506,7 +5512,7 @@ procedures:
       local_reason: {type: str, required: true, description: 사용자가 local을 골랐을 때 남기는 사유}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?", title: "str?"}
     body:
       id: attempts
       loop:
@@ -5535,13 +5541,13 @@ procedures:
                           - call: local-landing
                             with: {reason: "$params.local_reason"}
                           - return: ok
-                            value: {medium: local, reason: "$prev.reason"}
+                            value: {medium: local, reason: "$prev.reason", at: {expr: "now()"}}
                 - else:
                     waterfall:
                       - call: local-landing
                         with: {reason: "$prev.reason"}
                       - return: ok
-                        value: {medium: local, reason: "$prev.reason"}
+                        value: {medium: local, reason: "$prev.reason", at: {expr: "now()"}}
             failed: *recover
 
   landing-medium:
@@ -5552,7 +5558,7 @@ procedures:
       force_no_pr이면 로컬이다. 반환값은 data.landing에 묶인다.
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?", title: "str?"}
     body:
       id: medium-blocked
       call: pr-or-local
@@ -5577,7 +5583,8 @@ procedures:
                     reason: "$result['remote-setup'].value.reason",
                     remote: "$result['remote-setup'].value.remote",
                     repo: "$result['remote-setup'].value.repo",
-                    base: "$result['remote-setup'].value.base"}
+                    base: "$result['remote-setup'].value.base",
+                    at: {expr: "now()"}}
 
   pr-publish:
     description: >-
@@ -5590,7 +5597,7 @@ procedures:
       force_pr: {type: bool, default: false}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?", tip: "str?"}
+           pr_url: "str?", pr_number: "int?", tip: "str?", at: "str?", title: "str?"}
     body:
       id: publish-blocked
       call: pr-or-local
@@ -5613,7 +5620,9 @@ procedures:
                     base: "$result['pr-open'].value.base",
                     pr_url: "$result['pr-open'].value.url",
                     pr_number: "$result['pr-open'].value.number",
-                    tip: "$result['pr-open'].value.tip"}
+                    tip: "$result['pr-open'].value.tip",
+                    at: {expr: "now()"},
+                    title: "$result['pr-open'].value.title"}
 
   resolve-issue:
     description: >-

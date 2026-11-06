@@ -79,7 +79,7 @@ from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
-from . import pr_actions
+from . import pr_actions, pr_stamps
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import inputs as cflow2_inputs, ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -11324,6 +11324,14 @@ def _recorded_prs(manager) -> Tuple[List[dict], List[str]]:
             seen_projects.add(project)
             merged.setdefault(url, {**row, "session": name, "project": project})
     rows = list(merged.values())
+    # A row that has no title yet is looked up by a background ``gh`` pass and
+    # cached: this handler is polled, so it never waits on the forge for one.
+    # The cache is read here (``pr_stamps.stamp``, via ``for_session``), and
+    # the pass warms it when it fills; the next poll shows the title.
+    try:
+        pr_stamps.kick([r["url"] for r in rows if not r.get("title")])
+    except Exception:  # noqa: BLE001 -- a cache warm-up must not fail the list
+        pass
     rows.sort(key=lambda r: (r.get("at") or "", r.get("number") or 0), reverse=True)
     _prs_cache.update({"at": now, "rows": rows, "projects": sorted(seen_projects)})
     return rows, _prs_cache["projects"]

@@ -841,7 +841,8 @@ cmd.exe가 실행하므로 `$VAR`가 전개되지 않는다 — 이식성이 필
   `$visits.<node>`, `$caps.<capability>`. 시작 입력은 `$data.inputs.<name>`
   (프롬프트에서는 `${data.inputs.<name>}`)
 - 연산: `== != < <= > >=`, `in`, `not in`, `and`, `or`, `not`, 괄호
-- 함수: `len(x)`, `empty(x)`, `guide(name)`(질문 형식의 작성 지침, 2.10)
+- 함수: `len(x)`, `empty(x)`, `guide(name)`(질문 형식의 작성 지침, 2.10),
+  `now()`(현재 UTC 시각)
 
 ### 2.5 fragments, rules, include
 
@@ -1242,6 +1243,7 @@ until`)와 `consume`에만 쓰고, `push`·`set`·`remove`는 자기 런의 컬�
 | `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참. 위치는 log 전체 cursor와 NAME의 cursor 중 뒤의 것 |
 | `exists(ADDR)` | 주소의 런이 살아 있고 그 컬렉션을 선언했으면 참 |
 | `side(NAME)` | 이 세션의 side 런 NAME: `{name, scope, live, status, run, workflow}`. 경로로 읽는다: `side('stack').live` |
+| `now()` | 현재 UTC 시각. 런 스토어가 자기 기록에 찍는 것과 같은 ISO-8601 초 정밀도 문자열(`2026-11-06T07:26:18+00:00`)이라, 여기서 남긴 값이 런의 다른 시각 기록과 함께 정렬·묶인다 |
 
 `ADDR`은 문자열이다(`items('landing')`, `fresh('side:stack:signals', 'cut')`).
 프롬프트에서는 `${col.<이름>}`이 `self`의 레코드 목록을 JSON으로 렌더한다.

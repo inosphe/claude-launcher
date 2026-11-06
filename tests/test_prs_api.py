@@ -17,7 +17,7 @@ import pytest
 
 from claude_launcher.cflow2 import frontend
 from claude_launcher.cflow2.store import RunStore
-from claude_launcher.daemon import api, pr_actions
+from claude_launcher.daemon import api, pr_actions, pr_stamps
 
 
 def _session(name, project, cwd):
@@ -101,6 +101,22 @@ def test_the_cache_answers_the_second_read_without_rescanning(home, tmp_path, fr
     api._recorded_prs(manager)
     api._recorded_prs(manager)
     assert calls == ["s1"]
+
+
+def test_the_list_never_runs_gh_for_a_missing_title(home, tmp_path, fresh_cache,
+                                                    monkeypatch):
+    """A row without a title is filled by the daemon's background pass; this
+    read answers from the local cache and never waits on the forge
+    (claunch-ijkge.4.1.3, user directive: cache first, ``gh`` only on a miss)."""
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://ghe.example.com/o/r/pull/1", "number": 1}])
+    pr_stamps.disable()
+    monkeypatch.setattr(pr_actions, "detail",
+                        lambda *args, **kwargs: pytest.fail("the list called gh"))
+    rows, _ = api._recorded_prs(_manager([_session("s1", "p", str(a))]))
+    assert rows[0]["number"] == 1
+    assert "title" not in rows[0]
 
 
 def test_h_prs_filters_by_project_and_reports_the_unfiltered_count(home, tmp_path,
