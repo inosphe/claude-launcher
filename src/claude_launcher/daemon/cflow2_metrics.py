@@ -104,6 +104,43 @@ def human_gates(chart, events) -> list:
     return out
 
 
+def depth_steps(chart, events, complete=True) -> list:
+    """The run's callstack depth over time: at each change, the deepest node
+    among the instances the journal entered and has not yet left, as the
+    Callstack panel would draw it then (claunch-d54gw). Each point holds
+    until the next; ``depth`` None means nothing was active. Changes at one
+    time collapse to the last, and a repeat of the same depth is dropped.
+    A journal cut by the scan limit says nothing past its last event, so the
+    series ends there with None instead of holding to the run's end."""
+    active, out, last = {}, [], None
+    for event in events:
+        if isinstance(event.get("ts"), str) and timestamp(event["ts"]) is not None:
+            last = event["ts"]
+        name, iid = event.get("event"), event.get("instance")
+        if not iid or name not in ("entered", "left"):
+            continue
+        if name == "entered":
+            depth = _depth(chart, event.get("node"))
+            if depth is None:
+                continue
+            active[iid] = depth
+        elif active.pop(iid, None) is None:
+            continue
+        if last is None or last != event.get("ts"):
+            continue
+        point = {"at": last, "depth": max(active.values()) if active else None}
+        if out and out[-1]["at"] == last:
+            out.pop()
+        if not out or out[-1]["depth"] != point["depth"]:
+            out.append(point)
+    if not complete and out and out[-1]["depth"] is not None:
+        if out[-1]["at"] == last:
+            out.pop()
+        if not out or out[-1]["depth"] is not None:
+            out.append({"at": last, "depth": None})
+    return out
+
+
 def _facts(snap: dict) -> dict:
     """What ``observations`` needs from one saved run, none of it relative
     to the observation time: the identity, the times as saved, which tasks
@@ -126,7 +163,8 @@ def _facts(snap: dict) -> dict:
     return {"run": rid, "state": {k: state.get(k) for k in
                                   ("workflow", "status", "started", "finished")},
             "contracts": bool(contracts), "complete": snap["complete"], "reports": reports,
-            "gates": human_gates(chart, snap["events"])}
+            "gates": human_gates(chart, snap["events"]),
+            "depth": depth_steps(chart, snap["events"], snap["complete"])}
 
 
 #: Facts of saved runs by slot directory, valid while its files' stats hold.
@@ -272,7 +310,8 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
                          "completed_at": state.get("finished") if valid and state.get("status") == "done" else None,
                          "duration_s": finish - start if valid and finish is not None else None,
                          "merge_source": facts["contracts"], "merge_complete": complete,
-                         "merges": merges, "gates": gates, "gates_unended": unended})
+                         "merges": merges, "gates": gates, "gates_unended": unended,
+                         "depth": list(facts.get("depth") or []) if valid else []})
         except _UNAVAILABLE:
             unavailable += 1
     # Re-reports in later runs do not move a merge into a later time bin.

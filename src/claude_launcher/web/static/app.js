@@ -49193,12 +49193,37 @@ function cflow2GateRows(data, start, end) {
   return rows.sort((x, y) => x.lo - y.lo);
 }
 
+// A run's callstack depth over time as step lines inside the period
+// (claunch-d54gw). Each saved point holds until the next one, the last until
+// the run ended; a null depth (nothing active, or the journal read stopped)
+// breaks the line. One run may give several pieces.
+function cflow2DepthPieces(data, start, end) {
+  const pieces = [];
+  for (const run of (data || {}).runs || []) {
+    const pts = (run.depth || []).map(p => [Date.parse(p.at), Number.isInteger(p.depth) ? p.depth : null])
+      .filter(p => Number.isFinite(p[0]));
+    const stop = Date.parse(run.ended);
+    let cur = [];
+    const flush = () => { if (cur.length) pieces.push({run: run.run, steps: cur}); cur = []; };
+    pts.forEach(([at, depth], i) => {
+      const next = i + 1 < pts.length ? pts[i + 1][0] : stop;
+      if (depth === null || !Number.isFinite(next)) { flush(); return; }
+      const lo = Math.max(at, start), hi = Math.min(next, end);
+      if (hi <= lo) { if (at >= end) flush(); return; }
+      cur.push({lo, hi, depth});
+    });
+    flush();
+  }
+  return pieces;
+}
+
 const CF2_GATE_KINDS = {ask: "ask", choice: "user choice", visit_limit: "visit limit", loop_limit: "loop limit", move: "move request"};
 
 function cflow2GateChart(data, period) {
   const box = el("div", "cf2-gates");
   box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
   const rows = cflow2GateRows(data, ...period);
+  const pieces = cflow2DepthPieces(data, ...period);
   const runs = (data || {}).runs || [];
   const saved = runs.reduce((n, r) => n + (r.gates || []).length, 0);
   // Gates the daemon could not give an end (claunch-b6z8m): they have no
@@ -49206,7 +49231,7 @@ function cflow2GateChart(data, period) {
   const unended = runs.reduce((n, r) => n + (Number.isInteger(r.gates_unended) ? r.gates_unended : 0), 0);
   const unendedNote = () => el("p", "wf-note cf2-gates-unended",
     `${unended} gate wait${unended === 1 ? "" : "s"} in the saved runs ${unended === 1 ? "has" : "have"} no recorded end and ${unended === 1 ? "is" : "are"} not drawn.`);
-  if (!rows.length) {
+  if (!rows.length && !pieces.length) {
     box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
       "No gate waited on a person in the saved runs."));
     if (unended) box.appendChild(unendedNote());
@@ -49214,6 +49239,7 @@ function cflow2GateChart(data, period) {
   }
   const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
   const longest = rows.reduce((m, r) => Math.max(m, r.wait), 0);
+  const lineDepths = pieces.flatMap(p => p.steps.map(s => s.depth));
   const tiles = el("div", "cf2-throughput-tiles");
   const tile = (label, value, note) => {
     const t = el("div", "cf2-throughput-tile");
@@ -49224,17 +49250,19 @@ function cflow2GateChart(data, period) {
   tiles.append(tile("Gates", String(rows.length), "waited in this period"),
     tile("Waiting time", cflow2Duration(clipped / 1000), "inside this period"),
     tile("Longest wait", cflow2Duration(longest / 1000), "whole wait"),
-    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null));
+    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null),
+    tile("Deepest stack", lineDepths.length ? String(Math.max(...lineDepths)) : "—", "frames in this period"));
   box.appendChild(tiles);
 
-  // Deeper frames draw higher. The axis spans the depths present, so a run
-  // whose gates all sit 9 to 15 frames down does not spend its height on 0..8.
-  const depths = rows.map(r => r.gate.depth);
+  // Deeper frames draw higher. The axis spans the depths present (gate bars
+  // and the depth line), so a run whose stack stays 9 to 15 frames down does
+  // not spend its height on 0..8. Past twelve levels the lanes narrow.
+  const gateDepths = rows.map(r => r.gate.depth), depths = [...gateDepths, ...lineDepths];
   const lo = Math.min(...depths), hi = Math.max(...depths), levels = hi - lo + 1;
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
-  const lane = 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
+  const lane = levels > 12 ? Math.max(10, Math.floor(192 / levels)) : 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "Gates that waited on a person, by callstack depth (higher is deeper) over UTC time.");
+  svg.setAttribute("aria-label", "Callstack depth (line) and gates that waited on a person (bars), by depth (higher is deeper) over UTC time.");
   const node = (tag, attrs, text) => {
     const e = document.createElementNS(ns, tag);
     for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
@@ -49242,10 +49270,11 @@ function cflow2GateChart(data, period) {
     svg.appendChild(e); return e;
   };
   const y = depth => T + (hi - depth) * lane;
-  // Label the depths that hold a bar; past eight of them, every few levels.
-  const present = [...new Set(depths)].sort((a, b) => a - b);
+  // Label the depths that hold a bar; past eight of them, or with the depth
+  // line drawn (it crosses every level between its ends), every few levels.
+  const present = [...new Set(gateDepths)].sort((a, b) => a - b);
   const every = Math.max(1, Math.ceil(levels / 6));
-  const marks = present.length <= 8 ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
+  const marks = present.length && present.length <= 8 && !pieces.length ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
   for (const d of marks) {
     node("line", {x1: L, x2: W - R, y1: y(d) + lane / 2, y2: y(d) + lane / 2, class: "cf2-axis-grid"});
     node("text", {x: L - 4, y: y(d) + lane / 2 + 3, "text-anchor": "end", class: "cf2-axis-label"}, String(d));
@@ -49256,6 +49285,20 @@ function cflow2GateChart(data, period) {
     return span > 300 * 86400000 ? t.slice(0, 10) : span > 86400000 ? `${t.slice(5, 10)} ${t.slice(11, 16)}` : t.slice(11, 16);
   };
   const iso = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
+  // The depth line goes under the bars: a bar is the thing to hover.
+  const mid = depth => y(depth) + lane / 2;
+  for (const p of pieces) {
+    const xy = [];
+    for (const s of p.steps) {
+      xy.push(`${x(s.lo).toFixed(1)},${mid(s.depth)}`, `${x(s.hi).toFixed(1)},${mid(s.depth)}`);
+    }
+    const line = node("polyline", {points: xy.join(" "), class: "cf2-depth-line"});
+    line.dataset.run = p.run;
+    line.dataset.depths = p.steps.map(s => s.depth).join(",");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `callstack depth ${Math.min(...p.steps.map(s => s.depth))}–${Math.max(...p.steps.map(s => s.depth))}\nrun ${p.run}`;
+    line.appendChild(title);
+  }
   for (const r of rows) {
     const g = r.gate;
     const rect = node("rect", {x: x(r.lo), y: y(g.depth) + 3, width: Math.max(2, x(r.hi) - x(r.lo)),
@@ -49274,7 +49317,7 @@ function cflow2GateChart(data, period) {
   node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
   box.appendChild(svg);
   const legend = el("div", "cf2-throughput-legend");
-  legend.append(el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
+  legend.append(el("span", "cf2-legend-depth", "Callstack depth"), el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
     el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
   box.appendChild(legend);
   if (unended) box.appendChild(unendedNote());
