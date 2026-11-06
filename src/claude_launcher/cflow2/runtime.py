@@ -5593,7 +5593,8 @@ def quiescent(r: Run) -> bool:
 
     So it is a list of what a pass *would* do, each one ruled out, and it
     answers no for anything it does not recognise: a time-based await
-    (wait, pause, a timeout's deadline, a held choice's window, a verify that
+    (wait, pause, a timeout's deadline, a held choice's window, a batched
+    option's window with records waiting, a verify that
     may be lost), an ask still being routed or with a deadline or a notice
     not yet given, a delegation not settled (a child's receipt arrives as a
     file the clock settles over :data:`..daemon.cflow2_clock.RECEIPT_SETTLE`
@@ -5634,6 +5635,12 @@ def quiescent(r: Run) -> bool:
         if await_ == AW_APPROVAL:
             continue
         if await_ == AW_CHOOSE and not frame.get("held"):
+            # A batched option with records waiting has a window that opens
+            # by time alone (interval after the oldest arrival), and the
+            # clock announces it (claunch-1brxe): not quiescent.
+            if any(o.get("batch") and _batch_view(r, o)["count"]
+                   for o in r.chart.node(inst["node"]).get("options") or []):
+                return False
             continue
         if await_ == AW_TASK and not r.chart.node(inst["node"]).get("restart"):
             continue

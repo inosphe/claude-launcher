@@ -340,6 +340,11 @@ class Cflow2Clock:
         #: one re-nudge``. The same wait is never told twice; a different one
         #: clears this and earns its own single nudge (claunch-3sen5).
         self._driver_nudge_done: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+        #: ``(cwd, scope) -> the batch windows already announced`` -- each a
+        #: ``(choice instance, option, oldest arrival)`` whose window opened
+        #: while the driver had not picked it (claunch-1brxe). In memory
+        #: only, like the nudge records.
+        self._batch_told: Dict[Tuple[str, str], frozenset] = {}
         #: ``(cwd, scope) -> (the slot's files, when the full pass ran)`` for
         #: a held driver's slot that pass found quiescent; a pass skips it
         #: while both still hold. In memory only, so a restart -- whose first
@@ -821,6 +826,7 @@ class Cflow2Clock:
             # The wait's record too: a run started in this slot next reads the
             # same instance ids, and it is owed its own single nudge.
             self._driver_nudge_done.pop((cwd, scope), None)
+            self._batch_told.pop((cwd, scope), None)
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
@@ -837,6 +843,7 @@ class Cflow2Clock:
             notices.append((cwd, payload.get("driver") or _name(scope),
                             moved_block(scope, payload, why=WHY_DELEGATION)))
             told = True
+        told = self._batch_open(cwd, scope, payload, clock_now, notices, told)
         self._renudge(cwd, scope, payload, clock_now, notices, told)
         # Taken now, not only at the end of the pass: a step below that raises
         # would leave the old set, and every later pass would announce the
@@ -1001,6 +1008,62 @@ class Cflow2Clock:
         self._driver_nudge_done[key] = identity
         notices.append((cwd, payload.get("driver") or _name(scope),
                         moved_block(scope, payload, why=WHY_NUDGE)))
+
+    # -- batch windows on an open choose (claunch-1brxe) ---------------------
+
+    def _batch_open(self, cwd: str, scope: str, payload: Dict[str, Any],
+                    clock_now: float, notices: List[Notice], told: bool) -> bool:
+        """Tell the driver once when a batched option's window opens on a
+        choose it has not picked; returns whether a notice is going out.
+
+        A batched option (``batch: {collection, status, size}`` with an
+        ``interval``) is a window over a queue other sessions fill: a worker's
+        landing request goes into the leader's ``landing`` collection while
+        the leader sits at its standby choose. Nothing in the run moves when a
+        record arrives -- the choose is the same wait, so ``_renudge`` has
+        already spent its one nudge on it -- and a driver the idle hold freed
+        is woken only by a notice. The queue then filled, its window opened
+        (``size`` reached, or ``interval`` after the oldest arrival) and the
+        held leader never heard of it: the request sat unmerged until a person
+        noticed (claunch-1brxe, s1297).
+
+        So the window opening is announced like a held choice's would be,
+        once per window: a window is the choice instance, the option and the
+        oldest waiting record's arrival, so the same batch is not told twice
+        and the next one (after a take, or a different oldest record) is.
+        Typed to a held driver, :meth:`_deliver` wakes it. A driver in an
+        active session fault is skipped (``_renudge``'s rule); the window is
+        told on the first pass after the fault."""
+        key = (cwd, scope)
+        ready = set()
+        for choice in payload.get("choices") or []:
+            if choice.get("chooser") != ir.CHOOSER_AGENT or choice.get("held"):
+                continue
+            iid = str(choice.get("instance") or choice.get("id") or "")
+            for opt in choice.get("options") or []:
+                batch = opt.get("batch") if isinstance(opt, dict) else None
+                if not isinstance(batch, dict) or not batch.get("count"):
+                    continue
+                opens = batch.get("opens_epoch")
+                if (batch.get("count") or 0) >= (batch.get("size") or 0) \
+                        or opens is None or clock_now >= float(opens):
+                    ready.add((iid, str(opt.get("name") or ""), str(batch.get("first_at") or "")))
+        before = self._batch_told.get(key, frozenset())
+        if not ready:
+            self._batch_told.pop(key, None)
+            return told
+        new = ready - before
+        if not new:
+            self._batch_told[key] = frozenset(ready)
+            return told
+        if not told and self._driver_faulted(scope):
+            return told
+        self._batch_told[key] = frozenset(ready)
+        if told:
+            return told
+        notices.append((cwd, payload.get("driver") or _name(scope),
+                        moved_block(scope, payload, why=WHY_BATCH)))
+        return True
 
     # -- restarts (docs 2.2, restart) ----------------------------------------
     def _claim_restarts(self, cwd: str, scope: str, now: Optional[float],
@@ -1542,6 +1605,8 @@ def _slot_files(cwd: str, scope: str) -> Optional[Tuple[Any, ...]]:
 
 
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
+WHY_BATCH = ("a batched option's window opened -- the queue it gathers has "
+             "records waiting (size reached or interval passed)")
 WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
 WHY_NUDGE = ("the run is still waiting on you -- the clock nudges a waiting "
              "driver once, after an interval, and then leaves it alone "
