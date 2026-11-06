@@ -4976,7 +4976,7 @@ nodes:
          경로를 보고에 적는다.
       5. **자식 리뷰어 정리 (claunch-phkt1).** 이 세션의 직속 자식 리뷰어를
          찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
-         children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
+         children·cflow·cflow_declined·quick_fork_of·held뿐이다) — 그래서 두 출력을
          맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
          메시> --state all`에서 role 열(둘째 열)에 reviewer가 든 행의 셋째
          열과 같은 것이 직속 자식 리뷰어다. 역할이 여럿이면 그 열은
