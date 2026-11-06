@@ -204,9 +204,14 @@ const server = http.createServer((req, res) => {
     assert.equal(before.inTop, true, "the name, presses, gates and radio sit in the fixed top");
     assert.equal(before.hostInBody, true, "the borrowed panel sits in the scrolling body");
     assert.ok(before.overflow > 0, "the body overflows on a short window: " + JSON.stringify(before));
-    await page.$eval(`${col} .chart-detail-body`, (b) => { b.scrollTop = b.scrollHeight; });
+    // Find and scroll the body in one task: $eval resolves its handle first,
+    // and a redraw in between (the page's timer) leaves it on a detached node.
+    await page.evaluate((c) => {
+      const b = document.querySelector(`${c} .chart-detail-body`);
+      b.scrollTop = b.scrollHeight;
+    }, col);
     const after = await pinned();
-    assert.ok(after.bodyTop > 0, "the body scrolled");
+    assert.ok(after.bodyTop > 0, "the body scrolled: " + JSON.stringify({ before, after }));
     assert.equal(after.colTop, 0, "the column itself does not scroll");
     assert.equal(after.actsTop, before.actsTop, "the presses stay put");
     assert.equal(after.tabsTop, before.tabsTop, "the radio stays put");
