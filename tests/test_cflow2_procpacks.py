@@ -510,3 +510,54 @@ def test_the_routes_list_call_and_edit_packs(tmp_path):
             "cwd": cwd, "scope": "w1", "procedure": "local"})).status == 401
 
     _http(go)
+
+
+def test_a_session_call_is_recorded_as_the_agents(tmp_path):
+    """claunch-8t5r0.7: the call names who asked -- the actor header a
+    managed session's client sends makes it ``agent``; a bearer without it
+    (a person's shell) stays ``user``."""
+    from claude_launcher.daemon import actors
+
+    cwd = _cwd(tmp_path)
+    _start(tmp_path)
+
+    async def go(client, bearer):
+        agent = {**bearer, actors.HEADER: actors.header_value(actors.AGENT, "w1")}
+        resp = await client.post("/api/cflow2/call", headers=agent, json={
+            "cwd": cwd, "scope": "w1", "procedure": "local", "mode": "inline"})
+        assert resp.status == 200, await resp.text()
+        out = await resp.json()
+        assert out["calls"][0]["by"] == "agent"
+
+    _http(go)
+
+
+def test_a_session_may_not_install_remove_or_refilter_a_pack(tmp_path):
+    """claunch-8t5r0.7, user decision (person only): a pack's roles filter
+    decides which sessions may call it, so a session -- an agent's shell or
+    a cflow run -- is refused all three writes and nothing changes; the same
+    request without the actor header goes through."""
+    from claude_launcher.daemon import actors
+
+    cwd = _cwd(tmp_path)
+
+    async def go(client, bearer):
+        for kind in (actors.AGENT, actors.CFLOW):
+            session = {**bearer, actors.HEADER: actors.header_value(kind, "w1")}
+            for path, extra in (("install", {}), ("remove", {}), ("roles", {"roles": None})):
+                resp = await client.post(f"/api/cflow2/packs/{path}", headers=session,
+                                         json={"cwd": cwd, "pack": "demo", **extra})
+                assert resp.status == 403, (kind, path)
+                assert "by a person" in (await resp.json())["error"]
+        packs = await (await client.get(f"/api/cflow2/packs?cwd={cwd}", headers=bearer)).json()
+        assert [(p["id"], p["installed"]) for p in packs["packs"]] == [("demo", False)]
+        resp = await client.post("/api/cflow2/packs/install", headers=bearer,
+                                 json={"cwd": cwd, "pack": "demo"})
+        assert resp.status == 200 and (await resp.json())["packs"][0]["installed"]
+        # an installed pack's filter is still a person's to edit
+        session = {**bearer, actors.HEADER: actors.header_value(actors.AGENT, "w1")}
+        resp = await client.post("/api/cflow2/packs/roles", headers=session,
+                                 json={"cwd": cwd, "pack": "demo", "roles": None})
+        assert resp.status == 403
+
+    _http(go)

@@ -7676,9 +7676,17 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
 
 
 NUDGE_CFLOW2_CALLED = (
-    "cflow2: the user called sub procedure '{procedure}' from the dashboard "
+    "cflow2: {who} called sub procedure '{procedure}' through the daemon "
     "(call {call}, {mode}) on task {label} - call the flow_status tool: {how}"
 )
+
+
+def _session_actor(request: web.Request) -> Optional[dict]:
+    """The session behind ``request`` when a session (an agent's shell or
+    a cflow run) sent it, else None -- the person at the dashboard or a
+    shell that is not a managed session's (claunch-8t5r0.7)."""
+    actor = actors.from_request(request) or {}
+    return actor if actor.get("kind") in (actors.AGENT, actors.CFLOW) else None
 
 
 async def h_cflow2_procedures(request: web.Request) -> web.Response:
@@ -7693,10 +7701,11 @@ async def h_cflow2_procedures(request: web.Request) -> web.Response:
 
 
 async def h_cflow2_call(request: web.Request) -> web.Response:
-    """Call a sub procedure from the dashboard, as the user (docs 2.12.3):
-    the same call ``flow_call`` makes, on the run's active task, judged by
-    the same rules. Body: cwd, scope, procedure, node?, with?, mode?. The
-    driver is told."""
+    """Call a sub procedure through the daemon (docs 2.12.3): the same call
+    ``flow_call`` makes, on the run's active task, judged by the same rules.
+    The call records who asked: ``agent`` when a session sent the request
+    (its actor header), ``user`` otherwise (claunch-8t5r0.7). Body: cwd,
+    scope, procedure, node?, with?, mode?. The driver is told."""
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -7707,10 +7716,11 @@ async def h_cflow2_call(request: web.Request) -> web.Response:
     with_ = body.get("with")
     if with_ is not None and not isinstance(with_, dict):
         return json_error(400, "'with' must be an object")
+    session = _session_actor(request)
     payload = await asyncio.to_thread(
         cflow2_runtime.call, procedure, str(body.get("node") or "") or None, with_,
         cwd=cwd, scope=scope, mode=str(body.get("mode") or "") or None,
-        by=cflow2_runtime.CALL_BY_USER)
+        by=cflow2_runtime.CALL_BY_AGENT if session else cflow2_runtime.CALL_BY_USER)
     called = payload.get("called") or {}
     mode = called.get("mode") or "inline"
     how = ("the daemon quick-forks you to drive it; wait for its result"
@@ -7720,8 +7730,10 @@ async def h_cflow2_call(request: web.Request) -> web.Response:
                   if c.get("id") == called.get("call")), called.get("instance"))
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
-        NUDGE_CFLOW2_CALLED.format(procedure=procedure, call=called.get("call"),
-                                   mode=mode, label=label, how=how))
+        NUDGE_CFLOW2_CALLED.format(
+            who=(f"session {session['name']}" if session and session.get("name")
+                 else "a session" if session else "the user from the dashboard"),
+            procedure=procedure, call=called.get("call"), mode=mode, label=label, how=how))
     return json_response(payload)
 
 
@@ -7750,8 +7762,16 @@ async def h_cflow2_packs(request: web.Request) -> web.Response:
 
 
 async def _pack_op(request: web.Request, op) -> web.Response:
+    """Install, remove or re-filter a pack: a person's action. A session's
+    request is refused -- a pack's roles filter decides which sessions may
+    call its procedures, and a session that wrote it could admit itself
+    (claunch-8t5r0.7, user decision: person only)."""
     from ..cflow2 import procpacks
 
+    if _session_actor(request):
+        return json_error(403, "procedure packs are installed, removed and "
+                               "role-filtered by a person on the dashboard, "
+                               "not by a session")
     body = await _json_body(request)
     cwd = _pack_workspace(str(body.get("cwd") or ""))
     pack = str(body.get("pack") or "").strip()
