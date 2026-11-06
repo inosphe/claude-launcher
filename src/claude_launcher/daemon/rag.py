@@ -1180,6 +1180,21 @@ def _stored_meta(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) and data.get("format") == FORMAT else None
 
 
+def _previous_name(name: str) -> str:
+    """The name ``name`` had before the unified rename, or ``""`` if unchanged.
+
+    The combined corpus was stored as ``all`` (claunch-7aujp): ``unified.zvec``
+    was ``all.zvec``, and a preset collection keeps the ``.<slug>`` suffix it
+    was created with (``all.<slug>.zvec`` for ``unified.<slug>.zvec``). The
+    rename moved the directories in the operator's stop window; a store still
+    under the old name is read through this mapping.
+    """
+    head, dot, rest = name.partition(".")
+    if head != "unified":
+        return ""
+    return LEGACY_STORAGE_NAME + dot + rest
+
+
 def _path_identity(path: Path) -> str:
     """The DB a collection directory belongs to: ``<corpus>.<db>.zvec`` -> ``db``.
 
@@ -1191,7 +1206,7 @@ def _path_identity(path: Path) -> str:
     return identity
 
 
-def rag_stores(base: Path) -> List[dict]:
+def rag_stores(base: Path, *, sizes: bool = True) -> List[dict]:
     """Every collection directory under ``base``, as the DB panel reads them.
 
     A store is ``<corpus>.<name>.zvec``, or ``<corpus>.zvec`` for one built
@@ -1200,6 +1215,12 @@ def rag_stores(base: Path) -> List[dict]:
     can use the collection (claunch-fhs7f.1). ``identity`` is the part a
     preset's ``db`` names; it is empty for a pre-preset collection, which is
     adopted by a preset whose key matches its model.
+
+    ``sizes`` walks every collection to total its files, which is what the
+    DB panel shows and what a caller that draws a listing on a timer cannot
+    afford: the search card reads this every time it looks for collections
+    no index has opened yet (claunch-c7vjm). With ``sizes=False`` every row
+    still carries ``bytes``, as 0.
     """
     rows: List[dict] = []
     try:
@@ -1211,12 +1232,13 @@ def rag_stores(base: Path) -> List[dict]:
         name = path.name[: -len(".zvec")]
         corpus, _, identity = name.partition(".")
         total = 0
-        try:
-            for child in path.rglob("*"):
-                if child.is_file():
-                    total += child.stat().st_size
-        except OSError:
-            total = 0
+        if sizes:
+            try:
+                for child in path.rglob("*"):
+                    if child.is_file():
+                        total += child.stat().st_size
+            except OSError:
+                total = 0
         rows.append({
             "name": name,
             "corpus": corpus,
@@ -1331,21 +1353,12 @@ class Progress:
 #: records); it was called ``all`` before the rename (claunch-7aujp).
 KINDS = ("beads", "sessions", "unified")
 
-#: Names a caller may still use. Every boundary — the HTTP routes, the MCP
-#: tool, the CLI — normalizes through :func:`canonical`, so a script written
-#: against ``all`` keeps working while the CLI says it is deprecated.
-ALIASES = {"all": "unified"}
-
-#: The name each corpus uses on disk. The combined collection is ``all.zvec``
-#: and stays so until it is moved in its own round (claunch-7aujp.1): taking
-#: the new name here would open a second, empty collection and re-embed the
-#: documents the existing one holds.
-STORAGE_NAMES = {"unified": "all"}
-
-
-def canonical(kind: str) -> str:
-    """``kind`` under its current name: a deprecated alias maps to its corpus."""
-    return ALIASES.get(kind, kind)
+#: The combined corpus's name on disk before the rename (claunch-7aujp.1). A
+#: collection still under it is opened as ``unified`` — see
+#: :meth:`RagService._index_path` — so an installation that has not moved the
+#: directory yet keeps answering from the vectors it already has. The name is
+#: read, never written: nothing here creates a collection under it.
+LEGACY_STORAGE_NAME = "all"
 
 #: The watcher's sleep while the feature is off or ``watch_interval`` is 0:
 #: it still ticks, because a ``rag:`` block filled in later is noticed by
@@ -1465,22 +1478,23 @@ class RagService:
 
     # -- corpora -------------------------------------------------------- #
     def _key(self, kind: str, root: Optional[Path]) -> str:
-        kind = canonical(kind)
         if kind == "beads":
             digest = hashlib.sha1(str(root or "").encode("utf-8", "replace")).hexdigest()[:12]
             return f"beads-{digest}"
-        return STORAGE_NAMES.get(kind, kind)
+        return kind
 
     @staticmethod
     def _kind_of_key(key: str) -> str:
         """The corpus a collection key belongs to, under its current name.
 
-        A board key carries a hash; the combined corpus's key is its on-disk
-        name (``all``), which is the alias of ``unified``.
+        A board key carries a hash; a collection opened under the pre-rename
+        on-disk name (``all``) is the combined corpus, ``unified``.
         """
         if key.startswith("beads-"):
             return "beads"
-        return canonical(key)
+        if key == LEGACY_STORAGE_NAME:
+            return "unified"
+        return key
 
     async def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
         """The corpus's index, opened and loaded in a worker thread.
@@ -1543,12 +1557,24 @@ class RagService:
         second copy of the same model's vectors.
         """
         legacy = base / f"{key}.zvec"
+        previous = _previous_name(key)
+        if previous:
+            # The directory was not moved yet (the rename lands in a window the
+            # operator opens): read the vectors under the old name rather than
+            # creating a second, empty collection beside it (claunch-7aujp.1).
+            previous_legacy = base / f"{previous}.zvec"
+            if not legacy.is_dir() and previous_legacy.is_dir():
+                legacy = previous_legacy
         slug = str(cfg.get("db") or cfg.get("model_key") or "").strip()
         if not slug:
             return legacy
         slugged = base / f"{key}.{slug}.zvec"
         if slugged.is_dir():
             return slugged
+        if previous:
+            previous_slugged = base / f"{previous}.{slug}.zvec"
+            if previous_slugged.is_dir():
+                return previous_slugged
         dims = int(cfg.get("dimensions") or 0)
         meta = _stored_meta(legacy)
         meta_key = ""
@@ -1641,7 +1667,6 @@ class RagService:
         return prog
 
     async def _docs(self, kind: str, root: Optional[Path]) -> List[Doc]:
-        kind = canonical(kind)
         if kind == "unified":
             return await self.all_docs() if self.all_docs else []
         if kind == "beads":
@@ -1864,7 +1889,6 @@ class RagService:
         waiting, so it queues again and runs once more after the current
         pass: a change that landed mid-sync gets its own pass.
         """
-        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
         if kind in ("sessions", "unified"):
@@ -2145,14 +2169,14 @@ class RagService:
     def queue_view(self) -> dict:
         return {
             "depth": self._queue.qsize(),
-            "pending": sorted(canonical(key) for key in self._pending),
+            "pending": sorted(self._pending),
             "consumer": bool(self._consumer is not None and not self._consumer.done()),
             "watcher": bool(self._watcher is not None and not self._watcher.done()),
             "watch_interval": self.watch_interval(),
             "watched": sorted(self._watched),
             "consumed": self.consumed,
             "last_consumed_at": self.last_consumed_at,
-            "last_consumed_key": canonical(self.last_consumed_key) if self.last_consumed_key else None,
+            "last_consumed_key": self.last_consumed_key or None,
         }
 
     # -- search --------------------------------------------------------- #
@@ -2199,7 +2223,6 @@ class RagService:
         ``ranked`` says whether a second event is coming (``rerank_pending``),
         so a reader knows whether to keep listening.
         """
-        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
         if mode not in ("general", "active") or (mode == "active" and kind != "unified"):
@@ -2325,7 +2348,6 @@ class RagService:
         falls back to the ranked list for ``unified``, which mixes kinds and so
         has an exact-match head worth showing on its own.
         """
-        kind = canonical(kind)
         last: Optional[dict] = None
         async for event, view in self.search_stream(
             kind, query, root=root, limit=limit, rerank=rerank, wait=wait, mode=mode,
@@ -2545,7 +2567,6 @@ class RagService:
         cfg = self.config()
         if not store.rag_configured(cfg):
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
-        kind = canonical(kind)
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
         try:

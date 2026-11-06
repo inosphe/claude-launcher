@@ -97,6 +97,7 @@ const api = async (url, opts) => {
         children: [],
         slots_moved: ["w@main"],
         project: "hq",
+        mirrors_refiled: [{ mesh: "m@pcA", was: "claunch", now: "hq" }],
       }),
     };
   }
@@ -209,6 +210,8 @@ async function main() {
   const said = tags(refile, "p").pop().text;
   check("the answer names the new project and the run slots that moved",
     said.includes("project: hq") && said.includes("1 cflow run slot: w@main"), said);
+  check("the answer names a mesh mirror the re-filing took with it",
+    said.includes("1 mesh row re-filed: m@pcA (claunch → hq)"), said);
 
   // A session under no project: "keep default" first, every project after it.
   ctx.drop();

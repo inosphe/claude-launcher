@@ -155,6 +155,27 @@ def test_env_is_merged_over_the_parents_not_replaced():
 
 
 # --------------------------------------------------------------------------- #
+# person_fields: a person's launch (fleet, Spec page) picks profile/model
+# --------------------------------------------------------------------------- #
+def test_person_fields_lift_only_the_profile_model_and_effort_gates():
+    """The daemon's own keyword (api.spawn_child_as_person): profile, model
+    and effort pass a closed policy; args and the rest still do not, and a
+    request field of the same name is not the keyword."""
+    policy = _policy()
+    with pytest.raises(spawn.SpawnDenied, match="allow_profile"):
+        spawn.check(policy, {"profile": "talk"}, parent=PARENT, depth=0, children=0)
+    child = spawn.check(policy, {"profile": "talk", "model": "opus"}, parent=PARENT,
+                        depth=0, children=0, person_fields=True)
+    assert (child["profile"], child["model"]) == ("talk", "opus")
+    with pytest.raises(spawn.SpawnDenied):
+        spawn.check(policy, {"args": ["--x"]}, parent=PARENT, depth=0, children=0,
+                    person_fields=True)
+    with pytest.raises(spawn.SpawnDenied):
+        spawn.check(policy, {"profile": "talk", "person_fields": True}, parent=PARENT,
+                    depth=0, children=0)
+
+
+# --------------------------------------------------------------------------- #
 # auth: borrow shares profile's gate, null has none
 # --------------------------------------------------------------------------- #
 def test_borrow_is_gated_behind_allow_profile():

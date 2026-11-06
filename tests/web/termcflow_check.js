@@ -110,7 +110,7 @@ new Function(
      "sessionCategory", "gateWakeNote",
      "sessionInfoTooltip",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
-     "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow",
+     "termCflow2Question", "sessionLineOnPage", "termCflowView", "pressGateAnswer", "renderTermCflow",
      "personGateRecords", "railOpenedSecs", "runGateFeed", "gateSessionState",
      "gateSessionLink", "gateSessionStateSet", "refreshGateSessionStates"]
     .map(slice).join("\n") + `

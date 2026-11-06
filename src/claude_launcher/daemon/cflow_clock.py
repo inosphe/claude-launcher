@@ -3352,7 +3352,9 @@ class RunEventClock:
         ``flow_select``, ``flow_move``), so the person does not have to be
         found for every end decision and every move request.
 
-        Two jobs per pass over the same live sessions the end pass walks:
+        Two jobs per pass over the live and held sessions the end pass walks
+        (a held session's run is running, its question open, only its program
+        stopped -- claunch-7vf2z):
 
         * keep ``driver_parent`` current in each v2 run's state -- the run's
           own copy of the session registry's ``sdef.parent``, which is what
@@ -3373,7 +3375,16 @@ class RunEventClock:
 
         events: List[dict] = []
         try:
-            sessions = [s for s in self.manager.list() if not getattr(s, "exited", True)]
+            # A held session is live for this pass: its process is stopped but
+            # its run is running and its gate is open (the same "live or held"
+            # pair `_ws_parent_usable` and `live_session(include_held=True)`
+            # read). Skipping it here left its `driver_parent` stale and its
+            # gate announced to nobody, which is the defect claunch-7vf2z
+            # fixes.
+            sessions = [
+                s for s in self.manager.list()
+                if not getattr(s, "exited", True) or getattr(s, "held_at", None)
+            ]
         except Exception:
             return events
         live = set()
@@ -3808,8 +3819,11 @@ class RunEventClock:
         if "to" in event:
             # Addressed at the exit: that parent, alive, or nobody -- no
             # mesh-leader fallback, which is where the reports about other
-            # trees' dead runs used to come from.
-            target = self._live(event["to"])
+            # trees' dead runs used to come from. A held parent counts as
+            # alive: ``Session.deliver`` on a held record wakes it and delivers
+            # into the new incarnation (``_deliver_after_hold``), which is how
+            # a withheld parent still learns its child's gate (claunch-7vf2z).
+            target = self._live(event["to"], include_held=True)
         else:
             target = self._recipient(event["cwd"], event["scope"])
         if target is None:
@@ -3833,12 +3847,16 @@ class RunEventClock:
             )
         return bool(delivered)
 
-    def _live(self, name: str):
+    def _live(self, name: str, *, include_held: bool = False):
         try:
             candidate = self.manager.get(name)
         except Exception:
             return None
-        return None if candidate.exited else candidate
+        if candidate.exited and not (
+            include_held and getattr(candidate, "held_at", None)
+        ):
+            return None
+        return candidate
 
     def _recipient(self, cwd: str, scope: str):
         """The live session to tell: spawn parent first, mesh leader after.

@@ -332,6 +332,7 @@
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
+      <a href="#/fleet" data-page="fleet"><span>⋔</span>Fleet</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
       <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
@@ -469,6 +470,12 @@
            session's: it is never sent to the agent. Rendered by
            renderTermNote(). -->
       <span id="term-note" class="term-note hidden" title=""></span>
+      <!-- The sub procedure the attached session's v2 run is in, when it is
+           in one (claunch-8t5r0.3): the procedure, fork or inline, and a
+           fork that fell back to inline in amber with the cause in the
+           title. A click opens the sub procedure pane. Rendered by
+           SubprocUi.header() (subprocs.js) from the /api/cflow2/rail row. -->
+      <span id="term-subproc" class="term-subproc hidden" role="button" tabindex="0"></span>
       <!-- The name, and beside it the way back to that name in the rail. The
            list is a monitor of twenty-odd sessions in a 260px column: the row
            for the one you are typing in is as likely to be scrolled out of
@@ -722,6 +729,12 @@
            lit while one waits on you. -->
       <button id="term-planbtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's plan and the decisions it waits on">☰ plan</button>
+      <!-- The sub procedures this session's v2 run can call (subprocs.js,
+           SPLIT_PANES.subprocs, claunch-8t5r0.4/.5): every one listed, the
+           ones that cannot run now disabled with the reason on hover, and
+           the procedure packs with their role filter. -->
+      <button id="term-subprocbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="the sub procedures this session's run can call">⤷ sub</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
            and opened by itself when the session changes a question. This
@@ -1808,6 +1821,9 @@
     <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
          drawn by spec-page.js. -->
     <div id="spec-view" class="hidden"></div>
+    <!-- Fleet presets: launch an agent tree from a preset, and edit the
+         presets (docs/fleet.md); drawn by fleet-page.js. -->
+    <div id="fleet-view" class="hidden"></div>
   </main>
 
   <!-- #sess-view is moved in here, to the right of #main, on a wide screen:
@@ -1902,9 +1918,11 @@
 <script src="static/knowledge-page.js"></script>
 <script src="static/retrospection-page.js"></script>
 <script src="static/spec-page.js"></script>
+<script src="static/fleet-page.js"></script>
 <script src="static/sim-page.js"></script>
 <script src="static/category-page.js"></script>
 <script src="static/packs-pane.js"></script>
+<script src="static/subprocs.js"></script>
 <script src="static/durable-flow.js"></script>
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>

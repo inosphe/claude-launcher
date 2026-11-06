@@ -1250,10 +1250,20 @@ def test_land_skips_to_landed_with_the_master_commit_when_working_on_main(tmp_pa
     assert not st.get("choices")
 
 
+def _past_already_merged(st, kw):
+    """already-merged(claunch-yzwut.2) stands right before landing: a round
+    not yet in the target answers not-landed and meets the landing it had."""
+    from claude_launcher.cflow2 import runtime
+
+    assert [c["label"] for c in st["choices"]] == ["already-merged"]
+    return runtime.select(st["choices"][0]["instance"], "not-landed", "not in target", **kw)
+
+
 def test_land_is_unchanged_when_the_input_is_off(tmp_path, monkeypatch):
     body = [{"try": [{"call": "land"}], "catch": {"landed": ["wrapup"]}}]
-    st, _ = _procedure_run(tmp_path, monkeypatch, body, {})
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {})
     assert not st["tasks"]
+    st = _past_already_merged(st, kw)
     assert [c["label"] for c in st["choices"]] == ["landing"]
 
 
@@ -1273,6 +1283,7 @@ def test_land_follows_the_mode_branch_setup_recorded(tmp_path, monkeypatch, flag
         assert [t["label"] for t in st["tasks"]] == ["main-landed"]
     else:
         assert not st["tasks"]
+        st = _past_already_merged(st, kw)
         assert [c["label"] for c in st["choices"]] == ["landing"]
 
 

@@ -220,6 +220,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-
 html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
 html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term-strong); }
+html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(--term-muted); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
@@ -2172,9 +2173,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   #rail-nav-dock {
     /* Must be at least the number of links in #rail-nav, or the rows past it
        are unreachable while the dock is hovered (the pin shows them all).
-       26 links as of claunch-ijkge (the PR page added the last one); keep
-       this ahead of that count. */
-    --rail-nav-rows: 27;
+       29 links as of claunch-d0hji (the Fleet page added the last one; the
+       count had already passed 27 before it); keep this ahead of that count. */
+    --rail-nav-rows: 30;
     --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
     padding-right: var(--rail-nav-pin); background: #1b1e24;
@@ -4875,6 +4876,12 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .rag-state-text { font-size: 11px; color: #9da5b0; overflow-wrap: anywhere; }
 .rag-state-failed { color: #f85149; }
 .rag-state-busy { color: #58a6ff; }
+/* A collection on disk that no index has opened yet: drawn, not offered.
+   Greyed so it reads as "there, but not running" beside the rows that are
+   (claunch-c7vjm). */
+.rag-row-unopened { opacity: 0.6; }
+.rag-badge-unopened { border-style: dashed; }
+.rag-state-unopened { color: #9da5b0; }
 /* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
 .gh-head { display: flex; align-items: center; gap: 10px; }
 .gh-head h3 { flex: 1 1 auto; margin: 0; }
@@ -8455,12 +8462,24 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 /* The window overview: the fleet's sessions over today / 7 / 30 days, the
    provider strip that narrows them, and the detail panel beside the table. */
+/* The page takes the view's whole width (claunch-kd9lg): the 980px cap the
+   Window page's tiles and sections carry left half a wide screen empty
+   beside the table, so inside the Stats page the main column grows with the
+   view and the detail panel grows with it, between 420px and 720px. */
 .stats-layout {
-  display: flex; gap: 14px; align-items: flex-start; max-width: 1500px;
+  display: flex; gap: 14px; align-items: flex-start;
 }
 .stats-main { flex: 1 1 auto; min-width: 0; }
+#stats-view .window-summary,
+#stats-view .window-section,
+#stats-view .stats-window-note { max-width: none; }
+#stats-view .window-summary {
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+}
+.stats-part-cell { color: #8b949e; font-variant-numeric: tabular-nums; }
 .stats-detail {
-  flex: 0 0 460px; max-width: 460px; position: sticky; top: 8px;
+  flex: 0 0 clamp(420px, 30vw, 720px); max-width: 720px;
+  position: sticky; top: 8px;
   border: 1px solid #22262d; border-radius: 8px; background: #14171c;
   max-height: calc(100vh - 40px); overflow-y: auto;
 }
@@ -8899,7 +8918,11 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings .rag-db-table { width: 100%; min-width: 600px; border-collapse: collapse; font-size: 12px; }
 .search-settings .rag-db-table th { text-align: left; font-weight: 600; color: #9da5b0; padding: 4px 6px; border-bottom: 1px solid #30363d; white-space: nowrap; }
 .search-settings .rag-db-table td { padding: 4px 6px; border-bottom: 1px solid #21262d; vertical-align: middle; overflow-wrap: anywhere; }
-.search-settings .rag-db-entry td:nth-child(2), .search-settings .rag-db-entry td:nth-child(5) { white-space: nowrap; }
+/* Named by class, not nth-child: a DB's rows share the first and last cells
+   by rowspan, so a row's positions differ from the group's first one. */
+.search-settings .rag-db-entry .rag-db-corpus, .search-settings .rag-db-entry .rag-db-dims,
+.search-settings .rag-db-entry .rag-db-form { white-space: nowrap; }
+.search-settings .rag-db-entry .rag-db-model { color: #9da5b0; }
 .search-settings .rag-db-use { white-space: nowrap; background: none; border: none; padding: 0; margin: 0; color: #58a6ff; cursor: pointer; font: inherit; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .search-settings .rag-db-use:hover:not(:disabled) { text-decoration: underline; }
 .search-settings .rag-db-use:disabled { color: inherit; cursor: default; }
@@ -9235,6 +9258,34 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-detail-token-value { font-variant-numeric: tabular-nums; }
 .chart-detail-tokens { margin: 3px 0 0; padding-left: 16px; color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-detail-open { color: #58a6ff; text-decoration: none; }
+/* The column's lifecycle presses, its run gates and its two views
+   (claunch-h82vq). The gate block wears the terminal strip's amber, since
+   it is the same "a person owes this run an answer". */
+.chart-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.chart-detail-actions .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; text-decoration: none; }
+.chart-detail-actions .wf-btn.deny { border-color: #da3633; color: #ffa198; }
+.chart-detail-gates { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; }
+.chart-gate { border: 1px solid #6e5000; border-radius: 6px; padding: 6px 8px; background: #2a2210; }
+.chart-gate.optional { border-color: #30363d; background: none; }
+.chart-gate-head { color: #e3b341; text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
+.chart-gate-head:hover { text-decoration: underline; }
+.chart-gate-question { margin: 3px 0 0; color: #c9b27a; overflow-wrap: anywhere; }
+.chart-gate-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chart-gate-buttons .tcf-btn {
+  padding: 3px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+  background: #21262d; border: 1px solid #6e5000; color: #e6edf3; cursor: pointer;
+}
+.chart-gate-buttons .tcf-btn:hover { background: #4d3800; }
+.chart-gate-buttons .tcf-btn.approve { background: #238636; border-color: #2ea043; }
+.chart-gate-buttons .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
+.chart-detail-tabs { margin: 10px 0 0; }
+.chart-detail-host { margin-top: 8px; }
+/* The dashboard's session detail, borrowed into the column: the column
+   scrolls, so the panel neither scrolls itself nor pads like a page. */
+#sess-view.guest { padding: 0; overflow: visible; flex: none; }
+#sess-view.guest .wf-head { flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
+#sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
+#sess-view.guest .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 .chart-detail-open:hover { text-decoration: underline; }
 @media (max-width: 760px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
@@ -9803,6 +9854,16 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-legend-known::before, .cf2-legend-unknown::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
 .cf2-legend-known::before { background: #58a6ff; }
 .cf2-legend-unknown::before { border: 1px dashed #8b949e; }
+.cf2-gates { margin-top: 12px; }
+.cf2-gates-title { font-size: 12px; font-weight: 600; color: #9da5b0; margin: 0 0 4px; }
+.cf2-gates svg { width: 100%; display: block; }
+.cf2-gate-closed { fill: #d29922; }
+.cf2-gate-open { fill: #f85149; }
+.cf2-gate-cut { fill: #8b949e; }
+.cf2-legend-gate-closed::before, .cf2-legend-gate-open::before, .cf2-legend-gate-cut::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+.cf2-legend-gate-closed::before { background: #d29922; }
+.cf2-legend-gate-open::before { background: #f85149; }
+.cf2-legend-gate-cut::before { background: #8b949e; }
 .cf2-throughput details { margin-top: 6px; }
 .cf2-throughput summary { cursor: pointer; font-size: 12px; color: #9da5b0; }
 .cf2-throughput-compare > .cf2-throughput-controls { margin: 6px 0; }
@@ -11446,11 +11507,14 @@ a.category-ref:hover { text-decoration: underline; }
    prices (claunch-i6xl2). A caption under the small chart, and under the
    zoomed chart's legend; the number is right-aligned so its last digit sits
    over the plot's right edge. Nothing is drawn where the table has no rates
-   for the session's model -- the chart's tooltip says so instead. */
+   for the session's model -- the chart's tooltip says so instead. The second
+   line splits that total by what was billed -- read, cached read, output,
+   and cache write when the window wrote any (claunch-kr3wr). */
 #term-tps-overlay .term-series-cost {
   font-size: 10px; line-height: 12px; color: #c9d1d9; text-align: right;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
+#term-tps-overlay .term-series-cost-parts { color: #8b949e; }
 /* The zoomed chart is exactly as wide as its plot, and two fixed rows under
    the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
    The readout's text changes as the pointer moves, and it used to widen the
@@ -11876,3 +11940,182 @@ a.category-ref:hover { text-decoration: underline; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
   color: #c9d1d9; white-space: pre-wrap; overflow-wrap: anywhere;
 }
+
+/* ------------------------------------------------------------------ */
+/* Fleet page (#/fleet, fleet-page.js, claunch-d0hji): launch an agent */
+/* tree from a preset; edit presets. Scoped tokens, dark by default.   */
+/* ------------------------------------------------------------------ */
+#fleet-view {
+  --fl-bg: #0f1318; --fl-panel: #161b22; --fl-raise: #1c232d; --fl-border: #2a323d;
+  --fl-text: #e3e9f0; --fl-muted: #93a0b0; --fl-line: #3a4553; --fl-accent: #6aa6ff;
+  --fl-coordinator: #b48cff; --fl-sub-lead: #58a6ff; --fl-worker: #3fb950; --fl-reviewer: #e3b341;
+  --fl-independent: #39c5cf; --fl-stacked: #d2a8ff;
+  flex: 1; overflow-y: auto; min-height: 0; padding: 28px clamp(14px, 2.6vw, 40px);
+  background: var(--fl-bg); color: var(--fl-text); container-type: inline-size;
+}
+html[data-theme="light"] #fleet-view {
+  --fl-bg: #f6f7f9; --fl-panel: #ffffff; --fl-raise: #f1f4f8; --fl-border: #d8dee6;
+  --fl-text: #1f2328; --fl-muted: #5b6673; --fl-line: #c3ccd7; --fl-accent: #2f6fdb;
+  --fl-coordinator: #8250df; --fl-sub-lead: #0969da; --fl-worker: #1a7f37; --fl-reviewer: #9a6700;
+  --fl-independent: #1b7c83; --fl-stacked: #8250df;
+}
+.fl-shell { max-width: 1520px; margin: 0 auto; font-size: 13.5px; line-height: 1.55; }
+.fl-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.fl-head h2 { font-size: clamp(22px, 2.4vw, 30px); font-weight: 650; letter-spacing: -.03em; margin: 2px 0 4px; }
+.fl-eyebrow { color: var(--fl-accent); font-size: 11px; font-weight: 650; letter-spacing: .12em; }
+.fl-muted { color: var(--fl-muted); font-size: 12px; }
+.fl-desc { color: var(--fl-muted); white-space: pre-wrap; margin: 8px 0 0; font-size: 12.5px; }
+#fleet-view .wf-btn {
+  margin: 0; min-height: 34px; padding: 6px 14px; border-radius: 9px; font-weight: 550;
+  border: 1px solid var(--fl-border); background: var(--fl-raise); color: var(--fl-text); cursor: pointer;
+  transition: background .15s, border-color .15s, transform .08s;
+}
+#fleet-view .wf-btn:hover:not(:disabled) { border-color: var(--fl-accent); }
+#fleet-view .wf-btn:active:not(:disabled) { transform: translateY(1px); }
+#fleet-view .wf-btn:disabled { opacity: .45; cursor: default; }
+#fleet-view .fl-primary { background: var(--fl-accent); border-color: var(--fl-accent); color: #fff; }
+#fleet-view .fl-danger { background: transparent; color: #f0827a; border-color: transparent; }
+#fleet-view :is(input, select, textarea) {
+  font: inherit; color: var(--fl-text); background: var(--fl-bg); border: 1px solid var(--fl-border);
+  border-radius: 8px; padding: 7px 10px; min-width: 0; max-width: 100%; box-sizing: border-box;
+}
+html:not([data-theme="light"]) #fleet-view :is(input, select, textarea) { color-scheme: dark; }
+#fleet-view :is(input, select, textarea, button):focus-visible { outline: 2px solid var(--fl-accent); outline-offset: 2px; }
+.fl-seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--fl-border); border-radius: 11px; background: var(--fl-panel); }
+#fleet-view .fl-seg .wf-btn { border-color: transparent; background: transparent; min-height: 30px; }
+#fleet-view .fl-seg .wf-btn.fl-on { background: var(--fl-raise); border-color: var(--fl-border); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+
+.fl-grid { display: grid; grid-template-columns: minmax(340px, 460px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.fl-grid-edit { grid-template-columns: 230px minmax(0, 1fr) minmax(300px, 420px); }
+@container (max-width: 1100px) { .fl-grid, .fl-grid-edit { grid-template-columns: minmax(0, 1fr); } }
+.fl-panel { background: var(--fl-panel); border: 1px solid var(--fl-border); border-radius: 14px; padding: 18px; min-width: 0; }
+.fl-side { position: sticky; top: 0; }
+.fl-panel h3 { margin: 0 0 10px; font-size: 14px; font-weight: 650; }
+.fl-step { margin: 18px 0 8px !important; font-size: 12px !important; letter-spacing: .04em; color: var(--fl-muted); text-transform: uppercase; }
+.fl-step:first-child { margin-top: 0 !important; }
+.fl-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.fl-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 140px; min-width: 0; }
+.fl-label { font-size: 11.5px; color: var(--fl-muted); font-weight: 600; white-space: pre; }
+.fl-hint { font-size: 11px; color: var(--fl-muted); }
+.fl-task { width: 100%; resize: vertical; }
+.fl-check { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 12.5px; }
+.fl-levels { display: grid; gap: 8px; }
+.fl-levels .fl-field { flex-direction: row; align-items: center; gap: 10px; }
+.fl-levels .fl-label { flex: 0 0 46%; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
+.fl-levels select { flex: 1; }
+.fl-levels .fl-hint { flex: 0 0 100%; display: none; }
+.fl-adv { margin-top: 12px; border-top: 1px dashed var(--fl-border); padding-top: 8px; }
+.fl-adv summary { cursor: pointer; color: var(--fl-muted); font-size: 12px; }
+.fl-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.fl-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#fleet-view .fl-pill { min-height: 24px; padding: 1px 10px; font-size: 11.5px; border-radius: 999px; }
+#fleet-view .fl-pill.fl-on { border-color: var(--fl-accent); color: var(--fl-accent); }
+
+.fl-presets { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.fl-list { display: grid; gap: 8px; align-content: start; }
+#fleet-view .fl-preset {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; height: auto;
+  padding: 10px 12px; white-space: normal;
+}
+#fleet-view .fl-preset.fl-on { border-color: var(--fl-accent); box-shadow: inset 3px 0 0 var(--fl-accent); }
+#fleet-view .fl-preset.fl-bad { border-style: dashed; }
+
+/* The tree reads left to right: a card, then its children stacked in a
+   column, each joined to a shared spine by a short tick. */
+.fl-side-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.fl-legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 4px 0 14px; font-size: 11.5px; color: var(--fl-muted); }
+.fl-key { display: inline-flex; gap: 5px; align-items: center; }
+.fl-tree { overflow-x: auto; padding: 4px 2px 10px; }
+.fl-node { display: flex; align-items: center; }
+.fl-kids { display: flex; flex-direction: column; gap: 8px; padding-left: 30px; position: relative; }
+.fl-node > .fl-kids::before { content: ""; position: absolute; left: 0; top: 50%; width: 15px; border-top: 2px solid var(--fl-line); }
+.fl-kids > .fl-node { position: relative; }
+.fl-kids > .fl-node::before { content: ""; position: absolute; left: -15px; top: 50%; width: 15px; border-top: 2px solid var(--fl-line); }
+.fl-kids > .fl-node::after { content: ""; position: absolute; left: -15px; top: -4px; bottom: -4px; border-left: 2px solid var(--fl-line); }
+.fl-kids > .fl-node:first-child::after { top: 50%; }
+.fl-kids > .fl-node:last-child::after { bottom: 50%; }
+.fl-kids > .fl-node:only-child::after { display: none; }
+.fl-card {
+  --k: var(--fl-worker);
+  flex: 0 0 auto; width: 210px; box-sizing: border-box; padding: 9px 11px; border-radius: 11px;
+  background: var(--fl-raise); border: 1px solid var(--fl-border); border-left: 3px solid var(--k);
+  box-shadow: 0 1px 0 rgba(0,0,0,.18);
+}
+.fl-kind-coordinator { --k: var(--fl-coordinator); }
+.fl-kind-sub-lead { --k: var(--fl-sub-lead); }
+.fl-kind-worker { --k: var(--fl-worker); }
+.fl-kind-reviewer { --k: var(--fl-reviewer); }
+.fl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--k); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--k) 22%, transparent); }
+.fl-card-head { display: flex; align-items: center; gap: 7px; }
+.fl-handle { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-kind { margin-left: auto; font-size: 10.5px; color: var(--k); font-weight: 650; }
+.fl-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.fl-chip { font-size: 10.5px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--fl-border); color: var(--fl-muted); white-space: nowrap; }
+.fl-rel-independent { color: var(--fl-independent); border-color: color-mix(in srgb, var(--fl-independent) 45%, transparent); }
+.fl-rel-stacked { color: var(--fl-stacked); border-color: color-mix(in srgb, var(--fl-stacked) 45%, transparent); }
+.fl-issue-lane { color: var(--fl-text); }
+.fl-issue-pending { border-style: dashed; }
+.fl-card-foot { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+#fleet-view .fl-card-profile { padding: 3px 6px; font-size: 11.5px; }
+.fl-facts { display: grid; gap: 2px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--fl-bg); border: 1px solid var(--fl-border); font-size: 12px; overflow-wrap: anywhere; }
+.fl-plan { margin: 8px 0 0; padding-left: 22px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--fl-muted); }
+.fl-yaml { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--fl-bg); border: 1px solid var(--fl-border); font-size: 11.5px; max-height: 360px; overflow: auto; white-space: pre; }
+.fl-yaml-edit { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; resize: vertical; }
+.fl-err { white-space: pre-wrap; font-size: 12px; }
+
+/* The editor: the group tree beside the selected group's form. */
+.fl-split { display: grid; grid-template-columns: minmax(170px, 230px) minmax(0, 1fr); gap: 14px; align-items: start; }
+@container (max-width: 760px) { .fl-split { grid-template-columns: minmax(0, 1fr); } }
+.fl-gtree { display: grid; gap: 4px; align-content: start; }
+#fleet-view .fl-gnode {
+  --k: var(--fl-worker); display: flex; align-items: center; gap: 7px; justify-content: flex-start;
+  min-height: 30px; padding: 4px 10px; text-align: left; border-left: 3px solid var(--k);
+}
+#fleet-view .fl-gnode.fl-on { border-color: var(--fl-accent); border-left-color: var(--k); background: var(--fl-bg); }
+#fleet-view .fl-gnode .fl-muted { margin-left: auto; font-size: 10.5px; }
+.fl-group-form { display: grid; gap: 10px; padding: 12px; border-radius: 11px; border: 1px solid var(--fl-border); background: var(--fl-bg); }
+.fl-params { display: grid; gap: 8px; }
+.fl-params .fl-field { flex: 1 1 80px; }
+
+/* Sub procedures (subprocs.js, claunch-8t5r0.3-.5). The card line sits
+   under the run's v2 line (same order slot, after it in the DOM); the header
+   chip says the same for the attached session. A fork that fell back to
+   inline is amber on both, with the cause in the title. */
+#session-list .sess-subproc {
+  flex-basis: 100%; min-width: 0; padding-left: 28px; font-size: 11px;
+  color: #79c0ff; order: 3; overflow-wrap: anywhere;
+}
+#session-list .sess-subproc.fallback { color: #d29922; font-weight: 600; }
+.term-subproc {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: #10202e; color: #79c0ff; border: 1px solid #1f3a52;
+  cursor: pointer; white-space: nowrap; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.term-subproc.fallback { background: #3a2f0b; color: #e3b341; border-color: #6b5313; }
+.subproc-host { padding: 8px 12px; overflow: auto; height: 100%; box-sizing: border-box; }
+.subproc-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; }
+.subproc-task { font-weight: 600; }
+.subproc-muted { color: #7d8590; font-size: 11px; }
+.subproc-filter { font-size: 12px; cursor: pointer; }
+.subproc-refusal { color: #d29922; font-size: 12px; margin: 6px 0; }
+.subproc-note { color: #79c0ff; font-size: 12px; margin: 6px 0; }
+.subproc-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.subproc-item { border-bottom: 1px solid #21262d; padding: 6px 0; }
+.subproc-item.disabled { opacity: 0.55; }
+.subproc-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.subproc-name { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.subproc-tag {
+  font-size: 10px; padding: 0 5px; border-radius: 6px;
+  border: 1px solid #30363d; color: #8b949e;
+}
+.subproc-tag-fork { color: #a371f7; border-color: #3c2a5e; }
+.subproc-desc { font-size: 11px; color: #8b949e; margin-top: 2px; }
+.subproc-why { font-size: 11px; color: #d29922; margin-top: 2px; }
+.subproc-btn { font-size: 11px; margin-left: auto; }
+.subproc-row .subproc-btn ~ .subproc-btn { margin-left: 4px; }
+.subproc-form { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.subproc-params { font-family: SFMono-Regular, Consolas, monospace; font-size: 11px; width: 100%; }
+.subproc-error { color: #f85149; font-size: 11px; }
+.subproc-roles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+.subproc-roles input[type="text"] { min-width: 180px; font-size: 11px; }

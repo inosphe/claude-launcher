@@ -6,6 +6,7 @@ import copy
 import json
 import re
 import threading
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .. import atomic
@@ -47,6 +48,17 @@ def clean(value) -> dict | None:
     at = value.get("at")
     if isinstance(at, str) and at:
         out["at"] = at
+    elif isinstance(at, (int, float)) and not isinstance(at, bool):
+        # A v2 collection stamps its push time as epoch seconds (a float), and
+        # the PR page reads `at` as a string (`at.slice(0, 10)`). Normalise the
+        # number here to the same ISO-8601 UTC form ``utcnow()`` writes, so a
+        # collection row and a wizard row sort and group together
+        # (claunch-ijkge.4.1).
+        try:
+            out["at"] = datetime.fromtimestamp(at, timezone.utc).isoformat(
+                timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            pass
     seq = value.get("seq")
     if isinstance(seq, int) and not isinstance(seq, bool):
         out["seq"] = seq

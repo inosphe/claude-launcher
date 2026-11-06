@@ -1470,6 +1470,7 @@ class SessionManager:
         identity: str = "",
         warnings: Optional[List[str]] = None,
         exempt_depth: bool = False,
+        person_fields: bool = False,
         place_under: Optional[str] = None,
         created_by: Optional[dict] = None,
     ) -> Session:
@@ -1534,6 +1535,7 @@ class SessionManager:
             children=len(self.live_children(placed)) if placed else 0,
             warnings=warnings,
             exempt_depth=exempt_depth,
+            person_fields=person_fields,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
         # worktree is named after the child (``<parent>-<child>``) and the
@@ -3481,8 +3483,11 @@ class SessionManager:
         under ``new_cwd`` — left behind, the session's ``flow_*`` calls would
         resolve the run store under the new cwd and find nothing. And when
         ``project`` is given, ``sdef.project`` is re-filed under it (validated
-        against the registry) — the mesh and the listings read the project
-        live from the definition, so nothing else needs re-keying. Archived
+        against the registry) — the listings read the project live from the
+        definition, so nothing else here needs re-keying. A mesh *mirror* is
+        the exception: its row stores the project it was filed under at join
+        time, so the route that calls this (``h_session_migrate``) re-files it
+        through ``MeshManager.refile_mirrors_for`` after the move. Archived
         (finished) runs and the beads board's already-minted issues stay on
         the old board; only where *new* issues mint moves, with the cwd.
 

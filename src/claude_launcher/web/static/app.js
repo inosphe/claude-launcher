@@ -7667,6 +7667,9 @@ function renderTermHandle() {
    so a write that says what it already said buys a re-measure of the whole
    bar five seconds at a time for nothing. */
 function renderTermNote() {
+  // The sub procedure chip beside it follows the same session switches and
+  // polls (subprocs.js); it writes only when what it shows changed.
+  globalThis.SubprocUi?.header();
   const chip = $("term-note");
   if (!chip) return;
   const s = currentName
@@ -8289,6 +8292,8 @@ async function refreshCflow2Rail() {
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // and so does the header's sub procedure chip (subprocs.js)
+  globalThis.SubprocUi?.header();
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
@@ -8348,6 +8353,8 @@ function applyCflow2Badges() {
   for (const li of list.querySelectorAll("li[data-name]")) {
     const old = li.querySelector(".sess-cflow2");
     const r = (cflow2RailCache || {})[li.dataset.name];
+    // The sub procedure line under it (subprocs.js, claunch-8t5r0.3).
+    globalThis.SubprocUi?.card(li, r);
     if (!r) { if (old) old.remove(); continue; }
     const line = old || document.createElement("a");
     if (!old) {
@@ -10307,6 +10314,37 @@ function termSeriesCostText(price, tokens) {
   return `≈ ${currency}${amount}`;
 }
 
+/* What that estimate breaks down into, as the caption's second line writes
+   it: "read $0.042 · cached read $8.31 · output $0.018". Cache write is
+   named only when the window wrote any — the rule the Stats table set for
+   the same four parts (claunch-60y0d.1). Each part is priced by readingCost
+   over its one bucket, at the same rates the total uses, so a cache-write
+   rate that falls back to the read rate counts the same way in both
+   (claunch-kr3wr). */
+function termSeriesCostParts(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const part = (label, key) => {
+    const cost = readingCost({ [key]: +(tokens[key] || 0) }, price.rates);
+    if (cost === null) return "";
+    const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+    return `${label} ${currency}${amount}`;
+  };
+  const parts = [part("read", "input"), part("cached read", "cache_read")];
+  if (+tokens.cache_write > 0) parts.push(part("cache write", "cache_write"));
+  parts.push(part("output", "output"));
+  return parts.filter(Boolean).join(" · ");
+}
+
+/* The caption: the window's estimate, then the split under it. Both lines
+   are right-aligned to the plot's right edge by `.term-series-cost`. */
+function termSeriesCostBox(cost, parts) {
+  const box = el("div", "term-series-cost");
+  box.appendChild(el("div", "term-series-cost-total", cost));
+  if (parts) box.appendChild(el("div", "term-series-cost-parts", parts));
+  return box;
+}
+
 function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
@@ -10466,6 +10504,7 @@ function termSeriesChart(data, zoom, price) {
      largest of its group, so summing points would undercount. With no rates
      the chart says so in its tooltip rather than writing a $0. */
   const cost = termSeriesCostText(price, data.totals);
+  const costParts = cost ? termSeriesCostParts(price, data.totals) : "";
   const costOf = price && price.model
     ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
   const costLine = cost
@@ -10497,9 +10536,10 @@ function termSeriesChart(data, zoom, price) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. The request's own estimate rides on the first line
-       (claunch-i6xl2): it names a request, so its cost belongs beside the
-       number, and the second line's token figures are the long one. */
+       pointer. It carries no cost: the axis is request order, so the estimate
+       for a slice of it describes no period a reader can act on (the window's
+       own estimate is under the legend), and the user asked for it gone
+       (claunch-kr3wr). */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -10509,9 +10549,7 @@ function termSeriesChart(data, zoom, price) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      const pcost = termSeriesCostText(price, p);
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
-        (pcost ? ` · ${pcost}` : "");
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -10528,10 +10566,10 @@ function termSeriesChart(data, zoom, price) {
     });
     /* The window's estimate under the legend, where it describes the whole
        plot rather than the request under the pointer. */
-    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    const costBox = cost ? termSeriesCostBox(cost, costParts) : null;
     box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
-  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
+  if (!zoom && cost) box.appendChild(termSeriesCostBox(cost, costParts));
   return box;
 }
 
@@ -19721,6 +19759,34 @@ $("term-archive").addEventListener("click", async () => {
   await archiveSession(currentName);
 });
 
+/* Resume one exited session by name, for a page that is not its terminal
+   (the Chart page's detail column, claunch-h82vq): the header's ▶ resume is
+   the same request, but it reattaches the terminal, which only makes sense
+   for the attached session. Resolves true when the daemon took it. */
+async function respawnSession(name) {
+  if (!name) return false;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not resume '${name}'`, info.error || `HTTP ${resp.status}`);
+      return false;
+    }
+    // The attached terminal's socket died with the old child; drop it, and
+    // opening the terminal again attaches the new one.
+    if (name === currentName && typeof detach === "function") detach();
+    return true;
+  } catch (err) {
+    await modalInfo(`Could not resume '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return false;
+  } finally {
+    await refreshSessions({ state: "current" });
+  }
+}
+
 /* Stop everything. The records stay and every one of them is resumable after,
    which is what makes this the one bulk verb that needs no mesh guard: a
    member row is *meant* to outlive its terminal, reading `exited`. */
@@ -25021,6 +25087,73 @@ function termCflowView() {
   };
 }
 
+/* One press of a gate answer (termCflowAnswers / termCflow2Answers): the
+   reason prompt or the confirm it carries, then the post. Shared by the
+   terminal's strip and the Chart page's detail column (claunch-h82vq).
+   Resolves false when the reader cancelled. Not `async`: the node
+   harnesses slice it out of this file by its `function` keyword. */
+function pressGateAnswer(a, after) {
+  let payload = a.body;
+  if (a.reason) {
+    const why = prompt(a.reason, "");
+    if (why === null) return Promise.resolve(false); // cancelled the dialog, not the refusal
+    if (a.reasonRequired && !why.trim()) return Promise.resolve(false); // the engine would refuse it
+    payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
+  } else if (a.ask && !confirm(a.ask)) {
+    return Promise.resolve(false);
+  }
+  const sent = after ? cflowAction(a.path, payload, after) : cflowAction(a.path, payload);
+  return Promise.resolve(sent).then(() => true);
+}
+
+/* Every gate a person owes one session's runs, for a page that is not that
+   session's terminal (the Chart page's detail column, claunch-h82vq). The
+   strip above draws the first of them for the attached session; this lists
+   them all, each with the presses the strip would offer: the v1 run's gate,
+   then one entry per answer the v2 run owes (cflow2RailCache's `answers`).
+   An owed answer with no press (a halt, a plan wait) still gets an entry,
+   with `answers: []`, so the reader learns it is there and where to go. */
+function sessionGateViews(name) {
+  const out = [];
+  if (!name) return out;
+  const r = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
+  if (r && sessCflowGated(r)) {
+    out.push({
+      href: "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`),
+      what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+        sessCflowLabel(r),
+      question: termCflowQuestion(r),
+      answers: termCflowAnswers(r, name),
+      after: null,
+      optional: false,
+    });
+  }
+  const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[name];
+  if (r2 && r2.gated) {
+    const optional = r2.blocking === false;
+    const href = "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`);
+    const owed = (r2.answers || []).length ? r2.answers
+      : [{ kind: "", prompt: (r2.owed || []).join(" · ") }];
+    for (const a of owed) {
+      const presses = termCflow2Answers(r2, a, name);
+      const question = termCflow2Question(a);
+      out.push({
+        href,
+        what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
+          `${a.kind || "waiting"}${optional ? " · ○ optional" : ""}`,
+        question: presses.length ? question
+          : a.kind === "plan-wait"
+            ? `${question} — decide it in the plan pane (☰ plan)`
+            : `${question} — answer it on the run page`,
+        answers: presses,
+        after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
+        optional,
+      });
+    }
+  }
+  return out;
+}
+
 function renderTermCflow() {
   const box = $("term-cflow");
   if (!box) return;
@@ -25057,19 +25190,7 @@ function renderTermCflow() {
     const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
     b.type = "button";
     if (a.title) b.title = a.title;
-    b.addEventListener("click", () => {
-      let payload = a.body;
-      if (a.reason) {
-        const why = prompt(a.reason, "");
-        if (why === null) return; // cancelled the dialog, not the refusal
-        if (a.reasonRequired && !why.trim()) return; // the engine would refuse it
-        payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
-      } else if (a.ask && !confirm(a.ask)) {
-        return;
-      }
-      if (view.after) cflowAction(a.path, payload, view.after);
-      else cflowAction(a.path, payload);
-    });
+    b.addEventListener("click", () => pressGateAnswer(a, view.after));
     btns.appendChild(b);
   }
   box.appendChild(btns);
@@ -25817,6 +25938,15 @@ const SPLIT_PANES = {
     on: "close the plan pane — the terminal takes the column back",
     off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
   },
+  // The sub procedures this session's v2 run could call (subprocs.js,
+  // docs/cflow-v2.md 2.12.3, claunch-8t5r0.4/.5): every one listed, the ones
+  // that cannot run now greyed out with the reason, a call made here as the
+  // user, and the procedure packs with their role filter.
+  subprocs: {
+    btn: "term-subprocbtn", title: "⤷ sub",
+    on: "close the sub procedure pane — the terminal takes the column back",
+    off: "the sub procedures this session's run can call — call one, and install packs or edit their role filter",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -25829,7 +25959,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "subprocs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27830,10 +27960,60 @@ function setRailNavPinned(pinned) {
    across the breakpoint. */
 let detailWasUp = false;
 
+/* A page column borrowing the detail (claunch-h82vq): the Chart page's
+   Detail tab shows this same panel inside its right column instead of the
+   docked rail. { slot, name, onClose } while borrowed, null otherwise.
+   The address's `?detail=` still owns the rail: a page hosts the panel only
+   while the address names no detail (hostSessDetail refuses otherwise), and
+   an address that names one takes the panel back (route). */
+let sessDetailGuest = null;
+
+/* The borrow, read through typeof: the node harnesses slice the functions
+   that consult it out of this file without its declaration. */
+function detailGuest() {
+  return typeof sessDetailGuest === "undefined" ? null : sessDetailGuest;
+}
+
+function hostSessDetail(slot, name, onClose) {
+  const view = $("sess-view");
+  if (!view || !slot || !name) return false;
+  if (hashDetail(location.hash)) return false;
+  sessDetailGuest = { slot, name, onClose: onClose || null };
+  if (view.parentNode !== slot) slot.appendChild(view);
+  view.classList.add("guest");
+  if (sessName !== name) repointDetail(name);
+  syncDetailPanel();
+  return true;
+}
+
+/* Give the borrowed panel back: its subject goes back to whatever the
+   address names (nothing, usually), and the node to its home. */
+function releaseSessDetail() {
+  if (!sessDetailGuest) return;
+  sessDetailGuest = null;
+  const view = $("sess-view");
+  if (view) view.classList.remove("guest");
+  const want = hashDetail(location.hash);
+  if (!want) { if (sessName) dropDetail(); }
+  else if (want !== sessName) repointDetail(want);
+  syncDetailPanel();
+}
+
 function syncDetailPanel() {
   const view = $("sess-view");
   const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    // Borrowed by a page column: it is that column's content, so neither
+    // docked nor hidden, and the rail's drag bar has nothing to resize.
+    if (view.parentNode !== guest.slot) guest.slot.appendChild(view);
+    view.classList.remove("docked", "hidden");
+    split.classList.add("hidden");
+    if (!narrow && detailWasUp) refitSoon(60);
+    detailWasUp = false;
+    return;
+  }
   const host = narrow ? $("main") : $("layout");
   if (view.parentNode !== host) {
     // Last in #layout is the mobile bottom bar (display:none up here), so the
@@ -27897,6 +28077,7 @@ function syncSplitPane() {
   // would silently write the opposite of what it appears to do.
   for (const [pane, spec] of Object.entries(SPLIT_PANES)) {
     const btn = $(spec.btn);
+    if (!btn) continue;
     const on = !!lay && lay.split && lay.pane === pane;
     btn.setAttribute("aria-pressed", String(on));
     btn.title = on ? spec.on : spec.off;
@@ -28511,6 +28692,7 @@ function mobileTitle() {
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
+    case "fleet": return "fleet";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -28634,7 +28816,8 @@ MOBILE_MQ.addEventListener("change", () => {
   // handed back to the page the address names — routing again does exactly
   // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session") {
+    if (sessName && currentPage !== "session"
+        && !(typeof detailGuest === "function" && detailGuest())) {
       history.replaceState(history.state, "", hashWithDetail(location.hash, null));
       dropDetail();
     }
@@ -28688,6 +28871,7 @@ const VIEWS = {
   retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
+  fleet: "fleet-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -28916,6 +29100,8 @@ function openSplit(name, kind = "run") {
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
   // And the briefing and prompt packs pane (packs-pane.js).
   if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
+  // And the sub procedure picker and pack editor (subprocs.js).
+  if (kind === "subprocs") { globalThis.SubprocPane?.mount(splitBody, name); return; }
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
@@ -28957,6 +29143,7 @@ function closeSplit() {
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
+  if (splitKind === "subprocs") globalThis.SubprocPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
@@ -29053,6 +29240,7 @@ $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
 $("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
+$("term-subprocbtn").addEventListener("click", () => toggleSplitPane("subprocs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
@@ -29530,6 +29718,8 @@ function parseHash(h) {
   }
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
+  // #/fleet launches from a preset; #/fleet/presets opens the editor.
+  if (parts[0] === "fleet") return { page: "fleet", tab: parts[1] || "" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -29613,6 +29803,7 @@ function route() {
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
+  if (r.page !== "fleet") globalThis.FleetPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -29709,11 +29900,16 @@ function route() {
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
+    case "fleet": showView("fleet"); globalThis.FleetPage.open(r.tab); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
   // it: the buttons that do (openDetail, closeDetail) only edit the address.
-  if (!r.detail) { if (sessName) dropDetail(); }
+  // A page column holding the panel (hostSessDetail) keeps it while the
+  // address names no detail; one that names a detail takes it back.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (r.detail && guest) releaseSessDetail();
+  if (!r.detail) { if (sessName && !guest) dropDetail(); }
   else if (r.detail !== sessName) repointDetail(r.detail);
   syncLayout();
 }
@@ -31578,6 +31774,17 @@ const RAG_POLL_MS = 3000;
    waiting for the status refresh to draw it left the reader with no feedback
    at all (peer review of claunch-i2i95). */
 let ragBusy = false;
+/* The collections that exist on disk (/api/rag/dbs), so the card can draw the
+   ones no index has opened yet as placeholders (claunch-c7vjm). Kept off the
+   3-second status poll: /api/rag/dbs walks every collection to total its
+   files, and that walk is not worth repeating every RAG_POLL_MS. It rides a
+   minute-long clock instead, and it is read without the sizes (?sizes=0) —
+   the card draws no size. */
+let ragDisk = null;
+let ragDiskError = "";
+let ragDiskAt = 0;
+let ragDiskBusy = false;
+const RAG_DISK_POLL_MS = 60000;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31648,6 +31855,7 @@ function openSettings(section) {
   refreshPrompterSettings();
   refreshStatusChecks();
   refreshRagStatus();
+  refreshRagDisk();
   refreshGhStatus();
   refreshRelaySettings();
   refreshWslRegStub();
@@ -31784,8 +31992,39 @@ async function refreshRagStatus() {
   } catch (err) {
     ragError = String(err);
   }
+  // The disk listing the placeholder rows come from is re-read on this same
+  // refresh, but at most once per RAG_DISK_POLL_MS: the status poll fires
+  // every 3 seconds and the listing is the expensive half (claunch-c7vjm).
+  if (wsOpen && wsSection === "" && ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)) {
+    refreshRagDisk();
+  }
   if (wsOpen) renderWorkspaces();
   ragSchedulePoll();
+}
+
+/* Whether the disk listing is due. Split out so the harness can hold the
+   interval: the card must not put /api/rag/dbs on the 3-second clock
+   (claunch-c7vjm). */
+function ragDiskDue(now, last, interval) {
+  return !last || now - last >= interval;
+}
+
+async function refreshRagDisk() {
+  if (ragDiskBusy) return;
+  ragDiskBusy = true;
+  try {
+    const resp = await api("/api/rag/dbs?sizes=0");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragDisk = Array.isArray(data.dbs) ? data.dbs : [];
+    ragDiskAt = Date.now();
+    ragDiskError = "";
+  } catch (err) {
+    ragDiskError = String(err);
+  } finally {
+    ragDiskBusy = false;
+  }
+  if (wsOpen) renderWorkspaces();
 }
 
 /* Whether the status payload has anything left to watch. A reindex request
@@ -31962,21 +32201,65 @@ async function ragReindex(row, force) {
    collection still on a pre-preset directory carries no identity of its own —
    it is read through the legacy adoption rule — and the row says so, because
    that is the fact the two screens disagreed about (claunch-i2i95). */
-function ragDbGroups(st) {
+function ragDbGroups(st, placeholders) {
   const rows = st.indexes || [];
   const db = st.db || "(이름 없는 DB)";
   const groups = new Map();
-  for (const row of rows) {
-    const name = row.db_configured || db;
+  const add = (name, row) => {
     let g = groups.get(name);
     if (!g) {
-      g = { name, dims: 0, rows: [] };
+      g = { name, dims: [], rows: [] };
       groups.set(name, g);
     }
     g.rows.push(row);
-    if (row.dims && !g.dims) g.dims = row.dims;
-  }
+    // Every collection's width is kept: the header used to take the first
+    // row's and call it the DB's, which hid a DB whose corpora were built at
+    // different widths (claunch-rk0od).
+    if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);
+  };
+  for (const row of rows) add(row.db_configured || db, row);
+  // A collection on disk that no index has opened yet sits under the DB its
+  // identity names, so the reader sees it beside the ones that are running
+  // rather than in a second list with a second heading (claunch-c7vjm).
+  for (const row of placeholders || []) add(row.identity || db, { ...row, placeholder: true });
   return [...groups.values()];
+}
+
+/* The collections on disk that no open index accounts for. Both payloads
+   name a collection by the directory it lives in, so the two are compared by
+   that path and nothing else: ``/api/rag/status`` lists what the daemon has
+   opened, ``/api/rag/dbs`` lists everything that exists (claunch-c7vjm). */
+function ragPlaceholderRows(st, diskRows) {
+  const opened = new Set();
+  for (const row of (st && st.indexes) || []) {
+    if (row && row.path) opened.add(String(row.path));
+  }
+  return (diskRows || []).filter(row => row && row.path && !opened.has(String(row.path)));
+}
+
+/* What a placeholder row calls itself. The corpus is the part the card does
+   not otherwise draw — a board corpus is keyed ``beads-<hash>`` per root, so
+   it is shown as such and the hash stays reachable in the title. */
+function ragPlaceholderLabel(row) {
+  const corpus = String((row && row.corpus) || "");
+  if (corpus === "unified" || corpus === "all") return "Search anything (통합: 이슈·코멘트·세션)";
+  if (corpus === "sessions") return "sessions (세션)";
+  if (corpus.startsWith("beads-")) return `board ${corpus}`;
+  return corpus || "(코퍼스 미상)";
+}
+
+/* A placeholder row's state line. A width that differs from the model now
+   configured means the collection cannot serve a query when it opens — the
+   same fact the DB panel's preset warning names, said here before the cost
+   is paid (claunch-c7vjm). Says nothing when either width is unknown. */
+function ragPlaceholderState(row, st) {
+  const parts = ["아직 열리지 않음"];
+  const width = Number((row && row.dims) || 0);
+  const current = Number((st && st.dimensions) || 0);
+  if (width && current && width !== current) {
+    parts.push(`열리면 실패 예상 — 지금 설정은 ${current}차원`);
+  }
+  return { state: "unopened", text: parts.join(" · ") };
 }
 
 function ragBucketLabel(row) {
@@ -32018,6 +32301,9 @@ async function ragDbAction(st, group, force) {
   const outcomes = [];
   try {
     for (const row of group.rows) {
+      // A placeholder is a disk listing, not a bucket the daemon knows: it
+      // has no kind to name and nothing opened to reindex (claunch-c7vjm).
+      if (row.placeholder) continue;
       const data = await ragReindex(row, force);
       if (!data) {
         outcomes.push(`${ragBucketLabel(row)}: 오류`);
@@ -32139,26 +32425,58 @@ function ragCard() {
   queueRow.append(" ", pause);
   card.appendChild(queueRow);
 
-  for (const group of ragDbGroups(st)) {
+  const placeholders = ragPlaceholderRows(st, ragDisk);
+  if (ragDiskError) {
+    card.appendChild(el("p", "wf-note",
+      `디스크의 컬렉션 목록을 읽지 못했습니다 — 열리지 않은 컬렉션은 표시되지 않습니다 · ${ragDiskError}`));
+  } else if (placeholders.length) {
+    card.appendChild(el("p", "wf-note",
+      "회색 행은 디스크에 있지만 아직 열리지 않은 컬렉션입니다 — 검색·색인이 한 번 닿으면 정상 행이 됩니다."));
+  }
+  for (const group of ragDbGroups(st, placeholders)) {
     const box = el("div", "rag-db-block");
     const head = el("div", "rag-db-head");
     head.appendChild(el("strong", null, `DB ${group.name}`));
-    head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
-    const sync = el("button", "wf-btn clear", "Sync");
-    sync.type = "button";
-    sync.disabled = ragBusy;
-    sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
-    sync.addEventListener("click", () => ragDbAction(st, group, false));
-    const force = el("button", "wf-btn clear", "Rebuild");
-    force.type = "button";
-    force.disabled = ragBusy;
-    force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
-    force.addEventListener("click", () => ragDbAction(st, group, true));
-    head.append(sync, force);
+    head.appendChild(el("span", "beads-bits", group.dims.length ? ` · ${group.dims.join("/")}차원` : ""));
+    // Sync/Rebuild act on the DB's open collections. A group drawn only from
+    // the disk listing has none to act on, and a click there would ask the
+    // daemon to reindex a collection the card never opened (claunch-c7vjm).
+    if (group.rows.some(row => !row.placeholder)) {
+      const sync = el("button", "wf-btn clear", "Sync");
+      sync.type = "button";
+      sync.disabled = ragBusy;
+      sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
+      sync.addEventListener("click", () => ragDbAction(st, group, false));
+      const force = el("button", "wf-btn clear", "Rebuild");
+      force.type = "button";
+      force.disabled = ragBusy;
+      force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
+      force.addEventListener("click", () => ragDbAction(st, group, true));
+      head.append(sync, force);
+    }
     box.appendChild(head);
 
     const list = el("div", "rag-index-list");
     for (const row of group.rows) {
+      if (row.placeholder) {
+        const item = el("div", "rag-index-row rag-row-unopened");
+        const text = el("div", "rag-index-text");
+        const label = el("strong", null, ragPlaceholderLabel(row));
+        label.title = `corpus ${row.corpus}${row.identity ? ` · DB ${row.identity}` : ""}`;
+        text.appendChild(label);
+        const bits = [
+          row.dims ? `${row.dims}차원` : "차원 미상",
+          row.model || "모델 미상",
+          row.identity ? "이름 있음" : "이전 형식",
+        ];
+        text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+        const state = ragPlaceholderState(row, st);
+        text.appendChild(el("span", "rag-badge rag-badge-unopened", "미개방"));
+        text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+        item.appendChild(text);
+        list.appendChild(item);
+        continue;
+      }
       const item = el("div", "rag-index-row");
       const text = el("div", "rag-index-text");
       text.appendChild(el("strong", null, ragBucketLabel(row)));
@@ -32188,8 +32506,9 @@ function ragCard() {
     card.appendChild(box);
   }
   if (!(st.indexes || []).length) {
-    card.appendChild(el("p", "wf-note",
-      "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
+    card.appendChild(el("p", "wf-note", placeholders.length
+      ? "열린 색인이 아직 없습니다 — 위의 회색 행이 디스크에 있는 컬렉션입니다."
+      : "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
   }
   return card;
 }
@@ -35991,7 +36310,8 @@ function statsChart(buckets, unit) {
 function statsBucketTable(buckets, unit) {
   const table = el("table", "stats-table");
   const head = el("tr");
-  for (const h of ["period", "total", "requests", "output",
+  for (const h of ["period", "total", "requests",
+                   ...USAGE_PARTS.map(([, label]) => label),
                    ...STATS_CATEGORIES.map(([, label]) => label)]) {
     head.appendChild(el("th", null, h));
   }
@@ -36002,7 +36322,9 @@ function statsBucketTable(buckets, unit) {
     row.appendChild(el("td", null, statsBucketLabel(b.start, unit)));
     row.appendChild(el("td", "num", usageShort(b.total || 0)));
     row.appendChild(el("td", "num", (b.requests || 0).toLocaleString()));
-    row.appendChild(el("td", "num", usageShort(b.output || 0)));
+    for (const [key] of USAGE_PARTS) {
+      row.appendChild(el("td", "num stats-part-cell", usageShort(b[key] || 0)));
+    }
     for (const [key] of STATS_CATEGORIES) {
       row.appendChild(el("td", "num", String((b.inputs || {})[key] || 0)));
     }
@@ -36251,6 +36573,52 @@ function statsOverviewRows(d) {
     (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
 }
 
+/* A row's estimate under the provider filter in force: the daemon priced
+   each session (statsboard._price_row) and each of its ledger provider
+   entries at Settings → Model prices. A transcript row's declared part has
+   no entry of its own, so its estimate is the row's. `basis` says the
+   transcript row was priced at the model its newest turn answered on. */
+function statsRowCost(row) {
+  const whole = { cost: row.cost, priced: row.priced_tokens || 0,
+                  unpriced: row.unpriced_tokens || 0,
+                  model: row.model || "", basis: row.model_basis || "" };
+  if (!statsProvider) return whole;
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
+  if (!hit) return { cost: null, priced: 0, unpriced: 0, model: "", basis: "" };
+  if (hit.declared) return whole;
+  return { cost: hit.cost, priced: hit.priced_tokens || 0,
+           unpriced: hit.unpriced_tokens || 0, model: row.model || "",
+           basis: "" };
+}
+
+/* One estimate cell: "≈ $1.23", a dash where nothing found a price, and a
+   star on a partly priced figure (the tooltip says how much was left out).
+   Empty for a row with no tokens at all. */
+function statsCostCell(c, currency) {
+  const priced = c.priced || 0;
+  const unpriced = c.unpriced || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced || c.cost === null || c.cost === undefined) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = c.model
+        ? `no price row in Settings → Model prices for ${c.model}`
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(c.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices" +
+    (c.basis === "last" && c.model
+      ? `: every token priced at ${c.model}, the model this session's ` +
+        "newest turn answered on (its transcript names no model per request)"
+      : ": each model's four token kinds at its row's rates") +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
 /* The four parts a session row's bar is split into, under the provider
    filter in force: the whole window's, or the picked provider's slice of it.
    They are the parts of the same quantity `statsRowTotal` sums, so the bar's
@@ -36323,8 +36691,10 @@ function statsOverviewTable(d) {
   const total = rows.reduce((n, r) => n + statsRowTotal(r), 0);
   const today = (d.until || "").slice(0, 10);
   const table = el("table", "stats-table stats-overview");
+  const currency = d.currency || "$";
   const head = el("tr");
-  for (const h of ["session", "provider", "status", "tokens", "",
+  for (const h of ["session", "provider", "status", "tokens", "model",
+                   ...USAGE_PARTS.map(([, label]) => label), "est. cost",
                    "requests", "share", "last call"]) {
     head.appendChild(el("th", null, h));
   }
@@ -36399,7 +36769,22 @@ function statsOverviewTable(d) {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
     }
     row.appendChild(tokens);
-    row.appendChild(el("td", "stats-model-cell", r.model || ""));
+    const model = el("td", "stats-model-cell", r.model || "");
+    if (r.model) {
+      model.title = r.model_basis === "last"
+        ? `${r.model} — the model this session's newest turn answered on`
+        : r.model;
+    }
+    row.appendChild(model);
+    // The four parts the bar is split into, as numbers: the cheapest part
+    // (cache read) usually dominates the total, and the bar alone cannot
+    // say by how much.
+    const measured = value || r.source !== "none";
+    for (const p of statsRowBarParts(r)) {
+      row.appendChild(el("td", "num stats-part-cell",
+        measured ? usageShort(p.tokens) : ""));
+    }
+    row.appendChild(statsCostCell(statsRowCost(r), currency));
     row.appendChild(el("td", "num", statsRowRequests(r).toLocaleString()));
     row.appendChild(el("td", "num",
       total && value ? statsPct(value / total) : ""));
@@ -36599,20 +36984,38 @@ function statsSwitchList(row) {
 }
 
 /* The opened session's window figures, per provider. */
-function statsDetailWindow(row) {
+function statsDetailWindow(row, currency = "$") {
   const box = el("div", "stats-detail-window");
   const table = el("table", "stats-table stats-detail-providers");
   const head = el("tr");
-  for (const h of ["provider", "tokens", "requests", "share"]) {
+  for (const h of ["provider", "tokens", ...USAGE_PARTS.map(([, l]) => l),
+                   "est. cost", "requests", "share"]) {
     head.appendChild(el("th", null, h));
   }
   table.appendChild(head);
-  const parts = row.providers || [];
+  // A transcript row has no ledger part; its whole window figure is filed
+  // under the provider its profile declares (statsRowParts), and its
+  // estimate is the row's own.
+  const parts = statsRowParts(row);
   const sum = parts.reduce((n, p) => n + (p.total || 0), 0);
   for (const p of parts) {
     const line = el("tr");
-    line.appendChild(el("td", null, p.provider));
+    const name = el("td", null, p.provider);
+    if (p.declared) {
+      name.title = "read from this session's transcript and filed under the " +
+        "provider its profile declares";
+    }
+    line.appendChild(name);
     line.appendChild(el("td", "num", usageShort(p.total || 0)));
+    for (const [key] of USAGE_PARTS) {
+      line.appendChild(el("td", "num stats-part-cell", usageShort(p[key] || 0)));
+    }
+    line.appendChild(statsCostCell(p.declared
+      ? { cost: row.cost, priced: row.priced_tokens || 0,
+          unpriced: row.unpriced_tokens || 0, model: row.model || "",
+          basis: row.model_basis || "" }
+      : { cost: p.cost, priced: p.priced_tokens || 0,
+          unpriced: p.unpriced_tokens || 0, model: "", basis: "" }, currency));
     line.appendChild(el("td", "num", (p.requests || 0).toLocaleString()));
     line.appendChild(el("td", "num",
       sum ? statsPct((p.total || 0) / sum) : ""));
@@ -36651,8 +37054,14 @@ function statsReadingSections(d) {
   summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
     `${(t.requests || 0).toLocaleString()} requests` +
     (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
+    usageShare(t.input || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache write", usageShort(t.cache_write || 0),
+    usageShare(t.cache_write || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Output", usageShort(t.output || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
+    usageShare(t.output || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
     "of inputs, by count"));
   summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
@@ -36731,7 +37140,8 @@ function statsDetailPanel() {
   panel.appendChild(meta);
 
   if (row) {
-    panel.appendChild(statsSection("This window", null, statsDetailWindow(row)));
+    panel.appendChild(statsSection("This window", null, statsDetailWindow(
+      row, (statsOverview && statsOverview.currency) || "$")));
     panel.appendChild(statsSection("Provider / model changes", null,
       statsSwitchList(row)));
   }
@@ -37387,10 +37797,16 @@ function renderStatsOverview(main) {
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
+  const partOf = (key) => totals.total
+    ? `${statsPct((totals[key] || 0) / totals.total)} of tokens` : "";
   summary.appendChild(statsCard("Fresh input", usageShort(totals.input || 0),
-    `cache read ${usageShort(totals.cache_read || 0)}`));
+    partOf("input")));
+  summary.appendChild(statsCard("Cache read", usageShort(totals.cache_read || 0),
+    partOf("cache_read")));
+  summary.appendChild(statsCard("Cache write", usageShort(totals.cache_write || 0),
+    partOf("cache_write")));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
-    `cache write ${usageShort(totals.cache_write || 0)}`));
+    partOf("output")));
   summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
   const est = statsModelEstimate(d);
@@ -37399,8 +37815,10 @@ function renderStatsOverview(main) {
     summary.appendChild(statsCard("Est. cost",
       est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
       est.unpriced_tokens
-        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
-        : "Settings → Model prices"));
+        ? `${usageShort(est.priced_tokens)} priced · ` +
+          `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : `all ${usageShort(est.priced_tokens)} tokens priced ` +
+          "(Settings → Model prices)"));
   }
   summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
@@ -41994,7 +42412,7 @@ function sweepBatchSettingCard() {
     "Largest group of merges one sweep covers; a group this large closes at " +
     "once. Raising it means fewer sweeps (less test-window time) but a failed " +
     "sweep implicates more merges, and the failed batch has to be split " +
-    "(tools/delayed_sweep.py unbatch) to find the merge. 0 turns batching off: " +
+    "(claunch delayed-sweep unbatch) to find the merge. 0 turns batching off: " +
     "every merge is swept alone. Range 0-100."));
   card.appendChild(sweepBatchField("settle", "Settle time", "seconds",
     "How long the oldest queued merge waits for company before its group is " +
@@ -48608,6 +49026,114 @@ function cflow2Duration(seconds) {
   return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
+// The intervals the saved runs waited on a person (claunch-sbfsi.1), clipped
+// to [start, end). Each keeps its gate's callstack depth, which is the bar's
+// height in the chart, and its full wait for the tooltip and the longest-wait
+// tile. A run's gates come from its own journal, so two runs never share one.
+function cflow2GateRows(data, start, end) {
+  const rows = [];
+  for (const run of (data || {}).runs || []) {
+    const live = Date.parse(run.ended) >= Date.parse((data || {}).observed_at);
+    for (const gate of run.gates || []) {
+      const a = Date.parse(gate.opened), b = Date.parse(gate.closed);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b < a || !Number.isInteger(gate.depth)) continue;
+      const lo = Math.max(a, start), hi = Math.min(b, end);
+      if (hi < lo || (hi === lo && a !== b)) continue;
+      rows.push({gate, run: run.run, lo, hi, wait: b - a,
+        state: !gate.open ? "closed" : live ? "open" : "cut"});
+    }
+  }
+  return rows.sort((x, y) => x.lo - y.lo);
+}
+
+const CF2_GATE_KINDS = {ask: "ask", choice: "user choice", visit_limit: "visit limit", loop_limit: "loop limit", move: "move request"};
+
+function cflow2GateChart(data, period) {
+  const box = el("div", "cf2-gates");
+  box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
+  const rows = cflow2GateRows(data, ...period);
+  const runs = (data || {}).runs || [];
+  const saved = runs.reduce((n, r) => n + (r.gates || []).length, 0);
+  // Gates the daemon could not give an end (claunch-b6z8m): they have no
+  // interval to draw, so the panel says how many it left out.
+  const unended = runs.reduce((n, r) => n + (Number.isInteger(r.gates_unended) ? r.gates_unended : 0), 0);
+  const unendedNote = () => el("p", "wf-note cf2-gates-unended",
+    `${unended} gate wait${unended === 1 ? "" : "s"} in the saved runs ${unended === 1 ? "has" : "have"} no recorded end and ${unended === 1 ? "is" : "are"} not drawn.`);
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
+      "No gate waited on a person in the saved runs."));
+    if (unended) box.appendChild(unendedNote());
+    return box;
+  }
+  const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
+  const longest = rows.reduce((m, r) => Math.max(m, r.wait), 0);
+  const tiles = el("div", "cf2-throughput-tiles");
+  const tile = (label, value, note) => {
+    const t = el("div", "cf2-throughput-tile");
+    t.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
+    if (note) t.appendChild(el("div", "cf2-throughput-tile-note", note));
+    return t;
+  };
+  tiles.append(tile("Gates", String(rows.length), "waited in this period"),
+    tile("Waiting time", cflow2Duration(clipped / 1000), "inside this period"),
+    tile("Longest wait", cflow2Duration(longest / 1000), "whole wait"),
+    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null));
+  box.appendChild(tiles);
+
+  // Deeper frames draw higher. The axis spans the depths present, so a run
+  // whose gates all sit 9 to 15 frames down does not spend its height on 0..8.
+  const depths = rows.map(r => r.gate.depth);
+  const lo = Math.min(...depths), hi = Math.max(...depths), levels = hi - lo + 1;
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  const lane = 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Gates that waited on a person, by callstack depth (higher is deeper) over UTC time.");
+  const node = (tag, attrs, text) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e); return e;
+  };
+  const y = depth => T + (hi - depth) * lane;
+  // Label the depths that hold a bar; past eight of them, every few levels.
+  const present = [...new Set(depths)].sort((a, b) => a - b);
+  const every = Math.max(1, Math.ceil(levels / 6));
+  const marks = present.length <= 8 ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
+  for (const d of marks) {
+    node("line", {x1: L, x2: W - R, y1: y(d) + lane / 2, y2: y(d) + lane / 2, class: "cf2-axis-grid"});
+    node("text", {x: L - 4, y: y(d) + lane / 2 + 3, "text-anchor": "end", class: "cf2-axis-label"}, String(d));
+  }
+  const span = period[1] - period[0], x = ms => L + (ms - period[0]) / span * plotW;
+  const tick = ms => {
+    const t = new Date(ms).toISOString();
+    return span > 300 * 86400000 ? t.slice(0, 10) : span > 86400000 ? `${t.slice(5, 10)} ${t.slice(11, 16)}` : t.slice(11, 16);
+  };
+  const iso = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
+  for (const r of rows) {
+    const g = r.gate;
+    const rect = node("rect", {x: x(r.lo), y: y(g.depth) + 3, width: Math.max(2, x(r.hi) - x(r.lo)),
+      height: lane - 6, rx: 2, class: `cf2-gate-${r.state}`});
+    rect.dataset.node = g.node; rect.dataset.depth = g.depth;
+    const name = g.within && g.within !== g.label ? `${g.within} › ${g.label}` : (g.label || g.node);
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `${name} (${CF2_GATE_KINDS[g.kind] || g.kind}) · depth ${g.depth}\n` +
+      `${iso(Date.parse(g.opened))} – ${r.state === "open" ? "waiting now" : iso(Date.parse(g.closed))}\n` +
+      `waited ${cflow2Duration(r.wait / 1000)}` + (r.state === "cut" ? " · the run ended before an answer was recorded" : "") +
+      `\nrun ${r.run} · ${g.node}`;
+    rect.appendChild(title);
+  }
+  node("text", {x: L, y: H - 6, "text-anchor": "start", class: "cf2-axis-label"}, tick(period[0]));
+  node("text", {x: L + plotW / 2, y: H - 6, "text-anchor": "middle", class: "cf2-axis-label"}, tick(period[0] + span / 2));
+  node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
+  box.appendChild(svg);
+  const legend = el("div", "cf2-throughput-legend");
+  legend.append(el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
+    el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
+  box.appendChild(legend);
+  if (unended) box.appendChild(unendedNote());
+  return box;
+}
+
 function cflow2Throughput(data, state) {
   const section = cf2Section("Throughput over time");
   section.classList.add("cf2-throughput");
@@ -48635,6 +49161,7 @@ function cflow2Throughput(data, state) {
   const controls = el("div", "cf2-throughput-controls");
   const custom = el("div", "cf2-throughput-controls cf2-throughput-custom");
   const output = el("div", "cf2-throughput-output");
+  const gates = el("div");
   const compare = el("details", "cf2-throughput-compare"); compare.dataset.cf2Key = "throughput-compare";
   compare.appendChild(el("summary", null, "Compare two periods"));
   const compareInputs = el("div", "cf2-throughput-controls");
@@ -48685,7 +49212,8 @@ function cflow2Throughput(data, state) {
   about.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
   about.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
   if (!hasMerges) about.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
-  section.append(controls, custom, output, compare, about);
+  about.appendChild(el("p", "wf-note", "Human gate waits: a bar runs from the moment a gate was put to a person (a user choice, an ask that fell to a person, a visit or loop limit, a move request) to its answer. Asks routed to agent responders such as reviewers are left out. Height is the gate's callstack depth, the number of frames the Callstack panel draws above it."));
+  section.append(controls, custom, output, gates, compare, about);
 
   const range = (a, b) => [Date.parse(state[a] + "Z"), Date.parse(state[b] + "Z")];
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
@@ -48738,7 +49266,9 @@ function cflow2Throughput(data, state) {
     const unit = state.metric === "runs" ? "completed runs" : "reported merges";
     const period = range("start", "end");
     drawComparison(unit);
+    gates.replaceChildren();
     if (!valid(period)) {output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;}
+    gates.appendChild(cflow2GateChart(data, period));
     const span = period[1] - period[0];
     for (const option of binSelect.options) {
       option.disabled = option.value !== "auto" && span / Number(option.value) > CF2_THROUGHPUT_MAX_BINS;
@@ -51185,6 +51715,15 @@ function repointDetail(name) {
    back to the page the detail was opened over. Dropped first, so the router
    does not read the new entry as a terminal link to carry the rail across. */
 function closeDetail() {
+  // A page column that borrowed the panel (hostSessDetail) is closed by that
+  // page: its × hands the panel back and the page shows its own view again.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    const done = guest.onClose;
+    releaseSessDetail();
+    if (done) done();
+    return;
+  }
   dropDetail();
   go(hashWithDetail(location.hash, null));
 }
@@ -54983,13 +55522,19 @@ function sessMigrate(data) {
     const kidsOk = (doc.children || []).filter((c) => c.ok);
     const kidsFailed = (doc.children || []).filter((c) => !c.ok);
     // What travelled besides the session itself, so the operator can tell a
-    // plain directory change from one that also re-filed the session or
-    // carried its cflow runs over.
+    // plain directory change from one that also re-filed the session, carried
+    // its cflow runs over, or moved a mesh mirror it had built.
     const slots = doc.slots_moved || [];
+    const mirrors = doc.mirrors_refiled || [];
     const carried = [
       doc.project ? `project: ${doc.project}` : "",
       slots.length
         ? `${slots.length} cflow run slot${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}`
+        : "",
+      mirrors.length
+        ? `${mirrors.length} mesh row${mirrors.length === 1 ? "" : "s"} re-filed: ${mirrors
+            .map((m) => `${m.mesh} (${m.was} → ${m.now})`)
+            .join(", ")}`
         : "",
     ].filter(Boolean);
     say(

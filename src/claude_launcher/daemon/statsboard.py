@@ -869,6 +869,14 @@ def _read_transcript(sdef, zone: tzinfo) -> Optional[dict]:
         return None
 
 
+def _last_model(sdef) -> str:
+    """The model in ``sdef``'s newest transcript turn (ctxsize's reading)."""
+    from . import ctxsize  # local: ctxsize is a heavier import than this page needs
+
+    reading = ctxsize.for_session(sdef) or {}
+    return str(reading.get("model") or "")
+
+
 class Transcripts:
     """Window figures for sessions that never reached the routing shim.
 
@@ -879,12 +887,30 @@ class Transcripts:
     """
 
     def __init__(self, *, zone: Optional[tzinfo] = None,
-                 ttl: float = TRANSCRIPT_TTL, reader=None) -> None:
+                 ttl: float = TRANSCRIPT_TTL, reader=None,
+                 model_reader=None) -> None:
         self.zone = zone or local_zone()
         self.ttl = ttl
         self.reader = reader or (lambda sdef: _read_transcript(sdef, self.zone))
+        # The model a transcript row is priced at. A transcript reading is
+        # summed per bucket, not per model, so the only model it can name is
+        # the one its newest turn answered on -- the same model the rail
+        # prices a session's context at (ctxsize). ``None`` when a test
+        # injects a reader and no model reader: such rows stay unpriced.
+        if model_reader is None and reader is None:
+            model_reader = _last_model
+        self.model_reader = model_reader
         self._rows: Dict[str, Tuple[float, Optional[dict]]] = {}
         self._lock = threading.Lock()
+
+    def model(self, sdef) -> str:
+        """The model ``sdef``'s newest turn answered on, or ``""``."""
+        if self.model_reader is None:
+            return ""
+        try:
+            return str(self.model_reader(sdef) or "")
+        except Exception:  # noqa: BLE001 - a broken transcript is not a 500
+            return ""
 
     def reading(self, sdef, now: Optional[float] = None) -> Optional[dict]:
         name = str(getattr(sdef, "name", "") or "")
@@ -1207,6 +1233,65 @@ def estimate_cost(prices, provider: str, model: str,
             + _rate(rates, "output") * int(parts.get("output") or 0)) / 1e6
 
 
+def _entry_models(row: dict, entry: dict) -> List[dict]:
+    """The per-model parts of one provider entry of ``row``.
+
+    A ledger entry carries the models that answered it. A transcript row's
+    declared entry carries none: its whole figure rides the model its newest
+    turn answered on (``row["model"]``, marked ``model_basis: "last"``), or
+    the empty model -- never priced -- when no turn names one.
+    """
+    models = entry.get("models") or []
+    if models or row.get("source") != "transcript":
+        return models
+    item = {
+        "model": str(row.get("model") or ""), "declared": True,
+        "input": entry["input"], "cache_read": entry["cache_read"],
+        "cache_write": entry["cache_write"], "output": entry["output"],
+        "total": entry["total"], "requests": entry["requests"],
+    }
+    if item["model"] and row.get("model_basis"):
+        item["model_basis"] = row["model_basis"]
+    return [item]
+
+
+def _price_row(row: dict, prices) -> None:
+    """Write ``cost``/``priced_tokens``/``unpriced_tokens`` onto ``row`` and
+    onto each of its ledger provider entries.
+
+    The same sum the provider + model table makes, one session at a time:
+    each model part at its own price row. ``cost`` is ``None`` where none of
+    the row's tokens found a price, so the page draws a dash and never a
+    zero; a partly priced row keeps the unpriced count beside its estimate.
+    """
+    total_cost = 0.0
+    priced = unpriced = 0
+    for entry in row_providers(row):
+        e_cost = 0.0
+        e_priced = e_unpriced = 0
+        for item in _entry_models(row, entry):
+            tokens = int(item.get("total") or 0) or sum(
+                int(item.get(k) or 0)
+                for k in ("input", "cache_read", "cache_write", "output"))
+            cost = estimate_cost(prices, entry["provider"],
+                                 str(item.get("model") or ""), item)
+            if cost is None:
+                e_unpriced += tokens
+            else:
+                e_cost += cost
+                e_priced += tokens
+        if not entry.get("declared"):
+            entry["cost"] = e_cost if e_priced else None
+            entry["priced_tokens"] = e_priced
+            entry["unpriced_tokens"] = e_unpriced
+        total_cost += e_cost
+        priced += e_priced
+        unpriced += e_unpriced
+    row["cost"] = total_cost if priced else None
+    row["priced_tokens"] = priced
+    row["unpriced_tokens"] = unpriced
+
+
 def _empty_row(name: str) -> dict:
     return {
         "session": name, "status": "", "category": "", "harness": "",
@@ -1216,6 +1301,7 @@ def _empty_row(name: str) -> dict:
         "output": 0, "total": 0, "requests": 0,
         "first_at": None, "last_at": None, "days": {}, "switches": [],
         "declared_provider": "", "ended": False,
+        "cost": None, "priced_tokens": 0, "unpriced_tokens": 0,
     }
 
 
@@ -1363,6 +1449,12 @@ def overview(*, window: str = "today", include_ended: bool = False,
                     item.get("profile") or "", item.get("borrow") or "", doc),
             })
             row["provider"] = row["declared_provider"]
+            # The model its newest turn answered on: the only model a
+            # transcript reading can name, so its estimate is marked as
+            # priced at that model (``model_basis: "last"``).
+            row["model"] = transcripts.model(sdef)
+            if row["model"]:
+                row["model_basis"] = "last"
             rows.append(row)
             transcript_rows += 1
             continue
@@ -1423,16 +1515,9 @@ def overview(*, window: str = "today", include_ended: bool = False,
     # rather than borrowing another model's price.
     by_model: Dict[Tuple[str, str], dict] = {}
     for row in rows:
+        _price_row(row, prices)
         for entry in row_providers(row):
-            models = entry.get("models") or []
-            if not models and row.get("source") == "transcript":
-                models = [{
-                    "model": "", "declared": True,
-                    "input": entry["input"], "cache_read": entry["cache_read"],
-                    "cache_write": entry["cache_write"], "output": entry["output"],
-                    "total": entry["total"], "requests": entry["requests"],
-                }]
-            for item in models:
+            for item in _entry_models(row, entry):
                 key = (entry["provider"], str(item.get("model") or ""))
                 acc = by_model.setdefault(key, {
                     "provider": entry["provider"], "model": key[1],
@@ -1441,6 +1526,8 @@ def overview(*, window: str = "today", include_ended: bool = False,
                     "declared": bool(item.get("declared")),
                     "_sessions": set(),
                 })
+                if item.get("model_basis"):
+                    acc["model_basis"] = item["model_basis"]
                 for k in ("input", "cache_read", "cache_write", "output",
                           "total", "requests"):
                     acc[k] += int(item.get(k) or 0)

@@ -350,11 +350,12 @@ def test_the_parent_reads_the_childs_run_without_ticking_its_wait(tmp_path, monk
 # the daemon line that tells the parent
 # --------------------------------------------------------------------------- #
 class _FakeSession:
-    def __init__(self, name: str, cwd: str, parent=None):
+    def __init__(self, name: str, cwd: str, parent=None, *, held_at=None):
         from claude_launcher.daemon.harness import SessionDef
 
         self.exited = False
         self.ended_by = None
+        self.held_at = held_at
         self.sdef = SessionDef(name=name, cwd=cwd, parent=parent)
         self.delivered: list = []
         self.status_value = "idle"
@@ -363,6 +364,10 @@ class _FakeSession:
         return self.status_value
 
     def append_wal(self, text: str) -> bool:
+        return True
+
+    async def deliver(self, text: str, **kwargs) -> bool:
+        self.delivered.append(text)
         return True
 
     def kill(self, *, force: bool = False) -> None:
@@ -473,3 +478,158 @@ def test_a_dead_parent_leaves_the_gate_alone(tmp_path):
     # the gate itself is untouched -- the person still answers it
     assert runtime.gate_authority(d.state(), "boss") == runtime.CALLER_PARENT
     assert runtime.gate_authority(d.state(), "") == runtime.CALLER_USER
+
+
+# --------------------------------------------------------------------------- #
+# a held child is still a child (claunch-7vf2z)
+# --------------------------------------------------------------------------- #
+# `hold` stops the program and leaves the run live with its question open
+# (daemon/session.Session.hold sets held_at, then kills). Every surface below
+# used to read that record as dead, so a held child's gate reached nobody.
+class _FakeDaemon:
+    """The daemon client `mcp._live_children` talks to."""
+
+    def __init__(self, children, cwds=None):
+        self.children = children
+        self.cwds = cwds or {}
+
+    def get(self, path):
+        if path.endswith("/children"):
+            return {"children": self.children}
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        return {"cwd": self.cwds.get(name, "")}
+
+
+def test_the_children_row_says_whether_a_child_is_held(home, tmp_path):
+    """The row the parent's own MCP path reads. Without `held` a parent cannot
+    tell a held child from one that ended (daemon/api.h_session_children)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from test_cflow_hold_wake import HELD_AT, add_dead
+    from test_daemon_e2e import _manager
+
+    async def run():
+        from claude_launcher.daemon.harness import SessionDef
+
+        mgr = _manager()
+        cwd = str(tmp_path)
+        add_dead(mgr, "boss", cwd)
+        add_dead(mgr, "kid", cwd, held_at=HELD_AT)
+        add_dead(mgr, "gone", cwd)
+        for name in ("kid", "gone"):
+            mgr.get(name).sdef = SessionDef(
+                name=name, harness="claude", cwd=cwd, parent="boss")
+
+        client = TestClient(TestServer(build_app(mgr, "sekrit", started_at=0.0)))
+        await client.start_server()
+        try:
+            resp = await client.get(
+                "/api/sessions/boss/children",
+                headers={"Authorization": "Bearer sekrit"},
+            )
+            assert resp.status == 200, await resp.text()
+            return (await resp.json())["children"]
+        finally:
+            await client.close()
+
+    rows = asyncio.run(run())
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["kid"]["held"] is True
+    assert by_name["gone"]["held"] is False
+
+
+def test_flow_gates_lists_a_held_childs_gate(tmp_path, monkeypatch):
+    """The discovery path: `_live_children` keeps the held row, so the gate it
+    waits on reaches `flow_gates` (cflow2/mcp._live_children)."""
+    d = Drv(tmp_path)
+    d.to_end_decision()
+    rows = [
+        {"name": "w1", "status": "exited", "held": True},
+        {"name": "gone", "status": "exited", "held": False},
+    ]
+    monkeypatch.setattr(mcp, "_daemon",
+                        lambda: _FakeDaemon(rows, {"w1": d.cwd, "gone": d.cwd}))
+    monkeypatch.setenv("CLAUNCH_SESSION", "boss")
+    out = mcp.call_tool("flow_gates", {})
+    # the held child is listed with its open choice ...
+    assert [r["child"] for r in out["children"]] == ["w1"]
+    assert "new task" in out["children"][0]["choices"][0]["prompt"]
+    # ... and the dead one, on the same answer, is still left out
+    assert "gone" not in [r["child"] for r in out["children"]]
+
+
+def test_a_held_childs_gate_reaches_the_clock(tmp_path):
+    """The scan path: a held child's run is walked, so its `driver_parent` is
+    kept current and its gate is announced (cflow_clock._scan_v2_gates)."""
+    from claude_launcher.daemon import cflow_clock
+
+    d = Drv(tmp_path, parent="")
+    child = _FakeSession("w1", d.cwd, parent="boss")
+    child.exited = True
+    child.held_at = "2026-11-06T00:00:00+00:00"
+    boss = _FakeSession("boss", str(tmp_path / "boss"))
+    (tmp_path / "boss").mkdir()
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": child, "boss": boss}))
+    assert clock.scan() == []                       # first sight arms
+    assert d.state().get("driver_parent") == "boss"
+    d.to_end_decision()
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["child-gate"]
+    assert events[0]["to"] == "boss"
+
+
+def test_an_exited_child_that_is_not_held_is_not_scanned(tmp_path):
+    """The narrowing that keeps the change small: exited without held_at is
+    still nobody's run, exactly as before."""
+    from claude_launcher.daemon import cflow_clock
+
+    d = Drv(tmp_path, parent="")
+    child = _FakeSession("w1", d.cwd, parent="boss")
+    child.exited = True
+    boss = _FakeSession("boss", str(tmp_path / "boss"))
+    (tmp_path / "boss").mkdir()
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": child, "boss": boss}))
+    clock.scan()
+    d.to_end_decision()
+    assert clock.scan() == []
+
+
+def test_a_held_parent_is_told_and_woken(tmp_path):
+    """A parent that is itself held is woken by the delivery, so the gate is
+    not lost behind the parent's own hold (cflow_clock.RunEventClock._deliver)."""
+    from claude_launcher.daemon import cflow_clock
+
+    d = Drv(tmp_path, parent="")
+    boss = _FakeSession("boss", str(tmp_path / "boss"), held_at="2026-11-06T00:00:00+00:00")
+    boss.exited = True
+    (tmp_path / "boss").mkdir()
+    clock = cflow_clock.RunEventClock(
+        _FakeManager({"w1": _FakeSession("w1", d.cwd, parent="boss"), "boss": boss})
+    )
+    clock.scan()
+    d.to_end_decision()
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["child-gate"]
+    assert asyncio.run(clock._deliver(events[0])) is True
+    assert boss.delivered and "flow_gates" in boss.delivered[0]
+
+
+def test_a_dead_parent_is_still_not_written_to(tmp_path):
+    """Client-side counterpart of `test_a_dead_parent_leaves_the_gate_alone`:
+    the wider predicate reaches held records only."""
+    from claude_launcher.daemon import cflow_clock
+
+    d = Drv(tmp_path, parent="")
+    boss = _FakeSession("boss", str(tmp_path / "boss"))
+    boss.exited = True                              # exited, no held_at
+    (tmp_path / "boss").mkdir()
+    clock = cflow_clock.RunEventClock(
+        _FakeManager({"w1": _FakeSession("w1", d.cwd, parent="boss"), "boss": boss})
+    )
+    clock.scan()
+    d.to_end_decision()
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["child-gate"]
+    assert asyncio.run(clock._deliver(events[0])) is True
+    assert boss.delivered == []

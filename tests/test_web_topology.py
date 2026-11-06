@@ -674,6 +674,7 @@ CHECKS = [
         "retrospectionpage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
+        "subprocs_check.js",
         "simpage_check.js",
         "durableflow_check.js",
         "qapane_check.js",
@@ -689,6 +690,7 @@ CHECKS = [
         "sessioncli_check.js",
         "specpage_check.js",
         "specpage_tools_check.js",
+        "fleetpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
         "cflow2view_check.js",
@@ -711,6 +713,7 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "chartdetail_browser.cjs",
     "railchart_browser.cjs",
     "artifactscleanup_browser.cjs",
     "artifactsmeasure_browser.cjs",
@@ -725,6 +728,7 @@ BROWSER_CHECKS = [
     "cflow2history_browser.cjs",
     "cflow2gentle_browser.cjs",
     "cflow2throughput_browser.cjs",
+    "cflow2gates_browser.cjs",
     "glossary_browser.cjs",
     "retrospection_browser.cjs",
     "flows_browser.cjs",
