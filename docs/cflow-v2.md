@@ -2391,6 +2391,11 @@ roles: {type: whitelist, roles: [unreal]} # 생략하면 모든 역할
 - 필터 편집은 프로젝트 레이어의 사본만 고친다(`procpacks.set_roles`,
   `POST /api/cflow2/packs/roles`, body `roles: {type, roles} | null`). 카탈로그와 전역
   사본은 고치지 않는다.
+- 팩 설치·제거·역할 필터 편집(`/api/cflow2/packs/install`·`remove`·`roles`)은 사람만
+  한다(claunch-8t5r0.7, 사용자 결정). 요청의 actor(`actors.from_request`)가 `agent`나
+  `cflow`이면 데몬이 403으로 거절한다. 역할 필터는 어느 세션이 그 팩을 부를 수 있는지
+  정하므로, 세션이 고칠 수 있으면 자기 역할을 스스로 넣을 수 있기 때문이다. 목록
+  조회(`GET /api/cflow2/packs`)는 거절하지 않는다.
 - 허용 규칙(사용자 결정 qa-b9b833c7): 부를 수 있는 것은 작업의 `calls`에 있는 이름과,
   설치된 팩의 프로시저 중 역할 필터가 허용하는 것의 합집합이다. `calls`에
   `<pack>:<proc>`를 적을 수도 있다. 에이전트의 `flow_call`과 웹의 호출이 같은 판정을
@@ -2441,8 +2446,11 @@ roles: {type: whitelist, roles: [unreal]} # 생략하면 모든 역할
 - 웹의 ⤷ sub 패널(`subprocs.js`)은 이 목록을 그대로 보여 주고, 부를 수 없는 항목은
   비활성으로 두고 `why`를 마우스오버 툴팁과 본문에 적는다. 「available only」 체크박스가
   목록을 거른다. 호출은 `POST /api/cflow2/call {cwd, scope, procedure, node, with,
-  mode}`이고 런의 활성 작업에 붙는다(`by: user`). 활성 작업이 없으면 모든 항목이
-  비활성이다. 호출 뒤 데몬이 드라이버에 알림을 넣는다.
+  mode}`이고 런의 활성 작업에 붙는다. 호출 기록의 `by`는 요청의 actor로 정한다:
+  관리 세션의 클라이언트가 보내는 actor 헤더(`agent`·`cflow`)가 있으면 `agent`, 그
+  밖(웹 쿠키, 관리 세션 밖의 셸)은 `user`다(claunch-8t5r0.7). 활성 작업이 없으면 모든
+  항목이 비활성이다. 호출 뒤 데몬이 드라이버에 알림을 넣고, 알림에 호출한 쪽(세션
+  이름 또는 사용자)을 적는다.
 - 같은 패널에서 팩을 설치·제거하고 역할 필터를 편집한다(2.12.1).
 
 ### 2.13 사용자 조율 워크플로우 (`improv-coordinator-v2`)
