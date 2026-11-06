@@ -9251,6 +9251,34 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-detail-token-value { font-variant-numeric: tabular-nums; }
 .chart-detail-tokens { margin: 3px 0 0; padding-left: 16px; color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-detail-open { color: #58a6ff; text-decoration: none; }
+/* The column's lifecycle presses, its run gates and its two views
+   (claunch-h82vq). The gate block wears the terminal strip's amber, since
+   it is the same "a person owes this run an answer". */
+.chart-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.chart-detail-actions .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; text-decoration: none; }
+.chart-detail-actions .wf-btn.deny { border-color: #da3633; color: #ffa198; }
+.chart-detail-gates { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; }
+.chart-gate { border: 1px solid #6e5000; border-radius: 6px; padding: 6px 8px; background: #2a2210; }
+.chart-gate.optional { border-color: #30363d; background: none; }
+.chart-gate-head { color: #e3b341; text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
+.chart-gate-head:hover { text-decoration: underline; }
+.chart-gate-question { margin: 3px 0 0; color: #c9b27a; overflow-wrap: anywhere; }
+.chart-gate-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chart-gate-buttons .tcf-btn {
+  padding: 3px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+  background: #21262d; border: 1px solid #6e5000; color: #e6edf3; cursor: pointer;
+}
+.chart-gate-buttons .tcf-btn:hover { background: #4d3800; }
+.chart-gate-buttons .tcf-btn.approve { background: #238636; border-color: #2ea043; }
+.chart-gate-buttons .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
+.chart-detail-tabs { margin: 10px 0 0; }
+.chart-detail-host { margin-top: 8px; }
+/* The dashboard's session detail, borrowed into the column: the column
+   scrolls, so the panel neither scrolls itself nor pads like a page. */
+#sess-view.guest { padding: 0; overflow: visible; flex: none; }
+#sess-view.guest .wf-head { flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
+#sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
+#sess-view.guest .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 .chart-detail-open:hover { text-decoration: underline; }
 @media (max-width: 760px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
