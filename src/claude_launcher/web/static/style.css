@@ -12029,3 +12029,46 @@ html:not([data-theme="light"]) #fleet-view :is(input, select, textarea) { color-
 .fl-group-form { display: grid; gap: 10px; padding: 12px; border-radius: 11px; border: 1px solid var(--fl-border); background: var(--fl-bg); }
 .fl-params { display: grid; gap: 8px; }
 .fl-params .fl-field { flex: 1 1 80px; }
+
+/* Sub procedures (subprocs.js, claunch-8t5r0.3-.5). The card line sits
+   under the run's v2 line (same order slot, after it in the DOM); the header
+   chip says the same for the attached session. A fork that fell back to
+   inline is amber on both, with the cause in the title. */
+#session-list .sess-subproc {
+  flex-basis: 100%; min-width: 0; padding-left: 28px; font-size: 11px;
+  color: #79c0ff; order: 3; overflow-wrap: anywhere;
+}
+#session-list .sess-subproc.fallback { color: #d29922; font-weight: 600; }
+.term-subproc {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: #10202e; color: #79c0ff; border: 1px solid #1f3a52;
+  cursor: pointer; white-space: nowrap; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.term-subproc.fallback { background: #3a2f0b; color: #e3b341; border-color: #6b5313; }
+.subproc-host { padding: 8px 12px; overflow: auto; height: 100%; box-sizing: border-box; }
+.subproc-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; }
+.subproc-task { font-weight: 600; }
+.subproc-muted { color: #7d8590; font-size: 11px; }
+.subproc-filter { font-size: 12px; cursor: pointer; }
+.subproc-refusal { color: #d29922; font-size: 12px; margin: 6px 0; }
+.subproc-note { color: #79c0ff; font-size: 12px; margin: 6px 0; }
+.subproc-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.subproc-item { border-bottom: 1px solid #21262d; padding: 6px 0; }
+.subproc-item.disabled { opacity: 0.55; }
+.subproc-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.subproc-name { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.subproc-tag {
+  font-size: 10px; padding: 0 5px; border-radius: 6px;
+  border: 1px solid #30363d; color: #8b949e;
+}
+.subproc-tag-fork { color: #a371f7; border-color: #3c2a5e; }
+.subproc-desc { font-size: 11px; color: #8b949e; margin-top: 2px; }
+.subproc-why { font-size: 11px; color: #d29922; margin-top: 2px; }
+.subproc-btn { font-size: 11px; margin-left: auto; }
+.subproc-row .subproc-btn ~ .subproc-btn { margin-left: 4px; }
+.subproc-form { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.subproc-params { font-family: SFMono-Regular, Consolas, monospace; font-size: 11px; width: 100%; }
+.subproc-error { color: #f85149; font-size: 11px; }
+.subproc-roles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+.subproc-roles input[type="text"] { min-width: 180px; font-size: 11px; }
