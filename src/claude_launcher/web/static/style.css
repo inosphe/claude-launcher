@@ -9241,7 +9241,13 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-main { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 18px; }
 .chart-divider { cursor: col-resize; background: transparent; border-left: 1px solid #30363d; margin-left: 2px; touch-action: none; }
 .chart-divider:hover, .chart-divider.dragging, .chart-divider:focus-visible { border-left: 3px solid #388bfd; margin-left: 1px; outline: none; }
-.chart-detail { min-width: 0; min-height: 0; overflow-y: auto; padding: 0 4px 18px 14px; font-size: 12px; color: #c9d1d9; }
+/* The column is a fixed top (name, presses, gates, 요약 | Detail) over a body
+   that alone scrolls (claunch-h82vq.1). */
+.chart-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 0 4px 0 14px; font-size: 12px; color: #c9d1d9; }
+/* A long gate prompt on a short window must not push the radio out of the
+   column: past 70% of it the top scrolls on its own. */
+.chart-detail-top { flex: none; max-height: 70%; overflow-y: auto; padding-bottom: 8px; border-bottom: 1px solid #30363d; }
+.chart-detail-body { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 18px; }
 .chart-detail-hint { padding: 16px 2px; }
 .chart-detail-head { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px; border-bottom: 1px solid #30363d; }
 .chart-detail-name { margin: 0; font-size: 15px; font-weight: 600; color: #e6edf3; overflow-wrap: anywhere; flex: 1; min-width: 0; }
@@ -9280,8 +9286,8 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-gate-buttons .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
 .chart-detail-tabs { margin: 10px 0 0; }
 .chart-detail-host { margin-top: 8px; }
-/* The dashboard's session detail, borrowed into the column: the column
-   scrolls, so the panel neither scrolls itself nor pads like a page. */
+/* The dashboard's session detail, borrowed into the column: the column's
+   body scrolls, so the panel neither scrolls itself nor pads like a page. */
 #sess-view.guest { padding: 0; overflow: visible; flex: none; }
 #sess-view.guest .wf-head { flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
 #sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
@@ -9293,6 +9299,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
   .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
   .chart-divider { display: none; }
   .chart-detail { padding: 12px 0 18px; border-top: 1px solid #30363d; overflow: visible; }
+  .chart-detail-top, .chart-detail-body { max-height: none; overflow: visible; }
 }
 /* The rail's Chart view (#session-chart, chart-page.js openRail): the page's
    timeline in the session rail's width. The box scrolls down as a whole and

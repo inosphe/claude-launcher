@@ -1617,6 +1617,11 @@ globalThis.ChartPage = (() => {
             meshes, role: roleOf(s, meshes, ""), cflow: appCflowOf(s.name) };
     }
     const s = r.session;
+    // Two parts (claunch-h82vq.1): the top -- name, presses, gates and the
+    // 요약 | Detail radio -- stays put, and only the body under it scrolls,
+    // so the controls are in reach however far down the detail is read.
+    const top = node("div", "chart-detail-top");
+    const body = node("div", "chart-detail-body");
     const head = node("div", "chart-detail-head");
     head.appendChild(node("span", `chart-dot cat-${r.category}`));
     head.appendChild(node("h3", "chart-detail-name", r.name));
@@ -1625,21 +1630,23 @@ globalThis.ChartPage = (() => {
     close.title = "선택 해제";
     close.onclick = () => pick(r.name);
     head.appendChild(close);
-    box.appendChild(head);
-    if (hidden) box.appendChild(node("p", "chart-muted chart-detail-note",
+    top.appendChild(head);
+    if (hidden) top.appendChild(node("p", "chart-muted chart-detail-note",
       "현재 필터 조건에는 이 세션이 포함되지 않는다."));
     const acts = actionsBar(s);
-    if (acts) box.appendChild(acts);
+    if (acts) top.appendChild(acts);
     const gates = gatesBlock(r.name);
-    if (gates) box.appendChild(gates);
-    box.appendChild(paneTabs());
+    if (gates) top.appendChild(gates);
+    top.appendChild(paneTabs());
+    box.appendChild(top);
+    box.appendChild(body);
     if (state.pane === "detail") {
       // The dashboard's own session detail (#sess-view) goes in here once
       // the column is on the page (paint -> hostSessDetail): the same panel,
       // its poll and its sub-tabs, moved rather than drawn twice.
       const slot = node("div", "chart-detail-host");
       slot.dataset.name = r.name;
-      box.appendChild(slot);
+      body.appendChild(slot);
       return box;
     }
 
@@ -1714,10 +1721,10 @@ globalThis.ChartPage = (() => {
     } else {
       item("cflow", "없음");
     }
-    box.appendChild(dl);
+    body.appendChild(dl);
     const link = node("a", "chart-detail-open", "세션 열기 →");
     link.href = "#/s/" + encodeURIComponent(r.name);
-    box.appendChild(link);
+    body.appendChild(link);
     return box;
   }
 
@@ -1821,7 +1828,8 @@ globalThis.ChartPage = (() => {
          : focused.dataset && focused.dataset.name ? focused.dataset.name : "")
       : "";
     const oldMain = root.querySelector(".chart-main");
-    const oldSide = root.querySelector(".chart-detail");
+    // The detail column's scroller is its body; its top does not move.
+    const oldSide = root.querySelector(".chart-detail-body");
     const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
     // The grid keeps its own horizontal place across a redraw; read it before
     // the rebuild replaces the node. The timeline column (.chart-main) is the
@@ -1909,7 +1917,8 @@ globalThis.ChartPage = (() => {
     // to have a width.
     layoutTicks(main, model);
     main.scrollTop = tops[0];
-    if (side) side.scrollTop = tops[1];
+    const sideBody = side ? side.querySelector(".chart-detail-body") : null;
+    if (sideBody) sideBody.scrollTop = tops[1];
     // Same axis width: the viewer keeps their place. A new width (range or
     // cap changed) opens on the newest time -- the right edge.
     const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);

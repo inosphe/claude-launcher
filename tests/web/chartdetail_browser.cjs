@@ -18,7 +18,9 @@
         redraw and a reload;
      5. the detail's own × hands the panel back: the column shows 요약
         again and #sess-view is back out of the column and hidden;
-     6. leaving the page hands it back too. */
+     6. leaving the page hands it back too.
+   4b (claunch-h82vq.1): the column's top -- name, presses, gates, radio --
+   is fixed and only the body under it scrolls. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -173,6 +175,49 @@ const server = http.createServer((req, res) => {
     // The action row stays above the tabs in this view too; the kill pressed
     // in 3 reads as pending (killUiState) until a poll sees the exit.
     assert.deepEqual(await acts(), ["터미널", "ending…", "pause", "hold", "archive"]);
+    // 4b. Only the body scrolls (claunch-h82vq.1): on a short window the
+    // detail overflows, and scrolling it to the end leaves the top -- name,
+    // presses, gates, the radio -- where it was, in view.
+    await page.setViewportSize({ width: 1500, height: 650 });
+    const pinned = () => page.evaluate((c) => {
+      const col = document.querySelector(c);
+      const top = col.querySelector(".chart-detail-top");
+      const body = col.querySelector(".chart-detail-body");
+      const box = col.getBoundingClientRect();
+      const r = (sel) => (top.querySelector(sel) || { getBoundingClientRect: () => null }).getBoundingClientRect();
+      const acts = r(".chart-detail-actions");
+      const tabs = r(".chart-detail-tabs");
+      return {
+        inTop: !!top.querySelector(".chart-detail-actions") && !!top.querySelector(".chart-detail-gates")
+          && !!top.querySelector(".chart-detail-tabs") && !!top.querySelector(".chart-detail-name"),
+        hostInBody: !!body.querySelector(".chart-detail-host #sess-view"),
+        overflow: body.scrollHeight - body.clientHeight,
+        bodyTop: body.scrollTop,
+        colTop: col.scrollTop,
+        actsTop: acts && acts.top,
+        tabsTop: tabs && tabs.top,
+        tabsBottom: tabs && tabs.bottom,
+        colBottom: box.bottom,
+      };
+    }, col);
+    const before = await pinned();
+    assert.equal(before.inTop, true, "the name, presses, gates and radio sit in the fixed top");
+    assert.equal(before.hostInBody, true, "the borrowed panel sits in the scrolling body");
+    assert.ok(before.overflow > 0, "the body overflows on a short window: " + JSON.stringify(before));
+    await page.$eval(`${col} .chart-detail-body`, (b) => { b.scrollTop = b.scrollHeight; });
+    const after = await pinned();
+    assert.ok(after.bodyTop > 0, "the body scrolled");
+    assert.equal(after.colTop, 0, "the column itself does not scroll");
+    assert.equal(after.actsTop, before.actsTop, "the presses stay put");
+    assert.equal(after.tabsTop, before.tabsTop, "the radio stays put");
+    assert.ok(after.tabsBottom <= after.colBottom, "and stays in view: " + JSON.stringify(after));
+    // The summary view scrolls the same way.
+    await page.click(`${col} .chart-detail-tabs .seq-tab[data-pane="summary"]`);
+    await page.waitForSelector(`${col} .chart-detail-body .chart-detail-list`);
+    assert.ok(await page.$(`${col} .chart-detail-top .chart-detail-actions`), "summary: presses in the top");
+    await page.click(`${col} .chart-detail-tabs .seq-tab[data-pane="detail"]`);
+    await page.waitForSelector(`${col} .chart-detail-host #sess-view .sess-head`);
+    await page.setViewportSize({ width: 1500, height: 900 });
     // The page's own redraw keeps the panel where it is.
     await page.waitForTimeout(5600);
     h = await hosted();
