@@ -75,8 +75,10 @@ new Function("exports",
   slice("ragPresetDb") + "\n" +
   slice("ragPresetIdProblem") + "\n" +
   slice("ragDbGroups") + "\n" +
+  slice("ragCorpusLabel") + "\n" +
   "exports.dbSlug = ragDbSlug; exports.presetDb = ragPresetDb;\n" +
   "exports.idProblem = ragPresetIdProblem; exports.dbGroups = ragDbGroups;\n" +
+  "exports.corpusLabel = ragCorpusLabel;\n" +
   "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n")(api);
 
 const cardApi = {};
@@ -326,8 +328,33 @@ check("a DB rename posts from/to and the field follows the DB the edited preset 
       [true, true]);
 check("a DB delete asks first, takes the whole named DB and is disabled while read",
       [card.includes("window.confirm(`DB ${g.name}"), card.includes("g.legacy ? { name: g.name } : { db: g.name }"),
-       card.includes("del.disabled = occupied;"), card.includes("이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다")],
+       card.includes("del.disabled = occupied;"), card.includes("이 DB를 읽는 프리셋이 있어 삭제할 수 없습니다")],
       [true, true, true, true]);
+/* The table used to be one row per DB with a single "쓰는 프리셋" cell holding
+   the union of its collections' readers, which read as "the presets that
+   write into this DB". A preset adopts one collection per corpus, so the same
+   presets appear on each of that DB's rows; the table now draws one row per
+   collection and names the cell for what it answers (claunch-rk0od). */
+check("a board collection's corpus key shows as beads, the rest as themselves",
+      [api.corpusLabel("sessions"), api.corpusLabel("unified"),
+       api.corpusLabel("beads-0123456789ab"), api.corpusLabel(""), api.corpusLabel(undefined)],
+      ["sessions", "unified", "beads", "?", "?"]);
+check("the table's header names corpus, 형식 and the adopting presets",
+      card.includes('["DB 이름", "corpus", "형식", "이 컬렉션을 채택하는 프리셋", "폭", "모델", ""]'),
+      true);
+check("each collection gets its own row, its own presets and its own width",
+      [card.includes("const rows = g.collections.length ? g.collections : ["),
+       card.includes('row.presets.length ? row.presets.join(", ")'),
+       card.includes('row.dims ? String(row.dims) : "—"')],
+      [true, true, true]);
+check("the DB cell and the actions span the group's rows, and rename opens under the last",
+      [card.includes("nameCell.rowSpan = rows.length"), card.includes("actions.rowSpan = rows.length"),
+       card.includes("renameDbRow(rows.length > 1 ? lastTr : tr, g)")],
+      [true, true, true]);
+check("the RAG card's DB header lists every width, not the first row's",
+      [app.includes("if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);"),
+       app.includes('group.dims.length ? ` · ${group.dims.join("/")}차원` : ""')],
+      [true, true]);
 check("no node() call passes a class name as its text (the 'rag-preset-db' label leak)",
       /node\("(?:p|div|span)", "rag-[a-z-]+"\)/.test(src), false);
 check("the stylesheet ships the card's rules",

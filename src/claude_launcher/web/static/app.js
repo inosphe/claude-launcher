@@ -31810,11 +31810,14 @@ function ragDbGroups(st) {
     const name = row.db_configured || db;
     let g = groups.get(name);
     if (!g) {
-      g = { name, dims: 0, rows: [] };
+      g = { name, dims: [], rows: [] };
       groups.set(name, g);
     }
     g.rows.push(row);
-    if (row.dims && !g.dims) g.dims = row.dims;
+    // Every collection's width is kept: the header used to take the first
+    // row's and call it the DB's, which hid a DB whose corpora were built at
+    // different widths (claunch-rk0od).
+    if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);
   }
   return [...groups.values()];
 }
@@ -31983,7 +31986,7 @@ function ragCard() {
     const box = el("div", "rag-db-block");
     const head = el("div", "rag-db-head");
     head.appendChild(el("strong", null, `DB ${group.name}`));
-    head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
+    head.appendChild(el("span", "beads-bits", group.dims.length ? ` · ${group.dims.join("/")}차원` : ""));
     const sync = el("button", "wf-btn clear", "Sync");
     sync.type = "button";
     sync.disabled = ragBusy;
