@@ -19567,6 +19567,11 @@ async function archiveSession(name) {
   return true;
 }
 
+$("term-archive").addEventListener("click", async () => {
+  if (!currentName) return;
+  await archiveSession(currentName);
+});
+
 /* Resume one exited session by name, for a page that is not its terminal
    (the Chart page's detail column, claunch-h82vq): the header's ▶ resume is
    the same request, but it reattaches the terminal, which only makes sense
@@ -19594,11 +19599,6 @@ async function respawnSession(name) {
     await refreshSessions({ state: "current" });
   }
 }
-
-$("term-archive").addEventListener("click", async () => {
-  if (!currentName) return;
-  await archiveSession(currentName);
-});
 
 /* Stop everything. The records stay and every one of them is resumable after,
    which is what makes this the one bulk verb that needs no mesh guard: a
@@ -24895,20 +24895,20 @@ function termCflowView() {
 /* One press of a gate answer (termCflowAnswers / termCflow2Answers): the
    reason prompt or the confirm it carries, then the post. Shared by the
    terminal's strip and the Chart page's detail column (claunch-h82vq).
-   Resolves false when the reader cancelled. */
-async function pressGateAnswer(a, after) {
+   Resolves false when the reader cancelled. Not `async`: the node
+   harnesses slice it out of this file by its `function` keyword. */
+function pressGateAnswer(a, after) {
   let payload = a.body;
   if (a.reason) {
     const why = prompt(a.reason, "");
-    if (why === null) return false; // cancelled the dialog, not the refusal
-    if (a.reasonRequired && !why.trim()) return false; // the engine would refuse it
+    if (why === null) return Promise.resolve(false); // cancelled the dialog, not the refusal
+    if (a.reasonRequired && !why.trim()) return Promise.resolve(false); // the engine would refuse it
     payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
   } else if (a.ask && !confirm(a.ask)) {
-    return false;
+    return Promise.resolve(false);
   }
-  if (after) await cflowAction(a.path, payload, after);
-  else await cflowAction(a.path, payload);
-  return true;
+  const sent = after ? cflowAction(a.path, payload, after) : cflowAction(a.path, payload);
+  return Promise.resolve(sent).then(() => true);
 }
 
 /* Every gate a person owes one session's runs, for a page that is not that
@@ -27756,17 +27756,6 @@ function setRailNavPinned(pinned) {
    across the breakpoint. */
 let detailWasUp = false;
 
-/* The detail node itself, held once found. A page that hosts the detail in
-   its own column (hostSessDetail) rebuilds that column on its redraw, which
-   detaches the node for the length of the rebuild; getElementById cannot
-   find a detached node, so everything that writes the panel goes through
-   this reference instead. */
-let sessViewEl = null;
-function sessViewNode() {
-  if (!sessViewEl) sessViewEl = $("sess-view");
-  return sessViewEl;
-}
-
 /* A page column borrowing the detail (claunch-h82vq): the Chart page's
    Detail tab shows this same panel inside its right column instead of the
    docked rail. { slot, name, onClose } while borrowed, null otherwise.
@@ -27775,8 +27764,14 @@ function sessViewNode() {
    an address that names one takes the panel back (route). */
 let sessDetailGuest = null;
 
+/* The borrow, read through typeof: the node harnesses slice the functions
+   that consult it out of this file without its declaration. */
+function detailGuest() {
+  return typeof sessDetailGuest === "undefined" ? null : sessDetailGuest;
+}
+
 function hostSessDetail(slot, name, onClose) {
-  const view = sessViewNode();
+  const view = $("sess-view");
   if (!view || !slot || !name) return false;
   if (hashDetail(location.hash)) return false;
   sessDetailGuest = { slot, name, onClose: onClose || null };
@@ -27792,7 +27787,7 @@ function hostSessDetail(slot, name, onClose) {
 function releaseSessDetail() {
   if (!sessDetailGuest) return;
   sessDetailGuest = null;
-  const view = sessViewNode();
+  const view = $("sess-view");
   if (view) view.classList.remove("guest");
   const want = hashDetail(location.hash);
   if (!want) { if (sessName) dropDetail(); }
@@ -27801,13 +27796,14 @@ function releaseSessDetail() {
 }
 
 function syncDetailPanel() {
-  const view = sessViewNode();
+  const view = $("sess-view");
   const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
-  if (sessDetailGuest) {
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
     // Borrowed by a page column: it is that column's content, so neither
     // docked nor hidden, and the rail's drag bar has nothing to resize.
-    if (view.parentNode !== sessDetailGuest.slot) sessDetailGuest.slot.appendChild(view);
+    if (view.parentNode !== guest.slot) guest.slot.appendChild(view);
     view.classList.remove("docked", "hidden");
     split.classList.add("hidden");
     if (!narrow && detailWasUp) refitSoon(60);
@@ -28615,7 +28611,8 @@ MOBILE_MQ.addEventListener("change", () => {
   // handed back to the page the address names — routing again does exactly
   // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session" && !sessDetailGuest) {
+    if (sessName && currentPage !== "session"
+        && !(typeof detailGuest === "function" && detailGuest())) {
       history.replaceState(history.state, "", hashWithDetail(location.hash, null));
       dropDetail();
     }
@@ -29190,13 +29187,13 @@ $("detail-split").addEventListener("pointerdown", (e) => {
   e.preventDefault();   // a drag must not start selecting detail text
   $("detail-split").setPointerCapture(e.pointerId);
   $("detail-split").classList.add("dragging");
-  detailDragW = sessViewNode().getBoundingClientRect().width;
+  detailDragW = $("sess-view").getBoundingClientRect().width;
 });
 $("detail-split").addEventListener("pointermove", (e) => {
   if (detailDragW === null) return;
   // The bar is the rail's left edge: dragging it away from the rail's right
   // edge narrows the rail, towards it widens it.
-  detailDragW = clampDetailW(sessViewNode().getBoundingClientRect().right - e.clientX);
+  detailDragW = clampDetailW($("sess-view").getBoundingClientRect().right - e.clientX);
   applyDetailW(detailDragW);
   refitSoon();   // debounced: the real refit lands when the hand pauses
 });
@@ -29698,8 +29695,9 @@ function route() {
   // it: the buttons that do (openDetail, closeDetail) only edit the address.
   // A page column holding the panel (hostSessDetail) keeps it while the
   // address names no detail; one that names a detail takes it back.
-  if (r.detail && sessDetailGuest) releaseSessDetail();
-  if (!r.detail) { if (sessName && !sessDetailGuest) dropDetail(); }
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (r.detail && guest) releaseSessDetail();
+  if (!r.detail) { if (sessName && !guest) dropDetail(); }
   else if (r.detail !== sessName) repointDetail(r.detail);
   syncLayout();
 }
@@ -51348,7 +51346,7 @@ function dropDetail() {
   sessRunFold = null;
   sessNoteBox = null;
   sessReminderNoteBox = null;
-  sessViewNode().innerHTML = "";
+  $("sess-view").innerHTML = "";
   markDetailRow();
   // The row the panel described is no longer the panel's subject, so it goes
   // back to its own density (railCardMode).
@@ -51393,7 +51391,7 @@ function repointDetail(name) {
   sessReminderNoteBox = null;
   const kept = sessMetaKept.get(name);
   if (kept) renderSession(kept);
-  else sessViewNode().innerHTML = "<p class='wf-note'>loading…</p>";
+  else $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   // The panel's subject is one of the cards the rail expands (railCardMode),
   // so the row it now describes has to change density with it.
@@ -51408,8 +51406,9 @@ function repointDetail(name) {
 function closeDetail() {
   // A page column that borrowed the panel (hostSessDetail) is closed by that
   // page: its × hands the panel back and the page shows its own view again.
-  if (sessDetailGuest) {
-    const done = sessDetailGuest.onClose;
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    const done = guest.onClose;
     releaseSessDetail();
     if (done) done();
     return;
@@ -51426,8 +51425,8 @@ async function refreshSession() {
     const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
     data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      sessViewNode().innerHTML = "";
-      sessViewNode().appendChild(el(
+      $("sess-view").innerHTML = "";
+      $("sess-view").appendChild(el(
         "p", "wf-warning",
         // A daemon older than these assets serves the static files from disk
         // but runs the Python it started with, so this route may not exist
@@ -52695,7 +52694,7 @@ function morphPanel(live, fresh, before) {
 }
 
 function renderSession(data) {
-  const page = sessViewNode();
+  const page = $("sess-view");
   const s = data.session || {};
   // The 2s poll rebuilds this panel from scratch, and a rebuild detaches
   // whatever the user is typing in — which takes the caret with it. Keeping

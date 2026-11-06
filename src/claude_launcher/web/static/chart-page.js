@@ -1831,6 +1831,12 @@ globalThis.ChartPage = (() => {
     const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
     // The rail box scrolls as a whole (style.css #session-chart); keep it.
     const railTop = rail ? root.scrollTop : 0;
+    // A borrowed session detail (hostSessDetail) is parked on the body for
+    // the length of the rebuild: app.js finds it by id, and a node inside a
+    // wiped column is not in the document. The rebuild hosts it again or
+    // hands it back.
+    const borrowed = !rail && root.querySelector ? root.querySelector("#sess-view") : null;
+    if (borrowed && document.body) document.body.appendChild(borrowed);
     root.innerHTML = "";
     if (!rail) {
       const head = node("div", "wf-head");
