@@ -105,7 +105,9 @@ TOOLS = [
             "allow now. 'waits' are external conditions the engine polls (this "
             "call checks them). 'delegations' with status 'pending' carry a "
             "'brief' to run in a fresh sub-agent. 'loop_limits' mean a loop hit "
-            "its max and a person must extend it. 'person_picks' are choices a "
+            "its max: a person extends it ('claunch cflow2 extend'), and one "
+            "whose entry carries 'self_answer' you may open yourself with "
+            "flow_extend once that check passes. 'person_picks' are choices a "
             "person took for you, newest last: each 'reason' is their note, an "
             "instruction to follow. Several tasks can be active at "
             "once under par/foreach/group: each has its own 'instance' id. "
@@ -335,6 +337,31 @@ TOOLS = [
                 "reason": {"type": "string", "description": "why; journaled. Always say why as an agent -- what you read and what you saw in it, not the option's name again. Only a person may leave it out"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
+        },
+    },
+    {
+        "name": "flow_extend",
+        "description": (
+            "Open a loop_limit of your own run by one iteration, when the loop declares "
+            "a 'self_answer' check (flow_status 'loop_limits' entries that carry one). The "
+            "workflow's command is run first: it must exit 0 or the limit stays exactly "
+            "where it is, and a person still owns it ('claunch cflow2 extend'). So this "
+            "does not approve anything -- it produces the machine's answer that the wait "
+            "is over, and then the loop's own options (e.g. the 'landed' branch) become "
+            "reachable again. Use it when something woke you (a mesh message, a daemon "
+            "notice) and the fact the check names is now true; do not call it to buy more "
+            "waiting. Say why in 'reason'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description": "loop instance id or label "
+                         "(omit when one loop limit is open)"},
+                "reason": {"type": "string", "description": "why; journaled. Name what "
+                           "woke you and what the check measured"},
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
+            },
+            "required": ["reason"],
         },
     },
     {
@@ -723,7 +750,7 @@ def _foreign_run(args: dict) -> bool:
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-                "flow_move", "flow_call",
+                "flow_move", "flow_call", "flow_extend",
                 "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
         if not _foreign_run(args):
             cwd = str(args.get("cwd") or "").strip() or os.getcwd()
@@ -942,6 +969,19 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             str(args.get("node") or "").strip() or None, decision=option,
             decline=bool(args.get("decline")), reason=args.get("reason"),
             caller=runtime.CALLER_AGENT, cwd=cwd, scope=scope)
+    if name == "flow_extend":
+        cwd, scope, authority = _where_gate(args)
+        if authority != runtime.CALLER_AGENT:
+            # The driver's own answer to its own limit: a parent that holds a
+            # child's gate answers through flow_move, and this check reads the
+            # run's own checkout (its cwd), which a parent does not own.
+            raise runtime.FlowError(
+                "flow_extend answers this run's own loop limit as its driver; a run "
+                "that is not yours keeps the limit for its own session or a person "
+                "('claunch cflow2 extend')")
+        return runtime.self_extend_loop(
+            str(args.get("node") or "").strip() or None,
+            reason=args.get("reason"), cwd=cwd, scope=scope)
     if name == "flow_answer":
         from . import asks
 

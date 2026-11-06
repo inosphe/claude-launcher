@@ -19,7 +19,9 @@ await          completed by
 ``pause``      :func:`wait_tick` (a loop's ``every`` between iterations)
 ``limit``      :func:`extend_loop` (a loop at its ``max``; the run is
                ``waiting_approval`` with reason ``loop_limit``; extend it
-               or reset its count) or
+               or reset its count), :func:`self_extend_loop` (the run's
+               driver opens it by one iteration, only when the loop's
+               declared ``self_answer`` check exits 0) or
                :func:`extend_visits` (a node entered more than the chart's
                ``max_visits`` times; reason ``visit_limit``)
 ``approval``   an ask's answer (:func:`approve`, :func:`answer`)
@@ -1043,11 +1045,21 @@ def _loop_limit(r: Run, iid: str) -> None:
         # notification's age is this stamp, not when a browser first saw it
         "opened_at": r.now,
     }
+    gate = node.get("self_answer") or None
+    if gate:
+        # A hold the driver may open itself, once its check passes
+        # (claunch-9poqc): the card keeps the person a person's, and says
+        # out loud that a machine check also stands on it.
+        approval["self_answer"] = {"describe": gate.get("describe") or "",
+                                   "tool": "flow_extend"}
     r.state.setdefault("approvals", []).append(approval)
     r.state["status"] = ST_WAITING
     r.state["reason"] = "loop_limit"
-    r.emit("waiting", node=node.id, instance=iid, kind="loop_limit",
-           iterations=frame.get("iter"), max=approval["max"])
+    event = {"node": node.id, "instance": iid, "kind": "loop_limit",
+             "iterations": frame.get("iter"), "max": approval["max"]}
+    if gate:
+        event["self_answer"] = True
+    r.emit("waiting", **event)
 
 
 def _loop_body_done(r: Run, iid: str, outcome: str, value: Any) -> None:
@@ -4674,6 +4686,79 @@ def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = Non
     return brief(r, delegation)
 
 
+def _clear_limit(r: Run, iid: str) -> None:
+    """Take one instance off a limit hold: its await and its card."""
+    r.inst[iid]["await"] = None
+    r.state["approvals"] = [a for a in r.state.get("approvals", [])
+                            if a.get("instance") != iid]
+
+
+def self_extend_loop(node: Optional[str] = None, *, reason: Optional[str] = None,
+                     runner: Optional[ProbeRunner] = None,
+                     cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer a ``loop_limit`` as the run's driver, one iteration, and only
+    when the loop's ``self_answer`` check passes (claunch-9poqc).
+
+    A loop that declares ``self_answer: {probe, describe}`` names a fact that
+    ends its wait -- for ``improv-worker-v2``'s ``await`` loop, "my tip is in
+    the integration target". The daemon's own re-nudge may be the only clock
+    that was watching, and it can be hours late: a merge announced by a mesh
+    message or by a daemon notice wakes the driver's turn, and this is how
+    that turn moves the run on. The driver writes no verdict of its own: the
+    probe is run first, and a non-zero exit leaves the hold exactly where it
+    was, so a person still owns a limit the machine has not answered
+    ("머지 확인전 자체 미리 승인 금지").
+
+    A loop without ``self_answer`` is a person's: refused here with the path
+    a person answers by (:func:`extend_loop`)."""
+    if not str(reason or "").strip():
+        raise FlowError("say why in 'reason': the journal keeps it, and a self-answered "
+                        "limit without a stated reason cannot be reviewed")
+    st = RunStore(cwd, scope)
+    snap = Run.load(st)
+    iid = _find(snap, node, (AW_LIMIT,), "loop limit",
+                pred=lambda i: not snap.inst[i]["frame"].get("visit_limit"))
+    n = snap.node_of(iid)
+    gate = n.get("self_answer") or {}
+    if not gate.get("probe"):
+        raise FlowError(
+            f"{shown_label(snap.chart, n) or n.id} declares no self_answer: its loop limit is "
+            f"a person's to answer ('claunch cflow2 extend {iid} --by 1')")
+    ok, output = _probe_ok(_run_probe(snap, iid, runner or default_probe_runner,
+                                      gate.get("probe")))
+    if not ok:
+        raise FlowError(
+            f"{shown_label(snap.chart, n) or n.id} stays at its limit: the self_answer check "
+            f"did not pass ({str(output or '').strip()[-400:] or 'no output'}). The wait is "
+            f"not over; a person may still extend it ('claunch cflow2 extend')")
+
+    def op(r: Run) -> None:
+        _require_progress(r)
+        _require_no_move_request(r)
+        held = _find(r, node, (AW_LIMIT,), "loop limit",
+                     pred=lambda i: not r.inst[i]["frame"].get("visit_limit"))
+        if held != iid:
+            raise FlowError(f"the loop limit moved from {iid} to {held} while the check ran")
+        conf = r.node_of(held)
+        frame = r.inst[held]["frame"]
+        _clear_limit(r, held)
+        frame["extra"] = int(frame.get("extra") or 0) + 1
+        r.emit("selected", node=conf.id, instance=held, option="extend", by=1,
+               kind=HOLD_LOOP, by_self=True, reason=reason, check=gate.get("describe") or "")
+        if frame.get("phase") == "limit_par":
+            if len(frame["items"]) > _loop_max(r, held):
+                _loop_limit(r, held)
+                return
+            _foreach_par_start(r, held)
+        elif frame["iter"] == 0:
+            _loop_iterate(r, held)
+        else:
+            _loop_between(r, held)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
 def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
                 reset: bool = False, cwd: Optional[str] = None,
                 scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
@@ -4696,9 +4781,7 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
             raise FlowError("no iterations to reset: extend the loop (or stop it)")
         if not stop and not reset and by < 1:
             raise FlowError("extend by at least 1 (or stop the loop)")
-        r.inst[iid]["await"] = None
-        r.state["approvals"] = [a for a in r.state.get("approvals", [])
-                                if a.get("instance") != iid]
+        _clear_limit(r, iid)
         if stop:
             r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_LOOP)
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
@@ -6429,10 +6512,17 @@ def describe(r: Run) -> Dict[str, Any]:
                                  "max": _max_visits(r, key),
                                  **_opened_at(r, iid, HOLD_VISIT)})
         elif aw == AW_LIMIT:
-            limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
-                           "iterations": _loop_count(inst["frame"]),
-                           "max": _loop_cap(r, iid),
-                           **_opened_at(r, iid, HOLD_LOOP)})
+            limit = {"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
+                     "iterations": _loop_count(inst["frame"]),
+                     "max": _loop_cap(r, iid),
+                     **_opened_at(r, iid, HOLD_LOOP)}
+            gate = node.get("self_answer") or None
+            if gate:
+                # the driver's own answer to this hold (claunch-9poqc): a
+                # check it may run, not a decision it may make
+                limit["self_answer"] = {"describe": gate.get("describe") or "",
+                                        "tool": "flow_extend"}
+            limits.append(limit)
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
             groups.append({

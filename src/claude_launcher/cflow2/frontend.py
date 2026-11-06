@@ -1763,9 +1763,38 @@ def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
 def _loop_props(**kw: Any) -> Dict[str, Any]:
     base = {"mode": None, "guard": None, "max": None, "child": None, "between": None,
             "every": None, "items": None, "as_name": None, "parallel": False, "carry": None,
-            "rounds": False}
+            "rounds": False, "self_answer": None}
     base.update(kw)
     return base
+
+
+SELF_ANSWER_KEYS = ("probe", "describe")
+
+
+def _self_answer(ctx, sc, spec, line) -> Optional[Dict[str, Any]]:
+    """``loop.self_answer: {probe, describe}`` -- the one check that lets the
+    run's driver answer this loop's ``loop_limit`` by itself (docs 4.2,
+    claunch-9poqc). Without it a limit is a person's alone.
+
+    The probe is a command the engine runs when the driver asks; the loop is
+    only opened again when it exits 0. That is the whole point of the key:
+    the driver may not decide a wait is over, it may only produce the
+    machine's answer that it is."""
+    raw = spec.get("self_answer")
+    if raw is None:
+        return None
+    m = _need_map(ctx, sc.file, raw, "loop.self_answer", line)
+    _check_keys(ctx, sc.file, m, SELF_ANSWER_KEYS, "loop.self_answer")
+    if m.get("probe") is None:
+        raise ctx.err(sc.file, _key_line(m, "probe", line),
+                      "loop.self_answer needs a probe (the check that opens the limit)")
+    probe = _command(ctx, sc.file, _key_line(m, "probe", line), m["probe"],
+                     "loop.self_answer.probe")
+    describe = m.get("describe", "")
+    if not isinstance(describe, str):
+        raise ctx.err(sc.file, _key_line(m, "describe", line),
+                      "loop.self_answer.describe must be a string")
+    return {"probe": probe, "describe": describe.strip()}
 
 
 def _b_foreach(ctx, sc, node, value, m, line):
@@ -1789,7 +1818,7 @@ def _b_loop(ctx, sc, node, value, m, line):
     node.type = ir.T_LOOP
     spec = _need_map(ctx, sc.file, value, "loop", line)
     _check_keys(ctx, sc.file, spec, ("while", "until", "max", "do", "between", "every",
-                                     "rounds"), "loop")
+                                     "rounds", "self_answer"), "loop")
     has = [k for k in ("while", "until") if k in spec]
     if len(has) != 1:
         raise ctx.err(sc.file, line, "loop needs exactly one of while / until")
@@ -1805,7 +1834,8 @@ def _b_loop(ctx, sc, node, value, m, line):
     if not isinstance(rounds, bool):
         raise ctx.err(sc.file, _key_line(spec, "rounds", line),
                       "loop.rounds must be true or false")
-    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every, rounds=rounds)
+    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every, rounds=rounds,
+                             self_answer=_self_answer(ctx, sc, spec, line))
     lsc = _loop_scope(sc, node)
     node.props["child"] = _sub(ctx, lsc, node, _require(ctx, sc, spec, "do", "loop", line), "do", line)
     if spec.get("between") is not None:
