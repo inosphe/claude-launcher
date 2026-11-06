@@ -6,6 +6,11 @@ import urllib.parse
 import pytest
 
 from claude_launcher import daemon_client, search_mcp
+# `search_mcp` keeps its own copy of the corpus names because the MCP server
+# must not import the index (claunch-7aujp.2). The copy is pinned to the
+# original here: a name added or renamed on one side alone would otherwise be
+# accepted by the MCP and refused by the daemon.
+from claude_launcher.daemon import rag as daemon_rag
 
 
 class _Client:
@@ -132,6 +137,35 @@ def test_search_refuses_the_pre_rename_all_name(monkeypatch):
                        match="kind must be one of unified, beads, sessions"):
         search_mcp.call_tool("search", {"query": "x", "kind": "all"})
     assert client.calls == []
+
+
+def test_the_corpus_names_match_the_daemons_and_all_is_refused_on_both_sides(monkeypatch):
+    # The two tables are copies by design, so they are compared as a set: the
+    # MCP lists `unified` first (it is its default) and the daemon lists it
+    # last. Duplicates are refused separately — a set comparison would hide a
+    # name that appears twice on one side.
+    assert set(search_mcp.KINDS) == set(daemon_rag.KINDS)
+    assert len(search_mcp.KINDS) == len(daemon_rag.KINDS) == len(set(daemon_rag.KINDS))
+    # `all` was the combined corpus's name before the rename (claunch-7aujp.1).
+    # Checking both tables keeps the equality above honest: putting the old
+    # name back on both sides would leave the sets equal, and this stays red.
+    assert "all" not in search_mcp.KINDS
+    assert "all" not in daemon_rag.KINDS
+
+    # The MCP side accepts every name the daemon answers, unchanged.
+    client = _use(monkeypatch, {"/api/search?": UNIFIED})
+    for kind in daemon_rag.KINDS:
+        client.calls.clear()
+        search_mcp.call_tool("search", {"query": "x", "kind": kind})
+        assert _params(client.calls[0])["kind"] == kind
+
+    # ...and refuses `all` before sending it, naming exactly the daemon's set.
+    client.calls.clear()
+    with pytest.raises(search_mcp.SearchMcpError) as caught:
+        search_mcp.call_tool("search", {"query": "x", "kind": "all"})
+    assert client.calls == []
+    names = str(caught.value).removeprefix("kind must be one of ").split(", ")
+    assert set(names) == set(daemon_rag.KINDS)
 
 
 def test_search_rejects_active_with_a_narrower_kind_before_asking(monkeypatch):

@@ -1474,6 +1474,30 @@ def test_cli_search_registers_under_claunch():
     assert args.func.__name__ == "_cmd_rag_status"
 
 
+def test_the_shell_parser_offers_exactly_the_daemons_corpus_names():
+    """The parser's two ``--kind`` choice lists are a third copy of ``KINDS``.
+
+    ``cli_search`` repeats the names in its ``choices`` (it cannot ask the
+    daemon at parse time), so an addition or a rename made only here would be
+    accepted by the shell and answered 400 by the daemon (claunch-7aujp.2).
+    Every name the daemon answers parses, and nothing else does.
+    """
+    from claude_launcher.cli import build_parser
+    from claude_launcher.daemon import rag
+
+    parser = build_parser()
+    for kind in rag.KINDS:
+        assert parser.parse_args(["search", "who", "--kind", kind]).kind == kind
+        assert parser.parse_args(["rag", "reindex", "--kind", kind]).kind == kind
+    for name in ("all", "files"):
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args(["search", "who", "--kind", name])
+        assert refused.value.code == 2
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args(["rag", "reindex", "--kind", name])
+        assert refused.value.code == 2
+
+
 # --------------------------------------------------------------------------- #
 # the collection's own rules
 # --------------------------------------------------------------------------- #
