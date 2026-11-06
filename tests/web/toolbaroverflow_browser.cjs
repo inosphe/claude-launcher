@@ -34,7 +34,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
   try {
     const errors = [];
     const open = async () => {
-      const page = await browser.newPage({ viewport: { width: 2600, height: 900 } });
+      const page = await browser.newPage({ viewport: { width: 3000, height: 900 } });
       page.on("pageerror", e => errors.push(String(e)));
       await page.setContent(`<div id="layout">${header}</div>`);
       await page.addStyleTag({ path: path.join(root, "style.css") });
@@ -61,7 +61,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     // One sweep inside a page: set the width, wait for the fitting frame (two
     // frames: the resize is observed after layout, the fit runs on the next
-    // frame), record every control. ~2200 widths at two frames each is over a
+    // frame), record every control. ~2640 widths at two frames each is over a
     // minute on one page, so four pages sweep a quarter each at once; each
     // starts one pixel above its quarter so the seams are compared too.
     const sweep = (page, from, to) => page.evaluate(async ({ from, to }) => {
@@ -93,7 +93,11 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       return out;
     }, { from, to });
 
-    const [FROM, TO, PARTS] = [2400, 160, 4];
+    // The sweep starts where the whole labelled row fits with room to spare.
+    // With term-subprocbtn on the row the labelled row needs about 2435px, so
+    // a sweep from 2400 met the squeeze in its first column on some runs
+    // (gap 9.5 at 2400px) and failed the full-row check (claunch-jc99t.1).
+    const [FROM, TO, PARTS] = [2800, 160, 4];
     const cut = Math.ceil((FROM - TO + 1) / PARTS);
     const pages = await Promise.all(Array.from({ length: PARTS }, open));
     const page = pages[0];
@@ -285,6 +289,6 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     const glyphs = Object.values(at(rows[firstMenu].at - 0 + 0).row).filter(c => c.state === "icon").length;
     console.log(`toolbaroverflow: squeeze from ${rows.find(r => r.gap < 10).at}px, first glyph at ${firstIcon}px,`
-      + ` menu from ${rows[firstMenu].at}px (${glyphs} glyphs on the row then), 1px sweep 2400..160 monotonic`);
+      + ` menu from ${rows[firstMenu].at}px (${glyphs} glyphs on the row then), 1px sweep ${FROM}..${TO} monotonic`);
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });
