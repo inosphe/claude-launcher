@@ -9,6 +9,7 @@ another definition, and the beads rule block is the v1 block byte for byte.
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -1550,6 +1551,26 @@ BRIEF = {"problem": "p", "options": [
     {"name": "local", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"}],
     "recommendation": "local", "why": "w"}
 
+#: A landing record's ``at``: the wall clock the step ran at, in the store's
+#: own ISO-8601 second-precision form (claunch-ijkge.4.1.3). The PR page
+#: groups rows by it, so every landing value carries one; a test cannot
+#: predict the second it lands in, so the shape is checked and the value is
+#: dropped before the record is compared.
+_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+
+def _no_stamp(record):
+    out = dict(record)
+    # Required, not merely tolerated: a landing record without a stamp is the
+    # defect this field was added for, so its absence has to fail here.
+    at = out.pop("at", None)
+    assert isinstance(at, str) and _STAMP.match(at), record
+    # An unknown title is null, which the optional field fills in; a known one
+    # is the value the page shows and keeps a test's attention.
+    if out.get("title") is None:
+        out.pop("title", None)
+    return out
+
 
 def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
@@ -1572,8 +1593,9 @@ def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
                                        "repo": "o/r", "base": "master"})
     landing = runtime.RunStore(cwd, "m").load_state()["data"]["landing"]
     # the attempt block's return ended landing-medium; optional fields were filled
-    assert landing == {"medium": "pr", "reason": "gh ok", "remote": "origin", "repo": "o/r",
-                       "base": "master", "pr_url": None, "pr_number": None}
+    assert _no_stamp(landing) == {"medium": "pr", "reason": "gh ok", "remote": "origin",
+                                  "repo": "o/r", "base": "master", "pr_url": None,
+                                  "pr_number": None}
     # pr-publish without force_pr: a failed pr-open falls back to local, no question
     st = report("pr-open", "failed", {"reason": "push refused: stale info"})
     assert st["tasks"][0]["label"].rsplit("/", 1)[-1] == "local-landing-policy"
@@ -1682,7 +1704,37 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
     seen.extend(t["label"].rsplit("/", 1)[-1] for t in st.get("tasks") or [])
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()
-    assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data
+    got = {k: _no_stamp(v) for k, v in state["data"].items()
+           if k in ("landing", "published")}
+    assert got == data
+
+
+def test_pr_publish_keeps_the_title_the_pr_was_opened_with(tmp_path, monkeypatch):
+    """``pr-open`` reports the title it opened or updated, and the landing
+    record keeps it (claunch-ijkge.4.1.3): the PR page shows that value under
+    the row, so it has to travel with the record rather than be looked up
+    again."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_medium_flow(tmp_path), caps={}, params={"force_pr": True}, **kw)
+
+    def report(label, outcome="ok", value=None):
+        iid = next(t["instance"] for t in st["tasks"]
+                   if t["label"].rsplit("/", 1)[-1] == label)
+        return runtime.report(iid, outcome, value, **kw)
+
+    st = report("remote-setup", "ok", _SETUP)
+    st = report("pr-open", "ok", {**_PR, "title": "Add the PR tab"})
+    data = runtime.RunStore(str(tmp_path), "m").load_state()["data"]
+    # the medium is chosen before any PR exists: it stamps the time and claims
+    # no title (there is none to claim yet)
+    assert _STAMP.match(data["landing"]["at"])
+    assert data["landing"].get("title") is None
+    # the PR step is where the title becomes known, and it carries it
+    published = data["published"]
+    assert published["title"] == "Add the PR tab"
+    assert _STAMP.match(published["at"])
 
 
 # -- landing-review asks whoever takes the landing request (claunch-yq80p.12) -
