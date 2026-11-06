@@ -19567,6 +19567,34 @@ async function archiveSession(name) {
   return true;
 }
 
+/* Resume one exited session by name, for a page that is not its terminal
+   (the Chart page's detail column, claunch-h82vq): the header's ▶ resume is
+   the same request, but it reattaches the terminal, which only makes sense
+   for the attached session. Resolves true when the daemon took it. */
+async function respawnSession(name) {
+  if (!name) return false;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not resume '${name}'`, info.error || `HTTP ${resp.status}`);
+      return false;
+    }
+    // The attached terminal's socket died with the old child; drop it, and
+    // opening the terminal again attaches the new one.
+    if (name === currentName && typeof detach === "function") detach();
+    return true;
+  } catch (err) {
+    await modalInfo(`Could not resume '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return false;
+  } finally {
+    await refreshSessions({ state: "current" });
+  }
+}
+
 $("term-archive").addEventListener("click", async () => {
   if (!currentName) return;
   await archiveSession(currentName);
@@ -24864,6 +24892,73 @@ function termCflowView() {
   };
 }
 
+/* One press of a gate answer (termCflowAnswers / termCflow2Answers): the
+   reason prompt or the confirm it carries, then the post. Shared by the
+   terminal's strip and the Chart page's detail column (claunch-h82vq).
+   Resolves false when the reader cancelled. */
+async function pressGateAnswer(a, after) {
+  let payload = a.body;
+  if (a.reason) {
+    const why = prompt(a.reason, "");
+    if (why === null) return false; // cancelled the dialog, not the refusal
+    if (a.reasonRequired && !why.trim()) return false; // the engine would refuse it
+    payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
+  } else if (a.ask && !confirm(a.ask)) {
+    return false;
+  }
+  if (after) await cflowAction(a.path, payload, after);
+  else await cflowAction(a.path, payload);
+  return true;
+}
+
+/* Every gate a person owes one session's runs, for a page that is not that
+   session's terminal (the Chart page's detail column, claunch-h82vq). The
+   strip above draws the first of them for the attached session; this lists
+   them all, each with the presses the strip would offer: the v1 run's gate,
+   then one entry per answer the v2 run owes (cflow2RailCache's `answers`).
+   An owed answer with no press (a halt, a plan wait) still gets an entry,
+   with `answers: []`, so the reader learns it is there and where to go. */
+function sessionGateViews(name) {
+  const out = [];
+  if (!name) return out;
+  const r = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
+  if (r && sessCflowGated(r)) {
+    out.push({
+      href: "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`),
+      what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+        sessCflowLabel(r),
+      question: termCflowQuestion(r),
+      answers: termCflowAnswers(r, name),
+      after: null,
+      optional: false,
+    });
+  }
+  const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[name];
+  if (r2 && r2.gated) {
+    const optional = r2.blocking === false;
+    const href = "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`);
+    const owed = (r2.answers || []).length ? r2.answers
+      : [{ kind: "", prompt: (r2.owed || []).join(" · ") }];
+    for (const a of owed) {
+      const presses = termCflow2Answers(r2, a, name);
+      const question = termCflow2Question(a);
+      out.push({
+        href,
+        what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
+          `${a.kind || "waiting"}${optional ? " · ○ optional" : ""}`,
+        question: presses.length ? question
+          : a.kind === "plan-wait"
+            ? `${question} — decide it in the plan pane (☰ plan)`
+            : `${question} — answer it on the run page`,
+        answers: presses,
+        after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
+        optional,
+      });
+    }
+  }
+  return out;
+}
+
 function renderTermCflow() {
   const box = $("term-cflow");
   if (!box) return;
@@ -24900,19 +24995,7 @@ function renderTermCflow() {
     const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
     b.type = "button";
     if (a.title) b.title = a.title;
-    b.addEventListener("click", () => {
-      let payload = a.body;
-      if (a.reason) {
-        const why = prompt(a.reason, "");
-        if (why === null) return; // cancelled the dialog, not the refusal
-        if (a.reasonRequired && !why.trim()) return; // the engine would refuse it
-        payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
-      } else if (a.ask && !confirm(a.ask)) {
-        return;
-      }
-      if (view.after) cflowAction(a.path, payload, view.after);
-      else cflowAction(a.path, payload);
-    });
+    b.addEventListener("click", () => pressGateAnswer(a, view.after));
     btns.appendChild(b);
   }
   box.appendChild(btns);
@@ -27673,10 +27756,64 @@ function setRailNavPinned(pinned) {
    across the breakpoint. */
 let detailWasUp = false;
 
+/* The detail node itself, held once found. A page that hosts the detail in
+   its own column (hostSessDetail) rebuilds that column on its redraw, which
+   detaches the node for the length of the rebuild; getElementById cannot
+   find a detached node, so everything that writes the panel goes through
+   this reference instead. */
+let sessViewEl = null;
+function sessViewNode() {
+  if (!sessViewEl) sessViewEl = $("sess-view");
+  return sessViewEl;
+}
+
+/* A page column borrowing the detail (claunch-h82vq): the Chart page's
+   Detail tab shows this same panel inside its right column instead of the
+   docked rail. { slot, name, onClose } while borrowed, null otherwise.
+   The address's `?detail=` still owns the rail: a page hosts the panel only
+   while the address names no detail (hostSessDetail refuses otherwise), and
+   an address that names one takes the panel back (route). */
+let sessDetailGuest = null;
+
+function hostSessDetail(slot, name, onClose) {
+  const view = sessViewNode();
+  if (!view || !slot || !name) return false;
+  if (hashDetail(location.hash)) return false;
+  sessDetailGuest = { slot, name, onClose: onClose || null };
+  if (view.parentNode !== slot) slot.appendChild(view);
+  view.classList.add("guest");
+  if (sessName !== name) repointDetail(name);
+  syncDetailPanel();
+  return true;
+}
+
+/* Give the borrowed panel back: its subject goes back to whatever the
+   address names (nothing, usually), and the node to its home. */
+function releaseSessDetail() {
+  if (!sessDetailGuest) return;
+  sessDetailGuest = null;
+  const view = sessViewNode();
+  if (view) view.classList.remove("guest");
+  const want = hashDetail(location.hash);
+  if (!want) { if (sessName) dropDetail(); }
+  else if (want !== sessName) repointDetail(want);
+  syncDetailPanel();
+}
+
 function syncDetailPanel() {
-  const view = $("sess-view");
+  const view = sessViewNode();
   const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
+  if (sessDetailGuest) {
+    // Borrowed by a page column: it is that column's content, so neither
+    // docked nor hidden, and the rail's drag bar has nothing to resize.
+    if (view.parentNode !== sessDetailGuest.slot) sessDetailGuest.slot.appendChild(view);
+    view.classList.remove("docked", "hidden");
+    split.classList.add("hidden");
+    if (!narrow && detailWasUp) refitSoon(60);
+    detailWasUp = false;
+    return;
+  }
   const host = narrow ? $("main") : $("layout");
   if (view.parentNode !== host) {
     // Last in #layout is the mobile bottom bar (display:none up here), so the
@@ -28478,7 +28615,7 @@ MOBILE_MQ.addEventListener("change", () => {
   // handed back to the page the address names — routing again does exactly
   // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session") {
+    if (sessName && currentPage !== "session" && !sessDetailGuest) {
       history.replaceState(history.state, "", hashWithDetail(location.hash, null));
       dropDetail();
     }
@@ -29053,13 +29190,13 @@ $("detail-split").addEventListener("pointerdown", (e) => {
   e.preventDefault();   // a drag must not start selecting detail text
   $("detail-split").setPointerCapture(e.pointerId);
   $("detail-split").classList.add("dragging");
-  detailDragW = $("sess-view").getBoundingClientRect().width;
+  detailDragW = sessViewNode().getBoundingClientRect().width;
 });
 $("detail-split").addEventListener("pointermove", (e) => {
   if (detailDragW === null) return;
   // The bar is the rail's left edge: dragging it away from the rail's right
   // edge narrows the rail, towards it widens it.
-  detailDragW = clampDetailW($("sess-view").getBoundingClientRect().right - e.clientX);
+  detailDragW = clampDetailW(sessViewNode().getBoundingClientRect().right - e.clientX);
   applyDetailW(detailDragW);
   refitSoon();   // debounced: the real refit lands when the hand pauses
 });
@@ -29559,7 +29696,10 @@ function route() {
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
   // it: the buttons that do (openDetail, closeDetail) only edit the address.
-  if (!r.detail) { if (sessName) dropDetail(); }
+  // A page column holding the panel (hostSessDetail) keeps it while the
+  // address names no detail; one that names a detail takes it back.
+  if (r.detail && sessDetailGuest) releaseSessDetail();
+  if (!r.detail) { if (sessName && !sessDetailGuest) dropDetail(); }
   else if (r.detail !== sessName) repointDetail(r.detail);
   syncLayout();
 }
@@ -51208,7 +51348,7 @@ function dropDetail() {
   sessRunFold = null;
   sessNoteBox = null;
   sessReminderNoteBox = null;
-  $("sess-view").innerHTML = "";
+  sessViewNode().innerHTML = "";
   markDetailRow();
   // The row the panel described is no longer the panel's subject, so it goes
   // back to its own density (railCardMode).
@@ -51253,7 +51393,7 @@ function repointDetail(name) {
   sessReminderNoteBox = null;
   const kept = sessMetaKept.get(name);
   if (kept) renderSession(kept);
-  else $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  else sessViewNode().innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   // The panel's subject is one of the cards the rail expands (railCardMode),
   // so the row it now describes has to change density with it.
@@ -51266,6 +51406,14 @@ function repointDetail(name) {
    back to the page the detail was opened over. Dropped first, so the router
    does not read the new entry as a terminal link to carry the rail across. */
 function closeDetail() {
+  // A page column that borrowed the panel (hostSessDetail) is closed by that
+  // page: its × hands the panel back and the page shows its own view again.
+  if (sessDetailGuest) {
+    const done = sessDetailGuest.onClose;
+    releaseSessDetail();
+    if (done) done();
+    return;
+  }
   dropDetail();
   go(hashWithDetail(location.hash, null));
 }
@@ -51278,8 +51426,8 @@ async function refreshSession() {
     const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
     data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      $("sess-view").innerHTML = "";
-      $("sess-view").appendChild(el(
+      sessViewNode().innerHTML = "";
+      sessViewNode().appendChild(el(
         "p", "wf-warning",
         // A daemon older than these assets serves the static files from disk
         // but runs the Python it started with, so this route may not exist
@@ -52547,7 +52695,7 @@ function morphPanel(live, fresh, before) {
 }
 
 function renderSession(data) {
-  const page = $("sess-view");
+  const page = sessViewNode();
   const s = data.session || {};
   // The 2s poll rebuilds this panel from scratch, and a rebuild detaches
   // whatever the user is typing in — which takes the caret with it. Keeping
