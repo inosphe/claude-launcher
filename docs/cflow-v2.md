@@ -2150,6 +2150,25 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   `rail_entry`도 `flow_gates`도 나열하지 않는다 — 알림을 내면 `session_of(scope)`가
   주 런 이름을 만들어 부모를 주 런의 다른 gate로 보낸다. 그래서 중첩 런의 사람 gate는
   그 슬롯을 보는 쪽(`flow_status`·대시보드)이 답하고, 부모 위임은 그 범위 밖이다.
+- **hold된 자식도 자식이다** (claunch-7vf2z). `hold`는 세션의 프로그램을 내리는
+  상태이고(`Session.hold`가 `held_at`을 세운 뒤 kill한다) 런은 끝나지 않는다 —
+  `end-hold` 뒤의 `release-decision`처럼 기한 없는 질문이 그대로 열려 있다. 그래서
+  이 절의 세 술어는 「살아 있음」이 아니라 **「살아 있거나 hold됨」**이다.
+  - 자식 행: `/api/sessions/{name}/children`의 각 행이 `held`를 싣는다. 없으면
+    부모는 hold와 사망을 구별하지 못한다.
+  - 발견: `flow_gates`의 `_live_children`이 `held`인 자식을 거르지 않는다.
+  - 알림: `RunEventClock._scan_v2_gates`가 hold된 세션의 런도 스캔하고,
+    `child-gate`를 받을 부모가 hold면 `/deliver`가 그 부모를 깨워 전달한다.
+  둘 다 데몬의 다른 경로가 이미 쓰는 술어와 같다(`cflow2_triggers.live_session`의
+  `include_held`, `api._ws_parent_usable`의 `not session.exited or held_at`).
+- **에이전트는 `reason`을 적극적으로 쓴다** (관례, 엔진 강제 없음 — 사용자 결정
+  2026-11-06). `reason`은 선택지 이름을 다시 적는 자리가 아니라 근거를 남기는 자리다:
+  무엇을 읽었고 그 안에서 무엇을 보았는지. 생략 면제는 사람에게만 해당하고, 엔진은
+  사람 아닌 답에만 `reason`을 요구한다(`runtime._select_check`). 관례로 두는 이유는
+  그것이 다음 단계의 입력이기 때문이다 — `end-new-task`는 새 작업을 `end-decision`의
+  `reason`에서 읽고(`improv-worker-v2.yaml`), `end-hold`도 그 `reason`을 남기며, 저널
+  `selected.reason`과 `person_picks`가 그 답을 다시 읽는다. 부모가 자식의 gate에
+  답할 때는 그 자식의 작업 이슈 id와 근거를 함께 싣는다.
 - CLI: `claunch cflow2 select`·`move --approve|--deny`를 부모 세션의 셸에서 실행하면
   그 답도 `by: <부모 세션>`으로 남는다. 드라이버 셸에서는 지금처럼 거절한다
   (`_refuse_own_session`).
@@ -2750,7 +2769,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_status` | 활성 구성, 렌더된 현재 작업 프롬프트, 고를 수 있는 옵션, 시작 입력, 진행 중인 verify, 대기 항목 |
 | `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`). verify가 있으면 `verifying`으로 바로 돌아온다 |
 | `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`). 자기 런의 `chooser: user` 선택은 사람의 것이고, 부모 세션은 자식 런을 `scope`로 지목해 그 선택을 대신 답한다(2.11의 「부모 세션으로의 위임」) |
-| `flow_gates` | 이 세션의 살아 있는 자식 세션 런이 사람에게 기다리는 것: 열린 `chooser: user` 선택(프롬프트·옵션·지금 가용한지), 열린 이동·보고 요청, 루프·방문 한도. 부모만 답할 수 있는 항목과, 사람 몫이라 정보로만 싣는 ask를 함께 보여 준다 |
+| `flow_gates` | 이 세션의 살아 있거나 hold된 자식 세션 런이 사람에게 기다리는 것: 열린 `chooser: user` 선택(프롬프트·옵션·지금 가용한지), 열린 이동·보고 요청, 루프·방문 한도. 부모만 답할 수 있는 항목과, 사람 몫이라 정보로만 싣는 ask를 함께 보여 준다 |
 | `flow_move` | 자식 런의 열린 이동·보고 요청에 답함(`decision`: `approve`·`deny`, `reason`, `scope`, `cwd`). 부모 세션만 쓸 수 있고, 그 답은 `by: <부모 세션>`으로 저널에 남는다 |
 | `flow_fork` | `group`에 멤버 추가(`group`, `with`) |
 | `flow_call` | 활성 작업이 `calls`에 선언한 프로시저를 중첩 런으로 호출(`procedure`, `node`, `with`). 끝나면 같은 작업이 `call_result`와 함께 다시 활성이 된다(2.12) |

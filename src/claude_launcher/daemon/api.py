@@ -12757,6 +12757,12 @@ async def h_session_children(request: web.Request) -> web.Response:
                 "name": child,
                 "status": sess.status(),
                 "children": manager.children(child),
+                # A held session's process is gone but its run is not: the
+                # hold stops the program and leaves the cflow run live with
+                # its question still open (claunch-7vf2z). Without this row
+                # a parent reads a held child exactly like a dead one and
+                # never sees the gate it is waiting on.
+                "held": bool(sess.exited and getattr(sess, "held_at", None)),
             }
             run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
             if run:
