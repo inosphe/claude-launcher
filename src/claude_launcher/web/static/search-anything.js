@@ -638,7 +638,7 @@ globalThis.SearchAnything = (() => {
         table.append(body);
         const scroller = node("div", "", "rag-db-scroll"); scroller.append(table);
         dbList.append(scroller);
-        hint("DB 하나는 corpus(sessions, all, 보드별 beads)마다 컬렉션을 하나씩 가집니다. ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션이고, 이름을 누르면 그 모델의 이름이 채워집니다.", dbList);
+        hint("DB 하나는 corpus(sessions, unified, 보드별 beads)마다 컬렉션을 하나씩 가집니다. ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션이고, 이름을 누르면 그 모델의 이름이 채워집니다.", dbList);
         showDbResolved();
       }
       // Rename one DB in place: an input row under it, the slug the daemon
