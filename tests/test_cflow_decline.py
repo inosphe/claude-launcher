@@ -158,7 +158,12 @@ def test_children_rows_carry_no_role_as_the_worker_workflow_says(mgr, tmp_path):
 
     (row,) = _client(mgr, scenario)
     assert "role" not in row
-    named = {"name", "status", "children", "cflow", "cflow_declined", "quick_fork_of"}
+    # `held` is the row's way of telling a held child from a dead one
+    # (claunch-7vf2z): an allowance without this assertion would let the
+    # route drop the key again without a red test.
+    assert row["held"] is False
+    named = {"name", "status", "children", "cflow", "cflow_declined", "quick_fork_of",
+             "held"}
     assert set(row) <= named
     text = (resources.files("claude_launcher") / "workflows" / "v2"
             / "improv-worker-v2.yaml").read_text(encoding="utf-8")
