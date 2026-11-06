@@ -1756,6 +1756,52 @@ def _write_store(base, name, *, dims, model, model_key=""):
     path.with_suffix(".meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
 
+def test_the_dbs_route_can_skip_the_size_walk_the_search_card_does_not_draw(tmp_path):
+    """The card lists these to find collections no index has opened yet.
+
+    ``/api/rag/dbs`` walks every collection to total its files, which is what
+    the DB panel shows and what a listing read on a timer cannot afford.
+    ``?sizes=0`` answers the same rows with ``bytes`` 0 and never walks them,
+    and the facts the card does draw — the path, the width, the model, the
+    identity — are unchanged (claunch-c7vjm).
+    """
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        base = tmp_path / "index"
+        _write_store(base, "sessions.kept", dims=768, model="emb-a", model_key="kept")
+        (base / "sessions.kept.zvec" / "part.parquet").write_bytes(b"x" * 4096)
+        _write_store(base, "unified.kept", dims=768, model="emb-a", model_key="kept")
+        cfg = _cfg(server, watch_interval=0)
+        store.save({"rag": cfg})
+        service = rag.RagService(root_dir=base)
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            full = await client.get("/api/rag/dbs")
+            thin = await client.get("/api/rag/dbs?sizes=0")
+            assert full.status == 200 and thin.status == 200
+            counted = {row["name"]: row for row in (await full.json())["dbs"]}
+            light = {row["name"]: row for row in (await thin.json())["dbs"]}
+            assert counted["sessions.kept"]["bytes"] == 4096
+            assert light["sessions.kept"]["bytes"] == 0
+            # Same rows, same facts: only the size is left out.
+            assert set(light) == set(counted)
+            for name in counted:
+                assert {k: v for k, v in light[name].items() if k != "bytes"} == \
+                       {k: v for k, v in counted[name].items() if k != "bytes"}
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_renaming_a_preset_carries_the_saved_secret_and_stores_no_hint(tmp_path):
     """The id names the row AND files the secret — a rename must move it.
 

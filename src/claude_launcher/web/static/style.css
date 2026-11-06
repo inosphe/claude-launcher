@@ -4869,6 +4869,12 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .rag-state-text { font-size: 11px; color: #9da5b0; overflow-wrap: anywhere; }
 .rag-state-failed { color: #f85149; }
 .rag-state-busy { color: #58a6ff; }
+/* A collection on disk that no index has opened yet: drawn, not offered.
+   Greyed so it reads as "there, but not running" beside the rows that are
+   (claunch-c7vjm). */
+.rag-row-unopened { opacity: 0.6; }
+.rag-badge-unopened { border-style: dashed; }
+.rag-state-unopened { color: #9da5b0; }
 /* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
 .gh-head { display: flex; align-items: center; gap: 10px; }
 .gh-head h3 { flex: 1 1 auto; margin: 0; }

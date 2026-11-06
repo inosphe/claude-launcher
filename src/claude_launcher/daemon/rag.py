@@ -1151,7 +1151,7 @@ def _path_identity(path: Path) -> str:
     return identity
 
 
-def rag_stores(base: Path) -> List[dict]:
+def rag_stores(base: Path, *, sizes: bool = True) -> List[dict]:
     """Every collection directory under ``base``, as the DB panel reads them.
 
     A store is ``<corpus>.<name>.zvec``, or ``<corpus>.zvec`` for one built
@@ -1160,6 +1160,12 @@ def rag_stores(base: Path) -> List[dict]:
     can use the collection (claunch-fhs7f.1). ``identity`` is the part a
     preset's ``db`` names; it is empty for a pre-preset collection, which is
     adopted by a preset whose key matches its model.
+
+    ``sizes`` walks every collection to total its files, which is what the
+    DB panel shows and what a caller that draws a listing on a timer cannot
+    afford: the search card reads this every time it looks for collections
+    no index has opened yet (claunch-c7vjm). With ``sizes=False`` every row
+    still carries ``bytes``, as 0.
     """
     rows: List[dict] = []
     try:
@@ -1171,12 +1177,13 @@ def rag_stores(base: Path) -> List[dict]:
         name = path.name[: -len(".zvec")]
         corpus, _, identity = name.partition(".")
         total = 0
-        try:
-            for child in path.rglob("*"):
-                if child.is_file():
-                    total += child.stat().st_size
-        except OSError:
-            total = 0
+        if sizes:
+            try:
+                for child in path.rglob("*"):
+                    if child.is_file():
+                        total += child.stat().st_size
+            except OSError:
+                total = 0
         rows.append({
             "name": name,
             "corpus": corpus,
