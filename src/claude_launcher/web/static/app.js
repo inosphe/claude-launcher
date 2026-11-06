@@ -35960,7 +35960,8 @@ function statsChart(buckets, unit) {
 function statsBucketTable(buckets, unit) {
   const table = el("table", "stats-table");
   const head = el("tr");
-  for (const h of ["period", "total", "requests", "output",
+  for (const h of ["period", "total", "requests",
+                   ...USAGE_PARTS.map(([, label]) => label),
                    ...STATS_CATEGORIES.map(([, label]) => label)]) {
     head.appendChild(el("th", null, h));
   }
@@ -35971,7 +35972,9 @@ function statsBucketTable(buckets, unit) {
     row.appendChild(el("td", null, statsBucketLabel(b.start, unit)));
     row.appendChild(el("td", "num", usageShort(b.total || 0)));
     row.appendChild(el("td", "num", (b.requests || 0).toLocaleString()));
-    row.appendChild(el("td", "num", usageShort(b.output || 0)));
+    for (const [key] of USAGE_PARTS) {
+      row.appendChild(el("td", "num stats-part-cell", usageShort(b[key] || 0)));
+    }
     for (const [key] of STATS_CATEGORIES) {
       row.appendChild(el("td", "num", String((b.inputs || {})[key] || 0)));
     }
@@ -36220,6 +36223,52 @@ function statsOverviewRows(d) {
     (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
 }
 
+/* A row's estimate under the provider filter in force: the daemon priced
+   each session (statsboard._price_row) and each of its ledger provider
+   entries at Settings → Model prices. A transcript row's declared part has
+   no entry of its own, so its estimate is the row's. `basis` says the
+   transcript row was priced at the model its newest turn answered on. */
+function statsRowCost(row) {
+  const whole = { cost: row.cost, priced: row.priced_tokens || 0,
+                  unpriced: row.unpriced_tokens || 0,
+                  model: row.model || "", basis: row.model_basis || "" };
+  if (!statsProvider) return whole;
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
+  if (!hit) return { cost: null, priced: 0, unpriced: 0, model: "", basis: "" };
+  if (hit.declared) return whole;
+  return { cost: hit.cost, priced: hit.priced_tokens || 0,
+           unpriced: hit.unpriced_tokens || 0, model: row.model || "",
+           basis: "" };
+}
+
+/* One estimate cell: "≈ $1.23", a dash where nothing found a price, and a
+   star on a partly priced figure (the tooltip says how much was left out).
+   Empty for a row with no tokens at all. */
+function statsCostCell(c, currency) {
+  const priced = c.priced || 0;
+  const unpriced = c.unpriced || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced || c.cost === null || c.cost === undefined) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = c.model
+        ? `no price row in Settings → Model prices for ${c.model}`
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(c.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices" +
+    (c.basis === "last" && c.model
+      ? `: every token priced at ${c.model}, the model this session's ` +
+        "newest turn answered on (its transcript names no model per request)"
+      : ": each model's four token kinds at its row's rates") +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
 /* The four parts a session row's bar is split into, under the provider
    filter in force: the whole window's, or the picked provider's slice of it.
    They are the parts of the same quantity `statsRowTotal` sums, so the bar's
@@ -36292,8 +36341,10 @@ function statsOverviewTable(d) {
   const total = rows.reduce((n, r) => n + statsRowTotal(r), 0);
   const today = (d.until || "").slice(0, 10);
   const table = el("table", "stats-table stats-overview");
+  const currency = d.currency || "$";
   const head = el("tr");
-  for (const h of ["session", "provider", "status", "tokens", "",
+  for (const h of ["session", "provider", "status", "tokens", "model",
+                   ...USAGE_PARTS.map(([, label]) => label), "est. cost",
                    "requests", "share", "last call"]) {
     head.appendChild(el("th", null, h));
   }
@@ -36368,7 +36419,22 @@ function statsOverviewTable(d) {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
     }
     row.appendChild(tokens);
-    row.appendChild(el("td", "stats-model-cell", r.model || ""));
+    const model = el("td", "stats-model-cell", r.model || "");
+    if (r.model) {
+      model.title = r.model_basis === "last"
+        ? `${r.model} — the model this session's newest turn answered on`
+        : r.model;
+    }
+    row.appendChild(model);
+    // The four parts the bar is split into, as numbers: the cheapest part
+    // (cache read) usually dominates the total, and the bar alone cannot
+    // say by how much.
+    const measured = value || r.source !== "none";
+    for (const p of statsRowBarParts(r)) {
+      row.appendChild(el("td", "num stats-part-cell",
+        measured ? usageShort(p.tokens) : ""));
+    }
+    row.appendChild(statsCostCell(statsRowCost(r), currency));
     row.appendChild(el("td", "num", statsRowRequests(r).toLocaleString()));
     row.appendChild(el("td", "num",
       total && value ? statsPct(value / total) : ""));
@@ -36568,20 +36634,38 @@ function statsSwitchList(row) {
 }
 
 /* The opened session's window figures, per provider. */
-function statsDetailWindow(row) {
+function statsDetailWindow(row, currency = "$") {
   const box = el("div", "stats-detail-window");
   const table = el("table", "stats-table stats-detail-providers");
   const head = el("tr");
-  for (const h of ["provider", "tokens", "requests", "share"]) {
+  for (const h of ["provider", "tokens", ...USAGE_PARTS.map(([, l]) => l),
+                   "est. cost", "requests", "share"]) {
     head.appendChild(el("th", null, h));
   }
   table.appendChild(head);
-  const parts = row.providers || [];
+  // A transcript row has no ledger part; its whole window figure is filed
+  // under the provider its profile declares (statsRowParts), and its
+  // estimate is the row's own.
+  const parts = statsRowParts(row);
   const sum = parts.reduce((n, p) => n + (p.total || 0), 0);
   for (const p of parts) {
     const line = el("tr");
-    line.appendChild(el("td", null, p.provider));
+    const name = el("td", null, p.provider);
+    if (p.declared) {
+      name.title = "read from this session's transcript and filed under the " +
+        "provider its profile declares";
+    }
+    line.appendChild(name);
     line.appendChild(el("td", "num", usageShort(p.total || 0)));
+    for (const [key] of USAGE_PARTS) {
+      line.appendChild(el("td", "num stats-part-cell", usageShort(p[key] || 0)));
+    }
+    line.appendChild(statsCostCell(p.declared
+      ? { cost: row.cost, priced: row.priced_tokens || 0,
+          unpriced: row.unpriced_tokens || 0, model: row.model || "",
+          basis: row.model_basis || "" }
+      : { cost: p.cost, priced: p.priced_tokens || 0,
+          unpriced: p.unpriced_tokens || 0, model: "", basis: "" }, currency));
     line.appendChild(el("td", "num", (p.requests || 0).toLocaleString()));
     line.appendChild(el("td", "num",
       sum ? statsPct((p.total || 0) / sum) : ""));
@@ -36620,8 +36704,14 @@ function statsReadingSections(d) {
   summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
     `${(t.requests || 0).toLocaleString()} requests` +
     (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
+    usageShare(t.input || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache write", usageShort(t.cache_write || 0),
+    usageShare(t.cache_write || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Output", usageShort(t.output || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
+    usageShare(t.output || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
     "of inputs, by count"));
   summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
@@ -36700,7 +36790,8 @@ function statsDetailPanel() {
   panel.appendChild(meta);
 
   if (row) {
-    panel.appendChild(statsSection("This window", null, statsDetailWindow(row)));
+    panel.appendChild(statsSection("This window", null, statsDetailWindow(
+      row, (statsOverview && statsOverview.currency) || "$")));
     panel.appendChild(statsSection("Provider / model changes", null,
       statsSwitchList(row)));
   }
@@ -37356,10 +37447,16 @@ function renderStatsOverview(main) {
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
+  const partOf = (key) => totals.total
+    ? `${statsPct((totals[key] || 0) / totals.total)} of tokens` : "";
   summary.appendChild(statsCard("Fresh input", usageShort(totals.input || 0),
-    `cache read ${usageShort(totals.cache_read || 0)}`));
+    partOf("input")));
+  summary.appendChild(statsCard("Cache read", usageShort(totals.cache_read || 0),
+    partOf("cache_read")));
+  summary.appendChild(statsCard("Cache write", usageShort(totals.cache_write || 0),
+    partOf("cache_write")));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
-    `cache write ${usageShort(totals.cache_write || 0)}`));
+    partOf("output")));
   summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
   const est = statsModelEstimate(d);
@@ -37368,8 +37465,10 @@ function renderStatsOverview(main) {
     summary.appendChild(statsCard("Est. cost",
       est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
       est.unpriced_tokens
-        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
-        : "Settings → Model prices"));
+        ? `${usageShort(est.priced_tokens)} priced · ` +
+          `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : `all ${usageShort(est.priced_tokens)} tokens priced ` +
+          "(Settings → Model prices)"));
   }
   summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
