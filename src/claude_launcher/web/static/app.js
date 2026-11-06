@@ -44364,9 +44364,11 @@ async function wsSyncRefresh(name, fetchFirst) {
   if (wsOpen) renderWorkspaces();
 }
 
-/* Check or uncheck one target remote. The last checked one stays checked:
-   a sync with no target has nothing to do, so the box springs back with a
-   note instead of letting the set go empty (claunch-y3tuk). */
+/* Check or uncheck one target remote. The last checked box is drawn
+   disabled (wsSyncTargetsView), so an empty set is refused here only as a
+   guard. When the basis is the one unchecked, the basis moves to a checked
+   remote that may be the basis and the panel says so in a line, rather than
+   letting the radio jump without a word (claunch-j1894). */
 function wsSyncToggleRemote(name, remote, checked) {
   const st = wsSyncSt(name);
   const names = wsSyncRemoteNames(st.doc);
@@ -44382,7 +44384,13 @@ function wsSyncToggleRemote(name, remote, checked) {
   st.remotes = next;
   if (!st.remotes.includes(st.basis)) {
     const doc = st.doc || {};
-    st.basis = doc.basis && st.remotes.includes(doc.basis) ? doc.basis : st.remotes[0];
+    const was = st.basis;
+    // a candidate of the larger set is still one of any subset that holds it
+    const pool = [doc.basis, ...(doc.basis_candidates || [])];
+    st.basis = pool.find((r) => r && st.remotes.includes(r)) || st.remotes[0];
+    if (was && st.remotes.length > 1) {
+      st.remoteNote = `Basis moved to ${st.basis}: ${was} is no longer checked.`;
+    }
   }
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
@@ -44392,6 +44400,7 @@ function wsSyncToggleBasis(name, basis) {
   const st = wsSyncSt(name);
   if (!st.remotes.includes(basis)) return;
   st.basis = basis;
+  st.remoteNote = "";
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
 }
@@ -45284,7 +45293,11 @@ function wsSyncWhyDisabled(st, kind) {
     if ((doc.incompatible || []).length) {
       return "The checked remotes are not on one line; uncheck one to continue.";
     }
-    if (doc.basis_error) return doc.basis_error;
+    if (doc.basis_error) {
+      const r = wsSyncBasisRefusal(st, doc);
+      return r ? `Basis ${r.picked} is behind ${r.newer || "another checked remote"}; ` +
+        "pick another basis under Target remotes." : doc.basis_error;
+    }
     const pending = wsSyncPending(doc);
     if (!pending.length && (doc.plan || (doc.plans || []).length)) {
       const plan = doc.plan;
@@ -45312,70 +45325,147 @@ function wsSyncButtonRow(st, button, kind) {
   return row;
 }
 
-/* The checked remotes, the basis, and the order the daemon computed
-   (claunch-y3tuk). The set is a multi-checkbox that cannot go empty; the
-   basis is the remote whose tip the local branch is brought onto first, and
-   the order shows what runs when (basis first, then pushes). */
-function wsSyncRemotePicker(st, name, doc) {
+/* The basis this page asked for, when the daemon refused it for the set
+   checked now: its tip is behind another checked remote, so syncing through
+   it would push the newer remote's commits to it. null when nothing was
+   refused, or when the answer on screen was read for another set or another
+   pick (claunch-j1894). */
+function wsSyncBasisRefusal(st, doc) {
+  if (!doc || !doc.basis_error) return null;
+  const checked = st.remotes || [];
+  if (!wsSyncOrderMatches(doc, checked)) return null;
+  const picked = checked.includes(st.basis) ? st.basis : "";
+  const asked = typeof doc.basis_requested === "string" ? doc.basis_requested : picked;
+  if (!picked || asked !== picked || picked === doc.basis) return null;
+  const newer = (doc.basis_behind || {})[picked] || doc.basis || "";
+  return { picked, newer, use: doc.basis || "", text: doc.basis_error };
+}
+
+/* One reading of the Target remotes state, from which every part of the
+   section is drawn (claunch-j1894). Before this, the basis select showed the
+   page's pick while the badge and the execution order showed the basis the
+   daemon fell back to, so the section named two bases at once. Now:
+   - each row carries both of its controls: the checkbox (is it a target?)
+     and the basis radio (is it the one brought in first?);
+   - a row whose radio cannot be chosen says why on that row: not checked,
+     or its tip is behind another checked remote;
+   - the last checked box is disabled and says it is the only target;
+   - a refused pick is named with the remote that would replace it and a
+     button that makes the change, and no execution order is drawn for a
+     basis that will not run. */
+function wsSyncTargetsView(st, doc) {
   const names = wsSyncRemoteNames(doc);
   const keys = {};
-  for (const [key, n] of Object.entries(doc.remotes || {})) keys[n] = key;
+  for (const [key, n] of Object.entries((doc && doc.remotes) || {})) keys[n] = key;
+  const checked = (st.remotes || []).filter((r) => names.includes(r));
+  const fresh = wsSyncOrderMatches(doc, checked);
+  // candidates known for the set checked now; an older daemon, or an
+  // answer read for another set, leaves every checked remote selectable
+  const known = fresh && Array.isArray(doc && doc.basis_candidates);
+  const candidates = known ? doc.basis_candidates : checked;
+  const behind = known ? (doc.basis_behind || {}) : {};
+  const refusal = wsSyncBasisRefusal(st, doc);
+  const basis = checked.includes(st.basis) ? st.basis : (checked[0] || "");
+  const rows = names.map((remote) => {
+    const on = checked.includes(remote);
+    const only = on && checked.length === 1;
+    let why = "";
+    if (only) why = "only target — check another remote to uncheck this one";
+    else if (on && behind[remote]) why = `cannot be the basis: behind ${behind[remote]}`;
+    return {
+      remote, key: keys[remote] || "", checked: on, only,
+      isBasis: on && remote === basis,
+      canBasis: on && candidates.includes(remote) && !only,
+      why,
+    };
+  });
+  const order = fresh && !refusal ? (doc.sync_order || []) : [];
+  return { names, checked, basis, rows, refusal, order, fresh };
+}
+
+function wsSyncRemotePicker(st, name, doc) {
+  const view = wsSyncTargetsView(st, doc);
   const box = el("section", "ws-sync-section ws-sync-targets");
   box.setAttribute("aria-label", "Target remotes");
   box.appendChild(el("h4", null, "Target remotes"));
   box.appendChild(el("p", "wf-note",
-    "Fetches, comparisons and Sync run against the checked remotes only. " +
-    "At least one stays checked."));
-  if (!names.length) {
+    "Check the remotes to sync with and pick one as the basis. Fetches, " +
+    "comparisons and Sync use the checked remotes only. The basis is brought " +
+    "in first (fast-forward or rebase); the other checked remotes are then " +
+    "pushed to."));
+  if (!view.names.length) {
     box.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
     return box;
   }
   const list = el("div", "ws-sync-remotes");
-  for (const remote of names) {
-    const label = el("label", "wf-note ws-sync-remote");
+  list.setAttribute("role", "group");
+  for (const row of view.rows) {
+    const line = el("div", "ws-sync-remote" + (row.checked ? "" : " ws-sync-remote-off"));
+    const target = el("label", "wf-note ws-sync-remote-target");
     const input = el("input", "ws-sync-remote-box");
     input.type = "checkbox";
-    input.checked = (st.remotes || []).includes(remote);
-    input.addEventListener("change", () => wsSyncToggleRemote(name, remote, input.checked));
-    label.appendChild(input);
-    label.appendChild(el("span", "mono", remote));
-    if (keys[remote]) label.appendChild(el("span", "wf-note", keys[remote]));
-    if (doc.basis === remote && (st.remotes || []).length > 1) {
-      label.appendChild(el("span", "badge busy", "basis"));
+    input.checked = row.checked;
+    input.disabled = row.only;
+    input.setAttribute("aria-label", `Target ${row.remote}`);
+    input.addEventListener("change", () => wsSyncToggleRemote(name, row.remote, input.checked));
+    target.appendChild(input);
+    target.appendChild(el("span", "mono", row.remote));
+    if (row.key) target.appendChild(el("span", "wf-note", row.key));
+    line.appendChild(target);
+    const pick = el("label", "wf-note ws-sync-remote-basis");
+    const radio = el("input", "ws-sync-basis-radio");
+    radio.type = "radio";
+    radio.name = `ws-sync-basis-${name}`;
+    radio.value = row.remote;
+    radio.checked = row.isBasis;
+    radio.disabled = !row.canBasis;
+    radio.setAttribute("aria-label", `Basis ${row.remote}`);
+    radio.addEventListener("change", () => { if (radio.checked) wsSyncToggleBasis(name, row.remote); });
+    pick.appendChild(radio);
+    pick.appendChild(el("span", row.isBasis ? "badge busy" : null, "basis"));
+    line.appendChild(pick);
+    if (row.why) {
+      line.appendChild(el("span", "wf-note ws-sync-remote-why" +
+        (row.isBasis && view.refusal ? " wf-warning" : ""), row.why));
     }
-    list.appendChild(label);
+    list.appendChild(line);
   }
   box.appendChild(list);
-  if (st.remoteNote) box.appendChild(el("p", "wf-note wf-warning", st.remoteNote));
-  if ((st.remotes || []).length > 1) {
-    const row = el("div", "ws-sync-form");
-    const pick = el("select");
-    pick.setAttribute("aria-label", "Basis remote");
-    for (const remote of st.remotes) pick.appendChild(new Option(remote, remote));
-    pick.value = st.basis;
-    pick.addEventListener("change", () => wsSyncToggleBasis(name, pick.value));
-    row.appendChild(pick);
-    row.appendChild(el("span", "wf-note",
-      "Basis is fast-forwarded or rebased first; the others are pushed to."));
-    box.appendChild(row);
+  if (st.remoteNote) box.appendChild(el("p", "wf-note ws-sync-remote-note", st.remoteNote));
+  if (view.refusal) {
+    const r = view.refusal;
+    const warn = el("div", "wf-note wf-warning ws-sync-basis-refused");
+    warn.appendChild(el("span", null,
+      `${r.picked} cannot be the basis: its tip is behind ${r.newer || "another checked remote"}, ` +
+      `so syncing through it would push ${r.newer || "that remote"}'s commits to it. ` +
+      "Sync stays off until the basis is changed."));
+    if (r.use) {
+      const fix = el("button", "btn ws-sync-basis-fix", `Use ${r.use} as basis`);
+      fix.type = "button";
+      fix.addEventListener("click", () => wsSyncToggleBasis(name, r.use));
+      warn.appendChild(fix);
+    }
+    box.appendChild(warn);
+  } else if (doc.basis_error && view.fresh) {
+    box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   }
-  if (doc.basis_error) box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   if ((doc.incompatible || []).length) {
     box.appendChild(el("p", "wf-note wf-warning",
       "These remotes cannot be brought to one branch (their tips are not on one line): " +
-      doc.incompatible.map((p) => p.join(" / ")).join(", ")));
+      doc.incompatible.map((p) => p.join(" / ")).join(", ") +
+      ". Uncheck one of each pair."));
   }
-  if ((doc.sync_order || []).length && wsSyncOrderMatches(doc, st.remotes)) {
+  if (view.order.length) {
     const order = el("div", "ws-sync-order");
     order.appendChild(el("h5", null, "Execution order"));
-    (doc.sync_order || []).forEach((remote, i) => {
+    view.order.forEach((remote, i) => {
       const row = wsSyncPlanFor(doc, remote);
       const action = row && row.plan ? row.plan.action : (row && row.error ? "error" : "?");
       order.appendChild(el("div", "mono ws-sync-order-row",
         `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
     });
     box.appendChild(order);
-  } else if ((doc.sync_order || []).length) {
+  } else if ((doc.sync_order || []).length && !view.fresh) {
     // the read the order came from covered another set (claunch-cj1qi)
     box.appendChild(el("p", "wf-note ws-sync-order-stale",
       st.loading

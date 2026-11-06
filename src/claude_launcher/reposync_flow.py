@@ -364,7 +364,10 @@ def selected_plans(repo: str, remotes: Sequence[str], *, do_fetch: bool,
     (they are pushes once the basis is in). ``incompatible`` names pairs whose
     tips are not ancestor-related: no single local branch can equal both, so
     nothing may run. A requested ``basis`` that is older than another gets
-    ``basis_error`` and the computed basis is used instead.
+    ``basis_error`` and the computed basis is used instead. ``basis_candidates``
+    lists the remotes that may be the basis (no other checked tip is newer)
+    and ``basis_behind`` maps each other remote to a candidate that holds its
+    tip, so the panel can say why a remote cannot be picked.
 
     The second value is remote name -> :class:`reposync.Plan`, for callers
     that need the object rather than the card.
@@ -404,6 +407,13 @@ def selected_plans(repo: str, remotes: Sequence[str], *, do_fetch: bool,
     heads = [n for n in order
              if not any(tips[m] != tips[n] and reposync.is_ancestor(repo, tips[n], tips[m])
                         for m in order)]
+    # what the panel may offer as a basis, and why the others are refused:
+    # a remote whose tip another checked remote already holds would push
+    # that remote's newer commits to itself (claunch-j1894)
+    out["basis_candidates"] = list(heads)
+    out["basis_behind"] = {n: next((h for h in heads
+                                    if reposync.is_ancestor(repo, tips[n], tips[h])), "")
+                           for n in order if n not in heads}
     chosen = ""
     if basis:
         if basis not in made:
@@ -514,8 +524,12 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         out["incompatible"] = multi["incompatible"]
         out["basis"] = multi["basis"]
         out["sync_order"] = multi["sync_order"]
+        for key in ("basis_candidates", "basis_behind"):
+            if key in multi:
+                out[key] = multi[key]
         if multi.get("basis_error"):
             out["basis_error"] = multi["basis_error"]
+            out["basis_requested"] = basis or ""
         chosen = multi["basis"] or next(
             (r["remote"] for r in multi["plans"] if r.get("plan")), "")
         if multi["incompatible"]:

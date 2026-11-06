@@ -6964,6 +6964,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-remote { display: flex; align-items: center; gap: 6px; }
 .ws-sync-remote .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ws-sync-targets .ws-sync-form { margin: 4px 0 0; }
+.ws-sync-remote { flex-wrap: wrap; }
+.ws-sync-remote-target { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.ws-sync-remote-basis { display: inline-flex; align-items: center; gap: 4px; }
+.ws-sync-remote-basis input:disabled + span { opacity: .55; }
+.ws-sync-remote-off .ws-sync-remote-target { opacity: .65; }
+.ws-sync-remote-why { font-size: 12px; }
+.ws-sync-basis-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0; }
 .ws-sync-order { margin: 6px 0 0; }
 .ws-sync-order h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
 .ws-sync-order-row { font-size: 12px; padding: 1px 0; }
