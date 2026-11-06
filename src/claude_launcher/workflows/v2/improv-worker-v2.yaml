@@ -5077,6 +5077,12 @@ nodes:
       사람이나 생성 설정이 세워 둔 keep-alive·delivery-hold는 여기서 내리지
       않는다 — 사람의 설정이다.
 
+      이 질문(과 뒤의 release-decision)은 부모 세션도 답할 수 있다 — 부모는
+      `flow_gates`로 이 런의 열린 선택을 보고 `flow_select`로 고른다(hold된
+      자식도 살아 있는 자식으로 세어진다, claunch-7vf2z). 부모가 답하면 그
+      reason에 작업 이슈 id와 근거를 싣는다 — new-task는 새 작업을 그 reason에서
+      읽는다. 에이전트는 reason을 적극적으로 쓴다(docs/cflow-v2.md 2.11).
+
       1. 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
          (`claunch cflow2 journal`). 없으면 묻지 않고 「사유 없음」으로
          적는다(곧 hold되므로 답을 받을 턴이 없다).
@@ -8329,6 +8335,12 @@ procedures:
                         남는다. 답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채
                         깨어난다.
                         new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
+
+                        이 질문은 부모 세션도 답할 수 있다 — 부모는 `flow_gates`로
+                        이 런의 열린 선택을 보고 `flow_select`로 고른다. 부모가 답하면
+                        그 reason에 작업 이슈 id와 근거를 싣는다 — new-task는 새 작업을
+                        그 reason에서 읽는다(에이전트는 reason을 적극적으로 쓴다,
+                        docs/cflow-v2.md 2.11).
 
                         이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
                         데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.
