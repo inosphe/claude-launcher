@@ -49482,7 +49482,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   const root = el("div", "cf2 cf2-host-" + host);
   box.appendChild(root);
 
-  // -- the head: ways out on the left, run presses on the right -------------
+  // -- the head: ways out, then the name with the run presses beside it -----
   const top = el("div", "cf2-top");
   const nav = el("div", "cf2-nav");
   if (!ui.fullLink) {
@@ -49542,19 +49542,19 @@ function renderCflow2Into(box, data, ui, force = false) {
       bar.appendChild(b);
     }
   }
-  if (bar.childNodes.length) top.appendChild(bar);
-  root.appendChild(top);
-
+  // The head is one card (claunch-jc99t): the ways out on a line of their
+  // own, then the name and status with the run presses level with them on
+  // the right, then the facts, then any warning about the run's copy.
+  const head = el("div", "cf2-head");
+  if (nav.childNodes.length) head.appendChild(top);
   const title = el("div", "cf2-title");
   title.appendChild(el("span", "cf2-badge", "v2"));
   title.appendChild(el("h2", null, run.workflow || (data.chart || {}).name || "(workflow)"));
   title.appendChild(el("span", "cf2-status " + (CFLOW2_STATUS_CLS[status] || ""),
                        status.replace("_", " ")));
-  root.appendChild(title);
-  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
-  // the harness that slices this view does not carry the helper.
-  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
-  if (drift) root.appendChild(el("p", "wf-warning cf2-drift-note", drift));
+  if (bar.childNodes.length) title.appendChild(bar);
+  head.appendChild(title);
+  root.appendChild(head);
   const meta = el("div", "cf2-meta");
   const metaItem = (k, v, cls) => {
     const s = el("span", "cf2-fact");
@@ -49571,7 +49571,11 @@ function renderCflow2Into(box, data, ui, force = false) {
     metaItem("acceptance", run.acceptance.status +
       ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : ""));
   }
-  root.appendChild(meta);
+  head.appendChild(meta);
+  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
+  // the harness that slices this view does not carry the helper.
+  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
+  if (drift) head.appendChild(el("p", "wf-warning cf2-drift-note", drift));
   const scoped = data.scope && data.scope !== "default";
   if (!sessions.length && live) {
     root.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
@@ -50242,33 +50246,63 @@ function cflow2CollectionTable(name, col, post) {
 
 /* The run's start inputs (data.inputs), folded shut. An input whose
    declaration (data.input_decls) has set_by: [user] gets an editor while the
-   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
+   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f).
+   Laid out as one two-column table (claunch-jc99t): the names in a column as
+   wide as the longest of them, the value -- or, for an input a person may
+   set, its editor holding the value -- on the same line beside it. The
+   settable inputs come first under a heading of their own, so the rows a
+   person can act on are not scattered among the ones fixed at the start. */
 function cflow2InputsBlock(values, decls, post, options) {
   const declOf = {};
   for (const d of decls || []) declOf[d.name] = d;
   const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
-  const nEdit = Object.keys(values).filter(editable).length;
+  const keys = Object.keys(values);
+  const nEdit = keys.filter(editable).length;
   const box = document.createElement("details");
   box.className = "cf2-run-inputs";
-  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})` +
-    (nEdit ? ` · ${nEdit} editable` : "")));
-  for (const [k, v] of Object.entries(values)) {
-    const row = el("div", "cf2-run-input");
-    row.appendChild(el("span", "mono cf2-fact-k", k));
-    let text;
+  const sum = el("summary", "cf2-run-inputs-head", "inputs");
+  sum.appendChild(el("span", "cf2-count", String(keys.length)));
+  if (nEdit) sum.appendChild(el("span", "cf2-count cf2-count-edit", `${nEdit} editable`));
+  box.appendChild(sum);
+  const shown = (v) => {
     if (Array.isArray(v)) {
-      text = v.map((x) => (x && typeof x === "object")
+      return v.map((x) => (x && typeof x === "object")
         ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
-    } else text = v == null ? "" : String(v);
-    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
-    row.appendChild(text.length > 80 || text.includes("\n")
-      ? mdInto(el("div", "md cf2-run-input-value"), text)
-      : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
-    if (editable(k)) {
-      row.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
     }
-    box.appendChild(row);
-  }
+    return v == null ? "" : String(v);
+  };
+  const valueCell = (text) => (text.length > 80 || text.includes("\n")
+    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
+    ? mdInto(el("div", "md cf2-run-input-value"), text)
+    : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
+  const grid = el("div", "cf2-run-input-grid");
+  const group = (title, list) => {
+    if (!list.length) return;
+    if (nEdit && nEdit < keys.length) {
+      const h = el("div", "cf2-run-input-group", title);
+      h.appendChild(el("span", "cf2-count", String(list.length)));
+      grid.appendChild(h);
+    }
+    for (const k of list) {
+      const v = values[k];
+      const text = shown(v);
+      const settable = editable(k);
+      const row = el("div", "cf2-run-input" + (settable ? " settable" : ""));
+      const name = el("span", "mono cf2-run-input-k", k);
+      name.title = (declOf[k] || {}).label || k;
+      row.appendChild(name);
+      const cell = el("div", "cf2-run-input-cell");
+      // a settable input's editor holds its value; long prose still reads in
+      // full above the editor, a short value would only repeat it
+      if (!settable || text.length > 80 || text.includes("\n")) cell.appendChild(valueCell(text));
+      if (settable) cell.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
+      row.appendChild(cell);
+      grid.appendChild(row);
+    }
+  };
+  group("settable", keys.filter(editable));
+  group("fixed at start", keys.filter((k) => !editable(k)));
+  box.appendChild(grid);
   return box;
 }
 
@@ -50292,13 +50326,15 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     const box = el("input");
     box.type = "checkbox";
     box.checked = !!value;
+    const word = el("span", "cf2-run-input-state", String(box.checked));
     box.addEventListener("change", async () => {
       box.disabled = true;
       if (!await send(box.checked, String(box.checked))) box.checked = !box.checked;
+      word.textContent = String(box.checked);
       box.disabled = false;
     });
     const lab = el("label", "cf2-run-input-toggle");
-    lab.append(box, document.createTextNode(" on"));
+    lab.append(box, word);
     wrap.appendChild(lab);
     return wrap;
   }
@@ -50317,6 +50353,7 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     field.type = decl.type === "int" ? "number" : "text";
     field.value = value == null ? "" : String(value);
   }
+  if (field.tagName !== "SELECT") field.placeholder = "empty";
   if (decl.options && opts) {
     const list = el("datalist");
     list.id = `cf2-run-opt-${name}-${++cflowOptionSeq}`;
