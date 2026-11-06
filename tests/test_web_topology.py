@@ -771,6 +771,7 @@ BROWSER_CHECKS = [
         "meshfold_browser.cjs",
         "sysperf_browser.cjs",
         "ptyhostsetting_browser.cjs",
+        "modelpricesinput_browser.cjs",
         "spawngate_browser.cjs",
         "gateaside_browser.cjs",
         "filldefault_browser.cjs",

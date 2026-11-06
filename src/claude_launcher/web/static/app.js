@@ -31998,8 +31998,28 @@ async function refreshRagStatus() {
   if (wsOpen && wsSection === "" && ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)) {
     refreshRagDisk();
   }
-  if (wsOpen) renderWorkspaces();
+  ragCardRedraw();
   ragSchedulePoll();
+}
+
+/* The status poll runs every RAG_POLL_MS for as long as an index syncs —
+   minutes on a fleet this size — and what it read is drawn by this card
+   alone. Redrawing the whole Settings view for it rebuilt every other card's
+   inputs three times a second-ish: the Model prices add row lost its typed
+   model id and the rate cells their focus mid-typing (claunch-jmuvv). So
+   the card that shows the status is swapped in place; the full render stays
+   for when the card is not on the page. */
+function ragCardRedraw() {
+  if (!wsOpen) return;
+  const old = wsSection === "" && typeof document !== "undefined"
+    ? document.querySelector(".rag-card") : null;
+  if (!old) { renderWorkspaces(); return; }
+  const active = document.activeElement;
+  const inside = active && active.id && old.contains(active);
+  const focused = inside ? active.id : "";
+  const sel = inside ? settingsFieldSelection(active) : null;
+  old.replaceWith(ragCard());
+  refocusSettingsField(focused, sel);
 }
 
 /* Whether the disk listing is due. Split out so the harness can hold the
@@ -32024,7 +32044,7 @@ async function refreshRagDisk() {
   } finally {
     ragDiskBusy = false;
   }
-  if (wsOpen) renderWorkspaces();
+  ragCardRedraw();
 }
 
 /* Whether the status payload has anything left to watch. A reindex request
@@ -39384,6 +39404,7 @@ function renderWorkspaces() {
   const own = wsSection === "workspaces";
   const view = $(own ? "workspaces-view" : "ws-view");
   const focused = document.activeElement && document.activeElement.id;
+  const sel = focused ? settingsFieldSelection(document.activeElement) : null;
   view.innerHTML = "";
 
   const head = el("div", "wf-head");
@@ -39404,12 +39425,12 @@ function renderWorkspaces() {
   }
   if (wsSection === "vscode") {
     view.appendChild(vscodePanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "providers") {
     view.appendChild(providersPanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "profiles") {
@@ -39422,7 +39443,7 @@ function renderWorkspaces() {
   }
   if (wsSection === "workspaces") {
     workspacesPanel(view);
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
 
@@ -39461,7 +39482,7 @@ function renderWorkspaces() {
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
-  refocusSettingsField(focused);
+  refocusSettingsField(focused, sel);
 }
 
 /* ------------------------------------------------------------------ */
@@ -39831,15 +39852,29 @@ function workspacesPanel(view) {
    and on a checkbox it throws, which left the PTY host card's save half
    done with its box disabled (claunch-xnnct.5.1). selectionStart is null
    there instead of throwing. */
-function refocusSettingsField(focused) {
+function refocusSettingsField(focused, sel) {
   if (!focused) return;
   const again = $(focused);
   if (!again) return;
   again.focus();
   if (typeof again.selectionStart === "number") {
-    const end = again.value.length;
-    again.setSelectionRange(end, end);
+    // Where the caret was, when the redraw read it and the value still has
+    // room for it: a redraw in the middle of a word must not throw the next
+    // keystroke to the end (claunch-jmuvv). Else the end, as before.
+    const len = again.value.length;
+    if (sel && sel.start <= len && sel.end <= len) {
+      again.setSelectionRange(sel.start, sel.end);
+    } else {
+      again.setSelectionRange(len, len);
+    }
   }
+}
+
+/* The caret of a focused field, read before a redraw replaces it; null for a
+   control without one (selectionStart is null on a checkbox or a select). */
+function settingsFieldSelection(node) {
+  if (!node || typeof node.selectionStart !== "number") return null;
+  return { start: node.selectionStart, end: node.selectionEnd };
 }
 
 async function refreshFaq() {
@@ -41498,6 +41533,9 @@ function llmSettingsCard() {
    a row whose every rate is empty is dropped on save. The draft lives
    outside the DOM like llmDraft: this page re-renders on every poll. */
 let modelPricesDraft = null;
+/* The add row's answers, outside the DOM for the same reason: the provider
+   picked and the model id typed so far survive a redraw (claunch-jmuvv). */
+let modelPricesAdd = { provider: "", model: "" };
 let modelPricesNotice = "";
 let modelPricesBusy = false;
 
@@ -41580,6 +41618,12 @@ function modelPricesProviderOptions(draft) {
   return [any, ...[...named].filter(Boolean).sort()];
 }
 
+/* The id of one rate cell. Provider and model are free text; both are
+   URI-encoded (which encodes ':'), so the ':' separators are unambiguous. */
+function modelPriceRateId(provider, model, key) {
+  return `mp-rate:${encodeURIComponent(provider)}:${encodeURIComponent(model)}:${key}`;
+}
+
 function modelPricesCard() {
   const card = el("section", "ws-add model-prices");
   card.appendChild(el("h3", null, "Model prices"));
@@ -41642,6 +41686,9 @@ function modelPricesCard() {
       row.append(prov, name);
       for (const key of MP_RATE_KEYS) {
         const inp = document.createElement("input");
+        // An id, so refocusSettingsField can hand focus back to this cell
+        // after a redraw (claunch-jmuvv).
+        inp.id = modelPriceRateId(provider, model, key);
         inp.type = "text";
         inp.inputMode = "decimal";
         inp.className = "mp-rate";
@@ -41682,10 +41729,19 @@ function modelPricesCard() {
     opt.textContent = p === any ? `${any} (any provider)` : p;
     addProvider.appendChild(opt);
   }
+  if (modelPricesAdd.provider &&
+      [...addProvider.options].some((o) => o.value === modelPricesAdd.provider)) {
+    addProvider.value = modelPricesAdd.provider;
+  }
+  addProvider.addEventListener("change", () => {
+    modelPricesAdd.provider = addProvider.value;
+  });
   const addName = document.createElement("input");
   addName.id = "mp-add-model";
   addName.type = "text";
   addName.placeholder = "model id, e.g. claude-opus-5";
+  addName.value = modelPricesAdd.model;
+  addName.addEventListener("input", () => { modelPricesAdd.model = addName.value; });
   addName.setAttribute("list", "mp-model-options");
   const addList = document.createElement("datalist");
   addList.id = "mp-model-options";
@@ -41705,6 +41761,7 @@ function modelPricesCard() {
       rows[m] = { input: "", cache_read: "", cache_write: "", output: "" };
     }
     modelPricesDraft = draft;
+    modelPricesAdd.model = "";
     renderWorkspaces();
   };
   addBtn.addEventListener("click", addModel);
