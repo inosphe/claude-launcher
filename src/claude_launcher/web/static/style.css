@@ -8455,12 +8455,24 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 /* The window overview: the fleet's sessions over today / 7 / 30 days, the
    provider strip that narrows them, and the detail panel beside the table. */
+/* The page takes the view's whole width (claunch-kd9lg): the 980px cap the
+   Window page's tiles and sections carry left half a wide screen empty
+   beside the table, so inside the Stats page the main column grows with the
+   view and the detail panel grows with it, between 420px and 720px. */
 .stats-layout {
-  display: flex; gap: 14px; align-items: flex-start; max-width: 1500px;
+  display: flex; gap: 14px; align-items: flex-start;
 }
 .stats-main { flex: 1 1 auto; min-width: 0; }
+#stats-view .window-summary,
+#stats-view .window-section,
+#stats-view .stats-window-note { max-width: none; }
+#stats-view .window-summary {
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+}
+.stats-part-cell { color: #8b949e; font-variant-numeric: tabular-nums; }
 .stats-detail {
-  flex: 0 0 460px; max-width: 460px; position: sticky; top: 8px;
+  flex: 0 0 clamp(420px, 30vw, 720px); max-width: 720px;
+  position: sticky; top: 8px;
   border: 1px solid #22262d; border-radius: 8px; background: #14171c;
   max-height: calc(100vh - 40px); overflow-y: auto;
 }
