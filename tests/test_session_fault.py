@@ -385,6 +385,47 @@ def test_the_api_wait_line_and_a_bare_code_are_both_fallbacks_so_position_decide
     assert above[0].name == "api_status"
 
 
+API_RETRYING = "✻ API error · Retrying in 0s · attempt 1/10"
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi", "codex", "kimi", "agent"])
+def test_the_api_error_retrying_line_is_read_in_every_harness(harness):
+    """s6183 (2026-11-06) painted this spinner row with no status code, so
+    the `API Error: <code>` entries do not read it (claunch-al4lg)."""
+    found = session_fault.default().match(harness, API_RETRYING)
+    assert found is not None, f"{harness}: the retrying line matched nothing"
+    assert found[0].name == "api_status"
+
+
+def test_the_api_error_retrying_line_is_recorded_whole():
+    det, now = _detector("claude")
+    det.scan(_Screen(API_RETRYING), now=now["t"])
+    view = det.view()
+    assert view["kind"] == "api_status"
+    assert view["message"] == API_RETRYING
+
+
+@pytest.mark.parametrize("rows, kind", [
+    ((WEEKLY, API_RETRYING), "usage_limit"),
+    ((API_RETRYING, WEEKLY), "usage_limit"),
+    ((SAFEGUARDS, API_RETRYING), "policy_blocked"),
+    ((API_RETRYING, SAFEGUARDS), "policy_blocked"),
+])
+def test_a_named_cause_beats_the_api_error_retrying_line(rows, kind):
+    """The retrying line is `fallback`: it names no cause."""
+    det, now = _detector("claude")
+    det.scan(_Screen(*rows), now=now["t"])
+    assert det.view()["kind"] == kind, f"{rows} read {det.view()['kind']}"
+
+
+def test_the_overloaded_retry_wording_is_not_read_as_the_retrying_line():
+    """`API Error: 529 Overloaded — retrying in 30s` keeps its own kind: the
+    new entry needs the `·` right after `API error`."""
+    found = session_fault.default().match(
+        "claude", "API Error: 529 Overloaded — retrying in 30s (attempt 3/10)")
+    assert found is not None and found[0].name == "overloaded"
+
+
 PI_LOGIN = "Use /login to log into a provider via OAuth or API key. See: ..."
 
 
