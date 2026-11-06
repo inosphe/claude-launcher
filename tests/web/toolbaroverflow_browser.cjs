@@ -150,7 +150,11 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     // the first assert below names it: the VM button shipped in the header
     // (index.html's `term-vmbtn`) without landing here, so the harness failed
     // on clean master until `term-vmbtn` was put where MINIMIZE_ORDER keeps
-    // it, between `term-clibtn` and `term-splitbtn` (claunch-u0wyo.1).
+    // it, between `term-clibtn` and `term-splitbtn` (claunch-u0wyo.1). The
+    // sub procedure button (`term-subprocbtn`, claunch-8t5r0.3) then shipped
+    // without a place in MINIMIZE_ORDER itself, so it never iconified or
+    // left for the menu; it sits after `term-planbtn`, as in the header
+    // (claunch-jc99t.1).
     // Every width must be one position on it: the controls that are glyphs
     // or in the menu are a prefix of it (controls that never iconify, their
     // glyph being no narrower than their label, left out), and the controls
@@ -160,7 +164,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
       "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
       "term-zoom", "term-view", "term-life",
-      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
+      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-subprocbtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
       "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
       "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
       "term-tps", "term-note", "term-handle", "term-status",
