@@ -12,7 +12,7 @@ from claude_launcher.cflow2 import mcp as cflow2_mcp
 
 FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork", "flow_call",
               "flow_delegate", "flow_rule", "flow_collection", "flow_input",
-              "flow_request_move"}
+              "flow_request_move", "flow_extend"}
 
 DEF = textwrap.dedent("""
     cflow: 2
@@ -295,3 +295,82 @@ def test_brief_keeps_a_non_ok_record_whole():
     assert out["result"]["deployed-wait"] == timeout
     assert out["result"]["unit"] == fail
     assert out["result"]["work"]["value"] == {"summary": "<elided: 202 chars>"}
+
+
+SELF_LIMIT = textwrap.dedent("""
+    cflow: 2
+    name: selflimit
+    nodes:
+      s: {prompt: S, returns: {ok: {n: int}}}
+    body:
+      loop:
+        while: "true"
+        max: 1
+        self_answer: {probe: "check-the-wait", describe: 착지했는가}
+        do: s
+""")
+
+
+def _self_limit_at_its_max(project, monkeypatch):
+    """A run of ``selflimit`` driven by session s1, stopped at its loop max."""
+    from claude_launcher.cflow2 import runtime
+
+    (project / ".claunch" / "workflows" / "v2" / "selflimit.yaml").write_text(
+        SELF_LIMIT, encoding="utf-8")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s1")
+    _, err = _call("flow_start", {"workflow": "selflimit"})
+    assert err is None, err
+    st, err = _call("flow_report", {"node": "s", "value": {"n": 1}})
+    assert err is None, err
+    assert st["reason"] == "loop_limit"
+    assert st["loop_limits"][0]["self_answer"]["tool"] == "flow_extend"
+    return runtime
+
+
+def test_flow_extend_opens_the_drivers_own_limit(project, monkeypatch):
+    """claunch-9poqc: the driver answers its own loop limit through the tool,
+    and the engine's check decides -- here a notice arrived and git agrees."""
+    runtime = _self_limit_at_its_max(project, monkeypatch)
+    monkeypatch.setattr(runtime, "default_probe_runner",
+                        lambda probe, cwd, **kw: (0, "landed"))
+    st, err = _call("flow_extend", {"reason": "s29 sent the merge hash 58d7d489"})
+    assert err is None, err
+    assert st["status"] == "running" and st["tasks"][0]["label"] == "s"
+
+
+def test_flow_extend_refuses_what_the_check_does_not_confirm(project, monkeypatch):
+    """The message is not the answer: when the check says "not yet", the limit
+    stays and a person still owns it (머지 확인전 자체 미리 승인 금지)."""
+    runtime = _self_limit_at_its_max(project, monkeypatch)
+    monkeypatch.setattr(runtime, "default_probe_runner",
+                        lambda probe, cwd, **kw: (1, "not merged yet"))
+    st, err = _call("flow_extend", {"reason": "a notice arrived saying merged"})
+    assert st is None and "did not pass" in err and "not merged yet" in err
+    st, err = _call("flow_status", {})
+    assert st["reason"] == "loop_limit" and st["loop_limits"]
+
+
+def test_flow_extend_is_not_another_sessions_tool(project, monkeypatch):
+    runtime = _self_limit_at_its_max(project, monkeypatch)
+    monkeypatch.setattr(runtime, "default_probe_runner",
+                        lambda probe, cwd, **kw: (0, "landed"))
+    monkeypatch.setenv("CLAUNCH_SESSION", "s2")
+    st, err = _call("flow_extend", {"reason": "not my run", "scope": "s1@main"})
+    assert st is None and "may not operate it" in err
+
+
+def test_flow_extend_is_not_the_parents_tool_either(project, monkeypatch):
+    """A parent may answer a child's chooser: user choice and its move
+    requests (claunch-vjp4y). A loop limit is the driver's own answer to a
+    check it runs in its own checkout, so a parent is refused here."""
+    from claude_launcher.cflow2 import frontend, runtime
+
+    chart = frontend.compile_text(SELF_LIMIT)
+    monkeypatch.setenv("CLAUNCH_SESSION", "w1")
+    runtime.start(chart, cwd=str(project), scope="w1@main", driver_parent="boss")
+    runtime.report("s", "ok", {"n": 1}, cwd=str(project), scope="w1@main")
+    monkeypatch.setattr(runtime, "default_probe_runner",
+                        lambda probe, cwd, **kw: (0, "landed"))
+    monkeypatch.setenv("CLAUNCH_SESSION", "boss")
+    st, err = _call("flow_extend", {"reason": "the parent tries", "scope": "w1@main"})
+    assert st is None and "not yours" in err

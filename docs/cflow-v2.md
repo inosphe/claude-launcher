@@ -668,7 +668,7 @@ body:
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
 | `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
-| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). |
+| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true, self_answer: {probe, describe}}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). `self_answer`는 상한에 선 이 반복을 세션 에이전트가 `flow_extend`로 열 수 있게 하는 명령이다(4.2 — 통과할 때만 열린다) |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
 | `retry` | `retry: {do: T, max: N, every: SECONDS, until: EXPR, between: T}` | 재시도. `between`은 시도 사이에 실행하는 트리 |
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
@@ -2744,6 +2744,18 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
   이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
   (항목 수가 `max`보다 많은 병렬 `foreach`)에는 `--reset`을 거절한다. `--stop`은
   그 반복을 `fail`로 끝낸다.
+- 상한의 자기 답(`loop.self_answer`, claunch-9poqc): 반복이 `self_answer: {probe,
+  describe}`를 선언하면, 상한에 선 그 반복을 **런의 driver(그 세션 에이전트)가**
+  `flow_extend`(MCP)로 한 회차만 열 수 있다. 이때 엔진이 `probe`를 먼저 돌리고
+  **exit 0일 때만** 연다 — 0이 아니면 상한은 그대로 서고 사람만 답할 수 있다.
+  그러므로 이것은 승인이 아니라 기계가 낸 답이다: 세션은 「대기가 끝났다」를
+  스스로 정하지 못하고, 워크플로가 지목한 사실(예: 착지)을 명령에게 물어 그
+  답을 얻을 때만 문이 열린다. 남의 런은 열 수 없다(그 런의 driver만). `probe`는
+  `wait.probe`와 같은 명령 규칙을 따르며 런 값은 환경변수(`CFLOW_DATA_<NAME>`,
+  `CFLOW_IN_<NAME>`)로만 읽는다. 선언하지 않은 반복의 상한은 사람의 것이다
+  (`claunch cflow2 extend`). 상한에 걸린 항목과 대기 카드에는 그 선언이
+  `self_answer`로 실려 `flow_status`의 `loop_limits`와 `waiting` 이벤트에서
+  보인다. 재촉 타이머가 돌지 않아도, 통지로 깨어난 턴이 이 문으로 진행한다.
 - 방문 상한: 방문 수는 노드별로 런 전체에서 센다. 차트 최상위 `max_visits`(기본
   200)를 넘는 진입은 그 노드의 본문이 시작되기 전에 멈추고, 런은
   `waiting_approval`(reason `visit_limit`)가 된다. 사람이
@@ -2879,6 +2891,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
+| `flow_extend` | 자기 런의 `loop_limit`을 한 회차 연다(`node`, `reason`). 반복이 `self_answer`를 선언했고 그 명령이 exit 0일 때만 — 0이 아니면 상한은 그대로 서고 사람만 답한다(4.2). 남의 런은 열 수 없다 |
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`). 응답자의 도구 목록에는 v1 `answer`도 함께 있으므로 계열은 id가 정한다: `ask2-…`는 이 도구가, `ask-…`는 v1 게이트가 받는다 — 어느 도구로 불러도 그 ask를 받은 세션만 답할 수 있다(claunch-c3vq4) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |

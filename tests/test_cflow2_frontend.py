@@ -287,6 +287,32 @@ body:
     assert "exactly one of while / until" in err("body:\n  loop: {max: 2, do: a}\n")
 
 
+def test_a_loop_declares_the_check_that_opens_its_limit():
+    """``loop.self_answer`` (claunch-9poqc): the definition names the command
+    that answers the loop's limit, and nothing else may stand in its place."""
+    chart = C("""
+body:
+  - loop:
+      while: "true"
+      max: 2
+      self_answer: {probe: "check-the-wait", describe: 무엇을 재는가}
+      do: a
+  - loop: {while: "true", max: 2, do: a}
+""")
+    gate = chart.node("body.0").get("self_answer")
+    assert gate == {"probe": "check-the-wait", "describe": "무엇을 재는가"}
+    assert chart.node("body.1").get("self_answer") is None
+    # a loop without the probe leaves its limit to a person
+    assert "self_answer needs a probe" in err(
+        "body:\n  loop: {while: 'true', max: 2, do: a, self_answer: {describe: x}}\n")
+    assert "self_answer" in err(
+        "body:\n  loop: {while: 'true', max: 2, do: a, self_answer: {probe: p, when: x}}\n")
+    assert "is not substituted" in err(
+        "body:\n  loop: {while: 'true', max: 2, do: a, self_answer: {probe: 'x ${data.y}'}}\n")
+    assert "must be a string" in err(
+        "body:\n  loop: {while: 'true', max: 2, do: a, self_answer: {probe: p, describe: 3}}\n")
+
+
 def test_a_loop_marks_itself_as_rounds():
     """``loop.rounds`` (claunch-oxmso.1): the definition says which loop's
     iterations are the workflow's rounds, and the display value ``round_now``
