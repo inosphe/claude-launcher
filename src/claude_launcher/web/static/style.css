@@ -9864,6 +9864,8 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-legend-gate-closed::before { background: #d29922; }
 .cf2-legend-gate-open::before { background: #f85149; }
 .cf2-legend-gate-cut::before { background: #8b949e; }
+.cf2-depth-line { fill: none; stroke: #58a6ff; stroke-width: 1.5; stroke-linejoin: round; }
+.cf2-legend-depth::before { content: ""; display: inline-block; width: 12px; height: 0; border-top: 2px solid #58a6ff; margin-right: 5px; vertical-align: 3px; }
 .cf2-throughput details { margin-top: 6px; }
 .cf2-throughput summary { cursor: pointer; font-size: 12px; color: #9da5b0; }
 .cf2-throughput-compare > .cf2-throughput-controls { margin: 6px 0; }

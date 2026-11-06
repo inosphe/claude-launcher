@@ -302,3 +302,51 @@ def test_move_request_is_a_gate_until_decided():
     ]
     gates = metrics.human_gates(chart, events)
     assert [(g["kind"], g["closed"]) for g in gates] == [("move", at(4)), ("loop_limit", None)]
+
+
+def test_depth_steps_follow_the_deepest_active_node():
+    """(claunch-d54gw) The depth line is the deepest node among the instances
+    the journal entered and has not left. Parallel instances keep the max;
+    changes at one time collapse to the last; nothing active is None."""
+    chart, pick = gated_chart()
+    da, dpick = len(chart.ancestors("a")), len(chart.ancestors(pick))
+    assert da > dpick
+    events = [
+        {"ts": at(0), "event": "entered", "node": pick, "instance": "p@1"},
+        {"ts": at(1), "event": "entered", "node": "a", "instance": "a@2"},
+        {"ts": at(1), "event": "entered", "node": "b", "instance": "b@3"},
+        {"ts": at(2), "event": "left", "node": "b", "instance": "b@3"},
+        {"ts": at(3), "event": "left", "node": "a", "instance": "a@2"},
+        {"ts": at(3), "event": "reported", "node": "a", "instance": "a@2"},
+        {"ts": at(4), "event": "left", "instance": "gone@9"},
+        {"ts": at(5), "event": "left", "node": pick, "instance": "p@1"},
+    ]
+    assert metrics.depth_steps(chart, events) == [
+        {"at": at(0), "depth": dpick}, {"at": at(1), "depth": da},
+        {"at": at(3), "depth": dpick}, {"at": at(5), "depth": None}]
+    # Entered and left at one time: the transient depth never shows.
+    blink = [events[0], {**events[1], "ts": at(0)}, {**events[4], "ts": at(0)}]
+    assert metrics.depth_steps(chart, blink) == [{"at": at(0), "depth": dpick}]
+
+
+def test_depth_steps_of_a_cut_journal_end_at_its_last_event(tmp_path):
+    # A journal the scan limit cut says nothing past its last event: the line
+    # stops there instead of holding the last depth to the run's end.
+    chart, pick = gated_chart()
+    events = [{"ts": at(0), "event": "entered", "node": pick, "instance": "p@1"},
+              {"ts": at(7), "event": "waiting", "node": pick, "instance": "p@1",
+               "kind": "choose", "chooser": "user"}]
+    depth = len(chart.ancestors(pick))
+    assert metrics.depth_steps(chart, events, complete=False) == [
+        {"at": at(0), "depth": depth}, {"at": at(7), "depth": None}]
+    assert metrics.depth_steps(chart, events) == [{"at": at(0), "depth": depth}]
+    # Through the observations: a finished run's line ships on its row, and a
+    # run without valid times ships none.
+    st = RunStore(str(tmp_path), "s")
+    saved(st, "done", events=events)
+    st.chart_path.write_text(chart.to_json())
+    row = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]
+    assert row["depth"] == [{"at": at(0), "depth": depth}]
+    saved(st, "bad", start="not-a-time", events=events)
+    st.chart_path.write_text(chart.to_json())
+    assert metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]["depth"] == []
