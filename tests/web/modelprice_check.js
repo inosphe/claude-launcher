@@ -250,10 +250,12 @@ new Function(
   "exports", "el", "document", "api", "renderWorkspaces",
   [constLine("MP_RATE_KEYS"),
    ...["priceAnyProvider", "modelPricesProviderOptions",
-       "modelPricesDraftValues", "modelPricesSave", "modelPricesCard"]
+       "modelPricesDraftValues", "modelPricesSave", "modelPriceRateId",
+       "modelPricesCard"]
      .map(slice)].join("\n") + `
 let modelPrices = null, modelPricesKey = "", modelPricesError = "";
 let modelPricesDraft = null, modelPricesNotice = "", modelPricesBusy = false;
+let modelPricesAdd = { provider: "", model: "" };
 let sessionsCache = [];
 exports.load = (p) => { modelPrices = p; modelPricesDraft = null; };
 exports.draft = modelPricesDraftValues;
