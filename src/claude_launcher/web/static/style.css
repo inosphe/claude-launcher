@@ -9762,11 +9762,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2 .md .md-p { margin-bottom: 6px; }
 .cf2 .md-h1, .cf2 .md-h2, .cf2 .md-h3 { font-size: 13px; }
 .cf2 .wf-note { font-size: 12px; }
+/* The head card (claunch-jc99t): ways out, then the name and status with the
+   run presses level on the right, then the facts and any warning. */
+.cf2-head {
+  padding: 10px 14px 12px; background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px; display: flex; flex-direction: column; gap: 8px;
+}
 .cf2-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .cf2-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
 .cf2-nav .wf-session { font-size: 12px; }
-.cf2-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
-.cf2-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.cf2-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; align-items: center; }
+.cf2-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .cf2-title h2 { margin: 0; font-size: 18px; font-weight: 600; color: #e6edf3; overflow-wrap: anywhere; }
 .cf2-title .cf2-badge { margin-right: 0; }
 .cf2-status {
@@ -9778,6 +9784,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-status.ok { background: #1f4428; color: #3fb950; }
 .cf2-status.bad { background: #442022; color: #ff7b72; }
 .cf2-meta, .cf2-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: #9da5b0; }
+.cf2-head .cf2-meta { margin-top: 0; gap: 6px; }
+.cf2-head .cf2-meta .cf2-fact {
+  padding: 2px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 12px; color: #c9d1d9;
+}
+.cf2-head .wf-warning.cf2-drift-note {
+  margin: 0; padding: 6px 10px; border: 1px solid #9e6a03; border-left-width: 3px;
+  border-radius: 6px; background: #2b2111; color: #e3b341; line-height: 1.5;
+}
 .cf2-fact { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
 .cf2-fact-k { color: #6e7681; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .cf2 > .wf-warning { margin: 8px 0 0; }
@@ -10234,15 +10248,56 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-kid:hover { background: rgba(110, 118, 129, .12); }
 .cf2-jgrid-node { grid-template-columns: auto auto minmax(0, 1fr); max-height: 260px; }
 
-/* the run's inputs, folded */
-.cf2-run-inputs { margin-top: 8px; font-size: 12px; }
-.cf2-run-inputs > summary { cursor: pointer; color: #9da5b0; }
-.cf2-run-input { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 10px; padding: 3px 0; align-items: baseline; }
-.cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* the run's inputs, folded (claunch-jc99t): one table, the name column as
+   wide as the longest name (subgrid), each value or editor on its name's line */
+.cf2-run-inputs { margin-top: 10px; font-size: 12px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; }
+.cf2-run-inputs > summary {
+  cursor: pointer; color: #c9d1d9; font-weight: 600; padding: 7px 12px;
+  display: flex; align-items: center; gap: 6px; list-style: none;
+}
+.cf2-run-inputs > summary::-webkit-details-marker { display: none; }
+.cf2-run-inputs > summary::before {
+  content: "▸"; display: inline-block; width: 10px; color: #8b949e; transition: transform .12s;
+}
+.cf2-run-inputs[open] > summary::before { transform: rotate(90deg); }
+.cf2-run-inputs > summary:hover { background: #161b22; border-radius: 8px; }
+.cf2-run-inputs[open] > summary { border-bottom: 1px solid #30363d; border-radius: 8px 8px 0 0; }
+.cf2-run-inputs .cf2-count { font-weight: 400; }
+.cf2-run-inputs .cf2-count-edit { color: #58a6ff; background: #172947; }
+.cf2-run-input-grid {
+  display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  column-gap: 16px; padding: 4px 0 6px;
+}
+.cf2-run-input-group {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px;
+  color: #8b949e; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+}
+.cf2-run-input-group + .cf2-run-input { border-top: 0; }
+.cf2-run-input {
+  grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;
+  align-items: center; min-height: 30px; padding: 3px 12px; border-top: 1px solid #21262d;
+}
+.cf2-run-input:hover { background: #161b22; }
+.cf2-run-input.settable > .cf2-run-input-k { color: #c9d1d9; }
+.cf2-run-input-k { color: #8b949e; font-size: 12px; overflow-wrap: anywhere; }
+.cf2-run-input-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; color: #e6edf3; }
 .cf2-run-input-value.empty { color: #484f58; }
-.cf2-run-input-edit { grid-column: 2; display: flex; gap: 6px; align-items: flex-start; }
+.cf2-run-input-edit { display: flex; gap: 6px; align-items: center; max-width: 480px; }
 .cf2-run-input-edit textarea, .cf2-run-input-edit input[type=text],
-.cf2-run-input-edit input[type=number] { flex: 1; min-width: 0; font: inherit; }
+.cf2-run-input-edit input[type=number], .cf2-run-input-edit select {
+  flex: 1; min-width: 0; font: inherit; height: 24px; padding: 0 6px; box-sizing: border-box;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px;
+}
+.cf2-run-input-edit textarea { height: auto; padding: 3px 6px; }
+.cf2-run-input-edit input[type=number] { flex: 0 1 120px; }
+.cf2-run-input-edit select { flex: 0 1 200px; }
+.cf2-run-input-edit :is(input, textarea, select):focus { outline: none; border-color: #1f6feb; box-shadow: 0 0 0 2px rgba(31, 111, 235, .3); }
+.cf2-run-input-edit .wf-btn.sm { height: 24px; padding: 0 12px; }
+.cf2-run-input-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.cf2-run-input-toggle input { margin: 0; width: 14px; height: 14px; accent-color: #1f6feb; }
+.cf2-run-input-state { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #8b949e; }
+.cf2-run-input-toggle input:checked + .cf2-run-input-state { color: #3fb950; font-weight: 600; }
 .cf2-undecidable { color: #d29922; }
 
 /* A v2 workflow's start inputs (docs/cflow-v2.md 2.6). A workflow declares a
