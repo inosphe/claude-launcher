@@ -57,7 +57,7 @@
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇", "term-categorybtn": "⌘", "term-qabtn": "?", "term-threadsbtn": "🗪",
-    "term-clibtn": "❯", "term-vmbtn": "🖥", "term-wrapupbtn": "✎", "term-planbtn": "☰", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
+    "term-clibtn": "❯", "term-vmbtn": "🖥", "term-wrapupbtn": "✎", "term-planbtn": "☰", "term-subprocbtn": "⤷", "term-retro": "⟲", "term-procsbtn": "⚙", "term-size": "⤢",
     "term-details": "ⓘ", "term-zoom-level": "A",
     // Already one character: described like the rest, but no glyph -- the
     // fixed glyph width would make them wider, not narrower.

@@ -175,6 +175,60 @@ def fork_refusal(session: Any, *, min_left: int = FORK_MIN_CONTEXT,
     return ""
 
 
+def harness_fork_refusal(session: Any) -> str:
+    """Why ``session``'s harness offers no conversation to quick-fork (""
+    when it does): the same fact the quick-fork route refuses on
+    (``api.quick_fork_blocked`` -> ``spawn.can_fork``), asked ahead so a
+    fork-mode call falls back with that reason instead of a failed request."""
+    from .. import spawn as spawn_mod
+
+    sdef = getattr(session, "sdef", None)
+    try:
+        definition = sdef.to_dict() if sdef is not None else {}
+    except Exception:  # noqa: BLE001 - a record too odd to describe
+        definition = {}
+    if not spawn_mod.can_fork(definition):
+        harness = definition.get("harness") or "claude"
+        return (f"the driver's harness ({harness}) has no conversation on disk to copy, "
+                f"so it cannot be quick-forked")
+    return ""
+
+
+def call_fork_task(rec: Dict[str, Any], *, cwd: str, scope: str, driver: str) -> str:
+    """The task of a quick-fork that drives a fork-mode call's callee
+    (docs 2.12.2, claunch-8t5r0.2). Same checkout and branch as the driver;
+    what goes back is the callee's result and a handoff summary."""
+    nested = rec.get("nested") or {}
+    sub = nested.get("scope") or ""
+    where = nested.get("cwd") or cwd
+    return "\n".join([
+        f"You are a quick-fork of {driver!r}, started to carry out sub procedure call "
+        f"{rec.get('id')} -- procedure {rec.get('procedure')!r}, called by task "
+        f"{rec.get('label') or rec.get('node')} of {driver!r}'s cflow run ({scope!r}). "
+        f"The conversation above is {driver!r}'s up to the moment of the fork: use it, "
+        f"but from here on this call is your whole job. Do not carry on {driver!r}'s "
+        f"own tasks; it waits for this call.",
+        "",
+        f"Drive the callee run with the flow_* tools, always with scope={sub!r} and "
+        f"cwd={where!r}: flow_status(scope=..., cwd=...) first, then each of its tasks "
+        f"and choices until that run finishes. Its result goes back to {driver!r}'s "
+        f"task by itself when it finishes.",
+        f"You stand in {driver!r}'s checkout on its branch. Do not commit and do not "
+        f"switch branches: {driver!r} commits after the call returns.",
+        "",
+        f"When the callee run has finished, end this session with the claunch MCP tool "
+        f"handoff(text=...): a few lines for {driver!r} -- the outcome, the files you "
+        f"changed, anything left open. That text is typed into its terminal and this "
+        f"copy then ends. Do not call handoff before the callee finished: the call then "
+        f"falls back to {driver!r}, which drives the rest itself.",
+    ])
+
+
+def call_fork_body(rec: Dict[str, Any], *, cwd: str, scope: str, driver: str) -> Dict[str, Any]:
+    return {"task": call_fork_task(rec, cwd=cwd, scope=scope, driver=driver),
+            "self_merge_allowed": True}
+
+
 def fork_body(brief: Dict[str, Any], *, cwd: str, scope: str, driver: str,
               marker: Optional[str] = None) -> Dict[str, Any]:
     """The quick-fork request of a ``fork`` delegation: its task under the

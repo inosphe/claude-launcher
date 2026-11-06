@@ -1,0 +1,7 @@
+pack: 1
+title: Unreal 작업 규약
+description: >-
+  Unreal 프로젝트에서 지켜야 하는 작업 규약을 단계·검증이 있는 sub procedure로
+  묶은 예시 팩이다. prompt pack unreal-operator가 산문으로 주는 규칙을 호출 가능한
+  절차로 옮긴 것이다. 역할 unreal을 가진 세션만 부를 수 있다.
+roles: {type: whitelist, roles: [unreal]}

@@ -466,6 +466,12 @@
            session's: it is never sent to the agent. Rendered by
            renderTermNote(). -->
       <span id="term-note" class="term-note hidden" title=""></span>
+      <!-- The sub procedure the attached session's v2 run is in, when it is
+           in one (claunch-8t5r0.3): the procedure, fork or inline, and a
+           fork that fell back to inline in amber with the cause in the
+           title. A click opens the sub procedure pane. Rendered by
+           SubprocUi.header() (subprocs.js) from the /api/cflow2/rail row. -->
+      <span id="term-subproc" class="term-subproc hidden" role="button" tabindex="0"></span>
       <!-- The name, and beside it the way back to that name in the rail. The
            list is a monitor of twenty-odd sessions in a 260px column: the row
            for the one you are typing in is as likely to be scrolled out of
@@ -719,6 +725,12 @@
            lit while one waits on you. -->
       <button id="term-planbtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's plan and the decisions it waits on">☰ plan</button>
+      <!-- The sub procedures this session's v2 run can call (subprocs.js,
+           SPLIT_PANES.subprocs, claunch-8t5r0.4/.5): every one listed, the
+           ones that cannot run now disabled with the reason on hover, and
+           the procedure packs with their role filter. -->
+      <button id="term-subprocbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="the sub procedures this session's run can call">⤷ sub</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
            and opened by itself when the session changes a question. This
@@ -1906,6 +1918,7 @@
 <script src="static/sim-page.js"></script>
 <script src="static/category-page.js"></script>
 <script src="static/packs-pane.js"></script>
+<script src="static/subprocs.js"></script>
 <script src="static/durable-flow.js"></script>
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>

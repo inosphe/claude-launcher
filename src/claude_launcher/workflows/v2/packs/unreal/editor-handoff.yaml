@@ -1,0 +1,54 @@
+cflow: 2
+name: editor-handoff
+kind: procedure
+forkable: true
+description: >-
+  코드만으로 끝낼 수 없는 Unreal 에디터 작업(에셋 생성, Blueprint 연결, Project
+  Settings, PIE 검증)을 사람 operator에게 넘기는 beads 이슈로 만든다. 규칙의 원문은
+  prompt pack unreal-operator다. 호출한 작업의 브랜치·워크트리를 그대로 쓰며 커밋하지
+  않는다.
+
+params:
+  summary: {type: str, required: true, description: 에디터에서 해야 하는 일 한 문장}
+  parent: {type: str, default: "", description: 이 이슈가 딸릴 회차 이슈 id(비우면 독립 이슈)}
+  priority: {type: str, default: P2, description: "P1(런타임 정확성·검증 경로 차단) | P2 | P3"}
+
+returns:
+  ok:
+    issue: str
+    labels: list
+  fail:
+    reason: str
+
+nodes:
+  classify:
+    title: 에디터 작업 판정
+    prompt: |
+      넘길 일: ${params.summary}
+
+      prompt pack unreal-operator의 「operator 이슈를 만들어야 하는 경우」 목록과 대조한다
+      (rebrief pack=unreal-operator로 불러 읽는다). 코드 수정만으로 끝낼 수 있으면 이슈를
+      만들지 않고 fail(reason: code_only)로 돌아간다. 해당하면 라벨 후보(asset, blueprint,
+      settings, data, animation, hud, network, playtest)를 고른다.
+    returns:
+      ok: {labels: list}
+      fail: {reason: str}
+  file-issue:
+    title: operator 이슈 작성
+    prompt: |
+      `claunch beads create "Operator: <한국어 작업 제목>" --type task --priority ${params.priority}
+      --assignee operator --labels operator,unreal,manual,<classify의 라벨>`로 이슈를 만든다.
+      부모 ${params.parent}가 있으면 `--parent`로 단다. 본문은 한국어 markdown이고 다음을 담는다:
+      목적, 에디터에서 할 일(에셋 경로·클래스명·설정 키는 원문), 완료 확인 방법(PIE·로그·화면).
+      이 이슈를 에이전트 세션에 배정하지 않는다.
+    returns:
+      ok: {issue: str}
+      fail: {reason: str}
+
+body:
+  - classify
+  - file-issue
+  - return: ok
+    value:
+      issue: "$result['file-issue'].value.issue"
+      labels: "$result['classify'].value.labels"

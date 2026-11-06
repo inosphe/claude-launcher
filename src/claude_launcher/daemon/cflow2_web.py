@@ -632,6 +632,32 @@ def delegations(state: dict, journal: List[dict]) -> List[dict]:
     return out
 
 
+def rail_subprocs(state: dict) -> List[dict]:
+    """The open dynamic calls of a run, one line each, for the session rail
+    and the terminal header: procedure, its pack, the calling task, the mode
+    (``inline``/``fork``), the fork's state and session, and the fallback
+    cause when a fork went inline."""
+    out = []
+    for cid, rec in (state.get("calls") or {}).items():
+        if not isinstance(rec, dict) or rec.get("status") != "running":
+            continue
+        fork = rec.get("fork") if isinstance(rec.get("fork"), dict) else {}
+        nested = rec.get("nested") if isinstance(rec.get("nested"), dict) else {}
+        entry = {"id": rec.get("id") or cid, "procedure": rec.get("procedure"),
+                 "pack": rec.get("pack"), "label": rec.get("label"),
+                 "mode": rec.get("mode") or "inline", "started": rec.get("started"),
+                 "by": rec.get("by") or "agent", "scope": nested.get("scope"),
+                 "cwd": nested.get("cwd")}
+        if fork:
+            entry["fork"] = {k: fork.get(k) for k in ("status", "session") if fork.get(k)}
+        if isinstance(rec.get("fallback"), dict):
+            entry["fallback"] = {k: rec["fallback"].get(k)
+                                 for k in ("cause", "at", "fork_session")
+                                 if rec["fallback"].get(k)}
+        out.append(entry)
+    return out
+
+
 def calls(state: dict) -> List[dict]:
     """The run's dynamic calls (``flow_call``, docs/cflow-v2.md 2.12): which
     task called which procedure, how it stands, and the callee run's slot
@@ -642,9 +668,13 @@ def calls(state: dict) -> List[dict]:
             continue
         nested = rec.get("nested") if isinstance(rec.get("nested"), dict) else {}
         entry = {k: rec.get(k) for k in ("instance", "node", "label", "procedure", "status",
-                                         "started", "finished", "outcome")}
+                                         "started", "finished", "outcome", "pack", "by")}
         entry.update({"id": rec.get("id") or cid, "scope": nested.get("scope"),
-                      "cwd": nested.get("cwd")})
+                      "cwd": nested.get("cwd"), "mode": rec.get("mode") or "inline"})
+        if isinstance(rec.get("fork"), dict):
+            entry["fork"] = rec["fork"]
+        if isinstance(rec.get("fallback"), dict):
+            entry["fallback"] = rec["fallback"]
         out.append(entry)
     return out
 
@@ -946,7 +976,8 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
                 "workflow": None, "current": [], "owed": [], "optional": [],
                 "gated": False, "blocking": False,
-                "answers": [], "urgent_asks": [], "started": None, "updated": None,
+                "answers": [], "urgent_asks": [], "subprocs": [],
+                "started": None, "updated": None,
                 "entered_at": None, "round": None, "round_now": None}
     inst = state.get("inst") or {}
     current = []
@@ -1045,6 +1076,11 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "blocking": bool(owed),
         "answers": answers,
         "urgent_asks": _rail_urgent(state),
+        # The sub procedure calls open on this run (docs 2.12.2,
+        # claunch-8t5r0.3): the session card and the session header show
+        # which procedure runs, inline or in a fork, and a fork that fell
+        # back to inline -- the same record the notification event reports.
+        "subprocs": rail_subprocs(state),
         # The start inputs the run was launched with (runtime.status carries
         # the same under "inputs"). "Spawn same setup" seeds a child's spawn
         # form from this row, so the workflow's variables come over with it.

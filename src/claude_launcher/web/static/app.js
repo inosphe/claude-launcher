@@ -7584,6 +7584,9 @@ function renderTermHandle() {
    so a write that says what it already said buys a re-measure of the whole
    bar five seconds at a time for nothing. */
 function renderTermNote() {
+  // The sub procedure chip beside it follows the same session switches and
+  // polls (subprocs.js); it writes only when what it shows changed.
+  globalThis.SubprocUi?.header();
   const chip = $("term-note");
   if (!chip) return;
   const s = currentName
@@ -8206,6 +8209,8 @@ async function refreshCflow2Rail() {
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // and so does the header's sub procedure chip (subprocs.js)
+  globalThis.SubprocUi?.header();
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
@@ -8265,6 +8270,8 @@ function applyCflow2Badges() {
   for (const li of list.querySelectorAll("li[data-name]")) {
     const old = li.querySelector(".sess-cflow2");
     const r = (cflow2RailCache || {})[li.dataset.name];
+    // The sub procedure line under it (subprocs.js, claunch-8t5r0.3).
+    globalThis.SubprocUi?.card(li, r);
     if (!r) { if (old) old.remove(); continue; }
     const line = old || document.createElement("a");
     if (!old) {
@@ -25743,6 +25750,15 @@ const SPLIT_PANES = {
     on: "close the plan pane — the terminal takes the column back",
     off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
   },
+  // The sub procedures this session's v2 run could call (subprocs.js,
+  // docs/cflow-v2.md 2.12.3, claunch-8t5r0.4/.5): every one listed, the ones
+  // that cannot run now greyed out with the reason, a call made here as the
+  // user, and the procedure packs with their role filter.
+  subprocs: {
+    btn: "term-subprocbtn", title: "⤷ sub",
+    on: "close the sub procedure pane — the terminal takes the column back",
+    off: "the sub procedures this session's run can call — call one, and install packs or edit their role filter",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -25755,7 +25771,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "subprocs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27873,6 +27889,7 @@ function syncSplitPane() {
   // would silently write the opposite of what it appears to do.
   for (const [pane, spec] of Object.entries(SPLIT_PANES)) {
     const btn = $(spec.btn);
+    if (!btn) continue;
     const on = !!lay && lay.split && lay.pane === pane;
     btn.setAttribute("aria-pressed", String(on));
     btn.title = on ? spec.on : spec.off;
@@ -28895,6 +28912,8 @@ function openSplit(name, kind = "run") {
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
   // And the briefing and prompt packs pane (packs-pane.js).
   if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
+  // And the sub procedure picker and pack editor (subprocs.js).
+  if (kind === "subprocs") { globalThis.SubprocPane?.mount(splitBody, name); return; }
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
@@ -28936,6 +28955,7 @@ function closeSplit() {
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
+  if (splitKind === "subprocs") globalThis.SubprocPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
@@ -29032,6 +29052,7 @@ $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
 $("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
+$("term-subprocbtn").addEventListener("click", () => toggleSplitPane("subprocs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.

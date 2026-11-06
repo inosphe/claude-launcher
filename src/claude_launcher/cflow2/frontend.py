@@ -191,6 +191,9 @@ TOP_KEYS = (
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
     "inputs", "input_constraints", "collections", "collection_types", "question_types",
     "sides", "recur", "gates",
+    # a procedure a calling task may run in a quick-fork of its driver
+    # (docs 2.12.2, claunch-8t5r0.2)
+    "forkable",
     # ad-hoc layout metadata (cflow2/layouts.py): a reference to a separate
     # layout file, never the layout itself -- the workflow stays readable
     "layout",
@@ -202,6 +205,8 @@ TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
     "do", "triggers", "restart", "force_target", "session_workflow", "calls", "sims",
+    # the task may run a forkable callee in a quick-fork (docs 2.12.2)
+    "fork_calls",
     # a step's own layout reference (cflow2/layouts.py); overrides the
     # workflow's while that node is live
     "layout",
@@ -915,6 +920,13 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     calls = _calls(ctx, tfile, name, raw, tline)
     if calls:
         node.props["calls"] = calls
+    fork_calls = raw.get("fork_calls")
+    if fork_calls is not None:
+        if not isinstance(fork_calls, bool):
+            raise ctx.err(tfile, _key_line(raw, "fork_calls", tline),
+                          f"task {name!r}: fork_calls must be true or false")
+        if fork_calls:
+            node.props["fork_calls"] = True
     sims = _sims(ctx, tfile, name, raw, tline)
     if sims:
         node.props["sims"] = sims
@@ -963,7 +975,12 @@ def _calls(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any], line: int) -> L
     from the run's layers when the call is made, not here."""
     where = _key_line(raw, "calls", line)
     names = _str_list(ctx, file, raw.get("calls"), f"task {name!r} calls", where)
-    return list(dict.fromkeys(_definition_name(ctx, n, file, where, "calls") for n in names))
+    from . import procpacks
+
+    # a pack procedure is named <pack>:<procedure> (docs 2.12.1)
+    return list(dict.fromkeys(
+        n if procpacks.is_qualified(n) else _definition_name(ctx, n, file, where, "calls")
+        for n in names))
 
 
 def _force_target(ctx: _Ctx, file: str, raw: Dict[str, Any], node: ir.Node, line: int) -> bool:
@@ -2585,6 +2602,14 @@ def compile_text(text: str, *, source: str = "",
             raise ctx.err(file, _line(fr), "filter_roles.type must be whitelist or blacklist")
         _str_list(ctx, file, fr.get("roles"), "filter_roles.roles", _line(fr))
         filter_roles = _plain(fr)
+    forkable = doc.get("forkable")
+    if forkable is not None:
+        if not isinstance(forkable, bool):
+            raise ctx.err(file, _key_line(doc, "forkable"), "forkable must be true or false")
+        if forkable and kind != ir.KIND_PROCEDURE:
+            raise ctx.err(file, _key_line(doc, "forkable"),
+                          "forkable is a procedure's key (kind: procedure): it says a "
+                          "dynamic call may run it in a quick-fork")
     priority = doc.get("priority", 0)
     if isinstance(priority, bool) or not isinstance(priority, (int, float)):
         raise ctx.err(file, _key_line(doc, "priority"), "priority must be a number")
@@ -2668,6 +2693,7 @@ def compile_text(text: str, *, source: str = "",
         meta={
             "default_role": doc.get("default_role"),
             "filter_roles": filter_roles,
+            **({"forkable": True} if forkable else {}),
             "default_child_cflow": doc.get("default_child_cflow"),
             "priority": priority,
             "max_visits": max_visits,

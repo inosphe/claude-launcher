@@ -673,6 +673,7 @@ CHECKS = [
         "retrospectionpage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
+        "subprocs_check.js",
         "simpage_check.js",
         "durableflow_check.js",
         "qapane_check.js",

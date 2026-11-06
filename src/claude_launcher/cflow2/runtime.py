@@ -3753,9 +3753,207 @@ def _call_chain(state: Dict[str, Any], _depth: int = 0) -> List[str]:
         return []
 
 
+#: How a call runs (docs 2.12.2): in the session that drives the calling
+#: run, or in a quick-fork of it. ``auto`` (the default) forks when the task
+#: declares ``fork_calls`` and the procedure ``forkable``; ``inline`` never.
+CALL_MODE_AUTO = "auto"
+CALL_MODE_INLINE = "inline"
+CALL_MODE_FORK = "fork"
+CALL_MODES = (CALL_MODE_AUTO, CALL_MODE_INLINE)
+#: The fork of a fork-mode call: queued until the daemon decides, running
+#: once a copy drives the callee, ``fallback`` when it went inline instead.
+FORK_QUEUED = "queued"
+FORK_RUNNING = "running"
+FORK_FALLBACK = "fallback"
+#: Who asked for a call: the driver (``flow_call``) or a person (the
+#: dashboard's sub procedure picker, claunch-8t5r0.4).
+CALL_BY_AGENT = "agent"
+CALL_BY_USER = "user"
+
+
+def _call_target(procedure: str, cwd: str):
+    """``(chart, pack)`` of a call's procedure: a plain name from the layers,
+    a ``<pack>:<procedure>`` from an installed pack (docs 2.12.1)."""
+    from . import layers, procpacks
+
+    if procpacks.is_qualified(procedure):
+        hit = procpacks.find(procedure, cwd)
+        chart = procpacks.load(procedure, cwd)
+        return chart, (hit[0] if hit else None)
+    if not layers.is_name(procedure):
+        raise FlowError(f"call {procedure!r}: give a procedure name, not a path")
+    return layers.load(procedure, cwd), None
+
+
+def _role_specs(chart: Any, pack: Any) -> List[Tuple[str, Dict[str, Any]]]:
+    specs = []
+    own = (chart.meta or {}).get("filter_roles") if chart is not None else None
+    if own:
+        specs.append(("procedure", own))
+    if pack is not None and pack.roles:
+        specs.append((f"pack {pack.id}", pack.roles))
+    return specs
+
+
+def role_refusal(chart: Any, pack: Any, roles: Optional[Any]) -> str:
+    """Why a session holding ``roles`` may not call this procedure ("" when
+    it may): the procedure's own ``filter_roles`` and its pack's ``roles``
+    must both admit one of the roles held (docs 2.12.1)."""
+    from . import procpacks
+
+    held = list(roles) if roles else []
+    for what, spec in _role_specs(chart, pack):
+        if not procpacks.admits(spec, held):
+            shown = "+".join(held) if held else "no known role"
+            return (f"{what} admits {procpacks.describe(spec)}; the calling session "
+                    f"holds {shown}")
+    return ""
+
+
+def _held_for(cwd: Optional[str], scope: Optional[str], chart: Any, pack: Any,
+              roles: Optional[Any]) -> Optional[Any]:
+    """The roles to judge a call by: given by the caller (the daemon knows
+    them), else read off the mesh -- only when some filter asks."""
+    if roles is not None or not _role_specs(chart, pack):
+        return roles
+    from . import procpacks
+
+    try:
+        st = RunStore(cwd, scope)
+        state = st.load_state()
+    except (StoreError, OSError):
+        return None
+    return procpacks.held_roles(acting_session(state), state.get("mesh") or "",
+                                str(st.cwd))
+
+
+def callable_procedures(cwd: Optional[str] = None, scope: Optional[str] = None,
+                        node: Optional[str] = None, *, roles: Optional[Any] = None,
+                        catalog: bool = True, read_roles: bool = True) -> Dict[str, Any]:
+    """Every procedure a task of this run could be asked to call, each with
+    whether it can be called now and why not (docs 2.12.1): the active
+    task's ``calls``, every installed pack's procedures, and -- ``catalog``
+    -- the procedures of packs that are only in the package catalog. The
+    same judgement :func:`call` refuses on, so a picker that offers an entry
+    as available offers what the call accepts."""
+    from . import layers, procpacks
+
+    st = RunStore(cwd, scope)
+    r = Run.load(st, None)
+    state = r.state
+    tasks = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_TASK]
+    calling = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_CALL]
+    target = None
+    if node:
+        target = next((iid for iid in tasks if iid == node or r.node_of(iid).id == node
+                       or shown_label(r.chart, r.node_of(iid)) == node), None)
+    elif len(tasks) == 1:
+        target = tasks[0]
+    tnode = r.node_of(target) if target else None
+    declared = list((tnode.get("calls") if tnode is not None else None) or [])
+    fork_caller = bool(tnode is not None and tnode.get("fork_calls"))
+    if roles is None and read_roles:
+        roles = procpacks.held_roles(acting_session(state), state.get("mesh") or "",
+                                     str(st.cwd))
+    run_why = ""
+    if state.get("status") not in LIVE_STATUSES:
+        run_why = f"the run is {state.get('status')}"
+    elif _halted(r):
+        run_why = "the run is halted"
+    elif pending_move(state) is not None:
+        run_why = "a move request is open on the run"
+    elif target is None:
+        run_why = ("a call is already open on the active task" if calling and not tasks
+                   else "no active task to attach the call to" if not tasks
+                   else "several tasks are active; name the one that calls")
+    chain = _call_chain(state)
+    out: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(name: str, source: str, pack: Any = None, installed: bool = True) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        entry: Dict[str, Any] = {"name": name, "source": source,
+                                 "pack": pack.id if pack is not None else None,
+                                 "installed": installed, "declared": name in declared}
+        chart = None
+        why = run_why
+        try:
+            if procpacks.is_qualified(name):
+                chart = procpacks.load(name, str(st.cwd), installed_only=False)
+            else:
+                chart = layers.load(name, str(st.cwd))
+        except Exception as exc:  # noqa: BLE001 - listed with its reason
+            why = why or f"does not compile or resolve: {exc}"
+        if chart is not None:
+            entry.update({"description": chart.description or "",
+                          "params": chart.params or {},
+                          "returns": chart.returns or {},
+                          "forkable": bool((chart.meta or {}).get("forkable")),
+                          "filter_roles": (chart.meta or {}).get("filter_roles")})
+            if chart.kind != ir.KIND_PROCEDURE:
+                why = why or f"{chart.name} is a {chart.kind}, not a procedure"
+            blocks = [k for k, d in (chart.params or {}).items()
+                      if (d or {}).get("type") == "block"]
+            if blocks and not why:
+                why = f"block parameter(s) {', '.join(blocks)} need a call site"
+        if pack is not None:
+            entry["pack_roles"] = pack.roles
+        if not installed and not why:
+            why = f"pack {pack.id} is in the catalog only; install it into this workspace"
+        if not why and source == "calls" and name not in declared:
+            why = "the active task does not declare it in calls"
+        if not why:
+            why = role_refusal(chart, pack, roles)
+        if not why and name in chain:
+            why = f"recursive call: {' -> '.join(chain + [name])}"
+        if not why and len(chain) >= CALL_DEPTH_MAX:
+            why = f"call depth {CALL_DEPTH_MAX} reached"
+        entry["mode"] = (CALL_MODE_FORK if fork_caller and entry.get("forkable")
+                         else CALL_MODE_INLINE)
+        entry["available"] = not why
+        entry["why"] = why
+        out.append(entry)
+
+    for name in declared:
+        hit = procpacks.find(name, str(st.cwd)) if procpacks.is_qualified(name) else None
+        add(name, "calls", hit[0] if hit else None)
+    for pack in procpacks.all_packs(str(st.cwd)):
+        if not pack.installed and not catalog:
+            continue
+        for proc in pack.procedures:
+            add(procpacks.qualify(pack.id, proc), "pack", pack, pack.installed)
+    return {"run": state.get("run_id"), "scope": st.scope, "cwd": str(st.cwd),
+            "task": target, "task_label": shown_label(r.chart, tnode) if tnode else None,
+            "fork_calls": fork_caller, "roles": list(roles) if roles else None,
+            "refusal": run_why, "procedures": out}
+
+
+def _pack_calls(r: Run) -> List[str]:
+    """The installed pack procedures visible from the run's directory, by
+    qualified name (cached per status call on the Run)."""
+    cached = getattr(r, "_pack_calls_cache", None)
+    if cached is not None:
+        return cached
+    from . import procpacks
+
+    try:
+        names = [procpacks.qualify(p.id, proc)
+                 for p in procpacks.installed(str(r.store.cwd)) for proc in p.procedures]
+    except OSError:
+        names = []
+    try:
+        setattr(r, "_pack_calls_cache", names)
+    except AttributeError:
+        pass
+    return names
+
+
 def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, Any]] = None,
          *, cwd: Optional[str] = None, scope: Optional[str] = None,
-         now: Optional[float] = None) -> Dict[str, Any]:
+         now: Optional[float] = None, mode: Optional[str] = None,
+         roles: Optional[Any] = None, by: str = CALL_BY_AGENT) -> Dict[str, Any]:
     """An active task calls ``procedure`` (doc 2.12): the definition is
     resolved by name from the run's layers now, compiled, and started as a
     nested run ``<scope>~c<n>`` that the driver drives with the flow_* tools.
@@ -3765,11 +3963,30 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
     (default deny); one open call per task; no procedure twice in a chain
     and at most :data:`CALL_DEPTH_MAX` frames."""
     procedure = str(procedure or "").strip()
-    from . import layers
-    if not layers.is_name(procedure):
+    from . import layers, procpacks
+    if not (layers.is_name(procedure) or procpacks.is_qualified(procedure)):
         raise FlowError(f"call {procedure!r}: give a procedure name, not a path")
     if with_ is not None and not isinstance(with_, dict):
         raise FlowError("'with' must be an object of parameter -> value")
+    mode = str(mode or CALL_MODE_AUTO)
+    if mode not in CALL_MODES:
+        raise FlowError(f"call mode {mode!r}: one of {', '.join(CALL_MODES)}")
+    if by not in (CALL_BY_AGENT, CALL_BY_USER):
+        raise FlowError(f"call by {by!r}: one of {CALL_BY_AGENT}, {CALL_BY_USER}")
+    # Resolved before the run lock: compiling and reading the mesh roles
+    # (a daemon round trip) must not hold the run.
+    # A lookup error is held until the task's own checks ran: a name the
+    # task does not declare is refused as such, not as an unknown file.
+    st0 = RunStore(cwd, scope)
+    chart, pack, load_error = None, None, None
+    try:
+        chart, pack = _call_target(procedure, str(st0.cwd))
+    except FlowError as exc:
+        load_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - compile/lookup errors refuse the call
+        load_error = f"call {procedure!r}: {exc}"
+    is_pack = procpacks.is_qualified(procedure)
+    held = _held_for(cwd, scope, chart, pack, roles) if chart is not None else roles
     out: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
@@ -3778,20 +3995,24 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
         iid = _find(r, node, (AW_TASK,), "task")
         tnode = r.node_of(iid)
         allowed = tnode.get("calls") or []
-        if procedure not in allowed:
+        # Allowed: the task's own calls, or any procedure of an installed
+        # pack (docs 2.12.1, user decision qa-b9b833c7).
+        if procedure not in allowed and not is_pack:
             raise FlowError(
                 f"refused: task {shown_label(r.chart, tnode)} may not call {procedure!r} "
-                f"(its calls: {', '.join(allowed) or 'none declared'})")
+                f"(its calls: {', '.join(allowed) or 'none declared'}; a procedure of an "
+                f"installed pack is named <pack>:<procedure>)")
+        if load_error:
+            raise FlowError(load_error)
+        why = role_refusal(chart, pack, held)
+        if why:
+            raise FlowError(f"refused: call {procedure!r}: {why}")
         chain = _call_chain(r.state)
         if procedure in chain:
             raise FlowError(f"refused: recursive call: {' -> '.join(chain + [procedure])}")
         if len(chain) >= CALL_DEPTH_MAX:
             raise FlowError(f"refused: call depth {CALL_DEPTH_MAX} reached "
                             f"({' -> '.join(chain)})")
-        try:
-            chart = layers.load(procedure, str(r.store.cwd))
-        except Exception as exc:  # noqa: BLE001 - compile/lookup errors refuse the call
-            raise FlowError(f"call {procedure!r}: {exc}") from None
         if chart.kind != ir.KIND_PROCEDURE:
             raise FlowError(f"call {procedure!r}: {chart.name} is a {chart.kind}, not a "
                             f"procedure (kind: procedure)")
@@ -3811,20 +4032,31 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
         cid = f"c{len(calls) + 1}"
         sub = call_scope(r.store.scope, cid)
         returns = json.loads(json.dumps(chart.returns or {ir.OUTCOME_OK: {}}))
+        # Fork when both ends agree (docs 2.12.2): the caller declares
+        # fork_calls and the callee forkable. Until the daemon decides, the
+        # callee has no driver, so nobody drives it twice.
+        forked = (mode == CALL_MODE_AUTO and bool(tnode.get("fork_calls"))
+                  and bool((chart.meta or {}).get("forkable")))
         rec: Dict[str, Any] = {
             "id": cid, "instance": iid, "node": tnode.id,
             "label": shown_label(r.chart, tnode), "procedure": procedure,
             "with": params, "status": CALL_OPEN, "started": store_mod.utcnow(),
             "finished": None, "nested": {"cwd": str(r.store.cwd), "scope": sub},
             "returns": returns, "source": chart.source,
+            "mode": CALL_MODE_FORK if forked else CALL_MODE_INLINE,
+            "driver": driver, "by": by,
         }
+        if pack is not None:
+            rec["pack"] = pack.id
+        if forked:
+            rec["fork"] = {"status": FORK_QUEUED, "queued_at": store_mod.utcnow()}
         calls[cid] = rec
         frame = r.inst[iid]["frame"]
         frame.pop("call_result", None)
         frame["call"] = cid
         r.inst[iid]["await"] = AW_CALL
         r.emit("call_started", node=tnode.id, instance=iid, call=cid, procedure=procedure,
-               scope=sub, params=params)
+               scope=sub, params=params, mode=rec["mode"], by=by)
         link = {"cwd": str(r.store.cwd), "scope": r.store.scope, "call": cid,
                 "run": r.state.get("run_id"), "chain": chain + [procedure]}
         st = RunStore(str(r.store.cwd), sub)
@@ -3836,7 +4068,7 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             elif st.chart_path.exists():
                 st.chart_path.unlink()
             child = _new_run(st, chart, params=params, data=data, caps=r.state.get("caps"),
-                             driver=driver, now=r.now, parent=link)
+                             driver="" if forked else driver, now=r.now, parent=link)
             done = child.state.get("status") in FINISHED_STATUSES
             if done:
                 child.state["delivered"] = True  # applied below, in this lock
@@ -3844,7 +4076,11 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             child.after = []
             result = (child.state.get("status"), child.state.get("outcome"),
                       child.state.get("value"))
-        out.update({"call": cid, "instance": iid, "procedure": procedure, "scope": sub})
+        out.update({"call": cid, "instance": iid, "procedure": procedure, "scope": sub,
+                    "mode": rec["mode"]})
+        if forked:
+            out["fork"] = ("queued: the daemon quick-forks this session to drive the "
+                           "callee, or hands it back to you (inline) and says why")
         if done:
             _call_result(r, rec, *result)
     _mutate(cwd, scope, now, op)
@@ -3881,6 +4117,78 @@ def _call_result(r: Run, rec: Dict[str, Any], status_: Optional[str], outcome: A
     inst["frame"]["call_result"] = {"call": rec["id"], "procedure": rec["procedure"],
                                     "outcome": outcome, "value": value}
     inst["await"] = AW_TASK
+
+
+def _set_callee_driver(rec: Dict[str, Any], driver: str) -> None:
+    nested = rec.get("nested") or {}
+    st = RunStore(nested.get("cwd"), nested.get("scope"))
+    with st.lock():
+        if not st.exists():
+            return
+        state = st.load_state()
+        state["driver"] = driver or ""
+        st.save_state(state)
+
+
+def fork_calls_pending(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The open fork-mode calls of a run whose fork the daemon still has to
+    decide (queued) or watch (running)."""
+    return [rec for rec in (state.get("calls") or {}).values()
+            if isinstance(rec, dict) and rec.get("status") == CALL_OPEN
+            and (rec.get("fork") or {}).get("status") in (FORK_QUEUED, FORK_RUNNING)]
+
+
+def call_forked(call_id: str, copy: str, *, cwd: Optional[str] = None,
+                scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """The daemon quick-forked the driver for fork-mode call ``call_id``:
+    the copy drives the callee from now on (docs 2.12.2)."""
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("calls") or {}).get(call_id)
+        if not rec or rec.get("status") != CALL_OPEN:
+            raise FlowError(f"call {call_id}: not open")
+        fork = rec.setdefault("fork", {})
+        if fork.get("status") != FORK_QUEUED:
+            raise FlowError(f"call {call_id}: fork is {fork.get('status')}, not queued")
+        fork.update({"status": FORK_RUNNING, "session": copy, "started": store_mod.utcnow()})
+        r.emit("call_forked", call=call_id, node=rec.get("node"), procedure=rec.get("procedure"),
+               session=copy)
+        out.update(rec)
+    _mutate(cwd, scope, now, op)
+    _set_callee_driver(out, copy)
+    return out
+
+
+def call_fork_fallback(call_id: str, cause: str, *, cwd: Optional[str] = None,
+                       scope: Optional[str] = None, now: Optional[float] = None
+                       ) -> Dict[str, Any]:
+    """Fork-mode call ``call_id`` could not run in a fork (the harness has
+    no conversation to copy, the driver is a quick-fork, too little context
+    is left, the copy ended without the callee's result): it runs inline,
+    driven by the calling run's driver, and the fallback is recorded where
+    the session card, the header and the notification read it."""
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("calls") or {}).get(call_id)
+        if not rec or rec.get("status") != CALL_OPEN:
+            raise FlowError(f"call {call_id}: not open")
+        fork = rec.setdefault("fork", {})
+        was = fork.get("session")
+        fork.update({"status": FORK_FALLBACK, "cause": str(cause or ""),
+                     "at": store_mod.utcnow()})
+        rec["mode"] = CALL_MODE_INLINE
+        rec["fallback"] = {"cause": str(cause or ""), "at": fork["at"],
+                           **({"fork_session": was} if was else {})}
+        r.emit("fallback", cause=f"fork call refused: {cause}", route="inline",
+               decision="call", call=call_id, node=rec.get("node"),
+               procedure=rec.get("procedure"))
+        out.update(rec)
+        out["driver"] = rec.get("driver") or acting_session(r.state)
+    _mutate(cwd, scope, now, op)
+    _set_callee_driver(out, str(out.get("driver") or ""))
+    return out
 
 
 OPEN_DELEGATION = ("pending", "queued", "running")
@@ -6025,6 +6333,13 @@ def describe(r: Run) -> Dict[str, Any]:
             })
             if node.get("calls"):
                 tasks[-1]["calls"] = list(node.get("calls"))
+            if node.get("fork_calls"):
+                tasks[-1]["fork_calls"] = True
+            packs = _pack_calls(r)
+            if packs:
+                # every task may call an installed pack's procedures
+                # (docs 2.12.1); the roles are judged when it calls
+                tasks[-1]["pack_calls"] = packs
             if inst["frame"].get("call_result"):
                 tasks[-1]["call_result"] = inst["frame"]["call_result"]
             if inst["frame"].get("last_verify"):
@@ -6140,6 +6455,10 @@ def describe(r: Run) -> Dict[str, Any]:
         entry = {k: rec.get(k) for k in ("id", "instance", "node", "label", "procedure",
                                          "status", "started", "finished")}
         entry["scope"] = rec["nested"]["scope"]
+        entry["mode"] = rec.get("mode") or CALL_MODE_INLINE
+        for k in ("pack", "fork", "fallback", "by"):
+            if rec.get(k):
+                entry[k] = rec[k]
         if rec.get("status") != CALL_OPEN:
             entry["outcome"] = rec.get("outcome")
         calls.append(entry)

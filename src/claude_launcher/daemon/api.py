@@ -1146,6 +1146,13 @@ def build_app(
     r.add_get("/api/gates", h_gates)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
+    # sub procedures (docs 2.12.1-2.12.3, claunch-8t5r0)
+    r.add_get("/api/cflow2/procedures", h_cflow2_procedures)
+    r.add_post("/api/cflow2/call", h_cflow2_call)
+    r.add_get("/api/cflow2/packs", h_cflow2_packs)
+    r.add_post("/api/cflow2/packs/install", h_cflow2_pack_install)
+    r.add_post("/api/cflow2/packs/remove", h_cflow2_pack_remove)
+    r.add_post("/api/cflow2/packs/roles", h_cflow2_pack_roles)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
     r.add_post("/api/cflow2/input", h_cflow2_input)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
@@ -7666,6 +7673,120 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
         NUDGE_CFLOW2_PICKED.format(option=option, **words),
     )
     return json_response(payload)
+
+
+NUDGE_CFLOW2_CALLED = (
+    "cflow2: the user called sub procedure '{procedure}' from the dashboard "
+    "(call {call}, {mode}) on task {label} - call the flow_status tool: {how}"
+)
+
+
+async def h_cflow2_procedures(request: web.Request) -> web.Response:
+    """Every sub procedure a v2 run could call now, each with ``available``
+    and ``why`` (``runtime.callable_procedures``, docs 2.12.3):
+    ``?cwd=&scope=&node=``. The picker lists them all and greys out the
+    ones that are not available, with ``why`` as the tooltip."""
+    cwd, scope = _cflow2_slot(request)
+    node = request.query.get("node") or None
+    data = await asyncio.to_thread(cflow2_runtime.callable_procedures, cwd, scope, node)
+    return json_response(data)
+
+
+async def h_cflow2_call(request: web.Request) -> web.Response:
+    """Call a sub procedure from the dashboard, as the user (docs 2.12.3):
+    the same call ``flow_call`` makes, on the run's active task, judged by
+    the same rules. Body: cwd, scope, procedure, node?, with?, mode?. The
+    driver is told."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    procedure = str(body.get("procedure") or "").strip()
+    if not procedure:
+        return json_error(400, "'procedure' required in the JSON body")
+    with_ = body.get("with")
+    if with_ is not None and not isinstance(with_, dict):
+        return json_error(400, "'with' must be an object")
+    payload = await asyncio.to_thread(
+        cflow2_runtime.call, procedure, str(body.get("node") or "") or None, with_,
+        cwd=cwd, scope=scope, mode=str(body.get("mode") or "") or None,
+        by=cflow2_runtime.CALL_BY_USER)
+    called = payload.get("called") or {}
+    mode = called.get("mode") or "inline"
+    how = ("the daemon quick-forks you to drive it; wait for its result"
+           if mode == cflow2_runtime.CALL_MODE_FORK
+           else f"drive its callee run with scope {called.get('scope')!r}")
+    label = next((c.get("label") for c in payload.get("calls") or []
+                  if c.get("id") == called.get("call")), called.get("instance"))
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_CALLED.format(procedure=procedure, call=called.get("call"),
+                                   mode=mode, label=label, how=how))
+    return json_response(payload)
+
+
+def _pack_workspace(raw: str) -> str:
+    if not raw:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "'cwd' required"}),
+                                 content_type="application/json")
+    path = Path(raw).resolve()
+    if not path.is_dir():
+        raise web.HTTPBadRequest(text=json.dumps({"error": f"no such directory: {path}"}),
+                                 content_type="application/json")
+    return str(path)
+
+
+def _packs_payload(cwd: str) -> dict:
+    from ..cflow2 import procpacks
+
+    return {"cwd": cwd, "packs": [p.to_dict() for p in procpacks.all_packs(cwd)]}
+
+
+async def h_cflow2_packs(request: web.Request) -> web.Response:
+    """The procedure packs visible from ``?cwd=``: installed (project,
+    global) and the catalog (package), with their roles filter."""
+    cwd = _pack_workspace(request.query.get("cwd") or "")
+    return json_response(await asyncio.to_thread(_packs_payload, cwd))
+
+
+async def _pack_op(request: web.Request, op) -> web.Response:
+    from ..cflow2 import procpacks
+
+    body = await _json_body(request)
+    cwd = _pack_workspace(str(body.get("cwd") or ""))
+    pack = str(body.get("pack") or "").strip()
+    if not pack:
+        return json_error(400, "'pack' required in the JSON body")
+    try:
+        await asyncio.to_thread(op, cwd, pack, body)
+    except procpacks.PackError as exc:
+        return json_error(400, str(exc))
+    return json_response(await asyncio.to_thread(_packs_payload, cwd))
+
+
+async def h_cflow2_pack_install(request: web.Request) -> web.Response:
+    """Install a catalog pack into the workspace's project layer.
+    Body: cwd, pack, force?"""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.install(
+        cwd, pack, force=bool(body.get("force"))))
+
+
+async def h_cflow2_pack_remove(request: web.Request) -> web.Response:
+    """Remove a pack from the workspace's project layer. Body: cwd, pack."""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.remove(cwd, pack))
+
+
+async def h_cflow2_pack_roles(request: web.Request) -> web.Response:
+    """Edit an installed pack's roles filter (claunch-8t5r0.5).
+    Body: cwd, pack, roles ({type, roles} or null for every role)."""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.set_roles(
+        cwd, pack, body.get("roles")))
 
 
 async def h_cflow2_input(request: web.Request) -> web.Response:

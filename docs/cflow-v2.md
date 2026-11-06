@@ -2357,6 +2357,94 @@ nodes:
 - 목표 수립 단계의 시뮬레이션 금지(claunch-efnbt.9)는 이 허용 목록 위에 정적 검사로
   얹는다: `sims: deny`인 작업이 `calls`에 시뮬레이션 프로시저를 두면 컴파일 오류다.
 
+#### 2.12.1 프로시저 팩과 역할 필터 (claunch-8t5r0.1, .5, .6)
+
+프롬프트 팩(`prompt_packs`)이 산문 규칙을 세션에 넣는 단위라면, 프로시저 팩은
+단계·반환·검증을 가진 프로시저를 묶어 배포하는 단위다. 같은 규약을 on-demand skill
+문서로 읽게 할 수도 있지만, 팩의 프로시저는 단계마다 보고와 반환 검사가 있고 런
+기록에 남는다.
+
+```
+<layer>/packs/<id>/pack.yaml      # 매니페스트
+<layer>/packs/<id>/<proc>.yaml    # kind: procedure 정의, 이름은 파일 이름
+```
+
+```yaml
+pack: 1                                   # 매니페스트 버전(필수)
+title: Unreal 작업 규약
+description: ...
+roles: {type: whitelist, roles: [unreal]} # 생략하면 모든 역할
+```
+
+- 위치는 세 레이어다: 프로젝트 `.claunch/workflows/v2/packs`, 전역
+  `~/.claude-launcher/workflows/v2/packs`, 패키지 `workflows/v2/packs`. 같은 id는 가까운
+  레이어가 이긴다. 패키지 레이어는 카탈로그이고 **설치된 것이 아니다**: 프로젝트나
+  전역 레이어에 있는 팩만 부를 수 있다. 설치는 카탈로그 사본을 프로젝트 레이어로
+  복사하는 것이다(`procpacks.install`, 웹의 ⤷ sub 패널, `POST /api/cflow2/packs/install`).
+- 레이어 목록(`layers._candidates`)은 최상위 `*.yaml`만 읽으므로 `packs/` 아래 파일은
+  일반 정의 이름으로 해석되지 않는다. 팩의 프로시저는 `<pack>:<proc>`로만 부른다.
+- 역할 필터는 v1과 같은 `RoleFilter`(whitelist | blacklist)이고 역할 이름은 소문자로
+  정규화한다. 판정 대상은 호출하는 런의 드라이버가 메시에서 가진 역할
+  (`responders.pool(...).me_roles`)이다. 역할을 읽을 수 없으면 역할 없음으로 판정한다:
+  whitelist는 거절하고 blacklist는 허용한다. 프로시저 자체의 `filter_roles`와 팩의
+  `roles`가 둘 다 있으면 둘 다 통과해야 한다(`runtime.role_refusal`).
+- 필터 편집은 프로젝트 레이어의 사본만 고친다(`procpacks.set_roles`,
+  `POST /api/cflow2/packs/roles`, body `roles: {type, roles} | null`). 카탈로그와 전역
+  사본은 고치지 않는다.
+- 허용 규칙(사용자 결정 qa-b9b833c7): 부를 수 있는 것은 작업의 `calls`에 있는 이름과,
+  설치된 팩의 프로시저 중 역할 필터가 허용하는 것의 합집합이다. `calls`에
+  `<pack>:<proc>`를 적을 수도 있다. 에이전트의 `flow_call`과 웹의 호출이 같은 판정을
+  쓴다.
+- 예시 팩: 패키지의 `packs/unreal`(whitelist `[unreal]`). `editor-handoff`(forkable)는
+  에디터 전용 작업을 사람 `operator`에게 배정하는 beads 이슈로 만들고, `build-check`는
+  Build.cs 의존성·UHT 매크로·권위 경계를 점검한다. 규칙의 원문은 prompt pack
+  `unreal-operator`다.
+
+#### 2.12.2 포크 호출과 인라인 fallback (claunch-8t5r0.2)
+
+호출하는 작업이 `fork_calls: true`를 선언하고(작업 키) callee 정의가 최상위
+`forkable: true`를 선언하면(`kind: procedure`에서만 허용) 호출은 fork 모드다. 한쪽만
+선언하면 inline이다. `flow_call`의 `mode: inline`은 두 선언이 있어도 inline으로 부른다
+(`mode`는 `auto` | `inline`).
+
+- fork 모드 호출은 `calls[c<n>].fork.status = queued`로 기록되고, callee 런은 드라이버
+  없이 만들어진다(두 세션이 같은 callee를 진행하지 않도록).
+- 데몬의 클록(`Cflow2Clock._fork_calls`)이 다음 순서로 판정한다. 드라이버가 살아 있는가,
+  harness가 복사할 대화를 디스크에 가졌는가(`spawn.can_fork`), 드라이버가 quick-fork가
+  아닌가, 남은 컨텍스트가 `cflow2_fork_min_context` 이상인가(6.4의 fork 위임과 같은 검사).
+- 통과하면 드라이버를 quick-fork하고(`self_merge_allowed`), 사본이 callee를 진행한다
+  (`runtime.call_forked`: fork `running`, callee 드라이버 = 사본). 사본은 같은 워크트리와
+  브랜치에 서 있고 커밋하거나 브랜치를 바꾸지 않는다(사용자 결정 qa-d4b3e667). 돌아오는
+  것은 callee의 결과 값과 사본의 `handoff` 요약이다.
+- 판정이 거절이거나 quick-fork 요청이 실패하거나, 사본이 callee가 끝나기 전에 종료하면
+  inline fallback이다(`runtime.call_fork_fallback`): `mode = inline`,
+  `fallback {cause, at, fork_session?}`, callee 드라이버를 원래 드라이버로 되돌린다.
+  사용자에게는 두 경로로 알린다.
+  - 세션 헤더(`#term-subproc` 칩)와 세션 목록 카드(`.sess-subproc` 줄)가 호박색으로
+    `fork→inline`과 원인을 보여 준다(2.12.3의 rail 데이터).
+  - 알림: `spawn_events.report(kind="fallback", site="cflow2 sub procedure fork")`가
+    경고 세션 이벤트와 토스트를 낸다.
+  - 드라이버의 터미널에는 `call_fallback_block`이 들어가고, 런 저널에 `fallback`
+    이벤트(`route: inline`)가 남는다.
+
+#### 2.12.3 실행 상태 표시와 사용자 호출 (claunch-8t5r0.3, .4)
+
+- `/api/cflow2/rail`의 행에 `subprocs`가 있다(`cflow2_web.rail_subprocs`): 열린 호출마다
+  id, procedure, pack, label, mode, by(`agent` | `user`), scope, fork{status, session},
+  fallback. 세션 카드의 v2 줄 아래 `⤷ sub <procedure> · <mode>` 줄과 헤더 칩이 이 값을
+  그린다. 호출이 끝나면 둘 다 사라진다.
+- `GET /api/cflow2/procedures?cwd=&scope=&node=`(`runtime.callable_procedures`)는
+  작업의 `calls`, 설치된 팩의 프로시저, 카탈로그 팩의 프로시저를 **모두** 나열하고 각
+  항목에 `available`과 `why`를 싣는다. `why`는 `call`이 거절할 때와 같은 판정이다(런
+  상태, 활성 작업 없음, 이미 열린 호출, 카탈로그 전용, 역할 필터, 재귀, 깊이, 컴파일
+  오류).
+- 웹의 ⤷ sub 패널(`subprocs.js`)은 이 목록을 그대로 보여 주고, 부를 수 없는 항목은
+  비활성으로 두고 `why`를 마우스오버 툴팁과 본문에 적는다. 「available only」 체크박스가
+  목록을 거른다. 호출은 `POST /api/cflow2/call {cwd, scope, procedure, node, with,
+  mode}`이고 런의 활성 작업에 붙는다(`by: user`). 활성 작업이 없으면 모든 항목이
+  비활성이다. 호출 뒤 데몬이 드라이버에 알림을 넣는다.
+- 같은 패널에서 팩을 설치·제거하고 역할 필터를 편집한다(2.12.1).
+
 ### 2.13 사용자 조율 워크플로우 (`improv-coordinator-v2`)
 
 `improv-coordinator-v2`는 사용자와의 지속적인 요구사항 조율, 영역별 워커 배정,
