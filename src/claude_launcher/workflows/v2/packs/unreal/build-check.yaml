@@ -1,0 +1,43 @@
+cflow: 2
+name: build-check
+kind: procedure
+description: >-
+  Unreal C++ 변경을 착지 전에 확인한다. 바꾼 모듈의 Build.cs 의존성, UHT 매크로
+  (UCLASS·UPROPERTY·UFUNCTION)와 리플렉션 규칙, 서버·클라이언트 권위 경계를 점검하고,
+  에디터에서만 확인할 수 있는 항목은 editor-handoff로 넘길 목록으로 돌려준다.
+
+params:
+  paths: {type: list, required: true, description: 점검할 변경 파일(.h·.cpp·.Build.cs)}
+
+returns:
+  ok:
+    checked: list
+    issues: list
+    editor_only: list
+  fail:
+    reason: str
+
+nodes:
+  inspect:
+    title: 변경 점검
+    prompt: |
+      변경 파일: ${params.paths}
+      1. 새 include나 타입이 쓰는 모듈이 그 모듈의 *.Build.cs Public/PrivateDependencyModuleNames에
+         있는지 확인한다.
+      2. UCLASS·USTRUCT·UPROPERTY·UFUNCTION 선언이 .generated.h include 순서와 GENERATED_BODY 규칙을
+         지키는지, Replicated 속성이 GetLifetimeReplicatedProps에 등록됐는지 확인한다.
+      3. 서버 전용 로직이 HasAuthority 확인 없이 클라이언트 경로에서 돌지 않는지 확인한다.
+      빌드 명령을 실행할 수 있는 환경이면 실행하고 그 출력의 오류를 issues에 넣는다. 실행할 수
+      없으면 그 사실을 issues에 적는다(통과로 적지 않는다).
+      Blueprint·에셋·PIE로만 확인되는 항목은 editor_only에 한 줄씩 적는다.
+    returns:
+      ok: {checked: list, issues: list, editor_only: list}
+      fail: {reason: str}
+
+body:
+  - inspect
+  - return: ok
+    value:
+      checked: "$result['inspect'].value.checked"
+      issues: "$result['inspect'].value.issues"
+      editor_only: "$result['inspect'].value.editor_only"

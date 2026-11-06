@@ -877,6 +877,86 @@ class Cflow2Clock:
                               driver=driver)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices, driver=driver)
+        if runtime.fork_calls_pending(state):
+            self._fork_calls(cwd, scope, state, notices, halted)
+
+    # -- fork-mode calls (docs 2.12.2, claunch-8t5r0.2) ----------------------
+    def _call_fork_refusal(self, driver: str) -> str:
+        """Why the driver of a fork-mode call cannot be quick-forked now:
+        not live, a harness with no conversation to copy, a quick-fork
+        itself, too little context left (the same gate a fork delegation
+        passes, :meth:`_fork_refused`)."""
+        session = self._live(driver)
+        if session is None:
+            return f"no live session {driver!r} to quick-fork"
+        why = cflow2_exec.harness_fork_refusal(session)
+        if why:
+            return why
+        return cflow2_exec.fork_refusal(session, min_left=self._fork_min(),
+                                        left=self.context_left)
+
+    def _fork_calls(self, cwd: str, scope: str, state: Dict[str, Any],
+                    notices: List[Notice], halted: bool) -> None:
+        for rec in runtime.fork_calls_pending(state):
+            if self.stop.is_set():
+                return
+            fork = rec.get("fork") or {}
+            cid = str(rec.get("id") or "")
+            driver = str(rec.get("driver") or state.get("driver") or "") or _name(scope)
+            if fork.get("status") == runtime.FORK_QUEUED:
+                if halted:
+                    continue
+                why = self._call_fork_refusal(driver)
+                if not why:
+                    try:
+                        copy = self.fork(driver, cflow2_exec.call_fork_body(
+                            rec, cwd=cwd, scope=scope, driver=driver))
+                    except Exception as exc:  # noqa: BLE001 - every refusal falls back
+                        why = f"quick-fork failed: {exc}"
+                    else:
+                        try:
+                            runtime.call_forked(cid, copy, cwd=cwd, scope=scope)
+                        except (runtime.FlowError, cstore.StoreError) as exc:
+                            log.warning("cflow2 call %s/%s fork %s: %s", scope, cid, copy, exc)
+                        continue
+                self._call_fallback(cwd, scope, rec, driver, why, notices)
+            elif fork.get("status") == runtime.FORK_RUNNING:
+                copy = str(fork.get("session") or "")
+                if not copy or self._live(copy) is not None:
+                    continue
+                nested = rec.get("nested") or {}
+                try:
+                    callee = cstore.RunStore(nested.get("cwd"), nested.get("scope")).load_state()
+                except (cstore.StoreError, OSError):
+                    callee = {}
+                if callee.get("status") not in runtime.LIVE_STATUSES:
+                    continue  # finished: the result is on its way back
+                self._call_fallback(
+                    cwd, scope, rec, driver,
+                    f"the fork session {copy!r} ended before the callee finished", notices)
+
+    def _call_fallback(self, cwd: str, scope: str, rec: Dict[str, Any], driver: str,
+                       why: str, notices: List[Notice]) -> None:
+        """A fork-mode call goes inline: recorded on the call (the session
+        card and header read it from the rail), typed into the driver, and
+        filed as a warning notification event (spawn_events)."""
+        cid = str(rec.get("id") or "")
+        try:
+            runtime.call_fork_fallback(cid, why, cwd=cwd, scope=scope)
+        except (runtime.FlowError, cstore.StoreError) as exc:
+            log.warning("cflow2 call %s/%s fallback: %s", scope, cid, exc)
+            return
+        with self._lock:
+            self.results.append({"call": cid, "result": "fallback", "error": why})
+        notices.append((cwd, driver, call_fallback_block(scope, rec, why)))
+        try:
+            from . import spawn_events
+
+            spawn_events.report(driver, kind="fallback", reason=why,
+                                site="cflow2 sub procedure fork",
+                                procedure=rec.get("procedure"), call=cid, run_scope=scope)
+        except Exception:  # noqa: BLE001 - the notice must not stop the tick
+            log.exception("cflow2 call fallback event")
 
     def _delegation_closed(self, cwd: str, scope: str, state: Dict[str, Any]) -> bool:
         """Whether a delegation open at the end of the last pass is closed now.
@@ -1644,6 +1724,26 @@ def fallback_block(scope: str, delegation: str, label: str, cause: str,
         "protocol: the child session could not be spawned, so this delegation's brief "
         "is yours to run. Call flow_status, then flow_delegate for its brief and "
         "submit the result.",
+        "---"])
+
+
+def call_fallback_block(scope: str, rec: Dict[str, Any], cause: str) -> str:
+    """The driver's wake-up when a fork-mode call could not fork: the callee
+    is its own to drive now (docs 2.12.2)."""
+    if len(cause) > 200:
+        cause = cause[:197] + "..."
+    nested = rec.get("nested") or {}
+    return "\n".join([
+        "---",
+        "# claunch cflow2: a sub procedure call fell back to inline -- "
+        "machine-generated, not typed by the user",
+        f"run: {scope}",
+        f"call: {rec.get('id')} ({rec.get('procedure')}, from task "
+        f"{rec.get('label') or rec.get('node')})",
+        f"fallback: fork -> inline ({cause})",
+        f"protocol: no fork drives this call, so you drive its callee run now: "
+        f"flow_status with scope {nested.get('scope')!r}, then its tasks. The session "
+        f"header and the notifications show this fallback to the user.",
         "---"])
 
 

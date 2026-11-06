@@ -240,13 +240,20 @@ TOOLS = [
     {
         "name": "flow_call",
         "description": (
-            "Call a procedure from an active task (doc 2.12). The task must list "
-            "it in 'calls' (flow_status task 'calls'; none listed: every call is "
-            "refused). The procedure is resolved by name now and starts as a nested "
-            "run you drive with the flow_* tools under the scope in 'called.scope' "
-            "(flow_status 'calls'). Meanwhile the task waits ('calling'); when the "
-            "callee finishes, the task is active again with 'call_result' (outcome, "
-            "value) and you report it as usual. One open call per task."
+            "Call a procedure from an active task (doc 2.12). Callable: a name the "
+            "task lists in 'calls', or a procedure of a pack installed in this "
+            "workspace, named '<pack>:<procedure>' (flow_status task 'pack_calls'); "
+            "the procedure's filter_roles and its pack's roles must admit your mesh "
+            "role. The procedure is resolved by name now and starts as a nested "
+            "run under the scope in 'called.scope' (flow_status 'calls'). When the "
+            "task declares fork_calls and the procedure is forkable, the call is "
+            "'fork' mode: the daemon quick-forks you and the copy drives the callee "
+            "in this same checkout -- do not drive it yourself; if the fork cannot "
+            "start, the call falls back to inline (a terminal block says so and "
+            "why) and you drive it. Otherwise you drive it with the flow_* tools. "
+            "Meanwhile the task waits ('calling'); when the callee finishes, the "
+            "task is active again with 'call_result' (outcome, value) and you "
+            "report it as usual. One open call per task."
         ),
         "inputSchema": {
             "type": "object",
@@ -255,6 +262,9 @@ TOOLS = [
                 "node": {"type": "string", "description": "the calling task's instance id "
                          "or name (omit when one task is active)"},
                 "with": {"type": "object", "description": "the procedure's params"},
+                "mode": {"type": "string", "enum": ["auto", "inline"],
+                         "description": "auto (default): fork when the task declares "
+                         "fork_calls and the procedure is forkable; inline: never fork"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["procedure"],
@@ -895,7 +905,8 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         cwd, scope = _where(args)
         return runtime.call(str(args.get("procedure") or ""),
                             str(args.get("node") or "").strip() or None,
-                            args.get("with"), cwd=cwd, scope=scope)
+                            args.get("with"), cwd=cwd, scope=scope,
+                            mode=str(args.get("mode") or "").strip() or None)
     if name == "flow_delegate":
         # A 'session' delegation is submitted by a child session that stands
         # in its own directory (often its own worktree) under its own name:
