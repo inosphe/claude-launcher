@@ -427,13 +427,22 @@ session definitions respectively; neither holds the comments or the session
 records. So `rag reindex --kind unified` does not rebuild a board's index —
 those are separate collections, one per board.
 
-`all` was the name of that corpus before it became `unified`. Everything that
-accepted it still does: the daemon, the MCP `search` tool and both `--kind`
-options normalize it to `unified`, and the CLI prints
-`claunch: --kind all is deprecated; use --kind unified` on stderr. The
-collection on disk keeps the old name (`rag/all.zvec`) until it is moved in
-its own round, so `/api/rag/dbs` still reports `corpus: all` for it while
-`/api/rag/status` reports `kind: unified`.
+`all` was the name of that corpus before the rename (claunch-7aujp.1). It is
+no longer a value anyone accepts: the daemon answers 400 `kind must be one of
+beads, sessions, unified`, the MCP `search` tool raises the same list, and
+both `--kind` options refuse it at argparse (exit 2) before a request is
+sent.
+
+The collection on disk keeps the old name until it is moved in a window the
+operator opens (a daemon stop). Until that move, the service opens
+`rag/all.zvec` as the `unified` corpus — it reads the pre-rename name rather
+than starting a second, empty collection — so `/api/rag/status` reports
+`kind: unified` with `key: unified` while `/api/rag/dbs` still reports
+`corpus: all` for that directory. After the move both report `unified`.
+
+The rename did not change what the corpus holds, so the directory is moved,
+not rebuilt: the vectors are read from the moved directory without re-embedding
+the documents.
 
 `--mode` picks how much of the index the query reads. `general` (the
 default) searches all of it; `active` drops the documents whose records name

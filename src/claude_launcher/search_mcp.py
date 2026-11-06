@@ -35,15 +35,9 @@ import urllib.parse
 from . import daemon_client, mcp_rpc
 
 #: The corpora, under their current names. ``unified`` is the combined one;
-#: ``all`` is its deprecated alias and stays accepted (``ALIASES``), so a
-#: caller that still names it is answered rather than refused.
+#: it was called ``all`` until the rename, and that name is no longer
+#: answered (claunch-7aujp.1).
 KINDS = ("unified", "beads", "sessions")
-ALIASES = {"all": "unified"}
-
-
-def canonical(kind: str) -> str:
-    """``kind`` under its current name: the deprecated ``all`` maps to ``unified``."""
-    return ALIASES.get(kind, kind)
 
 #: How much of the index a query reads. ``active`` -- the dashboard's
 #: active-search box -- drops documents whose records name no live session,
@@ -87,13 +81,13 @@ TOOLS = [
                 },
                 "kind": {
                     "type": "string",
-                    "enum": list(KINDS) + list(ALIASES),
+                    "enum": list(KINDS),
                     "description": (
                         "'unified' (default): the combined corpus -- every board's "
                         "issues and comments plus every session's records. 'beads': "
                         "issues of this session's board only, one row per issue. "
-                        "'sessions': one row per session. 'all' is the deprecated "
-                        "name of 'unified' and is still accepted."
+                        "'sessions': one row per session. 'all' was this corpus's "
+                        "name before the rename and is refused now."
                     ),
                 },
                 "mode": {
@@ -235,9 +229,9 @@ def search(args: dict) -> dict:
     query = str(args.get("query") or "").strip()
     if not query:
         raise SearchMcpError("query is required")
-    kind = canonical(str(args.get("kind") or "unified"))
+    kind = str(args.get("kind") or "unified")
     if kind not in KINDS:
-        raise SearchMcpError(f"kind must be one of {', '.join(KINDS)} (or its alias 'all')")
+        raise SearchMcpError(f"kind must be one of {', '.join(KINDS)}")
     mode = str(args.get("mode") or "general")
     if mode not in MODES:
         raise SearchMcpError(f"mode must be one of {', '.join(MODES)}")

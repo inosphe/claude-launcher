@@ -1424,27 +1424,28 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
     assert "sync started" in capsys.readouterr().out
     # The daemon accepts three corpora; the CLI refused the third and left the
     # combined one unreachable from a shell (claunch-i2i95.1). It is `unified`
-    # now; `all` is its deprecated name and still parses, with one line on
-    # stderr (claunch-7aujp). It is not a board, so no cwd rides with it.
+    # and its pre-rename name `all` is gone with the rename (claunch-7aujp.1)
+    # — the parser refuses that name, so no request carries it. It is not a
+    # board, so no cwd rides with it.
     args = parser.parse_args(["rag", "reindex", "--kind", "unified", "--force"])
     assert args.func(args) == 0
     assert client.paths[-1][1]["kind"] == "unified" and "cwd" not in client.paths[-1][1]
     assert "sync started" in capsys.readouterr().out
-    args = parser.parse_args(["rag", "reindex", "--kind", "all", "--force"])
-    assert args.func(args) == 0
-    assert client.paths[-1][1]["kind"] == "unified" and "cwd" not in client.paths[-1][1]
-    captured = capsys.readouterr()
-    assert "sync started" in captured.out, "the deprecation line must not dirty stdout"
-    assert "--kind all is deprecated; use --kind unified" in captured.err
+    sent = len(client.paths)
+    with pytest.raises(SystemExit) as refused:
+        parser.parse_args(["rag", "reindex", "--kind", "all", "--force"])
+    assert refused.value.code == 2
+    assert "invalid choice: 'all'" in capsys.readouterr().err
+    assert len(client.paths) == sent, "a refused name must not reach the daemon"
     args = parser.parse_args(["search", "who", "--kind", "unified"])
     assert args.func(args) == 0
     assert "kind=unified" in client.paths[-1] and "cwd=" not in client.paths[-1]
     capsys.readouterr()
-    args = parser.parse_args(["search", "who", "--kind", "all"])
-    assert args.func(args) == 0
-    assert "kind=unified" in client.paths[-1], "the alias is normalized before the request"
-    assert "cwd=" not in client.paths[-1]
-    assert "--kind all is deprecated; use --kind unified" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as refused:
+        parser.parse_args(["search", "who", "--kind", "all"])
+    assert refused.value.code == 2
+    assert "invalid choice: 'all'" in capsys.readouterr().err
+    assert "kind=all" not in client.paths[-1]
     # The daemon takes `mode` (`_search_args`), and `active` only with the
     # combined corpus; the CLI had no way to send either, so the dashboard's
     # active-search was unreachable from a shell (claunch-1uyy1).
@@ -1783,6 +1784,67 @@ def test_index_path_uses_the_model_key_and_adopts_the_legacy_collection(tmp_path
         "format": rag.FORMAT, "model": "other-model", "dims": 8,
     }))
     assert svc._index_path(base, "sessions", cfg) == base / "sessions.qwen-qwen3-embedding-8b.zvec"
+
+
+def test_the_combined_corpus_reads_the_pre_rename_all_directory(tmp_path):
+    """`all` was the combined corpus's name on disk (claunch-7aujp.1).
+
+    The directories are moved in a window the operator opens, so until then
+    the collection is still `all.zvec`: opening it keeps the vectors that
+    exist instead of starting a second, empty collection under the new name.
+    """
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    base = tmp_path
+    cfg = {"model_key": "", "dimensions": 0}
+    # nothing on disk: a first write creates the current name
+    assert svc._index_path(base, "unified", cfg) == base / "unified.zvec"
+    (base / "all.zvec").mkdir(parents=True)
+    (base / "all.meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "m", "dims": 8,
+    }))
+    assert svc._index_path(base, "unified", cfg) == base / "all.zvec"
+    # once the directory is moved the new name is the one read
+    (base / "unified.zvec").mkdir()
+    assert svc._index_path(base, "unified", cfg) == base / "unified.zvec"
+    # the adoption is the combined corpus's alone: a board collection named
+    # `all-...` is not a thing, and `sessions` has no pre-rename name
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.zvec"
+
+
+def test_a_preset_collection_reads_the_pre_rename_all_directory(tmp_path):
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    base = tmp_path
+    cfg = {"model_key": "gemma-2", "dimensions": 8}
+    (base / "all.gemma-2.zvec").mkdir(parents=True)
+    assert svc._index_path(base, "unified", cfg) == base / "all.gemma-2.zvec"
+    (base / "unified.gemma-2.zvec").mkdir()
+    assert svc._index_path(base, "unified", cfg) == base / "unified.gemma-2.zvec"
+
+
+def test_the_combined_corpus_is_keyed_and_read_by_its_current_name(tmp_path):
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    # the key is the corpus's own name now — the storage pin is gone
+    assert svc._key("unified", None) == "unified"
+    assert svc._key("sessions", None) == "sessions"
+    assert svc._key("beads", tmp_path).startswith("beads-")
+    # a collection opened under the pre-rename name still reads as unified
+    assert rag.RagService._kind_of_key("all") == "unified"
+    assert rag.RagService._kind_of_key("unified") == "unified"
+    assert rag.RagService._kind_of_key("sessions") == "sessions"
+    assert rag.RagService._kind_of_key("beads-abc123") == "beads"
+
+
+def test_rag_stores_reads_the_corpus_from_the_directory_name(tmp_path):
+    """The DB panel's `corpus` column follows the directory name.
+
+    Both names are on disk on an installation that has not moved the combined
+    collection yet, and each row says which one it read.
+    """
+    (tmp_path / "all.zvec").mkdir()
+    (tmp_path / "unified.zvec").mkdir()
+    rows = {row["name"]: row for row in rag.rag_stores(tmp_path)}
+    assert rows["all"]["corpus"] == "all"
+    assert rows["unified"]["corpus"] == "unified"
 
 
 def test_rate_limiter_paces_requests(monkeypatch):

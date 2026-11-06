@@ -34,7 +34,7 @@ def _params(path):
 
 
 UNIFIED = {
-    "kind": "all",
+    "kind": "unified",
     "root": None,
     "reranked": True,
     "warnings": [],
@@ -116,20 +116,22 @@ def test_search_sessions_corpus_rows_read_as_sessions(monkeypatch):
 
 def test_search_mode_active_rides_on_the_unified_corpus(monkeypatch):
     client = _use(monkeypatch, {"/api/search?": {
-        "kind": "all", "index": {}, "results": []}})
+        "kind": "unified", "index": {}, "results": []}})
     answer = search_mcp.call_tool("search", {"query": "x", "kind": "unified", "mode": "active"})
     params = _params(client.calls[0])
     assert params["kind"] == "unified" and params["mode"] == "active"
     assert answer["mode"] == "active"
 
 
-def test_search_accepts_the_deprecated_all_alias(monkeypatch):
-    # `all` was the combined corpus's name; a caller written against it is
-    # answered, and the request carries the current name (claunch-7aujp).
+def test_search_refuses_the_pre_rename_all_name(monkeypatch):
+    # `all` was the combined corpus's name and is refused with the rename
+    # (claunch-7aujp.1): the error lists the names that answer, and no
+    # request goes out carrying a name the daemon would 400.
     client = _use(monkeypatch, {"/api/search?": UNIFIED})
-    answer = search_mcp.call_tool("search", {"query": "x", "kind": "all"})
-    assert _params(client.calls[0])["kind"] == "unified"
-    assert answer["kind"] == "unified"
+    with pytest.raises(search_mcp.SearchMcpError,
+                       match="kind must be one of unified, beads, sessions"):
+        search_mcp.call_tool("search", {"query": "x", "kind": "all"})
+    assert client.calls == []
 
 
 def test_search_rejects_active_with_a_narrower_kind_before_asking(monkeypatch):
@@ -148,7 +150,7 @@ def test_search_rejects_bad_input(monkeypatch):
     with pytest.raises(search_mcp.SearchMcpError):
         search_mcp.call_tool("search", {"query": "a", "kind": "files"})
     with pytest.raises(search_mcp.SearchMcpError):
-        search_mcp.call_tool("search", {"query": "a", "kind": "all", "mode": "fuzzy"})
+        search_mcp.call_tool("search", {"query": "a", "kind": "unified", "mode": "fuzzy"})
     assert client.calls == []
 
 

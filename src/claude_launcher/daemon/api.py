@@ -18089,10 +18089,10 @@ async def _search_args(request: web.Request):
     """The query string a search reads, validated the same way for the JSON
     answer and the stream. ``(args, error_response)``."""
     service: rag_mod.RagService = request.app["rag"]
-    # ``all`` is the deprecated name of the combined corpus; it normalizes to
-    # ``unified`` here, so every answer below — and the index it reads — names
-    # the corpus by its current name (claunch-7aujp).
-    kind = rag_mod.canonical((request.query.get("kind") or "beads").strip())
+    # ``all`` was the combined corpus's name until the rename and is not a
+    # corpus any more: it falls through to the 400 below, which lists the
+    # names that do answer (claunch-7aujp.1).
+    kind = (request.query.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return None, json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     mode = request.query.get("mode", "general")
@@ -18119,7 +18119,8 @@ async def _search_args(request: web.Request):
 
 async def h_search(request: web.Request) -> web.Response:
     """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions|unified``
-    (default beads; ``all`` is ``unified``'s deprecated name), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
+    (default beads; ``all`` was ``unified``'s name before the rename and is
+    refused), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
     the reranker, ``?wait=`` seconds to give a running index sync (0..30,
     default 2), and for the board ``?cwd=`` or ``?parent=`` as the
     candidates picker takes them.
@@ -18257,7 +18258,8 @@ async def h_gh_status(request: web.Request) -> web.Response:
 
 async def h_rag_reindex(request: web.Request) -> web.Response:
     """Start (or restart) an index sync. Body: ``kind`` (beads|sessions|unified,
-    default beads; ``all`` is ``unified``'s deprecated name), ``cwd`` for the board, ``force`` to re-embed everything.
+    default beads; ``all`` was ``unified``'s name before the rename and is
+    refused), ``cwd`` for the board, ``force`` to re-embed everything.
 
     Returns 202 with the sync's progress and, in ``started`` / ``running`` /
     ``force_applied`` / ``force_pending``, what the request actually did. The
@@ -18272,7 +18274,7 @@ async def h_rag_reindex(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
+    kind = str(body.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     if not service.configured():
@@ -18318,7 +18320,7 @@ async def h_rag_cancel(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
+    kind = str(body.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     root = None
