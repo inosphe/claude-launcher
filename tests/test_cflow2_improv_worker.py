@@ -155,8 +155,18 @@ V2_INSTEAD_BATCH = """상한 10개에 닿으면) 배치의 이슈 전부를 in_r
 #: in DIVERGENCES, and a re-introduced difference is a test failure, not a
 #: silently allowed one.
 
+#: claunch-e179c (user decision 2026-11-07, v2 only): v2's settle-stall is the
+#: worker's mechanical judgement, not a person's question.
+V1_ONLY_STALL = """settle-stall로 사람이 처분한다. 그러므로 이 리더가 그 보드 쓰기를
+하는 자리는 wrapup의 pool ask와 거부권 둘이다 — pool ask에 답하지
+않으면 워커는 기다리다 사람에게 넘어간다."""
+V2_INSTEAD_STALL = """settle-stall에서 워커가 끝내도 유실되는 일감이 없는지 판정한다. 그러므로 이 리더가 그 보드 쓰기를
+하는 자리는 wrapup의 pool ask와 거부권 둘이다 — pool ask에 답하지
+않으면 워커는 기다리다 settle-stall의 판정으로 넘어간다."""
+
 #: Every declared v2 divergence from the v1 block, as (v1 text, v2 text).
-DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH)]
+DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH),
+               (V1_ONLY_STALL, V2_INSTEAD_STALL)]
 
 
 def _words(text: str) -> str:
@@ -1013,7 +1023,6 @@ USER_QUESTIONS = {
     "cut-unreachable-choice": ["confirmed", "held"],
     "landed-unclear-choice": ["confirmed", "held"],
     "rework-decision": ["rework", "hold"],
-    "settle-stall": ["proceed", "keep-waiting"],
     "end-decision": ["end", "hold", "new-task", "self-improve", "auto-release"],
     "release-decision": ["end", "hold", "new-task"],
     "self-improve-align": ["register", "revise", "drop"],
@@ -2090,6 +2099,28 @@ def test_settle_check_ends_only_on_every_issue_closed_or_a_leader_hold():
     assert "이 세션이 스스로 쓴 `HOLD:`(landing-declined-hold, wrapup의 hold 동결)는 예외가 아니다" in words
     assert "HOLD CONFIRM REQUESTED:" in words
     assert "in_progress인 항목에는 queue-recheck의 done 규칙(unqueue)을 적용하지 않는다" in words
+
+
+def test_settle_stall_is_the_agents_mechanical_judgement():
+    """claunch-e179c (2026-11-07, user): proceed/keep-waiting is answered from
+    the board, the session list and the assignees' runs -- s1329 put the same
+    verdict to a person who had nothing to add, and a proceed then met the
+    end-decision question again. The stall is an agent choose; the person's
+    one question is end-decision, whose brief carries the stall's reason."""
+    chart = _chart()
+    stall = next(n for n in chart.nodes.values() if n.label == "settle-stall")
+    assert stall.type == "choose" and stall.get("chooser") == "agent"
+    assert stall.get("require_reason") is True
+    assert [o["name"] for o in stall.get("options")] == ["proceed", "keep-waiting"]
+    words = _words(stall.props["prompt"])
+    assert "사람에게 묻지 않는다" in words
+    assert "이 세션 자신이 해야 하는 경우가 없다" in words
+    assert "`sides.stack.live`" in words
+    # the person's one question carries the stall's reason
+    end = [n for n in chart.nodes.values()
+           if n.type == "scope" and n.get("proc") == "ask-user"
+           and "settle-stall의 proceed" in str(n.get("with_"))]
+    assert [n.id for n in end] and all("end-decision" in n.id for n in end)
 
 
 def test_a_held_round_issue_is_not_taken_for_a_next_round():

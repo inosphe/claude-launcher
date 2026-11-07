@@ -93,7 +93,7 @@ sides:
 #   stack-round           -> stack-round            (choose)
 #   settle-check          -> settle-check           (choose, retry settle-poll)
 #   settle-wait           -> settle-wait            (retry의 between, unsettled interval 600)
-#   settle-stall          -> settle-stall           (ask-user)
+#   settle-stall          -> settle-stall           (choose agent, claunch-e179c)
 #   end-gate              -> end-deadline(timeout 300), end-decision(ask-user),
 #                            auto-release(정리), release-decision(ask-user: end|hold|new-task)
 #                            (v1의 게이트는 end-decision이 맡는다. 5분 기한·정리·재질문은
@@ -4927,7 +4927,8 @@ nodes:
       (`interval: 600`)이 지킨다: 10분 안에 unsettled를 고르면 보류되고, 창이
       열릴 때 데몬이 이 세션을 깨운다 — 깨어나서 할 일은 보드를 다시 읽고
       정산 여부를 판정하는 것 하나뿐이다. 손으로 폴링하지 않는다. 재시도가
-      다 차도 조건이 안 서면 settle-stall에서 사람이 판단한다.
+      다 차도 조건이 안 서면 settle-stall에서 끝내도 유실되는 일감이 없는지
+      판정한다(에이전트의 판정, claunch-e179c).
     done_when: |
       대기 사실 한 줄이 보고에 있고, 상위에 재촉을 보내지 않았으며 보드에 쓰지
       않았다.
@@ -7942,7 +7943,8 @@ procedures:
       세션 종료 전 정산(v1 settle-check, settle-wait, settle-stall, end-gate,
       end-hold)과 세션 회고(retrospective). 이 세션이 만들었거나 배정받은 일감이 전부 closed(예외는 리더의
       HOLD)인지 보드로 확인하고(claunch-0b8dx),
-      아니면 10분 간격으로 여섯 번 다시 본 뒤 사람이 처분한다. 마지막에 사용자가
+      아니면 10분 간격으로 여섯 번 다시 본 뒤 settle-stall에서 에이전트가 「끝내도
+      유실되는 일감이 없는가」를 판정한다(claunch-e179c). 마지막에 사용자가
       세션 종료를 승인하거나 보류한다.
     body:
       # 정산 앞 계획 closure 게이트(claunch-5sryb). probe `claunch gate
@@ -8107,33 +8109,58 @@ procedures:
                         then: {raise: unsettled}
             catch:
               unsettled:
-                # 여섯 번 깨우는 동안 보드가 변하지 않았다 — 기다릴 것인가, 이
-                # 세션을 끝낼 것인가는 사람의 판단이다.
+                # 여섯 번 깨우는 동안 보드가 변하지 않았다. 이 자리는 사람의
+                # 질문(ask-user)이었다가 에이전트의 판정으로 바뀌었다(claunch-e179c,
+                # 2026-11-07 사용자 결정). 판단 기준인 「지금 끝내도 그 일감이
+                # 유실되지 않는가」는 보드·세션 목록·자식 런 상태로 답할 수 있고,
+                # s1329(런 20261106-084207-854fbb)에서 사람은 의도를 가지고 고를
+                # 재료 없이 같은 판정을 확인만 했다. proceed 뒤에는 end-decision이
+                # 종료를 사람에게 묻는다 — 종료 승인은 여전히 사람의 것이다.
                 - id: settle-stall
-                  call: ask-user
-                  bind: settle_stall
-                  with:
+                  choose:
+                    chooser: agent
                     require_reason: true
-                    topic: |
+                    prompt: |
                       이 세션이 만들었거나 배정받은 일감이 아직 완료되지 않았다(closed가
-                      아니고 상위가 쓴 `HOLD:` 마커도 없다). 타이머가 여섯 번 깨우는 동안 보드가 변하지
-                      않았다는 뜻이다 — 리더가 아직 답하지 않았거나, 답할 세션이 없거나,
-                      정산 대상이 아닌 무언가가 남아 있다.
+                      아니고 상위가 쓴 `HOLD:` 마커도 없다). 여섯 번 다시 확인하는 동안
+                      보드가 변하지 않았다. 이 자리는 「이 세션을 지금 끝내도 남은 일감이
+                      유실되지 않는가」를 기계적으로 판정한다. 사람에게 묻지 않는다.
 
-                      남은 것이 무엇인지는 `claunch cflow2 journal -t <세션>`의 settle-check
-                      보고와 `claunch beads list --status open --status in_ready --limit 0
-                      --json`(생성자 필터는 settle-check의 프롬프트에 있다)로 확인한다.
-                      정산됐다고 판정한 근거가 아니라 「무엇이 남았는가」를 보러 가는 것이다.
+                      남은 항목은 settle-check의 명령으로 다시 읽는다. 항목마다 그 일감을
+                      다음 상태로 옮길 주체를 확인한다:
+                      · assignee가 이 세션이 아닌 세션이면 `claunch sessions --project all`
+                        에서 살아 있는지(exited가 아닌지), 그 세션의 런이 무엇을 기다리는지
+                        (`claunch cflow2 status -t <assignee>`: loop_limit, waiting_approval
+                        등)를 본다.
+                      · 이 세션의 자식이 그 일감을 쥐고 있으면 그 자식의 착지를 처리할
+                        세션(LANDING REQUEST를 받은 통합 세션 또는 stack)이 누구인지 본다.
 
-                      판단 기준: 이 세션을 지금 끝내도 그 이슈가 유실되지 않는지(열린 채로
-                      남아 다음 adoption이 이어받을 수 있는지).
-                      선택지: proceed — 정산 없이 이 세션을 끝낸다, 남은 이슈는 열린 채로
-                      남고 이어받을 자리는 다음 회차의 adoption이 정한다. keep-waiting — 더
-                      기다린다, 보드가 바뀔 때까지 정산 확인을 다시 하고 시계를 다시 건다.
-                  cases:
-                    proceed: {break: settle-watch}
-                    keep-waiting: {continue: settle-watch}
-      # 회고(claunch-ygbsd): 정산이 서고(또는 사람이 proceed로 넘기고) 세션이
+                      **proceed** — 남은 항목마다 아래 중 하나가 성립한다:
+                      (a) 이 세션이 아닌 살아 있는 세션이 assignee로 쥐고 있다. 그 세션의
+                          런이 사람의 게이트에서 서 있어도 성립한다 — 이 세션이 기다려도
+                          그 게이트는 풀리지 않는다.
+                      (b) assignee가 없거나 이 세션의 종료 처리로 open이 되어 보드에
+                          남는다(다음 adoption이 이어받는다).
+                      그리고 남은 항목의 다음 단계(착지·머지·HOLD 확인에 대한 답)를 이
+                      세션 자신이 해야 하는 경우가 없다. 예: 살아 있는 자식이 이 세션에
+                      LANDING REQUEST를 보냈거나 stack side 런이 서 있으면(flow_status의
+                      `sides.stack.live`) 이 세션이 그 착지를 처리하는 자리이므로 proceed가
+                      아니다.
+                      **keep-waiting** — 위 조건이 하나라도 서지 않는다. 그 일감을 옮길
+                      수 있는 살아 있는 주체가 있는지 reason에 적는다.
+
+                      reason에는 항목마다 판정과 실제로 막고 있는 지점(예: 「claunch-gr62q:
+                      assignee s1334 살아 있음, s1334 런은 round/land/await@137 loop_limit
+                      대기, 통합 세션 s469 exited」)을 적는다. 이 reason은 뒤의
+                      end-decision brief가 그대로 옮겨 사람에게 보여 준다.
+                    options:
+                      proceed:
+                        description: 끝내도 유실되는 일감이 없다 — 남은 일감은 살아 있는 assignee가 쥐거나 보드에 open으로 남는다. 종료 결정(end-decision)으로
+                        then: {break: settle-watch}
+                      keep-waiting:
+                        description: 끝내면 유실되는 일감이 있다(이 세션이 처리할 착지·답이 남았다) — 정산 확인으로 돌아가 다시 기다린다
+                        then: {continue: settle-watch}
+      # 회고(claunch-ygbsd): 정산이 서고(또는 settle-stall이 proceed로 넘기고) 세션이
       # 아직 살아 있는 마지막 자리 — 종료 결정 뒤에는 대화를 되짚을 세션이 없다.
       # 회고가 fail이어도 종료 결정은 막지 않는다: 회고는 기록이고 정산이 아니다.
       - try: {seq: [retrospective]}
@@ -8236,6 +8263,14 @@ procedures:
                         싣는다: 주 이슈의 `SELF-IMPROVE REGISTERED @ <런 id>` 코멘트
                         (등록한 이슈 id, 또는 등록 없음)와, new-task로 시작할 후보가
                         있으면 그 id.
+
+                        정산이 서지 않은 채 settle-stall의 proceed로 이 질문에 왔으면
+                        (저널에 settle-stall의 `selected proceed`가 있으면) brief의 근거
+                        첫머리에 그 reason을 옮긴다: 남은 일감 id마다 누가 쥐고 있는지와
+                        실제로 막고 있는 지점(다른 세션의 loop_limit·승인 대기, 종료된 통합
+                        세션 등). 사람이 그 지점을 따로 처분해야 하면 그 명령(예:
+                        `claunch cflow2 extend <instance> -t <세션>`)도 적는다. 이 질문이
+                        남은 일감을 사람이 보는 유일한 자리다(claunch-e179c).
 
                         판단 근거: `claunch cflow2 journal -t <세션>`,
                         `claunch beads show <이슈> --json`.
