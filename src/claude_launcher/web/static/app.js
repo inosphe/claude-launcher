@@ -52163,8 +52163,14 @@ function sessHead(s) {
   // The same wizard, filled with what this session was itself created with
   // (spawnSameSeed), built above because the docked arrangement keeps it,
   // and the editor for this session's directory on the same line.
-  head.appendChild(same);
-  head.appendChild(code);
+  // These two and Open PR sit in one box. Wider than a phone the box is
+  // `display: contents` and the row reads as before; on a phone the box is
+  // the ⋯ menu, so the head keeps Spawn and Open terminal on one line
+  // (claunch-0a5nk.5).
+  const extra = el("span", "sess-head-extra");
+  extra.appendChild(same);
+  extra.appendChild(code);
+  head.appendChild(extra);
 
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
@@ -52174,7 +52180,7 @@ function sessHead(s) {
   const pr = el("button", "wf-btn", "Open PR");
   pr.title = "push this session's directory as a new branch and open a pull request";
   pr.addEventListener("click", () => openPrModal(s.name));
-  head.appendChild(pr);
+  extra.appendChild(pr);
 
   // Through the router, so the terminal it opens is the one the URL names.
   // On a desktop the router keeps the rail up beside it (the rail follows
@@ -52182,9 +52188,58 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
+  head.appendChild(sessHeadMoreButton(head, extra, s.name));
   head.appendChild(close);
   return head;
 }
+
+/* The phone's ⋯ on the session head (claunch-0a5nk.5). The stylesheet shows
+   it at 600px and below only. The head is rebuilt on every poll, so whether
+   the menu is open is kept here, by session name, and put back on the new
+   head; a route change, a pick, a tap outside and Escape close it. */
+let sessHeadMoreOpen = "";
+function setSessHeadMore(name) {
+  sessHeadMoreOpen = name || "";
+  for (const head of document.querySelectorAll(".sess-head")) {
+    const on = !!sessHeadMoreOpen && head.dataset.session === sessHeadMoreOpen;
+    head.classList.toggle("more-open", on);
+    const btn = head.querySelector(".sess-head-more");
+    if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+  }
+}
+function sessHeadMoreButton(head, extra, name) {
+  head.dataset.session = name || "";
+  extra.id = "sess-head-extra";
+  extra.setAttribute("role", "menu");
+  const btn = el("button", "wf-btn sess-head-more", "⋯");
+  btn.title = "more: Spawn same setup, VS Code, Open PR";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-controls", "sess-head-extra");
+  const on = !!name && sessHeadMoreOpen === name;
+  head.classList.toggle("more-open", on);
+  btn.setAttribute("aria-expanded", on ? "true" : "false");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setSessHeadMore(sessHeadMoreOpen === name ? "" : name);
+  });
+  // A pick runs its own handler first (listeners on the button itself), then
+  // the menu closes.
+  extra.addEventListener("click", (e) => {
+    if (e.target.closest("button")) setSessHeadMore("");
+  });
+  if (!sessHeadMoreWired) {
+    sessHeadMoreWired = true;
+    document.addEventListener("click", (e) => {
+      if (sessHeadMoreOpen && !e.target.closest(".sess-head-extra, .sess-head-more")) setSessHeadMore("");
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sessHeadMoreOpen) setSessHeadMore("");
+    });
+    window.addEventListener("hashchange", () => { if (sessHeadMoreOpen) setSessHeadMore(""); });
+  }
+  return btn;
+}
+let sessHeadMoreWired = false;
 
 /* The radio under the head: which panel this column is. `Details` is the
    session's facts and the ways to speak to it; `Workflow` is its run, given

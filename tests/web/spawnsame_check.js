@@ -51,7 +51,9 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const head = slice("sessHead");
 check("the head builds a 'Spawn same setup' button",
       head.includes('el("button", "wf-btn", "Spawn same setup")'));
-const afterSpawn = head.indexOf("head.appendChild(same)", head.indexOf("head.appendChild(spawn)"));
+// Wider than a phone the box it goes into is `display: contents`, so the row
+// still reads Spawn, Spawn same setup, ... (claunch-0a5nk.5).
+const afterSpawn = head.indexOf("extra.appendChild(same)", head.indexOf("head.appendChild(spawn)"));
 check("...appended right after the plain Spawn, before Open PR",
       afterSpawn > 0 && afterSpawn < head.indexOf('"Open PR"'));
 const docked = head.slice(head.indexOf("if (mine && terminalOnScreen()"));

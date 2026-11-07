@@ -768,6 +768,7 @@ BROWSER_CHECKS = [
         "mobiletop_browser.cjs",
         "mobiletabs_browser.cjs",
         "mobiletokens_browser.cjs",
+        "mobiledetail_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
