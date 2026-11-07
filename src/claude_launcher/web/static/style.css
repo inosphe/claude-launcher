@@ -1,3 +1,11 @@
+/* Viewport breakpoints (claunch-0a5nk.1). A width @media query uses one of
+   three steps, and tools/check_breakpoints.py refuses any other value:
+     phone    (max-width: 600px)   / (min-width: 601px)
+     compact  (max-width: 820px)   / (min-width: 821px)  -- MOBILE_MQ in app.js
+     wide     (max-width: 1100px)  / (min-width: 1101px)
+   (min-width: 1500px) is the one listed exception (the cflow pane margin).
+   @container queries size to their box, not the viewport, and are not
+   checked. */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* The page itself never scrolls: every scrollable region (session list,
    terminal, mesh/workflow pages) owns its own overflow, so a swipe lands on
@@ -2750,7 +2758,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    sideways (claunch-hz9ma). The placements are explicit: an auto-placed
    `used`/button pair would land in the 42px marker column and centre the
    button under the cells. */
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .new-usage-key { grid-template-columns: 42px minmax(0, 1fr) max-content max-content; }
   .new-usage-key-mark { grid-area: 1 / 1; }
   .new-usage-key-name { grid-area: 1 / 2; max-width: none; }
@@ -3906,7 +3914,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 #term-score-goal .term-score-opt { display: inline-flex; align-items: center; gap: 0.15rem; white-space: nowrap; font-size: 0.85rem; cursor: pointer; }
 #term-score-goal .term-score-opt:has(input:disabled) { cursor: default; opacity: 0.6; }
 #term-score-counts { font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-score-goal:not(.hidden)) { flex-wrap: wrap; }
   #term-score-goal { order: 2; flex-basis: 100%; }
 }
@@ -3926,7 +3934,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 /* On a phone the note takes its own row under the bar, so it does not take
    the little width the field has left beside the buttons. After the rule
    above, which it overrides. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-input-note:not(.hidden)) { flex-wrap: wrap; }
   #term-input-note { order: 3; flex-basis: 100%; max-width: none; }
 }
@@ -3935,7 +3943,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
    took the field to 22px at 380px. Four pixels of gap across the row's
    separators gives the field back what that button took, so it keeps the
    minimum this bar promises (terminputlayout_browser.cjs). */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input { gap: 4px; }
 }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
@@ -4943,7 +4951,7 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .beads-new-desc { resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
 .beads-new-board { padding-top: 5px; overflow-wrap: anywhere; }
 .beads-new-actions { display: flex; gap: 8px; margin-top: 4px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .beads-new-row { grid-template-columns: 1fr; }
   .beads-new-row small { grid-column: 1; }
 }
@@ -6762,7 +6770,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .model-tier-add-tier-field { display: flex; align-items: center; gap: 6px;
   flex: 0 1 380px; min-width: 0; }
 .model-tier-add-tier .wf-btn { margin: 0; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .model-tier-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .model-tier-row-head { display: none; }
   .model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: none; }
@@ -6831,10 +6839,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .sim-defaults-settings .llm-settings-form .wf-btn {
   grid-column: 1 / -1; justify-self: start;
 }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .delegate-settings { grid-template-columns: minmax(0, 1fr); }
   /* .llm-settings-form collapses at 600px for cards that sit alone; on this
-     page the block next to it has folded at 720px, and one card still holding
+     page the block next to it has folded at 820px, and one card still holding
      two columns reads as a mistake. */
   .sim-defaults-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
   .delegate-field select { font-size: 16px; }
@@ -7044,7 +7052,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-unmerged-row > * { min-width: 0; max-width: 100%; }
 .ws-sync-unmerged-row .ws-sync-unmerged-branch { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* On a narrow screen the groups wrap onto lines of their own: no dividers. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .ws-action-group + .ws-action-group { padding-left: 0; border-left: none; }
   .ws-action-group.ws-group-end { margin-left: 0; }
   .ws-sync-unmerged-row { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 5em); }
@@ -7267,7 +7275,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-packs-summary-note { margin: 4px 0 0; }
 .pack-chip-mini { padding: 0 6px; border-radius: 999px; background: #21262d; white-space: nowrap; max-width: 100%; }
 .new-packs-summary-list .pack-chip-mini { white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .pack-chip-mini { white-space: normal; }
 }
 .new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
@@ -8269,7 +8277,7 @@ body.embed #main { width: 100%; }
    mobile bar instead of floating over the session it is reporting on —
    and "under" is measured (--notices-top, claunch-lolft), because the
    status line's own buttons are in that bar. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #notices { top: var(--notices-top, 8px); right: 8px; left: 8px; width: auto; }
 }
 @media (max-width: 820px) {
@@ -8376,7 +8384,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .window-footnote {
   max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .window-row {
     grid-template-columns: 40px 68px minmax(80px, 1fr) 58px auto;
     gap: 7px; padding: 8px;
@@ -8463,7 +8471,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 .usage-detail-head { display: flex; align-items: baseline; gap: 8px; }
 .usage-stats-link { margin-left: auto; font-size: 11px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-session { flex: 1 1 100%; }
   .stats-chart { height: 120px; }
 }
@@ -8667,7 +8675,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   display: flex; justify-content: space-between; gap: 8px;
   color: #6e7681; font-size: 10px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-share-name { flex-basis: 72px; }
   .stats-lines { height: 120px; }
 }
@@ -8726,7 +8734,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .reports-board { color: #58a6ff; text-decoration: none; font-size: 11px; margin-left: auto; }
 .reports-board:hover { text-decoration: underline; }
 /* A phone reads a round as two lines: what it is, then when and how big. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .reports-row { gap: 8px; padding: 8px 4px; }
   .reports-open { flex: 1 1 100%; }
   .reports-order, .reports-board { margin-left: 0; }
@@ -9072,7 +9080,7 @@ a.commit-link { color: inherit; text-decoration: none; }
 tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e; }
 .cd-hunk-head { background: rgba(56, 139, 253, .1); color: #8b949e; padding: 3px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cd-note-text { color: #8b949e; font-style: italic; padding: 0 10px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #commit-view { padding: 12px 16px; }
   .cd-tools { margin-left: 0; }
   .cd-num { min-width: 28px; padding: 0 4px; }
@@ -9300,7 +9308,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 #sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
 #sess-view.guest .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 .chart-detail-open:hover { text-decoration: underline; }
-@media (max-width: 760px) {
+@media (max-width: 820px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
   .chart-split { display: flex; flex-direction: column; flex: none; }
   .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
@@ -9748,7 +9756,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 /* The page's own cards get the width the Sync panel needs. */
 #workspaces-view :is(.ws-add, .ws-list, .ws-card) { max-width: 980px; }
 .vscode-server .ws-text .error { display: block; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }
 }
@@ -11139,7 +11147,7 @@ a.category-ref:hover { text-decoration: underline; }
 .category-job { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .category-job-failed .category-chip { color: #ff7b72; border-color: #da3633; }
 .category-job-done .category-chip { color: #3fb950; border-color: #238636; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
@@ -11476,7 +11484,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-create-foot { display: flex; align-items: center; gap: 10px; }
 .mt-create-foot .mt-new-hint { flex: 1 1 auto; }
 .mt-create-foot .mt-new-create { width: auto; min-width: 140px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .mt-create-overlay { padding: 0; }
   .mt-create-card { width: 100vw; height: 100vh; border-radius: 0; }
 }
@@ -11514,7 +11522,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-log-body { color: #d8dbe0; font-size: 12px; margin: 2px 0; word-break: break-word; }
 .mt-log-scores { color: #c6cdd5; font-variant-numeric: tabular-nums; }
 .mt-log-sent { color: #3fb950; }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .mt-inner { grid-template-columns: 1fr; grid-auto-rows: min-content; }
   .mt-list, .mt-log { border: none; }
 }
@@ -11865,7 +11873,7 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-detail-list dt { color: #8b949e; }
 .hive-detail-list dd { color: #d8dbe0; word-break: break-word; white-space: pre-line; }
 .hive-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   #hive-view { padding: 12px 10px 8px; }
   .hive-frame { flex-direction: column; }
   .hive-detail { width: auto; max-height: 40%; }
