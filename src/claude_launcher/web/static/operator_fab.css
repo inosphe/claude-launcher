@@ -76,3 +76,10 @@ body.observer-active .operator-fab { display: none; }
   #opfab-view :is(button, select) { min-height: 36px; }
   .opfab-grip { display: none; }
 }
+
+/* Phone (claunch-0a5nk.4): the dock's buttons take the touch floor from
+   style.css, so the dock is 46px tall here; chat.css lifts its toasts by
+   the same token. */
+@media (max-width: 600px) {
+  .fab-dock > button { min-width: var(--tap-min, 44px); min-height: var(--tap-min, 44px); }
+}

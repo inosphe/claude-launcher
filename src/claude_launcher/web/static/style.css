@@ -7669,6 +7669,59 @@ body.embed #main { width: 100%; }
   #mobile-bottom { padding-bottom: 10px; }
 }
 
+/* ---- the phone's touch and type sizes (claunch-0a5nk.4) ----------------
+   Measured at 390px before this: 33 of 38 targets on home, 44/52 on the
+   session detail, 43/51 on new and 33/38 on beads were under 44px, and 36
+   of 66 text runs on home were under 12px (the filter counts at 9px). The
+   three tokens below are the phone's floor; they are read only inside the
+   phone block, so the desktop and the 601-820px shell keep their sizes.
+   The pages they apply to are the four the measurement covered. A row of
+   chips that no longer fits at 44px a chip scrolls sideways instead of
+   wrapping into a second and third row. */
+@media (max-width: 600px) {
+  :root { --tap-min: 44px; --fs-body: 13px; --fs-meta: 12px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(button, select, summary, a.seq-tab, [role="button"],
+        input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])) {
+    min-height: var(--tap-min);
+  }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split) button {
+    min-width: var(--tap-min);
+  }
+  /* Exception: the ancestor band's lines stay 20px tall. fitRailLead (app.js)
+     reserves RAIL_ANCESTOR_LINE_PX per line above the first row, so a taller
+     line would cover that row. */
+  #sidebar #rail-ancestors .rail-ancestor { min-height: 0; min-width: 0; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input[type="checkbox"], input[type="radio"]) { flex: none; width: 20px; height: 20px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input:not([type="checkbox"], [type="radio"]), select, textarea) { font-size: 16px; }
+  #session-list .sess-card, #new-view, #beads-view, #sess-view, #detail-split { font-size: var(--fs-body); }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(.session-filter-count, .mesh-role, .meta, .session-origin-option, .status-text,
+        .project-tab, .project-header-detail, legend, small, .badge, .wf-btn,
+        .sess-group-head, .sess-flag-state, .sess-storage-when, .sess-spawn-step,
+        .sess-spawn-group-blurb, .new-task-images-hint, #daemon-info, #mb-meta,
+        #cwd-hint, #new-claude-runtime-hint, #worktree-hint) {
+    font-size: var(--fs-meta);
+  }
+  .session-view-tabs label > span, .session-group-toggle span, #mb-meta { font-size: var(--fs-meta); }
+  #project-manage { min-width: var(--tap-min); }
+  #new-session label.check input { width: 20px; height: 20px; }
+  #new-session label.with-link a {
+    display: inline-flex; align-items: center; min-height: var(--tap-min); font-size: var(--fs-meta);
+  }
+  /* the top bar's buttons are on every page; the floating dock's are sized
+     in operator_fab.css, next to the toasts in chat.css that clear it */
+  #mobile-top :is(#m-menu, #m-more, #m-notice-bell) { min-width: var(--tap-min); min-height: var(--tap-min); }
+  /* chip rows: one line, sideways scroll */
+  .session-filters button { flex: 0 0 auto; padding: 3px 8px; }
+  .seq-tabs:not(.beads-filters) { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .seq-tabs:not(.beads-filters) > .seq-tab { flex-shrink: 0; }
+  .seq-tabs.beads-filters > .seq-tabs { flex-basis: 100%; min-width: 0; }
+  .seq-tab { display: inline-flex; align-items: center; }
+}
+
 /* ---- the session modal's two tabs ----------------------------------- */
 /* One form, two ways in: a session of its own, or a child of a named parent.
    The strip is inside the form so it travels with the node when the modal

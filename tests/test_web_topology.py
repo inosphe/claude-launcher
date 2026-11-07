@@ -767,6 +767,7 @@ BROWSER_CHECKS = [
         "terminputlayout_browser.cjs",
         "mobiletop_browser.cjs",
         "mobiletabs_browser.cjs",
+        "mobiletokens_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
