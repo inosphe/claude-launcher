@@ -1827,6 +1827,13 @@
       <div id="cli-term"></div>
     </div>
     <div id="glossary-view" class="hidden"></div>
+    <!-- Phone only (claunch-0a5nk.3): every page, as a list, behind the
+         bottom bar's "더보기" tab. Filled by openMenuPage() from #rail-nav,
+         so the two never list different pages. -->
+    <div id="menu-view" class="hidden">
+      <input id="menu-search" type="search" placeholder="page 검색" autocomplete="off" aria-label="page 검색">
+      <nav id="menu-list" aria-label="pages"></nav>
+    </div>
     <!-- Every running session's stage (claunch-7jzp8.2); drawn by plan-page.js. -->
     <div id="plan-view" class="plan-host hidden"></div>
     <!-- World-model simulations (docs/simulation.md); drawn by sim-page.js. -->
@@ -1852,6 +1859,16 @@
     </span>
     <span class="mb-go">terminal ›</span>
   </div>
+  <!-- Phone only (claunch-0a5nk.3): four pages a thumb away and the rest
+       under 더보기 (#/menu). Replaces the rail's 29-link grid at this width;
+       the desktop and tablet keep #rail-nav. -->
+  <nav id="mobile-tabs" aria-label="main pages">
+    <a href="#/" data-page="home"><span>⌂</span>세션</a>
+    <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
+    <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
+    <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
+    <a href="#/menu" data-page="menu"><span>⋯</span>더보기</a>
+  </nav>
   <!-- The notification history behind the bell: the approval requests still
        waiting (hidden cards included, with their buttons) and every notice
        this browser has shown. Kept in localStorage; the waiting list is

@@ -27905,6 +27905,12 @@ function syncLayout() {
   document.querySelectorAll("#rail-nav a").forEach((a) =>
     a.classList.toggle("active", a.dataset.page === page)
   );
+  // The phone's bottom tabs: a page without a tab of its own is reached
+  // through 더보기, so that tab is the one lit for it.
+  const tabs = [...document.querySelectorAll("#mobile-tabs a")];
+  const tabbed = tabs.some((a) => a.dataset.page === page);
+  tabs.forEach((a) => a.classList.toggle("active",
+    tabbed ? a.dataset.page === page : a.dataset.page === "menu"));
   // On a phone home IS the menu: the rail is the whole of that page, so
   // there is nothing to lay over it. Above the breakpoint the rail is docked
   // beside the page and is never a mode.
@@ -28686,6 +28692,7 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "menu": return "더보기";
     case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "retrospection": return "retrospection";
@@ -28894,6 +28901,7 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  menu: "menu-view",
   plan: "plan-view",
   knowledge: "knowledge-view",
   retrospection: "retrospection-view",
@@ -29736,6 +29744,8 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  // #/menu: every page as a list, the phone's 더보기 tab (claunch-0a5nk.3).
+  if (parts[0] === "menu") return { page: "menu" };
   if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
@@ -29922,6 +29932,7 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "menu": openMenuPage(); break;
     case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
@@ -31526,6 +31537,41 @@ function mdPlain(src) {
 function openHome() {
   showView("home");
   renderHome();
+}
+
+/* #/menu (claunch-0a5nk.3): the phone's 더보기 tab. The list is read from
+   #rail-nav each time, so a page added there is here too; the search box
+   narrows it by the label and the address. */
+function openMenuPage() {
+  showView("menu");
+  const list = $("menu-list");
+  const search = $("menu-search");
+  if (!list) return;
+  list.replaceChildren();
+  document.querySelectorAll("#rail-nav a").forEach((src) => {
+    const a = document.createElement("a");
+    a.href = src.getAttribute("href");
+    a.dataset.page = src.dataset.page;
+    const icon = src.querySelector("span");
+    a.appendChild(el("span", "menu-icon", icon ? icon.textContent : ""));
+    // The label is the link's own text, without its icon and badge spans.
+    const label = [...src.childNodes]
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent).join("").trim();
+    a.appendChild(el("span", "menu-label", label));
+    a.dataset.match = (label + " " + a.getAttribute("href")).toLowerCase();
+    list.appendChild(a);
+  });
+  if (search) { search.value = ""; filterMenuPage(""); }
+}
+function filterMenuPage(q) {
+  const needle = q.trim().toLowerCase();
+  document.querySelectorAll("#menu-list a").forEach((a) => {
+    a.hidden = !!needle && !a.dataset.match.includes(needle);
+  });
+}
+if ($("menu-search")) {
+  $("menu-search").addEventListener("input", (e) => filterMenuPage(e.target.value));
 }
 
 function homeCard(title, href, subtitle) {

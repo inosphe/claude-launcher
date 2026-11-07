@@ -7382,7 +7382,7 @@ a.seq-tab { text-decoration: none; }
    sections promoted to tabs, with the session you'd return to pinned along
    the bottom. These three elements exist only for that — desktop never
    shows them. */
-#mobile-top, #mobile-bottom { display: none; }
+#mobile-top, #mobile-bottom, #mobile-tabs { display: none; }
 
 /* Embedded (`?embed=1`, set on <body> by app.js): another page's side panel
    holds this UI in an iframe and wants the terminal only. Everything that is
@@ -7390,7 +7390,7 @@ a.seq-tab { text-decoration: none; }
    breakpoint below still applies inside a narrow iframe — that is fine, since
    the elements it promotes to modes are the ones hidden here. */
 body.embed #sidebar, body.embed #rail-split, body.embed #mobile-top,
-body.embed #mobile-bottom, body.embed #detail-split, body.embed #sess-view {
+body.embed #mobile-bottom, body.embed #mobile-tabs, body.embed #detail-split, body.embed #sess-view {
   display: none !important;
 }
 body.embed #main { width: 100%; }
@@ -7627,6 +7627,46 @@ body.embed #main { width: 100%; }
   /* a <select> is as wide as its longest option — a session name or a full
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
+}
+
+/* ---- the phone's bottom tabs and #/menu (claunch-0a5nk.3) ----
+   On a phone the rail's 29-link grid took the bottom ~500px of home and left
+   two session rows on screen. Here it gives way to five tabs pinned under
+   every page but the terminal, whose bottom is its input line and, while
+   typing, the keyboard. #/menu lists the rest. After the compact block, so
+   its #rail-nav-dock and #mobile-bottom rules do not win over these. */
+#menu-view { padding: 14px 12px; overflow-y: auto; overscroll-behavior: contain; }
+#menu-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 10px 12px;
+  font-size: 16px; color: #d8dbe0; background: #14161a;
+  border: 1px solid #3a414d; border-radius: 6px;
+}
+#menu-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#menu-list a {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px;
+  font-size: 14px; color: #d8dbe0; text-decoration: none;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 6px;
+}
+#menu-list a[hidden] { display: none; }
+#menu-list a:active { background: #22262d; }
+#menu-list .menu-icon { flex: none; width: 18px; text-align: center; color: #7d8590; }
+@media (max-width: 600px) {
+  #rail-nav-dock { display: none; }
+  #mobile-tabs {
+    display: grid; grid-template-columns: repeat(5, 1fr); flex: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: #1b1e24; border-top: 1px solid #2a2e36;
+  }
+  body[data-page="terminal"] #mobile-tabs { display: none; }
+  #mobile-tabs a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-width: 0; min-height: 52px; font-size: 12px; color: #9da5b0; text-decoration: none;
+    border-top: 2px solid transparent;
+  }
+  #mobile-tabs a span { font-size: 17px; line-height: 1.2; }
+  #mobile-tabs a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+  /* the return bar sits on the tabs, so its own inset is the tabs' */
+  #mobile-bottom { padding-bottom: 10px; }
 }
 
 /* ---- the session modal's two tabs ----------------------------------- */
