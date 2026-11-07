@@ -146,6 +146,77 @@ def test_post_with_a_stale_hash_is_409_with_the_current_hash(home):
     assert store.path().read_bytes() == before
 
 
+def _write_right_after_the_check(monkeypatch, other):
+    """Make the first hash read return the file, then write ``other`` over it.
+
+    That is the window the handler has between the hash check and the write:
+    another process (the CLI's ``store.save``) replaces the file there.
+    """
+    real = config_doc.file_bytes
+    calls = []
+
+    def file_bytes():
+        data = real()
+        if not calls:
+            store.save(other)
+        calls.append(data)
+        return data
+
+    monkeypatch.setattr(config_doc, "file_bytes", file_bytes)
+    return calls
+
+
+def test_post_when_the_file_changes_right_after_the_check_is_409(home, monkeypatch):
+    digest = write_config({"version": 2, "profiles": {"a": {}}})
+    calls = _write_right_after_the_check(
+        monkeypatch, {"version": 2, "profiles": {"a": {}, "from_cli": {}}})
+    status, body = call("POST", "/api/config/doc", json={
+        "base_hash": digest,
+        "ops": [{"op": "set", "path": ["profiles", "web"], "value": {}}],
+    })
+    assert status == 409
+    assert len(calls) == 2
+    after = store.path().read_bytes()
+    assert body["hash"] == hashlib.sha256(after).hexdigest() != digest
+    on_disk = store.parse_text(after.decode("utf-8"), store.path())
+    # the other writer's change stays and the ops were not applied over it
+    assert set(on_disk["profiles"]) == {"a", "from_cli"}
+
+
+def test_post_does_not_read_the_document_again_before_the_write(home, monkeypatch):
+    digest = write_config({"version": 2, "profiles": {"a": {}}})
+    events = []
+    real_read, real_save = config_doc.read, store.save
+    monkeypatch.setattr(config_doc, "read", lambda: events.append("read") or real_read())
+    monkeypatch.setattr(store, "save", lambda doc: events.append("save") or real_save(doc))
+    status, body = call("POST", "/api/config/doc", json={
+        "base_hash": digest,
+        "ops": [{"op": "set", "path": ["profiles", "web"], "value": {}}],
+    })
+    assert status == 200, body
+    # the only read is the answer's, after the write
+    assert events == ["save", "read"]
+    assert set(body["doc"]["profiles"]) == {"a", "web"}
+
+
+def test_build_app_registers_the_config_doc_and_token_routes(home):
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def routes():
+        manager = SessionManager(idle_threshold=0.5, scrollback=100, restore_default=False)
+        app = api.build_app(manager, TOKEN, started_at=0.0)
+        found = {}
+        for route in app.router.routes():
+            info = route.resource.get_info() if route.resource is not None else {}
+            path = info.get("path") or info.get("formatter")
+            found.setdefault(path, set()).add(route.method)
+        return found
+
+    found = asyncio.run(routes())
+    assert {"GET", "POST"} <= found.get("/api/config/doc", set())
+    assert {"GET", "PUT"} <= found.get("/api/config/profiles/{profile}/token", set())
+
+
 @pytest.mark.parametrize("ops", [
     # a harness declaration the strict parser refuses
     [{"op": "set", "path": ["harnesses", "bad"], "value": {"command": "x", "auth": "magic"}}],
