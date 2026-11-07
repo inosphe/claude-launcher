@@ -7395,6 +7395,19 @@ body.embed #mobile-bottom, body.embed #detail-split, body.embed #sess-view {
 }
 body.embed #main { width: 100%; }
 
+/* A phone's bar keeps the title readable: the dot already wears the
+   session's state (dotClassOf, with the paused/hold/failed marker), so the
+   badge that spells it out is the part left off (claunch-0a5nk.2). Two ids,
+   so it holds against the .badge rules wherever they sit. */
+@media (max-width: 600px) {
+  #mobile-top #m-status { display: none; }
+  /* The link chip is up only while the socket is down, and the terminal's
+     own overlay (#term-offline) says the rest; on a phone the chip's colour
+     and first word are what fit beside the title. `body` raises the gap
+     rule over the compact block below, which sets 8px. */
+  #mobile-top #m-link { max-width: 64px; }
+  body #mobile-top { gap: 6px; }
+}
 @media (max-width: 820px) {
   /* --app-h is the *visual* viewport: an on-screen keyboard shrinks that
      but not 100dvh, and the terminal has to fit what's left or type into
@@ -7441,6 +7454,40 @@ body.embed #main { width: 100%; }
   }
   #mobile-top #m-zoom .m-act:active { background: #363d49; }
   #mobile-top #m-zoom .m-act:disabled { opacity: 0.4; }
+  /* Which controls the bar carries depends on the page (claunch-0a5nk.2).
+     The size knob only sizes a terminal, so it is up on the terminal page
+     alone. The badge describes the open session, which is what the terminal
+     and the session page show; on any other page the title names the page
+     and the dot keeps the session's colour. The link chip reports that same
+     session's socket, so it follows the badge. */
+  body:not([data-page="terminal"]) #mobile-top #m-zoom { display: none; }
+  body:not([data-page="terminal"]):not([data-page="session"]) #mobile-top :is(#m-status, #m-link) { display: none; }
+  /* The link chip's words ("reconnecting… 4/8") give up width before the
+     title and the buttons do. */
+  #mobile-top #m-link {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* ⋯ and the menu it opens. The menu hangs under the bar's right edge, over
+     the page, and holds the session's rare moves and the debug chip. */
+  #mobile-top { position: relative; }
+  #mobile-top #m-more {
+    min-width: 38px; padding: 6px 0; font-size: 16px; line-height: 1;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more[aria-expanded="true"] { border-color: #58a6ff; }
+  #m-more-menu {
+    position: absolute; top: 100%; right: 8px; z-index: 60;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 168px; max-width: calc(100vw - 16px); padding: 8px;
+    background: #1b1e24; border: 1px solid #3a414d; border-radius: 8px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  }
+  #mobile-top #m-more-menu .m-act {
+    min-height: 44px; text-align: left; font-size: 13px;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more-menu #m-kill { background: #8b2e2e; color: #fff; border-color: #8b2e2e; }
   /* Stacked, #main's automatic minimum size is its content's height, and a
      terminal full of rows is content: without this it refuses to shrink when
      the keyboard takes half the screen, and the prompt ends up behind the

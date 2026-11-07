@@ -28780,6 +28780,34 @@ if ($("m-pause")) {
 $("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
+/* ⋯ on the phone bar (claunch-0a5nk.2): the menu holds the session's rare
+   moves (pause, kill, archive) and the link-panel chip, which together made
+   the bar wider than a 390px screen. It closes on a pick, on a tap outside,
+   on Escape and on a route change, so it never stays over a page the person
+   moved on from. */
+function setMobileMore(open) {
+  const btn = $("m-more"), menu = $("m-more-menu");
+  if (!btn || !menu) return;
+  menu.classList.toggle("hidden", !open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+if ($("m-more")) {
+  $("m-more").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMobileMore($("m-more-menu").classList.contains("hidden"));
+  });
+  $("m-more-menu").addEventListener("click", (e) => {
+    if (e.target.closest("button")) setMobileMore(false);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#m-more-menu, #m-more")) setMobileMore(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMobileMore(false);
+  });
+  window.addEventListener("hashchange", () => setMobileMore(false));
+}
+
 $("mobile-bottom").addEventListener("click", () => {
   if (!currentName) return;
   location.hash = "#/s/" + encodeURIComponent(currentName);

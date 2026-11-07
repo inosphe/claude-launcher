@@ -765,6 +765,7 @@ BROWSER_CHECKS = [
         "vmsession_browser.cjs",
         "vmoff_browser.cjs",
         "terminputlayout_browser.cjs",
+        "mobiletop_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
