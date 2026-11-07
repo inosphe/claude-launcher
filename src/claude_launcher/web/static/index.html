@@ -55,11 +55,6 @@
     <span id="m-title">no session</span>
     <button id="m-notice-bell" class="m-act notice-bell" type="button"
             title="notification history">🔔<span class="notice-bell-count"></span></button>
-    <!-- The observer header goes down on a phone, and the scope switch goes
-         with it — but the rail's own observe-pin box stays reachable, so a
-         phone that can pin sessions must also be able to choose the mode
-         that reads them. Both boxes drive one setting. -->
-    <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
     <button id="observer-mobile-monitor" class="m-act" type="button">관찰 시작</button>
     <button id="observer-mobile-operator" class="m-act" type="button" aria-pressed="false" aria-controls="observer-dock">Operator</button>
     <span id="m-status" class="badge"></span>
@@ -67,16 +62,13 @@
          which the badge beside it cannot: that one reports the session, and
          the session runs on happily while this phone cannot see it. -->
     <button id="m-link" class="m-act link-chip hidden" type="button"></button>
-    <!-- Mirror of the header's link-panel button, for the same reason. -->
-    <button id="m-conn" class="m-act conn-chip ok" type="button"
-            aria-expanded="false" aria-controls="conn-panel"
-            title="connection status (debug)">⇄</button>
     <!-- Force reconnect is not here: it is the overlay on the session screen
          (#term-offline), which is the only place a person needs it and the
          only place it explains itself -- see syncLinkChip(). -->
     <!-- Mirror of the header's take-size button: the header goes down on a
          phone, and a phone is as likely as any window to be the second
-         viewer of a session. -->
+         viewer of a session. It stays on the bar: it is up only while
+         another viewer holds the size, and then it is the move to make. -->
     <button id="m-size" class="m-act size-chip hidden" type="button">take size</button>
     <!-- The header's text-size knob goes down with the header on a phone, and
          it is the control a small screen needs most. Two of its three parts
@@ -89,9 +81,30 @@
               aria-label="larger text">+</button>
     </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
-    <button id="m-pause" class="m-act hidden" type="button">pause</button>
-    <button id="m-kill" class="m-act hidden" type="button">kill</button>
-    <button id="m-archive" class="m-act hidden" type="button">archive</button>
+    <!-- ⋯ holds what a 390px bar cannot carry beside the title
+         (claunch-0a5nk.2): the session's rare moves and the debug chip.
+         The buttons keep their ids, so the handlers that mirror the hidden
+         header's controls are the same ones; only where they sit moved. -->
+    <button id="m-more" class="m-act" type="button" aria-haspopup="menu"
+            aria-expanded="false" aria-controls="m-more-menu"
+            aria-label="more actions">⋯</button>
+    <div id="m-more-menu" class="hidden" role="menu">
+      <!-- Mirror of the header's link-panel button (the socket's debug
+           view). In a list it needs its name, not only the glyph. -->
+      <button id="m-conn" class="m-act conn-chip ok" type="button" role="menuitem"
+              aria-expanded="false" aria-controls="conn-panel"
+              title="connection status (debug)">⇄ connection</button>
+      <!-- The observer header goes down on a phone, and the scope switch goes
+           with it — but the rail's own observe-pin box stays reachable, so a
+           phone that can pin sessions must also be able to choose the mode
+           that reads them. Both boxes drive one setting. It is a setting,
+           changed rarely, so on the bar it sits in ⋯ (observer page only,
+           observer.css). -->
+      <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
+      <button id="m-pause" class="m-act hidden" type="button" role="menuitem">pause</button>
+      <button id="m-kill" class="m-act hidden" type="button" role="menuitem">kill</button>
+      <button id="m-archive" class="m-act hidden" type="button" role="menuitem">archive</button>
+    </div>
   </div>
 
   <!-- The rail. Only things that move on their own live here: the session
@@ -1814,6 +1827,13 @@
       <div id="cli-term"></div>
     </div>
     <div id="glossary-view" class="hidden"></div>
+    <!-- Phone only (claunch-0a5nk.3): every page, as a list, behind the
+         bottom bar's "더보기" tab. Filled by openMenuPage() from #rail-nav,
+         so the two never list different pages. -->
+    <div id="menu-view" class="hidden">
+      <input id="menu-search" type="search" placeholder="page 검색" autocomplete="off" aria-label="page 검색">
+      <nav id="menu-list" aria-label="pages"></nav>
+    </div>
     <!-- Every running session's stage (claunch-7jzp8.2); drawn by plan-page.js. -->
     <div id="plan-view" class="plan-host hidden"></div>
     <!-- World-model simulations (docs/simulation.md); drawn by sim-page.js. -->
@@ -1839,6 +1859,16 @@
     </span>
     <span class="mb-go">terminal ›</span>
   </div>
+  <!-- Phone only (claunch-0a5nk.3): four pages a thumb away and the rest
+       under 더보기 (#/menu). Replaces the rail's 29-link grid at this width;
+       the desktop and tablet keep #rail-nav. -->
+  <nav id="mobile-tabs" aria-label="main pages">
+    <a href="#/" data-page="home"><span>⌂</span>세션</a>
+    <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
+    <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
+    <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
+    <a href="#/menu" data-page="menu"><span>⋯</span>더보기</a>
+  </nav>
   <!-- The notification history behind the bell: the approval requests still
        waiting (hidden cards included, with their buttons) and every notice
        this browser has shown. Kept in localStorage; the waiting list is

@@ -80,7 +80,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       autogrowTermInput(document.getElementById('term-input-field'));
     });
 
-    for (const width of [1280, 760, 520, 380]) {
+    for (const width of [1280, 900, 760, 520, 380]) {
       await page.setViewportSize({ width, height: 600 });
       await page.evaluate(() => autogrowTermInput(document.getElementById('term-input-field')));
       // TERMINPUT_SHOT=<dir> keeps a picture of the bar at each width
@@ -95,12 +95,13 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       assert.ok(m.bar.scroll <= m.bar.client, `${width}px: bar overflows ${m.bar.scroll} > ${m.bar.client}`);
       assert.ok(m.sendRight <= m.viewport, `${width}px: send button right ${m.sendRight} > ${m.viewport}`);
       // the note gives up width before the field drops under its minimum
-      if (width >= 760) assert.ok(m.field.w >= 250, `${width}px: field squeezed to ${m.field.w}px`);
+      if (width > 820) assert.ok(m.field.w >= 250, `${width}px: field squeezed to ${m.field.w}px`);
       for (const b of m.buttons) {
         assert.ok(Math.abs(b.h - row) < 1, `${width}px: ${b.id} is ${b.h}px, not ${row}px`);
         assert.ok(Math.abs(b.bottom - m.field.bottom) < 1, `${width}px: ${b.id} bottom ${b.bottom} vs field ${m.field.bottom}`);
       }
-      if (width > 700) {
+      // 820px is the compact breakpoint (style.css, tools/check_breakpoints.py)
+      if (width > 820) {
         assert.ok(Math.abs(m.note.h - row) < 1 && Math.abs(m.note.bottom - m.field.bottom) < 1,
           `${width}px: note ${JSON.stringify(m.note)} off the row`);
       } else {

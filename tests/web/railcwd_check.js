@@ -160,6 +160,7 @@ new Function(
   + slice("cwdLine") + slice("railCwdLine")
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
   + slice("sessHead")
+  + "// The phone \u22ef on the head (claunch-0a5nk.5) is mobiledetail_browser.cjs's\n// subject; here it only has to resolve.\nfunction sessHeadMoreButton() { return el(\"button\", \"wf-btn sess-head-more\", \"\u22ef\"); }\n"
   + `
 Object.assign(exports, {
   refresh: refreshSessions,

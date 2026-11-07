@@ -1,3 +1,11 @@
+/* Viewport breakpoints (claunch-0a5nk.1). A width @media query uses one of
+   three steps, and tools/check_breakpoints.py refuses any other value:
+     phone    (max-width: 600px)   / (min-width: 601px)
+     compact  (max-width: 820px)   / (min-width: 821px)  -- MOBILE_MQ in app.js
+     wide     (max-width: 1100px)  / (min-width: 1101px)
+   (min-width: 1500px) is the one listed exception (the cflow pane margin).
+   @container queries size to their box, not the viewport, and are not
+   checked. */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* The page itself never scrolls: every scrollable region (session list,
    terminal, mesh/workflow pages) owns its own overflow, so a swipe lands on
@@ -2750,7 +2758,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    sideways (claunch-hz9ma). The placements are explicit: an auto-placed
    `used`/button pair would land in the 42px marker column and centre the
    button under the cells. */
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .new-usage-key { grid-template-columns: 42px minmax(0, 1fr) max-content max-content; }
   .new-usage-key-mark { grid-area: 1 / 1; }
   .new-usage-key-name { grid-area: 1 / 2; max-width: none; }
@@ -3906,7 +3914,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 #term-score-goal .term-score-opt { display: inline-flex; align-items: center; gap: 0.15rem; white-space: nowrap; font-size: 0.85rem; cursor: pointer; }
 #term-score-goal .term-score-opt:has(input:disabled) { cursor: default; opacity: 0.6; }
 #term-score-counts { font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-score-goal:not(.hidden)) { flex-wrap: wrap; }
   #term-score-goal { order: 2; flex-basis: 100%; }
 }
@@ -3926,7 +3934,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 /* On a phone the note takes its own row under the bar, so it does not take
    the little width the field has left beside the buttons. After the rule
    above, which it overrides. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-input-note:not(.hidden)) { flex-wrap: wrap; }
   #term-input-note { order: 3; flex-basis: 100%; max-width: none; }
 }
@@ -3935,7 +3943,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
    took the field to 22px at 380px. Four pixels of gap across the row's
    separators gives the field back what that button took, so it keeps the
    minimum this bar promises (terminputlayout_browser.cjs). */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input { gap: 4px; }
 }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
@@ -4335,6 +4343,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   border: none; color: #7d8590; font-size: 17px; line-height: 1; padding: 0 4px;
 }
 .sess-close:hover { color: #ff7b72; }
+/* The head's ⋯ and its box (sessHeadMoreButton, claunch-0a5nk.5): wider
+   than a phone the box is not a box and the ⋯ is not there. */
+.sess-head-extra { display: contents; }
+.sess-head-more { display: none; }
 .sess-meta {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px; font-size: 13px;
@@ -4943,7 +4955,7 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .beads-new-desc { resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
 .beads-new-board { padding-top: 5px; overflow-wrap: anywhere; }
 .beads-new-actions { display: flex; gap: 8px; margin-top: 4px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .beads-new-row { grid-template-columns: 1fr; }
   .beads-new-row small { grid-column: 1; }
 }
@@ -6762,7 +6774,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .model-tier-add-tier-field { display: flex; align-items: center; gap: 6px;
   flex: 0 1 380px; min-width: 0; }
 .model-tier-add-tier .wf-btn { margin: 0; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .model-tier-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .model-tier-row-head { display: none; }
   .model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: none; }
@@ -6831,10 +6843,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .sim-defaults-settings .llm-settings-form .wf-btn {
   grid-column: 1 / -1; justify-self: start;
 }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .delegate-settings { grid-template-columns: minmax(0, 1fr); }
   /* .llm-settings-form collapses at 600px for cards that sit alone; on this
-     page the block next to it has folded at 720px, and one card still holding
+     page the block next to it has folded at 820px, and one card still holding
      two columns reads as a mistake. */
   .sim-defaults-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
   .delegate-field select { font-size: 16px; }
@@ -7044,7 +7056,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-unmerged-row > * { min-width: 0; max-width: 100%; }
 .ws-sync-unmerged-row .ws-sync-unmerged-branch { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* On a narrow screen the groups wrap onto lines of their own: no dividers. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .ws-action-group + .ws-action-group { padding-left: 0; border-left: none; }
   .ws-action-group.ws-group-end { margin-left: 0; }
   .ws-sync-unmerged-row { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 5em); }
@@ -7267,7 +7279,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-packs-summary-note { margin: 4px 0 0; }
 .pack-chip-mini { padding: 0 6px; border-radius: 999px; background: #21262d; white-space: nowrap; max-width: 100%; }
 .new-packs-summary-list .pack-chip-mini { white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .pack-chip-mini { white-space: normal; }
 }
 .new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
@@ -7374,7 +7386,7 @@ a.seq-tab { text-decoration: none; }
    sections promoted to tabs, with the session you'd return to pinned along
    the bottom. These three elements exist only for that — desktop never
    shows them. */
-#mobile-top, #mobile-bottom { display: none; }
+#mobile-top, #mobile-bottom, #mobile-tabs { display: none; }
 
 /* Embedded (`?embed=1`, set on <body> by app.js): another page's side panel
    holds this UI in an iframe and wants the terminal only. Everything that is
@@ -7382,11 +7394,24 @@ a.seq-tab { text-decoration: none; }
    breakpoint below still applies inside a narrow iframe — that is fine, since
    the elements it promotes to modes are the ones hidden here. */
 body.embed #sidebar, body.embed #rail-split, body.embed #mobile-top,
-body.embed #mobile-bottom, body.embed #detail-split, body.embed #sess-view {
+body.embed #mobile-bottom, body.embed #mobile-tabs, body.embed #detail-split, body.embed #sess-view {
   display: none !important;
 }
 body.embed #main { width: 100%; }
 
+/* A phone's bar keeps the title readable: the dot already wears the
+   session's state (dotClassOf, with the paused/hold/failed marker), so the
+   badge that spells it out is the part left off (claunch-0a5nk.2). Two ids,
+   so it holds against the .badge rules wherever they sit. */
+@media (max-width: 600px) {
+  #mobile-top #m-status { display: none; }
+  /* The link chip is up only while the socket is down, and the terminal's
+     own overlay (#term-offline) says the rest; on a phone the chip's colour
+     and first word are what fit beside the title. `body` raises the gap
+     rule over the compact block below, which sets 8px. */
+  #mobile-top #m-link { max-width: 64px; }
+  body #mobile-top { gap: 6px; }
+}
 @media (max-width: 820px) {
   /* --app-h is the *visual* viewport: an on-screen keyboard shrinks that
      but not 100dvh, and the terminal has to fit what's left or type into
@@ -7433,6 +7458,40 @@ body.embed #main { width: 100%; }
   }
   #mobile-top #m-zoom .m-act:active { background: #363d49; }
   #mobile-top #m-zoom .m-act:disabled { opacity: 0.4; }
+  /* Which controls the bar carries depends on the page (claunch-0a5nk.2).
+     The size knob only sizes a terminal, so it is up on the terminal page
+     alone. The badge describes the open session, which is what the terminal
+     and the session page show; on any other page the title names the page
+     and the dot keeps the session's colour. The link chip reports that same
+     session's socket, so it follows the badge. */
+  body:not([data-page="terminal"]) #mobile-top #m-zoom { display: none; }
+  body:not([data-page="terminal"]):not([data-page="session"]) #mobile-top :is(#m-status, #m-link) { display: none; }
+  /* The link chip's words ("reconnecting… 4/8") give up width before the
+     title and the buttons do. */
+  #mobile-top #m-link {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* ⋯ and the menu it opens. The menu hangs under the bar's right edge, over
+     the page, and holds the session's rare moves and the debug chip. */
+  #mobile-top { position: relative; }
+  #mobile-top #m-more {
+    min-width: 38px; padding: 6px 0; font-size: 16px; line-height: 1;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more[aria-expanded="true"] { border-color: #58a6ff; }
+  #m-more-menu {
+    position: absolute; top: 100%; right: 8px; z-index: 60;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 168px; max-width: calc(100vw - 16px); padding: 8px;
+    background: #1b1e24; border: 1px solid #3a414d; border-radius: 8px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  }
+  #mobile-top #m-more-menu .m-act {
+    min-height: 44px; text-align: left; font-size: 13px;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more-menu #m-kill { background: #8b2e2e; color: #fff; border-color: #8b2e2e; }
   /* Stacked, #main's automatic minimum size is its content's height, and a
      terminal full of rows is content: without this it refuses to shrink when
      the keyboard takes half the screen, and the prompt ends up behind the
@@ -7572,6 +7631,122 @@ body.embed #main { width: 100%; }
   /* a <select> is as wide as its longest option — a session name or a full
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
+}
+
+/* ---- the phone's bottom tabs and #/menu (claunch-0a5nk.3) ----
+   On a phone the rail's 29-link grid took the bottom ~500px of home and left
+   two session rows on screen. Here it gives way to five tabs pinned under
+   every page but the terminal, whose bottom is its input line and, while
+   typing, the keyboard. #/menu lists the rest. After the compact block, so
+   its #rail-nav-dock and #mobile-bottom rules do not win over these. */
+#menu-view { padding: 14px 12px; overflow-y: auto; overscroll-behavior: contain; }
+#menu-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 10px 12px;
+  font-size: 16px; color: #d8dbe0; background: #14161a;
+  border: 1px solid #3a414d; border-radius: 6px;
+}
+#menu-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#menu-list a {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px;
+  font-size: 14px; color: #d8dbe0; text-decoration: none;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 6px;
+}
+#menu-list a[hidden] { display: none; }
+#menu-list a:active { background: #22262d; }
+#menu-list .menu-icon { flex: none; width: 18px; text-align: center; color: #7d8590; }
+@media (max-width: 600px) {
+  #rail-nav-dock { display: none; }
+  #mobile-tabs {
+    display: grid; grid-template-columns: repeat(5, 1fr); flex: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: #1b1e24; border-top: 1px solid #2a2e36;
+  }
+  body[data-page="terminal"] #mobile-tabs { display: none; }
+  #mobile-tabs a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-width: 0; min-height: 52px; font-size: 12px; color: #9da5b0; text-decoration: none;
+    border-top: 2px solid transparent;
+  }
+  #mobile-tabs a span { font-size: 17px; line-height: 1.2; }
+  #mobile-tabs a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+  /* the return bar sits on the tabs, so its own inset is the tabs' */
+  #mobile-bottom { padding-bottom: 10px; }
+}
+
+/* ---- the phone's touch and type sizes (claunch-0a5nk.4) ----------------
+   Measured at 390px before this: 33 of 38 targets on home, 44/52 on the
+   session detail, 43/51 on new and 33/38 on beads were under 44px, and 36
+   of 66 text runs on home were under 12px (the filter counts at 9px). The
+   three tokens below are the phone's floor; they are read only inside the
+   phone block, so the desktop and the 601-820px shell keep their sizes.
+   The pages they apply to are the four the measurement covered. A row of
+   chips that no longer fits at 44px a chip scrolls sideways instead of
+   wrapping into a second and third row. */
+@media (max-width: 600px) {
+  :root { --tap-min: 44px; --fs-body: 13px; --fs-meta: 12px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(button, select, summary, a.seq-tab, [role="button"],
+        input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])) {
+    min-height: var(--tap-min);
+  }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split) button {
+    min-width: var(--tap-min);
+  }
+  /* Exception: the ancestor band's lines stay 20px tall. fitRailLead (app.js)
+     reserves RAIL_ANCESTOR_LINE_PX per line above the first row, so a taller
+     line would cover that row. */
+  #sidebar #rail-ancestors .rail-ancestor { min-height: 0; min-width: 0; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input[type="checkbox"], input[type="radio"]) { flex: none; width: 20px; height: 20px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input:not([type="checkbox"], [type="radio"]), select, textarea) { font-size: 16px; }
+  #session-list .sess-card, #new-view, #beads-view, #sess-view, #detail-split { font-size: var(--fs-body); }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(.session-filter-count, .mesh-role, .meta, .session-origin-option, .status-text,
+        .project-tab, .project-header-detail, legend, small, .badge, .wf-btn,
+        .sess-group-head, .sess-flag-state, .sess-storage-when, .sess-spawn-step,
+        .sess-spawn-group-blurb, .new-task-images-hint, #daemon-info, #mb-meta,
+        #cwd-hint, #new-claude-runtime-hint, #worktree-hint) {
+    font-size: var(--fs-meta);
+  }
+  .session-view-tabs label > span, .session-group-toggle span, #mb-meta { font-size: var(--fs-meta); }
+  #project-manage { min-width: var(--tap-min); }
+  #new-session label.check input { width: 20px; height: 20px; }
+  #new-session label.with-link a {
+    display: inline-flex; align-items: center; min-height: var(--tap-min); font-size: var(--fs-meta);
+  }
+  /* the top bar's buttons are on every page; the floating dock's are sized
+     in operator_fab.css, next to the toasts in chat.css that clear it */
+  #mobile-top :is(#m-menu, #m-more, #m-notice-bell) { min-width: var(--tap-min); min-height: var(--tap-min); }
+  /* chip rows: one line, sideways scroll */
+  .session-filters button { flex: 0 0 auto; padding: 3px 8px; }
+  .seq-tabs:not(.beads-filters) { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .seq-tabs:not(.beads-filters) > .seq-tab { flex-shrink: 0; }
+  .seq-tabs.beads-filters > .seq-tabs { flex-basis: 100%; min-width: 0; }
+  .seq-tab { display: inline-flex; align-items: center; }
+}
+
+/* ---- the session detail head on a phone (claunch-0a5nk.5) --------------
+   Measured at 390px before this, the head's five verbs took three lines
+   above the facts. Here Spawn and Open terminal stay on the line and the
+   other three are a menu under ⋯. */
+@media (max-width: 600px) {
+  .sess-head { position: relative; }
+  /* Two lines: the name, its badges and × first; the verbs under them. The
+     ::before is a zero-height full-width item that breaks the line between
+     them (the cwd line keeps its order 9 and stays last). */
+  .sess-head::before { content: ""; flex-basis: 100%; height: 0; order: 1; }
+  .sess-head > .wf-btn { order: 2; }
+  .sess-head-more { display: inline-flex; align-items: center; justify-content: center; }
+  .sess-head-more[aria-expanded="true"] { outline: 1px solid #58a6ff; }
+  .sess-head-extra {
+    display: none; position: absolute; right: 0; top: 100%; z-index: 20;
+    flex-direction: column; gap: 6px; min-width: 200px; padding: 8px;
+    background: #1b1e24; border: 1px solid #3a414d; border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  }
+  .sess-head.more-open .sess-head-extra { display: flex; }
+  .sess-head-extra > button { width: 100%; margin: 0; text-align: left; }
 }
 
 /* ---- the session modal's two tabs ----------------------------------- */
@@ -8269,7 +8444,7 @@ body.embed #main { width: 100%; }
    mobile bar instead of floating over the session it is reporting on —
    and "under" is measured (--notices-top, claunch-lolft), because the
    status line's own buttons are in that bar. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #notices { top: var(--notices-top, 8px); right: 8px; left: 8px; width: auto; }
 }
 @media (max-width: 820px) {
@@ -8376,7 +8551,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .window-footnote {
   max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .window-row {
     grid-template-columns: 40px 68px minmax(80px, 1fr) 58px auto;
     gap: 7px; padding: 8px;
@@ -8463,7 +8638,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 .usage-detail-head { display: flex; align-items: baseline; gap: 8px; }
 .usage-stats-link { margin-left: auto; font-size: 11px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-session { flex: 1 1 100%; }
   .stats-chart { height: 120px; }
 }
@@ -8667,7 +8842,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   display: flex; justify-content: space-between; gap: 8px;
   color: #6e7681; font-size: 10px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-share-name { flex-basis: 72px; }
   .stats-lines { height: 120px; }
 }
@@ -8726,7 +8901,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .reports-board { color: #58a6ff; text-decoration: none; font-size: 11px; margin-left: auto; }
 .reports-board:hover { text-decoration: underline; }
 /* A phone reads a round as two lines: what it is, then when and how big. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .reports-row { gap: 8px; padding: 8px 4px; }
   .reports-open { flex: 1 1 100%; }
   .reports-order, .reports-board { margin-left: 0; }
@@ -9072,7 +9247,7 @@ a.commit-link { color: inherit; text-decoration: none; }
 tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e; }
 .cd-hunk-head { background: rgba(56, 139, 253, .1); color: #8b949e; padding: 3px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cd-note-text { color: #8b949e; font-style: italic; padding: 0 10px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #commit-view { padding: 12px 16px; }
   .cd-tools { margin-left: 0; }
   .cd-num { min-width: 28px; padding: 0 4px; }
@@ -9300,7 +9475,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 #sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
 #sess-view.guest .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 .chart-detail-open:hover { text-decoration: underline; }
-@media (max-width: 760px) {
+@media (max-width: 820px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
   .chart-split { display: flex; flex-direction: column; flex: none; }
   .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
@@ -9748,7 +9923,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 /* The page's own cards get the width the Sync panel needs. */
 #workspaces-view :is(.ws-add, .ws-list, .ws-card) { max-width: 980px; }
 .vscode-server .ws-text .error { display: block; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }
 }
@@ -11139,7 +11314,7 @@ a.category-ref:hover { text-decoration: underline; }
 .category-job { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .category-job-failed .category-chip { color: #ff7b72; border-color: #da3633; }
 .category-job-done .category-chip { color: #3fb950; border-color: #238636; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
@@ -11476,7 +11651,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-create-foot { display: flex; align-items: center; gap: 10px; }
 .mt-create-foot .mt-new-hint { flex: 1 1 auto; }
 .mt-create-foot .mt-new-create { width: auto; min-width: 140px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .mt-create-overlay { padding: 0; }
   .mt-create-card { width: 100vw; height: 100vh; border-radius: 0; }
 }
@@ -11514,7 +11689,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-log-body { color: #d8dbe0; font-size: 12px; margin: 2px 0; word-break: break-word; }
 .mt-log-scores { color: #c6cdd5; font-variant-numeric: tabular-nums; }
 .mt-log-sent { color: #3fb950; }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .mt-inner { grid-template-columns: 1fr; grid-auto-rows: min-content; }
   .mt-list, .mt-log { border: none; }
 }
@@ -11865,7 +12040,7 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-detail-list dt { color: #8b949e; }
 .hive-detail-list dd { color: #d8dbe0; word-break: break-word; white-space: pre-line; }
 .hive-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   #hive-view { padding: 12px 10px 8px; }
   .hive-frame { flex-direction: column; }
   .hive-detail { width: auto; max-height: 40%; }

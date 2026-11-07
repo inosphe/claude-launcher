@@ -27905,6 +27905,12 @@ function syncLayout() {
   document.querySelectorAll("#rail-nav a").forEach((a) =>
     a.classList.toggle("active", a.dataset.page === page)
   );
+  // The phone's bottom tabs: a page without a tab of its own is reached
+  // through 더보기, so that tab is the one lit for it.
+  const tabs = [...document.querySelectorAll("#mobile-tabs a")];
+  const tabbed = tabs.some((a) => a.dataset.page === page);
+  tabs.forEach((a) => a.classList.toggle("active",
+    tabbed ? a.dataset.page === page : a.dataset.page === "menu"));
   // On a phone home IS the menu: the rail is the whole of that page, so
   // there is nothing to lay over it. Above the breakpoint the rail is docked
   // beside the page and is never a mode.
@@ -28686,6 +28692,7 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "menu": return "더보기";
     case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "retrospection": return "retrospection";
@@ -28780,6 +28787,34 @@ if ($("m-pause")) {
 $("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
+/* ⋯ on the phone bar (claunch-0a5nk.2): the menu holds the session's rare
+   moves (pause, kill, archive) and the link-panel chip, which together made
+   the bar wider than a 390px screen. It closes on a pick, on a tap outside,
+   on Escape and on a route change, so it never stays over a page the person
+   moved on from. */
+function setMobileMore(open) {
+  const btn = $("m-more"), menu = $("m-more-menu");
+  if (!btn || !menu) return;
+  menu.classList.toggle("hidden", !open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+if ($("m-more")) {
+  $("m-more").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMobileMore($("m-more-menu").classList.contains("hidden"));
+  });
+  $("m-more-menu").addEventListener("click", (e) => {
+    if (e.target.closest("button")) setMobileMore(false);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#m-more-menu, #m-more")) setMobileMore(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMobileMore(false);
+  });
+  window.addEventListener("hashchange", () => setMobileMore(false));
+}
+
 $("mobile-bottom").addEventListener("click", () => {
   if (!currentName) return;
   location.hash = "#/s/" + encodeURIComponent(currentName);
@@ -28866,6 +28901,7 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  menu: "menu-view",
   plan: "plan-view",
   knowledge: "knowledge-view",
   retrospection: "retrospection-view",
@@ -29708,6 +29744,8 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  // #/menu: every page as a list, the phone's 더보기 tab (claunch-0a5nk.3).
+  if (parts[0] === "menu") return { page: "menu" };
   if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
@@ -29894,6 +29932,7 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "menu": openMenuPage(); break;
     case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
@@ -31498,6 +31537,41 @@ function mdPlain(src) {
 function openHome() {
   showView("home");
   renderHome();
+}
+
+/* #/menu (claunch-0a5nk.3): the phone's 더보기 tab. The list is read from
+   #rail-nav each time, so a page added there is here too; the search box
+   narrows it by the label and the address. */
+function openMenuPage() {
+  showView("menu");
+  const list = $("menu-list");
+  const search = $("menu-search");
+  if (!list) return;
+  list.replaceChildren();
+  document.querySelectorAll("#rail-nav a").forEach((src) => {
+    const a = document.createElement("a");
+    a.href = src.getAttribute("href");
+    a.dataset.page = src.dataset.page;
+    const icon = src.querySelector("span");
+    a.appendChild(el("span", "menu-icon", icon ? icon.textContent : ""));
+    // The label is the link's own text, without its icon and badge spans.
+    const label = [...src.childNodes]
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent).join("").trim();
+    a.appendChild(el("span", "menu-label", label));
+    a.dataset.match = (label + " " + a.getAttribute("href")).toLowerCase();
+    list.appendChild(a);
+  });
+  if (search) { search.value = ""; filterMenuPage(""); }
+}
+function filterMenuPage(q) {
+  const needle = q.trim().toLowerCase();
+  document.querySelectorAll("#menu-list a").forEach((a) => {
+    a.hidden = !!needle && !a.dataset.match.includes(needle);
+  });
+}
+if ($("menu-search")) {
+  $("menu-search").addEventListener("input", (e) => filterMenuPage(e.target.value));
 }
 
 function homeCard(title, href, subtitle) {
@@ -52089,8 +52163,14 @@ function sessHead(s) {
   // The same wizard, filled with what this session was itself created with
   // (spawnSameSeed), built above because the docked arrangement keeps it,
   // and the editor for this session's directory on the same line.
-  head.appendChild(same);
-  head.appendChild(code);
+  // These two and Open PR sit in one box. Wider than a phone the box is
+  // `display: contents` and the row reads as before; on a phone the box is
+  // the ⋯ menu, so the head keeps Spawn and Open terminal on one line
+  // (claunch-0a5nk.5).
+  const extra = el("span", "sess-head-extra");
+  extra.appendChild(same);
+  extra.appendChild(code);
+  head.appendChild(extra);
 
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
@@ -52100,7 +52180,7 @@ function sessHead(s) {
   const pr = el("button", "wf-btn", "Open PR");
   pr.title = "push this session's directory as a new branch and open a pull request";
   pr.addEventListener("click", () => openPrModal(s.name));
-  head.appendChild(pr);
+  extra.appendChild(pr);
 
   // Through the router, so the terminal it opens is the one the URL names.
   // On a desktop the router keeps the rail up beside it (the rail follows
@@ -52108,9 +52188,58 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
+  head.appendChild(sessHeadMoreButton(head, extra, s.name));
   head.appendChild(close);
   return head;
 }
+
+/* The phone's ⋯ on the session head (claunch-0a5nk.5). The stylesheet shows
+   it at 600px and below only. The head is rebuilt on every poll, so whether
+   the menu is open is kept here, by session name, and put back on the new
+   head; a route change, a pick, a tap outside and Escape close it. */
+let sessHeadMoreOpen = "";
+function setSessHeadMore(name) {
+  sessHeadMoreOpen = name || "";
+  for (const head of document.querySelectorAll(".sess-head")) {
+    const on = !!sessHeadMoreOpen && head.dataset.session === sessHeadMoreOpen;
+    head.classList.toggle("more-open", on);
+    const btn = head.querySelector(".sess-head-more");
+    if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+  }
+}
+function sessHeadMoreButton(head, extra, name) {
+  head.dataset.session = name || "";
+  extra.id = "sess-head-extra";
+  extra.setAttribute("role", "menu");
+  const btn = el("button", "wf-btn sess-head-more", "⋯");
+  btn.title = "more: Spawn same setup, VS Code, Open PR";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-controls", "sess-head-extra");
+  const on = !!name && sessHeadMoreOpen === name;
+  head.classList.toggle("more-open", on);
+  btn.setAttribute("aria-expanded", on ? "true" : "false");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setSessHeadMore(sessHeadMoreOpen === name ? "" : name);
+  });
+  // A pick runs its own handler first (listeners on the button itself), then
+  // the menu closes.
+  extra.addEventListener("click", (e) => {
+    if (e.target.closest("button")) setSessHeadMore("");
+  });
+  if (!sessHeadMoreWired) {
+    sessHeadMoreWired = true;
+    document.addEventListener("click", (e) => {
+      if (sessHeadMoreOpen && !e.target.closest(".sess-head-extra, .sess-head-more")) setSessHeadMore("");
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sessHeadMoreOpen) setSessHeadMore("");
+    });
+    window.addEventListener("hashchange", () => { if (sessHeadMoreOpen) setSessHeadMore(""); });
+  }
+  return btn;
+}
+let sessHeadMoreWired = false;
 
 /* The radio under the head: which panel this column is. `Details` is the
    session's facts and the ways to speak to it; `Workflow` is its run, given

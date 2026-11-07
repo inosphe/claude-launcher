@@ -214,9 +214,9 @@ assert.match(
   "the first field follows the prose without a divider");
 assert.match(rule(".sim-defaults-settings .llm-settings-form .wf-btn"),
   /grid-column: 1 \/ -1/, "Save spans the form instead of sitting in a cell");
-assert.ok(css.includes("@media (max-width: 720px)"), "the cards have a narrow layout");
+assert.ok(css.includes("@media (max-width: 820px)"), "the cards have a narrow layout");
 // The whole media block, brace-balanced (its rules have their own braces).
-const narrowAt = css.indexOf("@media (max-width: 720px)", css.indexOf(".delegate-settings {"));
+const narrowAt = css.indexOf("@media (max-width: 820px)", css.indexOf(".delegate-settings {"));
 let depth = 0, narrowEnd = narrowAt;
 for (let i = css.indexOf("{", narrowAt); i < css.length; i++) {
   if (css[i] === "{") depth++;
