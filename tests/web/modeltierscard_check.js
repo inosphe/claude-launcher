@@ -201,9 +201,9 @@ assert.match(rule(".model-tier-add-tier"), /border-top:/);
 // Controls the card draws have the app's dark surface, not the browser's.
 assert.match(rule(".model-tier-row select, .model-tier-add-field select, .model-tier-add-tier input"),
   /background: #0d1117/);
-assert.ok(css.includes("@media (max-width: 720px)"),
+assert.ok(css.includes("@media (max-width: 820px)"),
   "the card has a narrow layout");
-const narrow = css.slice(css.indexOf("@media (max-width: 720px)", css.indexOf(".model-tier {")),
+const narrow = css.slice(css.indexOf("@media (max-width: 820px)", css.indexOf(".model-tier {")),
   css.indexOf("/* Settings > Providers", css.indexOf(".model-tier {")));
 assert.match(narrow, /\.model-tier-row-head \{ display: none; \}/,
   "the column header goes away where the row is no longer a grid");
