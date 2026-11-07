@@ -2078,6 +2078,23 @@ claunch prune --dry-run        # show orphan dirs (not declared in ~/.claude-lau
 claunch prune                  # delete them
 ```
 
+**Editing it over HTTP (`/api/config/doc`).** The daemon serves the same file
+to a settings page behind its usual login (Bearer token or dashboard cookie).
+`GET /api/config/doc` answers `{"doc", "hash", "machine", "credentials"}`: the
+parsed file as JSON, the sha256 of its bytes, the host name, and per profile
+`{"kind": "token"|"oauth"|"none", "has_token"}` -- `token` when the profile's
+harness reads `.launcher-token`, `oauth` when the harness keeps its own login.
+`POST /api/config/doc` takes `{"base_hash", "ops"}`, where each op is
+`{"op": "set", "path": [...], "value"}` or `{"op": "delete", "path": [...]}`
+(string keys address mappings, integers sequence items; `set` creates missing
+mappings). A `base_hash` that no longer matches the file is 409 with the
+current hash; a result that fails the config file's load checks is 422 and
+nothing is written; otherwise the file is saved atomically and the new
+`{"doc", "hash"}` comes back. `GET`/`PUT /api/config/profiles/<profile>/token`
+reads and stores a token-kind profile's `.launcher-token` (`{"token"}`); an
+`oauth` profile is 400. Token values never appear in `/api/config/doc` or in a
+`PUT` answer.
+
 ## Profile sync server
 
 Copying `~/.claude-launcher/.claunch.yaml` by hand works for two machines and stops scaling at

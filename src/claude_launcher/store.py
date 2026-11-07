@@ -217,6 +217,18 @@ def load() -> dict:
     hit = _parsed
     if hit is not None and hit[0] == text:
         return _copy_doc(hit[1])
+    data = parse_text(text, p)
+    _parsed = (text, _copy_doc(data))
+    return data
+
+
+def parse_text(text: str, p: Path) -> dict:
+    """Parse config file text with the checks :func:`load` applies.
+
+    ``p`` names the file in the error messages only. Split out so a caller
+    holding a candidate document (``/api/config/doc``, see :mod:`config_doc`)
+    can refuse it with the same rules before it is written.
+    """
     try:
         data = yaml.load(text, Loader=_LOADER)
     except yaml.YAMLError as exc:
@@ -235,8 +247,14 @@ def load() -> dict:
             f"up to {VERSION} -- upgrade claunch"
         )
     data.setdefault("version", VERSION)
-    _parsed = (text, _copy_doc(data))
     return data
+
+
+def dump_text(doc: dict) -> str:
+    """The text :func:`save` writes for ``doc``."""
+    return yaml.safe_dump(
+        doc, sort_keys=True, allow_unicode=True, default_flow_style=False
+    )
 
 
 def save(doc: dict) -> None:
@@ -278,9 +296,7 @@ def save(doc: dict) -> None:
     doc.setdefault("version", VERSION)
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(
-        doc, sort_keys=True, allow_unicode=True, default_flow_style=False
-    )
+    text = dump_text(doc)
     with atomic.scratch(p) as tmp:
         tmp.write_text(text, encoding="utf-8")
         try:

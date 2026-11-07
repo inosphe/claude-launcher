@@ -33,6 +33,7 @@ from aiohttp import WSMsgType, web
 from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
 from .. import (
     pi_provider,
+    config_doc,
     credentials,
     lineage,
     metering,
@@ -997,6 +998,13 @@ def build_app(
     # A fresh draw for a random pool, from the create form's roll button: the
     # draw is what its next launch takes (claunch-i985h).
     r.add_post("/api/profiles/{profile}/keys/roll", h_profile_key_roll)
+    # Path-addressed config edits and the profile token, for a remote settings
+    # page (mux-relay /sync) reaching this daemon through its relay tunnel
+    # (claunch-gr62q, config_doc.py).
+    r.add_get("/api/config/doc", h_config_doc_get)
+    r.add_post("/api/config/doc", h_config_doc_post)
+    r.add_get("/api/config/profiles/{profile}/token", h_config_profile_token_get)
+    r.add_put("/api/config/profiles/{profile}/token", h_config_profile_token_put)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
     r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_post("/api/profiles/reasoning-effort", h_profiles_reasoning_effort)
@@ -15393,6 +15401,137 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             "children": children,
         }
     )
+
+
+#: Serialises ``POST /api/config/doc`` within this daemon, so the hash check
+#: and the write it guards are one step for every writer that comes through
+#: here. A CLI command writing the file in that window is not covered; it
+#: changes the hash, and the next POST answers 409.
+_config_doc_lock = asyncio.Lock()
+
+
+def _config_facts_changed(request: web.Request) -> None:
+    facts = request.app.get("profile_facts")
+    if facts is not None:
+        facts.invalidate()
+
+
+async def h_config_doc_get(request: web.Request) -> web.Response:
+    """The config file as JSON, with its hash and each profile's credential kind.
+
+    ``{"doc", "hash", "machine", "credentials": {profile: {"kind",
+    "has_token"}}}``. ``hash`` is the sha256 of the file's bytes; a write
+    sends it back as ``base_hash``. Token values are not part of the answer.
+    """
+    try:
+        current = config_doc.read()
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+    return json_response({
+        "doc": config_doc.jsonable(current["doc"]),
+        "hash": current["hash"],
+        "machine": config_doc.machine(),
+        "credentials": config_doc.credential_kinds(current["doc"]),
+    })
+
+
+async def h_config_doc_post(request: web.Request) -> web.Response:
+    """Apply ``{"base_hash", "ops": [{"op": "set"|"delete", "path", "value"}]}``.
+
+    409 ``{"error", "hash"}`` when the file is no longer the one ``base_hash``
+    names; 422 when an op cannot be applied or the result fails the store's
+    load checks (the file is untouched); 200 ``{"doc", "hash"}`` after the
+    store's atomic write.
+    """
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return json_error(400, "body must be JSON")
+    if not isinstance(body, dict):
+        return json_error(400, "body must be a JSON object")
+    base_hash = body.get("base_hash")
+    if not isinstance(base_hash, str) or not base_hash:
+        return json_error(400, "base_hash is required (the hash GET /api/config/doc returned)")
+    if not isinstance(body.get("ops"), list):
+        return json_error(400, "ops must be a list")
+    async with _config_doc_lock:
+        data = config_doc.file_bytes()
+        now = config_doc.digest(data)
+        if now != base_hash:
+            return json_response(
+                {"error": "the config file changed since base_hash was read", "hash": now},
+                status=409,
+            )
+        try:
+            current = config_doc.read()["doc"]
+            updated = config_doc.apply_ops(current, body["ops"])
+            config_doc.validate(updated)
+        except (config_doc.OpError, config_doc.InvalidDoc, store.StoreError) as exc:
+            return json_error(422, str(exc))
+        try:
+            store.save(updated)
+        except store.StoreError as exc:
+            return json_error(500, str(exc))
+        _config_facts_changed(request)
+        saved = config_doc.read()
+    return json_response({"doc": config_doc.jsonable(saved["doc"]), "hash": saved["hash"]})
+
+
+def _config_token_profile(request: web.Request):
+    """``(profile, None)`` for a token-kind profile, else ``(None, error response)``."""
+    try:
+        prof = profile_mod.require(request.match_info["profile"])
+    except profile_mod.ProfileError as exc:
+        return None, json_error(404, str(exc))
+    kind = config_doc.profile_kind(prof)
+    if kind != "token":
+        return None, json_error(
+            400, f"profile {prof.name!r} has no launcher token to carry (credential kind {kind})"
+        )
+    return prof, None
+
+
+async def h_config_profile_token_get(request: web.Request) -> web.Response:
+    """``{"token"}``: the profile's ``.launcher-token``, for a token-kind profile.
+
+    404 when the profile or its token file is missing, 400 for an ``oauth`` or
+    ``none`` profile. Nothing here logs the value.
+    """
+    prof, error = _config_token_profile(request)
+    if error is not None:
+        return error
+    try:
+        token = credentials.stored_token(prof)
+    except OSError as exc:
+        return json_error(500, f"cannot read the token of {prof.name!r}: {exc.strerror or exc}")
+    if token is None:
+        return json_error(404, f"profile {prof.name!r} has no stored token")
+    return json_response({"token": token})
+
+
+async def h_config_profile_token_put(request: web.Request) -> web.Response:
+    """Store ``{"token"}`` as the profile's ``.launcher-token`` (credentials.save_token).
+
+    The answer does not repeat the value: ``{"profile", "has_token": true}``.
+    """
+    prof, error = _config_token_profile(request)
+    if error is not None:
+        return error
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return json_error(400, "body must be JSON")
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token.strip():
+        return json_error(400, "token must be a non-empty string")
+    try:
+        credentials.save_token(prof, token)
+    except credentials.CredentialsError as exc:
+        return json_error(400, str(exc))
+    except OSError as exc:
+        return json_error(500, f"cannot store the token of {prof.name!r}: {exc.strerror or exc}")
+    _config_facts_changed(request)
+    return json_response({"profile": prof.name, "has_token": True})
 
 
 async def h_profile_keys(request: web.Request) -> web.Response:
