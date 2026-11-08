@@ -116,6 +116,15 @@ REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide", "nudge"})
 #: travels in :data:`REF_KEY`, which the mesh carries and does not interpret.
 INTENT_TYPES = frozenset({"say", "ask", "decide"}) | REPLY_OPTIONAL_TYPES
 
+#: Intents that owe the recipient an ACTION while owing no thread reply.
+#: ``decide`` is one by its definition above: the decision is recorded where
+#: the message points (its :data:`REF_KEY`), not in the thread. This is the
+#: distinction ``REPLY_OPTIONAL_TYPES`` alone cannot draw — under the bare fyi
+#: note a decide read as "nothing is owed", and routed asks were drained past
+#: until they timed out to the next responder group
+#: (claunch-ask-decide-needs-reply-zaxct).
+ACTION_OPTIONAL_REPLY_TYPES = frozenset({"decide"})
+
 #: An opaque pointer a sender may attach so a reader can follow a message back
 #: to whatever it is about. The mesh stores and relays it verbatim: knowing its
 #: shape would mean the mesh learning every schema that ever rides on it.
@@ -136,6 +145,17 @@ def expects_reply(message_type) -> bool:
     still classify correctly.
     """
     return str(message_type or "say").strip().lower() not in REPLY_OPTIONAL_TYPES
+
+
+def expects_action(message_type) -> bool:
+    """Whether a message of this ``type`` owes the recipient an action.
+
+    Separate from :func:`expects_reply` on purpose: a ``decide`` owes an
+    action and no reply, an ``ask`` owes both, an ``fyi`` owes neither. The
+    delivery block tells the recipient which of the three it received; a
+    single boolean could only say "reply or nothing".
+    """
+    return str(message_type or "say").strip().lower() in ACTION_OPTIONAL_REPLY_TYPES
 
 
 def type_notice(message_type) -> Optional[str]:
@@ -7013,6 +7033,52 @@ class MeshManager:
         self._persist_def(mesh)
         return {"mesh": mesh.name, "project": mesh.project or projects.DEFAULT}
 
+    def refile_mirrors_for(self, session: str, project: str) -> List[dict]:
+        """Re-file the mirrors filed where ``session`` used to be.
+
+        :meth:`join` seeds the mirror it builds from the joining session's
+        project (:meth:`_session_project`) and nothing recomputed it after
+        that, so a session re-filed by ``SessionManager.migrate(project=...)``
+        left its mirror under the project it came from — the mesh drew in a
+        tab whose only local member no longer stands there, and
+        ``/api/mesh?project=`` hid it from the one it moved to. The migrate
+        route asks this after the move; ``project`` is the session's new
+        one (blank = the default).
+
+        Two guards keep the filing where it is not this session's to
+        change: only a mirror — a mesh whose authority is another daemon,
+        since one this daemon owns is filed by :meth:`create` and moved by
+        :meth:`set_project` — and only while this session is its one local
+        member. With a second local member the filing is theirs too, and
+        the single value cannot serve both. Local bookkeeping, like
+        :meth:`set_project`: nothing is sent to the peers.
+
+        Returns one row per mirror actually changed (``mesh``, ``was``,
+        ``now``), in name order; an empty list is the ordinary answer.
+        """
+        now = projects.normalize(project)
+        now = "" if now == projects.DEFAULT else now
+        changed: List[dict] = []
+        for mesh in self.list():
+            if not mesh.primary:
+                continue
+            ours = [
+                member for member in mesh.members.values()
+                if self._is_local(mesh, member)
+            ]
+            if len(ours) != 1 or ours[0].session != session:
+                continue
+            if mesh.project == now:
+                continue
+            changed.append({
+                "mesh": mesh.name,
+                "was": mesh.project or projects.DEFAULT,
+                "now": now or projects.DEFAULT,
+            })
+            mesh.project = now
+            self._persist_def(mesh)
+        return changed
+
     def _session_project(self, session: str) -> str:
         """The project ``session`` is filed under, "" when unknown."""
         try:
@@ -10474,6 +10540,38 @@ _Dumper.add_representer(
 )
 
 
+def _delivery_note(mesh_name: str, needs_reply: bool, needs_action: bool) -> str:
+    """The one line a delivery block carries about what the reader owes.
+
+    Three debts, three sentences. ``needs_reply`` wins when both are set — a
+    ``say`` in the batch must be answered, and its sentence already tells the
+    reader to act before replying — but the block still carries
+    ``needs_action: true`` so the decide is not read as advisory.
+    """
+    if needs_reply:
+        # The ack clause lives HERE, not only in the skill: this is the one
+        # surface every member sees at the moment the duty applies, whatever
+        # its role and whether or not it ever ran /mesh.
+        return (
+            "mesh messages delivered to your terminal — reply with: "
+            f'claunch mesh send {mesh_name} <handle|*> "..."'
+            " — if this puts work on you, answer NOW with a brief --type ack "
+            "and --reply-to the message id, then send the outcome when it is done; "
+            "silence reads as not received"
+        )
+    if needs_action:
+        # A `decide` is answered where its `ref` points (for a cflow2 ask, the
+        # run's flow_answer). Under the bare fyi wording it read as "nothing is
+        # owed" and the responder drained past a routed ask until it expired to
+        # the next group (claunch-ask-decide-needs-reply-zaxct).
+        return (
+            "action required — no reply in this thread: this batch asks you to "
+            "decide. Record your decision where the message points (the entry's "
+            "`ref`), then continue; do not drain past it"
+        )
+    return "fyi/ack only — no reply expected; drain and continue"
+
+
 def format_delivery(
     mesh_name: str,
     handle: str,
@@ -10496,8 +10594,19 @@ def format_delivery(
     it, and the reader protocol in ``mesh_install`` has never listed it. The
     roster is still on the message in the log, so ``claunch mesh history``
     remains the way to ask who else received one (claunch-mesh-drop-batch-to-8lqg1).
+
+    ``ref`` IS carried, verbatim, on every entry whose message has one. It is
+    the block's own answer to "where do I record this?" — the ``decide`` note
+    tells the reader to record the decision where the entry's ``ref`` points,
+    and a pointer to a key this function dropped is a pointer to nothing.
+    cflow2 sends every ask that way (``{"kind": "cflow2.ask", "id": ..., "task":
+    ...}``), so without this the whole action sentence named a field the
+    reader could not find (claunch-ask-decide-needs-reply-zaxct). It is passed
+    through untouched: the mesh relayed it without interpreting it on the way
+    in (:data:`REF_KEY`), and it does not start interpreting it on the way out.
     """
     batch = []
+    intents = []
     for m in msgs:
         body = recipient_body(m, handle)
         if len(body) > MAX_DELIVERY_BODY:
@@ -10507,32 +10616,30 @@ def format_delivery(
         if origin is not None:
             entry["machine"] = "local" if not origin else f"{origin} (remote)"
         intent = str(msg_type_for(m, handle)).strip().lower() or "say"
+        intents.append(intent)
         if intent != "say":
             entry["type"] = intent
         if m.get("reply_to"):
             entry["reply_to"] = m["reply_to"]
+        ref = m.get(REF_KEY)
+        if isinstance(ref, dict) and ref:
+            entry[REF_KEY] = ref
         entry["body"] = _Literal(body) if "\n" in body else body
         batch.append(entry)
-    needs_reply = any(expects_reply(msg_type_for(m, handle)) for m in msgs)
-    doc = {
+    needs_reply = any(expects_reply(t) for t in intents)
+    needs_action = any(expects_action(t) for t in intents)
+    doc: dict = {
         "mesh": mesh_name,
         "to": handle,
         "messages": len(batch),
         "needs_reply": needs_reply,
-        "batch": batch,
-        "note": (
-            # The ack clause lives HERE, not only in the skill: this is the one
-            # surface every member sees at the moment the duty applies, whatever
-            # its role and whether or not it ever ran /mesh.
-            "mesh messages delivered to your terminal — reply with: "
-            f'claunch mesh send {mesh_name} <handle|*> "..."'
-            " — if this puts work on you, answer NOW with a brief --type ack "
-            "and --reply-to the message id, then send the outcome when it is done; "
-            "silence reads as not received"
-            if needs_reply
-            else "fyi/ack only — no reply expected; drain and continue"
-        ),
     }
+    # Written only when true: most batches owe nothing, and the line would
+    # otherwise ride every delivery into every member's terminal.
+    if needs_action:
+        doc["needs_action"] = True
+    doc["batch"] = batch
+    doc["note"] = _delivery_note(mesh_name, needs_reply, needs_action)
     dumped = yaml.dump(
         doc, Dumper=_Dumper, sort_keys=False, allow_unicode=True, width=100
     )

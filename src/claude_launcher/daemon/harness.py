@@ -212,6 +212,18 @@ class SessionDef:
     #: The pin is part of the definition, so it survives daemon restarts like
     #: the rest of it; ``None`` (the common case) means the strategy picks.
     key_id: Optional[str] = None
+    #: Switch this session onto another key of its pool when its harness
+    #: paints a usage limit (``daemon/key_switch.py``, claunch-d2t79). The
+    #: answer is the session's, given at creation or changed in the key
+    #: modal, and it is off unless asked for: an automatic restart moves the
+    #: session's process, so a session that never opted in keeps the old
+    #: behaviour (the fault pause).
+    #:
+    #: Only the *permission* lives here. The key chosen, how many tries have
+    #: been spent and for which fault are daemon state (the session
+    #: directory), because they describe one fault's handling and not the
+    #: definition of the session.
+    auto_key_switch: bool = False
     #: Hide Claude Code's built-in Artifact tool for this session. Persisted
     #: in the definition so both daemon restore and an operator reborrow keep
     #: the same tool surface.
@@ -382,6 +394,10 @@ class SessionDef:
             # Absent unless pinned, like the other optional fields: the common
             # record on disk is unchanged by this one.
             **({"key_id": self.key_id} if self.key_id else {}),
+            # Off is the default and writes nothing, same rule as the pin
+            # above: a session that never asked for it keeps the record it
+            # had before the field existed.
+            **({"auto_key_switch": True} if self.auto_key_switch else {}),
             "task": self.task,
             "issue": self.issue,
             "keep_alive": self.keep_alive,
@@ -465,6 +481,7 @@ class SessionDef:
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
             key_id=str(data.get("key_id") or "").strip() or None,
+            auto_key_switch=bool(data.get("auto_key_switch")),
             disable_artifact_tool=bool(data.get("disable_artifact_tool")),
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,

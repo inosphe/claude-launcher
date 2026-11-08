@@ -164,7 +164,7 @@ def load(profile: Profile) -> Optional[Pool]:
     """
     file = path(profile)
     try:
-        text = file.read_text(encoding="utf-8")
+        text = atomic.read_text(file)
     except FileNotFoundError:
         # Includes the pool that a concurrent clear removed between the open
         # and the read: a pool file that no longer exists is a profile with
@@ -760,16 +760,21 @@ def _rotation_index(pool: Pool) -> int:
     return 0
 
 
-def _utilization_reader(
+def _health_reader(
     source: Profile,
-) -> Tuple[Callable[[Key], Optional[float]], Optional[str]]:
+) -> Tuple[Callable[[Key], Optional["usage.KeyHealth"]], Optional[str]]:
     """A per-key usage lookup for the profile's provider, and why it may be blind.
 
     The reader is chosen once (it depends on the provider and harness, not on
-    the key) and then asked about each key's own token. When the provider's
-    usage cannot be measured per key the lookup finds ``None`` for every key
-    -- which makes the caller fall back to rotation -- and the second value
-    carries the reason, quoted in the fallback note. The reason comes from
+    the key) and then asked about each key's own token. It answers a
+    :class:`usage.KeyHealth` rather than a bare peak because the pick needs
+    both halves: the peak orders the keys, and ``blocked`` takes a key out --
+    a window already spent is not a launch this pool can make, however low the
+    key's other windows are (claunch-hego3, the same rule
+    :func:`switch_candidate` applies). When the provider's usage cannot be
+    measured per key the lookup finds ``None`` for every key -- which makes
+    the caller fall back to rotation -- and the second value carries the
+    reason, quoted in the fallback note. The reason comes from
     :func:`usage.unmeasurable_reason`, one table for every reader, so a
     provider that is unmeasurable is named there rather than at each call
     site (claunch-wllke.4).
@@ -794,9 +799,9 @@ def _utilization_reader(
     if reason is not None:
         return (lambda key: None), reason
 
-    def measure(key: Key) -> Optional[float]:
+    def measure(key: Key) -> Optional["usage.KeyHealth"]:
         try:
-            return usage.utilization_for_token(source, key.token)
+            return usage.health_for_token(source, key.token)
         except (
             usage.UsageError,
             credentials.CredentialsError,
@@ -899,18 +904,35 @@ def _pick(
                     "key-based usage reader)"
                 )
         else:
-            measure, unmeasurable = _utilization_reader(source)
+            from . import usage
+
+            measure, unmeasurable = _health_reader(source)
             scored = []
+            spent = 0
             for position, key in enumerate(pool.keys):
-                value = measure(key)
-                if value is not None:
-                    scored.append((value, position))
+                health = measure(key)
+                if health is None:
+                    continue
+                if not health.usable:
+                    # A window on this key is already spent: the launch that
+                    # lands on it walks straight into the same stop, whatever
+                    # its other windows say (claunch-hego3).
+                    spent += 1
+                    continue
+                order = (
+                    usage.tie_break_key(health)
+                    if strategy == "usage-min"
+                    else (health.peak,)
+                )
+                scored.append((order, position))
             index = None
             if scored:
                 index = (min(scored) if strategy == "usage-min" else max(scored))[1]
             else:
                 unmeasurable = unmeasurable or (
-                    f"no key's usage could be read ({strategy} needs a "
+                    "every key's usage is spent (no window is left on any key)"
+                    if spent
+                    else f"no key's usage could be read ({strategy} needs a "
                     "key-based usage reader)"
                 )
         if index is not None:
@@ -1127,3 +1149,84 @@ def summary(profile: Profile) -> dict:
     if pool.strategy in PINNED_STRATEGIES:
         data["pick"] = pool.pick
     return data
+
+
+@dataclass(frozen=True)
+class SwitchCandidate:
+    """The key an automatic switch would move a session onto, and why.
+
+    ``key_id`` is ``None`` when nothing usable is left, and ``reason`` then
+    says which of the three ways the pool came up empty: no pool, every key
+    spent, or every usable key already in use. The reason is the sentence a
+    board comment or a log line quotes, so it is written once here instead of
+    at each caller.
+    """
+
+    key_id: Optional[str]
+    profile: Optional[str]
+    reason: str
+    #: One line per key that was considered, for the record:
+    #: ``"<id>: peak 42.0"`` or ``"<id>: blocked by seven_day"``.
+    readings: Tuple[str, ...] = ()
+    #: The key whose reading was taken as the one in use.
+    current: Optional[str] = None
+
+
+def switch_candidate(
+    profile: Profile, *, current_key_id: Optional[str] = None
+) -> SwitchCandidate:
+    """The usable key a session on ``current_key_id`` should move onto.
+
+    The rule the operator fixed for automatic switching (claunch-d2t79): the
+    *usage min* key among those that can still be spent. Two filters before
+    the ordering, and they are the whole difference from a plain
+    ``usage-min`` launch pick:
+
+    1. a key any of whose windows is spent is not a candidate -- moving onto
+       it walks straight back into the stop the switch is leaving;
+    2. the key the session is already on is not a candidate either, or the
+       "switch" would restart the session onto the plan that just refused it.
+
+    What is left is ordered by peak utilization and then by the shorter
+    window (``usage.tie_break_key``). A key whose usage cannot be read is
+    skipped: the rule is "usage min", and an unread key has no minimum to
+    compare -- guessing here would spend a restart on a coin flip.
+    """
+    from . import usage
+
+    source = owner(profile)
+    if source is None:
+        return SwitchCandidate(None, None, "the profile holds no key pool")
+    pool = load(source)
+    if pool is None or not pool.keys:
+        return SwitchCandidate(None, source.name, "the key pool is empty")
+    current = str(current_key_id or "")
+    current_token = credentials.stored_token(source)
+    scored = []
+    readings: List[str] = []
+    for position, key in enumerate(pool.keys):
+        in_use = key.id == current or (not current and key.token == current_token)
+        health = usage.health_for_token(source, key.token)
+        if health is None:
+            readings.append(f"{key.id}: unreadable")
+            continue
+        if not health.usable:
+            readings.append(f"{key.id}: blocked by {health.blocked}")
+            continue
+        readings.append(f"{key.id}: peak {health.peak:g}")
+        if in_use:
+            continue
+        scored.append((usage.tie_break_key(health), position))
+    if not scored:
+        why = (
+            "every usable key is already the one this session runs on"
+            if any(": peak" in row for row in readings)
+            else "no key's usage could be read"
+        )
+        return SwitchCandidate(
+            None, source.name, why, tuple(readings), current or None
+        )
+    best = min(scored)[1]
+    return SwitchCandidate(
+        pool.keys[best].id, source.name, "", tuple(readings), current or None
+    )

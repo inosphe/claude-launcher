@@ -325,6 +325,19 @@ assert.deepStrictEqual(plain(P.cflowFacts(null, { workflow: 'improv', status: 's
     href: '#/wf/' + encodeURIComponent('default|/w/c') });
 assert.strictEqual(P.cflowFacts(null, null), null);
 
+// A run held only by choices it does not stop on (claunch-hbmhk.1): `gated`
+// is true for both kinds, so the status row reads `blocking` and says a
+// choice is open rather than that a person is being waited on.
+assert.deepStrictEqual(plain(P.cflowFacts({ workflow: 'improv-worker-v2', status: 'running',
+                                            gated: true, blocking: false, round: 2,
+                                            current: ['work'], owed: [] }, null)).rows,
+  [['workflow', 'improv-worker-v2'], ['status', 'running · 선택 열림'], ['round', '2'],
+   ['현재', 'work']]);
+assert.deepStrictEqual(plain(P.cflowFacts({ workflow: 'improv-worker-v2', status: 'running',
+                                            gated: true, blocking: true,
+                                            owed: ['select: end'] }, null)).rows,
+  [['workflow', 'improv-worker-v2'], ['status', 'running · 사람 대기'], ['대기', 'select: end']]);
+
 // The overlay's head of an opening task: its first lines, how many more.
 assert.deepStrictEqual(plain(P.taskPreview('a\nb\n')), { text: 'a\nb', clipped: false, more: 0 });
 const ten = Array.from({ length: 10 }, (_, i) => `line ${i}`).join('\n');

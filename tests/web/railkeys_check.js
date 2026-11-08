@@ -233,6 +233,7 @@ Object.assign(exports, {
   focused: railFocusedCardName,
   restore: restoreRailFocus,
   key: railCardKey,
+  chartKey: chartRowKey,
   kill: railCardKill,
   pause: railCardPause,
   archive: railCardArchive,
@@ -394,6 +395,7 @@ const ev = (key, over = {}) => Object.assign({
   ctx.key(ev(" ", { target: row("s3") }), "s3");
   check("Space does too", location.hash, "#/s/s3");
   check("...and none of that ended anything", kills().length, 0);
+
 
   /* ---------------------------------------------------------------- */
   /* the other card verbs: pause, archive, approve, pin                */
@@ -587,6 +589,8 @@ const ev = (key, over = {}) => Object.assign({
      Settings renderer, and has a stylesheet to draw it. */
   check("the help card is drawn from the binding table",
         /function keyHelpCard\(\)[\s\S]*?RAIL_CARD_KEYS\.map/.test(src), true);
+  check("...and documents the Chart row from the same table",
+        /function keyHelpCard\(\)[\s\S]*?"On a focused Chart row"[\s\S]*?RAIL_CARD_KEYS\.filter[\s\S]*?CHART_ROW_SKIPS/.test(src), true);
   check("...and Settings appends it",
         /function renderWorkspaces\(\)[\s\S]*?keyHelpCard\(\)/.test(src), true);
   check("...under a heading that says Help",
@@ -607,6 +611,32 @@ const ev = (key, over = {}) => Object.assign({
      reader's `k` is pointed at. */
   check("...and the default outline it replaces is gone",
         /#session-list li\.sess-card:focus\s*\{[^}]*outline:\s*none/s.test(css), true);
+
+  /* ---------------------------------------------------------------- */
+  /* the Chart view's rows (claunch-h0wi6.2.1)                         */
+  /* ---------------------------------------------------------------- */
+  /* The same table, less Enter/Space, which the row binds itself, and c,
+     the list card's details. A fresh record (s7), so no kill state left by
+     the checks above stands in the way. */
+  calls.length = 0;
+  ctx.setSessions([
+    { name: "s3", status: "exited" },
+    { name: "s7", status: "idle" },
+  ]);
+  location.hash = "";
+  const chartEnter = ev("Enter", { target: row("s2") });
+  check("a chart row keeps Enter for itself", ctx.chartKey(chartEnter, "s7"), false);
+  check("...and leaves it unswallowed for the row's own handler", chartEnter.prevented, 0);
+  check("...so the card's open does not run", location.hash, "");
+  check("a chart row keeps Space too", ctx.chartKey(ev(" ", { target: row("s2") }), "s7"), false);
+  check("c is not a chart row's", ctx.chartKey(ev("c", { target: row("s2") }), "s7"), false);
+  check("...under the card's rule: a modifier belongs to the browser",
+        ctx.chartKey(ev("k", { target: row("s2"), ctrlKey: true }), "s7"), false);
+  check("...and an exited record has nothing to end",
+        ctx.chartKey(ev("k", { target: row("s3") }), "s3"), false);
+  check("k on a chart row ends its session", ctx.chartKey(ev("k", { target: row("s2") }), "s7"), true);
+  await new Promise((r) => setTimeout(r, 0));
+  check("...through the card's request", kills().map((c) => c.url), ["/api/sessions/s7/kill"]);
 
   if (failures) {
     console.error(`${failures} rail keyboard check(s) failed`);

@@ -513,6 +513,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "planwaitcard_check.js",
+        "optionalgate_check.js",
         "leaderfault_check.js",
         "faultreset_check.js",
         "restartgate_check.js",
@@ -535,6 +536,8 @@ CHECKS = [
         "briefmodel_check.js",
         "model_settings_check.js",
         "modeltiers_check.js",
+        "modeltierscard_check.js",
+        "settingscards_check.js",
         "modelprice_check.js",
         "faqsettings_check.js",
         "briefrow_check.js",
@@ -647,6 +650,7 @@ CHECKS = [
         "prwizard_check.js",
         "railmeshgroup_check.js",
         "projects_check.js",
+        "tabtitle_check.js",
         "searchclear_check.js",
         "modalgitwait_check.js",
         "floworphans_check.js",
@@ -670,6 +674,7 @@ CHECKS = [
         "retrospectionpage_check.js",
         "categorypage_check.js",
         "packspane_check.js",
+        "subprocs_check.js",
         "simpage_check.js",
         "durableflow_check.js",
         "qapane_check.js",
@@ -685,6 +690,7 @@ CHECKS = [
         "sessioncli_check.js",
         "specpage_check.js",
         "specpage_tools_check.js",
+        "fleetpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
         "cflow2view_check.js",
@@ -707,6 +713,10 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "chart_browser.cjs",
+    "chartdetail_browser.cjs",
+    "railchart_browser.cjs",
+    "artifactscleanup_browser.cjs",
+    "artifactsmeasure_browser.cjs",
     "hive_browser.cjs",
     "megathread_browser.cjs",
     "resendactions_browser.cjs",
@@ -717,8 +727,11 @@ BROWSER_CHECKS = [
     "cflow2inputs_browser.cjs",
     "cflow2history_browser.cjs",
     "cflow2gentle_browser.cjs",
+    "cflow2runinputs_browser.cjs",
     "cflow2throughput_browser.cjs",
+    "cflow2gates_browser.cjs",
     "glossary_browser.cjs",
+    "retrospection_browser.cjs",
     "flows_browser.cjs",
         "diagramviewport_browser.cjs",
         "sessionform_browser.cjs",
@@ -752,6 +765,10 @@ BROWSER_CHECKS = [
         "vmsession_browser.cjs",
         "vmoff_browser.cjs",
         "terminputlayout_browser.cjs",
+        "mobiletop_browser.cjs",
+        "mobiletabs_browser.cjs",
+        "mobiletokens_browser.cjs",
+        "mobiledetail_browser.cjs",
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
@@ -759,7 +776,9 @@ BROWSER_CHECKS = [
         "meshfold_browser.cjs",
         "sysperf_browser.cjs",
         "ptyhostsetting_browser.cjs",
+        "modelpricesinput_browser.cjs",
         "spawngate_browser.cjs",
+        "gateaside_browser.cjs",
         "filldefault_browser.cjs",
         "seedmesh_browser.cjs",
         "stats_browser.cjs",
@@ -770,7 +789,9 @@ BROWSER_CHECKS = [
         "noticecost_browser.cjs",
         "noticewrap_browser.cjs",
         "noticefold_browser.cjs",
+        "noticeload_browser.cjs",
         "sessiontooltip_browser.cjs",
+        "skipconfirm_browser.cjs",
 ]
 
 
@@ -874,6 +895,66 @@ def test_browser_harnesses_strip_the_real_boot_call():
             )
 
 
+HARNESS_NODE = "test_browser_harness"
+BOOT_STRIP_NODE = "test_browser_harnesses_strip_the_real_boot_call"
+
+
+def _harness_node_diff(lines, scripts):
+    """Sort a ``--collect-only -q`` listing into the counts the guard explains.
+
+    Returns ``(missing, extra, boot_copies, duplicates)``. The listing is read
+    by node id, not by a substring of the line: ``-k browser_harness`` is a
+    substring match, so the ids it collects are the parametrized harnesses,
+    the boot-strip check (whose name starts with those same words), and any
+    test added later whose name happens to do the same. Only the first group
+    is one node per script, so only it may be compared against the list.
+    """
+    nodes = [line.split("::", 1)[1].strip() for line in lines if "::" in line]
+    expected = [f"{HARNESS_NODE}[{script}]" for script in scripts]
+    boot_copies = sum(1 for node in nodes if node == BOOT_STRIP_NODE)
+    collected = [node for node in nodes
+                 if node.startswith(HARNESS_NODE) and node != BOOT_STRIP_NODE]
+    missing = sorted(set(expected) - set(collected))
+    extra = sorted(set(collected) - set(expected))
+    duplicates = sorted({node for node in collected if collected.count(node) > 1})
+    return missing, extra, boot_copies, duplicates
+
+
+def test_the_harness_node_diff_separates_the_three_kinds_of_id():
+    """The guard below reads a listing it did not write.
+
+    Sorted by substring, a test whose name merely starts the same way is
+    counted as a harness and slips past the tally; sorted by id it is named in
+    the failure instead. The four kinds are fed in one listing here so that
+    each explanation the guard prints stays tied to the input that produces it.
+    """
+    lines = [
+        "tests/test_web_topology.py::test_browser_harness[a_browser.cjs]",
+        "tests/test_web_topology.py::test_browser_harness[b_browser.cjs]",
+        "tests/test_web_topology.py::test_browser_harness_extra",
+        "tests/test_web_topology.py::test_browser_harness[a_browser.cjs]",
+        f"tests/test_web_topology.py::{BOOT_STRIP_NODE}",
+        "73/360 tests collected (287 deselected)",
+    ]
+    missing, extra, boot_copies, duplicates = _harness_node_diff(
+        lines, ["a_browser.cjs", "b_browser.cjs", "c_browser.cjs"]
+    )
+    assert missing == [f"{HARNESS_NODE}[c_browser.cjs]"], (
+        f"a script the listing never mentions is not reported missing: {missing}"
+    )
+    assert duplicates == [f"{HARNESS_NODE}[a_browser.cjs]"], (
+        f"an id collected twice is not reported: {duplicates}"
+    )
+    assert boot_copies == 1, (
+        f"the boot-strip check, whose name starts with the same words, was "
+        f"counted {boot_copies} times"
+    )
+    assert extra == ["test_browser_harness_extra"], (
+        "a test whose name only starts the same way is counted as a harness: "
+        f"{extra}"
+    )
+
+
 def test_the_prose_that_opens_the_gate_selects_what_it_says():
     """CLAUDE.md says how to open the gate above (claunch-odk2w).
 
@@ -942,19 +1023,18 @@ def test_the_prose_that_opens_the_gate_selects_what_it_says():
         f"against this module:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
     )
     nodes = proc.stdout.splitlines()
-    harness_nodes = sum(1 for line in nodes if "::test_browser_harness[" in line)
-    assert harness_nodes == len(BROWSER_CHECKS), (
-        f"`-k browser_harness` collects {harness_nodes} harness node(s) from "
-        f"this module, not one per BROWSER_CHECKS entry "
-        f"({len(BROWSER_CHECKS)}): a sliced, filtered or renamed parametrize "
-        "list leaves the source checks above and the document's count green "
-        "while the printed command runs fewer harnesses than it claims"
+    missing, extra, boot_copies, duplicates = _harness_node_diff(nodes, BROWSER_CHECKS)
+    assert not (missing or extra or duplicates), (
+        f"`-k browser_harness` does not collect exactly one harness node per "
+        f"BROWSER_CHECKS entry ({len(BROWSER_CHECKS)}).\n"
+        f"  expected but not collected: {missing or 'none'}\n"
+        f"  collected more than once: {duplicates or 'none'}\n"
+        f"  collected but not expected: {extra or 'none'}\n"
+        "A sliced or filtered parametrize list drops entries; a test whose "
+        "name starts with the same words is run by the document's command "
+        "without being one of the harnesses."
     )
-    boot_nodes = sum(
-        1 for line in nodes
-        if line.endswith("::test_browser_harnesses_strip_the_real_boot_call")
-    )
-    assert boot_nodes == 1, (
-        f"`-k browser_harness` collects {boot_nodes} copies of the boot-strip "
-        "check; the document counts it once"
+    assert boot_copies == 1, (
+        f"`-k browser_harness` collects {boot_copies} copies of "
+        f"{BOOT_STRIP_NODE}; the document counts it once"
     )

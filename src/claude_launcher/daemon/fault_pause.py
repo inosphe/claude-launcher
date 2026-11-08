@@ -11,6 +11,11 @@ leader in that state keeps the dashboard's "leader stopped" card up
 was stopped on purpose, and :data:`leader_fault.ALERT_CATEGORIES` leaves it
 out.
 
+A multi-key profile gets one chance to avoid the pause: :mod:`key_switch`
+runs first in each pass and, for a session that asked for it, relaunches it
+on another usable key. What this module pauses is what that switch could not
+rescue.
+
 Who is paused, measured on the live object every pass:
 
 * ``fault_auto_pause`` is on in the daemon config;
@@ -20,9 +25,22 @@ Who is paused, measured on the live object every pass:
   possible; see :mod:`session_fault`);
 * its fault record is active and of a kind in :data:`KINDS`.
 
+A session that was just brought back -- respawned or woken out of a pause,
+a hold or a kill, or restarted on another key or borrowed profile
+(:attr:`Session.resumed_at`, claunch-x9agn) -- is left alone for
+:data:`GRACE` seconds (``daemon.fault_resume_grace``). Its screen can still
+show the limit line the previous incarnation stopped on (a resumed
+conversation is painted back), and read at once that line paused the session
+again before the new key or profile had a chance to answer. The grace is
+drawn on the session's timer line (:func:`grace_timer`) so a person can see
+when the pause may come back.
+
 A session this clock has paused once for a fault is not paused again for
 the same fault (the same reset deadline): a person who resumes it before the
-reset has decided to, and the clock does not undo that.
+reset has decided to, and the clock does not undo that. That memory outlives
+the daemon that made it: the pair is in :data:`RECORD` as well, so a restart
+-- which empties the in-memory map -- does not pause again a session a person
+resumed while the same limit was still on its screen (claunch-ijot0.1).
 
 Nothing resumes the session at the reset: whether to spend the new plan on it
 is the person's decision. What the daemon can do is say when that decision
@@ -51,6 +69,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 
@@ -71,6 +90,14 @@ INTERVAL = 30.0
 #: an API status error clears on its own within its window.
 KINDS = ("usage_limit",)
 
+#: Seconds after a resume during which a session is not paused (nor
+#: key-switched) for a fault (claunch-x9agn). ``daemon.fault_resume_grace``
+#: overrides it; 0 turns it off.
+GRACE = 30.0
+
+#: The config key for :data:`GRACE`.
+GRACE_KEY = "fault_resume_grace"
+
 #: The reason recorded on the pause (``Session.ended_by``).
 REASON = "usage-limit"
 
@@ -88,9 +115,28 @@ RECORD_FIELDS = (
     "action", "resolved_by", "code",
 )
 
+#: The record field naming the fault the pause was made for: the ``until``
+#: the live reading carried, empty when the harness stated none. It is the
+#: key :func:`sweep` keeps per session, so a daemon that restarts can tell it
+#: already paused this session for this fault (claunch-ijot0.1). Not part of
+#: :data:`RECORD_FIELDS`: it is the clock's own bookkeeping and the pause
+#: view never shows it.
+KEY_FIELD = "pause_key"
+
 #: What a reading taken from :data:`RECORD` says in ``source``, so a reader
 #: can tell it apart from one taken off a screen (``session_fault``).
 SOURCE = "pause-record"
+
+
+def pause_key(record: dict) -> str:
+    """The identity of the fault a pause is made for: its stated ``until``.
+
+    The same key the clock keeps in memory, written to the session directory
+    too. A fault with no stated deadline keys on ``""`` -- the in-memory map
+    has always held that for it, so a restart matches it the same way rather
+    than inventing an identity the live reading would not repeat.
+    """
+    return str(record.get("until") or "")
 
 
 def enabled(cfg: Optional[dict] = None) -> bool:
@@ -99,9 +145,50 @@ def enabled(cfg: Optional[dict] = None) -> bool:
     return bool(cfg.get("fault_auto_pause", True))
 
 
-def fault_to_pause(session) -> Optional[dict]:
-    """The active fault that pauses ``session`` now, or None."""
+def resume_grace(cfg: Optional[dict] = None) -> float:
+    """The grace after a resume in seconds (``fault_resume_grace``), >= 0."""
+    cfg = store.daemon_config() if cfg is None else cfg
+    try:
+        value = float(cfg.get(GRACE_KEY, GRACE))
+    except (TypeError, ValueError):
+        return GRACE
+    return value if value > 0 and value == value else 0.0
+
+
+def grace_until(session, grace: float) -> Optional[float]:
+    """When ``session``'s resume grace ends (epoch seconds), or None.
+
+    None when the session was not brought back by a resume this daemon saw
+    (:attr:`Session.resumed_at` is unset: a fresh session, a restore after a
+    daemon restart), when it has exited, or when the grace is off.
+    """
+    if grace <= 0 or getattr(session, "exited", False):
+        return None
+    resumed = getattr(session, "resumed_at", None)
+    if not isinstance(resumed, (int, float)) or isinstance(resumed, bool):
+        return None
+    return float(resumed) + grace
+
+
+def in_grace(session, grace: float, now: Optional[float] = None) -> bool:
+    """Whether ``session`` is inside its resume grace now."""
+    until = grace_until(session, grace)
+    if until is None:
+        return False
+    return (time.time() if now is None else now) < until
+
+
+def fault_to_pause(
+    session, *, grace: Optional[float] = None, now: Optional[float] = None
+) -> Optional[dict]:
+    """The active fault that pauses ``session`` now, or None.
+
+    ``grace`` is the resume grace in seconds (:func:`resume_grace` when
+    omitted); a session inside it is not paused yet, whatever its reading.
+    """
     if session.exited or getattr(session, "kill_requested", False):
+        return None
+    if in_grace(session, resume_grace() if grace is None else grace, now):
         return None
     try:
         record = session.fault()
@@ -114,22 +201,31 @@ def fault_to_pause(session) -> Optional[dict]:
     return record
 
 
-def sweep(manager, paused: Dict[str, str]) -> List[str]:
+def sweep(
+    manager, paused: Dict[str, str], *, grace: Optional[float] = None
+) -> List[str]:
     """Pause every session :func:`fault_to_pause` names; the names paused.
 
-    ``paused`` maps a session to the ``until`` of the fault it was paused
-    for, kept across passes so a resumed session is not paused again for
-    the same fault.
+    ``paused`` maps a session to the key of the fault it was paused for
+    (:func:`pause_key`), kept across passes so a resumed session is not
+    paused again for the same fault. It dies with the daemon, so the record
+    on disk answers the same question for a pass that runs after a restart
+    (:func:`paused_before`); a match there is remembered in ``paused`` too,
+    so the file is read once per session, not once per pass.
     """
+    grace = resume_grace() if grace is None else grace
     out: List[str] = []
     for session in list(manager.list()):
         name = session.sdef.name
         try:
-            record = fault_to_pause(session)
+            record = fault_to_pause(session, grace=grace)
             if record is None:
                 continue
-            until = str(record.get("until") or "")
-            if paused.get(name) == until:
+            key = pause_key(record)
+            if paused.get(name) == key:
+                continue
+            if paused_before(name, key):
+                paused[name] = key
                 continue
             manager.pause(name, by=actors.make(actors.DAEMON, reason=REASON))
         except Exception:  # noqa: BLE001 -- one session must not stop the pass
@@ -140,11 +236,37 @@ def sweep(manager, paused: Dict[str, str]) -> List[str]:
         # whose stamp is the session's, and two separate ``now()`` calls can
         # land on either side of a second boundary.
         write_record(name, record, paused_at=getattr(session, "paused_at", None))
-        paused[name] = until
+        paused[name] = key
         out.append(name)
     if out:
         log.info("fault pause (usage limit): %s", ", ".join(out))
     return out
+
+
+def paused_before(name: str, key: str) -> bool:
+    """Whether this clock already paused ``name`` for fault ``key`` before.
+
+    Answered from :data:`RECORD`, so it survives a daemon restart. The
+    session is a live candidate here -- exited and ending ones are filtered
+    by :func:`fault_to_pause` -- so a record for this fault means a person
+    resumed the session while the limit was still on its screen, and the
+    clock leaves that decision alone.
+
+    A record written before :data:`KEY_FIELD` existed has no key; its
+    ``until`` stands in only when the harness stated it, because a guessed
+    one is the pause's own invention and never equals a live ``until``.
+
+    A name reused by a later session can still find an older record; it has
+    to name the same deadline to match, and the cost of a false match is one
+    pause not made, not a wrong stop.
+    """
+    record = read_record(name)
+    if not record:
+        return False
+    stored = record.get(KEY_FIELD)
+    if stored is None:
+        return bool(record.get("until_stated")) and str(record.get("until") or "") == key
+    return str(stored) == key
 
 
 def kind_window(kind: str) -> float:
@@ -169,6 +291,9 @@ def write_record(name: str, record: dict, *, paused_at: Optional[str] = None) ->
     body = {k: record.get(k) for k in RECORD_FIELDS if k in record}
     stamp = paused_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     body["paused_at"] = stamp
+    # The key the pause was made for, from the live reading -- before the
+    # capping below invents an ``until`` this fault never carried.
+    body[KEY_FIELD] = pause_key(record)
     if _parse(body.get("until")) is None:
         window = kind_window(str(body.get("kind") or ""))
         paused = _parse(stamp)
@@ -329,6 +454,46 @@ def resets(
     return out
 
 
+#: The ``session_timers`` source and kind of the resume grace chip.
+TIMER_SOURCE = "fault"
+TIMER_KIND = "grace"
+
+
+def grace_timer(session, cfg: Optional[dict] = None,
+                now: Optional[float] = None) -> Optional[dict]:
+    """The timer-line chip for ``session``'s resume grace, or None.
+
+    Shown while the grace runs, the automatic pause is on and the session
+    still reads an active usage-limit fault: with the pause off, or once the
+    limit has cleared, there is nothing for the grace to hold back, so the
+    chip goes before its countdown ends (claunch-xn9ir).
+    """
+    from . import session_timers
+
+    cfg = store.daemon_config() if cfg is None else cfg
+    if not enabled(cfg):
+        return None
+    grace = resume_grace(cfg)
+    if not in_grace(session, grace, now):
+        return None
+    try:
+        record = session.fault()
+    except Exception:  # noqa: BLE001 -- a broken reading shows no chip
+        return None
+    if not record or not record.get("active") or record.get("kind") not in KINDS:
+        return None
+    until = grace_until(session, grace)
+    return session_timers.timer(
+        TIMER_SOURCE, TIMER_KIND, "resume-grace", "usage-limit grace", until,
+        since=getattr(session, "resumed_at", None),
+        detail=(
+            f"resumed: no usage-limit pause or key switch for {grace:g}s "
+            f"(daemon.{GRACE_KEY}); the pause pass after that may pause it "
+            "again if the limit is still on its screen"
+        ),
+    )
+
+
 def install(app) -> None:
     async def h_fault_resets(request: web.Request) -> web.Response:
         rows = resets(request.app["manager"], include_pending=True)
@@ -375,14 +540,33 @@ class FaultPauseClock:
                 await task
 
     def pass_once(self) -> List[str]:
-        if not enabled(self.config()):
+        cfg = self.config()
+        if not enabled(cfg):
             return []
-        return sweep(self.manager, self.paused)
+        return sweep(self.manager, self.paused, grace=resume_grace(cfg))
+
+    async def async_pass_once(self) -> List[str]:
+        """One pass: switch keys first, then pause what is left.
+
+        The switch (:mod:`key_switch`) runs inside this pass rather than in a
+        clock of its own so the two cannot race: a session that was just
+        relaunched onto another key reads no fault any more, so :func:`sweep`
+        below skips it without needing to know the switch happened. A separate
+        clock would leave a window where the pass paused the very session the
+        switch was about to restart.
+        """
+        cfg = self.config()
+        if not enabled(cfg):
+            return []
+        from . import key_switch
+
+        await key_switch.sweep(self.manager, cfg)
+        return sweep(self.manager, self.paused, grace=resume_grace(cfg))
 
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.interval)
             try:
-                self.pass_once()
+                await self.async_pass_once()
             except Exception:  # noqa: BLE001 -- the clock outlives a bad pass
                 log.exception("fault pause pass failed")

@@ -89,7 +89,7 @@ def test_worktree_event_contains_old_and_new_location_only_after_success(home, t
     assert mgr.events.rows(old) == []
     monkeypatch.setattr(mgr, "_recreate", lambda name, session, definition:
                         DeadSession(definition, created_at=session.created_at))
-    moved, carried = asyncio.run(mgr.migrate("s1", str(tmp_path)))
+    moved, carried, _slots = asyncio.run(mgr.migrate("s1", str(tmp_path)))
     event = mgr.events.rows(moved)[-1]
     assert event["kind"] == "worktree" and not carried
     assert event["details"] == {

@@ -123,9 +123,9 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 | 지점 | 파일 | 내용 |
 |---|---|---|
 | 1 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml` (`coding-plan`) | `returns.ok.plan_waiting`(`int?`)에 `summary.waiting`을 싣는다. 읽지 못하면 -1과 사유 |
-| 2 | 같은 파일 (`plan-wait-before-gate`) | `coding-plan` 뒤·게이트 앞의 `wait`. probe는 `claunch gate plan-waiting`(0 통과, 1 계속 대기, 그 밖은 판정 불가), `poll: 30`, `undecided_max: 3`, `seconds` 없음(상한 없음) |
+| 2 | 같은 파일 (`plan-wait`) | `coding-plan`(또는 `plan-seed`) 뒤·게이트 앞의 `wait`. probe는 `claunch gate plan-waiting`(0 통과, 1 계속 대기, 그 밖은 판정 불가), `poll: 30`, `undecided_max: 3`, `seconds` 없음(상한 없음) |
 | 3 | 같은 파일 (`coding-approval-check`) | 조건은 그대로. 대기가 앞에 서므로 게이트는 미결정이 풀린 뒤에만 선다 |
-| 4 | 같은 파일 (`plan-seed`, `plan-wait-after-seed`) | `coding-plan`을 건너뛰는 갈래(`approve-always` 이후, 자동 경로)에서 계획을 먼저 확보하고 같은 대기를 `work` 앞에 둔다 |
+| 4 | 같은 파일 (`plan-seed`) | `coding-plan`을 건너뛰는 갈래(`approve-always` 이후, 자동 경로)에서 계획을 먼저 확보한다. 대기는 2번과 같은 `plan-wait` 하나를 지난다(9절) |
 | 5 | `src/claude_launcher/gates/plan_waiting.py` | plan 저장소(`daemon_dir()/plan.sqlite3`)를 읽기 전용으로 열어 `waiting`을 판정한다. plan 없음·읽기 실패·값 없음은 모두 2 |
 | 6 | `src/claude_launcher/daemon/cflow2_web.py`, `src/claude_launcher/web/static/app.js` | rail의 `answers`에 `plan-wait`를 싣고(probe가 `plan-waiting` 게이트인 `wait`), 알림 카드는 그 세션의 plan 패널을 연다. 카드에는 누를 버튼이 없다 |
 
@@ -133,3 +133,48 @@ plan 패널의 답이 곧 게이트의 답이 되게 하는 안이다. 두 가�
 (`src/claude_launcher/cli_gate.py`의 `GATES`), 판정 불가가 세 번 쌓이면
 `plan-wait-unclear`가 계속 기다릴지 진행할지 사람에게 묻는다(규칙 1의
 「모르는 값은 멈춤」).
+
+## 7. 작업 시작 대기와 closure의 분리 (`claunch-jw1v2`)
+
+2회차 구현에서 두 작업 시작 대기(`plan-wait-before-gate`, `plan-wait-after-seed`)는
+`summary.waiting` 전체를 읽었다. 이 값에는 앞 회차가 남긴 closure verify·followup이
+들어 있어, 이미 착지한 작업의 확인 항목이 다음 회차의 `work`를 막았다. 규칙 1의
+「plan 미결정」은 지금 계획의 고르지 않은 decision을 뜻하도록 좁혔다.
+
+| 항목 | 내용 | 위치 |
+|---|---|---|
+| 작업 시작용 집계 | `summary.waiting_decisions`는 고르지 않은 decision 수다. `summary.waiting`은 지금처럼 decision·미확인 verify·미처분 followup을 합한다 | `src/claude_launcher/plan/store.py` (`summarize`) |
+| probe의 범위 | `claunch gate plan-waiting --scope start`는 `waiting_decisions`를 읽는다. 값이 없는 데몬이면 `blockers`의 decision 줄을 센다. 기본 `--scope settle`은 `waiting`을 읽는다 | `src/claude_launcher/gates/plan_waiting.py` |
+| 워크플로 | 작업 시작 대기(9절 이후 `plan-wait` 하나)는 `--scope start`, settle의 `closure-wait`·`closure-wait-timed`는 기본 범위다. 모두 `--notify`를 준다 | `src/claude_launcher/workflows/v2/improv-worker-v2.yaml` |
+| 멈춤 알림 | `--notify`는 멈춘 항목 집합마다 세션 스레드 「plan 게이트 대기」에 한 번 쓴다. 같은 집합이면 다시 쓰지 않고, 통과하면 기록을 지운다. 기록은 세션 scratch의 `plan-gate-notice.json`이다 | `plan_waiting.notify_stall` |
+| 보류 판정 | verify의 `deferred`(보류)는 waiting·closable을 막지 않는다. 세션은 그 확인을 보드 이슈로 옮기고 detail에 이슈 id를 적는다 | `store.VERDICTS`, `plan_api.decided_text` |
+| 결과 유지 | passed·deferred verify와 처리된 followup은 title·detail만 바뀌면 결과와 rev를 유지하고 `set` 이벤트의 `reworded_kept`에 남는다. 다시 물으려면 `plan_node`에 `reopen=<이유>`를 준다. failed verify는 문구가 바뀌면 다시 묻는다 | `store._kept`, `store.patch` |
+| 세션이 처리한 followup | 세션이 `status=done`으로 쓴 followup은 사용자 결정 없이 waiting에서 빠진다 | `store.summarize` |
+| 참고(note) | closure 종류 `note`는 waiting·closable을 막지 않는다. 패널의 「참고」 절과 end-decision 브리프에 목록으로 나온다. 사용자는 선택 사항으로 「여기서 진행」·「이슈로 넘김」을 누를 수 있고(「버림」은 없다), 그 결과는 followup과 같은 `[claunch plan]` 블록으로 세션에 전달되지만 게이트를 세우지 않는다(claunch-i0whx) | `store.NOTE_ACTIONS`, `plan_api.decided_text`, `plan-pane.js` |
+
+## 8. 계층 결정, 자동 선택, 배제 선택지, 변경 전달 (`claunch-vmcg7`)
+
+| 항목 | 내용 | 위치 |
+|---|---|---|
+| 계층 | 단계·결정의 children은 최대 5단계다. 결정의 자식 가운데 한 선택지에만 의존하는 항목은 `under: <선택지 label>`을 가진다. `under`가 없는 자식은 결정 전체에 속한다. 부모가 결정이 아니거나, 없는 label이거나, 배제된 선택지를 가리키는 `under`는 거절된다 | `store._Builder.node` |
+| 활성 경로 | `walk_active`는 고르지 않은 선택지 아래 항목을 건너뛴다. `summary.waiting`·`waiting_decisions`·`blockers`는 활성 경로만 세고, 건너뛴 id는 `summary.inactive`에 남는다. 활성 경로 밖의 결정에 `decide`를 보내면 거절된다 | `store.walk_active`, `store.summarize`, `store.decide` |
+| 자동 선택 | 선택지의 `default: true`는 권장안을 겸한다(결정마다 최대 하나). 쓰는 시점에 결과가 `{choice, by: "agent"}`로 채워져 사용자를 기다리지 않고(이전 결과가 사용자의 것이면 문구가 바뀌어도 default로 채우지 않고 사용자에게 다시 묻는다), `summary.auto`에 그 수가 남는다. 패널은 「자동 선택됨」으로 표시하고 다른 선택지의 「이 안 선택」 버튼을 유지한다 | `store._options`, `store._Builder.node`, `plan-pane.js` |
+| 배제 선택지 | 선택지의 `rejected: <이유>`는 고를 수 없는 선택지다. 권장·default를 겸할 수 없고, 고를 수 있는 선택지가 2개(default가 있으면 1개) 이상이어야 한다. 패널은 취소선과 「배제 이유」를 표시한다 | `store._options`, `store.decide`, `plan-pane.js`, `plan-page.js` |
+| 변경 전달 | 이미 답한 결정(자동 선택 포함)을 다른 선택지로 바꾸면 `[claunch plan]` 블록이 `CHANGED`로 시작하고 변경 전·후 선택지와 각 효과·리스크, 이전 안으로 한 작업을 다시 보라는 지시를 싣는다. 같은 선택지를 다시 고르면 확인 문장만 싣는다 | `plan_api.decided_text` |
+| 선택지 삭제 | `plan_node`로 options를 바꿀 때 `under` 자식이 가리키는 선택지를 지우거나 배제하면 거절된다 | `store.patch` |
+| 작업 시작 대기 | 자동 선택된 결정과 비활성 항목은 `--scope start`의 대기 수에 들어가지 않는다 | `gates/plan_waiting.py` (변경 없음, `waiting_decisions`를 읽음) |
+
+## 9. 회차별 plan (`claunch-r3j1o`)
+
+plan은 회차마다 따로 있다. 회차가 바뀌어도 plan 하나에 덧쓰면 앞 회차의 결정이 같은
+id·같은 문구의 다음 회차 결정으로 이어지고, 회차별 기록이 남지 않았다.
+
+| 항목 | 내용 | 위치 |
+|---|---|---|
+| 회차 열기 | `new_round(run, round)`는 지금 plan을 봉인해 `plan_rounds`에 보관하고 이 회차의 빈 plan을 연다. 같은 (run, round)로 다시 부르면 아무것도 바꾸지 않는다. revision은 같은 행에서 이어 올라가므로 앞 회차 revision으로 들어온 쓰기는 거절된다 | `src/claude_launcher/plan/store.py` (`new_round`, `_seal`) |
+| 넘어오는 항목 | 앞 회차 closure 가운데 `summary.blockers`에 있는 항목(확인하지 않았거나 실패한 verify, 처분하지 않았거나 처분 뒤 끝내지 않은 followup)이 `from: {run, round}`와 함께 넘어온다. note와 보류한 verify는 막는 항목이 아니므로 넘어오지 않는다. 판정은 `summarize`와 같은 함수(`closure_blocker`)에서 나온다 | `store.closure_blocker` |
+| 거절 모드 | `leftover=require_disposed`면 넘어올 항목이 있을 때 409로 거절하고 아무것도 봉인하지 않는다. 기본은 `carry` | `store.new_round` |
+| 트리거 | `intake`에 들어가는 순간 데몬이 `plan-round` 트리거로 회차를 연다. 규칙 `plan-panel`은 plan을 쓰는 노드에 plan_get의 run·round가 이 회차가 아니면 `plan_new_round`를 먼저 부르게 한다 | `src/claude_launcher/daemon/cflow2_triggers.py`, `improv-worker-v2.yaml` |
+| 작업 시작 대기 | 2·4번의 두 대기를 `plan-wait` 하나로 모았다. 계획 단계(`plan-step`: `coding-plan` 또는 `plan-seed`) 뒤, 승인 게이트 앞이다. probe는 `--scope start --notify`이고, `CFLOW2_RUN`·`CFLOW2_ROUND`와 plan의 run·round가 다르면 2(판정 불가)다. 두 축(어느 회차의 plan인가, 무엇을 기다리는가)은 서로 독립이다 | `improv-worker-v2.yaml`, `gates/plan_waiting.py` |
+| 지난 회차 보기 | 패널 상단의 회차 줄에서 고른 지난 회차를 읽기 전용으로 그린다(결정·처분·참고 버튼 없음). 넘어온 항목에는 출처 회차 칩이 붙는다 | `src/claude_launcher/web/static/plan-pane.js` |
+| 표면 | API `POST /api/plan/round`, `GET /api/plan/rounds`, `GET /api/plan?round=`, MCP `plan_new_round`·`plan_rounds`·`plan_get round=`. CLI는 두지 않는다(사용자 결정 d-cli) | `daemon/plan_api.py`, `plan_mcp.py` |

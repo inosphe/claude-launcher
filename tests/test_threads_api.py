@@ -546,6 +546,85 @@ def test_mentions_route_a_message_to_the_sessions_it_names(tmp_path):
     run(tmp_path, scenario, names=("s1", "s2", "s3"))
 
 
+def test_user_mention_keeps_a_guest_message_out_of_the_owner_terminal(tmp_path):
+    """claunch-ikcvw: ``@user`` names the person reading the thread and no
+    session. A guest writes it to answer the user alone -- with no mention the
+    owner would be typed into -- and a body carrying only ``@user`` reaches
+    nobody's terminal. It is not an unknown name, and naming a session or
+    ``@all`` alongside it still reaches those sessions."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s2"})
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "s3"})
+
+        def counts():
+            return {n: len(s.delivered) for n, s in mgr.sessions.items()}
+
+        # a guest answers the user alone: no terminal is typed into
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s2", "text": "@user 결정은 사용자가 하십니다"})
+        assert res["mentions"] == {"all": False, "targets": [], "user": True}
+        assert "delivered" not in res and "guests_delivered" not in res
+        assert "unknown_mentions" not in res
+        assert counts() == base
+        read = await req("GET", f"/api/threads/{tid}?reader=user")
+        assert read["messages"][-1]["body"].startswith("@user 결정은")
+
+        # the same body without the mention still types into the owner
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s2", "text": "결정은 사용자가 하십니다"})
+        assert "mentions" not in res and counts() == {**base, "s1": base["s1"] + 1}
+
+        # @user adds no session: a named guest is still reached
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s2", "text": "@user @s3 의견 주세요"})
+        assert res["mentions"] == {"all": False, "targets": ["s3"], "user": True}
+        assert res["guests_delivered"] == {"s3": True} and counts() == {**base, "s3": base["s3"] + 1}
+        assert "unknown_mentions" not in res                 # 'user' is no unknown name
+
+        # @all is the wider claim: it still names the owner and every guest
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s2", "text": "@user @all 정리했습니다"})
+        assert res["mentions"] == {"all": True, "targets": ["s1", "s3"], "user": True}
+        assert counts() == {**base, "s1": base["s1"] + 1, "s3": base["s3"] + 1}
+    run(tmp_path, scenario, names=("s1", "s2", "s3"))
+
+
+def test_user_mention_stays_the_user_even_with_a_session_named_user(tmp_path):
+    """claunch-ikcvw: the alias is reserved. A guest literally named ``user``
+    -- or any thread that has one -- must not turn ``@user`` into that
+    session's name: the token still names the person reading the thread, and
+    the build has to keep that, not only its docs. ``@all`` is a different
+    claim and still reaches that session, because it is a real participant."""
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"session": "s1", "title": "Design"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{tid}/guests", {"session": "s1", "guest": "user"})
+
+        def counts():
+            return {n: len(s.delivered) for n, s in mgr.sessions.items()}
+
+        # @user names the person, not the guest of that name
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s1", "text": "@user 이건 사용자에게만"})
+        assert res["mentions"] == {"all": False, "targets": [], "user": True}
+        assert "guests_delivered" not in res and counts() == base
+        assert "unknown_mentions" not in res
+
+        # @all is every participant, and that guest is one of them
+        base = counts()
+        res = await req("POST", f"/api/threads/{tid}/messages",
+                        {"session": "s1", "text": "@all 모두 봐 주세요"})
+        assert res["mentions"] == {"all": True, "targets": ["user"]}
+        assert res["guests_delivered"] == {"user": True}
+        assert counts() == {**base, "user": base["user"] + 1}
+    run(tmp_path, scenario, names=("s1", "user"))
+
+
 def test_a_named_guest_that_cannot_take_it_now_says_why(home, tmp_path):
     """claunch-p9wes.1.1: a mention types the message into the guest, and the
     response carries the guest's ``hold`` the way the owner's ``hold`` is
@@ -947,6 +1026,53 @@ def test_a_resent_message_follows_its_mentions(tmp_path):
         assert len(mgr.sessions["s1"].delivered) == s1_before   # the resend takes the same route
         assert len(mgr.sessions["s2"].delivered) == 3
         assert "you are a guest of session s1 here" in mgr.sessions["s2"].delivered[-1]
+
+    run(tmp_path, scenario)
+
+
+def test_a_resent_message_keeps_the_paths_of_its_images_and_files(tmp_path):
+    """claunch-sp0ut: a resend/revert rebuilds the block from the stored
+    message, and what ``record_delivery`` returns is the message itself --
+    ``call``'s attach pass only reaches a ``{"message": ...}`` envelope. So
+    the rebuilt block read ``img["path"]`` off a stored record that has none
+    (a 500 on every resend of an image message) while ``_file_lines``
+    silently dropped the attachment lines of a message with files."""
+
+    def stage_file(name="capture.utrace", body=b"a pretend trace"):
+        from claude_launcher.daemon import uploads
+
+        writer = uploads.stage_writer(name)
+        writer.write(body)
+        return writer.finish().id
+
+    async def scenario(req, mgr):
+        from claude_launcher.daemon import thread_images, uploads
+
+        image, file_id = _stage(), stage_file()
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "Perf", "text": "look",
+                                                 "images": [image], "files": [file_id]})
+        tid, seq = res["thread"]["id"], res["message"]["seq"]
+        kept = str(thread_images.folder() / image)
+        file_path = str(uploads.thread_dir() / file_id / "capture.utrace")
+        first = mgr.sessions["s1"].delivered[-1]
+        assert kept in first and file_path in first
+
+        # The resend answers 200 (500 before the fix) and the block carries
+        # both the image's path and the attachment line.
+        again = await req("POST", f"/api/threads/{tid}/messages/{seq}/resend", {})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "attached 1 image(s)" in block and f"  - {kept}" in block
+        assert f"[claunch attachment] capture.utrace (15 B) {file_path}" in block
+        # The answer says where the files are, the way a post's answer does.
+        assert again["message"]["images"][0]["path"] == kept
+        assert again["message"]["files"][0]["path"] == file_path
+
+        # A revert is the same rebuilt block, with its note.
+        back = await req("POST", f"/api/threads/{tid}/messages/{seq}/revert", {})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "disregard the earlier copy" in block
+        assert f"  - {kept}" in block and file_path in block
+        assert back["message"]["data"]["reverted_at"]
 
     run(tmp_path, scenario)
 

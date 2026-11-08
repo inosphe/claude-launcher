@@ -112,7 +112,22 @@ def _shown(parts: List[str]) -> str:
 
 
 # ---- the host folder ------------------------------------------------------- #
-_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# The host folder is walked by descriptor: openat() with
+# O_DIRECTORY|O_NOFOLLOW, and stat/open relative to a dir_fd. Windows has
+# neither the flags nor dir_fd support, so the operations that touch the host
+# folder (put, get) exist on POSIX only. ls and rm run in the guest alone and
+# work everywhere. Branching here keeps the module importable on Windows,
+# where the daemon imports it through vm_api at startup.
+HOST_FILES = os.name == "posix"
+if HOST_FILES:
+    _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _require_host_files(op: str) -> None:
+    if not HOST_FILES:
+        raise VmError("vm_files_unsupported",
+                      f"{op}: 이 호스트 OS({os.name})에서는 호스트 폴더 전송을 지원하지 않습니다 "
+                      f"(POSIX의 O_DIRECTORY·O_NOFOLLOW·dir_fd가 필요합니다)")
 
 
 def _unsafe(what: str) -> VmError:
@@ -564,6 +579,7 @@ class Files:
     def describe(self, vm_id: str) -> dict:
         vm = self.registry.get(vm_id)
         return {"host_dir": str(self.host_dir(vm_id)), "guest_dir": vm.work_dir,
+                "host_files": HOST_FILES,
                 "guest_dir_default": vmhub.FILES_DIR_DEFAULT.format(user=vm.ssh_user),
                 "limits": {"max_bytes": self.max_bytes, "max_items": self.max_items,
                            "timeout": self.timeout},
@@ -619,6 +635,7 @@ class Files:
 
     def _put(self, vm_id, src, target, overwrite) -> dict:
         vm = self._vm(vm_id)
+        _require_host_files("put")
         folder = self._host(vm_id)
         root = folder.open_root()
         parent = None
@@ -659,6 +676,7 @@ class Files:
 
     def _get(self, vm_id, src, target, overwrite) -> dict:
         vm = self._vm(vm_id)
+        _require_host_files("get")
         folder = self._host(vm_id)
         root = folder.open_root()
         stage_name, stage = None, None

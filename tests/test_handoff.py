@@ -278,6 +278,67 @@ def test_quick_fork_refuses_a_session_with_nothing_to_copy(home, tmp_path, monke
     asyncio.run(run())
 
 
+def test_quick_fork_carries_the_asked_for_side_items(home, tmp_path, forkable, typed):
+    """claunch-yydhs: ``copy`` names which of the origin's plan, open
+    questions and open threads the copy starts with. Omitted (every other
+    caller) copies none of them; an unknown name is a refusal, not a
+    silently dropped item."""
+    from claude_launcher.daemon import paths
+    from claude_launcher.plan import store as plan_store
+    from claude_launcher.qa import store as qa_store
+    from claude_launcher.threads import store as thread_store
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            plans = plan_store.PlanStore(paths.plan_db())
+            plans.set("a", "a", 0, title="Ship X", steps=[{"id": "s", "title": "read"}])
+            questions = qa_store.QaStore(paths.qa_db())
+            asked = questions.ask("a", title="Which base?")
+            threads = thread_store.ThreadStore(paths.threads_db())
+            opened = threads.open("a", "a", "Base branch", "master로 간다")
+
+            resp = await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["quick_fork"]["carried"] == {}
+            assert plans.get("a-qf1") is None
+            assert questions.list("a-qf1")["questions"] == []
+            assert threads.list("a-qf1")["threads"] == []
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"copy": ["plan", "qa", "threads"]}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            fork = doc["session"]["name"]
+            assert doc["quick_fork"]["carried"] == {"plan": True, "qa": 1, "threads": 1}
+            assert plans.get(fork)["title"] == "Ship X"
+            copied = questions.list(fork)["questions"]
+            assert [q["title"] for q in copied] == ["Which base?"] and copied[0]["status"] == "open"
+            copy_threads = threads.list(fork)["threads"]
+            assert [t["title"] for t in copy_threads] == ["Base branch"]
+            assert copy_threads[0]["id"] != opened["thread"]["id"]
+            # the origin keeps its own items
+            assert questions.get(asked["id"])["session"] == "a"
+
+            resp = await client.post(
+                "/api/sessions/a/quick-fork", json={"copy": ["plan", "bogus"]}, headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "bogus" in (await resp.json())["error"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_plain_spawn_cannot_claim_to_be_a_quick_fork(home, tmp_path, forkable):
     """``quick_fork_of`` unlocks merge, so only a request that copied the
     conversation (``fork``) may carry it — a spawn body naming it without

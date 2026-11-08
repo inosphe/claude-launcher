@@ -214,6 +214,7 @@ def test_the_directory_exists_before_the_session_runs_anything(home, tmp_path):
         ("# never write to /tmp/<a fixed name>", False, "a placeholder in prose"),
         ("STATE = '.claunch/tmp/e2e-roundtrip.json'", False, "project-relative, per checkout"),
         ("url = 'file:///tmp/x'", False, "a path inside a url"),
+        ("rm = '/bin/rm -f /tmp/x-*.jpg'  # tmp-paths: guest", False, "a command a VM guest runs"),
     ],
 )
 def test_the_check_separates_a_collision_from_a_mention(line, flagged, why):

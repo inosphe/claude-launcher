@@ -21,6 +21,8 @@ answered by deleting the documentation.
 
 What passes
 -----------
+A line that carries the marker ``tmp-paths: guest`` -- a command that runs
+inside a VM guest, whose ``/tmp`` is that guest's own and not this machine's.
 A path that carries the session in it (``$CLAUNCH_SESSION``, ``%s``), a
 placeholder in angle brackets, or the exported ``CLAUNCH_SCRATCH`` directory.
 Everything a session writes should go to the last of those: the daemon sets
@@ -69,6 +71,9 @@ _FIXED_TMP = re.compile(r"(?<![\w.\-/])/tmp/(?P<name>[A-Za-z0-9._-]+)")
 #: What makes an occurrence acceptable, checked on the surrounding token.
 _VARIES = ("$", "%", "<", "{", "CLAUNCH_SCRATCH")
 
+#: A line carrying this marker runs in a VM guest, not on this machine.
+GUEST_MARK = "tmp-paths: guest"
+
 
 def _token_around(line: str, start: int, end: int) -> str:
     """The whitespace-delimited token the match sits in.
@@ -90,6 +95,8 @@ def findings_in(text: str, *, path: str, workflow: bool) -> list[tuple[int, str]
     """Every fixed temp path in ``text``, as ``(line number, the line)``."""
     out: list[tuple[int, str]] = []
     for number, line in enumerate(text.splitlines(), start=1):
+        if GUEST_MARK in line:
+            continue
         subject = line
         if workflow:
             matched = _COMMAND_LINE.match(line)

@@ -884,6 +884,41 @@ def test_build_prompt_asks_for_the_work_not_names_or_ids():
     assert "이 세션이 맡은 일을 한 줄로" not in prompt
 
 
+def test_build_prompt_names_the_subject_not_a_bare_referent():
+    """A one-line that opens with 「변경」 names nothing (claunch-944s0).
+
+    The card shows that line to a leader who did not watch the session
+    (s6553's read "변경의 master 착지를 확인하고 착지 후 단계 전환과 마무리
+    정리를 수행한다"), and a bare 「변경」 leaves them asking which change.
+    A workflow step's name (「단계 전환」, 「마무리 정리」) is not the work
+    either: it says where the run stands, not what the session does there.
+    Both shapes are stated as rules with an example each, so the retired
+    "good example" — which taught this very phrasing — is gone.
+    """
+    prompt = briefing.build_prompt(
+        SessionDef(name="s6553", task="issue: claunch-hbmhk.1\nland the change"),
+        None,
+        [],
+    )
+    for needle in (
+        "맡은 일의 대상과 동작을 한 줄로",
+        "무엇을 가리키는지가 문장 안에",
+        "드러나지 않는 명사는 대상이 될 수 없다",
+        "모듈·화면·동작의 이름을 주어로 세운다",
+        "워크플로 절차의 이름을 작업 내용 대신 쓰지 않는다",
+        "「단계 전환」",
+        "「마무리 정리」",
+        '나쁜 예: "변경의 master 착지를 확인하고 착지 후 단계 전환과 마무리 정리를 수행한다."',
+        "세션 카드 한 줄 요약 지침을 고친 커밋을 master에 착지시키고",
+    ):
+        assert needle in prompt
+    # the example that used to stand here taught the phrasing the rule bans
+    assert (
+        "리뷰를 통과한 변경의 master 착지를 확인하고 회차 마무리 상태를 점검한다."
+        not in prompt
+    )
+
+
 def test_gather_live_reads_the_same_state_as_the_session_rail():
     class Session:
         exited = False
@@ -2206,6 +2241,38 @@ def test_sessions_list_survives_a_config_it_cannot_read(home, tmp_path):
             body = await resp.json()
             assert [s["name"] for s in body["sessions"]] == ["s1"]
             assert body["llm_configured"] is False
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_sessions_list_survives_a_config_it_cannot_read_outside_the_read_window(
+    home, tmp_path, monkeypatch
+):
+    """claunch-wgdcm: the poll that reaches the unreadable file for real.
+
+    ``store.load`` serves a repeat read inside ``_DISK_TTL`` from memory, so
+    the test above only reaches the broken file when the machine is slow
+    enough for 100ms to pass between ``mgr.create`` and the poll (a loaded
+    sweep). With the window at zero the poll always does.
+    """
+    monkeypatch.setattr(store, "_DISK_TTL", 0.0)
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            store.path().write_text("{ this: is: not: valid", encoding="utf-8")
+
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            assert [s["name"] for s in body["sessions"]] == ["s1"]
 
             await mgr.shutdown_all()
         finally:

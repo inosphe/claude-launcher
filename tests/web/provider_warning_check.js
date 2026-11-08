@@ -8,11 +8,12 @@
 
    - The decision. It is taken from two facts the daemon publishes on the
      session row (``provider``/``provider_service``) plus the record's own
-     ``provider_warning_ignored``. A strip that shows for Anthropic's own
-     service, for another harness, or for a session that already dismissed
-     it, is a warning nobody can trust; one that stays quiet on a row whose
-     service is unreadable is the safer direction of the same mistake, and is
-     pinned as such.
+     ``provider_warning_ignored`` and the session's own argv: a strip that
+     shows for Anthropic's own service, for another harness, for a session
+     that already dismissed it, or for one already running on skip
+     permissions is a warning nobody can trust; one that stays quiet on a row
+     whose service is unreadable is the safer direction of the same mistake,
+     and is pinned as such.
    - The presses. "restart with yolo mode" must be the details panel's own
      restart against the same route and body (/skip-permissions, {skip:true})
      — a second path would be a second definition of yolo mode. "ignore" must
@@ -203,15 +204,25 @@ check("...states the cost as a possibility, not a fact",
       /can add Claude usage/.test(shownText()), true);
 check("...and offers both answers", labels(), ["restart with yolo mode", "ignore"]);
 
-/* Already on yolo mode: the advice has been taken, so the restart press is
-   present but inert — the warning itself stays until a person ignores it. */
+/* Already on yolo mode: the advice has been taken and the permission
+   classifier is not called, so the strip is not drawn at all. It is not a
+   hidden card with an inert press either — "ignore" is the one press that
+   would record a permanent answer in the one state where it buys nothing,
+   and with that record the warning could never come back for a session that
+   later runs without the flag. Turning the flag off repaints from the same
+   row (claunch-9mwba.1). */
 ctx.sessionsCache = [{ name: "s1", harness: "claude", provider: "fireworks",
                        provider_service: "custom",
                        args: ["--dangerously-skip-permissions"] }];
 ctx.render();
-check("a session already on yolo mode says so", labels()[0], "already on yolo mode");
-check("...and does not offer to restart itself", buttons()[0].disabled, true);
-check("...but the warning is still there until it is ignored", hidden(), false);
+check("a session already on yolo mode draws nothing", hidden(), true);
+check("...and leaves no press to record an ignore with", labels(), []);
+ctx.sessionsCache = [{ name: "s1", harness: "claude", provider: "fireworks",
+                       provider_service: "custom", args: [] }];
+ctx.render();
+check("...and the strip comes back once the flag is off", hidden(), false);
+check("...with both answers again", labels(),
+      ["restart with yolo mode", "ignore"]);
 
 /* A dismissed record is the answer: nothing drawn at all. */
 ctx.sessionsCache = [{ name: "s1", harness: "claude", provider: "fireworks",

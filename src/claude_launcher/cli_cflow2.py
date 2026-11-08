@@ -185,6 +185,21 @@ def _caps_for(profile: Optional[str], harness: Optional[str]):
     return caps
 
 
+def _print_input_deps(chart: Any) -> None:
+    """validate's table of which rules and nodes read each start input
+    (claunch-cetzf.1, ``inputs.dependencies``)."""
+    from .cflow2 import inputs as inputs_mod
+
+    deps = inputs_mod.dependencies(chart)
+    if not deps:
+        return
+    print("input dependencies:")
+    for name, entry in deps.items():
+        cond = entry["conditional"]
+        print(f"  {name}: {len(entry['nodes'])} node(s), {len(entry['rules'])} rule(s)"
+              + (f", conditional rule(s) {', '.join(cond)}" if cond else ""))
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     from .cflow2 import caps as caps_mod, check, executors
 
@@ -201,6 +216,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(str(f))
     if not findings:
         print("checks: no findings")
+    _print_input_deps(chart)
     caps = _caps_for(args.profile, args.harness)
     for w in getattr(caps, "warnings", []) or []:
         print(f"caps warning: {w}")
@@ -242,6 +258,30 @@ def _cmd_caps(args: argparse.Namespace) -> int:
 
 
 # -- runs ---------------------------------------------------------------------
+
+
+def _parent_hand(scope: Optional[str]) -> tuple:
+    """``(caller, by)`` for a person's command run from a session's shell.
+
+    A shell outside any session is the person. A shell inside the run's own
+    session is refused by :func:`_refuse_own_session`. Between those sits the
+    one session that may answer this run's person gates without being the
+    person: the driver's parent (claunch-vjp4y), and its answer is journaled
+    under its own name so the run can tell the two hands apart.
+    """
+    from .cflow2 import runtime, store
+
+    session = os.environ.get(store.SESSION_ENV, "").strip()
+    if not session:
+        return runtime.CALLER_USER, None
+    st = store.RunStore(os.getcwd(), scope)
+    try:
+        state = st.load_state()
+    except (store.StoreError, OSError):
+        return runtime.CALLER_USER, None
+    if runtime.gate_authority(state, session) == runtime.CALLER_PARENT:
+        return runtime.CALLER_PARENT, session
+    return runtime.CALLER_USER, None
 
 
 def _refuse_own_session(scope: Optional[str], what: str) -> None:
@@ -326,6 +366,12 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
     for lim in payload.get("loop_limits") or []:
         print(f"  loop limit {lim['instance']}: {lim['iterations']}/{lim['max']} "
               f"(claunch cflow2 extend {lim['instance']} [--by N | --stop])")
+        gate = lim.get("self_answer") or {}
+        if gate:
+            # the session may open this one itself, once its check passes
+            # (claunch-9poqc) -- worth saying next to the person's verb
+            print(f"    self_answer: {gate.get('describe') or 'the loop declares a check'} "
+                  f"(the session's flow_extend, only when it passes)")
 
 
 def _parse_params(items: List[str]) -> Dict[str, Any]:
@@ -502,8 +548,11 @@ def _cmd_move(args: argparse.Namespace) -> int:
             raise runtime.FlowError("--approve/--deny answer the pending request; it names "
                                     "its node already (give a node without them to move "
                                     "somewhere else, which supersedes the request)")
+        caller, by = _parent_hand(args.scope)
         payload = runtime.resolve_move("approve" if args.approve else "deny",
-                                       reason=args.reason, cwd=os.getcwd(), scope=args.scope)
+                                       reason=args.reason, cwd=os.getcwd(),
+                                       scope=args.scope, caller=caller,
+                                       **({"by": by} if by else {}))
         req = payload.get("move_request") or {}
         what = ("the report of" if req.get("kind") == runtime.MOVE_KIND_REPORT
                 else "the move to")
@@ -582,7 +631,8 @@ def _cmd_select(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
     _refuse_own_session(args.scope, "select")
-    payload = runtime.select(args.node, args.option, args.reason, caller=runtime.CALLER_USER,
+    caller, by = _parent_hand(args.scope)
+    payload = runtime.select(args.node, args.option, args.reason, caller=caller, by=by,
                              cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
     note = runtime.person_pick_words(payload, args.option)["note"]
@@ -800,7 +850,10 @@ def _cmd_input(args: argparse.Namespace) -> int:
     got = json.dumps((payload.get("inputs") or {}).get(args.name), ensure_ascii=False)
     print(f"input {args.name} = {got}")
     if args.user:
-        _nudge_driver(args.scope, NUDGE_INPUT_SET.format(name=args.name, value=got))
+        from .cflow2 import inputs as inputs_mod
+
+        _nudge_driver(args.scope, NUDGE_INPUT_SET.format(name=args.name, value=got)
+                      + inputs_mod.format_impact(payload.get("input_impact")))
     return 0
 
 

@@ -2,14 +2,17 @@
 plan pane, and the decisions the user takes there.
 
   GET  /api/plan?session=<name>          one session's plan ({"plan": null} without one)
+  GET  /api/plan?session=&round=<run>/<n>  one sealed round of it (claunch-r3j1o.1; <run>/unknown too)
+  GET  /api/plan/rounds?session=<name>   its sealed rounds, oldest first, and the current plan's round
   GET  /api/plan/rail                    per session with a plan: title, context, summary
   GET  /api/plan/joint?session=<name>    the joint tree holding it (plan/joint.py); no session: every tree
   GET  /api/plan/overview[?all=1&project=]  every running session's stage, run and plan progress (plan/overview.py)
   GET  /api/plan/aggregators             each project's aggregation session
   POST /api/plan/aggregators/{project}/start  start it {profile, model?, effort?, name?}         (the user)
   POST /api/plan                         set       {session, revision, title, goal?, issue?, steps?, closure?}
-  POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?}
-  POST /api/plan/clear                   clear     {session, revision}
+  POST /api/plan/node/{id}               patch     {session, title?, detail?, status?, options?, reopen?}
+  POST /api/plan/clear                   clear     {session, revision}  (the plan is sealed first)
+  POST /api/plan/round                   new_round {session, run, round, title?, goal?, issue?, leftover?}
   POST /api/plan/node/{id}/decide        decide    {session, rev, choice?|verdict?|action?, note?}  (the user)
   POST /api/plan/feedback                feedback  {session, text, node?}                       (the user)
   POST /api/plan/node/{id}/deliver       deliver the waiting notification now {session}        (the user)
@@ -78,17 +81,63 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
     res = node.get("result") or {}
     kind = node["kind"]
     if kind == "decision":
-        opt = next((o for o in node.get("options") or [] if o["label"] == res.get("choice")), {})
-        head = f"{PREFIX} The user chose \"{res.get('choice')}\" on your plan's decision {node['id']}:"
-        body = _what(node) + [f"  expected effect: {opt.get('effect', '')}", f"  risk: {opt.get('risk', '')}"]
-        then = ("Follow that branch: rewrite the steps under it with plan_set (or patch them with plan_node) "
-                "so the plan shows the path you now take.")
+        opts = {o["label"]: o for o in node.get("options") or []}
+        opt = opts.get(res.get("choice"), {})
+        was = (previous or {}).get("choice")
+        changed = bool(was) and was != res.get("choice")
+        if changed:
+            whose = "your default" if previous.get("by") == "agent" else "their earlier choice"
+            head = (f"{PREFIX} The user CHANGED your plan's decision {node['id']}: \"{was}\" -> "
+                    f"\"{res.get('choice')}\" (replacing {whose}):")
+            old = opts.get(was, {})
+            body = _what(node) + [
+                f"  before: \"{was}\"",
+                f"    expected effect: {old.get('effect', '(the option is no longer listed)')}",
+                f"    risk: {old.get('risk', '')}",
+                f"  after: \"{res.get('choice')}\"",
+                f"    expected effect: {opt.get('effect', '')}",
+                f"    risk: {opt.get('risk', '')}",
+            ]
+            then = (f"Steer to the new branch now. Re-check what you did on \"{was}\": steps you finished or "
+                    f"started for it, code and commits it shaped, and the nodes under \"{was}\" (they no "
+                    f"longer count). Undo or redo what the new choice changes, and rewrite the plan with "
+                    f"plan_set so the nodes under \"{res.get('choice')}\" show the path you now take. If "
+                    f"switching costs more than the note suggests the user expects, say so in a thread "
+                    f"before you undo work.")
+        else:
+            head = f"{PREFIX} The user chose \"{res.get('choice')}\" on your plan's decision {node['id']}:"
+            body = _what(node) + [f"  expected effect: {opt.get('effect', '')}", f"  risk: {opt.get('risk', '')}"]
+            then = ("Follow that branch: rewrite the steps under it with plan_set (or patch them with plan_node) "
+                    "so the plan shows the path you now take.")
+            if was:
+                then = ("They confirmed " + ("your default" if previous.get("by") == "agent" else
+                                             "their earlier choice") + "; nothing changes. " + then)
     elif kind == "verify":
         head = f"{PREFIX} The user checked your plan's verify item {node['id']}: {res.get('verdict')}."
         body = _what(node)
-        then = ("Nothing to do but keep going." if res.get("verdict") == "passed" else
-                "It failed by hand. Fix what the note says, then reword the item with plan_node so the user "
-                "checks it again (a changed item asks again).")
+        then = {
+            "passed": "Nothing to do but keep going. Rewording the item later keeps this result; if what was "
+                      "checked changes, ask again with plan_node reopen=<what changed>.",
+            "deferred": "It cannot be checked yet (보류). It no longer waits on the user or keeps the session "
+                        "open: hand it over -- file it as a beads issue (claunch beads create ... --parent "
+                        "<your issue>) that says what to check and how -- and name the issue id in the item's "
+                        "detail with plan_node (the result stays).",
+        }.get(res.get("verdict"),
+              "It failed by hand. Fix what the note says, then reword the item with plan_node so the user "
+              "checks it again (a changed item asks again).")
+    elif kind == "note":
+        # claunch-i0whx: an optional pick on a note. It gates nothing either
+        # way, so there is no status to close -- the record of what was done
+        # goes into the note's detail (rewording keeps the user's result).
+        action = res.get("action")
+        head = f"{PREFIX} The user picked up your plan's note {node['id']}: {action}."
+        body = _what(node)
+        then = {
+            "here": "Take it into this round: add its steps to the plan (plan_set, keep the ids) and do them. "
+                    "The note itself waits on nobody; write what became of it into its detail with plan_node.",
+            "issue": "Hand it over: file it as a beads issue (claunch beads create ... --parent <your issue>) "
+                     "and name the issue id in the note's detail with plan_node (the result stays).",
+        }.get(action, "")
     else:
         action = res.get("action")
         head = f"{PREFIX} The user disposed of your plan's followup {node['id']}: {action}."
@@ -103,8 +152,9 @@ def decided_text(session: str, node: dict, previous: Optional[dict]) -> str:
     lines = [head, *body]
     if res.get("note"):
         lines += ["their note:", _quote(res["note"])]
-    if previous:
-        lines.append(f"(this replaces an earlier result: {previous})")
+    if previous and kind != "decision":
+        before = previous.get("verdict") or previous.get("action") or previous
+        lines.append(f"(this replaces an earlier result: {before})")
     lines.append(then)
     return "\n".join(lines)
 
@@ -311,8 +361,19 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         session = request.query.get("session") or ""
         if not session:
             return web.json_response({"error": "session is required"}, status=400)
+        key = request.query.get("round") or ""
+        if key:
+            res, err = await call(plans.get_round, session, key)
+            return err or web.json_response({"session": session, "round": key, "plan": res})
         res, err = await call(plans.get, session)
         return err or web.json_response({"session": session, "plan": with_delivery(res)})
+
+    async def h_rounds(request):
+        session = request.query.get("session") or ""
+        if not session:
+            return web.json_response({"error": "session is required"}, status=400)
+        res, err = await call(plans.rounds, session)
+        return err or web.json_response(res)
 
     async def h_rail(_request):
         res, err = await call(plans.rail)
@@ -320,13 +381,17 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
 
     def step_tree(nodes: list) -> list:
         """A plan's steps as the plan page draws them (claunch-7jzp8.5):
-        what each node says and how far it got, without revs or history."""
+        what each node says and how far it got, without revs or history.
+        ``auto`` marks a decision the session answered with its default;
+        ``under`` keeps a child's option branch (claunch-vmcg7)."""
         out = []
         for n in nodes:
-            item = {k: n[k] for k in ("id", "kind", "title", "detail", "status", "options") if n.get(k)}
-            choice = (n.get("result") or {}).get("choice")
-            if choice:
-                item["choice"] = choice
+            item = {k: n[k] for k in ("id", "kind", "title", "detail", "status", "options", "under") if n.get(k)}
+            res = n.get("result") or {}
+            if res.get("choice"):
+                item["choice"] = res["choice"]
+                if res.get("by") == "agent":
+                    item["auto"] = True
             item["children"] = step_tree(n.get("children") or [])
             out.append(item)
         return out
@@ -459,12 +524,22 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
     async def h_patch(request):
         body = await body_of(request)
         fields = {k: body.get(k) for k in ("title", "detail", "status", "options")}
-        res, err = await call(plans.patch, actor_of(body), session_of(body), request.match_info["id"], **fields)
+        res, err = await call(plans.patch, actor_of(body), session_of(body), request.match_info["id"],
+                              reopen=body.get("reopen"), **fields)
         return err or web.json_response(res)
 
     async def h_clear(request):
         body = await body_of(request)
         res, err = await call(plans.clear, actor_of(body), session_of(body), body.get("revision"))
+        return err or web.json_response(res)
+
+    async def h_round(request):
+        body = await body_of(request)
+        session = session_of(body)
+        res, err = await call(plans.new_round, actor_of(body), session, run=body.get("run"),
+                              round=body.get("round"), title=body.get("title"), goal=body.get("goal"),
+                              issue=body.get("issue"), context=context_of(session),
+                              leftover=body.get("leftover"))
         return err or web.json_response(res)
 
     async def h_decide(request):
@@ -507,12 +582,14 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
 
     app.router.add_get("/api/plan", h_get)
     app.router.add_get("/api/plan/rail", h_rail)
+    app.router.add_get("/api/plan/rounds", h_rounds)
     app.router.add_get("/api/plan/joint", h_joint)
     app.router.add_get("/api/plan/overview", h_overview)
     app.router.add_get("/api/plan/aggregators", h_aggregators)
     app.router.add_post("/api/plan/aggregators/{project}/start", h_aggregator_start)
     app.router.add_post("/api/plan", h_set)
     app.router.add_post("/api/plan/clear", h_clear)
+    app.router.add_post("/api/plan/round", h_round)
     app.router.add_post("/api/plan/feedback", h_feedback)
     app.router.add_post("/api/plan/node/{id}", h_patch)
     app.router.add_post("/api/plan/node/{id}/decide", h_decide)

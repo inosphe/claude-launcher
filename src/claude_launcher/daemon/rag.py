@@ -606,6 +606,55 @@ def _collection_dims(col) -> int:
     return 0
 
 
+#: A collection that finished creating holds a ``manifest.*`` file; a create
+#: that failed in the id map (below) leaves ``idmap.0`` and nothing else.
+_MANIFEST_GLOB = "manifest.*"
+#: Attempts at ``create_and_open`` and the pause before each retry. On Windows
+#: the engine's id map (RocksDB) renames ``000005.dbtmp`` to ``CURRENT`` in the
+#: new directory, and that rename fails with "access denied" (code 5) when
+#: another process holds a handle on the file for a moment, which happens
+#: under parallel load (claunch-etcs6: 3 failures in 1200 creates with 8
+#: processes, each on its own path, none in 600 creates in one process).
+_CREATE_ATTEMPTS = 5
+_CREATE_BACKOFF = 0.05
+
+
+def _is_partial_collection(path: Path) -> bool:
+    """A directory a failed ``create_and_open`` left behind."""
+    try:
+        return path.is_dir() and not any(path.glob(_MANIFEST_GLOB))
+    except OSError:
+        return False
+
+
+def _remove_partial_collection(path: Path) -> None:
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _create_collection(zvec, path: Path, schema):
+    """``zvec.create_and_open``, retried when the engine fails transiently.
+
+    A failed create leaves the directory behind, and the engine then refuses
+    both another create (the path exists) and an open (no version file), so
+    each retry starts from a removed directory.
+    """
+    last: Optional[RuntimeError] = None
+    for attempt in range(_CREATE_ATTEMPTS):
+        if attempt:
+            time.sleep(_CREATE_BACKOFF * attempt)
+        try:
+            return zvec.create_and_open(path=str(path), schema=schema)
+        except RuntimeError as exc:
+            last = exc
+            _remove_partial_collection(path)
+            log.warning("rag: create of %s failed (attempt %d/%d): %s", path.name, attempt + 1, _CREATE_ATTEMPTS, exc)
+    assert last is not None
+    raise last
+
+
+
 class VectorIndex:
     """One corpus's vectors, held in a zvec collection.
 
@@ -707,6 +756,12 @@ class VectorIndex:
         if self._closed:
             return None
         zvec = _zvec()
+        if self.path.is_dir() and _is_partial_collection(self.path):
+            # A create that died part-way (see ``_create_collection``) leaves
+            # the directory behind without the files ``open`` needs, and
+            # ``create_and_open`` refuses an existing path: the directory is
+            # neither openable nor creatable until it is removed.
+            _remove_partial_collection(self.path)
         if self.path.is_dir():
             try:
                 self._col = zvec.open(path=str(self.path))
@@ -738,7 +793,7 @@ class VectorIndex:
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dims),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._col = zvec.create_and_open(path=str(self.path), schema=schema)
+        self._col = _create_collection(zvec, self.path, schema)
         return self._col
 
     def _learn_index_dims(self, col) -> int:
@@ -1125,7 +1180,33 @@ def _stored_meta(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) and data.get("format") == FORMAT else None
 
 
-def rag_stores(base: Path) -> List[dict]:
+def _previous_name(name: str) -> str:
+    """The name ``name`` had before the unified rename, or ``""`` if unchanged.
+
+    The combined corpus was stored as ``all`` (claunch-7aujp): ``unified.zvec``
+    was ``all.zvec``, and a preset collection keeps the ``.<slug>`` suffix it
+    was created with (``all.<slug>.zvec`` for ``unified.<slug>.zvec``). The
+    rename moved the directories in the operator's stop window; a store still
+    under the old name is read through this mapping.
+    """
+    head, dot, rest = name.partition(".")
+    if head != "unified":
+        return ""
+    return LEGACY_STORAGE_NAME + dot + rest
+
+
+def _path_identity(path: Path) -> str:
+    """The DB a collection directory belongs to: ``<corpus>.<db>.zvec`` -> ``db``.
+
+    A pre-preset ``<corpus>.zvec`` has no identity; it is in no named DB and
+    is read only through the legacy adoption rule. Empty, never a guess.
+    """
+    stem = path.name[: -len(".zvec")] if path.name.endswith(".zvec") else path.name
+    _corpus, _, identity = stem.partition(".")
+    return identity
+
+
+def rag_stores(base: Path, *, sizes: bool = True) -> List[dict]:
     """Every collection directory under ``base``, as the DB panel reads them.
 
     A store is ``<corpus>.<name>.zvec``, or ``<corpus>.zvec`` for one built
@@ -1134,6 +1215,12 @@ def rag_stores(base: Path) -> List[dict]:
     can use the collection (claunch-fhs7f.1). ``identity`` is the part a
     preset's ``db`` names; it is empty for a pre-preset collection, which is
     adopted by a preset whose key matches its model.
+
+    ``sizes`` walks every collection to total its files, which is what the
+    DB panel shows and what a caller that draws a listing on a timer cannot
+    afford: the search card reads this every time it looks for collections
+    no index has opened yet (claunch-c7vjm). With ``sizes=False`` every row
+    still carries ``bytes``, as 0.
     """
     rows: List[dict] = []
     try:
@@ -1145,12 +1232,13 @@ def rag_stores(base: Path) -> List[dict]:
         name = path.name[: -len(".zvec")]
         corpus, _, identity = name.partition(".")
         total = 0
-        try:
-            for child in path.rglob("*"):
-                if child.is_file():
-                    total += child.stat().st_size
-        except OSError:
-            total = 0
+        if sizes:
+            try:
+                for child in path.rglob("*"):
+                    if child.is_file():
+                        total += child.stat().st_size
+            except OSError:
+                total = 0
         rows.append({
             "name": name,
             "corpus": corpus,
@@ -1235,6 +1323,15 @@ class Progress:
         #: How many sync passes ran for this corpus — the number the queue's
         #: coalescing is measured by (five enqueues of one key is one run).
         self.runs = 0
+        #: A forced request that arrived while a pass was running. It is not
+        #: dropped: the pass that is running finishes, and one more pass with
+        #: ``force`` follows it (claunch-i2i95). Before this flag a Rebuild
+        #: clicked mid-sync returned the running progress and was lost.
+        self.force_pending = False
+        #: Cooperative cancellation: the running pass stops at its next group
+        #: boundary and keeps what it already embedded. A rebuild has no other
+        #: stop — there was no route for it at all (claunch-i2i95).
+        self.cancel_requested = False
 
     def view(self) -> dict:
         return {
@@ -1246,10 +1343,22 @@ class Progress:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "runs": self.runs,
+            "force_pending": self.force_pending,
+            "cancel_requested": self.cancel_requested,
         }
 
 
-KINDS = ("beads", "sessions", "all")
+#: The corpora, under the names they are read and written by now. ``unified``
+#: is the combined one (issues and their comments plus every session's
+#: records); it was called ``all`` before the rename (claunch-7aujp).
+KINDS = ("beads", "sessions", "unified")
+
+#: The combined corpus's name on disk before the rename (claunch-7aujp.1). A
+#: collection still under it is opened as ``unified`` — see
+#: :meth:`RagService._index_path` — so an installation that has not moved the
+#: directory yet keeps answering from the vectors it already has. The name is
+#: read, never written: nothing here creates a collection under it.
+LEGACY_STORAGE_NAME = "all"
 
 #: The watcher's sleep while the feature is off or ``watch_interval`` is 0:
 #: it still ticks, because a ``rag:`` block filled in later is noticed by
@@ -1374,6 +1483,19 @@ class RagService:
             return f"beads-{digest}"
         return kind
 
+    @staticmethod
+    def _kind_of_key(key: str) -> str:
+        """The corpus a collection key belongs to, under its current name.
+
+        A board key carries a hash; a collection opened under the pre-rename
+        on-disk name (``all``) is the combined corpus, ``unified``.
+        """
+        if key.startswith("beads-"):
+            return "beads"
+        if key == LEGACY_STORAGE_NAME:
+            return "unified"
+        return key
+
     async def _index(self, kind: str, root: Optional[Path], cfg: dict) -> VectorIndex:
         """The corpus's index, opened and loaded in a worker thread.
 
@@ -1435,12 +1557,24 @@ class RagService:
         second copy of the same model's vectors.
         """
         legacy = base / f"{key}.zvec"
+        previous = _previous_name(key)
+        if previous:
+            # The directory was not moved yet (the rename lands in a window the
+            # operator opens): read the vectors under the old name rather than
+            # creating a second, empty collection beside it (claunch-7aujp.1).
+            previous_legacy = base / f"{previous}.zvec"
+            if not legacy.is_dir() and previous_legacy.is_dir():
+                legacy = previous_legacy
         slug = str(cfg.get("db") or cfg.get("model_key") or "").strip()
         if not slug:
             return legacy
         slugged = base / f"{key}.{slug}.zvec"
         if slugged.is_dir():
             return slugged
+        if previous:
+            previous_slugged = base / f"{previous}.{slug}.zvec"
+            if previous_slugged.is_dir():
+                return previous_slugged
         dims = int(cfg.get("dimensions") or 0)
         meta = _stored_meta(legacy)
         meta_key = ""
@@ -1533,7 +1667,7 @@ class RagService:
         return prog
 
     async def _docs(self, kind: str, root: Optional[Path]) -> List[Doc]:
-        if kind == "all":
+        if kind == "unified":
             return await self.all_docs() if self.all_docs else []
         if kind == "beads":
             if self.board is None or root is None:
@@ -1572,17 +1706,47 @@ class RagService:
 
     # -- syncing -------------------------------------------------------- #
     def ensure_sync(self, kind: str, root: Optional[Path], *, force: bool = False) -> Progress:
-        """Start a sync for the corpus unless one is running; return its progress."""
+        """Start a sync for the corpus unless one is running; return its progress.
+
+        A forced request that arrives while a pass is running is remembered on
+        the progress (``force_pending``) and runs as one more pass when the
+        current one ends — returning the running progress unchanged was how a
+        Rebuild clicked mid-sync disappeared without a trace (claunch-i2i95).
+        """
         cfg = self.config()
         key = self._key(kind, root)
         prog = self._progress_of(key)
         if prog.task is not None and not prog.task.done():
+            if force:
+                prog.force_pending = True
             return prog
         if not store.rag_configured(cfg):
             prog.error = "rag: block not configured"
             return prog
+        prog.force_pending = False
+        prog.cancel_requested = False
         prog.task = asyncio.create_task(self._sync(kind, root, cfg, prog, force))
         return prog
+
+    def progress(self, kind: str, root: Optional[Path] = None) -> Progress:
+        """The progress object a route reads before and after asking for a pass."""
+        return self._progress_of(self._key(kind, root))
+
+    def cancel_sync(self, kind: str, root: Optional[Path] = None) -> dict:
+        """Stop the pass a corpus is running, at its next group boundary.
+
+        A rebuild could not be stopped before this: the only pause route holds
+        the *next* corpus and the running pass finishes (claunch-i2i95). What
+        was embedded so far is kept — the pass saves before it returns — and
+        the collection may be partial, which the status row shows.
+        """
+        key = self._key(kind, root)
+        prog = self._progress_of(key)
+        if prog.task is None or prog.task.done():
+            return {"key": key, "running": False, "cancelled": False}
+        prog.cancel_requested = True
+        prog.force_pending = False
+        return {"key": key, "running": True, "cancelled": True}
 
     async def _sync(self, kind: str, root: Optional[Path], cfg: dict, prog: Progress, force: bool) -> None:
         prog.error = None
@@ -1614,12 +1778,17 @@ class RagService:
             chunks = 0
             limit = int(cfg.get("rate_limit") or 0)
             for doc in stale:
+                # The cancel is cooperative: a group already embedding is not
+                # torn mid-request, the pass stops before the next one and
+                # keeps what it wrote (claunch-i2i95).
+                if prog.cancel_requested:
+                    break
                 if group and chunks + len(doc.chunks) > batch:
                     await self._embed_group(client, index, group, prog, limit)
                     group, chunks = [], 0
                 group.append(doc)
                 chunks += len(doc.chunks)
-            if group:
+            if group and not prog.cancel_requested:
                 await self._embed_group(client, index, group, prog, limit)
             await index.save_soon()
         except RagError as exc:
@@ -1646,6 +1815,20 @@ class RagService:
                 await index.save_soon()
         finally:
             prog.finished_at = _now_iso()
+            # A forced request that arrived during this pass is not dropped:
+            # it runs as one more pass now that this one is over. The flag is
+            # cleared first so the follow-up pass cannot re-arm itself. A
+            # cancel discards a forced pass queued behind the one it stopped
+            # — the two requests are opposite, and leaving the flag set would
+            # draw "재색인 예약" on a row no pass is going to visit.
+            if prog.cancel_requested:
+                prog.force_pending = False
+            elif prog.force_pending and not self._closed:
+                prog.force_pending = False
+                cfg_now = self.config()
+                if store.rag_configured(cfg_now):
+                    prog.task = asyncio.create_task(
+                        self._sync(kind, root, cfg_now, prog, True))
 
     @staticmethod
     def _reconcile(index: VectorIndex, docs: List[Doc], force: bool, dims: int) -> List[Doc]:
@@ -1708,7 +1891,7 @@ class RagService:
         """
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
-        if kind in ("sessions", "all"):
+        if kind in ("sessions", "unified"):
             root = None
         elif root is None:
             return False
@@ -1740,13 +1923,13 @@ class RagService:
             pass
         self.enqueue("beads", root)
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def on_sessions_changed(self, *_args) -> None:
         """The registry's and the briefing cache's hook (either signature)."""
         self.enqueue("sessions")
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def watch(self, root: Optional[Path]) -> None:
         """Have the watcher stat ``root``'s board from now on."""
@@ -1791,7 +1974,7 @@ class RagService:
                 queued += 1
         if self.enqueue("sessions"):
             queued += 1
-        if self.all_docs and self.enqueue("all"):
+        if self.all_docs and self.enqueue("unified"):
             queued += 1
         return queued
 
@@ -1981,7 +2164,7 @@ class RagService:
                 invalidate(root)
         self.enqueue("beads", root)
         if self.all_docs:
-            self.enqueue("all")
+            self.enqueue("unified")
 
     def queue_view(self) -> dict:
         return {
@@ -1993,7 +2176,7 @@ class RagService:
             "watched": sorted(self._watched),
             "consumed": self.consumed,
             "last_consumed_at": self.last_consumed_at,
-            "last_consumed_key": self.last_consumed_key,
+            "last_consumed_key": self.last_consumed_key or None,
         }
 
     # -- search --------------------------------------------------------- #
@@ -2042,8 +2225,8 @@ class RagService:
         """
         if kind not in KINDS:
             raise ValueError(f"unknown corpus {kind!r}")
-        if mode not in ("general", "active") or (mode == "active" and kind != "all"):
-            raise ValueError("mode must be general, or active with kind=all")
+        if mode not in ("general", "active") or (mode == "active" and kind != "unified"):
+            raise ValueError("mode must be general, or active with kind=unified")
         cfg = self.config()
         if not store.rag_configured(cfg):
             raise RagError("rag: block not configured (base_url, api_key, embedding_model)")
@@ -2072,7 +2255,7 @@ class RagService:
         # Retrieve enough passages to avoid spending the candidate budget on
         # one issue's comments. Bound widening to keep vector lookup predictable.
         passages = {}
-        if kind == "all":
+        if kind == "unified":
             window = candidates
             while True:
                 ranked = await asyncio.to_thread(index.rank, qvec, window, **rank_args)
@@ -2162,7 +2345,7 @@ class RagService:
 
         The last value :meth:`search_stream` yields, for a caller that wants
         one answer. A reranker failure raises for a corpus of one kind and
-        falls back to the ranked list for ``all``, which mixes kinds and so
+        falls back to the ranked list for ``unified``, which mixes kinds and so
         has an exact-match head worth showing on its own.
         """
         last: Optional[dict] = None
@@ -2170,7 +2353,7 @@ class RagService:
             kind, query, root=root, limit=limit, rerank=rerank, wait=wait, mode=mode,
         ):
             if event == "error":
-                if kind != "all":
+                if kind != "unified":
                     raise RagError(view["error"])
                 view = {k: v for k, v in view.items() if k != "error"}
             last = view
@@ -2456,12 +2639,22 @@ class RagService:
             prog = self._progress_of(key)
             row = {
                 "key": key,
-                "kind": key if key in ("sessions", "all") else "beads",
+                "kind": self._kind_of_key(key),
                 "root": str(self._roots.get(key)) if self._roots.get(key) else None,
                 "documents": len(index.entries),
                 "dims": index.dims,
                 "updated_at": index.updated_at,
                 "path": str(index.path),
+                # The store this row is physically in: ``<corpus>.<db>.zvec``
+                # gives ``db``, a pre-preset ``<corpus>.zvec`` gives "". The
+                # card groups rows under this, so a reader never has to infer
+                # the DB from a path (claunch-i2i95).
+                "db": _path_identity(index.path),
+                # The DB the preset resolves to. A row whose path has no
+                # identity is being read through the legacy adoption rule, and
+                # that difference is the one the two screens disagreed about.
+                "db_configured": str(cfg.get("db") or ""),
+                "legacy": not _path_identity(index.path),
             }
             row.update(prog.view())
             indexes.append(row)

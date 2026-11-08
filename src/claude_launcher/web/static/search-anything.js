@@ -11,45 +11,6 @@ globalThis.SearchAnything = (() => {
     const where = p.source === "profile" ? `profile ${p.profile || ""}`.trim() : (p.base_url || "custom endpoint");
     return `${p.id} — ${p.embedding_model || "모델 미지정"} (${where})`;
   }
-  function ragBackfillTotals(indexes) {
-    let pending = 0, total = 0;
-    for (const idx of indexes || []) {
-      pending += Number(idx.pending) || 0;
-      total += Number(idx.total) || 0;
-    }
-    return { pending, total };
-  }
-  function ragBackfillStateLine(indexes, active, paused) {
-    const rows = Array.isArray(indexes) ? indexes : [];
-    const syncing = rows.some(r => r && r.syncing);
-    const totals = ragBackfillTotals(rows);
-    const activeEmpty = !active || (!active.preset && !active.embedding_model && !active.model_key);
-    if (paused)
-      return { state: "paused", text: `소급 임베딩 일시정지됨 · 남은 문서 ${totals.pending} / ${totals.total}건` };
-    if (syncing || totals.pending > 0)
-      return { state: "running", text: `소급 임베딩 진행 중 · 남은 문서 ${totals.pending} / ${totals.total}건` };
-    if (rows.length === 0 || totals.total === 0) {
-      // No rows is two different states. With a preset in force it means this
-      // preset has no collection under its name yet -- the case right after a
-      // save, when the old text read as "there are no documents at all"
-      // (claunch-fhs7f.1).
-      if (!activeEmpty) {
-        const which = active && active.preset ? `프리셓 ${active.preset}의 ` : "";
-        return { state: "idle", text: `${which}색인은 아직 없습니다 — 소급 임베딩이 시작되면 진행률이 여기에 표시됩니다.` };
-      }
-      return { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." };
-    }
-    const activeText = ragActiveText(active);
-    if (activeEmpty) return { state: "done", text: "색인 갱신 완료" };
-    return { state: "done", text: `${activeText} · 색인 갱신 완료` };
-  }
-  function ragActiveText(active) {
-    if (!active || (!active.preset && !active.embedding_model && !active.model_key)) return "";
-    const name = active.preset ? `프리셋 ${active.preset}` : "직접 설정";
-    const model = active.embedding_model || "";
-    const key = active.model_key ? ` · model_key ${active.model_key}` : "";
-    return `활성: ${name}${model ? " · " + model : ""}${key}`;
-  }
   // The store slug the daemon writes a DB name as (store.rag_model_key_slug):
   // lowercase, every run of other characters one hyphen, trimmed, 48 chars.
   // The card shows it before a save so the name on disk is never a surprise.
@@ -72,6 +33,15 @@ globalThis.SearchAnything = (() => {
     if (except === undefined && max && (presets || []).length >= max)
       return `프리셋은 ${max}개까지 저장됩니다. 프리셋을 삭제한 뒤 다시 시도하세요.`;
     return "";
+  }
+  // A board collection's corpus key is the board's digest, not the literal
+  // "beads" (daemon/rag.py's `_key` keys a board by its root's digest), so the
+  // column shows the corpus a reader can act on and keeps the digest in the
+  // cell's title (claunch-rk0od).
+  function ragCorpusLabel(corpus) {
+    const name = String(corpus || "");
+    if (name.startsWith("beads-")) return "beads";
+    return name || "?";
   }
   // The DB panel's rows: one per named DB (its collections across corpora
   // folded together), and one per collection of the pre-preset format,
@@ -101,13 +71,6 @@ globalThis.SearchAnything = (() => {
       g.bytes += Number(row.bytes) || 0;
     }
     return groups;
-  }
-  function ragBytes(n) {
-    n = Number(n) || 0;
-    if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
-    if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
-    if (n >= 1 << 10) return `${Math.round(n / (1 << 10))} KB`;
-    return `${n} B`;
   }
   async function request(path, body, method = "POST", signal) {
     const response = await api(path, body === undefined ? {signal} : {
@@ -414,7 +377,9 @@ globalThis.SearchAnything = (() => {
     submit.disabled = true; notice.textContent = "검색 중…"; results.replaceChildren(); filters.replaceChildren();
     offered = null; apply.hidden = true; rerankNote = "";
     try {
-      const response = await api("api/search/stream?kind=all&limit=30&mode=" + searchMode + "&q=" + encodeURIComponent(query),
+      // `unified` is the combined corpus; `all` was its name and the daemon
+      // still accepts it as a deprecated alias (claunch-7aujp).
+      const response = await api("api/search/stream?kind=unified&limit=30&mode=" + searchMode + "&q=" + encodeURIComponent(query),
         {signal: controller.signal, noBatch: true});
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -463,53 +428,16 @@ globalThis.SearchAnything = (() => {
       const writers = [];
       const busy = on => { for (const b of writers) b.disabled = on; if (!on) presetLimits(); };
 
-      // ---- what is in force: the active preset and the backfill ----------
-      // The daemon's own record of what it serves plus the backfill progress
-      // after a switch; refreshed by watchBackfill. Kept apart from the
-      // picker below, which only chooses what the fields edit.
+      // ---- what is in force: the active preset ---------------------------
+      // Only the preset in force is summarised here. The backfill progress,
+      // the pause control and the per-collection status live on the
+      // Semantic search card now — the two screens reported the same numbers
+      // with different words, which is what made them look like they
+      // disagreed (claunch-i2i95).
       const summary = node("div", "", "rag-summary");
       const activeRow = node("div", "", "rag-summary-row"), activeLine = node("span", "", "rag-summary-value");
       activeRow.append(node("span", "활성 프리셋", "rag-summary-key"), activeLine);
-      const backfillRow = node("div", "", "rag-summary-row");
-      const ragState = node("span", "", "rag-preset-state");
-      const pauseBtn = button("일시정지");
-      backfillRow.append(node("span", "소급 임베딩", "rag-summary-key"), ragState, pauseBtn);
-      summary.append(activeRow, backfillRow); card.insertBefore(summary, status);
-      let backfillPolls = 0, backfillPaused = false;
-      async function watchBackfill() {
-        try {
-          const st = await request("api/rag/status");
-          backfillPaused = Boolean(st.backfill_paused);
-          pauseBtn.textContent = backfillPaused ? "재개" : "일시정지";
-          const line = ragBackfillStateLine(st.indexes, st.active, backfillPaused);
-          ragState.textContent = line.text;
-          if (line.state === "running" && backfillPolls < 200) {
-            backfillPolls++;
-            setTimeout(watchBackfill, 3000);
-          }
-        } catch { /* the status read is best-effort; leave the last line */ }
-      }
-      watchBackfill();
-      // Pause holds the daemon's backfill consumer before its next key; the
-      // in-flight pass finishes, queued corpora keep their order, and resume
-      // drains from where the pause left it (POST api/rag/backfill/pause|resume).
-      pauseBtn.onclick = async () => {
-        busy(true);
-        const resuming = backfillPaused;
-        status.textContent = resuming ? "소급 임베딩을 재개하는 중…" : "소급 임베딩을 일시정지하는 중…";
-        try {
-          const data = await request(resuming ? "api/rag/backfill/resume" : "api/rag/backfill/pause", {}, "POST");
-          backfillPaused = Boolean(data.paused);
-          pauseBtn.textContent = backfillPaused ? "재개" : "일시정지";
-          status.textContent = backfillPaused
-            ? "소급 임베딩을 일시정지했습니다. 재개하면 남은 문서부터 이어서 처리합니다."
-            : "소급 임베딩을 재개했습니다.";
-          watchBackfill();
-        } catch (error) {
-          status.textContent = error.message;
-        } finally { busy(false); }
-      };
-      writers.push(pauseBtn);
+      summary.append(activeRow); card.insertBefore(summary, status);
 
       function field(key, title, type = "text", parent = form, note = "") {
         const label = node("label", ""), input = document.createElement("input");
@@ -657,10 +585,13 @@ globalThis.SearchAnything = (() => {
       // The width the last connection test measured: a DB of another width
       // is marked, since a save pointing at it is refused.
       let testedDims = 0, dbGroups = [];
-      // One row per DB. Clicking the name fills the field above; rename and
-      // delete act on the DB as a whole (every corpus's collection). A DB a
-      // preset reads cannot be deleted, so the button is disabled and says
-      // why (claunch-fhs7f.1, claunch-r4796).
+      // One row per DB, and only the two things this card still owns: the
+      // name to put in the field above, and the rename/delete actions. The
+      // dimensions, the model and the presets that read it are drawn on the
+      // Semantic search card instead — two places showing the same numbers is
+      // what made a reader think they disagreed (claunch-i2i95). A DB a preset
+      // reads cannot be deleted, so the button is disabled and says why
+      // (claunch-fhs7f.1, claunch-r4796).
       function renderDbs() {
         dbList.replaceChildren();
         if (!dbGroups.length) {
@@ -669,12 +600,24 @@ globalThis.SearchAnything = (() => {
         }
         const table = document.createElement("table"); table.className = "rag-db-table";
         const head = document.createElement("tr");
-        for (const h of ["DB 이름", "차원", "만든 모델", "쓰는 프리셋", "크기", ""]) head.append(node("th", h));
+        // One row per collection, not per DB: a preset adopts one collection in
+        // each corpus, so the same presets repeat down a DB's rows. The column
+        // name says that, which is what the row-per-DB layout hid — it read as
+        // "the presets that write into this DB" (claunch-rk0od).
+        for (const h of ["DB 이름", "corpus", "형식", "이 컬렉션을 채택하는 프리셋", "폭", "모델", ""]) head.append(node("th", h));
         const thead = document.createElement("thead"); thead.append(head); table.append(thead);
         const body = document.createElement("tbody");
         for (const g of dbGroups) {
+          // A legacy collection is a group of one; a named DB carries one
+          // collection per corpus it covers.
+          const rows = g.collections.length ? g.collections : [{ corpus: "", identity: "", dims: 0, model: "", presets: [], in_use: false }];
+          let lastTr = null;
+          rows.forEach((row, index) => {
           const tr = document.createElement("tr"); tr.className = "rag-db-entry";
+          lastTr = tr;
+          if (index === 0) {
           const nameCell = node("td", "");
+          if (rows.length > 1) nameCell.rowSpan = rows.length;
           const use = button(g.legacy ? `${g.name} (이전 형식)` : g.name, "rag-db-use");
           use.dataset.db = g.fill;
           use.title = g.fill ? `DB 이름 칸에 ${g.fill}을 채웁니다` : "이 컬렉션은 이름으로 지정할 수 없습니다";
@@ -686,17 +629,23 @@ globalThis.SearchAnything = (() => {
               (width && testedDims && width !== testedDims ? ` 이 DB는 ${width}차원이고 마지막 연결 테스트의 모델은 ${testedDims}차원이라 저장이 거절됩니다.` : "");
           };
           nameCell.append(use);
-          if (!g.legacy && g.collections.length > 1) nameCell.append(node("span", ` 컬렉션 ${g.collections.length}개`, "rag-hint-inline"));
-          const dimsCell = node("td", g.dims.length ? g.dims.map(d => `${d}`).join(", ") : "—");
-          if (testedDims && g.dims.length && !g.dims.includes(testedDims)) {
-            dimsCell.append(node("span", "차원 불일치", "rag-badge rag-badge-warn"));
+          if (!g.legacy && rows.length > 1) nameCell.append(node("span", ` 컬렉션 ${rows.length}개`, "rag-hint-inline"));
+          tr.append(nameCell);
           }
-          const readers = g.presets.length ? g.presets.join(", ") : (g.in_use ? "현재 활성 설정" : "없음");
+          const corpus = node("td", ragCorpusLabel(row.corpus), "rag-db-corpus");
+          corpus.title = row.corpus ? `corpus ${row.corpus}` : "";
+          tr.append(corpus,
+                    node("td", row.identity ? "이름 있음" : "이전 형식", "rag-db-form"),
+                    node("td", row.presets.length ? row.presets.join(", ") : (row.in_use ? "현재 활성 설정" : "없음"), "rag-db-readers"),
+                    node("td", row.dims ? String(row.dims) : "—", "rag-db-dims"),
+                    node("td", row.model || "—", "rag-db-model"));
+          if (index === 0) {
           const actions = node("td", "", "rag-db-actions");
+          if (rows.length > 1) actions.rowSpan = rows.length;
           const occupied = Boolean(g.presets.length || g.in_use);
           const del = button("삭제", "wf-btn clear rag-db-delete");
           del.disabled = occupied;
-          if (occupied) del.title = "이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다. 그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요.";
+          if (occupied) del.title = "이 DB를 읽는 프리셋이 있어 삭제할 수 없습니다. 그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요.";
           del.onclick = async () => {
             if (!window.confirm(`DB ${g.name}과 그 벡터를 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`)) return;
             del.disabled = true;
@@ -710,18 +659,22 @@ globalThis.SearchAnything = (() => {
           };
           if (!g.legacy) {
             const ren = button("이름 변경", "wf-btn clear rag-db-rename");
-            ren.onclick = () => renameDbRow(tr, g);
+            // The rename row goes under the group's last row, not its first:
+            // with the DB cell spanning the group, an inserted row between
+            // them breaks the table (claunch-rk0od).
+            ren.onclick = () => renameDbRow(rows.length > 1 ? lastTr : tr, g);
             actions.append(ren);
           }
           actions.append(del);
-          tr.append(nameCell, dimsCell, node("td", g.models.join(", ") || "—"), node("td", readers),
-                    node("td", ragBytes(g.bytes)), actions);
+          tr.append(actions);
+          }
           body.append(tr);
+          });
         }
         table.append(body);
         const scroller = node("div", "", "rag-db-scroll"); scroller.append(table);
         dbList.append(scroller);
-        hint("DB 하나는 corpus(sessions, all, 보드별 beads)마다 컬렉션을 하나씩 가집니다. ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션이고, 이름을 누르면 그 모델의 이름이 채워집니다.", dbList);
+        hint("한 행이 컬렉션 하나입니다. 프리셋은 corpus마다 컬렉션을 하나씩 채택하므로 같은 DB의 행들이 같은 프리셋을 적습니다. corpus가 beads인 행의 이름은 보드별 식별자이고, ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션입니다.", dbList);
         showDbResolved();
       }
       // Rename one DB in place: an input row under it, the slug the daemon
@@ -731,7 +684,7 @@ globalThis.SearchAnything = (() => {
       function renameDbRow(tr, g) {
         if (tr.nextSibling && tr.nextSibling.classList && tr.nextSibling.classList.contains("rag-db-rename-row")) return;
         const row = document.createElement("tr"); row.className = "rag-db-rename-row";
-        const cell = document.createElement("td"); cell.colSpan = 6;
+        const cell = document.createElement("td"); cell.colSpan = 7;
         const input = document.createElement("input"); input.value = g.name; input.autocomplete = "off"; input.maxLength = 64;
         const shown = node("span", "", "rag-hint-inline");
         const go = button("이름 변경", "wf-btn option"), cancel = button("취소");
@@ -759,7 +712,7 @@ globalThis.SearchAnything = (() => {
             const repointed = (data.presets || []).includes(presetSelect.value);
             if (screenDb === g.name || repointed) dbInput.value = data.db;
             for (const p of presets) if (data.presets && data.presets.includes(p.id)) p.db = data.db;
-            const moved = data.presets && data.presets.length ? ` 이 DB를 쓰던 프리셋(${data.presets.join(", ")})도 새 이름을 쓰도록 바꿨습니다.` : "";
+            const moved = data.presets && data.presets.length ? ` 이 DB를 읽던 프리셋(${data.presets.join(", ")})도 새 이름을 쓰도록 바꿨습니다.` : "";
             status.textContent = `DB ${g.name}의 이름을 ${data.db}으로 바꿨습니다. 벡터는 그대로입니다.${moved}`;
             showPreset();
           } catch (error) {
@@ -769,7 +722,7 @@ globalThis.SearchAnything = (() => {
         };
         const wrap = node("div", "", "rag-actions-row");
         wrap.append(node("span", "새 DB 이름", "rag-field-title"), input, go, cancel, shown);
-        cell.append(wrap, hint("이 DB의 모든 컬렉션을 새 이름으로 옮기고, 이 DB를 쓰는 프리셋의 DB 이름도 함께 바꿉니다. 옮기는 동안 검색과 색인이 잠시 멈춥니다."));
+        cell.append(wrap, hint("이 DB의 모든 컬렉션을 새 이름으로 옮기고, 이 DB를 읽는 프리셋의 DB 이름도 함께 바꿉니다. 옮기는 동안 검색과 색인이 잠시 멈춥니다."));
         row.append(cell); tr.after(row); update(); input.focus();
       }
       async function loadDbs() {
@@ -878,7 +831,7 @@ globalThis.SearchAnything = (() => {
       // After a save the daemon's reply is the new truth: mirror the rows
       // and the preset list (secrets stay stripped) into the card's state.
       function afterSave(data) {
-        backfillPolls = 0; watchBackfill(); loadDbs();
+        loadDbs();
         fields.api_key.value = ""; fields.api_key.placeholder = data.api_key_set ? "저장됨 · 비워 두면 그대로 유지" : "API key";
         Object.assign(saved, data.sources || {});
         if (Array.isArray(data.presets)) {
@@ -917,6 +870,11 @@ globalThis.SearchAnything = (() => {
         // The flat fields would land in the picked row anyway; keeping them out
         // of the body leaves one spelling of a save.
         for (const key of ["profile", "base_url", "api_key", "embedding_model", "rerank_model"]) delete out[key];
+        // The width the last connection test measured, so the daemon checks a
+        // live number instead of a sidecar that may predate a server changing
+        // its output width under the same model name (claunch-i2i95). Zero
+        // means "not measured"; the daemon falls back to its own record.
+        out.probe_dims = testedDims || 0;
         return out;
       }
       // The save body: the loaded preset list with the selected preset's row
@@ -1059,7 +1017,7 @@ globalThis.SearchAnything = (() => {
       // Selecting a preset only loads its values. Activation -- the daemon
       // restart and the backfill it starts -- happens on save, so peeking at
       // another preset costs nothing (search_anything.py restarts the service
-      // and enqueues "all" on the settings PUT).
+      // and enqueues "unified" on the settings PUT).
       presetSelect.onchange = () => {
         rename.box.hidden = true;
         loadPreset(presets.find(p => p.id === presetSelect.value));

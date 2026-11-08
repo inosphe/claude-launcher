@@ -63,8 +63,10 @@ function constBlock() {
 /* ---- stub DOM ---- */
 function makeNode(tag) {
   const classes = new Set();
+  const style = {};
+  style.setProperty = (name, value) => { style[name] = value; };
   const node = {
-    tag, style: {}, children: [], listeners: {}, dataset: {},
+    tag, style, children: [], listeners: {}, dataset: {},
     title: "", textContent: "", disabled: false, value: "",
   };
   Object.defineProperty(node, "className", {
@@ -104,6 +106,7 @@ const IDS = [
   "new-usage", "new-usage-who", "new-usage-when", "new-usage-refresh",
   "new-usage-windows", "new-usage-keys", "new-strategy-row",
   "new-key-strategy", "new-key-roll", "new-usage-note",
+  "new-auto-key-row", "new-auto-key-switch",
 ];
 const nodes = {};
 for (const id of IDS) nodes[id] = makeNode("div");
@@ -146,9 +149,13 @@ const env = {
 const build = new Function(
   ...Object.keys(env),
   constBlock() +
-  slice("newUsageAge") + slice("newUsageWindowLabel") + slice("newUsagePeak") +
-  slice("newUsageLevel") + slice("newUsageMoney") + slice("newUsageReset") +
-  slice("newUsageWindowText") + slice("newUsageWindowLine") +
+  slice("newUsageAge") + slice("newUsageWindowLabel") + slice("newUsageOrderedWindows") +
+  slice("newUsagePeak") +
+  slice("newUsageLevel") + slice("newUsageMoney") + slice("newUsageSpan") +
+  slice("newUsageReset") +
+  slice("newUsageWindowText") + slice("newUsageWindowParts") + slice("newUsageBar") +
+  slice("newUsageBarSlot") +
+  slice("newUsageWindowLine") + slice("newUsageKeyCell") +
   slice("newUsageKeySummary") + slice("newUsageFillStrategies") +
   slice("newUsageLender") + slice("newUsageSelector") +
   slice("renderNewUsage") + slice("startNewUsageRead") +
@@ -157,6 +164,7 @@ const build = new Function(
   slice("rollNewKey") + slice("applyNewKeyStrategy") +
   "; return { renderNewUsage, startNewUsageRead, setNewKeyStrategy,"
   + " setNewKeyChoice, rollNewKey, applyNewKeyStrategy, newUsageAge,"
+  + " newUsageReset, newUsageSpan, newUsageOrderedWindows,"
   + " state: newUsageState, pin: () => newSessionKeyId };",
 );
 const usage = build(...Object.values(env));
@@ -169,10 +177,28 @@ const roll = nodes["new-key-roll"];
 const strategyRow = nodes["new-strategy-row"];
 const note = nodes["new-usage-note"];
 const who = nodes["new-usage-who"];
+/* The automatic key switch (claunch-d2t79): the session's answer, asked where
+   the pool it applies to is drawn. */
+const autoRow = nodes["new-auto-key-row"];
+const autoBox = nodes["new-auto-key-switch"];
 
 function windowLine(name, utilization) {
   return { name, utilization, resets_at: null, status: "ok" };
 }
+
+/* A key row's window cell: [label, value] under one head, then the bar and
+   the countdown (claunch-hz9ma). */
+const cellsOf = (row) => row.children[3].children;
+const cellLabel = (cell) => cell.children[0].children[0].textContent;
+const cellValue = (cell) => cell.children[0].children[1].textContent;
+const cellReset = (cell) => {
+  const reset = cell.children.find((child) => /new-usage-cell-reset/.test(child.className));
+  return reset ? reset.textContent : "";
+};
+/* A resets_at far enough inside its minute that a slow harness cannot push
+   the floored countdown onto the previous minute. */
+const resetsIn = (minutes) =>
+  new Date(Date.now() + minutes * 60000 + 30000).toISOString();
 
 function doc(over = {}) {
   return {
@@ -223,8 +249,10 @@ async function main() {
   check("the block opens when the answer lands", box.classList.contains("hidden"), false);
   check("it names the profile", who.textContent, "Usage · work");
   check("the windows are drawn", windowsBox.children.length, 1);
-  check("a window reads like the usage page's",
-    windowsBox.children[0].children[0].textContent, "5h 12%");
+  check("a window names its span in its own column",
+    windowsBox.children[0].children[0].textContent, "5h");
+  check("...and its value in the next",
+    windowsBox.children[0].children[1].textContent, "12%");
   check("a single token has no key list", keysBox.classList.contains("hidden"), true);
   check("the strategy row is still on the form for a single token",
     strategyRow.classList.contains("hidden"), false);
@@ -232,6 +260,45 @@ async function main() {
   check("the note names how to get a pool", /one token/.test(note.textContent), true);
   check("the note stays visible", note.classList.contains("hidden"), false);
   check("no window error is shown", note.textContent.includes("usage unavailable"), false);
+  check("a single token cannot switch keys on a limit",
+    autoRow.classList.contains("hidden"), true);
+
+  /* ---- a window with no percentage keeps the countdown in its column
+     (claunch-hz9ma.1) ----
+     A detail sentence, or an amount with no limit, leaves nothing for the
+     bar to fill. The row must still draw the bar's place: the countdown is
+     auto-placed into the next free column, so dropping the bar moved it into
+     the bar's own column and the two rows' countdowns stopped lining up. */
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      usage: {
+        source: "oauth-usage", cached: true, updated_at: Date.now() / 1000,
+        windows: [
+          { name: "five_hour", detail: "12 calls this machine",
+            resets_at: resetsIn(287) },
+          { name: "weekly", utilization: 40, resets_at: resetsIn(6997) },
+        ],
+      },
+    }),
+  });
+  await flush();
+  const detailRow = windowsBox.children[0];
+  const pctRow = windowsBox.children[1];
+  // `at` stays safe when the row loses a column: the failure is then reported
+  // as a check, instead of a TypeError that would hide every check after it.
+  const at = (row, index) =>
+    ((row && row.children[index] && row.children[index].className) || "");
+  check("a detail window's row has four columns",
+    detailRow.children.length, 4);
+  check("...with the bar's place kept, unpainted",
+    at(detailRow, 2), "new-usage-bar-slot");
+  check("...so its countdown is in the fourth column",
+    at(detailRow, 3), "new-usage-window-reset");
+  check("a percentage window counts down in that same column",
+    [at(pctRow, 2).startsWith("new-usage-bar "), at(pctRow, 3)],
+    [true, "new-usage-window-reset"]);
 
   /* ---- a pool: every key, and the next launch's key marked ---- */
   selectorNow = "work:claude";
@@ -260,7 +327,7 @@ async function main() {
     keysBox.children[1].children[0].textContent, "next");
   check("a next row is lit", keysBox.children[1].className.includes("next"), true);
   check("a key row carries its own numbers",
-    keysBox.children[1].children[3].textContent, "5h 80%");
+    cellValue(cellsOf(keysBox.children[1])[0]), "80%");
   check("the masked token is drawn on the row",
     keysBox.children[1].children[2].textContent, "sk-B…2222");
   check("a key never spent says so",
@@ -276,6 +343,146 @@ async function main() {
     ["rotation", "usage-min", "usage-max", "random", "manual"]);
   check("the strategy select shows the pool's answer", select.value, "rotation");
   check("a pool with two keys may set the strategy", select.disabled, false);
+  check("...and may ask to switch keys on a limit",
+    autoRow.classList.contains("hidden"), false);
+
+  /* ---- one scale, one order, one set of columns (claunch-hz9ma) ---- */
+  // The profile and two keys report the same three spans, out of order, and
+  // one key does not report a month at all. The display's job is that a
+  // reader compares them by column: 5h, week, month, in that order, with the
+  // countdown in one unit rule.
+  check("a span under an hour is minutes", usage.newUsageSpan(47), "47m");
+  check("a span under a day is hours and minutes", usage.newUsageSpan(287), "4h47m");
+  check("an exact hour pads the minutes", usage.newUsageSpan(180), "3h00m");
+  check("a span of a day or more is days and hours", usage.newUsageSpan(6997), "4d 20h");
+  check("...with the minutes dropped", usage.newUsageSpan(25832), "17d 22h");
+  check("...and the hours dropped when they are zero", usage.newUsageSpan(2880), "2d");
+  check("the countdown uses the same units",
+    usage.newUsageReset(resetsIn(287)), "resets in 4h47m");
+  check("windows are ordered shortest first",
+    usage.newUsageOrderedWindows([{ name: "monthly" }, { name: "five_hour" },
+                                  { name: "weekly" }]).map((w) => w.name),
+    ["five_hour", "weekly", "monthly"]);
+  check("a window name the order table does not know keeps its place last",
+    usage.newUsageOrderedWindows([{ name: "custom" }, { name: "seven_day" },
+                                  { name: "other" }]).map((w) => w.name),
+    ["seven_day", "custom", "other"]);
+
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      next: { key_id: "k-1", strategy: "rotation", fallback: null },
+      usage: {
+        source: "oauth-usage", cached: true, updated_at: Date.now() / 1000,
+        windows: [
+          { name: "monthly", utilization: 89, resets_at: resetsIn(25832), status: "ok" },
+          { name: "five_hour", utilization: 0, resets_at: resetsIn(287), status: "ok" },
+          { name: "weekly", utilization: 8, resets_at: resetsIn(6997), status: "ok" },
+        ],
+      },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true,
+          usage: { windows: [
+            { name: "weekly", utilization: 8, resets_at: resetsIn(6997) },
+            { name: "five_hour", utilization: 0, resets_at: resetsIn(287) },
+          ], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false,
+          usage: { windows: [
+            { name: "monthly", utilization: 100, resets_at: resetsIn(36530) },
+            { name: "five_hour", utilization: 5, resets_at: resetsIn(287) },
+            { name: "weekly", utilization: 100, resets_at: resetsIn(11637) },
+          ], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  check("the profile's windows are listed shortest first",
+    windowsBox.children.map((row) => row.children[0].textContent),
+    ["5h", "week", "month"]);
+  check("a month countdown reads in days and hours",
+    windowsBox.children[2].children[3].textContent, "resets in 17d 22h");
+  check("a week countdown reads in days and hours",
+    windowsBox.children[1].children[3].textContent, "resets in 4d 20h");
+  check("a 5h countdown stays in hours and minutes",
+    windowsBox.children[0].children[3].textContent, "resets in 4h47m");
+  const row1 = cellsOf(keysBox.children[0]);
+  const row2 = cellsOf(keysBox.children[1]);
+  check("every key row draws every column, even one it does not report",
+    [row1.length, row2.length], [3, 3]);
+  check("...in the same order as the profile's reading",
+    row1.map(cellLabel), ["5h", "week", "month"]);
+  check("a window a key did not report is a dash in its own column",
+    [cellLabel(row1[2]), cellValue(row1[2])], ["month", "—"]);
+  check("the columns carry each key's own values",
+    [cellValue(row1[0]), cellValue(row1[1]), cellValue(row2[2])], ["0%", "8%", "100%"]);
+  check("a key's countdown uses the same units",
+    [cellReset(row1[1]), cellReset(row2[2])], ["resets in 4d 20h", "resets in 25d 8h"]);
+  check("the key rows and the profile's rows draw the same columns",
+    row1.length === row2.length && row1.length === windowsBox.children.length, true);
+
+  /* ---- a key window with no percentage keeps the bar's place too ---- */
+  // A key cell stacks its parts vertically (head, bar, countdown) instead of
+  // the profile row's four-column grid, so the bar is child 1 and the
+  // countdown child 2. A window that reports a detail line has no usable
+  // percentage, and that is exactly where the bar used to vanish and the
+  // countdown ride up — the same regression the profile-row assertions above
+  // pin, on the other renderer (claunch-hz9ma.1.1). `atCell` reads a missing
+  // child as "" so the failure is a check, not a TypeError that would hide
+  // every check after it.
+  selectorNow = "work:claude";
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, {
+    body: doc({
+      pooled: true, owner: "work", strategy: "rotation",
+      next: { key_id: "k-1", strategy: "rotation", fallback: null },
+      keys: [
+        { id: "k-1", label: "main", masked: "sk-A…1111", current: true, next: true,
+          usage: { windows: [
+            { name: "five_hour", detail: "12 calls this machine",
+              resets_at: resetsIn(287) },
+            { name: "weekly", utilization: 40, resets_at: resetsIn(6997) },
+          ], error: null } },
+        { id: "k-2", label: "spare", masked: "sk-B…2222", current: false, next: false,
+          usage: { windows: [
+            { name: "five_hour", utilization: 5, resets_at: resetsIn(287) },
+            { name: "weekly", utilization: 100, resets_at: resetsIn(6997) },
+          ], error: null } },
+      ],
+    }),
+  });
+  await flush();
+  const atCell = (cell, index) =>
+    ((cell && cell.children[index] && cell.children[index].className) || "");
+  const detailCell = cellsOf(keysBox.children[0])[0];
+  const pctCell = cellsOf(keysBox.children[1])[0];
+  check("a key window that reports a detail line says so",
+    cellValue(detailCell), "12 calls this machine");
+  check("a key window with a detail line still has three parts",
+    detailCell.children.length, 3);
+  check("...with the bar's place kept, unpainted",
+    atCell(detailCell, 1), "new-usage-bar-slot");
+  check("...so its countdown sits under it in the same unit",
+    [atCell(detailCell, 2), cellReset(detailCell)],
+    ["new-usage-cell-reset", "resets in 4h47m"]);
+  check("a percentage key window paints that same place",
+    [atCell(pctCell, 1).startsWith("new-usage-bar "),
+     atCell(pctCell, 2), cellReset(pctCell)],
+    [true, "new-usage-cell-reset", "resets in 4h47m"]);
+
+  /* A pool that shrinks under the tick leaves a hidden box ticked. A hidden
+     answer must not ride the submit as if it were chosen, so the render
+     clears it. */
+  autoBox.checked = true;
+  usage.state.at = 0;
+  usage.renderNewUsage();
+  settle(pending.length - 1, { body: doc() });
+  await flush();
+  check("a pool that shrinks hides the answer and clears the tick",
+    [autoRow.classList.contains("hidden"), autoBox.checked], [true, false]);
 
   /* ---- a usage strategy names its pick, marked as this read's answer ---- */
   selectorNow = "work:claude";

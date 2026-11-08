@@ -109,7 +109,9 @@ new Function("ctx", "document", "el", "api", "drawn", "live", "marks",
    function sessionFormView() { return sessionView; }
    const form = { quick_fork_workflow: { value: "-" }, quick_fork_mesh: { value: "-" },
      quick_fork_place: { value: "child" }, quick_fork_self_merge: { checked: false },
-     quick_fork_role: { value: "" } };
+     quick_fork_role: { value: "" },
+     quick_fork_copy_plan: { checked: false }, quick_fork_copy_qa: { checked: false },
+     quick_fork_copy_threads: { checked: false } };
    const forkBox = el("div", "cf2-inputs hidden");
    function $(id) { return id === "new-session" ? form : id === "new-quick-fork-inputs" ? forkBox : null; }
    function quickForkMeshName() { return ""; }

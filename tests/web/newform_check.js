@@ -128,13 +128,20 @@ check("the decision blocks are numbered in reading order",
    what it joins, how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
   "quick_fork_place", "quick_fork_mesh", "quick_fork_role", "quick_fork_workflow",
+  // the origin's side items a copy may carry (claunch-yydhs), before the
+  // opening task: they decide what the copy starts with, not what it is told
+  "quick_fork_copy_plan", "quick_fork_copy_qa", "quick_fork_copy_threads",
   "quick_fork_task", "quick_fork_self_merge",
   // where it works: the project, then the directory its default fills
   "project", "cwd",
   // who it is, and the operator's own note on it (claunch-zy9yk)
   "parent", "fork_parent", "over_limit", "name", "note",
-  // whose credentials it holds — promoted out of the fold
-  "profile", "harness", "model", "effort",
+  // whose credentials it holds — promoted out of the fold. The automatic key
+  // switch (claunch-d2t79) is asked here too, under the usage readout of the
+  // same pool: it is an answer about what happens to THIS session when the
+  // credential it was given runs out, so it belongs beside the row that
+  // decides whose credential that is.
+  "profile", "harness", "model", "effort", "auto_key_switch",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded. The score goal is a session setting the daemon
@@ -166,7 +173,7 @@ check("the profile is asked above the fold, not inside it",
        named(fold.text).includes("profile")],
       [true, false]);
 check("Profile, Harness, Model and effort are separate runtime choices",
-      named(runsOn.text), ["profile", "harness", "model", "effort"]);
+      named(runsOn.text), ["profile", "harness", "model", "effort", "auto_key_switch"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
 /* The recommendation those four rows make by themselves (a Claude-harness
@@ -346,9 +353,19 @@ check("...and everything promoted is genuinely inherited",
    what qualifies it) to "Runs as", the directory to "Where it works" at the
    top of the form. Between them they must account for the whole list, or a
    name was added to RUNTIME_PROMOTED without the markup moving. */
+/* The runs-as fence carries one answer that no child inherits: the automatic
+   key switch (claunch-d2t79). It is the operator's answer about this
+   session's own faults, and the spawn policy neither hands it back nor takes
+   it away — so it is named here rather than left to a loose filter, the way
+   FOLD_SETTINGS names the score goal, and it is subtracted below before the
+   two fences are compared with RUNTIME_PROMOTED. */
+const RUNTIME_SETTINGS = ["auto_key_switch"];
+check("the runs-as fence's only non-inherited row is the key switch",
+      named(runsOn.text).filter((k) => !INHERITS.includes(k)), RUNTIME_SETTINGS);
 check("the promoted rows are the ones the markup hoisted",
       PROMOTED.slice().sort(),
-      [...named(runsOn.text), ...named(where.text)].sort());
+      [...named(runsOn.text), ...named(where.text)]
+        .filter((k) => INHERITS.includes(k)).sort());
 
 /* ---- every field Create reads is still on the form ---- */
 function sliceFrom(marker) {
@@ -400,6 +417,24 @@ check("Create restores the control after a response or request failure",
 check("the create form provides an announced pending status",
       /id="create-status"/.test(html) && /role="status"/.test(html) &&
         /aria-live="polite"/.test(html), true);
+
+/* ---- the tick has to reach the request ----
+   `renderSessionForm` disables every control whose name is not in the mode's
+   `editable`, and `sessionFormPayload` keeps only the names in its `payload`.
+   A row named in neither is drawn, can be read by the submit handler, and
+   still arrives as nothing — which is how the automatic key switch shipped on
+   this form once (claunch-d2t79 review). Both tabs ask it: a created session
+   and a spawned child each keep their own answer. */
+const formConfig = new Function(
+  `${sliceFrom("function sessionFormConfig(")}; return sessionFormConfig;`)();
+const formPayload = new Function("sessionFormConfig",
+  `${sliceFrom("function sessionFormPayload(")}; return sessionFormPayload;`)(formConfig);
+check("the automatic key switch is editable on both tabs",
+      ["new", "spawn"].map((m) => formConfig(m).editable.includes("auto_key_switch")),
+      [true, true]);
+check("...and its tick survives the payload filter on both tabs",
+      ["new", "spawn"].map((m) => formPayload(m, { auto_key_switch: true }).auto_key_switch),
+      [true, true]);
 
 /* The board's own rule, read out of the submit handler: "new" is the absence
    of both keys. A request that says nothing gets an issue minted from its

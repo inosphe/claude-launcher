@@ -233,6 +233,10 @@ def test_mentions_are_told_to_the_agent(monkeypatch):
     body = prompt_packs.shipped("mcp-threads").body
     assert "@all" in body and "unknown_mentions" in body
     assert "No mention at all" in body
+    # claunch-ikcvw: the user-only mention is in both the tool and the pack,
+    # with the rule that turns it into "nobody's terminal"
+    assert "@user" in reply and "the user alone" in reply
+    assert "@user" in body and "nobody's terminal" in body
 
 
 def test_thread_ask_posts_to_the_asks_route(monkeypatch):

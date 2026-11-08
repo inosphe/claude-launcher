@@ -55,11 +55,6 @@
     <span id="m-title">no session</span>
     <button id="m-notice-bell" class="m-act notice-bell" type="button"
             title="notification history">🔔<span class="notice-bell-count"></span></button>
-    <!-- The observer header goes down on a phone, and the scope switch goes
-         with it — but the rail's own observe-pin box stays reachable, so a
-         phone that can pin sessions must also be able to choose the mode
-         that reads them. Both boxes drive one setting. -->
-    <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
     <button id="observer-mobile-monitor" class="m-act" type="button">관찰 시작</button>
     <button id="observer-mobile-operator" class="m-act" type="button" aria-pressed="false" aria-controls="observer-dock">Operator</button>
     <span id="m-status" class="badge"></span>
@@ -67,16 +62,13 @@
          which the badge beside it cannot: that one reports the session, and
          the session runs on happily while this phone cannot see it. -->
     <button id="m-link" class="m-act link-chip hidden" type="button"></button>
-    <!-- Mirror of the header's link-panel button, for the same reason. -->
-    <button id="m-conn" class="m-act conn-chip ok" type="button"
-            aria-expanded="false" aria-controls="conn-panel"
-            title="connection status (debug)">⇄</button>
     <!-- Force reconnect is not here: it is the overlay on the session screen
          (#term-offline), which is the only place a person needs it and the
          only place it explains itself -- see syncLinkChip(). -->
     <!-- Mirror of the header's take-size button: the header goes down on a
          phone, and a phone is as likely as any window to be the second
-         viewer of a session. -->
+         viewer of a session. It stays on the bar: it is up only while
+         another viewer holds the size, and then it is the move to make. -->
     <button id="m-size" class="m-act size-chip hidden" type="button">take size</button>
     <!-- The header's text-size knob goes down with the header on a phone, and
          it is the control a small screen needs most. Two of its three parts
@@ -89,9 +81,30 @@
               aria-label="larger text">+</button>
     </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
-    <button id="m-pause" class="m-act hidden" type="button">pause</button>
-    <button id="m-kill" class="m-act hidden" type="button">kill</button>
-    <button id="m-archive" class="m-act hidden" type="button">archive</button>
+    <!-- ⋯ holds what a 390px bar cannot carry beside the title
+         (claunch-0a5nk.2): the session's rare moves and the debug chip.
+         The buttons keep their ids, so the handlers that mirror the hidden
+         header's controls are the same ones; only where they sit moved. -->
+    <button id="m-more" class="m-act" type="button" aria-haspopup="menu"
+            aria-expanded="false" aria-controls="m-more-menu"
+            aria-label="more actions">⋯</button>
+    <div id="m-more-menu" class="hidden" role="menu">
+      <!-- Mirror of the header's link-panel button (the socket's debug
+           view). In a list it needs its name, not only the glyph. -->
+      <button id="m-conn" class="m-act conn-chip ok" type="button" role="menuitem"
+              aria-expanded="false" aria-controls="conn-panel"
+              title="connection status (debug)">⇄ connection</button>
+      <!-- The observer header goes down on a phone, and the scope switch goes
+           with it — but the rail's own observe-pin box stays reachable, so a
+           phone that can pin sessions must also be able to choose the mode
+           that reads them. Both boxes drive one setting. It is a setting,
+           changed rarely, so on the bar it sits in ⋯ (observer page only,
+           observer.css). -->
+      <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
+      <button id="m-pause" class="m-act hidden" type="button" role="menuitem">pause</button>
+      <button id="m-kill" class="m-act hidden" type="button" role="menuitem">kill</button>
+      <button id="m-archive" class="m-act hidden" type="button" role="menuitem">archive</button>
+    </div>
   </div>
 
   <!-- The rail. Only things that move on their own live here: the session
@@ -104,6 +117,10 @@
            wrap inside its own pill and shove the row open. -->
       <div id="rail-title">
         <h1><a href="#/" title="home">claunch</a></h1>
+        <!-- The browser tab's name (claunch-9thjl): this tab only, kept in
+             the address and sessionStorage, never in localStorage. -->
+        <button id="tab-title-edit" type="button"
+                title="name this browser tab">✎</button>
         <button id="refresh-all" type="button"
                 title="reload the session list now">⟳</button>
         <button id="theme-toggle" type="button" data-theme-toggle
@@ -200,14 +217,18 @@
       </a>
       <span id="session-search-note" class="session-search-note hidden"></span>
     </div>
-    <!-- List or Grid: two views of the same sessions. The list orders them
-         by lineage and state; the grid keeps each one in a fixed cell of a
-         named row that only a person moves (session-grid.js). Remembered per
-         browser. -->
+    <!-- List, Grid or Chart: three views of the same sessions. The list
+         orders them by lineage and state; the grid keeps each one in a fixed
+         cell of a named row that only a person moves (session-grid.js); the
+         chart draws the Chart page's timeline (chart-page.js) in the rail and
+         narrows by its own toolbar, so the state filters and the grouping
+         below are hidden in that view. The project tabs above stay: the
+         project is one pick for the whole page. Remembered per browser. -->
     <fieldset id="session-view" class="session-view-tabs">
       <legend class="sr-only">Session view</legend>
       <label><input type="radio" name="session-view" value="list" checked><span>List</span></label>
       <label><input type="radio" name="session-view" value="grid"><span>Grid</span></label>
+      <label><input type="radio" name="session-view" value="chart"><span>Chart</span></label>
     </fieldset>
     <!-- The boot's restore queue (claunch-v4uyt): how many sessions the
          daemon has started again after a restart, while any still wait. -->
@@ -292,6 +313,10 @@
          #/r/<machine>/<name>. -->
     <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
+    <!-- The Chart view of the rail: the same timeline as #/chart, drawn by
+         chart-page.js into this box (ChartPage.openRail). A row opens its
+         session. -->
+    <div id="session-chart" class="hidden" aria-label="Sessions on a time axis"></div>
     </div>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
@@ -320,6 +345,7 @@
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
+      <a href="#/fleet" data-page="fleet"><span>⋔</span>Fleet</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
       <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
@@ -457,6 +483,12 @@
            session's: it is never sent to the agent. Rendered by
            renderTermNote(). -->
       <span id="term-note" class="term-note hidden" title=""></span>
+      <!-- The sub procedure the attached session's v2 run is in, when it is
+           in one (claunch-8t5r0.3): the procedure, fork or inline, and a
+           fork that fell back to inline in amber with the cause in the
+           title. A click opens the sub procedure pane. Rendered by
+           SubprocUi.header() (subprocs.js) from the /api/cflow2/rail row. -->
+      <span id="term-subproc" class="term-subproc hidden" role="button" tabindex="0"></span>
       <!-- The name, and beside it the way back to that name in the rail. The
            list is a monitor of twenty-odd sessions in a 260px column: the row
            for the one you are typing in is as likely to be scrolled out of
@@ -651,9 +683,11 @@
                   title="terminate the program running in this session">kill</button>
           <!-- Archive is available whatever the session is doing. On a live
                one it is also the ending: the route stops the program and
-               files the record in one call, with no wind-down in between. -->
+               files the record in one call, with no wind-down in between.
+               Filing is also the clean (claunch-i0vje.2): the record stays,
+               its captured output, scratch and uploads do not. -->
           <button id="term-archive" class="term-btn" type="button" role="radio" aria-checked="false"
-                  title="file this session in the archive, where it stays inspectable and resumable — a session still running is ended by this press, after a confirmation">archive</button>
+                  title="file this session in the archive: the record stays inspectable and resumable, its captured output, scratch and uploads are deleted — a session still running is ended by this press, after a confirmation">archive</button>
         </span>
       </span>
       <!-- Text size, and with it the session's grid: bigger glyphs mean fewer
@@ -708,6 +742,12 @@
            lit while one waits on you. -->
       <button id="term-planbtn" class="term-btn split-btn" type="button" aria-pressed="false"
               title="this session's plan and the decisions it waits on">☰ plan</button>
+      <!-- The sub procedures this session's v2 run can call (subprocs.js,
+           SPLIT_PANES.subprocs, claunch-8t5r0.4/.5): every one listed, the
+           ones that cannot run now disabled with the reason on hover, and
+           the procedure packs with their role filter. -->
+      <button id="term-subprocbtn" class="term-btn split-btn" type="button" aria-pressed="false"
+              title="the sub procedures this session's run can call">⤷ sub</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
            and opened by itself when the session changes a question. This
@@ -771,7 +811,11 @@
          recorded on the session's definition, so it survives a reload, a
          daemon restart and a respawn. Every session without that record shows
          the strip, which is how the rule reaches the sessions that existed
-         before it. Rendered by renderTermProviderWarn(). -->
+         before it. A session already ON skip permissions shows nothing: the
+         classifier is not called, and the strip would offer only the
+         permanent "ignore" press; the strip returns by itself when the flag
+         is turned off (claunch-9mwba.1). Rendered by
+         renderTermProviderWarn(). -->
     <div id="term-provider-warn" class="hidden" role="region"
          aria-label="provider warning"></div>
     <!-- The briefing card the top toggle folds open: the strip that belongs to
@@ -967,6 +1011,27 @@
           <!-- the picked v2 workflow's start inputs, the same box as the
                new-session form's; drawn by syncQuickForkInputs -->
           <div id="new-quick-fork-inputs" class="cf2-inputs hidden"></div>
+          <!-- The origin's side items, off by default (claunch-yydhs): the
+               conversation is always copied; these three live in the
+               daemon's own stores and only travel when ticked. plan copies
+               the plan pane as it stands (steps, statuses, the user's
+               decisions), qa copies the questions still waiting on the
+               user, thread copies the open threads with their messages. -->
+          <fieldset id="new-quick-fork-copy">
+            <legend>Also copy from the original</legend>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_plan">
+              <span>plan — the plan pane's steps, statuses and decisions</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_qa">
+              <span>qa — questions still waiting on you (answered ones stay with the original)</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" name="quick_fork_copy_threads">
+              <span>thread — open thread conversations and their messages</span>
+            </label>
+          </fieldset>
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>
@@ -1152,6 +1217,16 @@
                 title="draw another key for random — the draw is what the next launch takes">roll</button>
             </div>
             <p id="new-usage-note" class="wf-note hidden"></p>
+            <!-- Automatic key switch (claunch-d2t79), shown only when the pool
+                 holds more than one key: on a usage limit the daemon restarts
+                 the session on the usable key with the lowest usage and types
+                 continue. Off unless ticked — a restart is a visible thing to
+                 do to a session. The retry cap is a machine setting
+                 (Settings ▸ Automatic key switch). -->
+            <label id="new-auto-key-row" class="check new-usage-auto hidden">
+              <input id="new-auto-key-switch" name="auto_key_switch" type="checkbox">
+              switch this session onto another key when it hits a usage limit
+            </label>
           </div>
         </fieldset>
 
@@ -1760,6 +1835,13 @@
       <div id="cli-term"></div>
     </div>
     <div id="glossary-view" class="hidden"></div>
+    <!-- Phone only (claunch-0a5nk.3): every page, as a list, behind the
+         bottom bar's "더보기" tab. Filled by openMenuPage() from #rail-nav,
+         so the two never list different pages. -->
+    <div id="menu-view" class="hidden">
+      <input id="menu-search" type="search" placeholder="page 검색" autocomplete="off" aria-label="page 검색">
+      <nav id="menu-list" aria-label="pages"></nav>
+    </div>
     <!-- Every running session's stage (claunch-7jzp8.2); drawn by plan-page.js. -->
     <div id="plan-view" class="plan-host hidden"></div>
     <!-- World-model simulations (docs/simulation.md); drawn by sim-page.js. -->
@@ -1767,6 +1849,9 @@
     <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
          drawn by spec-page.js. -->
     <div id="spec-view" class="hidden"></div>
+    <!-- Fleet presets: launch an agent tree from a preset, and edit the
+         presets (docs/fleet.md); drawn by fleet-page.js. -->
+    <div id="fleet-view" class="hidden"></div>
   </main>
 
   <!-- #sess-view is moved in here, to the right of #main, on a wide screen:
@@ -1782,6 +1867,16 @@
     </span>
     <span class="mb-go">terminal ›</span>
   </div>
+  <!-- Phone only (claunch-0a5nk.3): four pages a thumb away and the rest
+       under 더보기 (#/menu). Replaces the rail's 29-link grid at this width;
+       the desktop and tablet keep #rail-nav. -->
+  <nav id="mobile-tabs" aria-label="main pages">
+    <a href="#/" data-page="home"><span>⌂</span>세션</a>
+    <a href="#/threads" data-page="threads"><span>☰</span>Threads</a>
+    <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
+    <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
+    <a href="#/menu" data-page="menu"><span>⋯</span>더보기</a>
+  </nav>
   <!-- The notification history behind the bell: the approval requests still
        waiting (hidden cards included, with their buttons) and every notice
        this browser has shown. Kept in localStorage; the waiting list is
@@ -1861,9 +1956,11 @@
 <script src="static/knowledge-page.js"></script>
 <script src="static/retrospection-page.js"></script>
 <script src="static/spec-page.js"></script>
+<script src="static/fleet-page.js"></script>
 <script src="static/sim-page.js"></script>
 <script src="static/category-page.js"></script>
 <script src="static/packs-pane.js"></script>
+<script src="static/subprocs.js"></script>
 <script src="static/durable-flow.js"></script>
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>

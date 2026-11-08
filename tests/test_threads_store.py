@@ -604,6 +604,16 @@ def test_t13_mentions_are_the_at_tokens_of_a_body():
     assert S.parse_mentions("`@s2` 코드 안") == ["s2"]                   # no fence parsing: it is a token
 
 
+def test_t13b_the_user_mention_is_a_token_like_any_other():
+    """claunch-ikcvw: ``@user`` names the person reading the thread, not a
+    session; the store still only reads the token and the route decides that
+    it adds no target."""
+    assert S.MENTION_USER == "user"
+    assert S.parse_mentions("@user 이건 사용자에게만") == [S.MENTION_USER]
+    assert S.parse_mentions("@user @all") == ["user", "all"]
+    assert S.parse_mentions("@users 는 이름이 다르다") == ["users"]
+
+
 def test_t14_a_forked_thread_seats_its_guest_in_the_same_write(st):
     """claunch-uaxp8: the owner of a forked thread does not exist yet when the
     thread is written, so ``open(guest=...)`` writes the thread and the
@@ -663,3 +673,27 @@ def test_t15_a_resend_and_a_revert_mark_the_user_message(st, monkeypatch):
         st.record_delivery("s1", agent_seq, resent=True)
     with pytest.raises(S.NotFound):
         st.record_delivery("s1", agent_seq + 1000, resent=True)
+
+
+# -- a quick-fork's copy (claunch-yydhs) ---------------------------------- #
+
+def test_copy_session_carries_open_threads_and_their_messages(st):
+    res = st.open(S.USER, "s1", "Base branch", "어느 브랜치로 갈까")
+    tid = res["thread"]["id"]
+    st.post("s1", tid, "master로 간다")
+    closed = st.open("s1", "s1", "Done topic", "끝난 이야기")
+    st.set_status("s1", closed["thread"]["id"], "closed")
+
+    assert st.copy_session("s1", "s1-qf1") == 1
+    copies = st.list("s1-qf1")["threads"]
+    assert [t["title"] for t in copies] == ["Base branch"]
+    copy = st.read(copies[0]["id"])
+    assert [m["author"] for m in copy["messages"]] == ["user", "agent"]
+    assert [m["body"] for m in copy["messages"]] == ["어느 브랜치로 갈까", "master로 간다"]
+    assert copies[0]["id"] != tid
+    # a copy is history: none of it is the copy's unread input
+    assert st.list("s1-qf1")["threads"][0]["agent_unread"] == 0
+    # the source keeps its thread and the copied one is separate
+    assert st.get(tid)["session"] == "s1"
+
+    assert st.copy_session("nobody", "x") == 0

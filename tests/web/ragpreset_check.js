@@ -6,22 +6,22 @@
    hold. The option label names the preset id, its embedding model, and a
    model_key only when that key adds information beyond the model name. The
    summary line a reader sees under an active preset names the model and
-   where it lives (profile name or custom endpoint). The backfill totals
-   sum pending/total across the daemon's index rows and tolerate rows that
-   carry no counts. The backfill state line distinguishes running / idle /
-   done / paused from the status payload, and the active line names the
-   preset (or says the direct rows are in force) with the model and
-   model_key, staying empty when the daemon has no active record. And the
-   card wiring is the contract: there is no "직접 설정" option, switching
-   the picker only loads the preset's values into the fields (no PUT --
-   activation happens on save), the fieldsets stay editable under a preset,
-   a save replaces the selected preset's row with the screen values and
-   carries the pointer, a new preset appends through the settings PUT and
-   becomes active, model_key survives an edit only while the embedding
-   model is untouched, the connection-test button POSTs the screen rows and
-   the daemon probes those (its /api/rag/test forces the body to no preset),
-   the progress line polls /api/rag/status until nothing is pending, the
-   pause/resume toggle POSTs the backfill endpoints, and the Selftest button
+   where it lives (profile name or custom endpoint). The per-bucket state
+   line on the RAG card (app.js) distinguishes running / waiting / normal /
+   failed from one index row and shows the row's own progress, and the
+   queue line names the depth, the waiting buckets in order, the last sync
+   and the board watch. And the card wiring is the contract: there is no
+   "직접 설정" option, switching the picker only loads the preset's values
+   into the fields (no PUT -- activation happens on save), the fieldsets stay
+   editable under a preset, a save replaces the selected preset's row with
+   the screen values and carries the pointer, a new preset appends through
+   the settings PUT and becomes active, model_key survives an edit only while
+   the embedding model is untouched, the connection-test button POSTs the
+   screen rows and the daemon probes those (its /api/rag/test forces the body
+   to no preset), the RAG card polls /api/rag/status while work remains (a
+   bounded timer, not a promise the click was received), the pause/resume
+   toggle POSTs the backfill endpoints, a click reports what the daemon
+   answered, and the Selftest button
    POSTs the selftest endpoint with threshold/top_k/sample and renders the
    verdict in its own result line. And the follow-ups: the /v1 correction's
    opt-out (claunch-rag-preset-always-hn5bc.1) ships as a root-serving
@@ -44,32 +44,57 @@ const path = require("path");
 const root = path.join(__dirname, "..", "..");
 const src = fs.readFileSync(
   path.join(root, "src", "claude_launcher", "web", "static", "search-anything.js"), "utf8");
+/* The RAG card itself lives in app.js (claunch-i2i95 moved the per-collection
+   status, the queue line and the pause control there, under the DB heading
+   the settings card also names), so its pure helpers are read from there. */
+const app = fs.readFileSync(
+  path.join(root, "src", "claude_launcher", "web", "static", "app.js"), "utf8",
+).replace(/\r\n/g, "\n"); // a Windows checkout (core.autocrlf) has CRLF
 const css = fs.readFileSync(
   path.join(root, "src", "claude_launcher", "web", "static", "style.css"), "utf8");
 
-function slice(name) {
-  const start = src.indexOf(`function ${name}(`);
+function sliceFrom(text, name) {
+  let start = text.indexOf(`function ${name}(`);
   if (start < 0) throw new Error("missing " + name);
-  const body = src.indexOf(") {", start) + 2;
+  // An `async` function keeps its keyword: a slice that starts at `function`
+  // turns every `await` inside it into a syntax error.
+  if (text.slice(Math.max(0, start - 6), start) === "async ") start -= 6;
+  const body = text.indexOf(") {", start) + 2;
   let depth = 0;
-  for (let j = body; j < src.length; j++) {
-    if (src[j] === "{") depth++;
-    else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 1); }
+  for (let j = body; j < text.length; j++) {
+    if (text[j] === "{") depth++;
+    else if (text[j] === "}") { depth--; if (!depth) return text.slice(start, j + 1); }
   }
   throw new Error("unbalanced " + name);
 }
+function slice(name) { return sliceFrom(src, name); }
 
 const api = {};
 new Function("exports",
   slice("ragPresetOptionLabel") + "\n" + slice("ragPresetSummary") + "\n" +
-  slice("ragBackfillTotals") + "\n" + slice("ragBackfillStateLine") + "\n" +
-  slice("ragActiveText") + "\n" + slice("ragDbSlug") + "\n" + slice("ragPresetDb") + "\n" +
-  slice("ragPresetIdProblem") + "\n" + slice("ragDbGroups") + "\n" +
+  slice("ragDbSlug") + "\n" +
+  slice("ragPresetDb") + "\n" +
+  slice("ragPresetIdProblem") + "\n" +
+  slice("ragDbGroups") + "\n" +
+  slice("ragCorpusLabel") + "\n" +
   "exports.dbSlug = ragDbSlug; exports.presetDb = ragPresetDb;\n" +
   "exports.idProblem = ragPresetIdProblem; exports.dbGroups = ragDbGroups;\n" +
-  "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n" +
-  "exports.totals = ragBackfillTotals; exports.stateLine = ragBackfillStateLine;\n" +
-  "exports.active = ragActiveText;")(api);
+  "exports.corpusLabel = ragCorpusLabel;\n" +
+  "exports.label = ragPresetOptionLabel; exports.summary = ragPresetSummary;\n")(api);
+
+const cardApi = {};
+new Function("exports, beadsCache",
+  sliceFrom(app, "ragBucketState") + "\n" + sliceFrom(app, "ragQueueLine") + "\n" +
+  sliceFrom(app, "ragBucketLabel") + "\n" + sliceFrom(app, "beadsNameOfRoot") + "\n" +
+  sliceFrom(app, "ragDiskDue") + "\n" + sliceFrom(app, "ragPlaceholderRows") + "\n" +
+  sliceFrom(app, "ragPlaceholderLabel") + "\n" + sliceFrom(app, "ragPlaceholderState") + "\n" +
+  sliceFrom(app, "ragDbGroups") + "\n" +
+  "exports.bucketState = ragBucketState; exports.queueLine = ragQueueLine;\n" +
+  "exports.bucketLabel = ragBucketLabel; exports.diskDue = ragDiskDue;\n" +
+  "exports.placeholderRows = ragPlaceholderRows;\n" +
+  "exports.placeholderLabel = ragPlaceholderLabel;\n" +
+  "exports.placeholderState = ragPlaceholderState;\n" +
+  "exports.dbGroups = ragDbGroups;")(cardApi, null);
 
 let failures = 0;
 function check(label, got, want) {
@@ -103,54 +128,104 @@ check("an unmodelled preset says so rather than omitting the model",
       api.summary({ id: "d1", source: "custom" }),
       "d1 — 모델 미지정 (custom endpoint)");
 
-/* ---- backfill totals ----------------------------------------------------- */
-check("pending and total sum across index rows",
-      api.totals([{ kind: "sessions", pending: 2902, total: 2906 },
-                  { kind: "all", pending: 33615, total: 109440 }]),
-      { pending: 36517, total: 112346 });
-check("rows without counts and a missing list are tolerated",
-      [api.totals([{ kind: "all" }, { kind: "sessions", pending: 2 }]), api.totals(undefined)],
-      [{ pending: 2, total: 0 }, { pending: 0, total: 0 }]);
+/* ---- per-bucket state on the RAG card (app.js) --------------------------- */
+check("the combined corpus is named by what it holds, under either of its names",
+      [cardApi.bucketLabel({ kind: "unified" }), cardApi.bucketLabel({ kind: "all" })],
+      ["Search anything (통합: 이슈·코멘트·세션)", "Search anything (통합: 이슈·코멘트·세션)"]);
+check("the fleet bucket keeps its own name",
+      cardApi.bucketLabel({ kind: "sessions" }), "sessions (세션)");
+check("a bucket with no problem reads as normal",
+      cardApi.bucketState({ kind: "sessions", indexed: 2906, total: 2906, pending: 0 }),
+      { state: "ok", text: "정상" });
+check("a bucket with unembedded documents reads as waiting with its count",
+      cardApi.bucketState({ kind: "sessions", indexed: 4, total: 2906, pending: 2902 }),
+      { state: "pending", text: "대기 2902건" });
+check("a syncing bucket draws its own progress, not a queue-wide total",
+      cardApi.bucketState({ kind: "all", indexed: 120, total: 480, pending: 360, syncing: true }),
+      { state: "busy", text: "색인 중 120/480 (25%)" });
+check("a cancelled pass and a queued rebuild each say so on the busy line",
+      [cardApi.bucketState({ kind: "all", indexed: 1, total: 4, syncing: true, cancel_requested: true }).text,
+       cardApi.bucketState({ kind: "all", indexed: 1, total: 4, syncing: true, force_pending: true }).text],
+      ["색인 중 1/4 (25%) · 취소 요청됨", "색인 중 1/4 (25%) · 재색인 예약"]);
+check("an error outranks every other state and keeps the daemon's words",
+      cardApi.bucketState({ kind: "all", error: "dims 4096 != 768", syncing: true, pending: 9 }),
+      { state: "failed", text: "dims 4096 != 768" });
+check("a failed row carries the time of the pass that failed",
+      cardApi.bucketState({ kind: "all", error: "dims 4096 != 768",
+                            finished_at: "2026-11-04T08:05:09+00:00" }),
+      { state: "failed", text: "dims 4096 != 768 · 마지막 실패 2026-11-04 08:05:09" });
+check("a bucket with no counts still draws a percentage of zero",
+      cardApi.bucketState({ kind: "all", indexed: 0, total: 0, syncing: true }),
+      { state: "busy", text: "색인 중 0/0 (0%)" });
 
-/* ---- backfill state line ------------------------------------------------- */
-check("a syncing row means running regardless of pending",
-      api.stateLine([{ kind: "sessions", pending: 0, total: 100, syncing: true }],
-                    { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
-      { state: "running", text: "소급 임베딩 진행 중 · 남은 문서 0 / 100건" });
-check("pending above zero means running",
-      api.stateLine([{ kind: "sessions", pending: 12, total: 200 }],
-                    { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
-      { state: "running", text: "소급 임베딩 진행 중 · 남은 문서 12 / 200건" });
-check("no index rows under a preset says that preset has no index yet",
-      api.stateLine([], { preset: "qwen8b", embedding_model: "m1", model_key: "m1" }),
-      { state: "idle", text: "프리셓 qwen8b의 색인은 아직 없습니다 — 소급 임베딩이 시작되면 진행률이 여기에 표시됩니다." });
-check("no index rows with no active record means idle",
-      api.stateLine([], null),
-      { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
-check("zero total on every row with no active record means idle",
-      api.stateLine([{ kind: "sessions", pending: 0, total: 0 }], null),
-      { state: "idle", text: "색인 미구동 — 아직 임베딩된 문서가 없습니다." });
-check("a finished backfill with an active record appends the active line",
-      api.stateLine([{ kind: "sessions", pending: 0, total: 150 }],
-                    { preset: "qwen8b", embedding_model: "qwen3-embedding-8b", model_key: "qwen3-embedding-8b" }),
-      { state: "done", text: "활성: 프리셋 qwen8b · qwen3-embedding-8b · model_key qwen3-embedding-8b · 색인 갱신 완료" });
-check("a finished backfill with no active record is plain done",
-      api.stateLine([{ kind: "sessions", pending: 0, total: 150 }], null),
-      { state: "done", text: "색인 갱신 완료" });
-check("a paused backfill names the hold and keeps the counts",
-      api.stateLine([{ kind: "sessions", pending: 12, total: 200 }], null, true),
-      { state: "paused", text: "소급 임베딩 일시정지됨 · 남은 문서 12 / 200건" });
+/* ---- the queue line ------------------------------------------------------ */
+check("an idle queue names the depth, the last sync and the board watch",
+      cardApi.queueLine({ depth: 0, pending: [], last_consumed_at: "2026-11-04T08:05:09+00:00",
+                          watch_interval: 60 }),
+      "대기 0 · 마지막 sync 2026-11-04 08:05:09 · 보드 확인 60초");
+check("a queue that never ran says so, and a paused watch says it is off",
+      cardApi.queueLine({ depth: 0 }),
+      "대기 0 · 아직 sync 없음 · 보드 감시 꺼짐");
+check("waiting buckets keep their order on the line",
+      cardApi.queueLine({ depth: 2, pending: ["sessions", "beads-abc"], watch_interval: 30 }),
+      "대기 2 · 순서: sessions → beads-abc · 아직 sync 없음 · 보드 확인 30초");
 
-/* ---- the active line ----------------------------------------------------- */
-check("a preset active record names the preset, model and key",
-      api.active({ preset: "qwen8b", embedding_model: "qwen3-embedding-8b", model_key: "qwen3-embedding-8b" }),
-      "활성: 프리셋 qwen8b · qwen3-embedding-8b · model_key qwen3-embedding-8b");
-check("a direct (legacy) active record says so",
-      api.active({ preset: "", embedding_model: "nomic-embed-text", model_key: "nomic-embed-text" }),
-      "활성: 직접 설정 · nomic-embed-text · model_key nomic-embed-text");
-check("no active record means no line",
-      [api.active(null), api.active({}), api.active({ preset: "", embedding_model: "", model_key: "" })],
-      ["", "", ""]);
+/* ---- claunch-c7vjm: collections on disk that no index has opened ---------- */
+/* The card drew only /api/rag/status's indexes, so a collection on disk that
+   no search or reindex pass had touched yet was invisible there while the DB
+   panel listed it. The placeholder rows close that gap, and the disk listing
+   they come from must not ride the 3-second status poll -- /api/rag/dbs walks
+   every collection to total its files. */
+const statusWithOneOpen = {
+  db: "embed", dimensions: 768,
+  indexes: [{ kind: "sessions", path: "/idx/sessions.embed.zvec", db: "embed",
+              db_configured: "embed", dims: 768, indexed: 5, total: 5 }],
+};
+const diskRows = [
+  { name: "sessions.embed", corpus: "sessions", identity: "embed",
+    path: "/idx/sessions.embed.zvec", dims: 768, model: "embed" },
+  { name: "unified.embed", corpus: "unified", identity: "embed",
+    path: "/idx/unified.embed.zvec", dims: 4096, model: "embed" },
+  { name: "beads-abc123.sessions", corpus: "beads-abc123", identity: "sessions",
+    path: "/idx/beads-abc123.sessions.zvec", dims: 0, model: "" },
+];
+const unopened = cardApi.placeholderRows(statusWithOneOpen, diskRows);
+check("only the collections no index has opened become placeholders",
+      unopened.map(r => r.name), ["unified.embed", "beads-abc123.sessions"]);
+check("the difference is taken by directory, so a legacy path is not counted twice",
+      cardApi.placeholderRows(
+        { indexes: [{ path: "/idx/all.embed.zvec", kind: "unified" }] },
+        [{ name: "all.embed", path: "/idx/all.embed.zvec" }]).length, 0);
+check("a placeholder names its corpus, not the DB it folds under",
+      unopened.map(r => cardApi.placeholderLabel(r)),
+      ["Search anything (통합: 이슈·코멘트·세션)", "board beads-abc123"]);
+check("a width the running model cannot use is said before the open, not after",
+      [cardApi.placeholderState(unopened[0], statusWithOneOpen),
+       cardApi.placeholderState(unopened[1], statusWithOneOpen)],
+      [{ state: "unopened", text: "아직 열리지 않음 · 열리면 실패 예상 — 지금 설정은 768차원" },
+       { state: "unopened", text: "아직 열리지 않음" }]);
+const placeholderGroups = cardApi.dbGroups(statusWithOneOpen, unopened);
+check("a placeholder sits under its own DB beside the rows that are running",
+      placeholderGroups.map(g => [g.name, g.rows.map(r => Boolean(r.placeholder))]),
+      [["embed", [false, true]], ["sessions", [true]]]);
+check("a DB drawn only from the disk listing carries no Sync/Rebuild",
+      placeholderGroups.filter(g => !g.rows.some(r => !r.placeholder)).map(g => g.name),
+      ["sessions"]);
+check("the disk listing rides its own minute, never the status poll's 3 seconds",
+      [cardApi.diskDue(30, 10, 60), cardApi.diskDue(70, 10, 60), cardApi.diskDue(1, 0, 60),
+       /RAG_POLL_MS = 3000/.test(app), /RAG_DISK_POLL_MS = 60000/.test(app),
+       // the 3-second refresh only asks the disk for a listing when the
+       // minute is up -- the call itself lives outside it
+       sliceFrom(app, "refreshRagStatus")
+         .includes("ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)"),
+       sliceFrom(app, "refreshRagStatus").includes("rag/dbs")],
+      [false, true, true, true, true, true, false]);
+check("the disk listing asks for the rows without the size walk",
+      sliceFrom(app, "refreshRagDisk").includes('"/api/rag/dbs?sizes=0"'), true);
+check("the two listings are compared by the directory, the only name they share",
+      [sliceFrom(app, "ragPlaceholderRows").includes("row.path"),
+       sliceFrom(app, "ragPlaceholderRows").includes("row.name")],
+      [true, false]);
 
 /* ---- claunch-r4796: DB names, preset ids and the DB panel's rows ---------- */
 check("a DB name slugs the way the daemon stores it",
@@ -224,13 +299,75 @@ check("a preset rename carries the old id and moves the pointer only when it was
 check("the connection test posts the screen rows and keeps the width it measured",
       [card.includes('request(testOnly ? "api/rag/test" : "api/rag/settings"'), card.includes("testedDims = Number(data.dimensions) || 0;")],
       [true, true]);
-check("the progress line polls the status endpoint, bounded",
-      [card.includes('request("api/rag/status")'), card.includes("setTimeout(watchBackfill, 3000)"), card.includes("backfillPolls < 200")],
-      [true, true, true]);
+check("the RAG card polls the status endpoint while work remains, bounded",
+      [app.includes('api("/api/rag/status")'), app.includes("ragPolls >= RAG_POLL_LIMIT"),
+       app.includes("const RAG_POLL_MS = 3000"),
+       app.includes('setTimeout(() => { if (wsOpen && wsSection === "") refreshRagStatus(); }, RAG_POLL_MS)')],
+      [true, true, true, true]);
 check("the pause toggle posts the backfill endpoints and mirrors the polled state",
-      [card.includes('"api/rag/backfill/pause"'), card.includes('"api/rag/backfill/resume"'),
-       card.includes('pauseBtn.textContent = backfillPaused ? "재개" : "일시정지"')],
+      [app.includes('"/api/rag/backfill/pause"'), app.includes('"/api/rag/backfill/resume"'),
+       app.includes('st.backfill_paused ? "재개" : "일시정지"')],
       [true, true, true]);
+check("a click on the card reports what the daemon answered, before and after",
+      [app.includes("ragNotice = `${group.name} ${label} 요청 중…`;"),
+       app.includes("ragNotice = `${group.name} ${label} — ${outcomes.join(\" · \")}`;"),
+       app.includes("이미 색인 중 — 실행하지 않음"), app.includes("재색인 시작"),
+       app.includes('el("p", "wf-note rag-notice", ragNotice)')],
+      [true, true, true, true, true]);
+check("a syncing bucket can be cancelled from its own row",
+      [app.includes('api("/api/rag/cancel"'), app.includes('row.cancel_requested ? "취소 요청됨" : "취소"'),
+       app.includes('el("button", "wf-btn clear", row.cancel_requested ? "취소 요청됨" : "취소")')],
+      [true, true, true]);
+check("the card draws the request's notice and lock before the first await",
+      [app.includes("let ragBusy = false;"), app.includes("ragBusy = true;"),
+       app.includes("renderWorkspaces();  // the notice and the locked buttons, before the first await"),
+       app.includes("renderWorkspaces();  // drawn before the request, like ragDbAction"),
+       app.includes("} finally {\n    ragBusy = false;\n  }")],
+      [true, true, true, true, true]);
+
+/* ---- the click's first frame, run rather than read -----------------------
+   A source check cannot tell "the notice is set" from "the notice is drawn";
+   the peer review found exactly that gap. So `ragDbAction` is run here
+   against stubs: the render count and ragBusy are read straight after the
+   call (before its first await resolves) and again after it settles. */
+const clickApi = {};
+new Function("exports", `
+  let ragPolls = 0, ragBusy = false, ragNotice = "";
+  let renders = 0;
+  const renderWorkspaces = () => { renders++; };
+  const ragBucketLabel = row => "bucket-" + row.kind;
+  async function ragReindex(row, force) { await Promise.resolve(); return { started: true }; }
+  async function refreshRagStatus() { renders += 0; }
+  ${sliceFrom(app, "ragDbAction")}
+  exports.click = (group) => {
+    const pending = ragDbAction({}, group, false);
+    const during = { renders, busy: ragBusy, notice: ragNotice };
+    return { during, done: pending.then(() => ({ renders, busy: ragBusy, notice: ragNotice })) };
+  };
+`)(clickApi);
+const click = clickApi.click({ name: "kept", rows: [{ kind: "all" }, { kind: "sessions" }] });
+check("a click renders before the request is awaited, with the notice and the lock",
+      [click.during.renders, click.during.busy, click.during.notice],
+      [1, true, "kept Sync 요청 중…"]);
+const laterChecks = [];
+function checkLater(label, promise, want) {
+  laterChecks.push(promise.then(got => check(label, got, want)));
+}
+checkLater("the lock and the notice settle into the daemon's answer",
+           click.done.then(a => [a.busy, a.notice]),
+           [false, "kept Sync — bucket-all: 색인 시작 · bucket-sessions: 색인 시작"]);
+
+check("every control is disabled while a request is in flight",
+      [app.includes("pause.disabled = ragBusy;"), app.includes("sync.disabled = ragBusy;"),
+       app.includes("force.disabled = ragBusy;"),
+       app.includes("cancel.disabled = Boolean(row.cancel_requested) || ragBusy;")],
+      [true, true, true, true]);
+check("the card draws one block per DB, with Sync and Rebuild on its heading",
+      [app.includes("for (const group of ragDbGroups(st, placeholders))"), app.includes("`DB ${group.name}`"),
+       app.includes('el("button", "wf-btn clear", "Sync")'), app.includes('el("button", "wf-btn clear", "Rebuild")')],
+      [true, true, true, true]);
+check("the two buttons hang off a DB that has an open collection to act on",
+      sliceFrom(app, "ragCard").includes("group.rows.some(row => !row.placeholder)"), true);
 check("the selftest button posts threshold/top_k/sample and renders its own line",
       [card.includes('request("api/rag/selftest", {threshold: 0.5, top_k: 5, sample: 20})'),
        card.includes('node("p", "", "rag-selftest-result")')],
@@ -258,8 +395,33 @@ check("a DB rename posts from/to and the field follows the DB the edited preset 
       [true, true]);
 check("a DB delete asks first, takes the whole named DB and is disabled while read",
       [card.includes("window.confirm(`DB ${g.name}"), card.includes("g.legacy ? { name: g.name } : { db: g.name }"),
-       card.includes("del.disabled = occupied;"), card.includes("이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다")],
+       card.includes("del.disabled = occupied;"), card.includes("이 DB를 읽는 프리셋이 있어 삭제할 수 없습니다")],
       [true, true, true, true]);
+/* The table used to be one row per DB with a single "쓰는 프리셋" cell holding
+   the union of its collections' readers, which read as "the presets that
+   write into this DB". A preset adopts one collection per corpus, so the same
+   presets appear on each of that DB's rows; the table now draws one row per
+   collection and names the cell for what it answers (claunch-rk0od). */
+check("a board collection's corpus key shows as beads, the rest as themselves",
+      [api.corpusLabel("sessions"), api.corpusLabel("unified"),
+       api.corpusLabel("beads-0123456789ab"), api.corpusLabel(""), api.corpusLabel(undefined)],
+      ["sessions", "unified", "beads", "?", "?"]);
+check("the table's header names corpus, 형식 and the adopting presets",
+      card.includes('["DB 이름", "corpus", "형식", "이 컬렉션을 채택하는 프리셋", "폭", "모델", ""]'),
+      true);
+check("each collection gets its own row, its own presets and its own width",
+      [card.includes("const rows = g.collections.length ? g.collections : ["),
+       card.includes('row.presets.length ? row.presets.join(", ")'),
+       card.includes('row.dims ? String(row.dims) : "—"')],
+      [true, true, true]);
+check("the DB cell and the actions span the group's rows, and rename opens under the last",
+      [card.includes("nameCell.rowSpan = rows.length"), card.includes("actions.rowSpan = rows.length"),
+       card.includes("renameDbRow(rows.length > 1 ? lastTr : tr, g)")],
+      [true, true, true]);
+check("the RAG card's DB header lists every width, not the first row's",
+      [app.includes("if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);"),
+       app.includes('group.dims.length ? ` · ${group.dims.join("/")}차원` : ""')],
+      [true, true]);
 check("no node() call passes a class name as its text (the 'rag-preset-db' label leak)",
       /node\("(?:p|div|span)", "rag-[a-z-]+"\)/.test(src), false);
 check("the stylesheet ships the card's rules",
@@ -270,5 +432,7 @@ check("the stylesheet ships the card's rules",
 check("the stale per-entry flex rule is gone (it broke the table rows)",
       css.includes(".search-settings .rag-db-entry { display: flex"), false);
 
-if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
-console.log("ragpreset ok");
+Promise.all(laterChecks).then(() => {
+  if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
+  console.log("ragpreset ok");
+});

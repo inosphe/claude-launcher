@@ -10,10 +10,11 @@
    it, labelled by the session that wrote them -- the reader there is looking
    at a closed issue whose session is gone, so the session is the half of the
    row that is news.
-   And a sixth: the pane says where the issue sits in the family -- its parent
-   and its children, both taken from the board listing's edges, because `br
-   show` resolves what an issue depends on but nothing on that side names the
-   children, and the children are half of what a reader opens a parent to see.
+   And a sixth: the pane says where the issue sits in the family -- its
+   ancestors and its subtree. The daemon reads them from the issue's own
+   parent-child edges and sends them with /api/beads/<id>, because the listing
+   the page holds is paged and filtered and would name a parent or a child only
+   when it happened to load that row (claunch-3hubh).
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
 // Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
@@ -115,6 +116,7 @@ new Function(
   + slice("sessReports") + slice("sessReportRow")
   + slice("fmtReportSize") + slice("reportWhen")
   + slice("beadsHierarchy") + slice("beadsRelationBlock")
+  + slice("beadsHierarchyBlock") + slice("countFamily") + slice("beadsListingFamily")
   // The pane's own two sections: the issue's target workspace, and the two
   // ways to start a session on it. beadsworkspace_check.js is what pins their
   // behaviour; they are here because the pane calls them.
@@ -283,6 +285,68 @@ check("a child's pane names its parent, with the parent's own state",
       [fam.find("beads-rel-label")[0].text, fam.find("beads-rel-link")[0].text,
        fam.find("beads-status")[0].text], ["parent", "epic", "open"]);
 
+/* ---- the family the daemon read for this issue ------------------------- */
+/* /api/beads/<id> carries `hierarchy`, and the pane draws that instead of
+   the listing's rows: a listing is paged and filtered, so the parent and the
+   children of the opened issue are usually on some other page -- a family
+   drawn from those rows was drawn almost never (claunch-3hubh). The listing
+   here holds the issue ALONE, so a pane that still read it would show no
+   family at all. */
+ctx.setBoards({ boards: [{ root: "/repo",
+  issues: [{ id: "kid", title: "the child", status: "open", priority: 2 }],
+  deps: [] }] });
+ctx.setFocus("kid");
+ctx.setDetail({
+  issue: { id: "kid", title: "the child", comments: [] },
+  hierarchy: {
+    ancestors: [{ id: "epic", title: "the epic", status: "open", priority: 1 }],
+    children: [],
+  },
+});
+fam = ctx.pane().find("beads-detail-rel")[0];
+check("the family comes from the detail payload, not from the paged listing",
+      fam.find("beads-rel-link").map((a) => a.text), ["epic", "kid"]);
+check("the ancestor is labelled, the issue itself is marked and not a link",
+      [fam.find("beads-rel-label").map((n) => n.text),
+       fam.find("beads-rel-self").length,
+       fam.find("beads-rel-row").slice(-1)[0].find("a").length],
+      [["parent", "this issue"], 1, 0]);
+
+/* A subtree: both directions in the same box, each level indented one step
+   further. The count on the first child row is the whole subtree's, because
+   that is what the reader is being told is there. */
+ctx.setDetail({
+  issue: { id: "kid", title: "the child", comments: [] },
+  hierarchy: {
+    ancestors: [{ id: "epic", title: "the epic", status: "open" },
+                { id: "mid", title: "the middle", status: "in_progress" }],
+    children: [
+      { id: "a", title: "A", status: "open", children: [
+        { id: "a1", title: "A1", status: "closed", children: [] }] },
+      { id: "b", title: "B", status: "blocked", children: [] },
+    ],
+  },
+});
+fam = ctx.pane().find("beads-detail-rel")[0];
+check("ancestors, the issue, then the subtree, in that order",
+      fam.find("beads-rel-link").map((a) => a.text),
+      ["epic", "mid", "kid", "a", "a1", "b"]);
+check("the first child row counts the whole subtree",
+      fam.find("beads-rel-label").map((n) => n.text),
+      ["", "parent", "this issue", "descendants (3)", "", ""]);
+check("each level is indented one step further",
+      fam.find("beads-rel-row").map(
+        (r) => [...r.classes].find((c) => c.startsWith("beads-rel-d"))),
+      ["beads-rel-d0", "beads-rel-d1", "beads-rel-d2", "beads-rel-d3",
+       "beads-rel-d4", "beads-rel-d3"]);
+
+/* An issue whose payload says it has no family gets no box, the same as one
+   the listing could not place. */
+ctx.setDetail({ issue: { id: "kid", title: "the child", comments: [] },
+                hierarchy: { ancestors: [], children: [] } });
+check("an empty family from the daemon draws no box",
+      ctx.pane().find("beads-detail-rel").length, 0);
+
 /* Most issues are related to nothing. The pane must not spend a box saying so,
    and it must not break when the listing has not arrived yet -- the detail
    fetch and the listing go out together, so on the very first draw of a
@@ -297,6 +361,17 @@ ctx.setFocus("kid");
 ctx.setDetail({ issue: { id: "kid", title: "the child", comments: [] } });
 check("and neither does one whose board listing has not arrived yet",
       ctx.pane().find("beads-detail-rel").length, 0);
+
+/* The other side of that: the daemon's family needs no board at all, so a
+   direct #/beads/<id> link -- opened before any listing has arrived, or with
+   the issue filtered off the page -- still shows where the issue sits. */
+ctx.setDetail({ issue: { id: "kid", title: "the child", comments: [] },
+                hierarchy: { ancestors: [{ id: "epic", title: "the epic",
+                                          status: "open" }],
+                             children: [] } });
+check("a direct link draws the family with no board listing at all",
+      ctx.pane().find("beads-detail-rel")[0].find("beads-rel-link")
+        .map((a) => a.text), ["epic", "kid"]);
 
 /* The family goes between the facts and the description, which keeps it clear
    of the Reports block below -- that block is the only route to a report whose

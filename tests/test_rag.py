@@ -738,6 +738,195 @@ def test_queue_reruns_a_key_enqueued_mid_sync(tmp_path, repo):
     asyncio.run(run())
 
 
+def test_a_forced_reindex_during_a_pass_runs_one_more_pass(tmp_path, repo):
+    """A Rebuild clicked mid-sync is remembered, not dropped (claunch-i2i95).
+
+    ``ensure_sync`` used to return the running progress and forget the force,
+    so the second request left no trace anywhere the reader could see.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
+            gate = asyncio.Event()
+            reading = asyncio.Event()
+            real_docs = svc._docs
+
+            async def slow_docs(kind, root):
+                reading.set()
+                await gate.wait()
+                return await real_docs(kind, root)
+
+            svc._docs = slow_docs
+            prog = svc.ensure_sync("beads", repo)
+            await asyncio.wait_for(reading.wait(), 5)
+            again = svc.ensure_sync("beads", repo, force=True)
+            assert again is prog
+            assert prog.force_pending is True and prog.cancel_requested is False
+            gate.set()
+            await svc.drain(10)
+            # the pass that was running, then the remembered one
+            assert prog.runs == 2 and prog.force_pending is False
+            assert len(_embedded_docs(ep)) == 6
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_a_cancel_stops_the_pass_before_its_next_group_and_keeps_what_it_wrote(tmp_path, repo):
+    """Nothing could stop a running pass before this (claunch-i2i95).
+
+    ``pause_backfill`` holds the *next* corpus; the one a pass is on always
+    finished. The cancel is cooperative: the group already in flight is not
+    torn mid-request, the pass stops at the next boundary, and the vectors it
+    wrote stay in the collection.
+    """
+    class CancelOnFirst(Endpoint):
+        def __init__(self):
+            super().__init__()
+            self.on_first = None
+
+        async def embeddings(self, request):
+            response = await super().embeddings(request)
+            hook, self.on_first = self.on_first, None
+            if hook:
+                hook()
+            return response
+
+    ep = CancelOnFirst()
+    br = FakeBr(_issues())
+
+    async def run():
+        server = await _start_endpoint(ep)
+        try:
+            cfg = _cfg(server, batch=1)
+            svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=tmp_path / "rag")
+            ep.on_first = lambda: svc.cancel_sync("beads", repo)
+            prog = svc.ensure_sync("beads", repo)
+            await svc.drain(10)
+            assert prog.runs == 1
+            assert prog.cancel_requested is True
+            # one document reached the endpoint; the group after it did not
+            assert prog.indexed == 1 and prog.pending == 2
+            index = await svc._index("beads", repo, cfg)
+            assert len(index.entries) == 1
+            # a corpus with no pass running reports so instead of inventing one
+            assert svc.cancel_sync("beads", repo) == {
+                "key": svc._key("beads", repo), "running": False, "cancelled": False}
+        finally:
+            await svc.shutdown()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_reindex_returns_whether_it_started_and_cancel_is_a_route(tmp_path, repo, monkeypatch):
+    """The card needs an answer to click against (claunch-i2i95).
+
+    ``/api/rag/reindex`` now says what happened to the request — started,
+    already running, or queued as a forced pass — and ``/api/rag/cancel``
+    is the stop the running pass never had.
+    """
+    ep = Endpoint()
+    br = FakeBr(_issues())
+    monkeypatch.chdir(repo)
+
+    async def run():
+        server = await _start_endpoint(ep)
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=False)
+        board = _board(br, repo)
+        cfg_box = {"cfg": _cfg(server)}
+        service = rag.RagService(board=board, manager=mgr, config=lambda: cfg_box["cfg"],
+                                 root_dir=tmp_path / "rag")
+        gate = asyncio.Event()
+        reading = asyncio.Event()
+        real_docs = service._docs
+
+        async def slow_docs(kind, root):
+            reading.set()
+            await gate.wait()
+            return await real_docs(kind, root)
+
+        service._docs = slow_docs
+        client = await _serve(mgr, board, service)
+        try:
+            resp = await client.post("/api/rag/reindex", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 202
+            first = await resp.json()
+            assert first["started"] is True and first["force_applied"] is False
+
+            await asyncio.wait_for(reading.wait(), 5)
+            resp = await client.post("/api/rag/reindex", json={"cwd": str(repo)}, headers=BEARER)
+            during = await resp.json()
+            assert during["running"] is True and during["started"] is False
+            assert during["force_pending"] is False
+
+            resp = await client.post("/api/rag/reindex",
+                                     json={"cwd": str(repo), "force": True}, headers=BEARER)
+            forced = await resp.json()
+            assert forced["running"] is True and forced["started"] is False
+            assert forced["force_pending"] is True
+
+            # the cancel wins over the queued forced pass
+            resp = await client.post("/api/rag/cancel", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 200
+            cancelled = await resp.json()
+            assert cancelled["key"] == service._key("beads", repo)
+            assert cancelled["running"] is True and cancelled["cancelled"] is True
+            gate.set()
+            await service.drain(10)
+            prog = service._progress_of(service._key("beads", repo))
+            assert prog.runs == 1 and prog.force_pending is False
+
+            resp = await client.post("/api/rag/cancel", json={"cwd": str(repo)}, headers=BEARER)
+            assert resp.status == 409
+            assert (await resp.json())["cancelled"] is False
+            resp = await client.post("/api/rag/cancel", json={"kind": "nope"}, headers=BEARER)
+            assert resp.status == 400
+        finally:
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_status_rows_name_the_collection_db_and_whether_the_path_is_legacy(tmp_path, repo):
+    """The two screens judged different evidence (claunch-i2i95).
+
+    The RAG card read the collection's path; Search settings read the
+    preset's DB name. A row now carries both, plus whether ``_index_path``
+    reached it through the legacy adoption rule.
+    """
+    br = FakeBr(_issues())
+
+    async def run():
+        base = tmp_path / "rag"
+        cfg = dict(store.RAG_DEFAULTS)
+        cfg.update({"db": "kept", "model_key": "kept", "embedding_model": "emb"})
+        svc = rag.RagService(board=_board(br, repo), config=lambda: cfg, root_dir=base)
+        await svc._index("beads", repo, cfg)
+        row = next(r for r in svc.status()["indexes"] if r["kind"] == "beads")
+        assert row["db"] == "kept" and row["db_configured"] == "kept"
+        assert row["legacy"] is False
+
+        legacy_cfg = {k: v for k, v in cfg.items() if k not in ("db", "model_key")}
+        svc2 = rag.RagService(board=_board(br, repo), config=lambda: legacy_cfg, root_dir=base)
+        await svc2._index("beads", repo, legacy_cfg)
+        row = next(r for r in svc2.status()["indexes"] if r["kind"] == "beads")
+        assert row["db"] == "" and row["db_configured"] == ""
+        assert row["legacy"] is True
+        await svc.shutdown()
+        await svc2.shutdown()
+
+    asyncio.run(run())
+
+
 def test_board_write_hook_enqueues_and_restamps(tmp_path, repo):
     """(e) a ``br`` write through Board.br reaches the queue (and a read
     does not); the daemon's own write does not trip the watcher again."""
@@ -1233,6 +1422,46 @@ def test_cli_search_formats_the_daemon_answer(monkeypatch, capsys):
     assert args.func(args) == 0
     assert client.paths[-1][1]["force"] is True and "cwd" in client.paths[-1][1]
     assert "sync started" in capsys.readouterr().out
+    # The daemon accepts three corpora; the CLI refused the third and left the
+    # combined one unreachable from a shell (claunch-i2i95.1). It is `unified`
+    # and its pre-rename name `all` is gone with the rename (claunch-7aujp.1)
+    # — the parser refuses that name, so no request carries it. It is not a
+    # board, so no cwd rides with it.
+    args = parser.parse_args(["rag", "reindex", "--kind", "unified", "--force"])
+    assert args.func(args) == 0
+    assert client.paths[-1][1]["kind"] == "unified" and "cwd" not in client.paths[-1][1]
+    assert "sync started" in capsys.readouterr().out
+    sent = len(client.paths)
+    with pytest.raises(SystemExit) as refused:
+        parser.parse_args(["rag", "reindex", "--kind", "all", "--force"])
+    assert refused.value.code == 2
+    assert "invalid choice: 'all'" in capsys.readouterr().err
+    assert len(client.paths) == sent, "a refused name must not reach the daemon"
+    args = parser.parse_args(["search", "who", "--kind", "unified"])
+    assert args.func(args) == 0
+    assert "kind=unified" in client.paths[-1] and "cwd=" not in client.paths[-1]
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as refused:
+        parser.parse_args(["search", "who", "--kind", "all"])
+    assert refused.value.code == 2
+    assert "invalid choice: 'all'" in capsys.readouterr().err
+    assert "kind=all" not in client.paths[-1]
+    # The daemon takes `mode` (`_search_args`), and `active` only with the
+    # combined corpus; the CLI had no way to send either, so the dashboard's
+    # active-search was unreachable from a shell (claunch-1uyy1).
+    assert "mode=general" in client.paths[-1]
+    args = parser.parse_args(["search", "who", "--kind", "unified", "--mode", "active"])
+    assert args.func(args) == 0
+    assert "kind=unified" in client.paths[-1] and "mode=active" in client.paths[-1]
+    assert "cwd=" not in client.paths[-1]
+    capsys.readouterr()
+    before = len(client.paths)
+    args = parser.parse_args(["search", "who", "--mode", "active"])
+    with pytest.raises(SystemExit) as exc:
+        args.func(args)
+    assert exc.value.code == 2
+    assert len(client.paths) == before, "a refused pairing must not reach the daemon"
+    assert "--mode active is only valid with --kind unified" in capsys.readouterr().err
 
 
 def test_cli_search_registers_under_claunch():
@@ -1243,6 +1472,30 @@ def test_cli_search_registers_under_claunch():
     assert args.func.__name__ == "_cmd_search"
     args = parser.parse_args(["rag", "status"])
     assert args.func.__name__ == "_cmd_rag_status"
+
+
+def test_the_shell_parser_offers_exactly_the_daemons_corpus_names():
+    """The parser's two ``--kind`` choice lists are a third copy of ``KINDS``.
+
+    ``cli_search`` repeats the names in its ``choices`` (it cannot ask the
+    daemon at parse time), so an addition or a rename made only here would be
+    accepted by the shell and answered 400 by the daemon (claunch-7aujp.2).
+    Every name the daemon answers parses, and nothing else does.
+    """
+    from claude_launcher.cli import build_parser
+    from claude_launcher.daemon import rag
+
+    parser = build_parser()
+    for kind in rag.KINDS:
+        assert parser.parse_args(["search", "who", "--kind", kind]).kind == kind
+        assert parser.parse_args(["rag", "reindex", "--kind", kind]).kind == kind
+    for name in ("all", "files"):
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args(["search", "who", "--kind", name])
+        assert refused.value.code == 2
+        with pytest.raises(SystemExit) as refused:
+            parser.parse_args(["rag", "reindex", "--kind", name])
+        assert refused.value.code == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -1555,6 +1808,67 @@ def test_index_path_uses_the_model_key_and_adopts_the_legacy_collection(tmp_path
         "format": rag.FORMAT, "model": "other-model", "dims": 8,
     }))
     assert svc._index_path(base, "sessions", cfg) == base / "sessions.qwen-qwen3-embedding-8b.zvec"
+
+
+def test_the_combined_corpus_reads_the_pre_rename_all_directory(tmp_path):
+    """`all` was the combined corpus's name on disk (claunch-7aujp.1).
+
+    The directories are moved in a window the operator opens, so until then
+    the collection is still `all.zvec`: opening it keeps the vectors that
+    exist instead of starting a second, empty collection under the new name.
+    """
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    base = tmp_path
+    cfg = {"model_key": "", "dimensions": 0}
+    # nothing on disk: a first write creates the current name
+    assert svc._index_path(base, "unified", cfg) == base / "unified.zvec"
+    (base / "all.zvec").mkdir(parents=True)
+    (base / "all.meta.json").write_text(json.dumps({
+        "format": rag.FORMAT, "model": "m", "dims": 8,
+    }))
+    assert svc._index_path(base, "unified", cfg) == base / "all.zvec"
+    # once the directory is moved the new name is the one read
+    (base / "unified.zvec").mkdir()
+    assert svc._index_path(base, "unified", cfg) == base / "unified.zvec"
+    # the adoption is the combined corpus's alone: a board collection named
+    # `all-...` is not a thing, and `sessions` has no pre-rename name
+    assert svc._index_path(base, "sessions", cfg) == base / "sessions.zvec"
+
+
+def test_a_preset_collection_reads_the_pre_rename_all_directory(tmp_path):
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    base = tmp_path
+    cfg = {"model_key": "gemma-2", "dimensions": 8}
+    (base / "all.gemma-2.zvec").mkdir(parents=True)
+    assert svc._index_path(base, "unified", cfg) == base / "all.gemma-2.zvec"
+    (base / "unified.gemma-2.zvec").mkdir()
+    assert svc._index_path(base, "unified", cfg) == base / "unified.gemma-2.zvec"
+
+
+def test_the_combined_corpus_is_keyed_and_read_by_its_current_name(tmp_path):
+    svc = rag.RagService(config=lambda: dict(store.RAG_DEFAULTS), root_dir=tmp_path)
+    # the key is the corpus's own name now — the storage pin is gone
+    assert svc._key("unified", None) == "unified"
+    assert svc._key("sessions", None) == "sessions"
+    assert svc._key("beads", tmp_path).startswith("beads-")
+    # a collection opened under the pre-rename name still reads as unified
+    assert rag.RagService._kind_of_key("all") == "unified"
+    assert rag.RagService._kind_of_key("unified") == "unified"
+    assert rag.RagService._kind_of_key("sessions") == "sessions"
+    assert rag.RagService._kind_of_key("beads-abc123") == "beads"
+
+
+def test_rag_stores_reads_the_corpus_from_the_directory_name(tmp_path):
+    """The DB panel's `corpus` column follows the directory name.
+
+    Both names are on disk on an installation that has not moved the combined
+    collection yet, and each row says which one it read.
+    """
+    (tmp_path / "all.zvec").mkdir()
+    (tmp_path / "unified.zvec").mkdir()
+    rows = {row["name"]: row for row in rag.rag_stores(tmp_path)}
+    assert rows["all"]["corpus"] == "all"
+    assert rows["unified"]["corpus"] == "unified"
 
 
 def test_rate_limiter_paces_requests(monkeypatch):

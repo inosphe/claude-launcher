@@ -16,6 +16,10 @@ const appRuns = () => typeof cflowCache !== "undefined" && Array.isArray(cflowCa
 // row per session, refreshed by the dashboard poll whatever page is shown.
 const appRow = (cache, name) => cache && typeof cache === "object" ? cache[name] || null : null;
 const run2Of = s => appRow(typeof cflow2RailCache !== "undefined" ? cflow2RailCache : null, s.name);
+// A run can hold a gate the reader may answer without holding the run: the
+// rail says which with `blocking`, and a payload too old to carry it reads as
+// held — the same rule the rail chip draws from (claunch-hbmhk.1.1).
+const run2Held = s => { const r = run2Of(s); return !!r?.gated && r.blocking !== false; };
 const qaOf = s => appRow(typeof qaRailCache !== "undefined" ? qaRailCache : null, s.name);
 const threadsOf = s => appRow(typeof threadsRailCache !== "undefined" ? threadsRailCache : null, s.name);
 let draftTarget = "";
@@ -117,7 +121,7 @@ function sessionRuns(s) {
 }
 function activity(s) {
   const own=sessionRuns(s), pending=own.some(r=>String(r.status).startsWith("waiting"));
-  const question=(s.events||[]).some(e=>e.question&&!e.answer)||qaWaiting(s).length>0||!!run2Of(s)?.gated;
+  const question=(s.events||[]).some(e=>e.question&&!e.answer)||qaWaiting(s).length>0||run2Held(s);
   const waiting=gateWaits(s).length;
   const stamp=s.last_activity_at, age=stamp?Math.max(0,Date.now()-Date.parse(stamp)):null;
   const duration=Number.isFinite(age)?`${Math.floor(age/60000)}분 전 마지막 활동`:"활동 시각 미확인";
@@ -229,13 +233,13 @@ function visibleSessions() {
     && (!$("actions-only").checked||actionCount(s)>0));
 }
 /* What the reader owes one session: unacknowledged events, v1 runs waiting
-   on a person, a v2 run gated on a person, QA questions waiting, and any
-   daemon gate request naming this session (its own or one whose answer moves
-   it). */
+   on a person, a v2 run held on a person (a gate that blocks the run, not one
+   the run can proceed past), QA questions waiting, and any daemon gate
+   request naming this session (its own or one whose answer moves it). */
 function actionCount(s) {
   return (s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length
     +sessionRuns(s).filter(sessCflowGated).length
-    +(run2Of(s)?.gated?1:0)
+    +(run2Held(s)?1:0)
     +qaWaiting(s).length
     +gateWaits(s).length;
 }

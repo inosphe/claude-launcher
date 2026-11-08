@@ -425,15 +425,24 @@ def test_a_restart_recovers_each_running_guest_behind_the_start(tmp_path, monkey
 
         async def fast(_):
             await real_sleep(0)
+        # vm_api.asyncio is the asyncio module itself, so this shortens every
+        # wait in the process -- a polling loop written in this test would
+        # spend its whole budget without time passing and see nothing.
         monkeypatch.setattr(vm_api.asyncio, "sleep", fast)
         app = web.Application()
         vm_api.install(app, reg, mgr, hub)
         async with TestClient(TestServer(app)):
+            # The recovery runs behind the app's start (vm_api._start_hub),
+            # and its return is the second tart list: wait for that task, not
+            # for a clock. The hub's other two tasks never end.
+            recovery = next(t for t in app["vm_hub"]["tasks"]
+                            if t is not None and t.get_coro().__name__ == "recover")
+            await asyncio.wait_for(recovery, 10)
+            assert len(lists) >= 2
             for _ in range(200):
                 if "a" in hub.channels and hub.channels["a"].registry.get("a").channel == "up":
                     break
-                await asyncio.sleep(0.01)
-            assert len(lists) >= 2
+                await real_sleep(0.01)
             assert reg.get("a").state == "running" and reg.get("a").channel == "up"
     asyncio.run(go())
 

@@ -10,6 +10,7 @@ class Element {
   append(...items) { for (const i of items) { if (typeof i === 'object') i.parent = this; this.children.push(i); } }
   replaceChildren(...items) { this.children = []; this.append(...items); }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
   get childElementCount() { return this.children.length; }
   querySelector(tag) { return this.children.find(c => c.tag === tag) || null; }
   contains(other) { for (let n = other; n; n = n.parent) if (n === this) return true; return false; }
@@ -144,20 +145,32 @@ const last = () => calls[calls.length - 1];
   assert(all().some(n => n.tag === 'a' && n.textContent === 'i-1' && n.href === '#/beads/i-1'));
 
   // Session state comes from the daemon's partition: a live one shows what the
-  // screen reports, and the finished partitions stay hidden until asked.
+  // screen reports, and the two partitions that are done for good (killed,
+  // archived) start unchecked.
   const shown = (ref) => all().some(n => n.tag === 'a' && n.textContent === ref);
   assert(all().some(n => n.textContent === 'running · idle'));
   assert(all().some(n => n.textContent === 'running · busy'));
   assert(!shown('s10') && !shown('s11'));
   const filter = (key) => all().find(n => n.tag === 'input' && n.id === 'category-show-' + key);
-  const killBox = filter('killed'), archBox = filter('archived');
-  assert(killBox && archBox && !killBox.checked && !archBox.checked);
-  killBox.checked = true; killBox.onchange();
+  const preset = () => all().find(n => n.tag === 'button' && n.id === 'category-show-live');
+  // One box per lifecycle partition, each carrying only its own.
+  const LIVES = ['running', 'hold', 'paused', 'delayed', 'failed', 'killed', 'archived'];
+  for (const life of LIVES) assert(filter(life), `a box for ${life}`);
+  assert.deepStrictEqual(LIVES.map(l => filter(l).checked),
+    [true, true, true, true, true, false, false], 'the default keeps the working set');
+  // Each change re-renders the bar, so a press is always the fresh box's.
+  const toggle = (life, on) => { const box = filter(life); box.checked = on; box.onchange(); };
+  toggle('killed', true);
   assert(shown('s10') && !shown('s11') && all().some(n => n.textContent === 'killed'));
-  archBox.checked = true; archBox.onchange();
+  // The chip carries the partition in its class, which is what the colour
+  // palette (style.css :root --life-*) is keyed to.
+  assert(all().some(n => String(n.className || '').includes('category-status-killed')));
+  // Orthogonal: opening one box does not touch another partition.
+  assert(filter('archived').checked === false && shown('s4'));
+  toggle('archived', true);
   assert(shown('s11') && all().some(n => n.textContent === 'archived'));
-  killBox.checked = false; killBox.onchange();
-  archBox.checked = false; archBox.onchange();
+  toggle('killed', false);
+  toggle('archived', false);
   assert(!shown('s10') && !shown('s11'));
 
   // The other partitions stay visible until asked, like a record with no
@@ -165,21 +178,31 @@ const last = () => calls[calls.length - 1];
   assert(shown('s3') && shown('s4'));
   assert(all().some(n => n.textContent === '트리에 없는 세션 1개'));
 
-  // "running only (hold 포함)": running and hold stay; every other partition
-  // — and a session with no daemon record at all — is hidden.
-  const liveBox = filter('live');
-  assert(liveBox && !liveBox.checked);
-  liveBox.checked = true; liveBox.onchange();
+  // "running only (hold 포함)" is a preset over the same set, not a mode that
+  // outranks the boxes: pressing it narrows to running + hold, and the boxes
+  // are what it says.
+  const liveBox = preset();
+  assert(liveBox && liveBox.getAttribute('aria-pressed') === 'false');
+  liveBox.onclick();
+  assert.deepStrictEqual(LIVES.map(l => filter(l).checked),
+    [true, true, false, false, false, false, false], 'the preset is the set, spelled out');
+  assert(preset().getAttribute('aria-pressed') === 'true', 'the preset reads pressed off the set');
   assert(shown('s1') && shown('s2') && shown('s3') && all().some(n => n.textContent === 'hold'));
   assert(!shown('s4') && !shown('s10') && !shown('s11'));
-  assert(!all().some(n => n.textContent === '트리에 없는 세션 1개'), 'a session with no record is not "running" either');
-  // Issues are not sessions: the mode filters sessions only.
+  // Issues are not sessions: the filter narrows sessions only.
   assert(shown('i-1') && shown('i-2'));
-  // The killed box cannot re-add a session the mode hides.
-  killBox.checked = true; killBox.onchange();
-  assert(!shown('s10'));
-  killBox.checked = false; killBox.onchange();
-  liveBox.checked = false; liveBox.onchange();
+  // A session the daemon cannot partition belongs to no box, so no box hides
+  // it — the loose list stays.
+  assert(all().some(n => n.textContent === '트리에 없는 세션 1개'));
+  // Orthogonal: any box still decides its own partition, preset or not, and
+  // the preset's pressed state follows the set rather than overriding it.
+  toggle('killed', true);
+  assert(shown('s10'), 'a box decides its own partition even while the preset reads pressed');
+  assert(preset().getAttribute('aria-pressed') === 'false', 'changing the set leaves the preset');
+
+  // Back to the default working set.
+  for (const life of ['paused', 'delayed', 'failed']) toggle(life, true);
+  toggle('killed', false);
   assert(shown('s1') && shown('s2') && shown('s3') && shown('s4') && !shown('s10') && !shown('s11'));
   assert(all().some(n => n.textContent === '트리에 없는 세션 1개'));
 

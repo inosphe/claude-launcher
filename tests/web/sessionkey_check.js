@@ -76,7 +76,16 @@ function el(tag) {
   };
   return node;
 }
-const document = { createElement: el };
+const document = {
+  createElement: el,
+  // The picker's auto row writes its label as a text node beside the box,
+  // the way the page's other inline checkboxes do (claunch-d2t79).
+  createTextNode: (text) => {
+    const node = el("#text");
+    node.textContent = String(text);
+    return node;
+  },
+};
 
 const failures = [];
 function check(name, cond, detail) {
@@ -214,12 +223,14 @@ const usageApi = (path) => {
   });
 };
 const usageHelpers = ["newUsageWindowLabel", "newUsagePeak", "newUsageLevel",
-  "newUsageMoney", "newUsageReset", "newUsageWindowText", "newUsageKeySummary"]
+  "newUsageMoney", "newUsageOrderedWindows", "newUsageSpan", "newUsageReset",
+  "newUsageWindowText", "newUsageKeySummary"]
   .map(slice).join("\n");
 function usageLabelTable() {
   const start = src.indexOf("const NEW_USAGE_WINDOW_LABELS =");
-  if (start < 0) throw new Error("cannot locate NEW_USAGE_WINDOW_LABELS in app.js");
-  return src.slice(start, src.indexOf("};", start) + 2);
+  const order = src.indexOf("const NEW_USAGE_WINDOW_ORDER =");
+  if (start < 0 || order < 0) throw new Error("cannot locate the usage window tables in app.js");
+  return src.slice(start, src.indexOf("];", order) + 2);
 }
 const keyPickerUsage = new Function("api", "encodeURIComponent",
   slice("keyPickerUsage") + "; return keyPickerUsage;")(usageApi, encodeURIComponent);
@@ -283,6 +294,9 @@ const pickEnv = {
                   { name: "s2", harness: "opencode" }],
   currentName: "other",
   refreshSessions: () => { pickEnv.refreshed = true; },
+  // The auto row's write asks for a redraw through the collapser rather than
+  // a whole pass (claunch-d2t79), the same way the rail's chip does.
+  requestSessionsRefresh: () => { pickEnv.refreshRequested = true; },
   detach: () => {},
   attach: () => {},
   encodeURIComponent,
@@ -474,7 +488,101 @@ const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(
   check("the pool cache is dropped after a switch", !keyPools.has("work:claude"));
   check("the rail is refreshed", pickEnv.refreshed === true);
 
+  /* ---- the automatic key switch's answer (claunch-d2t79) ----
+     It is the SESSION's answer, not the pool's: the modal writes it to the
+     session route, costs no restart, and leaves the key list and the strategy
+     exactly where they were. */
+  pickEnv.sessionsCache[0].auto_key_switch = true;
+  pickEnv.answer = null;
+  pickEnv.writeAnswer = { auto_key_switch: false };
+  poolAnswer = two;
+  usageAnswer = { keys: [], next: { key_id: "k-aaaaaa", exact: true } };
+  await openKeyPicker("s1", "work:claude");
+  await settle();
+  const abox = dialog.controls;
+  const autoRow = abox && abox.children[3];
+  const autoNote = abox && abox.children[4];
+  const autoBox = autoRow && autoRow.children[0] && autoRow.children[0].children[0];
+  check("the modal offers the automatic switch", !!autoBox);
+  check("...checked because this session already asked for it",
+    autoBox && autoBox.checked === true);
+  check("...and the note names the rule the key is chosen by",
+    autoNote && /lowest usage/.test(autoNote.textContent),
+    autoNote && autoNote.textContent);
+  posted = null;
+  pickEnv.refreshRequested = false;
+  autoBox.checked = false;
+  autoBox.listeners.change();
+  await settle();
+  check("unticking writes the SESSION, not the pool",
+    posted && posted.path === "/api/sessions/s1/auto-key-switch",
+    posted && posted.path);
+  check("...with the new answer", posted && posted.body.enabled === false,
+    posted && JSON.stringify(posted.body));
+  check("...keeps the cached row on what the daemon stored",
+    pickEnv.sessionsCache[0].auto_key_switch === false,
+    String(pickEnv.sessionsCache[0].auto_key_switch));
+  check("...and asks the rail to redraw the card's badge",
+    pickEnv.refreshRequested === true);
+  delete pickEnv.sessionsCache[0].auto_key_switch;
+  pickEnv.writeAnswer = { key_id: "x" };
+
+  /* ---- the rail card's AUTO badge (claunch-d2t79) ----
+     Drawn from the session's own field on the poll, not from the pool cache:
+     the answer is what the daemon will do on a usage limit even before (or
+     without) that row's pool ever being read. */
+  function actionBar() {
+    const bar = el("div");
+    bar.children = [];
+    bar.querySelector = (sel) =>
+      bar.children.find((c) =>
+        String(c.className).split(/\s+/).includes(sel.replace(".", ""))) || null;
+    const own = (child) => {
+      child.remove = () => {
+        const at = bar.children.indexOf(child);
+        if (at >= 0) bar.children.splice(at, 1);
+      };
+      child.replaceWith = (next) => {
+        own(next);
+        const at = bar.children.indexOf(child);
+        if (at >= 0) bar.children.splice(at, 1, next);
+      };
+      return child;
+    };
+    bar.appendChild = (child) => { bar.children.push(own(child)); return child; };
+    return bar;
+  }
+  const badgeEnv = { asked: null };
+  const decorate = new Function("document", "keyPoolProfile", "openKeyPicker",
+    slice("decorateAutoKeyBadge") + "; return decorateAutoKeyBadge;")(
+    document,
+    new Function(slice("keyPoolProfile") + "; return keyPoolProfile;")(),
+    (n, p) => { badgeEnv.asked = [n, p]; });
+
+  const bar = actionBar();
+  decorate(bar, { name: "s1", profile: "work:claude" });
+  check("a session that did not ask for the switch has no badge",
+    bar.children.length === 0);
+  decorate(bar, { name: "s1", profile: "work:claude", auto_key_switch: true });
+  const badge = bar.children[0];
+  check("...and the one that did says AUTO",
+    !!badge && badge.textContent === "AUTO", badge && badge.textContent);
+  check("...as its own button, not the row",
+    badge && badge.type === "button" && badge.dataset.name === "s1");
+  decorate(bar, { name: "s1", profile: "work:claude", auto_key_switch: true });
+  check("...drawn once however often the poll comes round",
+    bar.children.length === 1);
+  badge.listeners.click({ stopPropagation() {} });
+  check("...opening this session's pool",
+    JSON.stringify(badgeEnv.asked) === '["s1","work:claude"]',
+    JSON.stringify(badgeEnv.asked));
+  decorate(bar, { name: "s1", profile: "work:claude" });
+  check("...and taken away when the answer is turned off",
+    bar.children.length === 0);
+
   /* ---- the stylesheet holds the chip to a pill ---- */
+  check("the AUTO badge has a rule of its own",
+    /#session-list \.sess-auto-key \{/.test(css));
   check("the chip has a rule", /#session-list \.sess-key \{/.test(css));
   const rule = (css.match(/#session-list \.sess-key \{[^}]*\}/) || [""])[0];
   check("the chip is capped", /max-width: \d+px/.test(rule), rule);

@@ -75,11 +75,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import yaml
 
 from . import collections as _collections
+from . import layouts as _layouts
 from . import question as _question
 from . import ir
 from . import store as _store
 
 ResolveInclude = Callable[[str], Optional[Path]]
+ResolveLayout = _layouts.ResolveLayout
 
 
 class FrontendError(Exception):
@@ -188,7 +190,13 @@ TOP_KEYS = (
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
     "inputs", "input_constraints", "collections", "collection_types", "question_types",
-    "sides", "recur",
+    "sides", "recur", "gates",
+    # a procedure a calling task may run in a quick-fork of its driver
+    # (docs 2.12.2, claunch-8t5r0.2)
+    "forkable",
+    # ad-hoc layout metadata (cflow2/layouts.py): a reference to a separate
+    # layout file, never the layout itself -- the workflow stays readable
+    "layout",
 )
 #: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
 LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
@@ -197,6 +205,11 @@ TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
     "do", "triggers", "restart", "force_target", "session_workflow", "calls", "sims",
+    # the task may run a forkable callee in a quick-fork (docs 2.12.2)
+    "fork_calls",
+    # a step's own layout reference (cflow2/layouts.py); overrides the
+    # workflow's while that node is live
+    "layout",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -213,7 +226,7 @@ MOMENT_ENTER = "enter"
 MOMENT_LEAVE = "leave"
 MOMENTS = (MOMENT_ENTER, MOMENT_LEAVE)
 #: ``triggers:`` actions (2.8). ``push`` is spelled as a ``push:`` key.
-TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing")
+TRIGGER_ACTIONS = ("briefing", "checks", "enqueue-landing", "plan-round")
 TRIGGER_PUSH = "push"
 COMBINATORS = (
     "seq", "waterfall", "cond", "choose", "foreach", "loop", "par", "retry",
@@ -234,7 +247,7 @@ PARAM_KEYS = ("type", "required", "default", "description")
 PARAM_BLOCK = "block"
 #: The tree mapping head that places a block param.
 SPLICE = "splice"
-RULE_KEYS = ("text", "why", "deliver", "effect")
+RULE_KEYS = ("text", "why", "deliver", "effect", "when")
 SPEC_KEYS = ("invariants", "paths", "ensures", "monitors")
 MONITOR_KEYS = ("always", "probe", "every", "on_violation", "when", "within", "expect")
 ON_VIOLATION = ("halt", "notify", "record")
@@ -296,6 +309,11 @@ class _Scope:
 class _Ctx:
     file: str
     resolve_include: Optional[ResolveInclude]
+    #: how a layout reference finds its file (``None`` = the v2 layers of the
+    #: process cwd, like includes); probes never reach the network or a shell
+    resolve_layout: Optional[ResolveLayout] = None
+    #: node id -> the layout reference that node declares (cflow2/layouts.py)
+    node_layouts: Dict[str, str] = field(default_factory=dict)
     fragments: Dict[str, Tuple[str, str, int]] = field(default_factory=dict)  # name -> (text, file, line)
     rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     rule_src: Dict[str, str] = field(default_factory=dict)
@@ -581,6 +599,10 @@ def _absorb(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
                 effect = _plain(effect)
             entry = {"text": raw["text"], "why": raw.get("why"), "deliver": deliver_v,
                      "effect": effect}
+            if raw.get("when") is not None:
+                # A conditional rule (docs 2.5): not baked into prompts; the
+                # runtime appends its text while the expression holds.
+                entry["when"] = _expr_text(ctx, file, raw["when"], f"rule {rid!r} when", rline)
             _merge_named(ctx, ctx.rules, ctx.rule_src, str(rid), entry, _where(file, rline), "rule")
 
     ctypes = doc.get("collection_types")
@@ -829,6 +851,7 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     raw = _need_map(ctx, tfile, raw, f"task {name!r}", line)
     tline = _line(raw, line)
     _check_keys(ctx, tfile, raw, TASK_KEYS, f"task {name!r}")
+    node_layout = _layout_ref(ctx, tfile, raw.get("layout"), _key_line(raw, "layout", tline))
     title = raw.get("title") or name
     prompt = raw.get("prompt") or ""
     if not isinstance(title, str) or not isinstance(prompt, str):
@@ -844,7 +867,8 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
         deliver = rule.get("deliver")
         if (deliver == "all" or (isinstance(deliver, list) and name in deliver)) and rid not in rule_ids:
             rule_ids.append(rid)
-    texts = [ctx.rules[r]["text"].strip() for r in rule_ids if r in ctx.rules]
+    texts = [ctx.rules[r]["text"].strip() for r in rule_ids
+             if r in ctx.rules and ctx.rules[r].get("when") is None]
     if texts:
         prompt = prompt.rstrip("\n") + ("\n\n" if prompt.strip() else "") + _RULES_HEADER + "\n" + "\n".join(texts) + "\n"
 
@@ -888,9 +912,21 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     )
     if session_workflow:
         node.props["session_workflow"] = session_workflow
+    if node_layout:
+        # Kept on the node (a task is reused, so the reference travels with
+        # the position) and in the chart's map, which serving reads.
+        node.props["layout"] = node_layout
+        ctx.node_layouts[nid] = node_layout
     calls = _calls(ctx, tfile, name, raw, tline)
     if calls:
         node.props["calls"] = calls
+    fork_calls = raw.get("fork_calls")
+    if fork_calls is not None:
+        if not isinstance(fork_calls, bool):
+            raise ctx.err(tfile, _key_line(raw, "fork_calls", tline),
+                          f"task {name!r}: fork_calls must be true or false")
+        if fork_calls:
+            node.props["fork_calls"] = True
     sims = _sims(ctx, tfile, name, raw, tline)
     if sims:
         node.props["sims"] = sims
@@ -939,7 +975,12 @@ def _calls(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any], line: int) -> L
     from the run's layers when the call is made, not here."""
     where = _key_line(raw, "calls", line)
     names = _str_list(ctx, file, raw.get("calls"), f"task {name!r} calls", where)
-    return list(dict.fromkeys(_definition_name(ctx, n, file, where, "calls") for n in names))
+    from . import procpacks
+
+    # a pack procedure is named <pack>:<procedure> (docs 2.12.1)
+    return list(dict.fromkeys(
+        n if procpacks.is_qualified(n) else _definition_name(ctx, n, file, where, "calls")
+        for n in names))
 
 
 def _force_target(ctx: _Ctx, file: str, raw: Dict[str, Any], node: ir.Node, line: int) -> bool:
@@ -981,14 +1022,21 @@ def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
             "brief", "format", "choices", "require_reason", "on_unroutable", "urgent",
-            "criteria")
+            "criteria", "delegate")
+#: ``ask.delegate`` keys: the options a delegated answerer may take
+#: (claunch-vjp4y.2). An agent-side answerer -- the driver's parent session --
+#: sees every option but may only land the ones named here; anything else is
+#: recorded as a refusal and the question goes to a person.
+ASK_DELEGATE_KEYS = ("allow",)
 #: What a step may say about the notice its ask raises, besides ``urgent``
 #: (which is its own boolean). These are keywords, not a rank: the dashboard
 #: shows a notice because it carries one of them, never because it scored
 #: above another one (thread th-3b3470, 2026-10-30). ``deferrable`` means the
 #: question can wait — the run stands still, nothing else is blocked by the
-#: answer — so a folded "Waiting on you" leaves it out while the run is
-#: otherwise busy. ``fatal``, ``blocking`` and ``expiring`` are derived by the
+#: answer. The dashboard reads it into the notice's criteria
+#: (``noticeCriteriaOf``); the "Waiting on you" fold that hid deferrable
+#: requests was replaced by the panel's sub tabs (claunch-slab3), so no
+#: surface acts on it today. ``fatal``, ``blocking`` and ``expiring`` are derived by the
 #: dashboard from what the notice already is (a stopped leader, a gate, a
 #: deadline) and are not declared here.
 ASK_CRITERIA = ("deferrable",)
@@ -1153,6 +1201,47 @@ def _ask_criteria(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: i
     return list(dict.fromkeys(value))
 
 
+def _ask_delegate(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int,
+                  choices: Optional[List[str]] = None) -> Dict[str, Any]:
+    """``ask.delegate``: which of the ask's options a delegated answerer may
+    take, as ``{allow: [option, ...]}``.
+
+    The answerer this restricts is the driver's parent session
+    (``runtime.gate_authority``); a person is never restricted. The list is
+    shown to the parent with the question, so its answer is a choice within
+    known bounds rather than a guess (user decision, thread th-ea5c7c).
+
+    Either a literal mapping or one ``${params.<p>}`` reference, the latter
+    resolved when the ask opens (a shared procedure passes its caller's list
+    through). A literal whose names are not among ``choices`` is refused here;
+    a param is checked against the brief's options when the ask opens."""
+    raw = ask.get("delegate")
+    if raw is None:
+        return {"delegate": None, "delegate_param": None}
+    pm = _PARAM_REF.match(raw.strip()) if isinstance(raw, str) else None
+    if pm:
+        return {"delegate": None, "delegate_param": f"$params.{pm.group(1)}"}
+    spec = _need_map(ctx, file, raw, f"task {name!r}: ask.delegate", aline)
+    _check_keys(ctx, file, spec, ASK_DELEGATE_KEYS, f"task {name!r}: ask.delegate")
+    allow = spec.get("allow")
+    if not isinstance(allow, list) or not allow \
+            or not all(isinstance(a, str) and a.strip() for a in allow):
+        raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow must be a non-empty "
+                      f"list of option names")
+    names = [a.strip() for a in allow]
+    if len({n.lower() for n in names}) != len(names):
+        raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow repeats a name "
+                      f"(answers are matched case-insensitively)")
+    if choices is not None:
+        want = {c.lower() for c in choices}
+        missing = [n for n in names if n.lower() not in want]
+        if missing:
+            raise ctx.err(file, aline, f"task {name!r}: ask.delegate.allow names "
+                          f"{', '.join(missing)}, which the fixed choices "
+                          f"({', '.join(choices)}) do not have")
+    return {"delegate": {"allow": names}, "delegate_param": None}
+
+
 def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
     """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
     default_option, timeout, on_decline, options}``.
@@ -1253,6 +1342,8 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "urgent": _ask_urgent(ctx, file, name, ask, aline),
         "criteria": _ask_criteria(ctx, file, name, ask, aline),
+        **_ask_delegate(ctx, file, name, ask, aline,
+                        [o["name"] for o in options] if options is not None else None),
         "options": options,
     }
 
@@ -1452,7 +1543,8 @@ def _b_cond(ctx, sc, node, value, m, line):
 def _b_choose(ctx, sc, node, value, m, line):
     node.type = ir.T_CHOOSE
     spec = _need_map(ctx, sc.file, value, "choose", line)
-    _check_keys(ctx, sc.file, spec, ("prompt", "chooser", "require_reason", "options"), "choose")
+    _check_keys(ctx, sc.file, spec, ("prompt", "chooser", "require_reason", "options",
+                                     "from", "otherwise", "timeout", "delegate"), "choose")
     chooser = spec.get("chooser", ir.CHOOSER_AGENT)
     if chooser not in ir.CHOOSERS:
         raise ctx.err(sc.file, line, f"choose.chooser must be one of {', '.join(ir.CHOOSERS)}")
@@ -1499,6 +1591,148 @@ def _b_choose(ctx, sc, node, value, m, line):
         options.append(entry)
     if not options:
         raise ctx.err(sc.file, line, "choose needs at least one option")
+    gate = _choose_gate(ctx, sc, spec, options, chooser, line)
+    if gate:
+        node.props.update(gate)
+
+
+GATE_KEYS = ("from", "otherwise", "timeout", "delegate")
+
+
+def _gate_allow(ctx, file: str, raw: Any, what: str, line: int) -> Dict[str, Any]:
+    """``delegate: {allow: [...]}`` of a gate: the options a delegated answerer
+    (the driver's parent) may take. Names are checked against the gate's own
+    options where it has them (a ``choose``); the run-level ``gates:`` list is
+    checked against what those gates answer (``approve``/``deny``)."""
+    raw = _need_map(ctx, file, raw, f"{what} delegate", line)
+    _check_keys(ctx, file, raw, ("allow",), f"{what} delegate")
+    allow = raw.get("allow")
+    if not isinstance(allow, list) or not allow or not all(
+            isinstance(a, str) and a.strip() for a in allow):
+        raise ctx.err(file, line, f"{what}: delegate.allow must be a non-empty list of "
+                                     f"option names")
+    names = [a.strip() for a in allow]
+    if len({n.casefold() for n in names}) != len(names):
+        raise ctx.err(file, line, f"{what}: delegate.allow repeats a name (answers are "
+                                     f"matched without regard to case)")
+    return {"allow": names}
+
+
+def _choose_gate(ctx, sc, spec: Dict[str, Any], options: List[Dict[str, Any]],
+                 chooser: str, line: int) -> Dict[str, Any]:
+    """The delegation a ``choose`` may declare (claunch-vjp4y.2.1).
+
+    A gate whose candidates are declared is routed through the ask machinery:
+    the question goes to those candidates with the option list, a deadline and
+    a ``delegate.allow`` list, and the answer applies as the pick itself. A
+    gate that declares nothing behaves exactly as before -- a person's alone.
+    """
+    declared = [k for k in GATE_KEYS if spec.get(k) is not None]
+    if not declared:
+        return {}
+    if chooser != ir.CHOOSER_USER:
+        raise ctx.err(sc.file, line, f"choose: {', '.join(declared)} delegates a person's gate; "
+                                     f"it needs chooser: user")
+    from ..cflow import model as v1
+
+    what = "choose"
+    try:
+        parsed = v1._parse_delegate({"from": spec.get("from"), "otherwise": spec.get("otherwise"),
+                                     "timeout": spec.get("timeout")}, what)
+    except v1.WorkflowError as exc:
+        raise ctx.err(sc.file, line, str(exc)) from None
+    if parsed.otherwise != v1.OTHERWISE_HUMAN:
+        raise ctx.err(sc.file, line, "choose: a gate's fallback is the person -- declare "
+                                     "'otherwise: human' or leave it out")
+    gate: Dict[str, Any] = {
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in parsed.candidates],
+        "timeout": parsed.timeout,
+    }
+    if not gate["from"]:
+        raise ctx.err(sc.file, line, "choose: from must name at least one candidate (a parent "
+                                     "gate with no candidate keeps the person as its only door)")
+    if spec.get("delegate") is not None:
+        allow = _gate_allow(ctx, sc.file, spec.get("delegate"), what, line)
+        names = allow["allow"]
+        known = {o["name"].casefold() for o in options}
+        missing = [n for n in names if n.casefold() not in known]
+        if missing:
+            raise ctx.err(sc.file, line, f"{what}: delegate.allow names {', '.join(missing)}, "
+                                         f"which the options do not have "
+                                         f"({', '.join(o['name'] for o in options)})")
+        gate["delegate"] = allow
+    return {"gate": gate}
+
+
+#: The run-level gates a definition may delegate (docs 2.11): the driver's
+#: move request and its report request. Both are ``resolve_move`` verdicts --
+#: ``approve`` / ``deny`` -- so ``report`` without its own entry is answered
+#: by the ``move`` one at run time.
+GATE_TARGETS = ("move", "report")
+GATE_VERDICTS = ("approve", "deny")
+
+
+def _gates(ctx, file: str, doc: Any) -> Optional[Dict[str, Any]]:
+    """``gates:`` -- the delegation of the gates that are a run's own, not a
+    node's: the driver's move and report requests (claunch-vjp4y.2.1).
+
+    A ``choose`` declares its own gate inline (``frontend._choose_gate``),
+    because its options are its own. These gates have a fixed pair of
+    verdicts, so they are declared once for the whole definition.
+    """
+    raw = doc.get("gates")
+    if raw is None:
+        return None
+    line = _key_line(doc, "gates", 1)
+    raw = _need_map(ctx, file, raw, "gates", line)
+    _check_keys(ctx, file, raw, GATE_TARGETS, "gates")
+    out: Dict[str, Any] = {}
+    for target in GATE_TARGETS:
+        if raw.get(target) is None:
+            continue
+        out[target] = _move_gate(ctx, file, raw[target], target,
+                                 _key_line(raw, target, line))
+    if not out:
+        raise ctx.err(file, line, f"gates: declare at least one of "
+                                  f"{', '.join(GATE_TARGETS)}")
+    return out
+
+
+def _move_gate(ctx, file: str, spec: Any, target: str,
+               line: int) -> Dict[str, Any]:
+    """One run-level gate: ``from``/``otherwise``/``timeout``/``delegate``,
+    read by the same parser a v1 ``delegate:`` is."""
+    what = f"gates.{target}"
+    spec = _need_map(ctx, file, spec, what, line)
+    _check_keys(ctx, file, spec, GATE_KEYS, what)
+    from ..cflow import model as v1
+
+    parse = {"from": spec.get("from"), "otherwise": spec.get("otherwise"),
+             "timeout": spec.get("timeout")}
+    try:
+        parsed = v1._parse_delegate(parse, what)
+    except v1.WorkflowError as exc:
+        raise ctx.err(file, line, str(exc)) from None
+    if parsed.otherwise != v1.OTHERWISE_HUMAN:
+        raise ctx.err(file, line, f"{what}: a gate's fallback is the person -- declare "
+                                  f"'otherwise: human' or leave it out")
+    if not parsed.candidates:
+        raise ctx.err(file, line, f"{what}: from must name at least one candidate")
+    gate: Dict[str, Any] = {
+        "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
+                 for c in parsed.candidates],
+        "timeout": parsed.timeout,
+    }
+    if spec.get("delegate") is not None:
+        allow = _gate_allow(ctx, file, spec.get("delegate"), what, line)
+        missing = [n for n in allow["allow"] if n.casefold() not in GATE_VERDICTS]
+        if missing:
+            raise ctx.err(file, line, f"{what}: delegate.allow names {', '.join(missing)}, "
+                                      f"which the gate does not answer "
+                                      f"({', '.join(GATE_VERDICTS)})")
+        gate["delegate"] = allow
+    return gate
 
 
 def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
@@ -1529,9 +1763,38 @@ def _batch_spec(ctx, sc, raw: Any, what: str, line: int) -> Dict[str, Any]:
 def _loop_props(**kw: Any) -> Dict[str, Any]:
     base = {"mode": None, "guard": None, "max": None, "child": None, "between": None,
             "every": None, "items": None, "as_name": None, "parallel": False, "carry": None,
-            "rounds": False}
+            "rounds": False, "self_answer": None}
     base.update(kw)
     return base
+
+
+SELF_ANSWER_KEYS = ("probe", "describe")
+
+
+def _self_answer(ctx, sc, spec, line) -> Optional[Dict[str, Any]]:
+    """``loop.self_answer: {probe, describe}`` -- the one check that lets the
+    run's driver answer this loop's ``loop_limit`` by itself (docs 4.2,
+    claunch-9poqc). Without it a limit is a person's alone.
+
+    The probe is a command the engine runs when the driver asks; the loop is
+    only opened again when it exits 0. That is the whole point of the key:
+    the driver may not decide a wait is over, it may only produce the
+    machine's answer that it is."""
+    raw = spec.get("self_answer")
+    if raw is None:
+        return None
+    m = _need_map(ctx, sc.file, raw, "loop.self_answer", line)
+    _check_keys(ctx, sc.file, m, SELF_ANSWER_KEYS, "loop.self_answer")
+    if m.get("probe") is None:
+        raise ctx.err(sc.file, _key_line(m, "probe", line),
+                      "loop.self_answer needs a probe (the check that opens the limit)")
+    probe = _command(ctx, sc.file, _key_line(m, "probe", line), m["probe"],
+                     "loop.self_answer.probe")
+    describe = m.get("describe", "")
+    if not isinstance(describe, str):
+        raise ctx.err(sc.file, _key_line(m, "describe", line),
+                      "loop.self_answer.describe must be a string")
+    return {"probe": probe, "describe": describe.strip()}
 
 
 def _b_foreach(ctx, sc, node, value, m, line):
@@ -1555,7 +1818,7 @@ def _b_loop(ctx, sc, node, value, m, line):
     node.type = ir.T_LOOP
     spec = _need_map(ctx, sc.file, value, "loop", line)
     _check_keys(ctx, sc.file, spec, ("while", "until", "max", "do", "between", "every",
-                                     "rounds"), "loop")
+                                     "rounds", "self_answer"), "loop")
     has = [k for k in ("while", "until") if k in spec]
     if len(has) != 1:
         raise ctx.err(sc.file, line, "loop needs exactly one of while / until")
@@ -1571,7 +1834,8 @@ def _b_loop(ctx, sc, node, value, m, line):
     if not isinstance(rounds, bool):
         raise ctx.err(sc.file, _key_line(spec, "rounds", line),
                       "loop.rounds must be true or false")
-    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every, rounds=rounds)
+    node.props = _loop_props(mode=mode, guard=guard, max=mx, every=every, rounds=rounds,
+                             self_answer=_self_answer(ctx, sc, spec, line))
     lsc = _loop_scope(sc, node)
     node.props["child"] = _sub(ctx, lsc, node, _require(ctx, sc, spec, "do", "loop", line), "do", line)
     if spec.get("between") is not None:
@@ -1991,6 +2255,9 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
     from_param = param_or(raw.get("from"), "from")
     if from_param is not None:
         raw.pop("from")
+    timeout_param = param_or(raw.get("timeout"), "timeout")
+    if timeout_param is not None:
+        raw.pop("timeout")
     for key in ("brief", "format", "choices", "prompt", "require_reason", "urgent"):
         raw.pop(key, None)
     try:
@@ -2014,9 +2281,16 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
         "from": [{"role": c.role, "scope": c.scope, "connect": c.connect}
                  for c in delegate.candidates],
         "from_param": from_param,
+        # A literal allow list is checked against the fixed choices here; one
+        # given as ``${params.<p>}`` is checked against the brief's own
+        # options when the ask opens (``runtime._brief_ask``), because the
+        # names are not known before then.
+        **_ask_delegate(ctx, file, name, ask, aline,
+                        choices_v if isinstance(choices_v, list) else None),
         "otherwise": delegate.otherwise,
         "default_option": default,
         "timeout": delegate.timeout,
+        "timeout_param": timeout_param,
         "on_decline": None,
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "urgent": _ask_urgent(ctx, file, name, ask, aline),
@@ -2312,13 +2586,31 @@ def _recur(ctx: _Ctx, file: str, doc: Dict[str, Any], kind: str) -> Optional[Dic
     raise ctx.err(file, line, "recur must be true or false, or a mapping {auto, min_gap}")
 
 
+def _layout_ref(ctx: _Ctx, file: str, raw: Any, line: int) -> Optional[str]:
+    """A ``layout:`` value -> its ``<id>@<version>`` reference.
+
+    The reference is checked here (a typo is an authoring error) but it is
+    *not* resolved here: :func:`compile_text` resolves each reference once and
+    keeps the result in ``chart.meta`` (cflow2/layouts.py)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ctx.err(file, line, "layout must be a '<id>@<version>' string")
+    try:
+        _layouts.parse_reference(raw)
+    except ValueError as exc:
+        raise ctx.err(file, line, f"layout: {exc}") from None
+    return raw.strip()
+
+
 def compile_text(text: str, *, source: str = "",
-                 resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
+                 resolve_include: Optional[ResolveInclude] = None,
+                 resolve_layout: Optional[ResolveLayout] = None) -> ir.Chart:
     """Compile one v2 document. ``source`` is its path (for ``src`` and errors)."""
     file = Path(source).name if source else "<string>"
     if resolve_include is None:
         resolve_include = _default_resolver(Path(source).parent if source else None)
-    ctx = _Ctx(file=file, resolve_include=resolve_include)
+    ctx = _Ctx(file=file, resolve_include=resolve_include, resolve_layout=resolve_layout)
     if source:
         ctx.included.add(str(Path(source).resolve()))
         ctx.including.append(str(Path(source).resolve()))
@@ -2340,6 +2632,14 @@ def compile_text(text: str, *, source: str = "",
             raise ctx.err(file, _line(fr), "filter_roles.type must be whitelist or blacklist")
         _str_list(ctx, file, fr.get("roles"), "filter_roles.roles", _line(fr))
         filter_roles = _plain(fr)
+    forkable = doc.get("forkable")
+    if forkable is not None:
+        if not isinstance(forkable, bool):
+            raise ctx.err(file, _key_line(doc, "forkable"), "forkable must be true or false")
+        if forkable and kind != ir.KIND_PROCEDURE:
+            raise ctx.err(file, _key_line(doc, "forkable"),
+                          "forkable is a procedure's key (kind: procedure): it says a "
+                          "dynamic call may run it in a quick-fork")
     priority = doc.get("priority", 0)
     if isinstance(priority, bool) or not isinstance(priority, (int, float)):
         raise ctx.err(file, _key_line(doc, "priority"), "priority must be a number")
@@ -2367,6 +2667,7 @@ def compile_text(text: str, *, source: str = "",
 
     collections = _collection_decls(ctx, file, doc)
     recur = _recur(ctx, file, doc, kind)
+    gates = _gates(ctx, file, doc)
     sides = doc.get("sides")
     if sides is not None or ctx.included_sides:
         sline = _key_line(doc, "sides", 1)
@@ -2393,6 +2694,26 @@ def compile_text(text: str, *, source: str = "",
                     procs=(name,) if kind == ir.KIND_PROCEDURE else ())
         root = _compile_tree(ctx, sc, doc["body"], None, "body", _key_line(doc, "body", 1))
 
+    layout_ref = _layout_ref(ctx, file, doc.get("layout"), _key_line(doc, "layout", 1))
+    # Each reference is resolved once, here, and the result is kept in the
+    # chart: the run's chart.json snapshot then carries the layout it started
+    # with, and editing the file later does not move a live run. A reference
+    # that does not resolve is a warning + a placeholder block when served --
+    # never a compile error (a layout problem must not stop a run).
+    resolved_layouts = _layouts.resolve_all(
+        [r for r in ([layout_ref] + list(ctx.node_layouts.values())) if r],
+        resolve_layout=ctx.resolve_layout)
+    for ref, entry in resolved_layouts.items():
+        if entry.get("error"):
+            ctx.warnings.append(f"layout {ref}: {entry.get('why') or entry['error']}")
+        elif entry.get("api", _layouts.SUPPORTED_API) != _layouts.SUPPORTED_API:
+            # Still a warning, never an error: the run starts and the served
+            # view model shows a placeholder where the layout would be
+            # (docs/cflow-v2.md 2.14, cflow2/layouts.py).
+            ctx.warnings.append(
+                f"layout {ref}: api {entry.get('api')} is not this build's api "
+                f"{_layouts.SUPPORTED_API} -- it is served as a placeholder")
+
     chart = ir.Chart(
         name=name,
         nodes=ctx.nodes,
@@ -2402,6 +2723,7 @@ def compile_text(text: str, *, source: str = "",
         meta={
             "default_role": doc.get("default_role"),
             "filter_roles": filter_roles,
+            **({"forkable": True} if forkable else {}),
             "default_child_cflow": doc.get("default_child_cflow"),
             "priority": priority,
             "max_visits": max_visits,
@@ -2418,6 +2740,15 @@ def compile_text(text: str, *, source: str = "",
                if ctx.question_types else {}),
             # recur: {"auto": bool} when declared (docs 2.1, recur)
             **({"recur": recur} if recur is not None else {}),
+            # gates: the move/report gates delegated to the parent
+            # (claunch-vjp4y.2.1, docs 2.11)
+            **({"gates": gates} if gates is not None else {}),
+            # layout metadata (cflow2/layouts.py): the workflow's reference,
+            # the per-node references, and the resolved files themselves --
+            # everything a view model needs, snapshotted with the chart
+            **({"layout": layout_ref} if layout_ref else {}),
+            **({"node_layouts": dict(ctx.node_layouts)} if ctx.node_layouts else {}),
+            **({"layouts": resolved_layouts} if resolved_layouts else {}),
         },
         params=_workflow_params(ctx, file, doc),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))
@@ -2436,10 +2767,12 @@ def compile_text(text: str, *, source: str = "",
     return chart
 
 
-def compile_file(path: Path, *, resolve_include: Optional[ResolveInclude] = None) -> ir.Chart:
+def compile_file(path: Path, *, resolve_include: Optional[ResolveInclude] = None,
+                 resolve_layout: Optional[ResolveLayout] = None) -> ir.Chart:
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise FrontendError(f"{path}: cannot read: {exc}") from None
-    return compile_text(text, source=str(path), resolve_include=resolve_include)
+    return compile_text(text, source=str(path), resolve_include=resolve_include,
+                        resolve_layout=resolve_layout)

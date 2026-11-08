@@ -839,3 +839,117 @@ def view(schema_: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 __all__ = ("TYPES", "InputsError", "schema", "constraints", "violations", "normalize", "check",
            "settle", "apply", "view", "option_items", "option_errors", "option_lists")
+
+
+# --------------------------------------------------------------------------- #
+# dependency graph and change impact (claunch-cetzf.1)
+# --------------------------------------------------------------------------- #
+#: An input read in a prompt (``${data.inputs.x}``), an expression
+#: (``$data.inputs.x``) or an input constraint (``$inputs.x``).
+_INPUT_REF_RE = re.compile(r"(?:\bdata\.inputs|\$inputs)\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v)
+
+
+def _refs(value: Any) -> List[str]:
+    out: List[str] = []
+    for text in _strings(value):
+        for m in _INPUT_REF_RE.finditer(text):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def dependencies(chart: ir.Chart) -> Dict[str, Dict[str, List[str]]]:
+    """Which rules and nodes read each declared input: ``{name: {"rules":
+    [rule ids whose text or when reads it], "conditional": [rule ids whose
+    when reads it], "nodes": [node ids whose props read it]}}``. Every
+    declared input has an entry, empty lists when nothing reads it. A node's
+    props include the baked rule texts, so a node that receives a rule
+    reading the input is listed too."""
+    decls = (chart.meta or {}).get("inputs") or {}
+    out: Dict[str, Dict[str, List[str]]] = {
+        n: {"rules": [], "conditional": [], "nodes": []} for n in decls}
+
+    def add(name: str, key: str, ident: str) -> None:
+        entry = out.get(name)
+        if entry is not None and ident not in entry[key]:
+            entry[key].append(ident)
+
+    for rid, rule in (chart.rules or {}).items():
+        rule = rule or {}
+        for name in _refs([rule.get("text"), rule.get("when")]):
+            add(name, "rules", rid)
+        for name in _refs(rule.get("when")):
+            add(name, "conditional", rid)
+    for node in chart.nodes.values():
+        names = _refs(node.props)
+        cond_rules = [rid for rid in node.props.get("rules") or []
+                      if ((chart.rules or {}).get(rid) or {}).get("when") is not None]
+        for rid in cond_rules:
+            names += [n for n in _refs([(chart.rules.get(rid) or {}).get("text"),
+                                        (chart.rules.get(rid) or {}).get("when")])
+                      if n not in names]
+        for name in names:
+            add(name, "nodes", node.id)
+    return out
+
+
+def impact(chart: ir.Chart, name: str, before: Dict[str, Any], after: Dict[str, Any],
+           active_nodes: List[Tuple[str, str]]) -> Dict[str, Any]:
+    """What changing input ``name`` changes (claunch-cetzf.1): the
+    conditional rules that turn on or off (``when`` evaluated over the run
+    data ``before`` and ``after`` the write), and which of the run's open
+    ``active_nodes`` (``(instance, node id)``) read the input, so their
+    prompt is re-rendered with the new value."""
+    from . import expr as expr_mod
+
+    deps = dependencies(chart).get(name) or {"rules": [], "conditional": [], "nodes": []}
+
+    def holds(cond: str, data: Dict[str, Any]) -> Optional[bool]:
+        try:
+            return expr_mod.truthy(expr_mod.evaluate(cond, {"data": data, "params": {}}))
+        except Exception:  # noqa: BLE001 - shown as unknown
+            return None
+
+    rules = []
+    for rid in deps["conditional"]:
+        body = (chart.rules or {}).get(rid) or {}
+        was, now = holds(body["when"], before), holds(body["when"], after)
+        if was != now:
+            rules.append({"id": rid, "when": body["when"], "was": was, "now": now,
+                          "text": str(body.get("text") or "").strip()})
+    nodes = set(deps["nodes"])
+    tasks = [{"instance": iid, "node": nid} for iid, nid in active_nodes if nid in nodes]
+    return {"input": name, "rules": rules, "tasks": tasks, "readers": len(deps["nodes"])}
+
+
+def format_impact(impact_v: Optional[Dict[str, Any]]) -> str:
+    """The block a driver's nudge carries after an input change: rules that
+    turned on or off, and the open tasks whose prompt now reads the new
+    value. Empty when the change touches neither."""
+    if not impact_v:
+        return ""
+    lines: List[str] = []
+    for rule in impact_v.get("rules") or []:
+        state = {True: "켜짐", False: "꺼짐", None: "판정 불가"}[rule.get("now")]
+        lines.append(f"- 규칙 {rule['id']}: {state} (조건 {rule['when']})")
+        if rule.get("now") and rule.get("text"):
+            lines.extend("    " + ln for ln in rule["text"].splitlines())
+    tasks = impact_v.get("tasks") or []
+    if tasks:
+        lines.append("- 이 값을 읽는 열린 작업: " + ", ".join(
+            f"{t['node']}({t['instance']})" for t in tasks)
+            + " — 프롬프트를 새 값으로 다시 읽는다")
+    if not lines:
+        return ""
+    return "\n── 입력 변경의 영향 ──\n" + "\n".join(lines)

@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -197,9 +198,16 @@ def test_portable_args_drop_machine_paths_and_relativise_repo_paths(tmp_path):
 
 
 def test_pytest_args_of_and_requested_width():
-    assert test_window.pytest_args_of(
-        'uv run --no-sync pytest tests -q -n 8 --basetemp="/x/y w"') == [
-        "tests", "-q", "-n", "8", "--basetemp=/x/y w"]
+    if os.name == "nt":
+        # pytest_args_of splits in non-POSIX mode on Windows so that backslash
+        # paths survive; a quoted value is therefore not unquoted there.
+        assert test_window.pytest_args_of(
+            r"uv run --no-sync pytest tests -q -n 8 --basetemp=C:\x\y") == [
+            "tests", "-q", "-n", "8", r"--basetemp=C:\x\y"]
+    else:
+        assert test_window.pytest_args_of(
+            'uv run --no-sync pytest tests -q -n 8 --basetemp="/x/y w"') == [
+            "tests", "-q", "-n", "8", "--basetemp=/x/y w"]
     assert test_window.pytest_args_of("/v/bin/python -m pytest tests -x") == ["tests", "-x"]
     assert test_window.pytest_args_of("make test") is None
     assert test_window.requested_width_of(["tests", "-n", "6"]) == 6
@@ -468,7 +476,9 @@ def test_borrowed_merge_runs_on_the_borrower_and_the_waiter_gets_its_result(
             assert remote["junit"] and "testsuite" in remote["junit"]
             await _until(lambda: runner.runs()[0]["status"] == "passed")
             # The checkout is gone and the borrower's window is free.
-            assert not (tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists()
+            # The status is set before the work directory is removed.
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
             assert own.status()["holders"] == []
             assert "token" not in runner.runs()[0]
             assert borrower.exists()
@@ -510,7 +520,9 @@ def test_borrower_stops_and_cleans_up_when_the_lender_revokes(
             assert lender.cancel(gid)
             await _until(lambda: runner.runs()[0]["status"] == "aborted", 30)
             assert "unknown" in runner.runs()[0]["error"]
-            assert not (tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists()
+            # The status is set before the work directory is removed.
+            await _until(lambda: not (
+                tmp_path / "borrows" / "window-borrow" / run_doc["id"]).exists(), 30)
             assert own.status()["holders"] == []
         finally:
             await runner.close()
@@ -556,6 +568,212 @@ def test_borrower_restart_gives_its_open_borrows_back(lender_clone, tmp_path):
 
     asyncio.run(run())
 
+
+
+class _OrderRunner(window_borrow.BorrowRunner):
+    """A borrower whose run is scripted and whose cleanup is slow: it
+    records the status a reader saw while the checkout was still there."""
+
+    def __init__(self, tmp_path, outcome):
+        async def transport(machine, path, body):
+            return {"beat": "ok"}
+
+        super().__init__(None, transport, lambda: "borrower",
+                         root=tmp_path / "borrows" / "window-borrow")
+        self.outcome = outcome
+        self.seen_during_cleanup = []
+
+    async def _run(self, run, workdir, state):
+        self._set(run, status="testing")
+        if self.outcome == "cancel":
+            await asyncio.sleep(60)
+        if self.outcome == "raise":
+            raise RuntimeError("setup broke")
+        state["final"] = {"status": "passed"}
+
+    def _cleanup(self, run, workdir):
+        time.sleep(0.3)
+        self.seen_during_cleanup.append(run["status"])
+
+
+@pytest.mark.parametrize("outcome, final", [
+    ("cancel", "aborted"), ("raise", "failed"), ("pass", "passed")])
+def test_a_run_reads_finished_only_after_its_cleanup(tmp_path, monkeypatch, outcome, final):
+    """claunch-whm4e.1.1.1: the terminal status was written before the grant
+    was released and the checkout removed, so a reader that waited for it
+    (test_borrower_stops_and_cleans_up_when_the_lender_revokes) could still
+    find the worktree when the cleanup was slow."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _OrderRunner(tmp_path, outcome)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await _until(lambda: doc["status"] == "testing", 5)
+        if outcome == "cancel":
+            task.cancel()
+        await task
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == final and doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
+
+
+def test_recover_marks_a_stale_run_aborted_after_its_cleanup(tmp_path):
+    async def run():
+        runner = _OrderRunner(tmp_path, "pass")
+        runner._runs.append({"id": "dead", "machine": "lender", "grant_id": "g",
+                             "token": "t", "status": "testing"})
+        await runner.recover()
+        assert runner.seen_during_cleanup == ["testing"]
+        assert runner.runs()[0]["status"] == "aborted"
+
+    asyncio.run(run())
+
+
+class _SecondCancelRunner(_OrderRunner):
+    """A cancelled run whose give-back to the lender and cleanup both take
+    long enough for a second cancel to land inside them."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path, "cancel")
+        self.giving_back = asyncio.Event()
+        self.cleaning = threading.Event()
+        self.gave_back = []
+
+    async def _give_back(self, run, reason):
+        self.giving_back.set()
+        await asyncio.sleep(60)
+        self.gave_back.append(reason)
+
+    def _cleanup(self, run, workdir):
+        self.cleaning.set()
+        super()._cleanup(run, workdir)
+
+
+@pytest.mark.parametrize("during", ["give-back", "cleanup"])
+def test_a_second_cancel_still_ends_the_run_aborted_after_its_cleanup(
+        tmp_path, monkeypatch, during):
+    """claunch-whm4e.1.1.1.1: a second cancel that landed while the first
+    one's except branch awaited the give-back left the run ACTIVE (testing)
+    for good; one that landed while the cleanup thread ran wrote the
+    terminal status with the checkout still there."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _SecondCancelRunner(tmp_path)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await _until(lambda: doc["status"] == "testing", 5)
+        task.cancel()
+        if during == "give-back":
+            await asyncio.wait_for(runner.giving_back.wait(), 5)
+        else:
+            runner._give_back = _no_give_back
+            await _until(runner.cleaning.is_set, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == "aborted" and doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
+
+
+async def _no_give_back(run, reason):
+    return None
+
+
+class _BrokenCleanupRunner(_SecondCancelRunner):
+    """A cancelled run whose cleanup thread raises after a second cancel
+    has already reached the await on it."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.second_cancel_sent = threading.Event()
+        self._give_back = _no_give_back
+
+    def _cleanup(self, run, workdir):
+        self.cleaning.set()
+        self.second_cancel_sent.wait(5)
+        self.seen_during_cleanup.append(run["status"])
+        raise RuntimeError("worktree remove broke")
+
+
+def test_a_second_cancel_survives_a_cleanup_that_raises(tmp_path, monkeypatch):
+    """claunch-whm4e.1.1.1.1.1: once the cleanup await had taken a cancel, a
+    cleanup thread that then raised replaced the cancel with its own error,
+    so the task ended with RuntimeError instead of CancelledError."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _BrokenCleanupRunner(tmp_path)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await _until(lambda: doc["status"] == "testing", 5)
+        task.cancel()
+        await _until(runner.cleaning.is_set, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        runner.second_cancel_sent.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        assert isinstance(caught.value.__context__, RuntimeError)
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == "aborted" and doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
+
+
+class _SlowGiveBackFailRunner(_OrderRunner):
+    """A run that fails and whose give-back to the lender takes long enough
+    for a cancel to land inside it."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path, "raise")
+        self.giving_back = asyncio.Event()
+
+    async def _give_back(self, run, reason):
+        self.giving_back.set()
+        await asyncio.sleep(60)
+
+
+def test_a_failed_run_stays_failed_when_cancelled_during_its_give_back(
+        tmp_path, monkeypatch):
+    """claunch-whm4e.1.1.1.1.1: the failed branch writes its terminal status
+    before it awaits the give-back, so a cancel landing in that await still
+    leaves the run failed (and only after its cleanup)."""
+    monkeypatch.setattr(window_borrow, "heartbeat_interval", lambda: 60)
+
+    async def run():
+        runner = _SlowGiveBackFailRunner(tmp_path)
+        doc = {"id": "r1", "machine": "lender", "grant_id": "g", "token": "t",
+               "status": "starting"}
+        runner._runs.append(doc)
+        task = asyncio.ensure_future(runner._drive(doc))
+        runner._tasks["r1"] = task
+        await asyncio.wait_for(runner.giving_back.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runner.seen_during_cleanup == ["testing"]
+        assert doc["status"] == "failed" and "setup broke" in doc["error"]
+        assert doc.get("finished_at")
+        assert "r1" not in runner._tasks
+
+    asyncio.run(run())
 
 
 def _tampering(transport, change):

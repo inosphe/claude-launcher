@@ -34,6 +34,10 @@ pytestmark = pytest.mark.usefixtures("vm_on")
 
 AGENT = {actors.HEADER: "agent:s1"}
 needs_guest = pytest.mark.skipif(sys.platform != "darwin", reason="the guest scripts use BSD find/stat/mktemp")
+# ROLL BACK together with vm_files.HOST_FILES when put/get gain a Windows
+# implementation (see VM_TEST_PREFIXES in tests/conftest.py).
+needs_host_files = pytest.mark.skipif(not vm_files.HOST_FILES,
+                                      reason="put/get walk the host folder by descriptor (POSIX only)")
 
 
 class LocalGuest:
@@ -249,6 +253,7 @@ def test_the_work_folder_is_the_users_to_set_and_survives_a_reload(tmp_path):
 
 
 # ---- the host folder ---------------------------------------------------------------- #
+@needs_host_files
 def test_the_host_folder_is_private_and_a_link_in_it_is_never_followed(tmp_path):
     folder = vm_files.HostFolder(tmp_path / "vm" / "a" / "files")
     root = folder.ensure()
@@ -276,6 +281,7 @@ def test_the_host_folder_is_private_and_a_link_in_it_is_never_followed(tmp_path)
         os.close(rootfd)
 
 
+@needs_host_files
 def test_a_host_folder_that_is_a_link_is_refused(tmp_path):
     target = tmp_path / "elsewhere"
     target.mkdir()
@@ -461,6 +467,7 @@ def canned_env(tmp_path, entries, items=None, rc=0, **limits):
     return Env(tmp_path, stream=canned(data, f"claunch-files: items {count}", rc), **limits)
 
 
+@needs_host_files
 def test_a_good_tar_is_written_with_owner_only_modes(tmp_path):
     env = canned_env(tmp_path, [("top", "d", None), ("top/a.txt", "f", b"aaa"), ("top/sub", "d", None),
                                 ("top/sub/b", "f", b"bb"), ("top/._a.txt", "f", vm_files.APPLEDOUBLE + b"\x00" * 40)])
@@ -485,6 +492,7 @@ def test_a_good_tar_is_written_with_owner_only_modes(tmp_path):
     [("top", "d", None), ("top//x", "f", b"1")],
     [("top", "d", None), ("top/./x", "f", b"1")],
 ])
+@needs_host_files
 def test_a_malicious_tar_writes_nothing_outside_and_leaves_nothing_behind(tmp_path, entries):
     env = canned_env(tmp_path, entries, items=len(entries))
     with pytest.raises(VmError) as err:
@@ -495,6 +503,7 @@ def test_a_malicious_tar_writes_nothing_outside_and_leaves_nothing_behind(tmp_pa
     assert not (tmp_path / "vm" / "evil").exists()
 
 
+@needs_host_files
 def test_a_tar_over_the_limits_is_refused_and_cleaned_up(tmp_path):
     env = canned_env(tmp_path, [("top", "d", None), ("top/big", "f", b"x" * 5000)], max_bytes=4000)
     assert code_of(env.get, "top") == "vm_files_limit" and env.host_entries() == []
@@ -503,6 +512,7 @@ def test_a_tar_over_the_limits_is_refused_and_cleaned_up(tmp_path):
     assert code_of(env.get, "top") == "vm_files_limit" and env.host_entries() == []
 
 
+@needs_host_files
 def test_a_tar_that_is_not_what_the_guest_announced_is_refused(tmp_path):
     entries = [("top", "d", None), ("top/a", "f", b"1"), ("top/b", "f", b"2")]
     env = canned_env(tmp_path, entries, items=5)                       # the guest said five
@@ -511,6 +521,7 @@ def test_a_tar_that_is_not_what_the_guest_announced_is_refused(tmp_path):
     assert code_of(env.get, "top") == "vm_files_failed" and env.host_entries() == []
 
 
+@needs_host_files
 def test_a_stream_cut_in_the_middle_of_a_file_leaves_no_partial_file(tmp_path):
     data = tar_of([("top", "d", None), ("top/a", "f", b"x" * 20000)])
     env = Env(tmp_path, stream=canned(data[:1500], "claunch-files: items 2", 0))
@@ -518,6 +529,7 @@ def test_a_stream_cut_in_the_middle_of_a_file_leaves_no_partial_file(tmp_path):
     assert env.host_entries() == []
 
 
+@needs_host_files
 def test_the_guest_reason_is_reported_when_nothing_was_streamed(tmp_path):
     env = Env(tmp_path, stream=canned(b"", "claunch-files: not found", 66))
     err = pytest.raises(VmError, env.get, "top").value
@@ -525,6 +537,7 @@ def test_the_guest_reason_is_reported_when_nothing_was_streamed(tmp_path):
     assert env.host_entries() == []
 
 
+@needs_host_files
 def test_a_transfer_past_the_time_limit_is_stopped(tmp_path):
     def slow(argv, feed=None, drain=None, timeout=600.0, **kw):
         return vm_tart.StreamResult(124, "timed out after 1s", timed_out=True)
@@ -792,6 +805,20 @@ def test_get_overwrite_works_for_a_path_named_replaced(env, kind):
     assert env.host_entries() == ["replaced"]
 
 
+def test_put_and_get_are_refused_where_the_host_has_no_descriptor_walk(env, monkeypatch):
+    # Windows has no O_DIRECTORY/O_NOFOLLOW and no dir_fd: the module still
+    # imports (the daemon loads it through vm_api), put/get answer
+    # vm_files_unsupported after the usual argument and state checks, and the
+    # guest-only ls/rm are not affected.
+    monkeypatch.setattr(vm_files, "HOST_FILES", False)
+    assert code_of(env.put, "x") == "vm_files_unsupported"
+    assert code_of(env.get, "x") == "vm_files_unsupported"
+    assert code_of(env.get, "../x") == "vm_files_unsafe"
+    assert not env.guest.scripts
+    assert env.files.describe("a")["host_files"] is False
+    assert vm_api._STATUS["vm_files_unsupported"] == 501
+
+
 def test_any_error_in_an_operation_is_recorded_and_becomes_vm_files_failed(env, monkeypatch):
     for exc in (FileNotFoundError("gone"), PermissionError("no"), OSError(28, "No space left")):
         def boom(*a, _exc=exc, **k):
@@ -842,6 +869,7 @@ def test_a_file_with_a_narrow_no_break_space_goes_both_ways(env):
     assert (env.host / "back.png").read_bytes() == b"png"
 
 
+@needs_host_files
 def test_only_a_real_appledouble_companion_is_dropped(tmp_path):
     magic = vm_files.APPLEDOUBLE + b"\x00" * 50
     env = canned_env(tmp_path, [("top", "d", None), ("top/x", "f", b"data"), ("top/._x", "f", magic),

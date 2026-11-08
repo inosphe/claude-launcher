@@ -167,7 +167,9 @@ new Function(
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsWindowTabs", "statsEndedToggle",
      "setStatsProvider", "statsProviderStrip",
-     "statsRowParts", "statsRowTotal", "statsRowRequests",
+     "statsRowParts", "statsRowTotal", "statsRowRequests", "statsRowCost",
+     "statsCostCell",
+     "statsRowBarParts", "statsRowBar", "statsRowBarLegend",
      "statsSummaryFigures", "statsOverviewRows",
      "statsModelRows", "statsModelTotals", "statsModelBar", "statsModelCost",
      "statsModelTable", "statsModelEstimate", "statsModelSection",
@@ -248,8 +250,10 @@ function sessionRow(extra) {
     profile: "ds4:claude", borrow: "", issue: "claunch-x", project: "claunch",
     source: "ledger", provider: "fireworks", model: "m1",
     providers: [{ provider: "fireworks", input: 100, cache_read: 900,
-                  cache_write: 0, output: 0, total: 1000, requests: 4 }],
+                  cache_write: 0, output: 0, total: 1000, requests: 4,
+                  cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 0 }],
     input: 100, cache_read: 900, cache_write: 0, output: 0, total: 1000,
+    cost: 0.0012, priced_tokens: 1000, unpriced_tokens: 0,
     requests: 4, first_at: "2026-10-21T09:00:00+09:00",
     last_at: "2026-10-21T20:00:00+09:00", days: { "2026-10-21": 1000 },
     switches: [{ at: "2026-10-21T09:30:00+09:00", kind: "provider",
@@ -289,12 +293,16 @@ const overview = {
           to: "ds4", from_model: "", to_model: "" },
       ],
       providers: [{ provider: "kimi", input: 10, cache_read: 90, cache_write: 0,
-                    output: 0, total: 100, requests: 1 }],
-      total: 100, requests: 1, days: { "2026-10-21": 100 },
+                    output: 0, total: 100, requests: 1,
+                    cost: null, priced_tokens: 0, unpriced_tokens: 100 }],
+      input: 10, cache_read: 90, total: 100, requests: 1,
+      days: { "2026-10-21": 100 },
+      cost: null, priced_tokens: 0, unpriced_tokens: 100,
     }),
     sessionRow({
       session: "oauth", source: "none", provider: "claude", model: "",
-      providers: [], total: 0, requests: 0, days: {}, switches: [
+      providers: [], input: 0, cache_read: 0, total: 0, requests: 0,
+      cost: null, priced_tokens: 0, unpriced_tokens: 0, days: {}, switches: [
         { at: "2026-10-21T10:00:00+09:00", kind: "profile", from: "own",
           to: "kimi", from_model: "", to_model: "" },
         { at: "2026-10-21T11:00:00+09:00", kind: "provider", from: "claude",
@@ -446,6 +454,37 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-rowbar-fill")[0].style.width === "100.00%" &&
         withClass("stats-rowbar-fill")[1].style.width === "10.00%",
         withClass("stats-rowbar-fill").map((b) => b.style.width));
+
+  // claunch-qs2ev.1: the bar is a stack of the four usage parts, in
+  // USAGE_PARTS order and the detail panel chart's colours, so a row that
+  // spent 900 of its 1,000 tokens on cache reads shows that as the wide band.
+  const partSegments = (r) => r.all().filter(
+    (n) => classesOf(n).has("stats-rowbar-part"));
+  const partClass = (n) => ["usage-in", "usage-cr", "usage-cw", "usage-out"]
+    .find((c) => classesOf(n).has(c)) || "";
+  const s1seg = partSegments(rows[0]);
+  check("a session's bar is split into its parts, fresh input first",
+        s1seg.length === 2 &&
+        s1seg.map(partClass).join() === "usage-in,usage-cr" &&
+        s1seg.map((n) => n.style.width).join() === "10.00%,90.00%",
+        s1seg.map((n) => [partClass(n), n.style.width]));
+  check("a part that is zero draws no segment",
+        s1seg.every((n) => partClass(n) !== "usage-cw" &&
+                            partClass(n) !== "usage-out"),
+        s1seg.map(partClass));
+  check("a segment names its part and the tokens it holds",
+        s1seg[1].title === "cache read: 900 of 1,000 tokens",
+        s1seg.map((n) => n.title));
+  check("the legend names the four parts above the table",
+        (() => {
+          const legend = withClass("stats-rowbar-legend")[0];
+          if (!legend) return false;
+          const swatches = legend.all().filter(
+            (n) => classesOf(n).has("usage-swatch")).map(partClass);
+          return swatches.join() === "usage-in,usage-cr,usage-cw,usage-out" &&
+            legend.words().includes("cache write");
+        })(),
+        withClass("stats-rowbar-legend").map((n) => n.words()));
   check("a session the ledger cannot speak for shows a dash, never a zero",
         rows[2].words().includes("—") &&
         withClass("stats-unmetered").length === 1, rows[2].words());
@@ -472,6 +511,55 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
         withClass("stats-method").length === 1 &&
         view.words().includes("metering ledger"),
         withClass("stats-method").length);
+
+  // claunch-kd9lg: the four parts as numbers and each row's estimate.
+  const overviewTable = withClass("stats-overview")[0];
+  const overviewHeads = overviewTable.all().filter((n) => n.tag === "th")
+    .map((n) => n.text);
+  check("the sessions table names each token part and the estimate",
+        JSON.stringify(overviewHeads) === JSON.stringify(
+          ["session", "provider", "status", "tokens", "model", "fresh input",
+           "cache read", "cache write", "output", "est. cost", "requests",
+           "share", "last call"]), overviewHeads);
+  const s1row = withClass("stats-row").find((r) => r.dataset.session === "s1");
+  const s1parts = s1row.all().filter((n) => classesOf(n).has("stats-part-cell"))
+    .map((n) => n.text);
+  check("a row writes its four parts as numbers",
+        JSON.stringify(s1parts) === JSON.stringify(["100", "900", "0", "0"]),
+        s1parts);
+  check("a priced row shows its estimate",
+        s1row.all().some((n) => classesOf(n).has("stats-model-cost") &&
+                                n.text === "≈ ₩0.0012"), s1row.words());
+  const s2row = withClass("stats-row").find((r) => r.dataset.session === "s2");
+  check("an unpriced row shows a dash for its estimate, never 0",
+        s2row.all().some((n) => classesOf(n).has("stats-model-unpriced") &&
+                                n.text === "—"), s2row.words());
+  const oauthRow = withClass("stats-row").find((r) => r.dataset.session === "oauth");
+  check("a row with no figure leaves its part cells empty",
+        oauthRow.all().filter((n) => classesOf(n).has("stats-part-cell"))
+          .every((n) => !n.text), oauthRow.words());
+  check("the summary has its own Cache read and Cache write tiles",
+        withClass("window-stat-title").some((n) => n.text === "Cache read") &&
+        withClass("window-stat-title").some((n) => n.text === "Cache write"),
+        withClass("window-stat-title").map((n) => n.text));
+
+  // A payload that carries a total but no breakdown (an older daemon) keeps
+  // one unnamed segment, so the bar's length survives the missing parts.
+  ctx.setAnswer(byUrl({
+    sessions: [sessionRow({ session: "noparts", providers: [], model: "",
+                            input: 0, cache_read: 0, cache_write: 0,
+                            output: 0, switches: [] })],
+  }));
+  ctx.refresh();
+  await tick();
+  check("a row with no part breakdown keeps one unnamed segment",
+        withClass("stats-rowbar-unknown").length === 1 &&
+        withClass("stats-rowbar-part").length === 1 &&
+        withClass("stats-row")[0].words().includes("1.00k"),
+        withClass("stats-rowbar-part").map((n) => [partClass(n), n.style.width]));
+  ctx.setAnswer(byUrl());
+  ctx.refresh();
+  await tick();
 
   // ---- provider + model ------------------------------------------------
   const modelTable = withClass("stats-model-table")[0];
@@ -641,6 +729,20 @@ const byUrl = (over) => (url) => url.includes("/api/stats/overview")
   check("the panel's window table carries the provider's share",
         withClass("stats-detail-providers")[0].words().includes("100.0%"),
         withClass("stats-detail-providers")[0].words());
+  const windowHeads = withClass("stats-detail-providers")[0].all()
+    .filter((n) => n.tag === "th").map((n) => n.text);
+  check("the panel's window table splits the four parts and the estimate",
+        JSON.stringify(windowHeads) === JSON.stringify(
+          ["provider", "tokens", "fresh input", "cache read", "cache write",
+           "output", "est. cost", "requests", "share"]) &&
+        withClass("stats-detail-providers")[0].words().includes("≈ ₩0.0012"),
+        windowHeads);
+  check("the transcript reading names each token part in its tiles",
+        ["Fresh input", "Cache read", "Cache write", "Output"].every((t) =>
+          panel.all().some((n) => classesOf(n).has("window-stat-title") &&
+                                  n.text === t)) &&
+        panel.all().some((n) => n.tag === "th" && n.text === "cache write"),
+        panel.words());
   check("the transcript reading is in the panel, labelled as the conversation",
         withClass("stats-area").length >= 4 &&
         panel.words().includes("whole conversation (transcript)"), panel.words());

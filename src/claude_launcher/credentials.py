@@ -152,7 +152,7 @@ def stored_token(profile: Profile) -> Optional[str]:
     path = _token_path(profile)
     if not path.is_file():
         return None
-    token = path.read_text(encoding="utf-8").strip()
+    token = atomic.read_text(path).strip()
     return token or None
 
 

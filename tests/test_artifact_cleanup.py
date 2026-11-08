@@ -64,6 +64,76 @@ def test_plan_reads_and_apply_deletes_only_owned_completed_runs(setup):
         service.apply("s1", plan["plan_id"])
 
 
+def test_a_row_apply_takes_one_item_and_keeps_the_plan_for_the_rest(setup):
+    """claunch-i0vje.1: a reader deletes one candidate, not the whole set."""
+    service, root, _, _ = setup
+    first = completed(root / "s1c1012000000")
+    second = completed(root / "s1c1012000001")
+    plan = service.plan("s1")
+    ready = [index for index, row in enumerate(plan["items"]) if row["status"] == "ready"]
+    assert len(ready) == 2
+    taken = Path(plan["items"][ready[0]]["path"])
+    left = Path(plan["items"][ready[1]]["path"])
+    assert {taken, left} == {first, second}
+
+    result = service.apply("s1", plan["plan_id"], [ready[0]])
+    # The counts describe this call: the row left alone is not "pending".
+    assert (result["removed"], result["cleanup_pending"]) == (1, 0)
+    assert not taken.exists() and left.exists()
+    receipt = json.loads(Path(result["receipt"]).read_text(encoding="utf-8"))
+    assert [row["status"] for row in receipt["items"]].count("removed") == 1
+    assert any(row["status"] == "ready" for row in receipt["items"])
+
+    # The same plan still serves the row it did not touch.
+    again = service.apply("s1", plan["plan_id"], [ready[1]])
+    assert again["removed"] == 1 and not left.exists()
+
+    # Asking for a row that was already taken deletes nothing and is not an
+    # error: the plan is what remembers it was removed.
+    nothing = service.apply("s1", plan["plan_id"], [ready[0]])
+    assert (nothing["removed"], nothing["cleanup_pending"]) == (0, 0)
+
+
+def test_rows_must_name_positions_in_the_plan(setup):
+    """An ambiguous row list deletes nothing; the plan survives it."""
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    completed(root / "s1c1012000001")
+    plan = service.plan("s1")
+    for rows in ([2], [-1], [0.0], ["0"], [True], [0, 0], [], "0", {"path": str(mine)}):
+        with pytest.raises(ac.CleanupError):
+            service.apply("s1", plan["plan_id"], rows)
+    assert mine.exists()
+    # A refused row list is not an apply: the plan is still there.
+    taken = service.apply("s1", plan["plan_id"], [0])
+    assert taken["removed"] == 1 and not mine.exists()
+
+
+def test_a_whole_apply_still_spends_the_plan(setup):
+    """Naming no row is the old contract: the plan is used up by the apply."""
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    plan = service.plan("s1")
+    assert service.apply("s1", plan["plan_id"])["removed"] == 1 and not mine.exists()
+    with pytest.raises(ac.CleanupError, match="unknown"):
+        service.apply("s1", plan["plan_id"])
+    with pytest.raises(ac.CleanupError, match="unknown"):
+        service.apply("s1", plan["plan_id"], [0])
+
+
+def test_a_row_apply_drops_a_standing_whole_plan_schedule(setup):
+    """The clock replans and takes everything; a hand-picked row wins."""
+    service, root, sessions, _ = setup
+    mine = completed(root / "s1c1012000000")
+    completed(root / "s1c1012000001")
+    plan = service.plan("s1")
+    service.schedule("s1", "measurement window unavailable")
+    assert service.scheduled_record("s1") is not None
+    assert service.apply("s1", plan["plan_id"], [0])["removed"] == 1
+    assert not mine.exists()
+    assert service.scheduled_record("s1") is None
+
+
 def test_modified_and_foreign_artifacts_are_preserved(setup, monkeypatch):
     service, root, _, _ = setup
     mine = completed(root / "s1c1012000000")
@@ -522,6 +592,54 @@ def test_api_holds_exclusive_window_and_reports_busy(setup, monkeypatch):
             assert result["removed"] == 1 and not window.held
             # The schedule served its purpose; a later pass finds nothing to do.
             assert service.run_scheduled("s1")["status"] == "none"
+    asyncio.run(scenario())
+
+
+def test_api_takes_row_positions_and_still_refuses_paths(setup):
+    """``rows`` names plan positions; a busy window is refused, not scheduled.
+
+    A schedule replans and applies the whole plan when the window frees, which
+    would delete the rows the reader left alone -- so a row apply never takes
+    that road.
+    """
+    service, root, _, _ = setup
+    first = completed(root / "s1c1012000000")
+    second = completed(root / "s1c1012000001")
+    class Window:
+        busy = False
+        async def acquire(self, cls, **kwargs):
+            if self.busy:
+                return {"granted": False, "reason": "test running"}
+            return {"granted": True, "grant_id": "cleanup"}
+        def release(self, token):
+            assert token == "cleanup"
+    window = Window()
+    async def scenario():
+        app = web.Application()
+        app["manager"], app["window"] = service.manager, window
+        artifact_cleanup_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            async def post(body):
+                return await client.post("/api/artifact-cleanup", json=body)
+            assert (await post({"session": "s1", "path": "C:/"})).status == 400
+            assert (await post({"session": "s1", "rows": [0]})).status == 400
+            plan = await (await post({"session": "s1"})).json()
+            bad = await post({"session": "s1", "plan_id": plan["plan_id"], "rows": "0"})
+            assert bad.status == 400
+            window.busy = True
+            busy = await (await post({"session": "s1", "plan_id": plan["plan_id"],
+                                      "rows": [0]})).json()
+            assert busy["status"] == "cleanup_pending"
+            assert busy["reason"] == "test running"
+            assert service.scheduled_record("s1") is None
+            assert first.exists() and second.exists()
+            window.busy = False
+            result = await (await post({"session": "s1", "plan_id": plan["plan_id"],
+                                        "rows": [0]})).json()
+            assert (result["removed"], result["cleanup_pending"]) == (1, 0)
+            assert not first.exists() and second.exists()
+            # The answer is the plan itself, so the page can redraw the rest.
+            assert [row["status"] for row in result["items"]][1] == "ready"
     asyncio.run(scenario())
 
 

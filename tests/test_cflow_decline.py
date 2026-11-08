@@ -142,6 +142,34 @@ def test_children_tells_the_leader_which_child_declined(mgr, tmp_path):
     assert "cflow_declined" not in rows["w2"]
 
 
+def test_children_rows_carry_no_role_as_the_worker_workflow_says(mgr, tmp_path):
+    # improv-worker-v2's auto-release finds its child reviewer by matching
+    # these rows against the mesh roster, because a row has no role
+    # (claunch-phkt1). If a role field is ever added, that prose is stale.
+    from importlib import resources
+
+    _dead(mgr, "lead", tmp_path)
+    _dead(mgr, "w1", tmp_path, parent="lead")
+    mgr.set_cflow_declined("w1", workflow="worker-flow", reason="no", by="w1")
+
+    async def scenario(client):
+        resp = await client.get("/api/sessions/lead/children", headers=BEARER)
+        return (await resp.json())["children"]
+
+    (row,) = _client(mgr, scenario)
+    assert "role" not in row
+    # `held` is the row's way of telling a held child from a dead one
+    # (claunch-7vf2z): an allowance without this assertion would let the
+    # route drop the key again without a red test.
+    assert row["held"] is False
+    named = {"name", "status", "children", "cflow", "cflow_declined", "quick_fork_of",
+             "held"}
+    assert set(row) <= named
+    text = (resources.files("claude_launcher") / "workflows" / "v2"
+            / "improv-worker-v2.yaml").read_text(encoding="utf-8")
+    assert "`children`의 자식 행에는 role이 없다(name·status·" in text
+
+
 def test_mesh_members_prints_the_flag(monkeypatch, capsys):
     class Client:
         def get(self, path):

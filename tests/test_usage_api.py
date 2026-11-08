@@ -63,6 +63,12 @@ def test_usage_endpoint_normalizes_report(monkeypatch):
                 "detail": None,
             }
         ],
+        # An account's spend split by API key; empty when the reader cannot
+        # (or need not) rate keys apart (claunch-uqnek).
+        "api_keys": [],
+        # ...and why it is empty, worded by the reader for the page
+        # (claunch-uqnek.1). A reader that does not split spend leaves "".
+        "api_keys_note": "",
     }
 
 
@@ -201,6 +207,40 @@ def test_usage_keys_reads_a_single_token_profile(monkeypatch):
     assert asked == [[]]
 
 
+def test_usage_keys_preview_keeps_the_accounts_api_key_split(monkeypatch):
+    """The preview's rebuilt body carries the spend split (claunch-feb3f).
+
+    The profile usage card draws ``api_keys``/``api_keys_note`` under the
+    account total, and for a pooled profile that total is this preview's
+    ``usage`` body. Rebuilding the body without them made a Fireworks account
+    say it did not break its spend down by API key, which it does.
+    """
+    prof = SimpleNamespace(name="work")
+    body = dict(
+        _body(),
+        api_keys=[{"key_id": "key_a", "label": "ds4", "used_dollars": 5.97}],
+        api_keys_note="One key of this account has spent this month.",
+    )
+    monkeypatch.setattr(api.profile_keys, "view", lambda _p: _view())
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (body, True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": None,
+            "keys": {},
+            "unmeasurable": None,
+        },
+    )
+
+    doc = api._credential_preview(prof, "work", False)
+
+    assert doc["usage"]["api_keys"] == body["api_keys"]
+    assert doc["usage"]["api_keys_note"] == body["api_keys_note"]
+
+
 def test_usage_keys_marks_the_next_key_and_reuses_the_effective_reading(monkeypatch):
     prof = SimpleNamespace(name="work")
     keys = [
@@ -329,6 +369,64 @@ def test_usage_keys_names_a_usage_pick_from_the_readings_it_already_has(monkeypa
     assert doc["next"]["exact"] is False
     assert doc["next_unknown"] is None
     assert [row["next"] for row in doc["keys"]] == [False, True]
+
+
+def test_usage_keys_leaves_a_spent_key_out_of_the_next_pick(monkeypatch):
+    """claunch-hego3: the form names a key the launch would actually take.
+
+    A key any of whose windows is spent is not a candidate of the launch's
+    pick (``usage.health_for_report``), so the preview must not hand the
+    comparison its peak and let a usage-min pick name it.
+    """
+    prof = SimpleNamespace(name="work")
+    keys = [{"id": "k-1", "masked": "sk-A…1111", "current": True},
+            {"id": "k-2", "masked": "sk-B…2222", "current": False}]
+    monkeypatch.setattr(
+        api.profile_keys,
+        "view",
+        lambda _p: _view(pooled=True, owner="work", strategy="usage-min", keys=keys),
+    )
+    monkeypatch.setattr(
+        api.profile_usage, "fetch", lambda _s, manual=False: (_body(), True, 1000.0)
+    )
+    monkeypatch.setattr(
+        api.profile_usage,
+        "key_usage",
+        lambda selector, manual=False, skip=(): {
+            "owner": "work",
+            "keys": {
+                "k-2": {
+                    "key_id": "k-2",
+                    "windows": [
+                        {"name": "five_hour", "utilization": 0.0, "status": "ok"},
+                        {"name": "seven_day", "utilization": 100.0,
+                         "status": "rate_limited"},
+                    ],
+                    "source": "oauth-usage",
+                    "updated_at": 950.0,
+                    "error": None,
+                }
+            },
+            "unmeasurable": None,
+        },
+    )
+    seen = {}
+
+    def peek(_p, readings=None):
+        seen.update(readings or {})
+        return SimpleNamespace(
+            key=SimpleNamespace(id="k-1"), strategy="usage-min", fallback=None,
+            exact=False,
+        )
+
+    monkeypatch.setattr(api.profile_keys, "peek", peek)
+
+    doc = api._credential_preview(prof, "work", False)
+
+    # k-2's five-hour window is lower than the current key's, so a peak-only
+    # comparison would have named the rate-limited key as the next launch's.
+    assert seen == {"k-1": 12.5, "k-2": None}
+    assert doc["next"]["key_id"] == "k-1"
 
 
 def test_usage_keys_explains_a_usage_strategy_that_cannot_be_compared(monkeypatch):

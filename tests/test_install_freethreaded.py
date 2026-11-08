@@ -25,6 +25,27 @@ from pathlib import Path
 
 import pytest
 
+def _posix_bash() -> str | None:
+    """The bash that runs the script under test.
+
+    On Windows a bare ``bash`` resolves to ``System32\bash.exe``, the WSL
+    launcher, which cannot see a Windows path and fails when no distribution
+    is set up. Git for Windows ships a bash that can, so it is looked up
+    through ``git`` itself; where neither exists the cases are skipped.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    git = shutil.which("git")
+    if git:
+        for root in Path(git).resolve().parents:
+            candidate = root / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+BASH = _posix_bash()
+
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.sh"
 PS1 = Path(__file__).resolve().parents[1] / "tools" / "install_freethreaded.ps1"
 
@@ -174,6 +195,8 @@ def _without_pkg_config(path: str, shadow_root: Path) -> str:
 @pytest.fixture
 def sandbox(tmp_path: Path):
     """A stub PATH, a stub tool directory, and a wheel the script accepts."""
+    if BASH is None:
+        pytest.skip("no POSIX bash that can run the install script on this host")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     uv = bin_dir / "uv"
@@ -237,6 +260,10 @@ def sandbox(tmp_path: Path):
         tmp_path: the defaults are computed from whichever HOME the run gets,
         and the script answers from the sandbox's own home directory.
         """
+        if os_name != "Linux" and os.name == "nt":
+            # Git Bash puts /usr/bin ahead of any PATH entry, so the stub
+            # `uname` never answers and the script sees MINGW, not Darwin.
+            pytest.skip("the stub uname cannot shadow /usr/bin/uname under Git Bash")
         pkg_config(pkg, crypto)
         env = dict(os.environ)
         inherited = env.get("PATH", "")
@@ -280,7 +307,7 @@ def sandbox(tmp_path: Path):
             env.pop(name, None)
         env.update(extra_env or {})
         return subprocess.run(
-            ["bash", str(SCRIPT), *args],
+            [BASH, SCRIPT.as_posix(), *args],
             input=stdin,
             capture_output=True,
             text=True,
@@ -421,6 +448,7 @@ def test_the_decision_is_reached_with_HOME_unset(sandbox):
     assert sandbox["installs"]() == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the sandbox redirects HOME/XDG, which a Windows host does not honour")
 def test_the_defaults_land_under_the_fallback_home_when_HOME_is_unset(sandbox, tmp_path):
     """The fallback has to be the passwd entry, not an empty string.
 
@@ -533,6 +561,7 @@ def test_p2p_builds_pylibsrtp_retags_it_and_overrides_it(sandbox):
     assert all(calls.index(line) < first_install for line in runs), calls
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the sandbox redirects HOME/XDG, which a Windows host does not honour")
 def test_a_cached_pylibsrtp_wheel_is_reused(sandbox):
     cached = sandbox["wheels"] / "pylibsrtp-1.0.0" / "pylibsrtp-1.0.0-cp314-cp314t-linux_x86_64.whl"
     cached.parent.mkdir(parents=True)
@@ -731,7 +760,10 @@ def ps1_sandbox(tmp_path: Path):
     return {"run": run, "calls": calls, "targets": targets, "tmp": tmp_path}
 
 
-needs_pwsh = pytest.mark.skipif(PWSH is None, reason="no pwsh on PATH to run the Windows script")
+needs_pwsh = pytest.mark.skipif(
+    PWSH is None or os.name == "nt",
+    reason="no pwsh on PATH, or a Windows host: the sandbox here models a POSIX pwsh"
+)
 
 
 @needs_pwsh

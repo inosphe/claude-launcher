@@ -418,20 +418,36 @@ def _read_paths(service, base, cfg):
     so a preset (or a direct config) reading that collection had no entry
     beside its name and the delete guard let it go (claunch-fhs7f.1 review).
     ``""`` is the active config.
+
+    The board corpora are keyed by root (``beads-<hash>``), so asking for the
+    three ``KINDS`` keys alone attributed no board collection to any preset:
+    the table said ``없음`` beside a collection search was actually reading
+    (claunch-i2i95). The roots the watcher holds are the keys a board corpus
+    can have, so they are added to the set.
     """
     try:
         doc = store.load()
     except (OSError, ValueError):
         doc = {}
     block = dict(doc.get("rag") or {}) if isinstance(doc, dict) else {}
-    out = {"": {service._index_path(base, kind, cfg) for kind in rag.KINDS}}
+    keys = list(rag.KINDS)
+    for root in list(getattr(service, "_watched", {}).values()):
+        try:
+            keys.append(service._key("beads", root))
+        except Exception:  # pragma: no cover - a root the key builder refuses
+            continue
+
+    def paths(conf):
+        return {service._index_path(base, key, conf) for key in keys}
+
+    out = {"": paths(cfg)}
     for preset in store.rag_presets(doc):
         conf = store.rag_config({"rag": {**block, "preset": preset["id"]}})
-        out[preset["id"]] = {service._index_path(base, kind, conf) for kind in rag.KINDS}
+        out[preset["id"]] = paths(conf)
     return out
 
 
-def _store_rows(service, base):
+def _store_rows(service, base, *, sizes=True):
     """Every collection on disk, marked with who reads it.
 
     ``rag.rag_stores`` answers what exists; this adds the two facts the DB
@@ -439,10 +455,12 @@ def _store_rows(service, base):
     running config is the one reading it. Both are answered by the path the
     runtime would open — ``_index_path`` — so a collection adopted under the
     pre-preset rule is attributed to its reader like any other
-    (claunch-fhs7f.1).
+    (claunch-fhs7f.1). ``sizes`` is passed through: the search card lists
+    these to find unopened collections and does not need the size walk
+    (claunch-c7vjm).
     """
     cfg = service.config()
-    rows = rag.rag_stores(base)
+    rows = rag.rag_stores(base, sizes=sizes)
     readers = _read_paths(service, base, cfg)
     active = readers.get("", set())
     for row in rows:
@@ -495,8 +513,8 @@ def _db_files(base, identity):
     return out
 
 
-def _db_width_conflict(doc, base):
-    """Why the active preset's named DB cannot hold this model's vectors.
+def _db_width_conflict(doc, base, probe_dims=0):
+    """Why the active preset's DB cannot hold this model's vectors.
 
     A preset that names its own ``db`` keeps that collection across a model
     swap, which is the point of the field (claunch-fhs7f.1) — but a
@@ -505,22 +523,30 @@ def _db_width_conflict(doc, base):
     with ``dimension mismatch``, far from the save that caused it, so the
     save is where it is refused.
 
-    Both numbers come from records already on disk: the target store's
-    sidecar, and the sidecar of a collection this same model built before.
-    Without that second record the model's width is unknown here and the
-    save goes through — the connection test learns the width and the card
-    compares it.
+    The DB checked is the one the preset resolves to, which is its stored
+    ``db`` or, when it names none, the identity derived from its model
+    (``store.rag_config``). Before, only a stored ``db`` was checked, so the
+    common preset — no ``db`` at all — saved a model of a new width over a
+    collection of the old one and failed at the first query instead
+    (claunch-i2i95).
+
+    The width the model produces comes from the connection test the card ran
+    plain (``probe_dims``) when it sent one; without it, from the sidecar of a
+    collection this same model built. That fallback can be stale — a server
+    that changed its output width under the same model name leaves a sidecar
+    that says the old number — so a probe, when there is one, wins.
     """
     cfg = store.rag_config(doc)
     active = cfg.get("preset") or ""
     row = next((p for p in store.rag_presets(doc) if p["id"] == active), None)
-    named = store.rag_model_key_slug(str((row or {}).get("db") or ""))
+    named = (store.rag_model_key_slug(str((row or {}).get("db") or ""))
+             or store.rag_model_key_slug(str(cfg.get("db") or "")))
     if not named:
         return None
     model_slug = store.rag_model_key_slug(str(cfg.get("embedding_model") or ""))
     rows = rag.rag_stores(base)
     target = next((r["dims"] for r in rows if r["identity"] == named and r["dims"]), 0)
-    known = next((
+    known = int(probe_dims or 0) or next((
         r["dims"] for r in rows
         if r["dims"] and r["identity"] != named
         and (r["model_key"] == model_slug or store.rag_model_key_slug(r["model"]) == model_slug)
@@ -606,7 +632,7 @@ def public_settings():
 def install(app):
     service = app["rag"]
     service.all_docs = Corpus(service, app["observer"]).docs
-    changed = lambda: service.enqueue("all")
+    changed = lambda: service.enqueue("unified")
     search_records.change_hooks.append(changed)
 
     async def cleanup(_app):
@@ -617,11 +643,24 @@ def install(app):
         if request.method == "GET":
             return web.json_response(public_settings())
         try:
-            doc = proposed(await request.json())
+            body = await request.json()
+            # The width the card's last connection test measured, when it sent
+            # one: the live number beats a sidecar that may predate a server
+            # changing its output width under the same model name. Taken out
+            # of the body before ``proposed`` reads it — that walk treats an
+            # unknown key as a numeric setting and would write it to the file.
+            try:
+                probe_dims = int((body or {}).get("probe_dims") or 0) if isinstance(body, dict) else 0
+            except (TypeError, ValueError):
+                probe_dims = 0
+            if isinstance(body, dict):
+                body.pop("probe_dims", None)
+            doc = proposed(body)
             # A named DB outlives a model swap, so a width the store cannot
             # hold is refused here rather than at the first query
-            # (claunch-fhs7f.1).
-            conflict = _db_width_conflict(doc, _rag_base(service))
+            # (claunch-fhs7f.1). The DB checked is the one the preset resolves
+            # to, derived identity included (claunch-i2i95).
+            conflict = _db_width_conflict(doc, _rag_base(service), probe_dims=probe_dims)
             if conflict:
                 raise ValueError(conflict)
             # Stop old-model syncs before changing their endpoint or vectors.
@@ -631,7 +670,7 @@ def install(app):
             service._progress.clear()
             service.start()
             await service.catch_up()
-            service.enqueue("all")
+            service.enqueue("unified")
             return web.json_response(public_settings())
         except (ValueError, store.StoreError) as exc:
             service.start()
@@ -721,9 +760,15 @@ def install(app):
         falls back to its model identity; either way this lists what is
         there — name, width, model, size — so the reader can point a preset
         at a store it already has before a model swap (claunch-fhs7f.1).
+
+        ``?sizes=0`` skips the per-collection walk that totals the files.
+        The search card asks for the list to find collections no index has
+        opened yet, and it asks on a timer; the size it does not draw there
+        is the expensive part (claunch-c7vjm).
         """
         cfg = service.config()
-        rows = _store_rows(service, _rag_base(service))
+        sizes = request.query.get("sizes", "1") not in ("0", "false", "no")
+        rows = _store_rows(service, _rag_base(service), sizes=sizes)
         return web.json_response({
             "dbs": rows,
             "active": cfg.get("db") or "",

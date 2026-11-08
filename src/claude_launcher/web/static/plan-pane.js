@@ -18,20 +18,37 @@
    data-plan-key after a redraw, so buttons and toggles keep the focus. The
    pane's own scroll position comes back the same way.
 
+   A poll that brings the same plan draws nothing (claunch-jw1v2, th-437508):
+   the pane keeps a fingerprint of what it last drew and a poll whose
+   fingerprint matches leaves the DOM alone, so a text selection the user is
+   dragging survives the 5 s tick. A poll that brings a change while the user
+   holds a selection in the pane waits like a focused field does, and draws
+   when the selection is let go (mouseup) or the next poll finds none.
+
+   Every item shows its node id (j-d2, v1): the session names nodes by id in
+   threads and terminal text, and the user matches them here.
+
    Joint view (claunch-7jzp8.1): when the session's joint tree
    (/api/plan/joint, plan/joint.py) holds another planned session, a toggle
    lists the tree -- spawn children, sessions on the same issue or a
    sub-issue -- each with its progress line, and opens any of them as a
-   nested pane of its own, where the user decides on that session's plan. */
+   nested pane of its own, where the user decides on that session's plan.
+
+   Rounds (claunch-r3j1o.1): a session that runs round after round seals
+   each round's plan (/api/plan/rounds). A row of round buttons switches the
+   pane to a sealed round, drawn read-only (no choice, check, note or
+   comment controls); the current plan is the default. A closure item carried
+   over from an earlier round names that round. */
 
 const PLAN_STEP_STATUS = {todo: "예정", doing: "진행 중", done: "완료", skipped: "건너뜀", blocked: "막힘"};
-const PLAN_VERDICT = {passed: "통과", failed: "실패"};
+const PLAN_VERDICT = {passed: "통과", failed: "실패", deferred: "보류"};
 const PLAN_ACTIONS = [
   {id: "here", label: "여기서 진행"},
   {id: "issue", label: "이슈로 넘김"},
   {id: "drop", label: "버림"},
 ];
-const PLAN_ACTION_LABEL = Object.fromEntries(PLAN_ACTIONS.map(a => [a.id, a.label]));
+const NOTE_ACTIONS = ["here", "issue"];   // a note's optional picks (claunch-i0whx)
+const PLAN_ACTION_LABEL =Object.fromEntries(PLAN_ACTIONS.map(a => [a.id, a.label]));
 const PLAN_VIA = {spawn: "자식 세션", same: "같은 이슈", issue: "하위 이슈"};
 
 function planNode(tag, text, cls) {
@@ -44,9 +61,10 @@ function planNode(tag, text, cls) {
 /* One line saying what the user decided on a node, or null. */
 function planResultText(n) {
   const r = n.result;
-  if (!r) return null;
-  if (n.kind === "decision") return `선택: ${r.choice}`;
+  if (!r) return n.kind === "followup" && n.status === "done" ? "세션이 처리함" : null;
+  if (n.kind === "decision") return `선택: ${r.choice}` + (r.by === "agent" ? " (자동 선택됨 · 다른 안을 고르면 세션에 전달됩니다)" : "");
   if (n.kind === "verify") return `확인: ${PLAN_VERDICT[r.verdict] || r.verdict}`;
+  if (!r.action) return null;
   return `처분: ${PLAN_ACTION_LABEL[r.action] || r.action}` + (n.status === "done" ? " · 처리됨" : "");
 }
 
@@ -88,12 +106,22 @@ function planIsField(el) {
   const tag = String(el.tagName || el.tag || "").toLowerCase();
   return tag === "textarea" || tag === "input";
 }
+/* The user holds a non-empty text selection inside the pane: a redraw would
+   replace the nodes it spans and drop it. */
+function planSelecting(root) {
+  if (!root || typeof document === "undefined" || !document.getSelection) return false;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  const anchor = sel.anchorNode;
+  return !!(anchor && root.contains && root.contains(anchor));
+}
 
 function makePlanPane({root, session, request, onChange, nested}) {
   const node = planNode;
   const base = "/api/plan";
   let data = null, error = "", busy = false, seq = 0, timer = null, feedback = "";
-  let joint = null, jointOpen = false, deferred = false;
+  let joint = null, jointOpen = false, deferred = false, drawn = null;
+  let rounds = null, viewing = "", readOnly = false;   // viewing: a sealed round's key, "" = current
   const members = {};    // session -> {el, view} of an opened joint member
   const notes = {};      // node id -> the note being typed
   const told = {};       // node id -> the last write's message
@@ -101,18 +129,25 @@ function makePlanPane({root, session, request, onChange, nested}) {
   async function load() {
     const mine = ++seq;
     try {
-      const out = await request(`${base}?session=${encodeURIComponent(session)}`);
+      const q = `session=${encodeURIComponent(session)}` + (viewing ? `&round=${encodeURIComponent(viewing)}` : "");
+      const out = await request(`${base}?${q}`);
       if (mine !== seq) return;
       data = out; error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
     if (!nested) {
+      try {
+        const out = await request(`${base}/rounds?session=${encodeURIComponent(session)}`);
+        if (mine === seq) rounds = out;
+      } catch (_exc) { if (mine === seq) rounds = null; }
       try {
         const out = await request(`${base}/joint?session=${encodeURIComponent(session)}`);
         if (mine === seq) joint = out.group;
       } catch (_exc) { if (mine === seq) joint = null; }
     }
     if (mine === seq) {
-      if (planIsField(planFocused(root()))) deferred = true;
+      const el = root();
+      if (fingerprint() === drawn) deferred = false;   // same plan: leave the DOM alone
+      else if (planIsField(planFocused(el)) || planSelecting(el)) deferred = true;
       else { deferred = false; render(); }
       schedule();
     }
@@ -126,10 +161,17 @@ function makePlanPane({root, session, request, onChange, nested}) {
   function settle() {
     if (!deferred || typeof setTimeout !== "function") return;
     setTimeout(() => {
-      if (!planIsField(planFocused(root()))) { deferred = false; render(); }
+      const el = root();
+      if (!planIsField(planFocused(el)) && !planSelecting(el)) { deferred = false; render(); }
     }, 0);
   }
-  { const el = root(); if (el && el.addEventListener) el.addEventListener("focusout", settle); }
+  { const el = root();
+    if (el && el.addEventListener) { el.addEventListener("focusout", settle); el.addEventListener("mouseup", settle); } }
+
+  /* What a draw depends on. Equal fingerprints draw the same DOM. */
+  function fingerprint() {
+    return JSON.stringify([data, joint, error, busy, jointOpen, told, Object.keys(members).sort()]);
+  }
 
   /* What the redraw must put back: the focus and its control, and how far
      down the pane was scrolled. */
@@ -169,6 +211,34 @@ function makePlanPane({root, session, request, onChange, nested}) {
     finally { busy = false; await load(); }
   }
 
+  function showRound(key) {
+    if (viewing === key) return;
+    viewing = key; data = null; render(); load();
+  }
+
+  /* The row that switches between the current plan and the sealed rounds,
+     newest first; shown only once a round was sealed. */
+  function roundBar() {
+    const sealed = (rounds && rounds.rounds) || [];
+    if (!sealed.length) return null;
+    const row = node("div", null, "plan-round-bar");
+    row.append(node("span", "회차", "plan-muted"));
+    const cur = rounds.current;
+    const curLabel = "현재" + (cur && cur.round != null ? ` (${cur.round}회차)` : "");
+    row.append(button(curLabel, () => showRound(""), viewing ? null : "plan-round-on", "round:"));
+    for (const r of sealed.slice().reverse().slice(0, 12)) {
+      const text = r.round == null ? "이전(회차 미상)" : `${r.round}회차`;
+      row.append(button(text, () => showRound(r.key), viewing === r.key ? "plan-round-on" : null, "round:" + r.key));
+    }
+    return row;
+  }
+
+  function fromChip(n) {
+    const f = n.from;
+    if (!f) return null;
+    return node("span", f.round == null ? "이전 회차에서 넘어옴" : `${f.round}회차에서 넘어옴`, "plan-chip plan-from");
+  }
+
   function noteBox(n, placeholder) {
     const t = node("textarea", null, "plan-note");
     t.value = notes[n.id] || ""; t.placeholder = placeholder; t.rows = 1; t.disabled = busy;
@@ -184,7 +254,8 @@ function makePlanPane({root, session, request, onChange, nested}) {
   }
   function tail(n, box) {
     const res = planResultText(n);
-    if (res) box.append(node("p", res + (n.result.note ? ` — ${n.result.note}` : ""), "plan-result"));
+    if (res) box.append(node("p", res + (n.result && n.result.note ? ` — ${n.result.note}` : ""), "plan-result"));
+    else if (n.reopened) box.append(node("p", `세션이 다시 확인을 요청했습니다: ${n.reopened.reason}`, "plan-stale"));
     else if (n.previous) box.append(node("p", "세션이 내용을 고쳐 이전 결정이 보류되었습니다. 다시 결정하세요.", "plan-stale"));
     if (told[n.id]) box.append(node("p", told[n.id], "plan-told"));
   }
@@ -196,71 +267,115 @@ function makePlanPane({root, session, request, onChange, nested}) {
   // Here the branches also carry the pane's controls.
   const STEP_MARK = {todo: "○", doing: "◐", done: "●", skipped: "–", blocked: "✕"};
 
-  function label(mark, chip, title) {
+  function label(mark, chip, title, id) {
     const l = node("div", null, "ptree-label");
-    l.append(node("span", mark, "ptree-mark"), node("span", title, "plan-title"), node("span", chip, "plan-chip"));
+    l.append(node("span", mark, "ptree-mark"));
+    if (id) l.append(node("code", id, "plan-id"));
+    l.append(node("span", title, "plan-title"), node("span", chip, "plan-chip"));
     return l;
   }
 
-  function optionBranch(n, o) {
+  // An option the session ruled out shows struck through with its reason
+  // and cannot be picked; the nodes that sit `under` an option hang below
+  // it, faded while it is not the path taken (claunch-vmcg7).
+  function optionBranch(n, o, inactive) {
     const decided = !!(n.result && n.result.choice);
     const chosen = decided && n.result.choice === o.label;
+    const auto = chosen && n.result.by === "agent";
     const li = node("li", null, "ptree-node ptree-option" + (chosen ? " ptree-chosen" : decided ? " ptree-unchosen" : "")
-      + (o.recommended ? " ptree-recommended" : ""));
+      + (o.recommended ? " ptree-recommended" : "") + (o.rejected ? " ptree-rejected" : ""));
     const card = node("div", null, "ptree-opt");
     const head = node("div", null, "plan-option-head");
     head.append(node("strong", o.label));
+    if (o.rejected) head.append(node("span", "배제", "plan-chip plan-chip-rejected"));
     if (o.recommended) head.append(node("span", "권장", "plan-chip"));
-    if (chosen) head.append(node("span", "선택됨", "plan-chip"));
+    if (chosen) head.append(node("span", auto ? "자동 선택됨" : "선택됨", "plan-chip" + (auto ? " plan-chip-auto" : "")));
     card.append(head,
       node("p", "기대 효과: " + o.effect, "plan-effect"),
       node("p", "리스크: " + o.risk, "plan-risk"));
-    if (!chosen) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`), null, `opt:${n.id}:${o.label}`));
+    if (o.rejected) card.append(node("p", "배제 이유: " + o.rejected, "plan-rejected"));
+    else if (!chosen && !inactive && !readOnly) card.append(button("이 안 선택", () => act(n.id, {rev: n.rev, choice: o.label}, `「${o.label}」을 선택해 세션에 전달했습니다`), null, `opt:${n.id}:${o.label}`));
     li.append(card);
+    const sub = (n.children || []).filter(c => c.under === o.label);
+    if (sub.length) {
+      const tree = stepTree(sub, inactive || !chosen);
+      if (!chosen) tree.append(node("li", decided ? "선택되지 않은 안의 하위 항목 (집계하지 않음)" : "이 안을 고르면 열리는 하위 항목", "ptree-branch-note"));
+      li.append(tree);
+    }
     return li;
   }
 
-  function stepBranch(n) {
+  function stepBranch(n, inactive) {
     const isDecision = n.kind === "decision";
+    const auto = isDecision && n.result && n.result.by === "agent";
     const state = isDecision ? (n.result ? "ptree-decided" : "ptree-undecided") : `ptree-st-${n.status || "todo"}`;
-    const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}`);
+    const li = node("li", null, `ptree-node ptree-${n.kind} ${state} plan-item plan-${n.kind}` + (inactive ? " ptree-inactive" : ""));
     li.append(isDecision
-      ? label("◆", n.result ? "결정됨" : "결정 필요", n.title)
-      : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title));
+      ? label("◆", n.result ? (auto ? "자동 선택됨" : "결정됨") : inactive ? "대기 (상위 안 미선택)" : "결정 필요", n.title, n.id)
+      : label(STEP_MARK[n.status] || STEP_MARK.todo, PLAN_STEP_STATUS[n.status] || n.status || "예정", n.title, n.id));
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     if (isDecision) {
       const opts = node("ul", null, "ptree plan-options-tree");
-      for (const o of n.options || []) opts.append(optionBranch(n, o));
-      const box = node("div", null, "plan-decision-box");
-      box.append(noteBox(n, "선택에 붙일 메모 (선택 사항)"));
-      tail(n, box);
-      li.append(opts, box);
+      for (const o of n.options || []) opts.append(optionBranch(n, o, inactive));
+      li.append(opts);
+      if (!inactive) {
+        const box = node("div", null, "plan-decision-box");
+        if (!readOnly) box.append(noteBox(n, "선택에 붙일 메모 (선택 사항)"));
+        tail(n, box);
+        li.append(box);
+      }
     }
-    if ((n.children || []).length) li.append(stepTree(n.children));
+    const common = (n.children || []).filter(c => !(isDecision && c.under));
+    if (common.length) li.append(stepTree(common, inactive));
     return li;
   }
 
-  function stepTree(nodes) {
+  function stepTree(nodes, inactive) {
     const ul = node("ul", null, "ptree ptree-steps");
-    for (const n of nodes) ul.append(stepBranch(n));
+    for (const n of nodes) ul.append(stepBranch(n, inactive));
     return ul;
   }
 
   function closureItem(n) {
     const verify = n.kind === "verify";
-    const res = n.result ? (verify ? `ptree-st-${n.result.verdict === "passed" ? "done" : "blocked"}` : "ptree-st-done") : "ptree-st-todo";
+    const VERIFY_ST = {passed: "done", deferred: "skipped"};
+    const res = n.result ? (verify ? `ptree-st-${VERIFY_ST[n.result.verdict] || "blocked"}` : "ptree-st-done") : "ptree-st-todo";
     const li = node("li", null, `ptree-node ptree-closure ${res} plan-item plan-${n.kind}`);
-    li.append(label(n.result ? "●" : "○", verify ? "사람 확인" : "후속 후보", n.title));
+    li.append(label(n.result ? (verify && n.result.verdict === "deferred" ? "–" : "●") : "○", verify ? "사람 확인" : "후속 후보", n.title, n.id));
+    const from = fromChip(n);
+    if (from) li.append(from);
     if (n.detail) li.append(node("p", n.detail, "plan-detail"));
     const row = node("div", null, "plan-actions");
-    if (verify) {
+    if (readOnly) {
+      // a sealed round: what was decided, no controls
+    } else if (verify) {
       row.append(button("통과", () => act(n.id, {rev: n.rev, verdict: "passed"}, "통과로 전달했습니다"), null, `verdict:${n.id}:passed`),
-                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다"), null, `verdict:${n.id}:failed`));
-      li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지)"), row);
+                 button("실패", () => act(n.id, {rev: n.rev, verdict: "failed"}, "실패로 전달했습니다"), null, `verdict:${n.id}:failed`),
+                 button("보류", () => act(n.id, {rev: n.rev, verdict: "deferred"}, "보류로 전달했습니다 — 세션이 이슈로 넘깁니다"), null, `verdict:${n.id}:deferred`));
+      li.append(noteBox(n, "확인 메모 (실패면 필수: 무엇이 잘못됐는지 · 보류는 지금 확인할 수 없는 항목)"), row);
+    } else if (!n.result && n.status === "done") {
+      // the session disposed of it itself (th-62379d): nothing to decide
     } else {
       for (const a of PLAN_ACTIONS) row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`), null, `act:${n.id}:${a.id}`));
       li.append(noteBox(n, "메모 (선택 사항)"), row);
     }
+    tail(n, li);
+    return li;
+  }
+
+  /* A note (th-62379d): for the record, read once at the end; it waits on
+     nobody. The user may still take it into this round or hand it over as
+     an issue (claunch-i0whx) -- optional buttons, no "버림": leaving it
+     alone already does nothing. */
+  function noteItem(n) {
+    const li = node("li", null, "ptree-node ptree-closure ptree-st-skipped plan-item plan-note-item");
+    li.append(label("·", "참고", n.title, n.id));
+    if (n.detail) li.append(node("p", n.detail, "plan-detail"));
+    if (readOnly) { tail(n, li); return li; }   // a sealed round: no controls
+    const row = node("div", null, "plan-actions");
+    for (const a of PLAN_ACTIONS.filter(a => NOTE_ACTIONS.includes(a.id)))
+      row.append(button(a.label, () => act(n.id, {rev: n.rev, action: a.id}, `「${a.label}」로 전달했습니다`), null, `act:${n.id}:${a.id}`));
+    li.append(noteBox(n, "메모 (선택 사항 · 누르지 않아도 종료를 막지 않습니다)"), row);
     tail(n, li);
     return li;
   }
@@ -309,6 +424,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     const state = viewState();
     el.replaceChildren();
     draw(el);
+    drawn = fingerprint();
     restoreView(state);
   }
 
@@ -317,6 +433,13 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if (error) { const a = node("p", error, "plan-error"); a.setAttribute("role", "alert"); shell.append(a); }
     if (!data) { shell.append(node("p", error ? "" : "loading…", "wf-note")); el.append(shell); return; }
     const p = data.plan;
+    readOnly = !!(p && p.sealed);
+    const bar = nested ? null : roundBar();
+    if (bar) shell.append(bar);
+    if (!p && viewing) {
+      shell.append(node("p", "이 회차의 기록을 찾지 못했습니다.", "plan-empty"));
+      el.append(shell); return;
+    }
     if (!p) {
       shell.append(node("p", "이 세션은 아직 계획을 쓰지 않았습니다 (plan_set).", "plan-empty"));
       // a parent without a plan of its own still shows its children's
@@ -327,7 +450,10 @@ function makePlanPane({root, session, request, onChange, nested}) {
     const head = node("div", null, "plan-pane-head");
     head.append(node("strong", p.title), node("span", `rev ${p.revision}` + (p.issue ? ` · ${p.issue}` : ""), "plan-muted"));
     shell.append(head);
-    if (joint && joint.sessions > 1) {
+    if (readOnly) {
+      shell.append(node("p", `지난 회차 ${p.round == null ? "(회차 미상)" : p.round + "회차"} · 봉인 ${p.closed_at || ""} · 읽기 전용`, "plan-sealed"));
+    }
+    if (!readOnly && joint && joint.sessions > 1) {
       const row = node("div", null, "plan-joint-bar");
       row.append(node("span", `연관 세션 ${joint.sessions}개 · 내 결정 대기 ${joint.waiting}건`, "plan-muted"),
                  button(jointOpen ? "이 세션만 보기" : "연관 세션 함께 보기", () => { jointOpen = !jointOpen; render(); }, null, "joint-toggle"));
@@ -344,22 +470,31 @@ function makePlanPane({root, session, request, onChange, nested}) {
     if ((p.steps || []).length) shell.append(stepTree(p.steps));
     else shell.append(node("p", "단계가 없습니다.", "plan-muted"));
 
+    const gated = (p.closure || []).filter(n => n.kind !== "note");
+    const notes = (p.closure || []).filter(n => n.kind === "note");
     shell.append(node("h4", "종료 조건", "plan-section"));
-    if ((p.closure || []).length) {
+    if (gated.length) {
       const ul = node("ul", null, "ptree ptree-closures");
-      for (const n of p.closure) ul.append(closureItem(n));
+      for (const n of gated) ul.append(closureItem(n));
       shell.append(ul);
     } else shell.append(node("p", "사람 확인 항목·후속 후보가 없습니다.", "plan-muted"));
+    if (notes.length) {
+      shell.append(node("h4", "참고 (최종 확인용 · 게이트 없음)", "plan-section"));
+      const ul = node("ul", null, "ptree ptree-notes");
+      for (const n of notes) ul.append(noteItem(n));
+      shell.append(ul);
+    }
 
     if (!s.closable && s.blockers.length) {
       const det = node("details", null, "plan-blockers");
       det.append(node("summary", `닫을 수 없는 이유 ${s.blockers.length}건`));
       const ul = node("ul");
-      for (const b of s.blockers) ul.append(node("li", `${b.who === "user" ? "[내 차례]" : "[세션]"} ${b.title} — ${b.why}`));
+      for (const b of s.blockers) ul.append(node("li", `${b.who === "user" ? "[내 차례]" : "[세션]"} ${b.id ? b.id + " " : ""}${b.title} — ${b.why}`));
       det.append(ul);
       shell.append(det);
     }
 
+    if (readOnly) { el.append(shell); return; }
     const fb = node("div", null, "plan-feedback");
     const t = node("textarea"); t.rows = 2; t.value = feedback; t.disabled = busy;
     t.placeholder = "계획에 대한 의견 (방향 수정, 빠진 단계 등) — 세션 터미널로 전달됩니다";
@@ -375,7 +510,7 @@ function makePlanPane({root, session, request, onChange, nested}) {
     ++seq; clearTimeout(timer); timer = null;
     for (const name of Object.keys(members)) { members[name].view.stop(); delete members[name]; }
   }
-  return {open: load, stop, _state: () => ({data, notes, joint})};
+  return {open: load, stop, _state: () => ({data, notes, joint, rounds, viewing})};
 }
 
 async function planRequest(path, method = "GET", body) {

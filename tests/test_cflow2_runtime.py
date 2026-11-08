@@ -307,6 +307,86 @@ def test_loop_limit_reset_refusals(tmp_path):
     assert d.status()["status"] == "waiting_approval"
 
 
+SELF_ANSWER = """
+        nodes:
+          s: {prompt: S, returns: {ok: {n: int}}}
+        body:
+          loop:
+            while: "true"
+            max: 1
+            self_answer: {probe: "check-the-wait", describe: 착지했는가}
+            do: s
+"""
+
+
+def _self_extend(d, runner, reason="상위가 머지 커밋 해시를 보냈다"):
+    return runtime.self_extend_loop(None, reason=reason, runner=runner, **d.kw())
+
+
+def test_a_declared_check_opens_the_loop_limit_for_the_driver(tmp_path):
+    """claunch-9poqc: a loop at its max that declares ``self_answer`` can be
+    opened by the run's driver, one iteration, once its check exits 0 -- the
+    turn a merge notice wakes does not have to wait for a person."""
+    seen = []
+
+    def runner(probe, cwd, **kw):
+        seen.append((probe, cwd))
+        return (0, "landed")
+
+    d = Drv(tmp_path, SELF_ANSWER)
+    d.report("s", "ok", {"n": 1})
+    assert d.st["reason"] == "loop_limit"
+    lim = d.st["loop_limits"][0]
+    assert lim["self_answer"] == {"describe": "착지했는가", "tool": "flow_extend"}
+    assert d.state()["approvals"][0]["self_answer"]["describe"] == "착지했는가"
+    assert d.events("waiting")[-1]["self_answer"] is True
+
+    d.st = _self_extend(d, runner)
+    assert seen == [("check-the-wait", d.cwd)]
+    assert d.st["status"] == "running" and d.tasks() == ["s"]
+    ev = d.events("selected")[-1]
+    assert (ev["option"], ev["by"], ev["by_self"], ev["reason"]) == (
+        "extend", 1, True, "상위가 머지 커밋 해시를 보냈다")
+    assert d.state()["approvals"] == []
+    # one iteration, not a blank cheque: the limit stands again after it
+    d.report("s", "ok", {"n": 2})
+    assert d.st["reason"] == "loop_limit"
+
+
+def test_a_failing_check_leaves_the_limit_to_a_person(tmp_path):
+    def runner(probe, cwd, **kw):
+        return (1, "not merged yet")
+
+    d = Drv(tmp_path, SELF_ANSWER)
+    d.report("s", "ok", {"n": 1})
+    with pytest.raises(runtime.FlowError, match="did not pass"):
+        _self_extend(d, runner)
+    d.status()
+    assert d.st["status"] == "waiting_approval" and d.st["reason"] == "loop_limit"
+    assert len(d.st["loop_limits"]) == 1
+    assert d.state()["approvals"], "the person's card is still standing"
+    assert not d.events("selected")
+
+
+def test_a_loop_without_the_check_is_a_persons_limit(tmp_path):
+    d = Drv(tmp_path, TASKS + """
+        body:
+          loop: {while: "true", max: 1, do: a}
+    """)
+    d.do("a")
+    with pytest.raises(runtime.FlowError, match="declares no self_answer"):
+        _self_extend(d, lambda probe, cwd, **kw: (0, "would have passed"))
+    assert d.status()["reason"] == "loop_limit"
+
+
+def test_a_self_answered_limit_still_needs_a_reason(tmp_path):
+    d = Drv(tmp_path, SELF_ANSWER)
+    d.report("s", "ok", {"n": 1})
+    with pytest.raises(runtime.FlowError, match="say why"):
+        _self_extend(d, lambda probe, cwd, **kw: (0, "landed"), reason="  ")
+    assert d.status()["reason"] == "loop_limit"
+
+
 def test_until_runs_body_first(tmp_path):
     d = Drv(tmp_path, """
         nodes:
@@ -464,6 +544,70 @@ def test_par_quorum_unreachable(tmp_path):
     d = Drv(tmp_path, PAR.replace("{settle}", "quorum:3"))
     d.report("f", "fail")
     assert d.st["status"] == "failed"
+
+
+GATE = TASKS + """
+body:
+  par:
+    settle: {settle}
+    branches:
+      work: {loop: {while: "true", max: 2, do: a}}
+      gate:
+        id: door
+        choose:
+          chooser: user
+          options:
+            open: {then: b}
+"""
+
+
+def _optional_of(d):
+    return {c["label"] or c["node"]: c["optional"] for c in d.st["choices"]}
+
+
+def test_optional_choice_is_the_settle_of_the_region_around_it(tmp_path):
+    """``optional`` on a choice (claunch-hbmhk): the region around it settles
+    without its branch, so the run carries on and the engine cancels the
+    door. Only the settle modes that decide on fewer than every branch can
+    promise that, and a structure that does not prove it answers False -- a
+    gate that really stops the run must never be drawn as a choice."""
+    sub = tmp_path
+
+    def opt(name, settle):
+        (sub / name).mkdir()
+        return _optional_of(Drv(sub / name, GATE.replace("{settle}", settle)))
+
+    assert opt("race", "race") == {"door": True}
+    assert opt("any", "any") == {"door": True}
+    # Every branch of an ``all``/``allSettled`` region is required.
+    assert opt("all", "all") == {"door": False}
+    assert opt("settled", "allSettled") == {"door": False}
+    # A quorum needs K branches, so the door is skippable while K is below
+    # the number of branches.
+    assert opt("q1", "quorum:1") == {"door": True}
+    assert opt("q2", "quorum:2") == {"door": False}
+
+    # One branch alone: race and any behave like all, and a choice outside
+    # any par is the plain stop it always was.
+    (sub / "solo").mkdir()
+    assert _optional_of(Drv(sub / "solo", TASKS + """
+        body:
+          par:
+            settle: race
+            branches:
+              gate:
+                id: door
+                choose:
+                  chooser: user
+                  options: {open: {then: b}}
+    """)) == {"door": False}
+    (sub / "plain").mkdir()
+    assert _optional_of(Drv(sub / "plain", TASKS + """
+        body:
+          choose:
+            chooser: user
+            options: {open: {then: b}}
+    """)) == {"body": False}
 
 
 def test_timeout_goes_to_else(tmp_path):

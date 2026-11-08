@@ -21,6 +21,7 @@ Grammar (lowest precedence first)::
               | ("items" | "count" | "fresh") "(" expr ("," expr)? ")"
               | "exists" "(" expr ")"
               | "side" "(" expr ")"
+              | "now" "(" ")"
     path     := ("." field | "[" expr "]")+
 
 The collection functions (``docs/cflow-v2.md`` 2.7, 「읽기」) read records
@@ -31,7 +32,11 @@ free of run state. ``side(name)`` (doc 2.9) is the mapping the resolver
 returns for the session's side run ``name`` (``live``, ``status``, ``run``,
 ``workflow``, ``scope``), read with a path: ``side('stack').live``. Without a
 resolver they raise :class:`ExprError`. ``guide(name)`` (2.10) reads the
-question type declarations under :data:`QUESTIONS_KEY`. Root names that
+question type declarations under :data:`QUESTIONS_KEY`. ``now()`` is the one
+call with no argument: the current UTC time as the ISO-8601 second-precision
+string the run store itself writes (``2026-11-06T07:26:18+00:00``), so a
+record that stamps a time here sorts against every other stamp the run
+keeps. Root names that
 start with ``__`` are never readable as references.
 
 A reference whose root or path does not exist evaluates to ``null``. Ordering
@@ -49,6 +54,7 @@ refuses on the way (``TypeError``, ``ValueError``, ``RecursionError``,
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -60,6 +66,14 @@ __all__ = ["ExprError", "Expr", "parse", "evaluate", "references", "truthy",
 COLLECTIONS_KEY = "__collections__"
 #: Where the runtime puts the chart's question types (name -> declaration).
 QUESTIONS_KEY = "__questions__"
+
+
+def now_iso() -> str:
+    """The current UTC time as ``now()`` returns it: the same ISO-8601,
+    second-precision string the run store writes for its own stamps, so a
+    value recorded through the expression language sorts and groups against
+    every other stamp the run keeps (``2026-11-06T07:26:18+00:00``)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class ExprError(Exception):
@@ -367,6 +381,11 @@ class _Parser:
                     raise self.error(f"{word}() takes one argument")
                 self.expect_punct(")")
                 return self.parse_post(("call", word, arg, tok.col))
+            if word == "now":
+                self.next()
+                self.expect_punct("(")
+                self.expect_punct(")")
+                return self.parse_post(("now", tok.col))
             if word in _KEYWORDS:
                 raise self.error(f"unexpected keyword {word!r}", tok)
             raise self.error(
@@ -528,6 +547,8 @@ class _Eval:
             return self.compare(node[1], self.run(node[2]), self.run(node[3]), node[4])
         if kind == "call":
             return self.call(node[1], self.run(node[2]), node[3])
+        if kind == "now":
+            return now_iso()
         if kind == "ccall":
             return self.collection_call(node[1], [self.run(a) for a in node[2]], node[3])
         if kind == "post":

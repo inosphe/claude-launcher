@@ -407,6 +407,29 @@ def _split_incomplete_utf8(data: bytes) -> Tuple[bytes, bytes]:
     return data, b""
 
 
+def _first_typed_char(data: bytes) -> str:
+    """The first character in ``data`` a person typed, or ``""``.
+
+    Used only when a composer goes from empty to holding something, so the
+    character returned is the one that opens the line. Escape sequences are
+    skipped — the terminal's own reports and the bracketed-paste markers are
+    not text — and control keys carry nothing printable, so a frame of
+    ``C-u`` alone answers ``""``.
+
+    A multi-byte character arrives as consecutive one-byte spans (see
+    :func:`_input_tokens`), which is why the bytes are collected first and
+    decoded once rather than decoded span by span.
+    """
+    raw = bytearray()
+    for kind, i, j in _input_tokens(data):
+        if kind == "byte":
+            raw += data[i:j]
+    for ch in bytes(raw).decode("utf-8", errors="replace"):
+        if ch.isprintable():
+            return ch
+    return ""
+
+
 def draft_edit_from_bytes(
     data: bytes, *, in_paste: bool = False
 ) -> Tuple[int, bool, bool]:
@@ -909,6 +932,14 @@ class Session:
         #: person's request goes down; the next boot re-judges from
         #: scratch, same as it always did.
         self.resumed_by_human = False
+        #: Epoch seconds when :class:`SessionManager` brought this incarnation
+        #: back from an exited record (respawn, wake, resume out of a pause,
+        #: hold or kill) or restarted it under a changed definition (a key
+        #: switch, a borrow) -- None for a fresh session and for a restore
+        #: after a daemon restart. The fault pause leaves the session alone
+        #: for a grace after it (``fault_pause.GRACE``, claunch-x9agn). In
+        #: memory only.
+        self.resumed_at: Optional[float] = None
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
@@ -973,6 +1004,15 @@ class Session:
         #: composer (claunch-wzx2r). A composing mark opens a draft with this
         #: still at 0 — nothing has reached the composer yet.
         self._draft_chars = 0
+        #: The first character a person put into that composer, or ``""``.
+        #: One character is all the delivery path needs: Claude Code's bash
+        #: mode is a *mode*, opened by a leading ``!`` that never appears in
+        #: the query, so after C-u empties the line the mode is still on and
+        #: the next paste would be run as a shell script (claunch-n8tji).
+        #: Knowing which line was opened that way is what tells the sweep in
+        #: :meth:`_deliver` to send the key that leaves the mode, and keeps
+        #: that extra key out of harnesses that have no such mode.
+        self._draft_head = ""
         #: Bytes of an escape sequence or a UTF-8 character that were cut off
         #: at the end of the last keystroke frame, and when they arrived. They
         #: are read with the next frame's bytes instead of being taken for
@@ -1858,6 +1898,45 @@ class Session:
                 )
                 await self.write_bytes(b"\r")
                 await asyncio.sleep(FORCE_DRAFT_SETTLE)
+            else:
+                # A composer the guard let go of is not an empty composer:
+                # DRAFT_GUARD ends the *hold*, it cannot delete what is in the
+                # line, and pasting into that line is the splice the refusal
+                # above exists to prevent — worse, when the line opens with
+                # the harness's bash-mode marker (``!``) the Enter that
+                # submits the paste runs the delivery as a shell script
+                # (claunch-n8tji). C-u is the keystroke the human would press;
+                # the count goes to the log because the only thing this loses
+                # is text typed at least DRAFT_GUARD ago.
+                stale = int(getattr(self, "_draft_chars", 0) or 0)
+                if stale > 0 and not self.draft_open():
+                    log.info(
+                        "delivery to %r cleared an abandoned composer (%d chars, "
+                        "left on screen for longer than DRAFT_GUARD); a paste "
+                        "would have been submitted into that line",
+                        self.sdef.name,
+                        stale,
+                    )
+                    await self.write_bytes(b"\x15")
+                    if getattr(self, "_draft_head", "") == "!":
+                        # C-u empties the query; it does not leave bash mode,
+                        # which is a mode rather than a line and was opened by
+                        # a ``!`` that never entered the query at all. A
+                        # backspace in the now-empty query is the key that
+                        # closes it — Escape and C-c also close it, but they
+                        # also cut off whatever this session is doing, and a
+                        # delivery must not stop the receiver's turn to be
+                        # heard (claunch-n8tji, s954-rev2's review).
+                        log.info(
+                            "delivery to %r closed bash mode before pasting "
+                            "(the abandoned line opened with '!')",
+                            self.sdef.name,
+                        )
+                        await self.write_bytes(b"\x7f")
+                    self._draft_open = False
+                    self._draft_chars = 0
+                    self._draft_head = ""
+                    self._draft_uncommitted = False
             # State-dependent reminders resolve after readiness and draft
             # waits, so a newer user rating can replace or cancel them.
             if before is not None:
@@ -2208,9 +2287,17 @@ class Session:
                 # The line went away with its submit (or was discarded);
                 # only what was typed after it, in this same frame, remains.
                 self._draft_chars = max(0, delta)
+                self._draft_head = (
+                    _first_typed_char(data) if self._draft_chars > 0 else ""
+                )
                 self._draft_open = self._draft_chars > 0
                 self._draft_uncommitted = False
             elif delta:
+                if not getattr(self, "_draft_chars", 0):
+                    # The composer was empty, so this frame opens the line —
+                    # and the character it opens with is the one the delivery
+                    # path needs to know (``!`` is bash mode, claunch-n8tji).
+                    self._draft_head = _first_typed_char(data)
                 self._draft_chars = max(
                     0, getattr(self, "_draft_chars", 0) + delta
                 )
@@ -2497,6 +2584,7 @@ class Session:
         await self.write_bytes(b"\r")
         self._draft_open = False
         self._draft_chars = 0
+        self._draft_head = ""
         self._draft_uncommitted = False
         self._input_paste = False
         self._input_paste_at = 0.0

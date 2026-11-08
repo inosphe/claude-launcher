@@ -101,12 +101,15 @@ log = logging.getLogger("claunch.daemon.cflow2")
 
 DEFAULT_POLL = 10.0
 
-#: How often a run still waiting on its driver (an unreported task, an agent
-#: choose nobody picked) is told again, in seconds. A choose has no wait to
-#: fire, so without this the run is silent from its entry until a daemon
-#: restart's resume nudge -- the s1308 seven-hour stuck (claunch-slia4.1).
-#: Configurable as ``cflow2_renudge_interval`` (store.DAEMON_DEFAULTS); 0
-#: or less disables the re-nudge.
+#: How long a run still waiting on its driver (an unreported task, an agent
+#: choose nobody picked) waits before it is told ONE more time, in seconds. A
+#: choose has no wait to fire, so without this the run is silent from its
+#: entry until a daemon restart's resume nudge -- the s1308 seven-hour stuck
+#: (claunch-slia4.1). The nudge is owed once per wait: the same wait is never
+#: repeated, and a different one (a task reported, a choose picked) gets its
+#: own single nudge (claunch-3sen5). Configurable as
+#: ``cflow2_renudge_interval`` (store.DAEMON_DEFAULTS); 0 or less disables the
+#: re-nudge.
 DEFAULT_RENUDGE_INTERVAL = 600.0
 
 #: Who the journal names when a session's own ending finished its run: the
@@ -198,11 +201,12 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     if env:
         full_env.update({str(k): str(v) for k, v in env.items()})
     cmd = runtime.expand_argv(probe, full_env) if isinstance(probe, list) else str(probe)
+    cmd, shell = runtime.shell_command(cmd)
     kwargs: Dict[str, Any] = {}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True
     try:
-        proc = subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=cwd, env=full_env,
+        proc = subprocess.Popen(cmd, shell=shell, cwd=cwd, env=full_env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, text=True, **kwargs)
     except OSError as exc:
@@ -332,6 +336,15 @@ class Cflow2Clock:
         #: ``_open_delegations``: a restart forgets it and the resume nudge
         #: covers the down time.
         self._driver_nudged: Dict[Tuple[str, str], float] = {}
+        #: ``(cwd, scope) -> the wait (``_wait_identity``) that already had its
+        #: one re-nudge``. The same wait is never told twice; a different one
+        #: clears this and earns its own single nudge (claunch-3sen5).
+        self._driver_nudge_done: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+        #: ``(cwd, scope) -> the batch windows already announced`` -- each a
+        #: ``(choice instance, option, oldest arrival)`` whose window opened
+        #: while the driver had not picked it (claunch-1brxe). In memory
+        #: only, like the nudge records.
+        self._batch_told: Dict[Tuple[str, str], frozenset] = {}
         #: ``(cwd, scope) -> (the slot's files, when the full pass ran)`` for
         #: a held driver's slot that pass found quiescent; a pass skips it
         #: while both still hold. In memory only, so a restart -- whose first
@@ -810,6 +823,10 @@ class Cflow2Clock:
         if first.get("status") not in runtime.LIVE_STATUSES:
             self._open_delegations.pop((cwd, scope), None)
             self._driver_nudged.pop((cwd, scope), None)
+            # The wait's record too: a run started in this slot next reads the
+            # same instance ids, and it is owed its own single nudge.
+            self._driver_nudge_done.pop((cwd, scope), None)
+            self._batch_told.pop((cwd, scope), None)
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
@@ -826,6 +843,7 @@ class Cflow2Clock:
             notices.append((cwd, payload.get("driver") or _name(scope),
                             moved_block(scope, payload, why=WHY_DELEGATION)))
             told = True
+        told = self._batch_open(cwd, scope, payload, clock_now, notices, told)
         self._renudge(cwd, scope, payload, clock_now, notices, told)
         # Taken now, not only at the end of the pass: a step below that raises
         # would leave the old set, and every later pass would announce the
@@ -866,6 +884,86 @@ class Cflow2Clock:
                               driver=driver)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices, driver=driver)
+        if runtime.fork_calls_pending(state):
+            self._fork_calls(cwd, scope, state, notices, halted)
+
+    # -- fork-mode calls (docs 2.12.2, claunch-8t5r0.2) ----------------------
+    def _call_fork_refusal(self, driver: str) -> str:
+        """Why the driver of a fork-mode call cannot be quick-forked now:
+        not live, a harness with no conversation to copy, a quick-fork
+        itself, too little context left (the same gate a fork delegation
+        passes, :meth:`_fork_refused`)."""
+        session = self._live(driver)
+        if session is None:
+            return f"no live session {driver!r} to quick-fork"
+        why = cflow2_exec.harness_fork_refusal(session)
+        if why:
+            return why
+        return cflow2_exec.fork_refusal(session, min_left=self._fork_min(),
+                                        left=self.context_left)
+
+    def _fork_calls(self, cwd: str, scope: str, state: Dict[str, Any],
+                    notices: List[Notice], halted: bool) -> None:
+        for rec in runtime.fork_calls_pending(state):
+            if self.stop.is_set():
+                return
+            fork = rec.get("fork") or {}
+            cid = str(rec.get("id") or "")
+            driver = str(rec.get("driver") or state.get("driver") or "") or _name(scope)
+            if fork.get("status") == runtime.FORK_QUEUED:
+                if halted:
+                    continue
+                why = self._call_fork_refusal(driver)
+                if not why:
+                    try:
+                        copy = self.fork(driver, cflow2_exec.call_fork_body(
+                            rec, cwd=cwd, scope=scope, driver=driver))
+                    except Exception as exc:  # noqa: BLE001 - every refusal falls back
+                        why = f"quick-fork failed: {exc}"
+                    else:
+                        try:
+                            runtime.call_forked(cid, copy, cwd=cwd, scope=scope)
+                        except (runtime.FlowError, cstore.StoreError) as exc:
+                            log.warning("cflow2 call %s/%s fork %s: %s", scope, cid, copy, exc)
+                        continue
+                self._call_fallback(cwd, scope, rec, driver, why, notices)
+            elif fork.get("status") == runtime.FORK_RUNNING:
+                copy = str(fork.get("session") or "")
+                if not copy or self._live(copy) is not None:
+                    continue
+                nested = rec.get("nested") or {}
+                try:
+                    callee = cstore.RunStore(nested.get("cwd"), nested.get("scope")).load_state()
+                except (cstore.StoreError, OSError):
+                    callee = {}
+                if callee.get("status") not in runtime.LIVE_STATUSES:
+                    continue  # finished: the result is on its way back
+                self._call_fallback(
+                    cwd, scope, rec, driver,
+                    f"the fork session {copy!r} ended before the callee finished", notices)
+
+    def _call_fallback(self, cwd: str, scope: str, rec: Dict[str, Any], driver: str,
+                       why: str, notices: List[Notice]) -> None:
+        """A fork-mode call goes inline: recorded on the call (the session
+        card and header read it from the rail), typed into the driver, and
+        filed as a warning notification event (spawn_events)."""
+        cid = str(rec.get("id") or "")
+        try:
+            runtime.call_fork_fallback(cid, why, cwd=cwd, scope=scope)
+        except (runtime.FlowError, cstore.StoreError) as exc:
+            log.warning("cflow2 call %s/%s fallback: %s", scope, cid, exc)
+            return
+        with self._lock:
+            self.results.append({"call": cid, "result": "fallback", "error": why})
+        notices.append((cwd, driver, call_fallback_block(scope, rec, why)))
+        try:
+            from . import spawn_events
+
+            spawn_events.report(driver, kind="fallback", reason=why,
+                                site="cflow2 sub procedure fork",
+                                procedure=rec.get("procedure"), call=cid, run_scope=scope)
+        except Exception:  # noqa: BLE001 - the notice must not stop the tick
+            log.exception("cflow2 call fallback event")
 
     def _delegation_closed(self, cwd: str, scope: str, state: Dict[str, Any]) -> bool:
         """Whether a delegation open at the end of the last pass is closed now.
@@ -929,40 +1027,123 @@ class Cflow2Clock:
 
     def _renudge(self, cwd: str, scope: str, payload: Dict[str, Any],
                  clock_now: float, notices: List[Notice], told: bool) -> None:
-        """Tell a run's driver again when the run has waited on it past the
-        re-nudge interval (claunch-slia4.1).
+        """Tell a run's driver once more when the run has waited on it past the
+        re-nudge interval -- once per wait, never repeatedly (claunch-slia4.1,
+        claunch-3sen5).
 
         A choose has no wait to fire, so ``ticked`` stays 0 and the run is
         silent from its entry -- the s1308 stuck. The interval starts at the
         wait's first sight (or at any notice above, which is fresh context for
         the driver) and stops when the run stops waiting on its driver, so a
-        resolved choose or a finished run cannot be nudged about again. A busy
-        driver is skipped without spending the interval: when its turn ends,
-        the next pass re-nudges at once if the wait is already that old. A
+        resolved choose or a finished run cannot be nudged about again.
+
+        The nudge is owed once for a given wait. A driver that does not pick
+        the run up is left alone: repeating the same block every interval only
+        filled its terminal, and the typed text also reset
+        ``Session.quiet_for``, so the idle hold could never free the session
+        (s1249 got one every ten minutes for six hours). A wait that is
+        actually a different one -- another task, another choose, another
+        sub-agent delegation (``_wait_identity``) -- clears the record and
+        earns its own single nudge.
+
+        A busy driver is skipped without spending the interval: when its turn
+        ends, the next pass nudges at once if the wait is already that old. A
         driver in an active session fault is skipped the same way, so the
         first pass after the fault's window (a usage limit's reset) tells it
         once and the run picks up again (claunch-ijot0)."""
         key = (cwd, scope)
         if not _waits_on_driver(payload):
             self._driver_nudged.pop(key, None)
+            self._driver_nudge_done.pop(key, None)
             return
+        identity = _wait_identity(payload)
         if told:
+            # A real notice just went out: fresh context for the driver, and
+            # this wait's one nudge is still owed, counted from now.
+            self._driver_nudged[key] = clock_now
+            self._driver_nudge_done.pop(key, None)
+            return
+        done = self._driver_nudge_done.get(key)
+        if done is not None and done != identity:
+            # The wait the last nudge was about is gone (a task reported, a
+            # choose picked, a delegation submitted). A new wait, its own
+            # interval, one nudge.
+            self._driver_nudged[key] = clock_now
+            self._driver_nudge_done.pop(key, None)
+            return
+        if done is not None:
+            return  # this wait already had its one nudge; stay quiet
+        last = self._driver_nudged.get(key)
+        if last is None:
             self._driver_nudged[key] = clock_now
             return
         interval = self._renudge_interval_seconds()
         if interval <= 0:
-            return
-        last = self._driver_nudged.get(key)
-        if last is None:
-            self._driver_nudged[key] = clock_now
             return
         if clock_now - last < interval or not self._driver_idle(scope):
             return
         if self._driver_faulted(scope):
             return
         self._driver_nudged[key] = clock_now
+        self._driver_nudge_done[key] = identity
         notices.append((cwd, payload.get("driver") or _name(scope),
                         moved_block(scope, payload, why=WHY_NUDGE)))
+
+    # -- batch windows on an open choose (claunch-1brxe) ---------------------
+
+    def _batch_open(self, cwd: str, scope: str, payload: Dict[str, Any],
+                    clock_now: float, notices: List[Notice], told: bool) -> bool:
+        """Tell the driver once when a batched option's window opens on a
+        choose it has not picked; returns whether a notice is going out.
+
+        A batched option (``batch: {collection, status, size}`` with an
+        ``interval``) is a window over a queue other sessions fill: a worker's
+        landing request goes into the leader's ``landing`` collection while
+        the leader sits at its standby choose. Nothing in the run moves when a
+        record arrives -- the choose is the same wait, so ``_renudge`` has
+        already spent its one nudge on it -- and a driver the idle hold freed
+        is woken only by a notice. The queue then filled, its window opened
+        (``size`` reached, or ``interval`` after the oldest arrival) and the
+        held leader never heard of it: the request sat unmerged until a person
+        noticed (claunch-1brxe, s1297).
+
+        So the window opening is announced like a held choice's would be,
+        once per window: a window is the choice instance, the option and the
+        oldest waiting record's arrival, so the same batch is not told twice
+        and the next one (after a take, or a different oldest record) is.
+        Typed to a held driver, :meth:`_deliver` wakes it. A driver in an
+        active session fault is skipped (``_renudge``'s rule); the window is
+        told on the first pass after the fault."""
+        key = (cwd, scope)
+        ready = set()
+        for choice in payload.get("choices") or []:
+            if choice.get("chooser") != ir.CHOOSER_AGENT or choice.get("held"):
+                continue
+            iid = str(choice.get("instance") or choice.get("id") or "")
+            for opt in choice.get("options") or []:
+                batch = opt.get("batch") if isinstance(opt, dict) else None
+                if not isinstance(batch, dict) or not batch.get("count"):
+                    continue
+                opens = batch.get("opens_epoch")
+                if (batch.get("count") or 0) >= (batch.get("size") or 0) \
+                        or opens is None or clock_now >= float(opens):
+                    ready.add((iid, str(opt.get("name") or ""), str(batch.get("first_at") or "")))
+        before = self._batch_told.get(key, frozenset())
+        if not ready:
+            self._batch_told.pop(key, None)
+            return told
+        new = ready - before
+        if not new:
+            self._batch_told[key] = frozenset(ready)
+            return told
+        if not told and self._driver_faulted(scope):
+            return told
+        self._batch_told[key] = frozenset(ready)
+        if told:
+            return told
+        notices.append((cwd, payload.get("driver") or _name(scope),
+                        moved_block(scope, payload, why=WHY_BATCH)))
+        return True
 
     # -- restarts (docs 2.2, restart) ----------------------------------------
     def _claim_restarts(self, cwd: str, scope: str, now: Optional[float],
@@ -1504,9 +1685,12 @@ def _slot_files(cwd: str, scope: str) -> Optional[Tuple[Any, ...]]:
 
 
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
+WHY_BATCH = ("a batched option's window opened -- the queue it gathers has "
+             "records waiting (size reached or interval passed)")
 WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
-WHY_NUDGE = ("the run is still waiting on you -- the clock re-nudges a waiting "
-             "driver on an interval (claunch-slia4.1)")
+WHY_NUDGE = ("the run is still waiting on you -- the clock nudges a waiting "
+             "driver once, after an interval, and then leaves it alone "
+             "(claunch-slia4.1, claunch-3sen5)")
 
 
 def _driver_runs(entry: Dict[str, Any]) -> bool:
@@ -1532,6 +1716,30 @@ def _waits_on_driver(payload: Dict[str, Any]) -> bool:
            for c in payload.get("choices") or []):
         return True
     return any(_driver_runs(d) for d in payload.get("delegations") or [])
+
+
+def _wait_identity(payload: Dict[str, Any]) -> Tuple[str, ...]:
+    """What the run is waiting on, as a value that changes when the wait does.
+
+    The re-nudge is owed once per wait, so the clock has to be able to tell
+    "still the same wait" from "a new one" (claunch-3sen5). It reads the
+    instance ids the payload carries, not the labels: a run that reports one
+    task into another of the same label would otherwise look unchanged, and
+    its new wait would never be announced. A task that entered again has a new
+    visit on its instance id for the same reason.
+    """
+    at: List[str] = []
+    for task in payload.get("tasks") or []:
+        at.append(str(task.get("instance") or task.get("id")
+                      or task.get("label") or ""))
+    for choice in payload.get("choices") or []:
+        if choice.get("chooser") == ir.CHOOSER_AGENT and not choice.get("held"):
+            at.append(str(choice.get("instance") or choice.get("id")
+                          or choice.get("label") or ""))
+    for entry in payload.get("delegations") or []:
+        if _driver_runs(entry):
+            at.append(str(entry.get("id") or entry.get("node") or ""))
+    return tuple(sorted(at))
 
 
 def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> str:
@@ -1581,6 +1789,26 @@ def fallback_block(scope: str, delegation: str, label: str, cause: str,
         "protocol: the child session could not be spawned, so this delegation's brief "
         "is yours to run. Call flow_status, then flow_delegate for its brief and "
         "submit the result.",
+        "---"])
+
+
+def call_fallback_block(scope: str, rec: Dict[str, Any], cause: str) -> str:
+    """The driver's wake-up when a fork-mode call could not fork: the callee
+    is its own to drive now (docs 2.12.2)."""
+    if len(cause) > 200:
+        cause = cause[:197] + "..."
+    nested = rec.get("nested") or {}
+    return "\n".join([
+        "---",
+        "# claunch cflow2: a sub procedure call fell back to inline -- "
+        "machine-generated, not typed by the user",
+        f"run: {scope}",
+        f"call: {rec.get('id')} ({rec.get('procedure')}, from task "
+        f"{rec.get('label') or rec.get('node')})",
+        f"fallback: fork -> inline ({cause})",
+        f"protocol: no fork drives this call, so you drive its callee run now: "
+        f"flow_status with scope {nested.get('scope')!r}, then its tasks. The session "
+        f"header and the notifications show this fallback to the user.",
         "---"])
 
 

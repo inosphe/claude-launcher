@@ -41,6 +41,30 @@ def test_the_threads_pack_says_how_to_alert_the_user():
     assert "qa_ask thread=<id>" in body
 
 
+def test_the_threads_pack_says_how_a_guest_answers_the_user_alone():
+    """claunch-ikcvw: a guest that wants only the user to read it writes
+    ``@user``; no mention would type the answer into the owner. The rule is
+    in the pack, not only in the daemon, because a guest decides to use it."""
+    body = prompt_packs.shipped("mcp-threads").body
+    assert "`@user`" in body
+    assert "names the person reading the\nthread and no session" in body   # the pack wraps its lines
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    assert "@user" in tools["thread_reply"]["description"]
+
+
+def test_the_threads_pack_says_an_unmentioned_guest_reply_reaches_the_owner():
+    """claunch-ikcvw.1: ``daemon/threads_api.session_mentions`` types a message
+    with no mention at all into the owner alone, a guest's replies included
+    (pinned from the code side by
+    ``test_threads_api.test_user_mention_keeps_a_guest_message_out_of_the_owner_terminal``).
+    The pack said the opposite -- "your answer stays in the thread unread
+    until it next reads it" -- so a guest who followed it would quietly wake
+    the owner, which is the noise ``@user`` exists to avoid."""
+    body = prompt_packs.shipped("mcp-threads").body
+    assert "stays in\nthe thread unread" not in body
+    assert "with no mention at all\n  your answer is typed into the owner alone" in body
+
+
 def test_the_threads_pack_says_a_diverged_topic_gets_a_new_thread():
     """A thread is one topic: content that left the thread's title goes to a
     new thread, and the alert procedure no longer reuses any open thread

@@ -28,7 +28,7 @@ const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
                          "web", "static");
-const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8").replace(/\r\n/g, "\n"); // CRLF on a Windows checkout
 
 let failures = 0;
 function check(what, got, want) {
@@ -151,6 +151,8 @@ function harness() {
           ["Start without skip permissions?",
            [["Back to the form", null],
             ["Start without skip permissions", true]]]);
+    check("...asked over the form it came from, so 'Back' has a place to go",
+          [asked.overForm], [true]);
     check("...and it names the cost with the attribution the page already uses",
           [/permission skipping off/.test(asked.body),
            /not Claude's own/.test(asked.body),
@@ -208,6 +210,180 @@ function harness() {
           true);
     check("...because the confirm never ticks the box on the operator's behalf",
           /skip_permissions\.checked\s*=/.test(body), false);
+  }
+
+  if (failures) {
+    console.error(`${failures} failure(s)`);
+    process.exit(1);
+  }
+  console.log("skip-permissions confirm: ok");
+})();
+
+/* ---- the question is asked OVER the form, not after closing it ----------
+   The confirm is raised from #new-session's own submit, and that form lives
+   inside the shared dialog's body. showModal used to close the session modal
+   first -- and sessionModalClose puts every row back to what it held when
+   the box opened -- so "Back to the form" ended on a form that was gone and
+   a box whose typing had been undone (claunch-9mwba). The two halves of the
+   fix are pinned here against the shipped functions: the caller asks with
+   `overForm`, and showModal parks the form node (never a field) and puts it
+   back whatever the answer is. */
+
+let focusedNow = null;   // node.focus() lands here; document.activeElement reads it
+
+function fakeNode(tag) {
+  const n = {
+    tag, textContent: "", innerText: "", type: "", disabled: false,
+    dataset: {}, children: [], listeners: {}, onclick: null,
+    classList: {
+      set: new Set(),
+      add(c) { this.set.add(c); },
+      remove(c) { this.set.delete(c); },
+      contains(c) { return this.set.has(c); },
+      toggle(c, on) { if (on) this.set.add(c); else this.set.delete(c); },
+    },
+    appendChild(child) { n.children.push(child); return child; },
+    addEventListener(ev, fn) { n.listeners[ev] = fn; },
+    removeEventListener(ev) { delete n.listeners[ev]; },
+    querySelector() { return n.children.find((c) => c.tag === "button") || null; },
+    focus() { focusedNow = n; },
+  };
+  // Both spellings clear the node: showModal writes `textContent = body`,
+  // the parking writes `innerText = ""`.
+  const clear = { get() { return ""; }, set() { n.children.length = 0; } };
+  Object.defineProperty(n, "textContent", {
+    get() { return n._text || ""; },
+    set(v) { n._text = v; n.children.length = 0; },
+  });
+  Object.defineProperty(n, "innerHTML", clear);
+  Object.defineProperty(n, "innerText", clear);
+  return n;
+}
+
+/* sliceFrom above starts counting at the first "{" after the name, which is
+   the parameter list for a function whose arguments are destructured --
+   showModal's are. This one starts at the "{" of the ") {" that opens the
+   body. */
+function sliceFunction(marker) {
+  const start = src.indexOf(marker);
+  if (start < 0) throw new Error(`cannot slice ${marker} from app.js`);
+  const open = src.indexOf(") {", src.indexOf("(", start)) + 2;
+  if (open < 2) throw new Error(`no body after ${marker}`);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1) + "\n";
+    }
+  }
+  throw new Error(`unbalanced braces after ${marker}`);
+}
+
+function overFormWorld() {
+  const els = {
+    "modal-overlay": fakeNode("div"),
+    "modal-title": fakeNode("h2"),
+    "modal-body": fakeNode("div"),
+    "modal-actions": fakeNode("div"),
+    "new-session": fakeNode("form"),
+    "new-view": fakeNode("div"),
+  };
+  els["new-session"].children.push(fakeNode("button"));  // its submit press
+  focusedNow = els["new-session"].children[0];
+  const doc = {
+    get active() { return focusedNow; },
+    listeners: {},
+    addEventListener(ev, fn) { doc.listeners[ev] = fn; },
+    removeEventListener(ev, fn) {
+      if (doc.listeners[ev] === fn) delete doc.listeners[ev];
+    },
+    createElement(tag) { return fakeNode(tag); },
+    contains() { return true; },
+  };
+  const state = { closed: 0, sessionModal: {} };
+  const out = {};
+  new Function(
+    "exports", "$", "document", "sessionModal", "sessionModalClose",
+    "sessionModalKey", "syncSessionModalChrome", "refitSoon",
+    sliceFunction("function showModal(") +
+    sliceFunction("function parkSessionForm(") +
+    sliceFunction("function restoreSessionForm(") +
+    "\nexports.ask = showModal;\n"
+  )(
+    out,
+    (id) => els[id] || null,
+    doc,
+    state.sessionModal,
+    () => { state.closed++; },
+    () => {},
+    () => {},
+    () => {}
+  );
+  return { els, doc, state, ask: (opts) => out.ask(opts) };
+}
+
+(async () => {
+  const ASK = {
+    title: "Start without skip permissions?",
+    body: "This session starts with permission skipping off.",
+    actions: [
+      { label: "Back to the form", value: null },
+      { label: "Start without skip permissions", value: true },
+    ],
+    overForm: true,
+  };
+
+  {
+    const w = overFormWorld();
+    const form = w.els["new-session"];
+    w.els["modal-body"].appendChild(form);   // where openSessionModal puts it
+    const pending = w.ask(ASK);
+    check("overForm parks the form out of the dialog body",
+          [w.els["modal-body"].children.includes(form),
+           w.els["new-view"].children.includes(form)],
+          [false, true]);
+    check("...without closing the session modal or resetting a row",
+          w.state.closed, 0);
+    check("...and the question owns the dialog meanwhile",
+          [w.els["modal-title"].textContent, w.els["modal-body"].children.includes(form)],
+          ["Start without skip permissions?", false]);
+    const back = w.els["modal-actions"].children.find(
+      (b) => b.tag === "button" && b.textContent === "Back to the form");
+    back.listeners.click();
+    check("Back to the form answers null", await pending, null);
+    check("...and the form is back in the dialog, still open",
+          [w.els["modal-body"].children.includes(form),
+           w.els["modal-overlay"].classList.contains("hidden")],
+          [true, false]);
+    check("...under the session modal's own Escape, not the question's",
+          [typeof w.doc.listeners.keydown, w.doc.listeners.keydown === undefined],
+          ["function", false]);
+    check("...and the session modal was never closed", w.state.closed, 0);
+    // The question's answers go with the question: left in the bar they
+    // stand over a form that never asks them again, and a press on one
+    // settles a promise that settled already (claunch-9mwba review).
+    check("...with the question's own buttons gone from the action bar",
+          w.els["modal-actions"].children.length, 0);
+  }
+
+  {
+    // The explicit start ("yes") must put the form back just the same: the
+    // submit goes on to launch and closes the box itself, and a form left in
+    // #new-view would make that close the box with an empty body.
+    const w = overFormWorld();
+    const form = w.els["new-session"];
+    w.els["modal-body"].appendChild(form);
+    const pending = w.ask(ASK);
+    const yes = w.els["modal-actions"].children.find(
+      (b) => b.tag === "button" && b.textContent === "Start without skip permissions");
+    yes.listeners.click();
+    check("the explicit start answers true", await pending, true);
+    check("...and the form is in the dialog for the launch that follows",
+          w.els["modal-body"].children.includes(form), true);
+    check("...with the session modal still open", w.state.closed, 0);
+    check("...and no answer of the question left behind in the bar",
+          w.els["modal-actions"].children.length, 0);
   }
 
   if (failures) {

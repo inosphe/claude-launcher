@@ -395,3 +395,30 @@ def test_questions_filed_before_the_rediscuss_choice_can_be_withdrawn_too(qa):
     qa.close("s1", closed["id"], 2)
     reopened = qa.answer(Q.USER, closed["id"], 3, choices=[Q.REDISCUSS], text="reopen and rethink")
     assert reopened["reopened"] and reopened["question"]["status"] == "answered"
+
+
+# -- a quick-fork's copy (claunch-yydhs) ---------------------------------- #
+
+def test_copy_open_carries_the_unanswered_questions_and_leaves_the_rest(qa):
+    waiting = qa.ask("s1", title="Which base?", body="ctx", options=["master", "stack"], multi=True)
+    answered = qa.ask("s1", title="already settled")
+    qa.answer(Q.USER, answered["id"], 1, choices=[], text="yes")
+    closed = qa.ask("s1", title="done with")
+    qa.close("s1", closed["id"], 1)
+    stale = qa.ask("s1", title="answered then reworded")
+    qa.answer(Q.USER, stale["id"], 1, text="old")
+    qa.update("s1", stale["id"], 2, title="answered then reworded again")
+
+    assert qa.copy_open("s1", "s1-qf1") == 2
+    copied = qa.list("s1-qf1")["questions"]
+    # created_at is stamped to the second, so the two land in id order:
+    # compare as a set, not as a sequence.
+    assert {q["title"] for q in copied} == {"Which base?", "answered then reworded again"}
+    assert all(q["status"] == "open" and q["answer"] is None for q in copied)
+    first = next(q for q in copied if q["title"] == "Which base?")
+    assert (first["body"], first["options"], first["multi"]) == ("ctx", waiting["options"], True)
+    assert first["id"] != waiting["id"]
+    assert first["thread"] is None
+    # the source is untouched: its answers and statuses are its own
+    assert qa.get(answered["id"])["status"] == "answered"
+    assert qa.get(waiting["id"])["status"] == "open"

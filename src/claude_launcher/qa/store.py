@@ -453,6 +453,41 @@ class QaStore:
                 })
         return out
 
+    # -- the daemon's copy (a quick-fork, claunch-yydhs) -------------------
+
+    def copy_open(self, source: str, target: str, *, actor: str = "daemon") -> int:
+        """Copy ``source``'s unanswered questions onto ``target`` as new open
+        questions: same title, body and options, a new id, no answer, and no
+        thread link (a copied thread gets a new id of its own). Answered and
+        closed questions are history and stay with the source -- a copy that
+        carried them would show the user questions they already settled.
+        The target's live-question limit still holds; returns how many
+        questions landed."""
+        with self._write() as db:
+            live = db.execute(
+                "SELECT COUNT(*) FROM questions WHERE session = ? AND status <> 'closed'", (target,)
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT * FROM questions WHERE session = ? AND status IN ('open', 'stale') "
+                "ORDER BY created_at, id", (source,)
+            ).fetchall()
+            now = _now()
+            copied = 0
+            for r in rows:
+                if live + copied >= MAX_LIVE_PER_SESSION:
+                    break
+                qid = "qa-" + secrets.token_hex(4)
+                while db.execute("SELECT 1 FROM questions WHERE id = ?", (qid,)).fetchone():
+                    qid = "qa-" + secrets.token_hex(4)
+                db.execute(
+                    "INSERT INTO questions (id, session, title, body, options, multi, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (qid, target, r["title"], r["body"], r["options"], int(r["multi"]), now, now),
+                )
+                self._event(db, self._load(db, qid), actor, "copy", data={"from": r["id"]})
+                copied += 1
+            return copied
+
     # -- the session's writes ---------------------------------------------
 
     def ask(self, actor: str, *, title, body=None, options=None, multi=False, thread=None) -> dict:

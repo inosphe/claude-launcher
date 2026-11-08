@@ -373,9 +373,12 @@ class StatusSession(FakeSession):
         return self._status
 
 
-def test_a_choose_waiting_driver_is_renudged_on_an_interval(tmp_path, monkeypatch):
+def test_a_choose_waiting_driver_is_nudged_once(tmp_path, monkeypatch):
     """claunch-slia4.1: a run left at an agent choose -- no wait to fire, so
-    the ticked-based notice never resends -- is told again on an interval."""
+    the ticked-based notice never resends -- is told again after an interval,
+    and claunch-3sen5: that is the only time. The same wait is never repeated
+    (s1249 got one every ten minutes for six hours, and each one reset the
+    idle hold's quiet clock)."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     _start(tmp_path, CHOOSE_RUN)
     clock = _clock(FakeManager(StatusSession("own", str(tmp_path))),
@@ -388,9 +391,9 @@ def test_a_choose_waiting_driver_is_renudged_on_an_interval(tmp_path, monkeypatc
     assert cwd == str(tmp_path) and name == "own"
     assert "waiting on you" in text
     assert cflow2_clock.WHY_NUDGE in text
-    assert clock.scan(now=T0 + 602) == []      # one nudge per interval
-    notices = clock.scan(now=T0 + 1202)
-    assert len(notices) == 1 and cflow2_clock.WHY_NUDGE in notices[0][2]
+    assert clock.scan(now=T0 + 602) == []      # the one nudge is spent
+    assert clock.scan(now=T0 + 1202) == []     # and the same wait is not
+    assert clock.scan(now=T0 + 7200) == []     # repeated, however long it lasts
 
 
 def test_a_busy_driver_is_not_renudged(tmp_path, monkeypatch):
@@ -484,6 +487,9 @@ def test_resolving_the_choice_stops_its_renudge(tmp_path, monkeypatch):
     notices = clock.scan(now=T0 + 1202)
     assert len(notices) == 1
     assert "waiting on you: a" in notices[0][2]
+    # the new wait got its one nudge; it does not get a third (claunch-3sen5)
+    assert clock.scan(now=T0 + 1803) == []
+    assert clock.scan(now=T0 + 3603) == []
 
 
 def test_a_finished_run_drops_its_renudge_baseline(tmp_path, monkeypatch):
@@ -1123,16 +1129,18 @@ def test_stuck_pass_lets_heartbeat_go_stale(tmp_path, monkeypatch):
 
 
 def test_run_probe_env_and_timeout_kills_group(tmp_path):
-    win = sys.platform == "win32"  # cmd.exe: %VAR%, no printf, no sleep
-    # cmd.exe expands %VAR% before it parses `||`, so `set VAR` is the way to print the raw value
-    code, out = cflow2_clock.run_probe('set CFLOW_IN_TARGET' if win
-                                       else 'printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
+    # A probe is written for a POSIX shell on every platform (claunch-2kz0r:
+    # cmd.exe does not read $VAR, so Windows runs a bash where one exists).
+    # Only a machine with no POSIX shell at all still gets cmd.exe.
+    if os.name == "nt" and runtime.shell_command("true")[1]:
+        pytest.skip("no POSIX shell here: the probe would run in cmd.exe")
+    code, out = cflow2_clock.run_probe('printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
                                        env={"CFLOW_IN_TARGET": "x || true; false"})
-    assert code == 0 and out.strip().removeprefix("CFLOW_IN_TARGET=") == "x || true; false"
+    assert code == 0 and out.strip() == "x || true; false"
     code, _ = cflow2_clock.run_probe("exit 3", str(tmp_path))
     assert code == 3
     t0 = time.monotonic()
-    code, out = cflow2_clock.run_probe("ping -n 30 127.0.0.1 >NUL" if win else "sleep 30 & sleep 30",
+    code, out = cflow2_clock.run_probe("sleep 30 & sleep 30",
                                        str(tmp_path), timeout=0.5)
     assert code == 124 and time.monotonic() - t0 < 10
 

@@ -139,8 +139,9 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncRemotePicker", "wsSyncPanel", "wsSyncPullBody",
        "wsSyncShared", "wsSyncUnmerged", "wsSyncSaved", "wsSyncSave", "wsSyncSavedBasis",
-       "wsSyncRemoteNames", "wsSyncPlanFor", "wsSyncInitSelection", "wsSyncToggleRemote",
-       "wsSyncToggleBasis",
+       "wsSyncRemoteNames", "wsSyncPlanFor", "wsSyncOrderMatches",
+       "wsSyncInitSelection", "wsSyncToggleRemote",
+       "wsSyncToggleBasis", "wsSyncBasisRefusal", "wsSyncTargetsView",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
        "wsSyncWhyDisabled", "wsSyncButtonRow", "commitRef", "commitText"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncParentNote", "wsSyncPromptText",
@@ -582,18 +583,116 @@ async function tick() {
   const checks = nodes.filter((n) => n.cls === "ws-sync-remote-box");
   assert.equal(checks.length, 2, "one checkbox per remote");
   assert.ok(checks.every((n) => n.checked), "the seeded set is checked");
-  const basisPick = nodes.find((n) => (n.attrs || {})["aria-label"] === "Basis remote");
-  assert.equal(basisPick.value, "origin");
+  assert.ok(checks.every((n) => !n.disabled), "two checked: either may be unchecked");
+  // the basis is picked on the remote's own row (claunch-j1894): no
+  // separate select that can name another remote than the badge
+  assert.equal(nodes.filter((n) => (n.attrs || {})["aria-label"] === "Basis remote").length, 0,
+               "no separate basis select");
+  let radios = nodes.filter((n) => n.cls === "ws-sync-basis-radio");
+  assert.equal(radios.length, 2, "one basis radio per remote row");
+  assert.deepEqual(radios.filter((n) => n.checked).map((n) => n.value), ["origin"],
+                   "the basis radio sits on the basis row");
+  assert.ok(radios.every((n) => !n.disabled), "without candidates, every checked remote may be the basis");
   const orderText = nodes.map(deep).join("\n");
   assert.ok(orderText.includes("1. origin (basis) — rebase"), "the basis runs first");
   assert.ok(orderText.includes("2. mirror — push"), "the mirror is pushed to after it");
   assert.ok(nodes.some((n) => n.text === "Sync 2 remotes"), "the button names the set");
-  // the last checked remote springs back instead of emptying the set
+  // an order computed for another checked set is not drawn as this set's
+  // (claunch-cj1qi): the checkboxes follow the page at once, the order only
+  // follows the status read, so a read that is in flight -- or one that
+  // failed and left the previous answer on screen -- names another set
+  st.remotes = ["origin"];
+  st.basis = "origin";
+  st.loading = true;
+  let staleText = walk(ctx.wsSyncPanel(W)).map(deep).join("\n");
+  assert.ok(!staleText.includes("mirror — push"),
+            "in flight: an unchecked remote is not listed");
+  assert.ok(staleText.includes("Reading the execution order for the remotes checked now"),
+            "in flight: the panel says it is reading the checked set");
+  st.loading = false;
+  staleText = walk(ctx.wsSyncPanel(W)).map(deep).join("\n");
+  assert.ok(!staleText.includes("mirror — push"),
+            "after a failed read: an unchecked remote is not listed");
+  assert.ok(staleText.includes("No execution order for the remotes checked now"),
+            "after a failed read: the panel says the order does not cover the set");
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.map(deep).join("\n").includes("2. mirror — push"),
+            "the same set is drawn again once the checkboxes agree with the answer");
+  // the last checked remote stays checked
   st.remotes = ["origin"];
   st.basis = "origin";
   ctx.wsSyncToggleRemote("proj", "origin", false);
   assert.deepEqual(st.remotes, ["origin"], "the last checked remote stays checked");
   assert.match(st.remoteNote, /At least one/);
+  // ...and the panel says so on that row before anyone tries (claunch-j1894)
+  st.remoteNote = "";
+  st.doc = { ...DOC_MULTI, selected_remotes: ["origin"], sync_order: ["origin"],
+             plans: [DOC_MULTI.plans[0]] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  const onlyBox = nodes.find((n) => n.cls === "ws-sync-remote-box" && n.checked);
+  assert.ok(onlyBox.disabled, "the only checked box is disabled");
+  assert.ok(nodes.map(deep).join("\n").includes("only target"),
+            "the row says it is the only target");
+  assert.ok(nodes.filter((n) => n.cls === "ws-sync-basis-radio").every((n) => n.disabled),
+            "one target: there is no basis to choose");
+  st.doc = DOC_MULTI;
+
+  // candidates from the daemon: a remote behind another cannot be picked,
+  // and its row says behind which (claunch-j1894)
+  st.remotes = ["origin", "mirror"];
+  st.basis = "origin";
+  st.doc = { ...DOC_MULTI, basis_candidates: ["origin"], basis_behind: { mirror: "origin" } };
+  nodes = walk(ctx.wsSyncPanel(W));
+  radios = nodes.filter((n) => n.cls === "ws-sync-basis-radio");
+  assert.ok(!radios.find((n) => n.value === "origin").disabled, "the newest tip may be the basis");
+  assert.ok(radios.find((n) => n.value === "mirror").disabled, "a remote behind it may not");
+  assert.ok(nodes.map(deep).join("\n").includes("cannot be the basis: behind origin"),
+            "the refused row says behind which remote");
+
+  // a remembered basis the daemon refused: the radio stays on the page's
+  // pick, the panel names the remote that would replace it with a button
+  // that makes the change, and no execution order claims the other basis
+  // (the screenshot of claunch-j1894: select origin, badge and order mirror)
+  st.basis = "mirror";
+  st.doc = { ...DOC_MULTI, basis: "origin", basis_requested: "mirror",
+             basis_candidates: ["origin"], basis_behind: { mirror: "origin" },
+             basis_error: "basis mirror is behind origin; syncing through it would push origin's commits to it" };
+  nodes = walk(ctx.wsSyncPanel(W));
+  let text = nodes.map(deep).join("\n");
+  radios = nodes.filter((n) => n.cls === "ws-sync-basis-radio");
+  assert.deepEqual(radios.filter((n) => n.checked).map((n) => n.value), ["mirror"],
+                   "the radio shows the pick the page sent");
+  assert.ok(text.includes("mirror cannot be the basis: its tip is behind origin"),
+            "the refusal names both remotes");
+  assert.ok(!text.includes("Execution order"), "no order is drawn for a basis that will not run");
+  assert.equal(nodes.filter((n) => n.cls === "badge busy" && n.text === "basis").length, 1,
+               "one row is marked basis");
+  assert.match(ctx.wsSyncWhyDisabled(st, "sync"), /Basis mirror is behind origin/,
+               "the Sync button says why it is off");
+  const fix = nodes.find((n) => n.cls === "btn ws-sync-basis-fix");
+  assert.equal(fix.text, "Use origin as basis");
+  calls.length = 0;
+  reply = () => ({ status: 200, body: JSON.parse(JSON.stringify(DOC_MULTI)) });
+  fix.handlers.click[0]();
+  assert.equal(st.basis, "origin", "the button moves the basis");
+  assert.ok(calls.some((c) => c.url.includes("basis=origin")), "and reads the status for it");
+  await new Promise((r) => setTimeout(r, 0));
+
+  // unchecking the basis moves it to a checked candidate and says so
+  st.remotes = ["origin", "mirror", "third"];
+  st.basis = "third";
+  st.doc = { ...DOC_MULTI,
+             remotes: { ...DOC_MULTI.remotes, "git.example/t/p": "third" },
+             selected_remotes: ["origin", "mirror", "third"],
+             basis: "third", basis_candidates: ["third"], basis_behind: {} };
+  ctx.wsSyncToggleRemote("proj", "third", false);
+  assert.deepEqual(st.remotes, ["origin", "mirror"]);
+  assert.equal(st.basis, "origin");
+  assert.equal(st.remoteNote, "Basis moved to origin: third is no longer checked.");
+  await new Promise((r) => setTimeout(r, 0));
+  st.doc = DOC_MULTI;
 
   // two checked: one request per remote, basis first, status read between
   st.remotes = ["origin", "mirror"];

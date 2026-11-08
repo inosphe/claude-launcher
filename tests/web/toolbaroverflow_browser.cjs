@@ -34,7 +34,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
   try {
     const errors = [];
     const open = async () => {
-      const page = await browser.newPage({ viewport: { width: 2600, height: 900 } });
+      const page = await browser.newPage({ viewport: { width: 3000, height: 900 } });
       page.on("pageerror", e => errors.push(String(e)));
       await page.setContent(`<div id="layout">${header}</div>`);
       await page.addStyleTag({ path: path.join(root, "style.css") });
@@ -61,7 +61,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     // One sweep inside a page: set the width, wait for the fitting frame (two
     // frames: the resize is observed after layout, the fit runs on the next
-    // frame), record every control. ~2200 widths at two frames each is over a
+    // frame), record every control. ~2640 widths at two frames each is over a
     // minute on one page, so four pages sweep a quarter each at once; each
     // starts one pixel above its quarter so the seams are compared too.
     const sweep = (page, from, to) => page.evaluate(async ({ from, to }) => {
@@ -93,7 +93,11 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       return out;
     }, { from, to });
 
-    const [FROM, TO, PARTS] = [2400, 160, 4];
+    // The sweep starts where the whole labelled row fits with room to spare.
+    // With term-subprocbtn on the row the labelled row needs about 2435px, so
+    // a sweep from 2400 met the squeeze in its first column on some runs
+    // (gap 9.5 at 2400px) and failed the full-row check (claunch-jc99t.1).
+    const [FROM, TO, PARTS] = [2800, 160, 4];
     const cut = Math.ceil((FROM - TO + 1) / PARTS);
     const pages = await Promise.all(Array.from({ length: PARTS }, open));
     const page = pages[0];
@@ -146,6 +150,15 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     // The order itself, pinned here and not read from toolbar.js, so a
     // reordered MINIMIZE_ORDER fails until this list is changed with it.
+    // A control added to the row is a control this list has not met yet, and
+    // the first assert below names it: the VM button shipped in the header
+    // (index.html's `term-vmbtn`) without landing here, so the harness failed
+    // on clean master until `term-vmbtn` was put where MINIMIZE_ORDER keeps
+    // it, between `term-clibtn` and `term-splitbtn` (claunch-u0wyo.1). The
+    // sub procedure button (`term-subprocbtn`, claunch-8t5r0.3) then shipped
+    // without a place in MINIMIZE_ORDER itself, so it never iconified or
+    // left for the menu; it sits after `term-planbtn`, as in the header
+    // (claunch-jc99t.1).
     // Every width must be one position on it: the controls that are glyphs
     // or in the menu are a prefix of it (controls that never iconify, their
     // glyph being no narrower than their label, left out), and the controls
@@ -155,7 +168,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       "term-goto", "term-pin", "term-fork", "term-merge", "term-retro", "term-rebrief",
       "term-webdebug", "term-observer", "term-blockbar", "term-procsbtn", "term-conn",
       "term-zoom", "term-view", "term-life",
-      "term-chartbtn", "term-categorybtn", "term-clibtn", "term-splitbtn", "term-simsbtn",
+      "term-chartbtn", "term-categorybtn", "term-wrapupbtn", "term-planbtn", "term-subprocbtn", "term-clibtn", "term-vmbtn", "term-splitbtn", "term-simsbtn",
       "term-qabtn", "term-threadsbtn", "term-brief", "term-details",
       "term-reminder", "term-hold", "term-link", "term-scroll", "term-size",
       "term-tps", "term-note", "term-handle", "term-status",
@@ -276,6 +289,6 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
 
     const glyphs = Object.values(at(rows[firstMenu].at - 0 + 0).row).filter(c => c.state === "icon").length;
     console.log(`toolbaroverflow: squeeze from ${rows.find(r => r.gap < 10).at}px, first glyph at ${firstIcon}px,`
-      + ` menu from ${rows[firstMenu].at}px (${glyphs} glyphs on the row then), 1px sweep 2400..160 monotonic`);
+      + ` menu from ${rows[firstMenu].at}px (${glyphs} glyphs on the row then), 1px sweep ${FROM}..${TO} monotonic`);
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

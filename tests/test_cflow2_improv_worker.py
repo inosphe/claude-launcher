@@ -9,6 +9,7 @@ another definition, and the beads rule block is the v1 block byte for byte.
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -44,7 +45,16 @@ BLOCK_END = "것만은 금지다."
 ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group"),
                      ("par-write-overlap", "round/item/slices"),
                      # claunch-0b8dx: no cap on the number of rounds
-                     ("unbounded-visits", None)}
+                     ("unbounded-visits", None),
+                     # claunch-yzwut: the one place a worker may merge master --
+                     # merge-by-agent's apply step, once per attempt (the
+                     # self-merge procedure tries three times). The ban is the
+                     # conditional rule master-merge-effect, so the check warns
+                     # instead of failing; a fourth entry here is a second
+                     # merging node and must be argued for, not added.
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply"),
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply#2"),
+                     ("never-effect-when", "round/land/self-merge-run.try/self-merge-apply#3")}
 
 # Every v1 step id -> the v2 labels that carry it.
 V1_TO_V2 = {
@@ -419,18 +429,23 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
 # --------------------------------------------------------------------------- #
 # the plan's own decisions stop the round before the gate (claunch-rzepk)
 # --------------------------------------------------------------------------- #
-def test_the_plan_wait_is_declared_on_both_paths():
-    """One wait beside the gate, one on the path that skips ``coding-plan``.
+def test_the_plan_wait_is_one_node_on_every_path():
+    """One wait after the plan step, whether the plan was written by
+    ``coding-plan`` (gate path) or ``plan-seed`` (no gate) -- claunch-r3j1o.2.
 
-    Both probe ``claunch gate plan-waiting`` (0 clear, 1 still owed, 2 could
+    It probes ``claunch gate plan-waiting --scope start`` -- the unchosen
+    decisions only, claunch-jw1v2 -- (0 clear, 1 still owed, 2 could
     not tell), poll, and cap undecided reads -- but carry no ``seconds``:
     the confirmed rule has no upper bound on "stop until the user decides",
     and a failed read goes to a person instead of releasing the run
     (docs/plan-coding-approval.md 규칙 1)."""
     chart = _chart()
+    # settle's closure gate probes the same command (claunch-5sryb); it is
+    # tested on its own below
     waits = [n for n in chart.nodes.values() if n.type == "wait"
-             and n.get("probe") == ["claunch", "gate", "plan-waiting"]]
-    assert len(waits) == 2, [n.id for n in waits]
+             and n.get("probe") == ["claunch", "gate", "plan-waiting", "--scope", "start", "--notify"]
+             and "closure-wait" not in n.id]
+    assert [n.label for n in waits] == ["plan-wait"], [n.id for n in waits]
     for n in waits:
         assert "plan-wait" in n.id
         assert n.get("poll") == 30 and n.get("undecided_max") == 3
@@ -1100,9 +1115,219 @@ def test_rules_and_master_merge_invariant():
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     rule = doc["rules"]["no-master-merge"]
     assert "claunch-97knp" in rule["why"]
-    assert chart.spec["invariants"]["no-master-merge"] == {"never_effect": "git.merge",
-                                                           "target": "master"}
+    # claunch-yzwut: the unconditional never_effect invariant could not admit
+    # merge-by-agent's merge, so the static ban moved to the conditional rule
+    # master-merge-effect. The text everyone reads stays in no-master-merge.
+    assert "no-master-merge" not in (chart.spec.get("invariants") or {})
+    ban = chart.rules["master-merge-effect"]
+    assert ban["effect"] == {"deny": "git.merge", "target": "master"}
+    assert ban["when"] == "$data.self_merge.armed != true"
+    assert ban["deliver"] == []
+    assert "claunch-yzwut" in rule["why"]
+    assert chart.spec["paths"]["review-before-self-merge"]["must_pass"] == ["peer-review"]
     assert chart.spec["paths"]["settle-before-end"]["must_pass"] == ["settle"]
+
+
+# -- allow_work_on_main (claunch-cetzf.2) / require_plan_closure (claunch-5sryb)
+
+MODE = "$result['branch-setup'].value.mode"
+
+def _procedure_run(tmp_path, monkeypatch, body, values):
+    """A run of the real definition with ``body`` replaced and ``values``
+    applied as start inputs."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["body"] = body
+    doc.pop("spec", None)
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    chart = inputs.apply(chart, values)
+    kw = {"cwd": str(tmp_path), "scope": "p", "now": 1.0}
+    return runtime.start(chart, caps={}, **kw), kw
+
+
+def _branch_setup(st, kw, mode):
+    from claude_launcher.cflow2 import runtime
+
+    [task] = [t for t in st["tasks"] if t["label"] == "branch-setup"]
+    value = {"branch": "master" if mode == "main" else "s-x", "base": "master",
+             "base_hash": "0" * 40, "shared": False, "mode": mode}
+    return runtime.report(task["instance"], "ok", value, **kw)
+
+
+def test_allow_work_on_main_is_a_user_input_read_by_branch_setup_only():
+    from claude_launcher.cflow2 import inputs
+
+    chart = _chart()
+    decl = chart.meta["inputs"]["allow_work_on_main"]
+    assert decl["type"] == "bool" and decl["default"] is False
+    assert decl["set_by"] == ["user"]
+    # the input decides branch-setup; every node after it reads the mode that
+    # branch-setup recorded, so a mid-round change cannot desync the landing
+    assert chart.rules["branch-on-main"]["when"] == "$data.inputs.allow_work_on_main == true"
+    assert chart.rules["branch-on-main"]["deliver"] == ["branch-setup"]
+    assert chart.rules["no-master-commit"]["when"] == f"{MODE} != 'main'"
+    assert chart.rules["work-on-main"]["when"] == f"{MODE} == 'main'"
+    assert "branch-setup" not in chart.rules["no-master-commit"]["deliver"]
+    assert "branch-setup" not in chart.rules["work-on-main"]["deliver"]
+    # the merge ban's text stays unconditional; its static effect is the
+    # conditional rule master-merge-effect (claunch-yzwut), whose condition is
+    # the self-merge mark and never the work-on-main mode
+    assert "when" not in chart.rules["no-master-merge"]
+    assert chart.rules["no-master-merge"].get("effect") is None
+    assert chart.rules["master-merge-effect"]["effect"] == {"deny": "git.merge",
+                                                           "target": "master"}
+    assert MODE not in chart.rules["master-merge-effect"]["when"]
+    assert "master 체크아웃 후 커밋" not in chart.rules["no-master-merge"]["text"]
+    deps = inputs.dependencies(chart)["allow_work_on_main"]
+    assert deps["conditional"] == ["branch-on-main"]
+    setup = next(n for n in chart.nodes.values() if n.label == "branch-setup")
+    assert "branch-on-main" in setup.get("rules")
+    assert not {"no-master-commit", "work-on-main"} & set(setup.get("rules"))
+    # neither conditional text is baked into the compiled prompt
+    assert "이 회차는 master에서 직접 작업한다" not in setup.get("prompt")
+    assert "master 체크아웃에서 커밋하지 않는다" not in setup.get("prompt")
+    assert setup.get("returns")["ok"]["mode"] == "str?"
+
+
+def test_branch_setup_reads_the_rule_matching_the_input():
+    from claude_launcher.cflow2 import runtime
+
+    chart = _chart()
+    setup = next(n for n in chart.nodes.values() if n.label == "branch-setup")
+
+    class _R:
+        pass
+
+    r = _R()
+    r.chart = chart
+    on = runtime.node_prompt(r, setup, {"data": {"inputs": {"allow_work_on_main": True}}})
+    off = runtime.node_prompt(r, setup, {"data": {"inputs": {"allow_work_on_main": False}}})
+    assert "이 회차는 master에서 직접 작업한다" in on
+    assert "이 회차는 master에서 직접 작업한다" not in off
+
+
+def _mode_env(mode, flag):
+    setup = {"outcome": "ok", "value": {"mode": mode}} if mode else None
+    return {"data": {"inputs": {"allow_work_on_main": flag}},
+            "result": {"branch-setup": setup} if setup else {}}
+
+
+@pytest.mark.parametrize("mode,flag,on_main", [
+    ("main", True, True), ("main", False, True),
+    ("new", True, False), ("reuse", False, False), (None, True, False)])
+def test_commit_rules_follow_the_recorded_mode_not_the_input(mode, flag, on_main):
+    from claude_launcher.cflow2 import runtime
+
+    chart = _chart()
+    commit = next(n for n in chart.nodes.values() if n.label == "commit")
+
+    class _R:
+        pass
+
+    r = _R()
+    r.chart = chart
+    text = runtime.node_prompt(r, commit, _mode_env(mode, flag))
+    assert ("이 회차는 master에서 작업 중이다" in text) is on_main
+    assert ("master 체크아웃에서 커밋하지 않는다" in text) is (not on_main)
+
+
+def test_land_skips_to_landed_with_the_master_commit_when_working_on_main(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    body = [{"try": ["branch-setup", {"call": "land"}],
+             "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {"allow_work_on_main": True})
+    st = _branch_setup(st, kw, "main")
+    [task] = st["tasks"]
+    assert task["label"] == "main-landed"
+    st = runtime.report(task["instance"], "ok", {"tip": "abc123", "commits": ["abc123"]}, **kw)
+    # landed reached the caller: wrapup is next, no landing choice stood
+    assert [t["label"] for t in st["tasks"]] == ["wrapup"]
+    assert not st.get("choices")
+
+
+def _past_already_merged(st, kw):
+    """already-merged(claunch-yzwut.2) stands right before landing: a round
+    not yet in the target answers not-landed and meets the landing it had."""
+    from claude_launcher.cflow2 import runtime
+
+    assert [c["label"] for c in st["choices"]] == ["already-merged"]
+    return runtime.select(st["choices"][0]["instance"], "not-landed", "not in target", **kw)
+
+
+def test_land_is_unchanged_when_the_input_is_off(tmp_path, monkeypatch):
+    body = [{"try": [{"call": "land"}], "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {})
+    assert not st["tasks"]
+    st = _past_already_merged(st, kw)
+    assert [c["label"] for c in st["choices"]] == ["landing"]
+
+
+@pytest.mark.parametrize("flag,mode,skips", [
+    # the input turned on after a feature branch was cut: a normal landing
+    (True, "new", False),
+    # the input turned off after the round committed on master: no request
+    (False, "main", True)])
+def test_land_follows_the_mode_branch_setup_recorded(tmp_path, monkeypatch, flag, mode, skips):
+    body = [{"try": ["branch-setup", {"call": "land"}], "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {"allow_work_on_main": not flag})
+    from claude_launcher.cflow2 import runtime
+
+    runtime.set_input("allow_work_on_main", flag, caller=runtime.CALLER_USER, **kw)
+    st = _branch_setup(st, kw, mode)
+    if skips:
+        assert [t["label"] for t in st["tasks"]] == ["main-landed"]
+    else:
+        assert not st["tasks"]
+        st = _past_already_merged(st, kw)
+        assert [c["label"] for c in st["choices"]] == ["landing"]
+
+
+def test_a_stack_only_land_ignores_the_mode_a_past_round_left(tmp_path, monkeypatch):
+    """A stack-only round runs no branch-setup, so the mode is a past round's.
+    That round lands the children's stack: main-gate stays shut and the stack
+    cut is next (review CHANGES REQUESTED @ ea06fa49)."""
+    body = [{"try": ["branch-setup", {"call": "land", "with": {"mode": "stack-only"}}],
+             "catch": {"landed": ["wrapup"]}}]
+    st, kw = _procedure_run(tmp_path, monkeypatch, body, {"allow_work_on_main": True})
+    st = _branch_setup(st, kw, "main")
+    labels = [t["label"] for t in st["tasks"]]
+    assert "main-landed" not in labels
+    assert labels == ["stack-cut"]
+
+
+def test_settle_waits_for_plan_closure_without_a_deadline_when_required(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}],
+                            {"require_plan_closure": True})
+    [w] = st["waits"]
+    assert w["node"].endswith("closure-wait") and w["seconds"] is None
+    assert w["probe"] == ["claunch", "gate", "plan-waiting", "--notify"]
+    # a day of "still owed" does not release it
+    st = runtime.wait_tick(86_400.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert [x["node"] for x in st["waits"]] == [w["node"]]
+    st = runtime.wait_tick(86_500.0, lambda cmd, cwd: (0, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not any("closure" in x["node"] for x in st.get("waits") or [])
+    assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
+
+
+def test_settle_goes_on_after_three_minutes_when_closure_is_not_required(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}], {})
+    [w] = st["waits"]
+    assert w["node"].endswith("closure-wait-timed") and w["seconds"] == 180
+    st = runtime.wait_tick(100.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert [x["node"] for x in st["waits"]] == [w["node"]]
+    st = runtime.wait_tick(200.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not any("closure" in x["node"] for x in st.get("waits") or [])
+    assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
 
 
 def test_moved_rule_prose_is_not_repeated_in_prompts():
@@ -1184,8 +1409,13 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
     assert set(v1) == {"work", "commit", "integration-request", "landed", "wrapup"}
     chart = _chart()
     seen = set()
+    v2_only = []
     for node in chart.nodes.values():
-        trig = node.get("triggers")
+        # plan-round has no v1 counterpart: v1 has no per-round plan
+        # (claunch-r3j1o). It is declared once, at intake.
+        v2_only += [(node.label, t["do"]) for t in node.get("triggers") or []
+                    if t["do"] == "plan-round"]
+        trig = [t for t in node.get("triggers") or [] if t["do"] != "plan-round"]
         if not trig:
             continue
         assert node.label in v1, node.id
@@ -1199,6 +1429,7 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
         assert got == v1[node.label], node.id
         seen.add(node.label)
     assert seen == set(v1)
+    assert v2_only == [("intake", "plan-round")]
 
 
 def test_landing_queue_item_records_who_passed_the_review():
@@ -1320,6 +1551,26 @@ BRIEF = {"problem": "p", "options": [
     {"name": "local", "summary": "s", "risk": "r", "outcome": "o", "reversibility": "reversible"}],
     "recommendation": "local", "why": "w"}
 
+#: A landing record's ``at``: the wall clock the step ran at, in the store's
+#: own ISO-8601 second-precision form (claunch-ijkge.4.1.3). The PR page
+#: groups rows by it, so every landing value carries one; a test cannot
+#: predict the second it lands in, so the shape is checked and the value is
+#: dropped before the record is compared.
+_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+
+def _no_stamp(record):
+    out = dict(record)
+    # Required, not merely tolerated: a landing record without a stamp is the
+    # defect this field was added for, so its absence has to fail here.
+    at = out.pop("at", None)
+    assert isinstance(at, str) and _STAMP.match(at), record
+    # An unknown title is null, which the optional field fills in; a known one
+    # is the value the page shows and keeps a test's attention.
+    if out.get("title") is None:
+        out.pop("title", None)
+    return out
+
 
 def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
@@ -1342,8 +1593,9 @@ def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
                                        "repo": "o/r", "base": "master"})
     landing = runtime.RunStore(cwd, "m").load_state()["data"]["landing"]
     # the attempt block's return ended landing-medium; optional fields were filled
-    assert landing == {"medium": "pr", "reason": "gh ok", "remote": "origin", "repo": "o/r",
-                       "base": "master", "pr_url": None, "pr_number": None}
+    assert _no_stamp(landing) == {"medium": "pr", "reason": "gh ok", "remote": "origin",
+                                  "repo": "o/r", "base": "master", "pr_url": None,
+                                  "pr_number": None}
     # pr-publish without force_pr: a failed pr-open falls back to local, no question
     st = report("pr-open", "failed", {"reason": "push refused: stale info"})
     assert st["tasks"][0]["label"].rsplit("/", 1)[-1] == "local-landing-policy"
@@ -1452,7 +1704,37 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
     seen.extend(t["label"].rsplit("/", 1)[-1] for t in st.get("tasks") or [])
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()
-    assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data
+    got = {k: _no_stamp(v) for k, v in state["data"].items()
+           if k in ("landing", "published")}
+    assert got == data
+
+
+def test_pr_publish_keeps_the_title_the_pr_was_opened_with(tmp_path, monkeypatch):
+    """``pr-open`` reports the title it opened or updated, and the landing
+    record keeps it (claunch-ijkge.4.1.3): the PR page shows that value under
+    the row, so it has to travel with the record rather than be looked up
+    again."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_medium_flow(tmp_path), caps={}, params={"force_pr": True}, **kw)
+
+    def report(label, outcome="ok", value=None):
+        iid = next(t["instance"] for t in st["tasks"]
+                   if t["label"].rsplit("/", 1)[-1] == label)
+        return runtime.report(iid, outcome, value, **kw)
+
+    st = report("remote-setup", "ok", _SETUP)
+    st = report("pr-open", "ok", {**_PR, "title": "Add the PR tab"})
+    data = runtime.RunStore(str(tmp_path), "m").load_state()["data"]
+    # the medium is chosen before any PR exists: it stamps the time and claims
+    # no title (there is none to claim yet)
+    assert _STAMP.match(data["landing"]["at"])
+    assert data["landing"].get("title") is None
+    # the PR step is where the title becomes known, and it carries it
+    published = data["published"]
+    assert published["title"] == "Add the PR tab"
+    assert _STAMP.match(published["at"])
 
 
 # -- landing-review asks whoever takes the landing request (claunch-yq80p.12) -
@@ -1964,9 +2246,12 @@ def test_the_landing_request_is_gated_on_a_bound_issue():
     # and the request; nothing else may raise a request there. claunch-ijkge
     # adds pr-submitted-route after the gate: auto_merge=false ends the round
     # at PR submission, so it must not reach the request either — and it runs
-    # after the gate so the marker task has the bound issue.
+    # after the gate so the marker task has the bound issue. claunch-yzwut
+    # adds self-merge-route: a round the person sent to merge-by-agent leaves
+    # here as landed instead of filing a request, and a round whose receiver
+    # appeared meanwhile falls through to the channel check.
     between = labels[labels.index("issue-gate") + 1:labels.index("integration-request")]
-    assert between == ["pr-submitted-route", "landing-channel"]
+    assert between == ["pr-submitted-route", "self-merge-route", "landing-channel"]
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
@@ -2118,6 +2403,46 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
     assert "flow_start" in text and "inputs: {issue: <그 id>}" in text
     assert "--labels user-direct" in text and "--parent" in text
     assert node["returns"] == {"ok": {"issue": "str"}}
+
+
+def test_reviewer_is_released_at_auto_release_and_recycled_on_new_task():
+    """claunch-phkt1: auto-release records the child reviewer the settle reap
+    already ended and asks to kill only one still alive; end-new-task asks to
+    resume that reviewer (a person's card, resume_gate) and leaves a
+    REVIEWER RECYCLE marker the next run's reviewer-ensure reads -- withdrawing
+    a still-pending request before it spawns, so two reviewers never stand."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    nodes = doc["nodes"]
+    release = _words(nodes["auto-release"]["prompt"])
+    assert "settle-reap" in release and "MCP `kill`" in release
+    assert "reviewer: <이름> exited" in release
+    assert "reviewer: <이름> kill-request <id>" in release
+    assert "session.kill" in nodes["auto-release"]["effects"]
+    # the children rows carry no role: the reviewer is found by matching the
+    # mesh roster's session column, as the daemon's own reap does
+    assert "`children`의 자식 행에는 role이 없다" in release
+    assert "claunch mesh members <이 런의 메시> --state all" in release
+    assert "`cflow_clock._reviewer_children`" in release
+    # the roster's third column is <daemon>/<session>: compare the part after '/'
+    assert "`/` 뒤의 세션 이름과 비교한다" in release
+    assert "`+`로 나눈 조각 가운데 reviewer가 있는지 본다" in release
+    new_task = _words(nodes["end-new-task"]["prompt"])
+    assert "MCP `resume_session`" in new_task
+    assert "REVIEWER RECYCLE: <리뷰어 이름> resume-request <요청 id>" in new_task
+    assert "operator의 경로이므로 쓰지 않는다" in new_task
+    # filed after the new run stands: a resume approved while this run is
+    # still in settle would be reaped again by settle-reap
+    assert "새 런이 선 **뒤에** 같은 턴에서 되살리기를 요청한다" in new_task
+    assert "보고 전에 요청하지 않는다" in new_task
+    # a tie is broken by the name auto-release wrote, read before the new run
+    # replaces what cflow2 status shows
+    assert "`AUTO-RELEASE` 줄에 `reviewer: <이름>`으로 적은 이름을 고른다" in new_task
+    assert "끝난 런의 reviewer-ensure 값을 여기서 얻을 수 없다" in new_task
+    assert "session.spawn" in nodes["end-new-task"]["effects"]
+    ensure = _words(nodes["reviewer-ensure"]["prompt"])
+    assert "REVIEWER RECYCLE:" in ensure
+    assert "`withdraw: true`로 요청을 거둔 뒤" in ensure
+    assert "rejected·failed·withdrawn·moot" in ensure
 
 
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
@@ -2292,11 +2617,14 @@ def test_the_notice_runs_before_the_end_gate():
         seq = chart.nodes[node.props["child"]]
         return chart.nodes[seq.props["children"][0]].label
 
-    # after the retrospective's try, before the gate loop
-    assert try_task(children[1]) == "retrospective"
-    assert try_task(children[2]) == "end-notice"
+    # after the retrospective's try, before the gate loop. The closure gate
+    # (claunch-5sryb) stands first, ahead of settle-watch.
+    assert chart.nodes[children[0]].label == "closure-gate"
+    assert chart.nodes[children[1]].label == "settle-watch"
+    assert try_task(children[2]) == "retrospective"
+    assert try_task(children[3]) == "end-notice"
     gate = next(c for c in children if chart.nodes[c].label == "end-watch")
-    assert children.index(children[2]) < children.index(gate)
+    assert children.index(children[3]) < children.index(gate)
     # the notice is not a member of either gate's cases any more, and each
     # gate's end does its own part: the first cleans up, the second is a bare
     # break (the cleanup already ran before it).
@@ -2331,6 +2659,84 @@ def test_ending_the_session_at_an_end_gate_finishes_the_run(tmp_path, monkeypatc
     # and it is not done twice
     again = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=7.0)
     assert again["finished"] is False
+
+
+def test_hold_keeps_the_run_open_and_asks_again_under_a_new_ask(
+        tmp_path, monkeypatch):
+    """claunch-llfac: hold no longer ends the run. From end-decision it cleans
+    up first (as end does), runs end-hold and poses release-decision; from
+    release-decision it runs end-hold and poses the same question again
+    under a new ask id. The run stays waiting on a person -- so kill-on-end
+    never applies and no keep-alive is needed -- until end or new-task."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = _end_flow(tmp_path)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    st = _pose(st, _brief("end", "hold", "new-task", "self-improve", "auto-release"), **kw)
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["auto-release"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    first = st["asks"][0]["ask"]
+    # hold again at release-decision: end-hold, then the question anew
+    runtime.approve(None, decision="hold", reason="r", **kw)
+    st = runtime.status(**kw)
+    assert _end_labels(st) == ["end-hold"], _end_labels(st)
+    st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
+    assert _end_labels(st) == ["ask-frame"], _end_labels(st)
+    st = _pose(st, _brief("end", "hold", "new-task"), **kw)
+    assert st["status"] == "waiting_approval"
+    # the driver reads the hold command off the waiting task, session included
+    assert "`claunch hold $CLAUNCH_SESSION`" in st["asks"][0]["task_prompt"]
+    second = st["asks"][0]["ask"]
+    assert second != first
+    # the reposed question is still an end gate: ending the session answers it
+    done = runtime.end_on_session_exit(cwd=kw["cwd"], scope=kw["scope"], now=5.0)
+    assert done["finished"] is True and done["ask"] == second, done
+    assert runtime.status(**kw)["status"] == "done"
+
+
+def test_end_hold_sends_the_session_to_hold_without_keep_alive():
+    """claunch-llfac: the hold answer means the session hold state (held_at,
+    daemon/hold.py). keep-alive would keep the session out of the idle hold
+    and delivery-hold would leave a woken session unable to be held again, so
+    neither is set; `claunch hold` runs after release-decision is posed."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    text = doc["nodes"]["end-hold"]["prompt"]
+    assert "claunch keep-alive $CLAUNCH_SESSION" not in text
+    assert "delivery-hold $CLAUNCH_SESSION --on" not in text
+    assert "keep-alive와 delivery-hold는 세우지 않는다" in text
+    watch = _find_id(doc["procedures"], "release-watch")
+    release = watch["loop"]["do"][0]
+    assert release["id"] == "release-decision"
+    assert release["cases"]["hold"] == ["end-hold", {"continue": "release-watch"}]
+    # `lit` keeps $CLAUNCH_SESSION as text; a bare with: string reads $ as an expression
+    nudge = release["with"]["nudge"]["lit"]
+    # every hold command the driver is told to run must name the session:
+    # `claunch hold` has no CLAUNCH_SESSION fallback (error: no session given)
+    import re
+    from claude_launcher.cli import build_parser
+    from claude_launcher.cli_sessions import _resolve_target
+    commands = re.findall(r"`(claunch hold[^`]*)`", text + nudge)
+    assert commands, "no hold command in end-hold / release-decision"
+    for cmd in commands:
+        if cmd == "claunch hold":
+            continue  # quoted as the failing form, not as an instruction
+        argv = cmd.replace("$CLAUNCH_SESSION", "s1").split()[1:]
+        args = build_parser().parse_args(argv)
+        assert _resolve_target(args) and args.session == "s1", cmd
+    assert "`claunch hold $CLAUNCH_SESSION`을 실행한다" in nudge
+    assert "`claunch hold $CLAUNCH_SESSION`은 여기서 실행하지 않는다" in text
+    for topic in (release["with"]["topic"],
+                  _find_id(doc["procedures"], "end-decision")["with"]["topic"]):
+        flat = " ".join(topic.split())
+        assert "세션 hold 상태" in flat and "keep-alive" not in flat
 
 
 def test_ending_the_session_away_from_an_end_gate_leaves_the_run_alone(
@@ -4382,3 +4788,40 @@ def test_the_second_round_takes_the_recheck_kind_not_the_seed(tmp_path):
     st = runtime.start(chart, caps={}, inputs={"start_at": "landing"}, **kw)
     assert st["result"]["round"]["value"] == {"mode": "second"}
 
+
+
+# --------------------------------------------------------------------------- #
+# the round's plan: opened at intake, written after the consult (claunch-r3j1o)
+# --------------------------------------------------------------------------- #
+def test_intake_opens_the_rounds_plan():
+    """Entering intake rolls the plan to this round (trigger plan-round)."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert {"do": "plan-round", "at": "enter"} in doc["nodes"]["intake"]["triggers"]
+
+
+def test_the_plan_is_first_written_in_the_item_after_the_consult():
+    """Both nodes that write the round's first plan -- coding-plan on the gate
+    path, plan-seed without a gate -- sit in the item's plan step, so they run
+    after consult-check and can take its reason's branch decision
+    (claunch-tcczr). Neither stands before the consult."""
+    chart = _chart()
+    assert [n.id for n in chart.nodes.values() if n.label == "plan-seed"] == ["round/item/plan-seed"]
+    assert [n.id for n in chart.nodes.values() if n.label == "coding-plan"] == ["round/item/coding-plan"]
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    body = doc["procedures"]["worker-round"]["body"]
+    head = [s.get("id") if isinstance(s, dict) else s for s in body[0]["cond"][1]["else"]]
+    assert "plan-open" not in head and "plan-seed" not in head
+
+
+def test_every_plan_writer_is_told_to_open_this_round_first():
+    """The trigger is asynchronous; the rule delivered to each node that
+    writes the plan says to call plan_new_round when the plan is another
+    round's, and plan-seed writes only when this round's plan has no steps."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    rule = doc["rules"]["plan-panel"]
+    assert {"coding-plan", "plan-seed", "work"} <= set(rule["deliver"])
+    text = _words(rule["text"])
+    assert "plan_new_round" in text and "round_now" in text
+    assert "note와 보류(deferred)한 verify는 넘어오지 않는다" in text
+    seed = _words(doc["nodes"]["plan-seed"]["prompt"])
+    assert "plan_new_round" in seed and "steps가 없으면" in seed

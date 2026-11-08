@@ -1818,7 +1818,8 @@ function syncBulkActions(sessions, filter = "current") {
       "relaunch every unarchived exited session under its own name and conversation");
   set("archive-exited", dead, `archive ${dead} exited`,
       "move exited sessions into the archive while retaining their records, "
-      + "conversations and resume capability");
+      + "conversations and resume capability — each session's captured "
+      + "output, scratch and uploads are deleted");
   set("cleanup-exited", ended, `⌫ clean ${ended} exited`,
       "permanently drop the record of every exited session — paused and "
       + "archived ones included — and optionally delete the output each one "
@@ -1845,8 +1846,19 @@ function syncBulkActions(sessions, filter = "current") {
    safe answer and the destructive one side by side, one click apart. The
    picked option's `value` is merged into the pressed action's value, so the
    caller reads one object. */
-function showModal({ title, body, actions, checkbox = null, choices = null, controls = null }) {
-  if (typeof sessionModal !== "undefined" && sessionModal) {
+function showModal({ title, body, actions, checkbox = null, choices = null,
+                     controls = null, overForm = false }) {
+  // The session form lives inside this same dialog's body, so a question
+  // asked FROM that form (the skip-permissions confirm) cannot simply take
+  // the body: the form would be deleted out of the page. `overForm` parks
+  // the form in #new-view for the length of the question and puts it back
+  // untouched after the answer, which is what makes "Back to the form" a
+  // place that still exists (claunch-9mwba). Every other caller keeps the
+  // older arrangement: the session modal is closed first, because a dialog
+  // raised over a form it is not about would otherwise draw on top of one.
+  const parked = overForm && typeof sessionModal !== "undefined" && sessionModal
+    ? parkSessionForm() : null;
+  if (!parked && typeof sessionModal !== "undefined" && sessionModal) {
     sessionModalClose();
     if (sessionModal) return Promise.resolve(null);
   }
@@ -1860,6 +1872,7 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const done = (value) => {
       overlay.classList.add("hidden");
       document.removeEventListener("keydown", onKey);
+      if (parked) restoreSessionForm(parked);
       resolve(value);
     };
     const onKey = (e) => { if (e.key === "Escape") done(null); };
@@ -1964,6 +1977,54 @@ function showModal({ title, body, actions, checkbox = null, choices = null, cont
     const first = row.querySelector("button");
     if (first) first.focus();
   });
+}
+
+/* Parking for a question asked on top of the session form (showModal's
+   `overForm`), and putting it back.
+
+   The form is a node inside #modal-body, so the question's body would clear
+   it away. The node is moved home to #new-view for the length of the
+   question and returned as it stands: nothing here reads or writes a field,
+   which is the difference from sessionModalClose -- that one restores every
+   row to what it held when the box opened, and the operator is still typing
+   in that box. The session modal's own answers are taken out for the same
+   length (Escape, a backdrop press), so the answer given belongs to the
+   question. */
+function parkSessionForm() {
+  const form = $("new-session");
+  const home = $("new-view");
+  const overlay = $("modal-overlay");
+  if (!form || !home || !overlay) return null;
+  const focused = document.activeElement;
+  home.appendChild(form);
+  $("modal-body").innerText = "";
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", sessionModalKey);
+  overlay.onclick = null;
+  return { focused };
+}
+
+function restoreSessionForm(parked) {
+  if (typeof sessionModal === "undefined" || !sessionModal) return;
+  const overlay = $("modal-overlay");
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild($("new-session"));
+  // The question's own answers go with the question. Left in the bar they
+  // would stand over a form that never asks them again, and a press on one
+  // settles a promise that settled already — the button would only blink.
+  // openSessionModal leaves this bar empty and puts the form's Cancel inside
+  // the form, so empty is what the form's own state looks like.
+  $("modal-actions").innerHTML = "";
+  // The form's own ways out, put back exactly as openSessionModal set them.
+  overlay.onclick = (e) => { if (e.target === overlay) sessionModalClose(); };
+  document.addEventListener("keydown", sessionModalKey);
+  // The title and the submit wording are the question's right now.
+  syncSessionModalChrome();
+  overlay.classList.remove("hidden");
+  refitSoon(60);
+  const back = parked && parked.focused;
+  if (back && back.focus && document.contains(back)) back.focus();
 }
 
 const modalInfo = (title, body) =>
@@ -2638,26 +2699,55 @@ function shadowGroupValue(group, row) {
   return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
 }
 
-/* Which group's tab is open, per grouping, remembered per browser.
+/* Which group's tab is open, per grouping, remembered per browser tab
+   (claunch-9thjl.1).
 
    The rail is a poll and rebuilds whenever the fleet changes, so the pick
    lives here and every rebuild reads it back. A saved value that is not
    among the groups right now (the mesh ended, the filter emptied it) is
    kept rather than overwritten: the first tab stands in for it until that
-   group is back. */
+   group is back.
+
+   The pick belongs to one browser tab, so it stays out of localStorage:
+   every tab of this origin shares that, and a pick in one window would move
+   the rail -- and the automatic title that names its open group -- in the
+   others on their next load. It rides the address as `?group=<group>:<value>`
+   beside `?project=` and `?title=` -- a reload, a bookmark and a duplicated
+   tab keep it -- and sessionStorage, which the browser keeps per tab, holds
+   it for an address that names none (every link inside the page is written
+   without it). */
 const SESSION_GROUP_TAB_KEY = `claunch_session_group_tab:${BASE}`;
+
+/* `mesh:mesh-0826` -> {group, value}. Only the first colon separates: a
+   workspace value is a path and keeps its own (`F:\works\...`). */
+function parseGroupParam(raw) {
+  const text = String(raw || "");
+  const at = text.indexOf(":");
+  if (at < 0) return null;
+  const group = text.slice(0, at);
+  const value = text.slice(at + 1);
+  if (!value || !SESSION_GROUPS.includes(group)) return null;
+  return { group, value };
+}
+
 let sessionGroupTab = (() => {
+  let out = {};
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
+    const saved = JSON.parse(sessionStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      const out = {};
       for (const group of SESSION_GROUPS) {
         if (typeof saved[group] === "string") out[group] = saved[group];
       }
-      return out;
     }
   } catch {}
-  return {};
+  // The address outranks this tab's memory: it is what a reload carries.
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const named = parseGroupParam(new URLSearchParams(q < 0 ? "" : h.slice(q + 1)).get("group"));
+    if (named) out[named.group] = named.value;
+  } catch {}
+  return out;
 })();
 
 /* The tab that is open: the saved one when it is among `values`, else the
@@ -2667,13 +2757,58 @@ function sessionGroupActiveTab(group, values) {
   return values.includes(saved) ? saved : (values[0] ?? null);
 }
 
+/* This tab's memory of the pick, for an address that names none. */
+function rememberSessionGroupTab() {
+  if (typeof sessionStorage === "undefined") return;   // a reduced harness
+  try { sessionStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab)); } catch {}
+}
+
+/* The same address with the open tab set to `group:value`, or taken out. */
+function hashWithGroup(h, group, value) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (value) params.set("group", `${group}:${value}`);
+  else params.delete("group");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+/* Write the open tab into the address in place -- replaced, not pushed: a
+   pick narrows the rail, it is not a place to go Back to. */
+function syncGroupHash(group, value) {
+  if (typeof location === "undefined" || typeof history === "undefined") return;
+  const want = hashWithGroup(location.hash, group, value);
+  if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
+}
+
 function setSessionGroupTab(group, value, remember = true) {
   sessionGroupTab[group] = value;
-  if (remember) {
-    try {
-      localStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab));
-    } catch {}
+  if (!remember) return;
+  // Guarded: reduced harnesses slice this without the two helpers.
+  if (typeof rememberSessionGroupTab === "function") rememberSessionGroupTab();
+  if (typeof syncGroupHash === "function") syncGroupHash(group, value);
+}
+
+/* The open tab rides the address as `?group=`. An address that names one is
+   obeyed -- a reload, a bookmark, Back -- and one that names none (every
+   link inside the page is written without it) is given the current pick
+   back, in place. Called by route() before anything else. */
+function syncRouteGroup() {
+  const named = hashQuery(location.hash);
+  if (named.has("group")) {
+    const pick = parseGroupParam(named.get("group"));
+    if (pick && sessionGroupTab[pick.group] !== pick.value) {
+      setSessionGroupTab(pick.group, pick.value, false);
+      rememberSessionGroupTab();
+      sessionGroupTabScrollReset = true;
+      if (typeof refreshSessions === "function") refreshSessions({ cached: true });
+    }
+    return;
   }
+  const group = sessionGroupOrder[0];
+  if (group && sessionGroupTab[group]) syncGroupHash(group, sessionGroupTab[group]);
+  else if (group) syncGroupHash(group, "");
 }
 
 /* Which side of a mesh the rail shows, chosen on the mesh header
@@ -3168,8 +3303,14 @@ function toggleSessionPin(name) {
    helpers expect is missing. */
 const SESSION_VIEW_KEY = `claunch_session_view:${BASE}`;
 const SESSION_GRID_KEY = `claunch_session_grid:${BASE}`;
+/* The rail's views: list, grid and chart (the Chart page's timeline drawn in
+   the rail, chart-page.js openRail). Anything else reads as the list. */
+const SESSION_VIEWS = ["list", "grid", "chart"];
+function sessionViewOf(value) {
+  return SESSION_VIEWS.includes(value) ? value : "list";
+}
 let sessionView = (() => {
-  try { return localStorage.getItem(SESSION_VIEW_KEY) === "grid" ? "grid" : "list"; } catch {}
+  try { return sessionViewOf(localStorage.getItem(SESSION_VIEW_KEY)); } catch {}
   return "list";
 })();
 const SESSION_GRID_PER_LINE_KEY = `claunch_session_grid_per_line:${BASE}`;
@@ -3233,7 +3374,7 @@ function sessionGridLayout() {
 }
 
 function setSessionView(view, remember = true) {
-  sessionView = view === "grid" ? "grid" : "list";
+  sessionView = sessionViewOf(view);
   if (remember) {
     try { localStorage.setItem(SESSION_VIEW_KEY, sessionView); } catch {}
   }
@@ -3242,22 +3383,31 @@ function setSessionView(view, remember = true) {
 
 function syncSessionView() {
   const grid = sessionView === "grid";
-  $("session-list")?.classList.toggle("hidden", grid);
+  const chart = sessionView === "chart";
+  $("session-list")?.classList.toggle("hidden", grid || chart);
   $("session-grid")?.classList.toggle("hidden", !grid);
+  $("session-chart")?.classList.toggle("hidden", !chart);
   // The ancestor band belongs to the list above the rows it names; the grid
-  // has no rows to anchor it (renderRailAncestors hides it in that view).
+  // and the chart have no rows to anchor it (renderRailAncestors hides it
+  // while the list is hidden).
   if (typeof renderRailAncestors === "function") renderRailAncestors();
   // Mesh and workspace grouping split the list into tabs; the grid's rows
-  // are its grouping, so the mode and the tabs would do nothing there.
+  // are its grouping, so the mode and the tabs would do nothing there. The
+  // chart groups and filters with its own toolbar (Group by, Range, archived,
+  // killed), so the rail's state filters go too in that view: two filter
+  // bars over one chart would not say which one narrowed it.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
-    el.classList.toggle("hidden", grid));
+    el.classList.toggle("hidden", grid || chart));
+  $("session-filters")?.classList.toggle("view-hidden", chart);
   const groupTabs = $("session-group-tabs");
-  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
+  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid || chart);
   const groupHeader = $("session-group-header");
-  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid);
+  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid || chart);
   document.querySelectorAll('input[name="session-view"]').forEach((input) => {
     input.checked = input.value === sessionView;
   });
+  if (chart) globalThis.ChartPage?.openRail();
+  else globalThis.ChartPage?.stopRail();
   if (grid) renderSessionGrid(true);
   else drawSessionGridLineage();   // clears it: the list has no overlay
 }
@@ -4436,14 +4586,51 @@ let sessionGroupTabScrollReset = false;
    for no rebuild and a rebuild writes no position. The mark is a deadline, not
    a bare flag -- a browser that fires no `scrollend` (or an animation the
    reader interrupts with the wheel) must not leave the rail without its
-   scroll-triggered rebuilds for more than this. */
+   scroll-triggered rebuilds for more than this. The `⇱ card` reveal moves the
+   reader the same way and marks the rail the same way (railPressMark). */
 const RAIL_SCROLL_TOP_ANIM_MS = 3000;
 
-/* Whether a scroll-to-top press's animation is still running on `list`. */
+/* Whether a press's smooth scroll is still running on `list`. */
 function railScrollTopMarked(list) {
   const until = list && typeof list._railScrollTopUntil === "number"
     ? list._railScrollTopUntil : 0;
   return until > Date.now();
+}
+
+/* Mark the rail as owned by a smooth scroll the page started, and take the
+   mark off when the animation settles (claunch-7vd4v, claunch-7vd4v.1).
+
+   Two presses move the reader this way -- the open tab's scroll to the top
+   and the `⇱ card` reveal of one row -- and both are stopped the same way: a
+   pass that runs mid-animation writes the position with an instant
+   `scrollTop`, and an instant write aborts a smooth scroll (CSSOM View). The
+   rail froze where that pass found it, partway up, and the next press
+   advanced it only as far as the pass after that -- or, for the reveal,
+   reached the row because nothing ran in between.
+
+   The mark is what tells the two guards to stand down while the animation
+   runs: `railWireWindowScroll` asks for no rebuild, and `refreshSessions`
+   neither tears the rows down nor writes their position. It is a deadline,
+   not a bare flag -- a browser that fires no `scrollend` must not leave the
+   rail without its scroll-triggered rebuilds for more than this.
+
+   The release does the work the guards skipped: it clears the mark and runs
+   the covering check, so the slice around where the scroll ended is drawn
+   (the slice on the list covers where it started). */
+function railPressMark(list) {
+  if (!list || typeof list !== "object") return;
+  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
+  if (typeof list.addEventListener !== "function") return;
+  list.addEventListener("scrollend", () => {
+    list._railScrollTopUntil = 0;
+    const box = typeof $ === "function" ? $("session-list") : null;
+    if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
+    if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
+    if (typeof railSliceCovers === "function" && railSliceCovers(box)) return;
+    if (typeof refreshSessions !== "function") return;
+    refreshSessions._forceRebuild = true;
+    refreshSessions({ cached: true });
+  }, { once: true });
 }
 
 /* The rail back to its top: smoothly where the browser can. */
@@ -4454,22 +4641,7 @@ function scrollSessionListTop() {
     list.scrollTop = 0;
     return;
   }
-  list._railScrollTopUntil = Date.now() + RAIL_SCROLL_TOP_ANIM_MS;
-  if (typeof list.addEventListener === "function") {
-    /* The animation settled: take the mark off and run the covering check the
-       scroll handler skipped while it stood, so the slice around the top is
-       drawn (the window covered where the animation started, not where it
-       ended). */
-    list.addEventListener("scrollend", () => {
-      list._railScrollTopUntil = 0;
-      const box = typeof $ === "function" ? $("session-list") : null;
-      if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
-      if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
-      if (railSliceCovers(box)) return;
-      refreshSessions._forceRebuild = true;
-      refreshSessions({ cached: true });
-    }, { once: true });
-  }
+  railPressMark(list);
   list.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -4580,6 +4752,10 @@ function renderSessionGroupTabs(group, tabs, active) {
   bar.classList.toggle("hidden", !group || !tabs.length);
   bar.textContent = "";
   bar.dataset.active = active ?? "";
+  // Guarded: reduced harnesses slice this without the title state.
+  if (typeof noteRailOpenGroup === "function") {
+    noteRailOpenGroup(group || "", group && tabs.length ? active : null);
+  }
   if (!group) {
     renderSessionGroupHeader("", null);
     return;
@@ -4710,6 +4886,11 @@ function setSessionGroup(group, enabled, remember = true) {
   if (remember) {
     localStorage.setItem(SESSION_GROUP_ORDER_KEY, JSON.stringify(sessionGroupOrder));
     localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
+    // The address names the open tab of the grouping in force; switching the
+    // grouping switches which pick it names.
+    if (typeof syncGroupHash === "function") {
+      syncGroupHash(group, sessionGroupTab[group] || "");
+    }
   }
   syncSessionGroupMode();
   refreshSessions();
@@ -5171,6 +5352,23 @@ function railCardKey(ev, name) {
   return binding.act(name);
 }
 
+/* The same keys on a row of the Chart view (the rail's and the #/chart
+   page's, chart-page.js sessionRow), while the row itself holds the
+   keyboard -- the card's rule, for the card's reason (claunch-h0wi6.2.1).
+   Two of the card's keys are the row's own business and are left to it:
+   Enter and Space, which the row binds itself (the rail's opens the session,
+   the page's selects the row), and c, whose details live on the list card
+   and not on a chart row. */
+const CHART_ROW_SKIPS = new Set(["Enter", " ", "Spacebar", "c"]);
+
+function chartRowKey(ev, name) {
+  if (!ev) return false;
+  const raw = String(ev.key || "");
+  const pressed = raw.length === 1 ? raw.toLowerCase() : raw;
+  if (CHART_ROW_SKIPS.has(pressed)) return false;
+  return railCardKey(ev, name);
+}
+
 /* Bound on the document rather than per row: the rows are rebuilt by every
    poll that changes the fleet, and a listener on each of them would go with
    it. `focusout` fires BEFORE the new element takes focus, so it reads the
@@ -5564,10 +5762,10 @@ function railWireWindowScroll(list) {
       const box = typeof $ === "function" ? $("session-list") : null;
       if (!box || !Array.isArray(box._railRows) || !box._railWindowPlan) return;
       if (typeof box.clientHeight !== "number" || box.clientHeight <= 0) return;
-      /* A scroll-to-top press owns the position until its animation settles;
-         a rebuild here would restore the mid-animation position and abort the
-         smooth scroll. Reaching the top ends the wait -- no `scrollend` a
-         listener could miss is needed for that. */
+      /* A press moving the reader owns the position until its animation
+         settles; a rebuild here would restore the mid-animation position and
+         abort the smooth scroll. Reaching the top ends the wait -- no
+         `scrollend` a listener could miss is needed for that. */
       if (railScrollTopMarked(box)) {
         if ((box.scrollTop || 0) > 0) return;
         box._railScrollTopUntil = 0;
@@ -6050,7 +6248,18 @@ async function refreshSessions(options) {
   const windowForced = refreshSessions._forceRebuild === true;
   refreshSessions._forceRebuild = false;
   const changed = windowForced || signature !== list._sessionsSignature;
-  const rebuild = changed && !railHeld();
+  // A press that is moving the reader owns the rows as well as the position
+  // while its smooth scroll runs (railPressMark): a teardown here would take
+  // the row the animation is travelling to out of the page, and emptying the
+  // list clamps scrollTop to 0 with it -- the restore below is skipped while
+  // the mark stands, so the rail would land at the top instead of at the
+  // card. The pass after the mark draws what this one left behind: a forced
+  // rebuild is re-armed below, and a changed signature still differs because
+  // the signature is written only where the draw loop ends. Inlined for the
+  // harnesses that slice this function, like the position guard below.
+  const pressScrolling = typeof list._railScrollTopUntil === "number"
+    && list._railScrollTopUntil > Date.now();
+  const rebuild = changed && !railHeld() && !pressScrolling;
   // A forced rebuild a press held off is still owed (claunch-thuwx.1): the pass
   // the release triggers sees the same signature, reads as "nothing changed",
   // and the slice the scroll asked for is never drawn.
@@ -7458,6 +7667,9 @@ function renderTermHandle() {
    so a write that says what it already said buys a re-measure of the whole
    bar five seconds at a time for nothing. */
 function renderTermNote() {
+  // The sub procedure chip beside it follows the same session switches and
+  // polls (subprocs.js); it writes only when what it shows changed.
+  globalThis.SubprocUi?.header();
   const chip = $("term-note");
   if (!chip) return;
   const s = currentName
@@ -8080,21 +8292,39 @@ async function refreshCflow2Rail() {
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // and so does the header's sub procedure chip (subprocs.js)
+  globalThis.SubprocUi?.header();
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
-   hold only a person releases, or an open choice whose chooser is `user`. */
+   hold only a person releases, or an open choice whose chooser is `user`.
+
+   `blocking` is the narrower question the shape answers (claunch-hbmhk):
+   is the run stopped on this row, or does it merely offer a door? A choice
+   in a settle: race/any region is the second — the engine cancels it when a
+   sibling finishes, so the row must not wear the filled "it is on you" mark.
+   A payload from before `blocking` existed carries no such field; absent is
+   read as a stop, which is what every one of these used to be. */
 function cflow2RailMarkState(r) {
-  if (r.gated) return "yours";
+  if (r.gated) return r.blocking === false ? "optional" : "yours";
   if (r.status === "done") return "done";
   if (r.status === "failed" || r.status === "aborted" || r.status === "error")
     return "error";
   return "running";
 }
 
+/* The rail line's one sentence. Blocking gates keep the flag that says the
+   run is held; an optional door is named as optional and gets no flag, since
+   nothing is being held. Both can be open at once, and the order is the
+   order of the claims: what stops the run first. */
 function cflow2RailLabel(r) {
   if (r.status === "error") return `error${r.error ? ": " + r.error : ""}`;
-  if (r.gated) return `⚑ ${(r.owed || []).join(" · ")}`;
+  if (r.gated) {
+    const parts = [];
+    if ((r.owed || []).length) parts.push(`⚑ ${r.owed.join(" · ")}`);
+    for (const x of r.optional || []) parts.push(x);
+    return parts.join(" · ") || "⚑";
+  }
   if (r.status === "done" || r.status === "failed" || r.status === "aborted")
     return r.status;
   const where = (r.current || []).join(", ");
@@ -8105,12 +8335,26 @@ function cflow2RailLabel(r) {
   return `${r.status || "running"}${round}${where ? " · " + where : ""}`;
 }
 
+/* The hover of the v2 line: what the run owes the reader, one line each.
+   An optional door says what it is — the reader cannot tell from the word
+   "optional" alone whether leaving it alone loses anything, and it does
+   not: the run carries on and the door closes by itself. */
+function cflow2RailTip(r) {
+  const lines = (r.owed || []).slice();
+  for (const x of r.optional || []) {
+    lines.push(`${x} — the run carries on without it, and closes it by itself`);
+  }
+  return lines.join("\n");
+}
+
 function applyCflow2Badges() {
   const list = $("session-list");
   if (!list) return;
   for (const li of list.querySelectorAll("li[data-name]")) {
     const old = li.querySelector(".sess-cflow2");
     const r = (cflow2RailCache || {})[li.dataset.name];
+    // The sub procedure line under it (subprocs.js, claunch-8t5r0.3).
+    globalThis.SubprocUi?.card(li, r);
     if (!r) { if (old) old.remove(); continue; }
     const line = old || document.createElement("a");
     if (!old) {
@@ -8125,7 +8369,11 @@ function applyCflow2Badges() {
     const wf = `${r.scope}|${r.cwd}`;
     if (line.dataset.wf !== wf) line.dataset.wf = wf;
     line.href = "#/wf/" + encodeURIComponent(wf);
-    line.className = `sess-cflow2${r.gated ? " gated" : ""}`;
+    // Amber is for a row the run is held on. A door nobody has to take keeps
+    // its own class so the stylesheet, and anyone reading the DOM, can tell
+    // the two apart (claunch-hbmhk).
+    const blocking = r.gated && r.blocking !== false;
+    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`;
     const state = cflow2RailMarkState(r);
     const mark = document.createElement("span");
     mark.className = `wf-mark wf-mark-${state}`;
@@ -8136,7 +8384,7 @@ function applyCflow2Badges() {
     const txt = document.createElement("span");
     txt.className = "sess-cflow2-text";
     txt.textContent = `${r.workflow || "cflow2"} · ${cflow2RailLabel(r)}`;
-    line.title = (r.gated ? r.owed : r.current || []).join("\n");
+    line.title = r.gated ? cflow2RailTip(r) : (r.current || []).join("\n");
     const linkLabel = document.createElement("span");
     linkLabel.className = "sess-cflow-link";
     linkLabel.textContent = "Run ↗";
@@ -10066,6 +10314,37 @@ function termSeriesCostText(price, tokens) {
   return `≈ ${currency}${amount}`;
 }
 
+/* What that estimate breaks down into, as the caption's second line writes
+   it: "read $0.042 · cached read $8.31 · output $0.018". Cache write is
+   named only when the window wrote any — the rule the Stats table set for
+   the same four parts (claunch-60y0d.1). Each part is priced by readingCost
+   over its one bucket, at the same rates the total uses, so a cache-write
+   rate that falls back to the read rate counts the same way in both
+   (claunch-kr3wr). */
+function termSeriesCostParts(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const part = (label, key) => {
+    const cost = readingCost({ [key]: +(tokens[key] || 0) }, price.rates);
+    if (cost === null) return "";
+    const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+    return `${label} ${currency}${amount}`;
+  };
+  const parts = [part("read", "input"), part("cached read", "cache_read")];
+  if (+tokens.cache_write > 0) parts.push(part("cache write", "cache_write"));
+  parts.push(part("output", "output"));
+  return parts.filter(Boolean).join(" · ");
+}
+
+/* The caption: the window's estimate, then the split under it. Both lines
+   are right-aligned to the plot's right edge by `.term-series-cost`. */
+function termSeriesCostBox(cost, parts) {
+  const box = el("div", "term-series-cost");
+  box.appendChild(el("div", "term-series-cost-total", cost));
+  if (parts) box.appendChild(el("div", "term-series-cost-parts", parts));
+  return box;
+}
+
 function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
@@ -10225,6 +10504,7 @@ function termSeriesChart(data, zoom, price) {
      largest of its group, so summing points would undercount. With no rates
      the chart says so in its tooltip rather than writing a $0. */
   const cost = termSeriesCostText(price, data.totals);
+  const costParts = cost ? termSeriesCostParts(price, data.totals) : "";
   const costOf = price && price.model
     ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
   const costLine = cost
@@ -10256,9 +10536,10 @@ function termSeriesChart(data, zoom, price) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. The request's own estimate rides on the first line
-       (claunch-i6xl2): it names a request, so its cost belongs beside the
-       number, and the second line's token figures are the long one. */
+       pointer. It carries no cost: the axis is request order, so the estimate
+       for a slice of it describes no period a reader can act on (the window's
+       own estimate is under the legend), and the user asked for it gone
+       (claunch-kr3wr). */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -10268,9 +10549,7 @@ function termSeriesChart(data, zoom, price) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      const pcost = termSeriesCostText(price, p);
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
-        (pcost ? ` · ${pcost}` : "");
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -10287,10 +10566,10 @@ function termSeriesChart(data, zoom, price) {
     });
     /* The window's estimate under the legend, where it describes the whole
        plot rather than the request under the pointer. */
-    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    const costBox = cost ? termSeriesCostBox(cost, costParts) : null;
     box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
-  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
+  if (!zoom && cost) box.appendChild(termSeriesCostBox(cost, costParts));
   return box;
 }
 
@@ -12569,6 +12848,12 @@ function wfDotClass(status, run) {
                       so it must not look like either kind of "waiting"
      ◆  your move   — stopped, filled: it is on the person reading this
      ◇  with a peer — stopped, hollow: it is on somebody else
+     ○  optional    — a door, not a stop: the person MAY pick here, and the
+                      run carries on without a pick and closes the door by
+                      itself (a choice in a settle: race/any par —
+                      claunch-hbmhk). Its own shape because ◆ would claim
+                      the row is held by the reader, which is the one thing
+                      this is not
      ✓  done
      ✕  error/aborted
 
@@ -12581,6 +12866,7 @@ const WF_GLYPH = {
   held: "‖",
   yours: "◆",
   peer: "◇",
+  optional: "○",
   done: "✓",
   error: "✕",
 };
@@ -14251,12 +14537,15 @@ function setCurrentProject(name) {
     applyProjectDefaultCwd(form);
   }
   if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
+  if (typeof syncTabTitle === "function") syncTabTitle();
   // Both lists hold every project already: redraw them from the cache now,
   // with no request, so the pick shows the moment it is made.
   refreshSessions({ cached: true });
   refreshMeshList({ cached: true });
   if (currentPage === "home") renderHome();
-  if (currentPage === "chart") globalThis.ChartPage?.render(true);
+  if (currentPage === "chart" || (typeof sessionView !== "undefined" && sessionView === "chart")) {
+    globalThis.ChartPage?.render(true);
+  }
   if (currentPage === "hive") globalThis.HivePage?.render(true);
 }
 
@@ -14270,6 +14559,102 @@ function syncRouteProject() {
     const want = named.get("project") || "";
     if (want !== currentProject) setCurrentProject(want);
   } else if (currentProject) syncProjectHash();
+}
+
+/* The browser tab's title (claunch-9thjl). Several windows on one daemon are
+   common, and every one of them used to read "claunch sessions" in the
+   browser's tab strip. By default the title names what the rail is looking
+   at: the open group tab (a mesh, or a workspace) and the picked project. A
+   person can name a window instead (the ✎ beside the rail's title).
+
+   That name belongs to one browser tab, so it is kept out of localStorage:
+   every tab of this origin shares that, and naming one window would rename
+   the others on their next load. It rides the address as `?title=` beside
+   `?project=` -- a reload, a bookmark and a duplicated tab keep it -- and
+   sessionStorage, which the browser keeps per tab, holds it for an address
+   that names none (every link inside the page is written without it). */
+const TAB_TITLE_KEY = `claunch_tab_title:${BASE}`;
+const TAB_TITLE_DEFAULT = "claunch sessions";
+let customTabTitle = (() => {
+  try {
+    const h = typeof location !== "undefined" ? location.hash || "" : "";
+    const q = h.indexOf("?");
+    const params = new URLSearchParams(q < 0 ? "" : h.slice(q + 1));
+    if (params.has("title")) return (params.get("title") || "").trim();
+  } catch {}
+  try { return (sessionStorage.getItem(TAB_TITLE_KEY) || "").trim(); } catch { return ""; }
+})();
+// The rail's open group tab, as renderSessionGroupTabs last drew it.
+let railOpenGroup = { group: "", value: null };
+function noteRailOpenGroup(group, value) {
+  if (railOpenGroup.group === group && railOpenGroup.value === value) return;
+  railOpenGroup = { group, value };
+  syncTabTitle();
+}
+
+/* The title the rail's state gives: the open group tab, then the project,
+   each left out when there is none. The `(no mesh)` bucket is not a name. */
+function autoTabTitle(project, group, value) {
+  const parts = [];
+  if (group && value && value !== "(no mesh)") {
+    parts.push(group === "workspace" ? sessionWorkspaceLabel(value) : value);
+  }
+  if (project) parts.push(project);
+  return parts.length ? `${parts.join(" · ")} · claunch` : TAB_TITLE_DEFAULT;
+}
+
+/* The same address with the custom title set to `name`, or taken out. */
+function hashWithTitle(h, name) {
+  const s = h || "";
+  const q = s.indexOf("?");
+  const params = new URLSearchParams(q < 0 ? "" : s.slice(q + 1));
+  if (name) params.set("title", name);
+  else params.delete("title");
+  const qs = params.toString();
+  return (s.split("?")[0] || "#/") + (qs ? "?" + qs : "");
+}
+
+function syncTabTitle() {
+  if (typeof document === "undefined") return;
+  const want = customTabTitle
+    || autoTabTitle(currentProject, railOpenGroup.group, railOpenGroup.value);
+  if (document.title !== want) document.title = want;
+  const btn = typeof $ === "function" ? $("tab-title-edit") : null;
+  if (btn) {
+    btn.classList.toggle("custom", !!customTabTitle);
+    btn.title = customTabTitle
+      ? `browser tab named "${customTabTitle}" — click to rename or clear`
+      : "name this browser tab (now follows the open mesh and project)";
+  }
+}
+
+/* Name this browser tab; "" goes back to the automatic title. Written into
+   the address in place, like the project: a name is not a place to go Back
+   to. */
+function setCustomTabTitle(name) {
+  const next = String(name || "").trim();
+  customTabTitle = next;
+  try {
+    if (next) sessionStorage.setItem(TAB_TITLE_KEY, next);
+    else sessionStorage.removeItem(TAB_TITLE_KEY);
+  } catch {}
+  if (typeof location !== "undefined" && typeof history !== "undefined") {
+    const want = hashWithTitle(location.hash, next);
+    if ((location.hash || "#/") !== want) history.replaceState(history.state, "", want);
+  }
+  syncTabTitle();
+}
+
+/* The custom title rides the address as `?title=`, the way the project
+   does (syncRouteProject): an address that names one is obeyed, and one
+   that names none is given the current name back. Called by route(). */
+function syncRouteTitle() {
+  const named = hashQuery(location.hash);
+  if (named.has("title")) {
+    const want = (named.get("title") || "").trim();
+    if (want !== customTabTitle) setCustomTabTitle(want);
+  } else if (customTabTitle) setCustomTabTitle(customTabTitle);
+  syncTabTitle();
 }
 
 /* Opening a session while the rail is narrowed to another project moves the
@@ -16792,6 +17177,14 @@ const NEW_USAGE_WINDOW_LABELS = {
   five_hour: "5h", seven_day: "7d", weekly: "week", monthly: "month",
   monthly_spend: "month spend", credit: "credit",
 };
+/* The order every usage readout lists its windows in: shortest window first.
+   The same column then means the same span on every row a reader compares
+   (claunch-hz9ma) — a provider is free to report its windows in any order.
+   A name this table does not know keeps its place after the known ones, so a
+   provider that invents a window is still drawn rather than dropped. */
+const NEW_USAGE_WINDOW_ORDER = [
+  "five_hour", "seven_day", "weekly", "monthly", "monthly_spend", "credit",
+];
 const NEW_USAGE_STRATEGY_LABELS = {
   rotation: "rotation (one key per launch, in order)",
   "usage-min": "usage-min (lowest usage)",
@@ -16848,6 +17241,22 @@ function newUsageWindowLabel(name) {
   return NEW_USAGE_WINDOW_LABELS[name] || String(name || "window");
 }
 
+/* The windows of a reading in NEW_USAGE_WINDOW_ORDER, stable for names the
+   table does not know. Used for every list this block draws and for the
+   scrollable picker's line, so the 5h/week/month columns line up wherever a
+   reader compares two accounts (claunch-hz9ma). */
+function newUsageOrderedWindows(windows) {
+  const rank = (name) => {
+    const at = NEW_USAGE_WINDOW_ORDER.indexOf(String(name || ""));
+    return at < 0 ? NEW_USAGE_WINDOW_ORDER.length : at;
+  };
+  return (windows || [])
+    .map((window, index) => ({ window, index }))
+    .sort((a, b) => rank(a.window && a.window.name) - rank(b.window && b.window.name)
+      || a.index - b.index)
+    .map((item) => item.window);
+}
+
 /* Peak utilization across a reading's windows: the number the pool's usage
    strategies compare keyed readers on (usage.utilization_for_token). */
 function newUsagePeak(windows) {
@@ -16869,13 +17278,26 @@ function newUsageMoney(value) {
   return Number.isFinite(number) ? `$${number.toFixed(2)}` : "";
 }
 
+/* A span of minutes under one unit rule, so "4h47m" and "430h32m" are read
+   at the same scale: minutes below an hour, hours below a day, days above it
+   (claunch-hz9ma). Minutes are dropped once a day is in the number — the
+   reader comparing a 5h window with a 17d one needs the magnitude, not the
+   remainder. */
+function newUsageSpan(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest ? `${days}d ${rest}h` : `${days}d`;
+}
+
 function newUsageReset(resetsAt) {
   const at = Date.parse(String(resetsAt || ""));
   if (!Number.isFinite(at)) return "";
   const minutes = Math.floor((at - Date.now()) / 60000);
   if (minutes <= 0) return "resetting";
-  if (minutes < 60) return `resets in ${minutes}m`;
-  return `resets in ${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+  return `resets in ${newUsageSpan(minutes)}`;
 }
 
 /* One window as a text summary — `5h 42% · resets in 2h05m`. Used for both
@@ -16907,26 +17329,139 @@ function newUsageWindowText(window) {
   return `${label} ${parts.join(" · ")}`;
 }
 
+/* What one window is worth on its own, as parts a row places in fixed
+   columns: the value a reader compares (a percent, an amount, or the
+   reader's own detail sentence), the reset countdown, and the reset's
+   absolute time for the tooltip. `pct` is NaN when there is no percentage
+   to draw a bar from. */
+function newUsageWindowParts(window) {
+  const pct = Number(window && window.utilization);
+  const detail = typeof (window && window.detail) === "string" ? window.detail : "";
+  const amount = newUsageMoney(window && window.used_dollars);
+  const limit = newUsageMoney(window && window.limit_dollars);
+  const left = newUsageMoney(window && window.remaining_dollars);
+  const amountOnly = !!amount && !limit;
+  let value = "—";
+  if (detail) value = detail;
+  else if (amountOnly) value = amount;
+  else if (Number.isFinite(pct)) value = `${pct.toFixed(0)}%`;
+  const extra = [];
+  if (limit) extra.push(`of ${limit}`);
+  if (left) extra.push(`${left} left`);
+  const reset = newUsageReset(window && window.resets_at);
+  const absolute = Date.parse(String((window && window.resets_at) || ""));
+  return {
+    pct: detail ? NaN : pct,
+    value: extra.length ? `${value} ${extra.join(" · ")}` : value,
+    reset,
+    absolute: Number.isFinite(absolute) ? new Date(absolute).toLocaleString() : "",
+  };
+}
+
+function newUsageBar(pct, level) {
+  const bar = document.createElement("span");
+  bar.className = `new-usage-bar ${level}`.trim();
+  const fill = document.createElement("i");
+  fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  bar.appendChild(fill);
+  return bar;
+}
+
+/* The bar's column, drawn even when there is no percentage to fill it. The
+   countdown after it is auto-placed into the next free column, so a row that
+   skipped the bar would put its countdown where the bar belongs and the
+   countdowns would stop standing in one column (claunch-hz9ma.1). It paints
+   nothing: an empty track would read as "0% used". */
+function newUsageBarSlot() {
+  const slot = document.createElement("span");
+  slot.className = "new-usage-bar-slot";
+  return slot;
+}
+
+/* The profile's own reading, one row per window. The window's name sits in
+   its own column so the short window is always first and the same column
+   means the same span from one row to the next (claunch-hz9ma). */
 function newUsageWindowLine(window) {
   const li = document.createElement("li");
   li.className = "new-usage-window";
-  const pct = Number(window && window.utilization);
-  const level = newUsageLevel(pct);
+  const name = String((window && window.name) || "");
+  if (name) li.dataset.window = name;
+  const parts = newUsageWindowParts(window);
+  const level = newUsageLevel(parts.pct);
+  const label = document.createElement("span");
+  label.className = "new-usage-window-label";
+  label.textContent = newUsageWindowLabel(name);
   const accent = document.createElement("span");
   accent.className = `new-usage-pct ${level}`.trim();
-  accent.textContent = newUsageWindowText(window);
-  li.appendChild(accent);
-  const hasDetail = !!(window && typeof window.detail === "string" && window.detail);
-  if (Number.isFinite(pct) && !hasDetail) {
-    const bar = document.createElement("span");
-    bar.className = `new-usage-bar ${level}`.trim();
-    const fill = document.createElement("i");
-    fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-    bar.appendChild(fill);
-    li.appendChild(bar);
-    li.title = `${newUsageWindowLabel(window.name)}: ${pct.toFixed(1)}% used`;
+  accent.textContent = parts.value;
+  li.append(label, accent);
+  li.appendChild(Number.isFinite(parts.pct)
+    ? newUsageBar(parts.pct, level)
+    : newUsageBarSlot());
+  if (parts.reset) {
+    const reset = document.createElement("span");
+    reset.className = "new-usage-window-reset";
+    reset.textContent = parts.reset;
+    if (parts.absolute) reset.title = `resets ${parts.absolute}`;
+    li.appendChild(reset);
+  }
+  if (window && window.status && !["ok", "allowed"].includes(String(window.status))) {
+    const status = document.createElement("span");
+    status.className = "new-usage-window-status";
+    status.textContent = String(window.status);
+    li.appendChild(status);
+  }
+  if (Number.isFinite(parts.pct)) {
+    li.title = `${newUsageWindowLabel(name)}: ${parts.pct.toFixed(1)}% used`
+      + (parts.absolute ? ` · resets ${parts.absolute}` : "");
   }
   return li;
+}
+
+/* One window of a key's row. Every key row draws the same columns in the
+   same order, so a window the key does not report is still a cell (a dash)
+   and the columns after it stay lined up with the other keys — that is what
+   makes two accounts comparable at a glance (claunch-hz9ma). */
+function newUsageKeyCell(window, name) {
+  const cell = document.createElement("span");
+  const label = document.createElement("span");
+  label.className = "new-usage-cell-label";
+  label.textContent = newUsageWindowLabel(name);
+  const head = document.createElement("span");
+  head.className = "new-usage-cell-head";
+  cell.dataset.window = String(name || "");
+  if (!window) {
+    cell.className = "new-usage-cell empty";
+    const dash = document.createElement("span");
+    dash.className = "new-usage-cell-pct";
+    dash.textContent = "—";
+    head.append(label, dash);
+    cell.appendChild(head);
+    cell.title = `${newUsageWindowLabel(name)}: not reported for this key`;
+    return cell;
+  }
+  const parts = newUsageWindowParts(window);
+  const level = newUsageLevel(parts.pct);
+  cell.className = `new-usage-cell ${level}`.trim();
+  const value = document.createElement("span");
+  value.className = `new-usage-cell-pct ${level}`.trim();
+  value.textContent = parts.value;
+  head.append(label, value);
+  cell.appendChild(head);
+  cell.appendChild(Number.isFinite(parts.pct)
+    ? newUsageBar(parts.pct, level)
+    : newUsageBarSlot());
+  if (parts.reset) {
+    const reset = document.createElement("span");
+    reset.className = "new-usage-cell-reset";
+    reset.textContent = parts.reset;
+    cell.appendChild(reset);
+  }
+  const title = [newUsageWindowLabel(name)];
+  if (Number.isFinite(parts.pct)) title.push(`${parts.pct.toFixed(1)}% used`);
+  if (parts.absolute) title.push(`resets ${parts.absolute}`);
+  cell.title = title.join(" · ");
+  return cell;
 }
 
 function newUsageKeySummary(reading, unmeasurable) {
@@ -16934,7 +17469,7 @@ function newUsageKeySummary(reading, unmeasurable) {
   if (reading.error) return reading.error;
   const windows = reading.windows || [];
   if (!windows.length) return unmeasurable || "no windows";
-  return windows.map(newUsageWindowText).join("  ·  ");
+  return newUsageOrderedWindows(windows).map(newUsageWindowText).join("  ·  ");
 }
 
 /* The strategy select: one option per strategy the daemon accepts
@@ -17144,9 +17679,10 @@ function renderNewUsage() {
     refresh.textContent = reading ? "reading…" : "refresh";
   }
 
-  // The profile's own reading — the effective token's quota.
+  // The profile's own reading — the effective token's quota. Shortest window
+  // first, in the same order the key rows use (claunch-hz9ma).
   const windowsBox = $("new-usage-windows");
-  const windows = (doc && doc.usage && doc.usage.windows) || [];
+  const windows = newUsageOrderedWindows(doc && doc.usage && doc.usage.windows);
   if (windowsBox) {
     windowsBox.innerHTML = "";
     for (const window of windows) windowsBox.appendChild(newUsageWindowLine(window));
@@ -17157,6 +17693,27 @@ function renderNewUsage() {
   const keysBox = $("new-usage-keys");
   const keys = (doc && doc.keys) || [];
   const multi = !!(doc && doc.pooled) && keys.length > 1;
+  // The columns every key row draws: the union of the windows the profile and
+  // its keys report, in one order. A key that does not report a window still
+  // gets that window's cell, so the columns after it never shift between two
+  // accounts a reader is comparing (claunch-hz9ma).
+  const keyColumnNames = [];
+  for (const window of newUsageOrderedWindows([
+    ...windows,
+    ...keys.flatMap((key) => (key.usage && key.usage.windows) || []),
+  ])) {
+    const name = String((window && window.name) || "");
+    if (name && !keyColumnNames.includes(name)) keyColumnNames.push(name);
+  }
+  const autoRow = $("new-auto-key-row");
+  if (autoRow) {
+    // Ticking it needs two keys to switch between; a pool that changes under
+    // the tick (a key removed in another tab) leaves the box hidden, and a
+    // hidden answer must not ride the submit as if it were chosen.
+    autoRow.classList.toggle("hidden", !multi);
+    const autoBox = $("new-auto-key-switch");
+    if (!multi && autoBox) autoBox.checked = false;
+  }
   const strategy = (doc && doc.strategy) || "rotation";
   if (keysBox) {
     keysBox.innerHTML = "";
@@ -17180,8 +17737,22 @@ function renderNewUsage() {
         token.title = key.id || "";
         const use = document.createElement("span");
         use.className = "new-usage-key-use";
-        use.textContent = newUsageKeySummary(key.usage, doc.unmeasurable) || "not measured";
-        if (key.usage && key.usage.error) use.classList.add("bad");
+        use.style.setProperty("--window-count", String(Math.max(1, keyColumnNames.length)));
+        const reading = key.usage || null;
+        if (!reading) {
+          use.textContent = doc.unmeasurable || "not measured";
+        } else if (reading.error) {
+          use.textContent = reading.error;
+          use.classList.add("bad");
+        } else if (!keyColumnNames.length) {
+          use.textContent = doc.unmeasurable || "no windows";
+        } else {
+          for (const column of keyColumnNames) {
+            const window = (reading.windows || [])
+              .find((item) => String(item && item.name) === column);
+            use.appendChild(newUsageKeyCell(window, column));
+          }
+        }
         // When the key was last spent — the second half of "which key is this",
         // and the thing a pool's rotation is actually moving through.
         const used = document.createElement("span");
@@ -18343,6 +18914,10 @@ async function confirmStartWithoutSkipPermissions(f, parent) {
       { label: "Back to the form", value: null },
       { label: "Start without skip permissions", value: true },
     ],
+    // The form this submit came from is still open behind the question, and
+    // "Back to the form" means that one -- not a fresh box with the rows
+    // reset to what they held when it opened (claunch-9mwba).
+    overForm: true,
   });
   return answer === true;
 }
@@ -18498,6 +19073,12 @@ $("new-session").addEventListener("submit", async (e) => {
     return;
   }
   const parent = spawnParent();
+  // Read here, not at the report below: the skip-permissions confirm further
+  // down is a showModal, and showing one closes the session modal. A create
+  // made for an agent's spawn request still has to report back to it
+  // (claunch-oaxni), and that answer cannot depend on a box the question
+  // took away.
+  const spawnRid = sessionModal && sessionModal.spawnRequest;
   if (sessionFormView().mode === "spawn" && !parent) {
     $("create-error").textContent = "Choose a parent session.";
     $("create-error").classList.remove("hidden");
@@ -18672,6 +19253,10 @@ $("new-session").addEventListener("submit", async (e) => {
   // session (claunch-i985h). Absent unless pressed; the daemon refuses an id
   // the profile's pool does not hold.
   if (newSessionKeyId) body.key_id = newSessionKeyId;
+  // The auto-switch permission (claunch-d2t79), sent only when ticked so a form
+  // that never showed the row (a single-key pool) cannot turn it on. The box
+  // lives in the usage block and is hidden unless the pool has two keys.
+  if (f.auto_key_switch && f.auto_key_switch.checked) body.auto_key_switch = true;
   // The operator's note goes on the session record with the launch
   // (claunch-zy9yk); empty is left off, which is "no note".
   if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
@@ -18827,7 +19412,6 @@ $("new-session").addEventListener("submit", async (e) => {
     // the request learns which session the person made from it, top-level
     // or child — the tab it was created from, which need not be the scope
     // the agent asked for (claunch-oaxni).
-    const spawnRid = sessionModal && sessionModal.spawnRequest;
     if (spawnRid && made.name) spawnGateLink(spawnRid, made.name, parent ? "child" : "root");
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
@@ -19134,7 +19718,13 @@ if ($("term-idle-hold")) $("term-idle-hold").addEventListener("click", () => hol
    one call, with no wind-down in between (see h_session_archive). That makes
    it destructive in a way archiving an already-ended record is not, so a
    running session is confirmed first and an exited one goes straight
-   through, exactly as it always did. */
+   through, exactly as it always did.
+
+   Filing is also the clean (claunch-i0vje.2): manager.archive removes the
+   session directory, so the record is what a person keeps — the captured
+   output, scratch and uploads it wrote are gone, and a resume starts from
+   an empty directory. The confirmation says so, because that half cannot be
+   undone. */
 async function archiveSession(name) {
   const record = sessionsCache.find((s) => s.name === name) || {};
   if (record.status !== "exited" && !(await modalConfirm(
@@ -19142,7 +19732,8 @@ async function archiveSession(name) {
     `It is still running. Archiving ends the program now — the board ` +
     `wind-down that a kill offers is skipped — and files the record in the ` +
     `same step. The record itself stays, so it can be resumed from the ` +
-    `archive afterwards.`,
+    `archive afterwards; its captured output, scratch and uploads are ` +
+    `deleted with it and do not come back.`,
     "End and archive"
   ))) return false;
   const resp = await api(
@@ -19167,6 +19758,34 @@ $("term-archive").addEventListener("click", async () => {
   if (!currentName) return;
   await archiveSession(currentName);
 });
+
+/* Resume one exited session by name, for a page that is not its terminal
+   (the Chart page's detail column, claunch-h82vq): the header's ▶ resume is
+   the same request, but it reattaches the terminal, which only makes sense
+   for the attached session. Resolves true when the daemon took it. */
+async function respawnSession(name) {
+  if (!name) return false;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not resume '${name}'`, info.error || `HTTP ${resp.status}`);
+      return false;
+    }
+    // The attached terminal's socket died with the old child; drop it, and
+    // opening the terminal again attaches the new one.
+    if (name === currentName && typeof detach === "function") detach();
+    return true;
+  } catch (err) {
+    await modalInfo(`Could not resume '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return false;
+  } finally {
+    await refreshSessions({ state: "current" });
+  }
+}
 
 /* Stop everything. The records stay and every one of them is resumable after,
    which is what makes this the one bulk verb that needs no mesh guard: a
@@ -19468,6 +20087,14 @@ window.claunchNotices = {
   shown: (id) => noticeSourceShown(id),
   record: (entry) => noticeRecord(Object.assign({ kind: "" }, entry)),
 };
+
+// Guarded: reduced harnesses slice this stretch without the rail's header.
+const tabTitleEdit = $("tab-title-edit");
+if (tabTitleEdit) tabTitleEdit.addEventListener("click", () => {
+  const got = prompt("Name this browser tab (empty: follow the open mesh and project)",
+    customTabTitle);
+  if (got !== null) setCustomTabTitle(got);
+});
 
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
@@ -19801,6 +20428,10 @@ function configureSessionFork(source) {
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
   f.quick_fork_self_merge.checked = false;
+  // The origin's side items start unchecked: the conversation is always
+  // copied, and a copy that carried the plan or the open questions by
+  // default would change every existing fork (claunch-yydhs).
+  for (const key of ["plan", "qa", "threads"]) f[`quick_fork_copy_${key}`].checked = false;
   quickForkFill(f.quick_fork_place, [
     { value: "child", label: `As child of ${source.name} (recommended)` },
     { value: "sibling", label: inherited.parent
@@ -20048,6 +20679,10 @@ function quickForkRequestOptions(f, view) {
   if (mesh && mesh !== "-") options.mesh = mesh;
   const wf = f.quick_fork_workflow.value;
   if (wf && wf !== "-") options.workflow = wf;
+  // The origin's side items (claunch-yydhs). Omitted when nothing is
+  // ticked, so an ordinary fork sends exactly what it always sent.
+  const copy = ["plan", "qa", "threads"].filter((key) => f[`quick_fork_copy_${key}`].checked);
+  if (copy.length) options.copy = copy;
   const inputsBox = $("new-quick-fork-inputs");
   if (options.workflow && inputsBox && !inputsBox.classList.contains("hidden")) {
     options.cflow_inputs = cflowInputsValues(inputsBox);
@@ -20113,6 +20748,7 @@ async function quickForkSession(name, task, options, view = {}) {
   if (options && options.role) body.role = options.role;
   if (options && options.sibling) body.sibling = true;
   if (options && options.self_merge_allowed) body.self_merge_allowed = true;
+  if (options && options.copy && options.copy.length) body.copy = options.copy;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -24156,6 +24792,7 @@ const TERM_TIMER_GLYPH = {
   pause: "↻",
   ask: "?",
   timer: "⏱",    // a report timer the agent set for itself
+  grace: "⛨",    // a resumed session the usage-limit pause leaves alone (claunch-x9agn)
 };
 const TERM_TIMER_GLYPH_DEFAULT = "⏱";
 
@@ -24506,8 +25143,14 @@ function termCflow2Question(a) {
 
 /* What the strip draws for the attached session, from whichever run waits
    on the reader: the v1 run first (its strip predates this one and its
-   gate stops the session outright), else the v2 run's first owed answer.
-   `null` when neither does. */
+   gate stops the session outright), else the v2 run's first answer.
+   `null` when neither does.
+
+   A v2 run whose answers are all optional (`blocking === false`,
+   claunch-hbmhk.1) still draws the strip -- its choice can be taken from
+   here, which is why a person keeps it -- but it says so: `· ○ optional`
+   on the head and the `optional` class on the box, the rail chip's own
+   distinction (○ and plain colour) carried to the terminal. */
 function termCflowView() {
   // The terminal and the session's HTML view alike (claunch-hjux5).
   if (!sessionLineOnPage(currentPage) || !currentName) return null;
@@ -24525,16 +25168,19 @@ function termCflowView() {
   }
   const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[currentName];
   if (!r2 || !r2.gated) return null;
+  // Absent `blocking` is an older payload: read it as the run being held.
+  const optional = r2.blocking === false;
   const owed = r2.answers || [];
   const a = owed[0] || { kind: "", prompt: (r2.owed || []).join(" · ") };
   const more = owed.length > 1 ? ` (+${owed.length - 1} more)` : "";
   const question = termCflow2Question(a);
   const presses = termCflow2Answers(r2, a, currentName);
   return {
-    key: [r2.run, r2.status, a.kind, a.instance || "", owed.length],
+    key: [r2.run, r2.status, a.kind, a.instance || "", owed.length, optional],
     href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
     what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
-      `${a.kind || "waiting"}${more}`,
+      `${a.kind || "waiting"}${more}${optional ? " · ○ optional" : ""}`,
+    optional,
     // A plan wait has no press on the run page: its decision is taken in the
     // session's plan pane, so the strip points there instead (claunch-rzepk).
     question: presses.length ? question
@@ -24544,6 +25190,73 @@ function termCflowView() {
     answers: presses,
     after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
   };
+}
+
+/* One press of a gate answer (termCflowAnswers / termCflow2Answers): the
+   reason prompt or the confirm it carries, then the post. Shared by the
+   terminal's strip and the Chart page's detail column (claunch-h82vq).
+   Resolves false when the reader cancelled. Not `async`: the node
+   harnesses slice it out of this file by its `function` keyword. */
+function pressGateAnswer(a, after) {
+  let payload = a.body;
+  if (a.reason) {
+    const why = prompt(a.reason, "");
+    if (why === null) return Promise.resolve(false); // cancelled the dialog, not the refusal
+    if (a.reasonRequired && !why.trim()) return Promise.resolve(false); // the engine would refuse it
+    payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
+  } else if (a.ask && !confirm(a.ask)) {
+    return Promise.resolve(false);
+  }
+  const sent = after ? cflowAction(a.path, payload, after) : cflowAction(a.path, payload);
+  return Promise.resolve(sent).then(() => true);
+}
+
+/* Every gate a person owes one session's runs, for a page that is not that
+   session's terminal (the Chart page's detail column, claunch-h82vq). The
+   strip above draws the first of them for the attached session; this lists
+   them all, each with the presses the strip would offer: the v1 run's gate,
+   then one entry per answer the v2 run owes (cflow2RailCache's `answers`).
+   An owed answer with no press (a halt, a plan wait) still gets an entry,
+   with `answers: []`, so the reader learns it is there and where to go. */
+function sessionGateViews(name) {
+  const out = [];
+  if (!name) return out;
+  const r = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
+  if (r && sessCflowGated(r)) {
+    out.push({
+      href: "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`),
+      what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+        sessCflowLabel(r),
+      question: termCflowQuestion(r),
+      answers: termCflowAnswers(r, name),
+      after: null,
+      optional: false,
+    });
+  }
+  const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[name];
+  if (r2 && r2.gated) {
+    const optional = r2.blocking === false;
+    const href = "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`);
+    const owed = (r2.answers || []).length ? r2.answers
+      : [{ kind: "", prompt: (r2.owed || []).join(" · ") }];
+    for (const a of owed) {
+      const presses = termCflow2Answers(r2, a, name);
+      const question = termCflow2Question(a);
+      out.push({
+        href,
+        what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
+          `${a.kind || "waiting"}${optional ? " · ○ optional" : ""}`,
+        question: presses.length ? question
+          : a.kind === "plan-wait"
+            ? `${question} — decide it in the plan pane (☰ plan)`
+            : `${question} — answer it on the run page`,
+        answers: presses,
+        after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
+        optional,
+      });
+    }
+  }
+  return out;
 }
 
 function renderTermCflow() {
@@ -24564,6 +25277,7 @@ function renderTermCflow() {
   box.innerHTML = "";
   if (!show) {
     box.classList.add("hidden");
+    box.classList.remove("optional");
     refitSoon(60);
     return;
   }
@@ -24581,23 +25295,15 @@ function renderTermCflow() {
     const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
     b.type = "button";
     if (a.title) b.title = a.title;
-    b.addEventListener("click", () => {
-      let payload = a.body;
-      if (a.reason) {
-        const why = prompt(a.reason, "");
-        if (why === null) return; // cancelled the dialog, not the refusal
-        if (a.reasonRequired && !why.trim()) return; // the engine would refuse it
-        payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
-      } else if (a.ask && !confirm(a.ask)) {
-        return;
-      }
-      if (view.after) cflowAction(a.path, payload, view.after);
-      else cflowAction(a.path, payload);
-    });
+    b.addEventListener("click", () => pressGateAnswer(a, view.after));
     btns.appendChild(b);
   }
   box.appendChild(btns);
   box.classList.remove("hidden");
+  // A choice the run is not held on still shows here (its press is real),
+  // and the box says so the way the rail chip does (claunch-hbmhk.1).
+  if (view.optional) box.classList.add("optional");
+  else box.classList.remove("optional");
   refitSoon(60);
 }
 
@@ -24614,6 +25320,14 @@ function renderTermCflow() {
    a respawn. A session without that record shows the strip -- which is how
    the rule reaches every session created before it existed, and why a new one
    shows it until a person presses ignore once.
+
+   A session already running on skip permissions shows nothing at all: the
+   advice has been taken and the classifier is not called, and the strip
+   would be offering only "ignore" -- a permanent record pressed in the one
+   state where it buys nothing, and the one press that could keep the warning
+   away from a session that later runs without the flag. Turning the flag off
+   is a restart, and the strip paints again on the next poll from the row
+   (claunch-9mwba.1).
 
    The provider pair rides the session row (``provider``/``provider_service``,
    published by the daemon): a browser cannot open the config that decides it,
@@ -24633,8 +25347,16 @@ function termProviderWarnView() {
   const skipping = (typeof argvHasGroup === "function" && group.length)
     ? argvHasGroup((s.args || []).map(String), group)
     : false;
-  return { name: s.name, provider: s.provider || "", skipping,
-           canYolo: group.length > 0 };
+  // A session already on skip permissions is the advice taken: the
+  // permission classifier this strip warns about does not run. So the strip
+  // is not drawn at all -- and it offers no "ignore" press in that state,
+  // because that record is permanent and pressing it there would be the only
+  // way to lose the warning for a session that later runs without the flag.
+  // Nothing is recorded here, so the restart that turns the flag off (a
+  // fresh PTY under the same name) paints the strip again on the next poll
+  // (claunch-9mwba.1).
+  if (skipping) return null;
+  return { name: s.name, provider: s.provider || "", canYolo: group.length > 0 };
 }
 
 function renderTermProviderWarn() {
@@ -24642,7 +25364,7 @@ function renderTermProviderWarn() {
   if (!box) return;
   const view = termProviderWarnView();
   const sig = view
-    ? JSON.stringify([view.name, view.provider, view.skipping])
+    ? JSON.stringify([view.name, view.provider])
     : "hidden";
   // Rebuilt only when what it draws changes: the two-second poll answers the
   // same thing on almost every tick, and replacing a button under the pointer
@@ -24666,17 +25388,13 @@ function renderTermProviderWarn() {
   const btns = el("span", "tpw-buttons");
   // A harness that declares no skip-permissions args has nothing to restart
   // into: offering the press there would be a button that cannot do what it
-  // says. The warning and "ignore" still stand.
+  // says. The warning and "ignore" still stand. A session already ON skip
+  // permissions never reaches this painter -- the view above answers null
+  // for it (claunch-9mwba.1).
   if (view.canYolo) {
-    const yolo = el(
-      "button", "tpw-btn tpw-yolo",
-      view.skipping ? "already on yolo mode" : "restart with yolo mode"
-    );
+    const yolo = el("button", "tpw-btn tpw-yolo", "restart with yolo mode");
     yolo.type = "button";
-    yolo.disabled = !!view.skipping;
-    yolo.title = view.skipping
-      ? "this session already runs with skip permissions"
-      : "restart it with skip permissions — same name, same conversation";
+    yolo.title = "restart it with skip permissions — same name, same conversation";
     yolo.addEventListener("click", () => restartSessionYolo(view.name, yolo));
     btns.appendChild(yolo);
   }
@@ -24807,6 +25525,9 @@ function personGateRecords() {
         session, cwd: r.cwd, scope: r.scope, workflow: r.workflow, version: 2,
         kind: a.kind, label: a.label || a.instance || a.kind,
         urgent: !!a.urgent, prompt: termCflow2Question(a),
+        // A choice the run is not held on (claunch-hbmhk): the card says so
+        // and counts its age as how long the door has been open.
+        optional: !!a.optional,
         // What the step declared about its own notice (ask.criteria): keywords
         // the panel shows by, never a rank (noticeCriteriaOf).
         criteria: Array.isArray(a.criteria) ? a.criteria.slice() : [],
@@ -25322,6 +26043,15 @@ const SPLIT_PANES = {
     on: "close the plan pane — the terminal takes the column back",
     off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
   },
+  // The sub procedures this session's v2 run could call (subprocs.js,
+  // docs/cflow-v2.md 2.12.3, claunch-8t5r0.4/.5): every one listed, the ones
+  // that cannot run now greyed out with the reason, a call made here as the
+  // user, and the procedure packs with their role filter.
+  subprocs: {
+    btn: "term-subprocbtn", title: "⤷ sub",
+    on: "close the sub procedure pane — the terminal takes the column back",
+    off: "the sub procedures this session's run can call — call one, and install packs or edit their role filter",
+  },
 };
 
 function sessLayoutFor(name) {
@@ -25334,7 +26064,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "subprocs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -27280,6 +28010,12 @@ function syncLayout() {
   document.querySelectorAll("#rail-nav a").forEach((a) =>
     a.classList.toggle("active", a.dataset.page === page)
   );
+  // The phone's bottom tabs: a page without a tab of its own is reached
+  // through 더보기, so that tab is the one lit for it.
+  const tabs = [...document.querySelectorAll("#mobile-tabs a")];
+  const tabbed = tabs.some((a) => a.dataset.page === page);
+  tabs.forEach((a) => a.classList.toggle("active",
+    tabbed ? a.dataset.page === page : a.dataset.page === "menu"));
   // On a phone home IS the menu: the rail is the whole of that page, so
   // there is nothing to lay over it. Above the breakpoint the rail is docked
   // beside the page and is never a mode.
@@ -27335,10 +28071,60 @@ function setRailNavPinned(pinned) {
    across the breakpoint. */
 let detailWasUp = false;
 
+/* A page column borrowing the detail (claunch-h82vq): the Chart page's
+   Detail tab shows this same panel inside its right column instead of the
+   docked rail. { slot, name, onClose } while borrowed, null otherwise.
+   The address's `?detail=` still owns the rail: a page hosts the panel only
+   while the address names no detail (hostSessDetail refuses otherwise), and
+   an address that names one takes the panel back (route). */
+let sessDetailGuest = null;
+
+/* The borrow, read through typeof: the node harnesses slice the functions
+   that consult it out of this file without its declaration. */
+function detailGuest() {
+  return typeof sessDetailGuest === "undefined" ? null : sessDetailGuest;
+}
+
+function hostSessDetail(slot, name, onClose) {
+  const view = $("sess-view");
+  if (!view || !slot || !name) return false;
+  if (hashDetail(location.hash)) return false;
+  sessDetailGuest = { slot, name, onClose: onClose || null };
+  if (view.parentNode !== slot) slot.appendChild(view);
+  view.classList.add("guest");
+  if (sessName !== name) repointDetail(name);
+  syncDetailPanel();
+  return true;
+}
+
+/* Give the borrowed panel back: its subject goes back to whatever the
+   address names (nothing, usually), and the node to its home. */
+function releaseSessDetail() {
+  if (!sessDetailGuest) return;
+  sessDetailGuest = null;
+  const view = $("sess-view");
+  if (view) view.classList.remove("guest");
+  const want = hashDetail(location.hash);
+  if (!want) { if (sessName) dropDetail(); }
+  else if (want !== sessName) repointDetail(want);
+  syncDetailPanel();
+}
+
 function syncDetailPanel() {
   const view = $("sess-view");
   const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    // Borrowed by a page column: it is that column's content, so neither
+    // docked nor hidden, and the rail's drag bar has nothing to resize.
+    if (view.parentNode !== guest.slot) guest.slot.appendChild(view);
+    view.classList.remove("docked", "hidden");
+    split.classList.add("hidden");
+    if (!narrow && detailWasUp) refitSoon(60);
+    detailWasUp = false;
+    return;
+  }
   const host = narrow ? $("main") : $("layout");
   if (view.parentNode !== host) {
     // Last in #layout is the mobile bottom bar (display:none up here), so the
@@ -27402,6 +28188,7 @@ function syncSplitPane() {
   // would silently write the opposite of what it appears to do.
   for (const [pane, spec] of Object.entries(SPLIT_PANES)) {
     const btn = $(spec.btn);
+    if (!btn) continue;
     const on = !!lay && lay.split && lay.pane === pane;
     btn.setAttribute("aria-pressed", String(on));
     btn.title = on ? spec.on : spec.off;
@@ -27886,12 +28673,14 @@ function layRailOut() {
    second ago can legitimately have none yet, and that is a no-op rather than
    an error — the next poll builds it and the reader can press again. */
 function revealSessionCard(name) {
-  const card = sessionView === "grid"
-    ? revealSessionGridCell(name) : revealSessionListRow(name);
+  const card = sessionView === "chart"
+    ? (globalThis.ChartPage?.railRow?.(name) || null)
+    : sessionView === "grid"
+      ? revealSessionGridCell(name) : revealSessionListRow(name);
   if (!card) return false;
   // The list view's rows are the ones that skip their layout; a grid cell is
   // always laid out.
-  const laidOut = sessionView === "grid" ? null : layRailOut();
+  const laidOut = sessionView === "list" ? layRailOut() : null;
   if (laidOut) {
     if (railLaidOutTimer) clearTimeout(railLaidOutTimer);
     railLaidOutTimer = setTimeout(() => {
@@ -27906,9 +28695,20 @@ function revealSessionCard(name) {
   // target it measured once. Guarded like the other optional
   // painters: the isolated rail harnesses slice this function without it.
   if (typeof pinRailAncestors === "function") pinRailAncestors(name, GOTO_FLASH_MS);
+  // The scroll below runs smoothly and owns the rail until it lands
+  // (claunch-7vd4v.1): a pass that ran mid-animation wrote the position and
+  // the animation stopped where the reader could see it -- pressing again,
+  // from closer, reached the row. The mark is the one the scroll-to-top press
+  // uses; only the list view scrolls the rail (a grid cell moves the page), so
+  // only it is marked. Guarded like pinRailAncestors: the isolated rail
+  // harnesses slice this function without it.
+  const scrolling = typeof card.scrollIntoView === "function";
+  if (scrolling && laidOut && typeof railPressMark === "function") {
+    railPressMark(laidOut);
+  }
   // Centred, not merely "into view": a row brought to the very edge of the
   // rail is on screen and still reads as not found.
-  if (card.scrollIntoView) card.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (scrolling) card.scrollIntoView({ block: "center", behavior: "smooth" });
   gotoFlashName = name;
   if (gotoFlashTimer) clearTimeout(gotoFlashTimer);
   gotoFlashTimer = setTimeout(() => {
@@ -27997,12 +28797,14 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "menu": return "더보기";
     case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "retrospection": return "retrospection";
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
+    case "fleet": return "fleet";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -28090,6 +28892,34 @@ if ($("m-pause")) {
 $("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
+/* ⋯ on the phone bar (claunch-0a5nk.2): the menu holds the session's rare
+   moves (pause, kill, archive) and the link-panel chip, which together made
+   the bar wider than a 390px screen. It closes on a pick, on a tap outside,
+   on Escape and on a route change, so it never stays over a page the person
+   moved on from. */
+function setMobileMore(open) {
+  const btn = $("m-more"), menu = $("m-more-menu");
+  if (!btn || !menu) return;
+  menu.classList.toggle("hidden", !open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+if ($("m-more")) {
+  $("m-more").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMobileMore($("m-more-menu").classList.contains("hidden"));
+  });
+  $("m-more-menu").addEventListener("click", (e) => {
+    if (e.target.closest("button")) setMobileMore(false);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#m-more-menu, #m-more")) setMobileMore(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMobileMore(false);
+  });
+  window.addEventListener("hashchange", () => setMobileMore(false));
+}
+
 $("mobile-bottom").addEventListener("click", () => {
   if (!currentName) return;
   location.hash = "#/s/" + encodeURIComponent(currentName);
@@ -28126,7 +28956,8 @@ MOBILE_MQ.addEventListener("change", () => {
   // handed back to the page the address names — routing again does exactly
   // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session") {
+    if (sessName && currentPage !== "session"
+        && !(typeof detailGuest === "function" && detailGuest())) {
       history.replaceState(history.state, "", hashWithDetail(location.hash, null));
       dropDetail();
     }
@@ -28175,11 +29006,13 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  menu: "menu-view",
   plan: "plan-view",
   knowledge: "knowledge-view",
   retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
+  fleet: "fleet-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -28408,6 +29241,8 @@ function openSplit(name, kind = "run") {
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
   // And the briefing and prompt packs pane (packs-pane.js).
   if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
+  // And the sub procedure picker and pack editor (subprocs.js).
+  if (kind === "subprocs") { globalThis.SubprocPane?.mount(splitBody, name); return; }
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
@@ -28449,6 +29284,7 @@ function closeSplit() {
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
+  if (splitKind === "subprocs") globalThis.SubprocPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
@@ -28545,6 +29381,7 @@ $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
 $("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
+$("term-subprocbtn").addEventListener("click", () => toggleSplitPane("subprocs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
@@ -29012,6 +29849,8 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  // #/menu: every page as a list, the phone's 더보기 tab (claunch-0a5nk.3).
+  if (parts[0] === "menu") return { page: "menu" };
   if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
@@ -29022,6 +29861,8 @@ function parseHash(h) {
   }
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
+  // #/fleet launches from a preset; #/fleet/presets opens the editor.
+  if (parts[0] === "fleet") return { page: "fleet", tab: parts[1] || "" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -29047,6 +29888,9 @@ function route() {
   r.detail = hashDetail(location.hash);
   // Guarded: reduced harnesses slice route() without the project state.
   if (typeof syncRouteProject === "function") syncRouteProject();
+  // Guarded: reduced harnesses slice route() without the group tab state.
+  if (typeof syncRouteGroup === "function") syncRouteGroup();
+  if (typeof syncRouteTitle === "function") syncRouteTitle();
   // An open rail follows the terminal: the rail describes the session on
   // screen, and one left pointing at the session we came *from* quietly
   // mislabels everything in it, its cflow run most of all. The links that
@@ -29102,6 +29946,7 @@ function route() {
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
+  if (r.page !== "fleet") globalThis.FleetPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -29192,17 +30037,23 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "menu": openMenuPage(); break;
     case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
+    case "fleet": showView("fleet"); globalThis.FleetPage.open(r.tab); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
   // it: the buttons that do (openDetail, closeDetail) only edit the address.
-  if (!r.detail) { if (sessName) dropDetail(); }
+  // A page column holding the panel (hostSessDetail) keeps it while the
+  // address names no detail; one that names a detail takes it back.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (r.detail && guest) releaseSessDetail();
+  if (!r.detail) { if (sessName && !guest) dropDetail(); }
   else if (r.detail !== sessName) repointDetail(r.detail);
   syncLayout();
 }
@@ -30793,6 +31644,41 @@ function openHome() {
   renderHome();
 }
 
+/* #/menu (claunch-0a5nk.3): the phone's 더보기 tab. The list is read from
+   #rail-nav each time, so a page added there is here too; the search box
+   narrows it by the label and the address. */
+function openMenuPage() {
+  showView("menu");
+  const list = $("menu-list");
+  const search = $("menu-search");
+  if (!list) return;
+  list.replaceChildren();
+  document.querySelectorAll("#rail-nav a").forEach((src) => {
+    const a = document.createElement("a");
+    a.href = src.getAttribute("href");
+    a.dataset.page = src.dataset.page;
+    const icon = src.querySelector("span");
+    a.appendChild(el("span", "menu-icon", icon ? icon.textContent : ""));
+    // The label is the link's own text, without its icon and badge spans.
+    const label = [...src.childNodes]
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent).join("").trim();
+    a.appendChild(el("span", "menu-label", label));
+    a.dataset.match = (label + " " + a.getAttribute("href")).toLowerCase();
+    list.appendChild(a);
+  });
+  if (search) { search.value = ""; filterMenuPage(""); }
+}
+function filterMenuPage(q) {
+  const needle = q.trim().toLowerCase();
+  document.querySelectorAll("#menu-list a").forEach((a) => {
+    a.hidden = !!needle && !a.dataset.match.includes(needle);
+  });
+}
+if ($("menu-search")) {
+  $("menu-search").addEventListener("input", (e) => filterMenuPage(e.target.value));
+}
+
 function homeCard(title, href, subtitle) {
   const card = el("a", "home-card");
   card.href = href;
@@ -31048,6 +31934,36 @@ let statusCheckDraft = { name: "", question: "" };
 /* The semantic-search feature's state (/api/rag/status), for its card. */
 let ragStatus = null;
 let ragError = "";
+/* The last thing a click on the RAG card did — "요청 중…", then what the
+   daemon answered ("색인 시작" / "이미 색인 중 — 실행하지 않음" / "예약").
+   Kept across the status re-render so the answer survives the refresh that
+   follows the request (claunch-i2i95). */
+let ragNotice = "";
+/* While the card shows work moving it re-reads its status on a timer: one
+   pass can run for minutes, and a card that only refreshed on click leaves
+   the reader unable to tell whether the click was received at all
+   (claunch-i2i95). Bounded like the settings-card poll it replaces, and it
+   stops re-arming as soon as nothing is left to watch. */
+let ragPolls = 0;
+const RAG_POLL_LIMIT = 200;
+const RAG_POLL_MS = 3000;
+/* True while a click's request is in flight. The card draws the notice and
+   the disabled buttons in one render *before* the request goes out, so
+   "요청 중…" is on screen while it is on the wire — setting the notice and
+   waiting for the status refresh to draw it left the reader with no feedback
+   at all (peer review of claunch-i2i95). */
+let ragBusy = false;
+/* The collections that exist on disk (/api/rag/dbs), so the card can draw the
+   ones no index has opened yet as placeholders (claunch-c7vjm). Kept off the
+   3-second status poll: /api/rag/dbs walks every collection to total its
+   files, and that walk is not worth repeating every RAG_POLL_MS. It rides a
+   minute-long clock instead, and it is read without the sizes (?sizes=0) —
+   the card draws no size. */
+let ragDisk = null;
+let ragDiskError = "";
+let ragDiskAt = 0;
+let ragDiskBusy = false;
+const RAG_DISK_POLL_MS = 60000;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31118,6 +32034,7 @@ function openSettings(section) {
   refreshPrompterSettings();
   refreshStatusChecks();
   refreshRagStatus();
+  refreshRagDisk();
   refreshGhStatus();
   refreshRelaySettings();
   refreshWslRegStub();
@@ -31125,6 +32042,7 @@ function openSettings(section) {
   refreshTestOutputDir();
   refreshDelegateSetting();
   refreshSweepBatchSetting();
+  refreshKeySwitchSetting();
   refreshWebdebugSetting();
   refreshModelTiers();
   refreshProviderAffinity();
@@ -31253,7 +32171,76 @@ async function refreshRagStatus() {
   } catch (err) {
     ragError = String(err);
   }
-  if (wsOpen) renderWorkspaces();
+  // The disk listing the placeholder rows come from is re-read on this same
+  // refresh, but at most once per RAG_DISK_POLL_MS: the status poll fires
+  // every 3 seconds and the listing is the expensive half (claunch-c7vjm).
+  if (wsOpen && wsSection === "" && ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)) {
+    refreshRagDisk();
+  }
+  ragCardRedraw();
+  ragSchedulePoll();
+}
+
+/* The status poll runs every RAG_POLL_MS for as long as an index syncs —
+   minutes on a fleet this size — and what it read is drawn by this card
+   alone. Redrawing the whole Settings view for it rebuilt every other card's
+   inputs three times a second-ish: the Model prices add row lost its typed
+   model id and the rate cells their focus mid-typing (claunch-jmuvv). So
+   the card that shows the status is swapped in place; the full render stays
+   for when the card is not on the page. */
+function ragCardRedraw() {
+  if (!wsOpen) return;
+  const old = wsSection === "" && typeof document !== "undefined"
+    ? document.querySelector(".rag-card") : null;
+  if (!old) { renderWorkspaces(); return; }
+  const active = document.activeElement;
+  const inside = active && active.id && old.contains(active);
+  const focused = inside ? active.id : "";
+  const sel = inside ? settingsFieldSelection(active) : null;
+  old.replaceWith(ragCard());
+  refocusSettingsField(focused, sel);
+}
+
+/* Whether the disk listing is due. Split out so the harness can hold the
+   interval: the card must not put /api/rag/dbs on the 3-second clock
+   (claunch-c7vjm). */
+function ragDiskDue(now, last, interval) {
+  return !last || now - last >= interval;
+}
+
+async function refreshRagDisk() {
+  if (ragDiskBusy) return;
+  ragDiskBusy = true;
+  try {
+    const resp = await api("/api/rag/dbs?sizes=0");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragDisk = Array.isArray(data.dbs) ? data.dbs : [];
+    ragDiskAt = Date.now();
+    ragDiskError = "";
+  } catch (err) {
+    ragDiskError = String(err);
+  } finally {
+    ragDiskBusy = false;
+  }
+  ragCardRedraw();
+}
+
+/* Whether the status payload has anything left to watch. A reindex request
+   that arrived during a pass sits in ``force_pending`` and the queue holds
+   buckets waiting on the consumer, so both keep the poll armed. */
+function ragHasWork(st) {
+  if (!st) return false;
+  if ((st.indexes || []).some(r => r && (r.syncing || r.pending || r.force_pending))) return true;
+  const q = st.queue || {};
+  return Boolean(q.depth || (q.pending || []).length);
+}
+
+function ragSchedulePoll() {
+  if (!(wsOpen && wsSection === "") || !ragHasWork(ragStatus)) { ragPolls = 0; return; }
+  if (ragPolls >= RAG_POLL_LIMIT) return;
+  ragPolls++;
+  setTimeout(() => { if (wsOpen && wsSection === "") refreshRagStatus(); }, RAG_POLL_MS);
 }
 
 async function refreshGhStatus() {
@@ -31399,31 +32386,193 @@ async function ragReindex(row, force) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     ragError = "";
+    return data;
   } catch (err) {
     ragError = String(err);
+    return null;
+  } finally {
+    setTimeout(refreshRagStatus, 1200);
   }
-  setTimeout(refreshRagStatus, 1500);
 }
 
-function ragIndexLine(row) {
-  const parts = [`${row.documents} document${row.documents === 1 ? "" : "s"}`];
-  if (row.dims) parts.push(`${row.dims} dimensions`);
-  if (row.total) parts.push(`${row.indexed}/${row.total} current`);
-  if (row.pending) parts.push(`${row.pending} pending`);
-  parts.push(row.syncing ? "syncing" : "idle");
-  if (row.updated_at) parts.push(`updated ${String(row.updated_at).replace("T", " ").slice(0, 19)}`);
-  return parts.join(" · ");
+/* One DB's buckets as the card draws them: the DB the active preset resolves
+   to is the heading, and every collection it reads is a row under it. A
+   collection still on a pre-preset directory carries no identity of its own —
+   it is read through the legacy adoption rule — and the row says so, because
+   that is the fact the two screens disagreed about (claunch-i2i95). */
+function ragDbGroups(st, placeholders) {
+  const rows = st.indexes || [];
+  const db = st.db || "(이름 없는 DB)";
+  const groups = new Map();
+  const add = (name, row) => {
+    let g = groups.get(name);
+    if (!g) {
+      g = { name, dims: [], rows: [] };
+      groups.set(name, g);
+    }
+    g.rows.push(row);
+    // Every collection's width is kept: the header used to take the first
+    // row's and call it the DB's, which hid a DB whose corpora were built at
+    // different widths (claunch-rk0od).
+    if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);
+  };
+  for (const row of rows) add(row.db_configured || db, row);
+  // A collection on disk that no index has opened yet sits under the DB its
+  // identity names, so the reader sees it beside the ones that are running
+  // rather than in a second list with a second heading (claunch-c7vjm).
+  for (const row of placeholders || []) add(row.identity || db, { ...row, placeholder: true });
+  return [...groups.values()];
 }
 
-/* The index queue in one line: how much is waiting, when the consumer last
-   ran, how often the board files are checked for a CLI write. */
+/* The collections on disk that no open index accounts for. Both payloads
+   name a collection by the directory it lives in, so the two are compared by
+   that path and nothing else: ``/api/rag/status`` lists what the daemon has
+   opened, ``/api/rag/dbs`` lists everything that exists (claunch-c7vjm). */
+function ragPlaceholderRows(st, diskRows) {
+  const opened = new Set();
+  for (const row of (st && st.indexes) || []) {
+    if (row && row.path) opened.add(String(row.path));
+  }
+  return (diskRows || []).filter(row => row && row.path && !opened.has(String(row.path)));
+}
+
+/* What a placeholder row calls itself. The corpus is the part the card does
+   not otherwise draw — a board corpus is keyed ``beads-<hash>`` per root, so
+   it is shown as such and the hash stays reachable in the title. */
+function ragPlaceholderLabel(row) {
+  const corpus = String((row && row.corpus) || "");
+  if (corpus === "unified" || corpus === "all") return "Search anything (통합: 이슈·코멘트·세션)";
+  if (corpus === "sessions") return "sessions (세션)";
+  if (corpus.startsWith("beads-")) return `board ${corpus}`;
+  return corpus || "(코퍼스 미상)";
+}
+
+/* A placeholder row's state line. A width that differs from the model now
+   configured means the collection cannot serve a query when it opens — the
+   same fact the DB panel's preset warning names, said here before the cost
+   is paid (claunch-c7vjm). Says nothing when either width is unknown. */
+function ragPlaceholderState(row, st) {
+  const parts = ["아직 열리지 않음"];
+  const width = Number((row && row.dims) || 0);
+  const current = Number((st && st.dimensions) || 0);
+  if (width && current && width !== current) {
+    parts.push(`열리면 실패 예상 — 지금 설정은 ${current}차원`);
+  }
+  return { state: "unopened", text: parts.join(" · ") };
+}
+
+function ragBucketLabel(row) {
+  // `unified` is the combined corpus; `all` was its name and the daemon may
+  // still report it during a rollout, so both draw the same row
+  // (claunch-7aujp). The label names what the corpus holds: the name alone
+  // read as "everything, including the board indexes", which it is not.
+  if (row.kind === "unified" || row.kind === "all") {
+    return "Search anything (통합: 이슈·코멘트·세션)";
+  }
+  if (row.kind === "sessions") return "sessions (세션)";
+  return `board ${beadsNameOfRoot(row.root)}`;
+}
+
+function ragBucketState(row) {
+  if (row.error) {
+    // A failure keeps its time: the daemon stamps the pass it belongs to, and
+    // "실패" alone cannot tell a failure from five minutes ago from one that
+    // just happened (peer review of claunch-i2i95).
+    const when = row.finished_at ? String(row.finished_at).replace("T", " ").slice(0, 19) : "";
+    return { state: "failed", text: when ? `${row.error} · 마지막 실패 ${when}` : row.error };
+  }
+  if (row.syncing) {
+    const pct = row.total ? Math.floor((row.indexed / row.total) * 100) : 0;
+    return { state: "busy", text: `색인 중 ${row.indexed}/${row.total} (${pct}%)` +
+      (row.cancel_requested ? " · 취소 요청됨" : "") +
+      (row.force_pending ? " · 재색인 예약" : "") };
+  }
+  if (row.pending) return { state: "pending", text: `대기 ${row.pending}건` };
+  return { state: "ok", text: "정상" };
+}
+
+async function ragDbAction(st, group, force) {
+  const label = force ? "Rebuild" : "Sync";
+  ragPolls = 0;  // a fresh request restarts the bounded watch
+  ragBusy = true;
+  ragNotice = `${group.name} ${label} 요청 중…`;
+  renderWorkspaces();  // the notice and the locked buttons, before the first await
+  const outcomes = [];
+  try {
+    for (const row of group.rows) {
+      // A placeholder is a disk listing, not a bucket the daemon knows: it
+      // has no kind to name and nothing opened to reindex (claunch-c7vjm).
+      if (row.placeholder) continue;
+      const data = await ragReindex(row, force);
+      if (!data) {
+        outcomes.push(`${ragBucketLabel(row)}: 오류`);
+        continue;
+      }
+      if (data.force_applied) outcomes.push(`${ragBucketLabel(row)}: 재색인 시작`);
+      else if (data.started) outcomes.push(`${ragBucketLabel(row)}: 색인 시작`);
+      else if (data.force_pending) outcomes.push(`${ragBucketLabel(row)}: 색인 중 — 재색인 예약`);
+      else if (data.running) outcomes.push(`${ragBucketLabel(row)}: 이미 색인 중 — 실행하지 않음`);
+      else outcomes.push(`${ragBucketLabel(row)}: 요청 수락 안 됨`);
+    }
+  } finally {
+    ragBusy = false;
+  }
+  ragNotice = `${group.name} ${label} — ${outcomes.join(" · ")}`;
+  await refreshRagStatus();
+}
+
+async function ragCancel(row) {
+  const body = { kind: row.kind };
+  if (row.root) body.cwd = row.root;
+  ragPolls = 0;
+  ragBusy = true;
+  ragNotice = `${ragBucketLabel(row)} 취소 요청 중…`;
+  renderWorkspaces();  // drawn before the request, like ragDbAction
+  try {
+    const resp = await api("/api/rag/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok && resp.status !== 409) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragNotice = data.cancelled
+      ? `${ragBucketLabel(row)}: 취소 요청됨 — 다음 묶음에서 멈추고 지금까지의 임베딩은 보존합니다`
+      : `${ragBucketLabel(row)}: 진행 중인 작업이 없습니다`;
+  } catch (err) {
+    ragNotice = `${ragBucketLabel(row)} 취소 실패 · ${err.message}`;
+  } finally {
+    ragBusy = false;
+  }
+  await refreshRagStatus();
+}
+
+async function ragBackfill(hold) {
+  ragPolls = 0;
+  ragBusy = true;
+  ragNotice = hold ? "소급 임베딩을 일시정지하는 중…" : "소급 임베딩을 재개하는 중…";
+  renderWorkspaces();  // drawn before the request, like ragDbAction
+  try {
+    const resp = await api(hold ? "/api/rag/backfill/pause" : "/api/rag/backfill/resume", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragNotice = data.paused ? "일시정지됨 — 진행 중 pass는 끝까지 갑니다" : "재개됨";
+  } catch (err) {
+    ragNotice = `전환 실패 · ${err.message}`;
+  } finally {
+    ragBusy = false;
+  }
+  await refreshRagStatus();
+}
+
 function ragQueueLine(q) {
-  const parts = [`queue ${q.depth || 0} waiting`];
-  if (q.pending && q.pending.length) parts.push(`pending ${q.pending.join(", ")}`);
+  const parts = [`대기 ${q.depth || 0}`];
+  if (q.pending && q.pending.length) parts.push(`순서: ${q.pending.join(" → ")}`);
   parts.push(q.last_consumed_at
-    ? `last sync ${String(q.last_consumed_at).replace("T", " ").slice(0, 19)}`
-    : "no sync yet");
-  parts.push(q.watch_interval > 0 ? `board files checked every ${q.watch_interval}s` : "board watcher off");
+    ? `마지막 sync ${String(q.last_consumed_at).replace("T", " ").slice(0, 19)}`
+    : "아직 sync 없음");
+  parts.push(q.watch_interval > 0 ? `보드 확인 ${q.watch_interval}초` : "보드 감시 꺼짐");
   return parts.join(" · ");
 }
 
@@ -31435,6 +32584,7 @@ function ragCard() {
     "an embedding endpoint to rank the board and the fleet by meaning. " +
     "Manage the endpoint and models in Search settings below. Indexes update automatically."));
   if (ragError) card.appendChild(el("p", "error", ragError));
+  if (ragNotice) card.appendChild(el("p", "wf-note rag-notice", ragNotice));
   const st = ragStatus;
   if (!st) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -31445,7 +32595,8 @@ function ragCard() {
     card.appendChild(el("pre", "rag-yaml",
       "rag:\n  source: custom             # or profile (with profile: <name>)\n" +
       "  base_url: https://host/v1\n  api_key: <key>        # or CLAUNCH_RAG_API_KEY\n" +
-      "  embedding_model: <model id>\n  rerank_model: <model id>   # optional\n" +
+      "  embedding_model: <model id>\n" +
+      "  rerank_model: <model id>   # optional\n" +
       "  verify_tls: true           # false for a self-signed chain"));
     return card;
   }
@@ -31457,31 +32608,110 @@ function ragCard() {
     st.dimensions ? `${st.dimensions} dims` : "model dims",
   ];
   card.appendChild(el("p", "beads-bits", facts.join("  ·  ")));
-  if (st.queue) card.appendChild(el("p", "beads-bits rag-queue-line", ragQueueLine(st.queue)));
-  const list = el("div", "rag-index-list");
-  for (const row of st.indexes || []) {
-    const item = el("div", "rag-index-row");
-    const text = el("div", "rag-index-text");
-    text.appendChild(el("strong", null, row.kind === "all" ? "Search anything" : row.kind === "sessions" ? "sessions" : `board ${beadsNameOfRoot(row.root)}`.trim()));
-    text.appendChild(el("span", "beads-bits", ragIndexLine(row)));
-    if (row.error) text.appendChild(el("span", "error", row.error));
-    item.appendChild(text);
-    const sync = el("button", "wf-btn clear", "Sync"); sync.type = "button";
-    sync.title = "embed what changed since the last sync";
-    sync.addEventListener("click", () => ragReindex(row, false));
-    const force = el("button", "wf-btn clear", "Rebuild"); force.type = "button";
-    force.title = "re-embed every document";
-    force.addEventListener("click", () => ragReindex(row, true));
-    item.append(sync, force);
-    list.appendChild(item);
+
+  // The queue and its two controls. Pausing holds the next bucket, not the
+  // one a pass is on — the line says so rather than promising a stop it
+  // cannot make (claunch-i2i95).
+  const q = st.queue || {};
+  const queueRow = el("p", "beads-bits rag-queue-line", ragQueueLine(q));
+  const pause = el("button", "wf-btn clear", st.backfill_paused ? "재개" : "일시정지");
+  pause.type = "button";
+  pause.disabled = ragBusy;  // a request is in flight; the card says which
+  pause.title = st.backfill_paused
+    ? "대기 중인 색인을 다시 시작합니다"
+    : "다음 버킷의 색인을 시작하지 않습니다. 진행 중인 pass는 끝까지 갑니다";
+  pause.addEventListener("click", () => ragBackfill(!st.backfill_paused));
+  queueRow.append(" ", pause);
+  card.appendChild(queueRow);
+
+  const placeholders = ragPlaceholderRows(st, ragDisk);
+  if (ragDiskError) {
+    card.appendChild(el("p", "wf-note",
+      `디스크의 컬렉션 목록을 읽지 못했습니다 — 열리지 않은 컬렉션은 표시되지 않습니다 · ${ragDiskError}`));
+  } else if (placeholders.length) {
+    card.appendChild(el("p", "wf-note",
+      "회색 행은 디스크에 있지만 아직 열리지 않은 컬렉션입니다 — 검색·색인이 한 번 닿으면 정상 행이 됩니다."));
+  }
+  for (const group of ragDbGroups(st, placeholders)) {
+    const box = el("div", "rag-db-block");
+    const head = el("div", "rag-db-head");
+    head.appendChild(el("strong", null, `DB ${group.name}`));
+    head.appendChild(el("span", "beads-bits", group.dims.length ? ` · ${group.dims.join("/")}차원` : ""));
+    // Sync/Rebuild act on the DB's open collections. A group drawn only from
+    // the disk listing has none to act on, and a click there would ask the
+    // daemon to reindex a collection the card never opened (claunch-c7vjm).
+    if (group.rows.some(row => !row.placeholder)) {
+      const sync = el("button", "wf-btn clear", "Sync");
+      sync.type = "button";
+      sync.disabled = ragBusy;
+      sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
+      sync.addEventListener("click", () => ragDbAction(st, group, false));
+      const force = el("button", "wf-btn clear", "Rebuild");
+      force.type = "button";
+      force.disabled = ragBusy;
+      force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
+      force.addEventListener("click", () => ragDbAction(st, group, true));
+      head.append(sync, force);
+    }
+    box.appendChild(head);
+
+    const list = el("div", "rag-index-list");
+    for (const row of group.rows) {
+      if (row.placeholder) {
+        const item = el("div", "rag-index-row rag-row-unopened");
+        const text = el("div", "rag-index-text");
+        const label = el("strong", null, ragPlaceholderLabel(row));
+        label.title = `corpus ${row.corpus}${row.identity ? ` · DB ${row.identity}` : ""}`;
+        text.appendChild(label);
+        const bits = [
+          row.dims ? `${row.dims}차원` : "차원 미상",
+          row.model || "모델 미상",
+          row.identity ? "이름 있음" : "이전 형식",
+        ];
+        text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+        const state = ragPlaceholderState(row, st);
+        text.appendChild(el("span", "rag-badge rag-badge-unopened", "미개방"));
+        text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+        item.appendChild(text);
+        list.appendChild(item);
+        continue;
+      }
+      const item = el("div", "rag-index-row");
+      const text = el("div", "rag-index-text");
+      text.appendChild(el("strong", null, ragBucketLabel(row)));
+      const state = ragBucketState(row);
+      const bits = [
+        row.dims ? `${row.dims}차원` : "차원 미상",
+        `${row.indexed}/${row.total || row.documents}`,
+        row.legacy ? "경로: 프리셋 도입 전 형식" : `DB ${row.db || "?"}`,
+      ];
+      text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+      text.appendChild(el("span", `rag-badge rag-badge-${state.state}`,
+        state.state === "ok" ? "정상" : state.state === "busy" ? "색인 중"
+          : state.state === "failed" ? "실패" : "대기"));
+      text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+      item.appendChild(text);
+      if (row.syncing) {
+        const cancel = el("button", "wf-btn clear", row.cancel_requested ? "취소 요청됨" : "취소");
+        cancel.type = "button";
+        cancel.disabled = Boolean(row.cancel_requested) || ragBusy;
+        cancel.title = "다음 임베딩 묶음에서 멈춥니다. 지금까지 임베딩한 것은 남습니다";
+        cancel.addEventListener("click", () => ragCancel(row));
+        item.append(cancel);
+      }
+      list.appendChild(item);
+    }
+    box.appendChild(list);
+    card.appendChild(box);
   }
   if (!(st.indexes || []).length) {
-    list.appendChild(el("p", "wf-note",
-      "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
+    card.appendChild(el("p", "wf-note", placeholders.length
+      ? "열린 색인이 아직 없습니다 — 위의 회색 행이 디스크에 있는 컬렉션입니다."
+      : "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
   }
-  card.appendChild(list);
   return card;
 }
+
 
 function closeWorkspaces() {
   if (!wsOpen) return;
@@ -32951,15 +34181,76 @@ function beadsBoardSection(board) {
   return sec;
 }
 
-/* The opened issue's place in the family, built from the board listing's own
-   edges rather than from the issue payload. `br show` resolves what an issue
-   depends on, so the parent is in there — but nothing on that side names the
-   children, and the children are half of what a reader opens a parent to see.
-   The listing has both directions, so both come from there or neither does.
+/* The opened issue's place in the family.
 
-   Returns null when there is no family to draw, so the pane spends no room
-   saying an issue is unrelated to everything — which is most of them. */
+   The daemon reads it from the issue's own parent-child edges and sends it
+   with /api/beads/<id> (`hierarchy`), because the listing this page holds is
+   paged and filtered: the parent and the children are usually on another page,
+   so a family drawn from those rows was drawn almost never (claunch-3hubh).
+
+   The listing is still the answer for a daemon that does not send one — its
+   edges cover whatever it did load, which is better than nothing. A family
+   that is empty either way draws no box: most issues are unrelated to
+   everything, and the pane does not spend room saying so. */
 function beadsRelationBlock(id) {
+  const fromDaemon = beadsDetail && beadsDetail.hierarchy;
+  if (fromDaemon) return beadsHierarchyBlock(fromDaemon, id);
+  return beadsListingFamily(id);
+}
+
+/* The daemon's family: ancestors top-down, the issue itself, then its subtree.
+   Depth is a class rather than an inline style so the indentation lives with
+   the rest of the pane's rules (`beads-rel-d1` … in style.css). */
+function beadsHierarchyBlock(family, id) {
+  const up = (family && family.ancestors) || [];
+  const kids = (family && family.children) || [];
+  if (!up.length && !kids.length) return null;
+  const box = el("div", "beads-detail-rel");
+  const depthClass = (n) => "beads-rel-d" + Math.min(6, n);
+  const line = (issue, depth, label) => {
+    const row = el("div", "beads-rel-row " + depthClass(depth));
+    row.appendChild(el("span", "beads-rel-label", label || ""));
+    row.appendChild(beadsStatusBadge(issue.status));
+    const a = el("a", "beads-rel-link", issue.id);
+    a.href = "#/beads/" + encodeURIComponent(issue.id);
+    row.appendChild(a);
+    row.appendChild(el("span", "beads-rel-title", issue.title || "(untitled)"));
+    return row;
+  };
+  up.forEach((a, n) => box.appendChild(
+    line(a, n, n === up.length - 1 ? "parent" : "")));
+  const self = el("div", "beads-rel-row beads-rel-self " + depthClass(up.length));
+  self.appendChild(el("span", "beads-rel-label", "this issue"));
+  self.appendChild(el("span", "beads-rel-link", id || beadsFocus || ""));
+  box.appendChild(self);
+  let seen = 0;
+  const walk = (nodes, depth) => {
+    for (const k of nodes) {
+      // The subtree's count goes on the first row only: it is the block's,
+      // not a row's, and it is every descendant rather than one level.
+      box.appendChild(line(k, depth, seen++ ? ""
+        : `descendants (${countFamily(kids)})`));
+      walk(k.children || [], depth + 1);
+    }
+  };
+  walk(kids, up.length + 1);
+  return box;
+}
+
+/* How many issues hang off `nodes`, the count the block's first child row
+   carries. Counted rather than taken from a length, because the subtree is
+   what the reader is being told is there. */
+function countFamily(nodes) {
+  let n = 0;
+  for (const k of nodes || []) n += 1 + countFamily(k.children);
+  return n;
+}
+
+/* The older answer: the family the loaded board rows happen to contain, read
+   from the listing's own edges. `br show` resolves what an issue depends on,
+   so the parent is in the payload — but nothing on that side names the
+   children, and the children are half of what a reader opens a parent to see. */
+function beadsListingFamily(id) {
   const board = ((beadsCache && beadsCache.boards) || []).find(
     (b) => (b.issues || []).some((i) => i.id === id));
   if (!board) return null;
@@ -35218,7 +36509,8 @@ function statsChart(buckets, unit) {
 function statsBucketTable(buckets, unit) {
   const table = el("table", "stats-table");
   const head = el("tr");
-  for (const h of ["period", "total", "requests", "output",
+  for (const h of ["period", "total", "requests",
+                   ...USAGE_PARTS.map(([, label]) => label),
                    ...STATS_CATEGORIES.map(([, label]) => label)]) {
     head.appendChild(el("th", null, h));
   }
@@ -35229,7 +36521,9 @@ function statsBucketTable(buckets, unit) {
     row.appendChild(el("td", null, statsBucketLabel(b.start, unit)));
     row.appendChild(el("td", "num", usageShort(b.total || 0)));
     row.appendChild(el("td", "num", (b.requests || 0).toLocaleString()));
-    row.appendChild(el("td", "num", usageShort(b.output || 0)));
+    for (const [key] of USAGE_PARTS) {
+      row.appendChild(el("td", "num stats-part-cell", usageShort(b[key] || 0)));
+    }
     for (const [key] of STATS_CATEGORIES) {
       row.appendChild(el("td", "num", String((b.inputs || {})[key] || 0)));
     }
@@ -35478,6 +36772,115 @@ function statsOverviewRows(d) {
     (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
 }
 
+/* A row's estimate under the provider filter in force: the daemon priced
+   each session (statsboard._price_row) and each of its ledger provider
+   entries at Settings → Model prices. A transcript row's declared part has
+   no entry of its own, so its estimate is the row's. `basis` says the
+   transcript row was priced at the model its newest turn answered on. */
+function statsRowCost(row) {
+  const whole = { cost: row.cost, priced: row.priced_tokens || 0,
+                  unpriced: row.unpriced_tokens || 0,
+                  model: row.model || "", basis: row.model_basis || "" };
+  if (!statsProvider) return whole;
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
+  if (!hit) return { cost: null, priced: 0, unpriced: 0, model: "", basis: "" };
+  if (hit.declared) return whole;
+  return { cost: hit.cost, priced: hit.priced_tokens || 0,
+           unpriced: hit.unpriced_tokens || 0, model: row.model || "",
+           basis: "" };
+}
+
+/* One estimate cell: "≈ $1.23", a dash where nothing found a price, and a
+   star on a partly priced figure (the tooltip says how much was left out).
+   Empty for a row with no tokens at all. */
+function statsCostCell(c, currency) {
+  const priced = c.priced || 0;
+  const unpriced = c.unpriced || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced || c.cost === null || c.cost === undefined) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = c.model
+        ? `no price row in Settings → Model prices for ${c.model}`
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(c.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices" +
+    (c.basis === "last" && c.model
+      ? `: every token priced at ${c.model}, the model this session's ` +
+        "newest turn answered on (its transcript names no model per request)"
+      : ": each model's four token kinds at its row's rates") +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
+/* The four parts a session row's bar is split into, under the provider
+   filter in force: the whole window's, or the picked provider's slice of it.
+   They are the parts of the same quantity `statsRowTotal` sums, so the bar's
+   length and the segments inside it always agree. */
+function statsRowBarParts(row) {
+  const parts = statsRowParts(row).filter(
+    (p) => !statsProvider || p.provider === statsProvider);
+  const sum = (key) => parts.reduce((n, p) => n + (Number(p[key]) || 0), 0);
+  return USAGE_PARTS.map(([key, label, short]) =>
+    ({ key, label, short, tokens: sum(key) }));
+}
+
+/* One row's tokens bar, split into those parts in USAGE_PARTS order (fresh
+   input at the left). The colours are the detail panel's chart colours
+   (`.usage-in` and friends), so a session is the same picture in both
+   readings. A part that is zero draws no segment — a slice of nothing is a
+   smudge, not information — and a payload carrying a total but no breakdown
+   (an older daemon) keeps one unnamed segment so the length still reads. */
+function statsRowBar(row, peak) {
+  const value = statsRowTotal(row);
+  const bar = el("span", "stats-rowbar");
+  const fill = el("span", "stats-rowbar-fill stats-rowbar-split");
+  fill.style.width = ((value / peak) * 100).toFixed(2) + "%";
+  const parts = statsRowBarParts(row);
+  const known = parts.reduce((n, p) => n + p.tokens, 0);
+  if (!known) {
+    const seg = el("span", "stats-rowbar-part stats-rowbar-unknown");
+    seg.style.width = "100%";
+    seg.title = "no breakdown for this reading: the tokens it counted " +
+      "carry no part";
+    fill.appendChild(seg);
+  } else {
+    for (const p of parts) {
+      if (!p.tokens) continue;
+      const seg = el("span", `stats-rowbar-part usage-${p.short}`);
+      seg.style.width = ((p.tokens / known) * 100).toFixed(2) + "%";
+      seg.title = `${p.label}: ${p.tokens.toLocaleString()} of ` +
+        `${known.toLocaleString()} tokens`;
+      fill.appendChild(seg);
+    }
+  }
+  bar.appendChild(fill);
+  bar.title = known
+    ? parts.map((p) => `${p.label} ${p.tokens.toLocaleString()}`).join("\n")
+    : `${value.toLocaleString()} tokens, with no breakdown by part`;
+  return bar;
+}
+
+/* The four colours named once above the table: a stack is only readable
+   when the reader can tell which band is which without hovering every row.
+   Same order and swatches as the detail panel's legend. */
+function statsRowBarLegend() {
+  const box = el("div", "usage-legend stats-rowbar-legend");
+  for (const [, label, short] of USAGE_PARTS) {
+    const item = el("span", "usage-legend-item");
+    item.append(el("span", `usage-swatch usage-${short}`),
+               el("span", null, label));
+    box.appendChild(item);
+  }
+  box.title = "each row's tokens bar is split into these parts, in this order";
+  return box;
+}
+
 /* The table: one row per session, longest bar first. A row with no figure
    (an OAuth route writes no ledger line) says so instead of drawing zero,
    because "not measured here" and "spent nothing" are different answers. */
@@ -35487,8 +36890,10 @@ function statsOverviewTable(d) {
   const total = rows.reduce((n, r) => n + statsRowTotal(r), 0);
   const today = (d.until || "").slice(0, 10);
   const table = el("table", "stats-table stats-overview");
+  const currency = d.currency || "$";
   const head = el("tr");
-  for (const h of ["session", "provider", "status", "tokens", "",
+  for (const h of ["session", "provider", "status", "tokens", "model",
+                   ...USAGE_PARTS.map(([, label]) => label), "est. cost",
                    "requests", "share", "last call"]) {
     head.appendChild(el("th", null, h));
   }
@@ -35552,11 +36957,8 @@ function statsOverviewTable(d) {
 
     const tokens = el("td", "num stats-tokens-cell");
     if (value) {
-      const bar = el("span", "stats-rowbar");
-      const fill = el("span", "stats-rowbar-fill");
-      fill.style.width = ((value / peak) * 100).toFixed(2) + "%";
-      bar.appendChild(fill);
-      tokens.append(bar, el("span", "stats-rowvalue", usageShort(value)));
+      tokens.append(statsRowBar(r, peak),
+                    el("span", "stats-rowvalue", usageShort(value)));
     } else if (r.source === "none") {
       const dash = el("span", "stats-unmetered", "—");
       dash.title = "no figure for this session: the ledger has no record " +
@@ -35566,7 +36968,22 @@ function statsOverviewTable(d) {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
     }
     row.appendChild(tokens);
-    row.appendChild(el("td", "stats-model-cell", r.model || ""));
+    const model = el("td", "stats-model-cell", r.model || "");
+    if (r.model) {
+      model.title = r.model_basis === "last"
+        ? `${r.model} — the model this session's newest turn answered on`
+        : r.model;
+    }
+    row.appendChild(model);
+    // The four parts the bar is split into, as numbers: the cheapest part
+    // (cache read) usually dominates the total, and the bar alone cannot
+    // say by how much.
+    const measured = value || r.source !== "none";
+    for (const p of statsRowBarParts(r)) {
+      row.appendChild(el("td", "num stats-part-cell",
+        measured ? usageShort(p.tokens) : ""));
+    }
+    row.appendChild(statsCostCell(statsRowCost(r), currency));
     row.appendChild(el("td", "num", statsRowRequests(r).toLocaleString()));
     row.appendChild(el("td", "num",
       total && value ? statsPct(value / total) : ""));
@@ -35766,20 +37183,38 @@ function statsSwitchList(row) {
 }
 
 /* The opened session's window figures, per provider. */
-function statsDetailWindow(row) {
+function statsDetailWindow(row, currency = "$") {
   const box = el("div", "stats-detail-window");
   const table = el("table", "stats-table stats-detail-providers");
   const head = el("tr");
-  for (const h of ["provider", "tokens", "requests", "share"]) {
+  for (const h of ["provider", "tokens", ...USAGE_PARTS.map(([, l]) => l),
+                   "est. cost", "requests", "share"]) {
     head.appendChild(el("th", null, h));
   }
   table.appendChild(head);
-  const parts = row.providers || [];
+  // A transcript row has no ledger part; its whole window figure is filed
+  // under the provider its profile declares (statsRowParts), and its
+  // estimate is the row's own.
+  const parts = statsRowParts(row);
   const sum = parts.reduce((n, p) => n + (p.total || 0), 0);
   for (const p of parts) {
     const line = el("tr");
-    line.appendChild(el("td", null, p.provider));
+    const name = el("td", null, p.provider);
+    if (p.declared) {
+      name.title = "read from this session's transcript and filed under the " +
+        "provider its profile declares";
+    }
+    line.appendChild(name);
     line.appendChild(el("td", "num", usageShort(p.total || 0)));
+    for (const [key] of USAGE_PARTS) {
+      line.appendChild(el("td", "num stats-part-cell", usageShort(p[key] || 0)));
+    }
+    line.appendChild(statsCostCell(p.declared
+      ? { cost: row.cost, priced: row.priced_tokens || 0,
+          unpriced: row.unpriced_tokens || 0, model: row.model || "",
+          basis: row.model_basis || "" }
+      : { cost: p.cost, priced: p.priced_tokens || 0,
+          unpriced: p.unpriced_tokens || 0, model: "", basis: "" }, currency));
     line.appendChild(el("td", "num", (p.requests || 0).toLocaleString()));
     line.appendChild(el("td", "num",
       sum ? statsPct((p.total || 0) / sum) : ""));
@@ -35818,8 +37253,14 @@ function statsReadingSections(d) {
   summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
     `${(t.requests || 0).toLocaleString()} requests` +
     (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
+    usageShare(t.input || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache write", usageShort(t.cache_write || 0),
+    usageShare(t.cache_write || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Output", usageShort(t.output || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
+    usageShare(t.output || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
     "of inputs, by count"));
   summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
@@ -35898,7 +37339,8 @@ function statsDetailPanel() {
   panel.appendChild(meta);
 
   if (row) {
-    panel.appendChild(statsSection("This window", null, statsDetailWindow(row)));
+    panel.appendChild(statsSection("This window", null, statsDetailWindow(
+      row, (statsOverview && statsOverview.currency) || "$")));
     panel.appendChild(statsSection("Provider / model changes", null,
       statsSwitchList(row)));
   }
@@ -36554,10 +37996,16 @@ function renderStatsOverview(main) {
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
+  const partOf = (key) => totals.total
+    ? `${statsPct((totals[key] || 0) / totals.total)} of tokens` : "";
   summary.appendChild(statsCard("Fresh input", usageShort(totals.input || 0),
-    `cache read ${usageShort(totals.cache_read || 0)}`));
+    partOf("input")));
+  summary.appendChild(statsCard("Cache read", usageShort(totals.cache_read || 0),
+    partOf("cache_read")));
+  summary.appendChild(statsCard("Cache write", usageShort(totals.cache_write || 0),
+    partOf("cache_write")));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
-    `cache write ${usageShort(totals.cache_write || 0)}`));
+    partOf("output")));
   summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
   const est = statsModelEstimate(d);
@@ -36566,8 +38014,10 @@ function renderStatsOverview(main) {
     summary.appendChild(statsCard("Est. cost",
       est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
       est.unpriced_tokens
-        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
-        : "Settings → Model prices"));
+        ? `${usageShort(est.priced_tokens)} priced · ` +
+          `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : `all ${usageShort(est.priced_tokens)} tokens priced ` +
+          "(Settings → Model prices)"));
   }
   summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
@@ -36604,9 +38054,12 @@ function renderStatsOverview(main) {
   }
 
   const rows = statsOverviewRows(d);
-  main.appendChild(statsSection(`Sessions by usage`, rows.length,
-    rows.length ? statsScroll(statsOverviewTable(d))
-      : el("p", "wf-note", "no session worked in this window")));
+  const usageBody = el("div", "stats-usage-body");
+  if (rows.length) usageBody.appendChild(statsRowBarLegend());
+  usageBody.appendChild(rows.length
+    ? statsScroll(statsOverviewTable(d))
+    : el("p", "wf-note", "no session worked in this window"));
+  main.appendChild(statsSection(`Sessions by usage`, rows.length, usageBody));
 
   const models = statsModelSection(d);
   if (models) main.appendChild(models);
@@ -38130,6 +39583,7 @@ function renderWorkspaces() {
   const own = wsSection === "workspaces";
   const view = $(own ? "workspaces-view" : "ws-view");
   const focused = document.activeElement && document.activeElement.id;
+  const sel = focused ? settingsFieldSelection(document.activeElement) : null;
   view.innerHTML = "";
 
   const head = el("div", "wf-head");
@@ -38150,12 +39604,12 @@ function renderWorkspaces() {
   }
   if (wsSection === "vscode") {
     view.appendChild(vscodePanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "providers") {
     view.appendChild(providersPanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "profiles") {
@@ -38168,7 +39622,7 @@ function renderWorkspaces() {
   }
   if (wsSection === "workspaces") {
     workspacesPanel(view);
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
 
@@ -38202,11 +39656,12 @@ function renderWorkspaces() {
   view.appendChild(testOutputDirCard());
   view.appendChild(delegateSettingCard());
   view.appendChild(sweepBatchSettingCard());
+  view.appendChild(keySwitchSettingCard());
   view.appendChild(webdebugSettingCard());
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
-  refocusSettingsField(focused);
+  refocusSettingsField(focused, sel);
 }
 
 /* ------------------------------------------------------------------ */
@@ -38576,15 +40031,29 @@ function workspacesPanel(view) {
    and on a checkbox it throws, which left the PTY host card's save half
    done with its box disabled (claunch-xnnct.5.1). selectionStart is null
    there instead of throwing. */
-function refocusSettingsField(focused) {
+function refocusSettingsField(focused, sel) {
   if (!focused) return;
   const again = $(focused);
   if (!again) return;
   again.focus();
   if (typeof again.selectionStart === "number") {
-    const end = again.value.length;
-    again.setSelectionRange(end, end);
+    // Where the caret was, when the redraw read it and the value still has
+    // room for it: a redraw in the middle of a word must not throw the next
+    // keystroke to the end (claunch-jmuvv). Else the end, as before.
+    const len = again.value.length;
+    if (sel && sel.start <= len && sel.end <= len) {
+      again.setSelectionRange(sel.start, sel.end);
+    } else {
+      again.setSelectionRange(len, len);
+    }
   }
+}
+
+/* The caret of a focused field, read before a redraw replaces it; null for a
+   control without one (selectionStart is null on a checkbox or a select). */
+function settingsFieldSelection(node) {
+  if (!node || typeof node.selectionStart !== "number") return null;
+  return { start: node.selectionStart, end: node.selectionEnd };
 }
 
 async function refreshFaq() {
@@ -38670,6 +40139,14 @@ function keyHelpCard() {
     ["On a focused rail card", RAIL_CARD_KEYS.map((b) => ({
       label: b.label, what: b.what, when: b.when,
     }))],
+    // The Chart view's rows take the same table less the keys the row keeps
+    // for itself (chartRowKey), so this group is derived the same way.
+    ["On a focused Chart row", [
+      { label: "Enter / Space", what: "open the session (rail) or select the row (#/chart)",
+        when: "any row" },
+      ...RAIL_CARD_KEYS.filter((b) => !b.keys.some((k) => CHART_ROW_SKIPS.has(k)))
+        .map((b) => ({ label: b.label, what: b.what, when: b.when })),
+    ]],
     ["Elsewhere on the page", KEY_HELP_EXTRA],
   ];
   for (const [heading, rows] of groups) {
@@ -39048,7 +40525,9 @@ function simDefaultsCard() {
   if (bModel && (draft.judge_profile || draft.interpreter_profile) === draft.interpreter_profile && draft.judge_model === bModel) {
     form.appendChild(el("p", "wf-note", "The judge uses the interpreter's model: its judgement is not independent."));
   }
-  const save = el("button", "wf-btn", simDefaultsBusy ? "Saving…" : "Save simulation models");
+  // The card's one primary action: the three fields above save themselves
+  // nowhere until this is pressed.
+  const save = el("button", "wf-btn approve", simDefaultsBusy ? "Saving…" : "Save simulation models");
   save.type = "submit";
   save.disabled = simDefaultsBusy;
   form.appendChild(save);
@@ -40233,6 +41712,9 @@ function llmSettingsCard() {
    a row whose every rate is empty is dropped on save. The draft lives
    outside the DOM like llmDraft: this page re-renders on every poll. */
 let modelPricesDraft = null;
+/* The add row's answers, outside the DOM for the same reason: the provider
+   picked and the model id typed so far survive a redraw (claunch-jmuvv). */
+let modelPricesAdd = { provider: "", model: "" };
 let modelPricesNotice = "";
 let modelPricesBusy = false;
 
@@ -40315,6 +41797,12 @@ function modelPricesProviderOptions(draft) {
   return [any, ...[...named].filter(Boolean).sort()];
 }
 
+/* The id of one rate cell. Provider and model are free text; both are
+   URI-encoded (which encodes ':'), so the ':' separators are unambiguous. */
+function modelPriceRateId(provider, model, key) {
+  return `mp-rate:${encodeURIComponent(provider)}:${encodeURIComponent(model)}:${key}`;
+}
+
 function modelPricesCard() {
   const card = el("section", "ws-add model-prices");
   card.appendChild(el("h3", null, "Model prices"));
@@ -40377,6 +41865,9 @@ function modelPricesCard() {
       row.append(prov, name);
       for (const key of MP_RATE_KEYS) {
         const inp = document.createElement("input");
+        // An id, so refocusSettingsField can hand focus back to this cell
+        // after a redraw (claunch-jmuvv).
+        inp.id = modelPriceRateId(provider, model, key);
         inp.type = "text";
         inp.inputMode = "decimal";
         inp.className = "mp-rate";
@@ -40417,10 +41908,19 @@ function modelPricesCard() {
     opt.textContent = p === any ? `${any} (any provider)` : p;
     addProvider.appendChild(opt);
   }
+  if (modelPricesAdd.provider &&
+      [...addProvider.options].some((o) => o.value === modelPricesAdd.provider)) {
+    addProvider.value = modelPricesAdd.provider;
+  }
+  addProvider.addEventListener("change", () => {
+    modelPricesAdd.provider = addProvider.value;
+  });
   const addName = document.createElement("input");
   addName.id = "mp-add-model";
   addName.type = "text";
   addName.placeholder = "model id, e.g. claude-opus-5";
+  addName.value = modelPricesAdd.model;
+  addName.addEventListener("input", () => { modelPricesAdd.model = addName.value; });
   addName.setAttribute("list", "mp-model-options");
   const addList = document.createElement("datalist");
   addList.id = "mp-model-options";
@@ -40440,6 +41940,7 @@ function modelPricesCard() {
       rows[m] = { input: "", cache_read: "", cache_write: "", output: "" };
     }
     modelPricesDraft = draft;
+    modelPricesAdd.model = "";
     renderWorkspaces();
   };
   addBtn.addEventListener("click", addModel);
@@ -41022,6 +42523,107 @@ function sweepBatchField(field, label, unit, detail) {
   return row;
 }
 
+/* Automatic key switch (#/settings, claunch-d2t79). One machine-wide number:
+   how many times one session may be moved onto another key of its pool for
+   the same usage-limit fault. Whether a *particular* session is switched at
+   all is that session's own answer, set in the new-session form, the spawn
+   form or the key modal -- this card only bounds the retries, which is the
+   part that should not differ session by session. Read live by the fault
+   clock, so a saved value applies on its next pass. */
+let keySwitchSetting = {
+  retries: 1, defaults: { retries: 1 }, loaded: false, error: "", busy: false,
+};
+
+function takeKeySwitchSetting(data) {
+  Object.assign(keySwitchSetting, {
+    retries: data.retries,
+    defaults: data.defaults || keySwitchSetting.defaults,
+    loaded: true, error: "",
+  });
+}
+
+async function refreshKeySwitchSetting() {
+  try {
+    const resp = await api("/api/key-switch-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeKeySwitchSetting(data);
+  } catch (err) {
+    keySwitchSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveKeySwitchSetting(value) {
+  keySwitchSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/key-switch-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retries: value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeKeySwitchSetting(data);
+  } catch (err) {
+    keySwitchSetting.error = String(err);
+  }
+  keySwitchSetting.busy = false;
+  renderWorkspaces();
+}
+
+function keySwitchSettingCard() {
+  const st = keySwitchSetting;
+  const card = el("section", "ws-add key-switch-settings");
+  card.appendChild(el("h3", null, "Automatic key switch"));
+  card.appendChild(el("p", "wf-note",
+    "When a session that asked for it hits a usage limit, the daemon restarts " +
+    "it on another key of its profile's pool and types continue. The key is " +
+    "the usable one with the lowest usage, read across the 5-hour, weekly and " +
+    "monthly windows together; a key whose window is already spent is never " +
+    "chosen. This is how many switches one session may spend on the same " +
+    "fault — after that it is paused until the plan resets, which is the " +
+    "behaviour without this feature. Same setting as daemon." +
+    "fault_key_switch_retries in ~/.claude-launcher/.claunch.yaml. 0 turns " +
+    "the switch off for every session; whether a session is switched at all " +
+    "is set per session (new-session form, spawn form, or the key modal)."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const row = el("div", "sweep-batch-row");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = "key-switch-retries";
+  input.min = "0";
+  input.max = "10";
+  input.step = "1";
+  input.disabled = st.busy;
+  input.value = String(st.retries);
+  input.addEventListener("change", () => {
+    const text = String(input.value).trim();
+    if (text === "") return saveKeySwitchSetting(null);
+    return saveKeySwitchSetting(Number(text));
+  });
+  const reset = el("button", "wf-btn clear", "Reset");
+  reset.type = "button";
+  reset.disabled = st.busy || st.retries === st.defaults.retries;
+  reset.title = `back to the default, ${st.defaults.retries}`;
+  reset.addEventListener("click", () => saveKeySwitchSetting(null));
+  const head = el("label", "sweep-batch-label", "Retries per fault ");
+  head.append(input,
+    el("span", "sweep-batch-unit", ` (default ${st.defaults.retries})`), reset);
+  row.appendChild(head);
+  row.appendChild(el("p", "wf-note",
+    "Range 0-10. 1 (the default) means one switch per fault: if the second " +
+    "key also hits a limit, the session is paused instead of being restarted " +
+    "again."));
+  card.appendChild(row);
+  return card;
+}
+
 function sweepBatchSettingCard() {
   const st = sweepBatchSetting;
   const card = el("section", "ws-add sweep-batch-settings");
@@ -41046,7 +42648,7 @@ function sweepBatchSettingCard() {
     "Largest group of merges one sweep covers; a group this large closes at " +
     "once. Raising it means fewer sweeps (less test-window time) but a failed " +
     "sweep implicates more merges, and the failed batch has to be split " +
-    "(tools/delayed_sweep.py unbatch) to find the merge. 0 turns batching off: " +
+    "(claunch delayed-sweep unbatch) to find the merge. 0 turns batching off: " +
     "every merge is swept alone. Range 0-100."));
   card.appendChild(sweepBatchField("settle", "Settle time", "seconds",
     "How long the oldest queued merge waits for company before its group is " +
@@ -41163,7 +42765,9 @@ function webdebugSwitchRow(field, label, detail) {
 
 function webdebugSettingCard() {
   const st = webdebugSetting;
-  const card = el("section", "ws-add sweep-batch-settings");
+  // Its own class: this card wore sweep-batch-settings, which is the other
+  // card's, so a rule written for one of them styled both.
+  const card = el("section", "ws-add webdebug-settings");
   card.appendChild(el("h3", null, "Web debug browser"));
   card.appendChild(el("p", "wf-note",
     "The browser behind /webdebug (the 'web' button in a session's terminal " +
@@ -41394,53 +42998,77 @@ function modelTiersAddTier() {
   saveModelTiers();
 }
 
+/* One tier is a panel: its name and entry count in the head, a column header
+   over the entry rows, and its own "Add entry" control at the foot. The three
+   field names are drawn once in that header rather than beside every select,
+   so the selects stand in columns and two entries are compared by reading
+   down one of them. The column labels are the selects' accessible names
+   (aria-label), since the visible copy of each lives in the header row and is
+   not adjacent to the control (claunch-61vj3.1). */
 function modelTierSection(tier) {
   const wrap = el("div", "model-tier");
-  wrap.appendChild(el("h4", null, tier.id));
-  if (!tier.entries.length) wrap.appendChild(el("p", "wf-note", "No entries -- add one below."));
+  const head = el("div", "model-tier-head");
+  head.appendChild(el("h4", "model-tier-name", tier.id));
+  head.appendChild(el("span", "model-tier-meta",
+    tier.entries.length === 1 ? "1 entry" : `${tier.entries.length} entries`));
+  wrap.appendChild(head);
+  if (!tier.entries.length) {
+    wrap.appendChild(el("p", "wf-note model-tier-empty", "No entries yet -- add one below."));
+  }
   const active = modelTiers.block.active[tier.id] || 0;
+  if (tier.entries.length) {
+    const columns = el("div", "model-tier-row model-tier-row-head");
+    for (const label of ["Active", "Profile", "Harness", "Model", ""]) {
+      columns.appendChild(el("span", "model-tier-col", label));
+    }
+    wrap.appendChild(columns);
+  }
   tier.entries.forEach((entry, index) => {
-    const row = el("div", "model-tier-entry");
+    const row = el("div", "model-tier-row");
     const radio = document.createElement("input");
     radio.type = "radio";
+    radio.className = "model-tier-radio";
     radio.name = `model-tier-active-${tier.id}`;
     radio.checked = index === active;
     radio.disabled = modelTiers.busy;
     radio.title = "Active entry for this tier";
+    radio.setAttribute("aria-label", `Entry ${index + 1} of tier ${tier.id} is the active one`);
     radio.addEventListener("change", () => modelTiersSetActive(tier.id, index));
-    row.appendChild(radio);
-    const profile = el("label", "delegate-field", " Profile ");
-    profile.appendChild(modelTierEntrySelect(
+    const profile = modelTierEntrySelect(
       entry.profile, modelTiers.profiles, "(profile)",
       (v) => { if (v) modelTiersSetEntry(tier, index, "profile", v); }
-    ));
-    const harness = el("label", "delegate-field", " Harness ");
-    harness.appendChild(modelTierEntrySelect(
+    );
+    profile.setAttribute("aria-label", "Profile");
+    const harness = modelTierEntrySelect(
       entry.harness || "", modelTiersEntryHarnessChoices(entry.profile), "(profile default)",
       (v) => modelTiersSetEntry(tier, index, "harness", v)
-    ));
-    const model = el("label", "delegate-field", " Model ");
-    model.appendChild(modelTierEntrySelect(
+    );
+    harness.setAttribute("aria-label", "Harness");
+    const model = modelTierEntrySelect(
       entry.model || "",
       modelTiersEntryModelChoices(entry.profile, entry.harness || ""), "(default)",
       (v) => modelTiersSetEntry(tier, index, "model", v)
-    ));
-    const remove = el("button", "wf-btn danger", "Delete");
+    );
+    model.setAttribute("aria-label", "Model");
+    const remove = el("button", "wf-btn clear model-tier-del", "Delete");
     remove.type = "button";
     remove.disabled = modelTiers.busy;
     remove.addEventListener("click", () => modelTiersRemoveEntry(tier, index));
-    row.append(profile, harness, model, remove);
+    row.append(radio, profile, harness, model, remove);
     wrap.appendChild(row);
   });
   const addRow = el("div", "model-tier-add");
+  const addField = el("label", "model-tier-add-field");
+  addField.appendChild(el("span", "model-tier-add-label", "New entry"));
   const addProfile = document.createElement("select");
   addProfile.disabled = modelTiers.busy || !modelTiers.profiles.length;
   for (const p of modelTiers.profiles) addProfile.appendChild(new Option(p, p));
-  const add = el("button", "wf-btn approve", "Add entry");
+  addField.appendChild(addProfile);
+  const add = el("button", "wf-btn model-tier-add-btn", "Add entry");
   add.type = "button";
   add.disabled = modelTiers.busy || !modelTiers.profiles.length;
   add.addEventListener("click", () => modelTiersAddEntry(tier, addProfile.value));
-  addRow.append(addProfile, add);
+  addRow.append(addField, add);
   wrap.appendChild(addRow);
   return wrap;
 }
@@ -41448,12 +43076,17 @@ function modelTierSection(tier) {
 function modelTiersCard() {
   const st = modelTiers;
   const card = el("section", "ws-add model-tiers-settings");
-  card.appendChild(el("h3", null, "Model tiers"));
-  card.appendChild(el("p", "wf-note",
-    "Named routing slots of ordered (profile, model, harness) entries; the " +
-    "marked entry is what the tier resolves to. An empty harness/model means " +
-    "the profile default / the default role model. Edits save immediately. " +
-    "Same settings as the model_tiers: block of ~/.claude-launcher/.claunch.yaml."));
+  const head = el("div", "model-tier-card-head");
+  head.appendChild(el("h3", null, "Model tiers"));
+  head.appendChild(el("span", "model-tier-card-meta",
+    st.loaded ? `${st.block.tiers.length} of ${st.max_tiers} tiers` : ""));
+  card.appendChild(head);
+  card.appendChild(el("p", "wf-note model-tier-help",
+    "Named routing slots of ordered entries. The marked entry is what the " +
+    "tier resolves to; an empty harness or model takes the profile default. " +
+    "Edits save immediately."));
+  card.appendChild(el("p", "wf-note model-tier-source",
+    "Stored as the model_tiers: block of ~/.claude-launcher/.claunch.yaml."));
   if (st.error) card.appendChild(el("p", "error", st.error));
   if (!st.loaded) {
     card.appendChild(el("p", "wf-note", "reading…"));
@@ -41462,14 +43095,17 @@ function modelTiersCard() {
   if (!st.block.tiers.length) card.appendChild(el("p", "wf-note", "No tiers defined."));
   for (const tier of st.block.tiers) card.appendChild(modelTierSection(tier));
   const form = el("form", "model-tier-add-tier");
+  const idField = el("label", "model-tier-add-tier-field");
+  idField.appendChild(el("span", "model-tier-add-tier-label", "New tier"));
   const idInput = document.createElement("input");
   idInput.placeholder = "Tier id, for example: economy";
   idInput.value = modelTiersTierDraft;
   idInput.disabled = st.busy;
   idInput.addEventListener("input", () => { modelTiersTierDraft = idInput.value; });
+  idField.appendChild(idInput);
   const addTier = el("button", "wf-btn approve", "Add tier");
   addTier.disabled = st.busy;
-  form.append(idInput, addTier);
+  form.append(idField, addTier);
   form.addEventListener("submit", (e) => { e.preventDefault(); modelTiersAddTier(); });
   card.appendChild(form);
   if (modelTiersAddError) card.appendChild(el("p", "error", modelTiersAddError));
@@ -43058,6 +44694,20 @@ function wsSyncPlanFor(doc, remote) {
   return ((doc && doc.plans) || []).find((r) => r.remote === remote) || null;
 }
 
+/* Whether the last status answer was computed for the set checked now.
+   The checkboxes follow this page at once, the answer only after the read
+   that follows -- so while that read is in flight, and for as long as it has
+   not succeeded, `sync_order` names another set. An order computed for
+   another set is the previous read's answer and is not drawn as this one's
+   (claunch-cj1qi). A daemon that predates `selected_remotes` leaves nothing
+   to compare and keeps the old behaviour. */
+function wsSyncOrderMatches(doc, remotes) {
+  const asked = doc && doc.selected_remotes;
+  if (!Array.isArray(asked)) return true;
+  const key = (list) => [...list].sort().join(",");
+  return key(asked) === key(remotes || []);
+}
+
 /* Seed the checked set on the first read, or keep the one this page already
    has. The remembered choice wins when it is still present; otherwise the
    plan's remote, then the first remote. The basis follows a checked remote. */
@@ -43141,9 +44791,11 @@ async function wsSyncRefresh(name, fetchFirst) {
   if (wsOpen) renderWorkspaces();
 }
 
-/* Check or uncheck one target remote. The last checked one stays checked:
-   a sync with no target has nothing to do, so the box springs back with a
-   note instead of letting the set go empty (claunch-y3tuk). */
+/* Check or uncheck one target remote. The last checked box is drawn
+   disabled (wsSyncTargetsView), so an empty set is refused here only as a
+   guard. When the basis is the one unchecked, the basis moves to a checked
+   remote that may be the basis and the panel says so in a line, rather than
+   letting the radio jump without a word (claunch-j1894). */
 function wsSyncToggleRemote(name, remote, checked) {
   const st = wsSyncSt(name);
   const names = wsSyncRemoteNames(st.doc);
@@ -43159,7 +44811,13 @@ function wsSyncToggleRemote(name, remote, checked) {
   st.remotes = next;
   if (!st.remotes.includes(st.basis)) {
     const doc = st.doc || {};
-    st.basis = doc.basis && st.remotes.includes(doc.basis) ? doc.basis : st.remotes[0];
+    const was = st.basis;
+    // a candidate of the larger set is still one of any subset that holds it
+    const pool = [doc.basis, ...(doc.basis_candidates || [])];
+    st.basis = pool.find((r) => r && st.remotes.includes(r)) || st.remotes[0];
+    if (was && st.remotes.length > 1) {
+      st.remoteNote = `Basis moved to ${st.basis}: ${was} is no longer checked.`;
+    }
   }
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
@@ -43169,6 +44827,7 @@ function wsSyncToggleBasis(name, basis) {
   const st = wsSyncSt(name);
   if (!st.remotes.includes(basis)) return;
   st.basis = basis;
+  st.remoteNote = "";
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
 }
@@ -44061,7 +45720,11 @@ function wsSyncWhyDisabled(st, kind) {
     if ((doc.incompatible || []).length) {
       return "The checked remotes are not on one line; uncheck one to continue.";
     }
-    if (doc.basis_error) return doc.basis_error;
+    if (doc.basis_error) {
+      const r = wsSyncBasisRefusal(st, doc);
+      return r ? `Basis ${r.picked} is behind ${r.newer || "another checked remote"}; ` +
+        "pick another basis under Target remotes." : doc.basis_error;
+    }
     const pending = wsSyncPending(doc);
     if (!pending.length && (doc.plan || (doc.plans || []).length)) {
       const plan = doc.plan;
@@ -44089,69 +45752,153 @@ function wsSyncButtonRow(st, button, kind) {
   return row;
 }
 
-/* The checked remotes, the basis, and the order the daemon computed
-   (claunch-y3tuk). The set is a multi-checkbox that cannot go empty; the
-   basis is the remote whose tip the local branch is brought onto first, and
-   the order shows what runs when (basis first, then pushes). */
-function wsSyncRemotePicker(st, name, doc) {
+/* The basis this page asked for, when the daemon refused it for the set
+   checked now: its tip is behind another checked remote, so syncing through
+   it would push the newer remote's commits to it. null when nothing was
+   refused, or when the answer on screen was read for another set or another
+   pick (claunch-j1894). */
+function wsSyncBasisRefusal(st, doc) {
+  if (!doc || !doc.basis_error) return null;
+  const checked = st.remotes || [];
+  if (!wsSyncOrderMatches(doc, checked)) return null;
+  const picked = checked.includes(st.basis) ? st.basis : "";
+  const asked = typeof doc.basis_requested === "string" ? doc.basis_requested : picked;
+  if (!picked || asked !== picked || picked === doc.basis) return null;
+  const newer = (doc.basis_behind || {})[picked] || doc.basis || "";
+  return { picked, newer, use: doc.basis || "", text: doc.basis_error };
+}
+
+/* One reading of the Target remotes state, from which every part of the
+   section is drawn (claunch-j1894). Before this, the basis select showed the
+   page's pick while the badge and the execution order showed the basis the
+   daemon fell back to, so the section named two bases at once. Now:
+   - each row carries both of its controls: the checkbox (is it a target?)
+     and the basis radio (is it the one brought in first?);
+   - a row whose radio cannot be chosen says why on that row: not checked,
+     or its tip is behind another checked remote;
+   - the last checked box is disabled and says it is the only target;
+   - a refused pick is named with the remote that would replace it and a
+     button that makes the change, and no execution order is drawn for a
+     basis that will not run. */
+function wsSyncTargetsView(st, doc) {
   const names = wsSyncRemoteNames(doc);
   const keys = {};
-  for (const [key, n] of Object.entries(doc.remotes || {})) keys[n] = key;
+  for (const [key, n] of Object.entries((doc && doc.remotes) || {})) keys[n] = key;
+  const checked = (st.remotes || []).filter((r) => names.includes(r));
+  const fresh = wsSyncOrderMatches(doc, checked);
+  // candidates known for the set checked now; an older daemon, or an
+  // answer read for another set, leaves every checked remote selectable
+  const known = fresh && Array.isArray(doc && doc.basis_candidates);
+  const candidates = known ? doc.basis_candidates : checked;
+  const behind = known ? (doc.basis_behind || {}) : {};
+  const refusal = wsSyncBasisRefusal(st, doc);
+  const basis = checked.includes(st.basis) ? st.basis : (checked[0] || "");
+  const rows = names.map((remote) => {
+    const on = checked.includes(remote);
+    const only = on && checked.length === 1;
+    let why = "";
+    if (only) why = "only target — check another remote to uncheck this one";
+    else if (on && behind[remote]) why = `cannot be the basis: behind ${behind[remote]}`;
+    return {
+      remote, key: keys[remote] || "", checked: on, only,
+      isBasis: on && remote === basis,
+      canBasis: on && candidates.includes(remote) && !only,
+      why,
+    };
+  });
+  const order = fresh && !refusal ? (doc.sync_order || []) : [];
+  return { names, checked, basis, rows, refusal, order, fresh };
+}
+
+function wsSyncRemotePicker(st, name, doc) {
+  const view = wsSyncTargetsView(st, doc);
   const box = el("section", "ws-sync-section ws-sync-targets");
   box.setAttribute("aria-label", "Target remotes");
   box.appendChild(el("h4", null, "Target remotes"));
   box.appendChild(el("p", "wf-note",
-    "Fetches, comparisons and Sync run against the checked remotes only. " +
-    "At least one stays checked."));
-  if (!names.length) {
+    "Check the remotes to sync with and pick one as the basis. Fetches, " +
+    "comparisons and Sync use the checked remotes only. The basis is brought " +
+    "in first (fast-forward or rebase); the other checked remotes are then " +
+    "pushed to."));
+  if (!view.names.length) {
     box.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
     return box;
   }
   const list = el("div", "ws-sync-remotes");
-  for (const remote of names) {
-    const label = el("label", "wf-note ws-sync-remote");
+  list.setAttribute("role", "group");
+  for (const row of view.rows) {
+    const line = el("div", "ws-sync-remote" + (row.checked ? "" : " ws-sync-remote-off"));
+    const target = el("label", "wf-note ws-sync-remote-target");
     const input = el("input", "ws-sync-remote-box");
     input.type = "checkbox";
-    input.checked = (st.remotes || []).includes(remote);
-    input.addEventListener("change", () => wsSyncToggleRemote(name, remote, input.checked));
-    label.appendChild(input);
-    label.appendChild(el("span", "mono", remote));
-    if (keys[remote]) label.appendChild(el("span", "wf-note", keys[remote]));
-    if (doc.basis === remote && (st.remotes || []).length > 1) {
-      label.appendChild(el("span", "badge busy", "basis"));
+    input.checked = row.checked;
+    input.disabled = row.only;
+    input.setAttribute("aria-label", `Target ${row.remote}`);
+    input.addEventListener("change", () => wsSyncToggleRemote(name, row.remote, input.checked));
+    target.appendChild(input);
+    target.appendChild(el("span", "mono", row.remote));
+    if (row.key) target.appendChild(el("span", "wf-note", row.key));
+    line.appendChild(target);
+    const pick = el("label", "wf-note ws-sync-remote-basis");
+    const radio = el("input", "ws-sync-basis-radio");
+    radio.type = "radio";
+    radio.name = `ws-sync-basis-${name}`;
+    radio.value = row.remote;
+    radio.checked = row.isBasis;
+    radio.disabled = !row.canBasis;
+    radio.setAttribute("aria-label", `Basis ${row.remote}`);
+    radio.addEventListener("change", () => { if (radio.checked) wsSyncToggleBasis(name, row.remote); });
+    pick.appendChild(radio);
+    pick.appendChild(el("span", row.isBasis ? "badge busy" : null, "basis"));
+    line.appendChild(pick);
+    if (row.why) {
+      line.appendChild(el("span", "wf-note ws-sync-remote-why" +
+        (row.isBasis && view.refusal ? " wf-warning" : ""), row.why));
     }
-    list.appendChild(label);
+    list.appendChild(line);
   }
   box.appendChild(list);
-  if (st.remoteNote) box.appendChild(el("p", "wf-note wf-warning", st.remoteNote));
-  if ((st.remotes || []).length > 1) {
-    const row = el("div", "ws-sync-form");
-    const pick = el("select");
-    pick.setAttribute("aria-label", "Basis remote");
-    for (const remote of st.remotes) pick.appendChild(new Option(remote, remote));
-    pick.value = st.basis;
-    pick.addEventListener("change", () => wsSyncToggleBasis(name, pick.value));
-    row.appendChild(pick);
-    row.appendChild(el("span", "wf-note",
-      "Basis is fast-forwarded or rebased first; the others are pushed to."));
-    box.appendChild(row);
+  if (st.remoteNote) box.appendChild(el("p", "wf-note ws-sync-remote-note", st.remoteNote));
+  if (view.refusal) {
+    const r = view.refusal;
+    const warn = el("div", "wf-note wf-warning ws-sync-basis-refused");
+    warn.appendChild(el("span", null,
+      `${r.picked} cannot be the basis: its tip is behind ${r.newer || "another checked remote"}, ` +
+      `so syncing through it would push ${r.newer || "that remote"}'s commits to it. ` +
+      "Sync stays off until the basis is changed."));
+    if (r.use) {
+      const fix = el("button", "btn ws-sync-basis-fix", `Use ${r.use} as basis`);
+      fix.type = "button";
+      fix.addEventListener("click", () => wsSyncToggleBasis(name, r.use));
+      warn.appendChild(fix);
+    }
+    box.appendChild(warn);
+  } else if (doc.basis_error && view.fresh) {
+    box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   }
-  if (doc.basis_error) box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   if ((doc.incompatible || []).length) {
     box.appendChild(el("p", "wf-note wf-warning",
       "These remotes cannot be brought to one branch (their tips are not on one line): " +
-      doc.incompatible.map((p) => p.join(" / ")).join(", ")));
+      doc.incompatible.map((p) => p.join(" / ")).join(", ") +
+      ". Uncheck one of each pair."));
   }
-  if ((doc.sync_order || []).length) {
+  if (view.order.length) {
     const order = el("div", "ws-sync-order");
     order.appendChild(el("h5", null, "Execution order"));
-    (doc.sync_order || []).forEach((remote, i) => {
+    view.order.forEach((remote, i) => {
       const row = wsSyncPlanFor(doc, remote);
       const action = row && row.plan ? row.plan.action : (row && row.error ? "error" : "?");
       order.appendChild(el("div", "mono ws-sync-order-row",
         `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
     });
     box.appendChild(order);
+  } else if ((doc.sync_order || []).length && !view.fresh) {
+    // the read the order came from covered another set (claunch-cj1qi)
+    box.appendChild(el("p", "wf-note ws-sync-order-stale",
+      st.loading
+        ? "Reading the execution order for the remotes checked now…"
+        : "No execution order for the remotes checked now: the last status read " +
+          "did not cover them. Refresh to read it again."));
   }
   return box;
 }
@@ -47605,6 +49352,157 @@ function cflow2Duration(seconds) {
   return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
+// The intervals the saved runs waited on a person (claunch-sbfsi.1), clipped
+// to [start, end). Each keeps its gate's callstack depth, which is the bar's
+// height in the chart, and its full wait for the tooltip and the longest-wait
+// tile. A run's gates come from its own journal, so two runs never share one.
+function cflow2GateRows(data, start, end) {
+  const rows = [];
+  for (const run of (data || {}).runs || []) {
+    const live = Date.parse(run.ended) >= Date.parse((data || {}).observed_at);
+    for (const gate of run.gates || []) {
+      const a = Date.parse(gate.opened), b = Date.parse(gate.closed);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b < a || !Number.isInteger(gate.depth)) continue;
+      const lo = Math.max(a, start), hi = Math.min(b, end);
+      if (hi < lo || (hi === lo && a !== b)) continue;
+      rows.push({gate, run: run.run, lo, hi, wait: b - a,
+        state: !gate.open ? "closed" : live ? "open" : "cut"});
+    }
+  }
+  return rows.sort((x, y) => x.lo - y.lo);
+}
+
+// A run's callstack depth over time as step lines inside the period
+// (claunch-d54gw). Each saved point holds until the next one, the last until
+// the run ended; a null depth (nothing active, or the journal read stopped)
+// breaks the line. One run may give several pieces.
+function cflow2DepthPieces(data, start, end) {
+  const pieces = [];
+  for (const run of (data || {}).runs || []) {
+    const pts = (run.depth || []).map(p => [Date.parse(p.at), Number.isInteger(p.depth) ? p.depth : null])
+      .filter(p => Number.isFinite(p[0]));
+    const stop = Date.parse(run.ended);
+    let cur = [];
+    const flush = () => { if (cur.length) pieces.push({run: run.run, steps: cur}); cur = []; };
+    pts.forEach(([at, depth], i) => {
+      const next = i + 1 < pts.length ? pts[i + 1][0] : stop;
+      if (depth === null || !Number.isFinite(next)) { flush(); return; }
+      const lo = Math.max(at, start), hi = Math.min(next, end);
+      if (hi <= lo) { if (at >= end) flush(); return; }
+      cur.push({lo, hi, depth});
+    });
+    flush();
+  }
+  return pieces;
+}
+
+const CF2_GATE_KINDS = {ask: "ask", choice: "user choice", visit_limit: "visit limit", loop_limit: "loop limit", move: "move request"};
+
+function cflow2GateChart(data, period) {
+  const box = el("div", "cf2-gates");
+  box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
+  const rows = cflow2GateRows(data, ...period);
+  const pieces = cflow2DepthPieces(data, ...period);
+  const runs = (data || {}).runs || [];
+  const saved = runs.reduce((n, r) => n + (r.gates || []).length, 0);
+  // Gates the daemon could not give an end (claunch-b6z8m): they have no
+  // interval to draw, so the panel says how many it left out.
+  const unended = runs.reduce((n, r) => n + (Number.isInteger(r.gates_unended) ? r.gates_unended : 0), 0);
+  const unendedNote = () => el("p", "wf-note cf2-gates-unended",
+    `${unended} gate wait${unended === 1 ? "" : "s"} in the saved runs ${unended === 1 ? "has" : "have"} no recorded end and ${unended === 1 ? "is" : "are"} not drawn.`);
+  if (!rows.length && !pieces.length) {
+    box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
+      "No gate waited on a person in the saved runs."));
+    if (unended) box.appendChild(unendedNote());
+    return box;
+  }
+  const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
+  const longest = rows.reduce((m, r) => Math.max(m, r.wait), 0);
+  const lineDepths = pieces.flatMap(p => p.steps.map(s => s.depth));
+  const tiles = el("div", "cf2-throughput-tiles");
+  const tile = (label, value, note) => {
+    const t = el("div", "cf2-throughput-tile");
+    t.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
+    if (note) t.appendChild(el("div", "cf2-throughput-tile-note", note));
+    return t;
+  };
+  tiles.append(tile("Gates", String(rows.length), "waited in this period"),
+    tile("Waiting time", cflow2Duration(clipped / 1000), "inside this period"),
+    tile("Longest wait", cflow2Duration(longest / 1000), "whole wait"),
+    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null),
+    tile("Deepest stack", lineDepths.length ? String(Math.max(...lineDepths)) : "—", "frames in this period"));
+  box.appendChild(tiles);
+
+  // Deeper frames draw higher. The axis spans the depths present (gate bars
+  // and the depth line), so a run whose stack stays 9 to 15 frames down does
+  // not spend its height on 0..8. Past twelve levels the lanes narrow.
+  const gateDepths = rows.map(r => r.gate.depth), depths = [...gateDepths, ...lineDepths];
+  const lo = Math.min(...depths), hi = Math.max(...depths), levels = hi - lo + 1;
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  const lane = levels > 12 ? Math.max(10, Math.floor(192 / levels)) : 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Callstack depth (line) and gates that waited on a person (bars), by depth (higher is deeper) over UTC time.");
+  const node = (tag, attrs, text) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e); return e;
+  };
+  const y = depth => T + (hi - depth) * lane;
+  // Label the depths that hold a bar; past eight of them, or with the depth
+  // line drawn (it crosses every level between its ends), every few levels.
+  const present = [...new Set(gateDepths)].sort((a, b) => a - b);
+  const every = Math.max(1, Math.ceil(levels / 6));
+  const marks = present.length && present.length <= 8 && !pieces.length ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
+  for (const d of marks) {
+    node("line", {x1: L, x2: W - R, y1: y(d) + lane / 2, y2: y(d) + lane / 2, class: "cf2-axis-grid"});
+    node("text", {x: L - 4, y: y(d) + lane / 2 + 3, "text-anchor": "end", class: "cf2-axis-label"}, String(d));
+  }
+  const span = period[1] - period[0], x = ms => L + (ms - period[0]) / span * plotW;
+  const tick = ms => {
+    const t = new Date(ms).toISOString();
+    return span > 300 * 86400000 ? t.slice(0, 10) : span > 86400000 ? `${t.slice(5, 10)} ${t.slice(11, 16)}` : t.slice(11, 16);
+  };
+  const iso = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
+  // The depth line goes under the bars: a bar is the thing to hover.
+  const mid = depth => y(depth) + lane / 2;
+  for (const p of pieces) {
+    const xy = [];
+    for (const s of p.steps) {
+      xy.push(`${x(s.lo).toFixed(1)},${mid(s.depth)}`, `${x(s.hi).toFixed(1)},${mid(s.depth)}`);
+    }
+    const line = node("polyline", {points: xy.join(" "), class: "cf2-depth-line"});
+    line.dataset.run = p.run;
+    line.dataset.depths = p.steps.map(s => s.depth).join(",");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `callstack depth ${Math.min(...p.steps.map(s => s.depth))}–${Math.max(...p.steps.map(s => s.depth))}\nrun ${p.run}`;
+    line.appendChild(title);
+  }
+  for (const r of rows) {
+    const g = r.gate;
+    const rect = node("rect", {x: x(r.lo), y: y(g.depth) + 3, width: Math.max(2, x(r.hi) - x(r.lo)),
+      height: lane - 6, rx: 2, class: `cf2-gate-${r.state}`});
+    rect.dataset.node = g.node; rect.dataset.depth = g.depth;
+    const name = g.within && g.within !== g.label ? `${g.within} › ${g.label}` : (g.label || g.node);
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `${name} (${CF2_GATE_KINDS[g.kind] || g.kind}) · depth ${g.depth}\n` +
+      `${iso(Date.parse(g.opened))} – ${r.state === "open" ? "waiting now" : iso(Date.parse(g.closed))}\n` +
+      `waited ${cflow2Duration(r.wait / 1000)}` + (r.state === "cut" ? " · the run ended before an answer was recorded" : "") +
+      `\nrun ${r.run} · ${g.node}`;
+    rect.appendChild(title);
+  }
+  node("text", {x: L, y: H - 6, "text-anchor": "start", class: "cf2-axis-label"}, tick(period[0]));
+  node("text", {x: L + plotW / 2, y: H - 6, "text-anchor": "middle", class: "cf2-axis-label"}, tick(period[0] + span / 2));
+  node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
+  box.appendChild(svg);
+  const legend = el("div", "cf2-throughput-legend");
+  legend.append(el("span", "cf2-legend-depth", "Callstack depth"), el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
+    el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
+  box.appendChild(legend);
+  if (unended) box.appendChild(unendedNote());
+  return box;
+}
+
 function cflow2Throughput(data, state) {
   const section = cf2Section("Throughput over time");
   section.classList.add("cf2-throughput");
@@ -47632,6 +49530,7 @@ function cflow2Throughput(data, state) {
   const controls = el("div", "cf2-throughput-controls");
   const custom = el("div", "cf2-throughput-controls cf2-throughput-custom");
   const output = el("div", "cf2-throughput-output");
+  const gates = el("div");
   const compare = el("details", "cf2-throughput-compare"); compare.dataset.cf2Key = "throughput-compare";
   compare.appendChild(el("summary", null, "Compare two periods"));
   const compareInputs = el("div", "cf2-throughput-controls");
@@ -47682,7 +49581,8 @@ function cflow2Throughput(data, state) {
   about.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
   about.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
   if (!hasMerges) about.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
-  section.append(controls, custom, output, compare, about);
+  about.appendChild(el("p", "wf-note", "Human gate waits: a bar runs from the moment a gate was put to a person (a user choice, an ask that fell to a person, a visit or loop limit, a move request) to its answer. Asks routed to agent responders such as reviewers are left out. Height is the gate's callstack depth, the number of frames the Callstack panel draws above it."));
+  section.append(controls, custom, output, gates, compare, about);
 
   const range = (a, b) => [Date.parse(state[a] + "Z"), Date.parse(state[b] + "Z")];
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
@@ -47735,7 +49635,9 @@ function cflow2Throughput(data, state) {
     const unit = state.metric === "runs" ? "completed runs" : "reported merges";
     const period = range("start", "end");
     drawComparison(unit);
+    gates.replaceChildren();
     if (!valid(period)) {output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;}
+    gates.appendChild(cflow2GateChart(data, period));
     const span = period[1] - period[0];
     for (const option of binSelect.options) {
       option.disabled = option.value !== "auto" && span / Number(option.value) > CF2_THROUGHPUT_MAX_BINS;
@@ -47892,7 +49794,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   const root = el("div", "cf2 cf2-host-" + host);
   box.appendChild(root);
 
-  // -- the head: ways out on the left, run presses on the right -------------
+  // -- the head: ways out, then the name with the run presses beside it -----
   const top = el("div", "cf2-top");
   const nav = el("div", "cf2-nav");
   if (!ui.fullLink) {
@@ -47952,19 +49854,19 @@ function renderCflow2Into(box, data, ui, force = false) {
       bar.appendChild(b);
     }
   }
-  if (bar.childNodes.length) top.appendChild(bar);
-  root.appendChild(top);
-
+  // The head is one card (claunch-jc99t): the ways out on a line of their
+  // own, then the name and status with the run presses level with them on
+  // the right, then the facts, then any warning about the run's copy.
+  const head = el("div", "cf2-head");
+  if (nav.childNodes.length) head.appendChild(top);
   const title = el("div", "cf2-title");
   title.appendChild(el("span", "cf2-badge", "v2"));
   title.appendChild(el("h2", null, run.workflow || (data.chart || {}).name || "(workflow)"));
   title.appendChild(el("span", "cf2-status " + (CFLOW2_STATUS_CLS[status] || ""),
                        status.replace("_", " ")));
-  root.appendChild(title);
-  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
-  // the harness that slices this view does not carry the helper.
-  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
-  if (drift) root.appendChild(el("p", "wf-warning cf2-drift-note", drift));
+  if (bar.childNodes.length) title.appendChild(bar);
+  head.appendChild(title);
+  root.appendChild(head);
   const meta = el("div", "cf2-meta");
   const metaItem = (k, v, cls) => {
     const s = el("span", "cf2-fact");
@@ -47981,7 +49883,11 @@ function renderCflow2Into(box, data, ui, force = false) {
     metaItem("acceptance", run.acceptance.status +
       ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : ""));
   }
-  root.appendChild(meta);
+  head.appendChild(meta);
+  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
+  // the harness that slices this view does not carry the helper.
+  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
+  if (drift) head.appendChild(el("p", "wf-warning cf2-drift-note", drift));
   const scoped = data.scope && data.scope !== "default";
   if (!sessions.length && live) {
     root.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
@@ -48096,8 +50002,13 @@ function renderCflow2Into(box, data, ui, force = false) {
       (mr.decided_reason ? ` — ${mr.decided_reason}` : "")));
   }
   for (const c of run.choices || []) {
+    // `optional` (claunch-hbmhk): the region around this choice settles
+    // without it and the engine cancels it, so picking is a convenience and
+    // the card must not imply the round is standing still until it is used.
     const card = cf2Card("choice", c.label || c.node,
-      c.chooser === "user" ? "yours to pick" : "the agent's — you may pick for it");
+      c.optional ? "optional — the run goes on without a pick"
+        : c.chooser === "user" ? "yours to pick"
+        : "the agent's — you may pick for it");
     if (c.prompt) card.appendChild(mdInto(el("div", "md cf2-body"), c.prompt));
     const key = `${host}:choice:${c.instance}`;
     const presses = (c.options || []).map((o) => {
@@ -48647,33 +50558,63 @@ function cflow2CollectionTable(name, col, post) {
 
 /* The run's start inputs (data.inputs), folded shut. An input whose
    declaration (data.input_decls) has set_by: [user] gets an editor while the
-   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
+   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f).
+   Laid out as one two-column table (claunch-jc99t): the names in a column as
+   wide as the longest of them, the value -- or, for an input a person may
+   set, its editor holding the value -- on the same line beside it. The
+   settable inputs come first under a heading of their own, so the rows a
+   person can act on are not scattered among the ones fixed at the start. */
 function cflow2InputsBlock(values, decls, post, options) {
   const declOf = {};
   for (const d of decls || []) declOf[d.name] = d;
   const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
-  const nEdit = Object.keys(values).filter(editable).length;
+  const keys = Object.keys(values);
+  const nEdit = keys.filter(editable).length;
   const box = document.createElement("details");
   box.className = "cf2-run-inputs";
-  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})` +
-    (nEdit ? ` · ${nEdit} editable` : "")));
-  for (const [k, v] of Object.entries(values)) {
-    const row = el("div", "cf2-run-input");
-    row.appendChild(el("span", "mono cf2-fact-k", k));
-    let text;
+  const sum = el("summary", "cf2-run-inputs-head", "inputs");
+  sum.appendChild(el("span", "cf2-count", String(keys.length)));
+  if (nEdit) sum.appendChild(el("span", "cf2-count cf2-count-edit", `${nEdit} editable`));
+  box.appendChild(sum);
+  const shown = (v) => {
     if (Array.isArray(v)) {
-      text = v.map((x) => (x && typeof x === "object")
+      return v.map((x) => (x && typeof x === "object")
         ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
-    } else text = v == null ? "" : String(v);
-    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
-    row.appendChild(text.length > 80 || text.includes("\n")
-      ? mdInto(el("div", "md cf2-run-input-value"), text)
-      : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
-    if (editable(k)) {
-      row.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
     }
-    box.appendChild(row);
-  }
+    return v == null ? "" : String(v);
+  };
+  const valueCell = (text) => (text.length > 80 || text.includes("\n")
+    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
+    ? mdInto(el("div", "md cf2-run-input-value"), text)
+    : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
+  const grid = el("div", "cf2-run-input-grid");
+  const group = (title, list) => {
+    if (!list.length) return;
+    if (nEdit && nEdit < keys.length) {
+      const h = el("div", "cf2-run-input-group", title);
+      h.appendChild(el("span", "cf2-count", String(list.length)));
+      grid.appendChild(h);
+    }
+    for (const k of list) {
+      const v = values[k];
+      const text = shown(v);
+      const settable = editable(k);
+      const row = el("div", "cf2-run-input" + (settable ? " settable" : ""));
+      const name = el("span", "mono cf2-run-input-k", k);
+      name.title = (declOf[k] || {}).label || k;
+      row.appendChild(name);
+      const cell = el("div", "cf2-run-input-cell");
+      // a settable input's editor holds its value; long prose still reads in
+      // full above the editor, a short value would only repeat it
+      if (!settable || text.length > 80 || text.includes("\n")) cell.appendChild(valueCell(text));
+      if (settable) cell.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
+      row.appendChild(cell);
+      grid.appendChild(row);
+    }
+  };
+  group("settable", keys.filter(editable));
+  group("fixed at start", keys.filter((k) => !editable(k)));
+  box.appendChild(grid);
   return box;
 }
 
@@ -48697,13 +50638,15 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     const box = el("input");
     box.type = "checkbox";
     box.checked = !!value;
+    const word = el("span", "cf2-run-input-state", String(box.checked));
     box.addEventListener("change", async () => {
       box.disabled = true;
       if (!await send(box.checked, String(box.checked))) box.checked = !box.checked;
+      word.textContent = String(box.checked);
       box.disabled = false;
     });
     const lab = el("label", "cf2-run-input-toggle");
-    lab.append(box, document.createTextNode(" on"));
+    lab.append(box, word);
     wrap.appendChild(lab);
     return wrap;
   }
@@ -48722,6 +50665,7 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     field.type = decl.type === "int" ? "number" : "text";
     field.value = value == null ? "" : String(value);
   }
+  if (field.tagName !== "SELECT") field.placeholder = "empty";
   if (decl.options && opts) {
     const list = el("datalist");
     list.id = `cf2-run-opt-${name}-${++cflowOptionSeq}`;
@@ -50177,6 +52121,15 @@ function repointDetail(name) {
    back to the page the detail was opened over. Dropped first, so the router
    does not read the new entry as a terminal link to carry the rail across. */
 function closeDetail() {
+  // A page column that borrowed the panel (hostSessDetail) is closed by that
+  // page: its × hands the panel back and the page shows its own view again.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    const done = guest.onClose;
+    releaseSessDetail();
+    if (done) done();
+    return;
+  }
   dropDetail();
   go(hashWithDetail(location.hash, null));
 }
@@ -50315,8 +52268,14 @@ function sessHead(s) {
   // The same wizard, filled with what this session was itself created with
   // (spawnSameSeed), built above because the docked arrangement keeps it,
   // and the editor for this session's directory on the same line.
-  head.appendChild(same);
-  head.appendChild(code);
+  // These two and Open PR sit in one box. Wider than a phone the box is
+  // `display: contents` and the row reads as before; on a phone the box is
+  // the ⋯ menu, so the head keeps Spawn and Open terminal on one line
+  // (claunch-0a5nk.5).
+  const extra = el("span", "sess-head-extra");
+  extra.appendChild(same);
+  extra.appendChild(code);
+  head.appendChild(extra);
 
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
@@ -50326,7 +52285,7 @@ function sessHead(s) {
   const pr = el("button", "wf-btn", "Open PR");
   pr.title = "push this session's directory as a new branch and open a pull request";
   pr.addEventListener("click", () => openPrModal(s.name));
-  head.appendChild(pr);
+  extra.appendChild(pr);
 
   // Through the router, so the terminal it opens is the one the URL names.
   // On a desktop the router keeps the rail up beside it (the rail follows
@@ -50334,9 +52293,58 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
+  head.appendChild(sessHeadMoreButton(head, extra, s.name));
   head.appendChild(close);
   return head;
 }
+
+/* The phone's ⋯ on the session head (claunch-0a5nk.5). The stylesheet shows
+   it at 600px and below only. The head is rebuilt on every poll, so whether
+   the menu is open is kept here, by session name, and put back on the new
+   head; a route change, a pick, a tap outside and Escape close it. */
+let sessHeadMoreOpen = "";
+function setSessHeadMore(name) {
+  sessHeadMoreOpen = name || "";
+  for (const head of document.querySelectorAll(".sess-head")) {
+    const on = !!sessHeadMoreOpen && head.dataset.session === sessHeadMoreOpen;
+    head.classList.toggle("more-open", on);
+    const btn = head.querySelector(".sess-head-more");
+    if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+  }
+}
+function sessHeadMoreButton(head, extra, name) {
+  head.dataset.session = name || "";
+  extra.id = "sess-head-extra";
+  extra.setAttribute("role", "menu");
+  const btn = el("button", "wf-btn sess-head-more", "⋯");
+  btn.title = "more: Spawn same setup, VS Code, Open PR";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-controls", "sess-head-extra");
+  const on = !!name && sessHeadMoreOpen === name;
+  head.classList.toggle("more-open", on);
+  btn.setAttribute("aria-expanded", on ? "true" : "false");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setSessHeadMore(sessHeadMoreOpen === name ? "" : name);
+  });
+  // A pick runs its own handler first (listeners on the button itself), then
+  // the menu closes.
+  extra.addEventListener("click", (e) => {
+    if (e.target.closest("button")) setSessHeadMore("");
+  });
+  if (!sessHeadMoreWired) {
+    sessHeadMoreWired = true;
+    document.addEventListener("click", (e) => {
+      if (sessHeadMoreOpen && !e.target.closest(".sess-head-extra, .sess-head-more")) setSessHeadMore("");
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sessHeadMoreOpen) setSessHeadMore("");
+    });
+    window.addEventListener("hashchange", () => { if (sessHeadMoreOpen) setSessHeadMore(""); });
+  }
+  return btn;
+}
+let sessHeadMoreWired = false;
 
 /* The radio under the head: which panel this column is. `Details` is the
    session's facts and the ways to speak to it; `Workflow` is its run, given
@@ -52416,11 +54424,56 @@ function sessInputJournal(name) {
    the same question creation asks: its own token or a borrowed one; Claude
    additionally offers none (--null). Picking any clears the others, so a
    borrow chosen on a --null Claude session turns the token back on. */
+/* Which key of a multi-key pool this session spends, and the way to another
+   (claunch-d2t79). The panel already restarts the session; the key is the
+   other half of the same restart, so it belongs here rather than only on the
+   rail's chip. Returns null for a session with no pool or a single key — a
+   one-key profile has nothing to choose between, and a row saying so would be
+   noise on every session of the fleet. */
+function sessKeySection(s) {
+  const poolProfile = keyPoolProfile(s);
+  if (!poolProfile) return null;
+  const box = el("div", "sess-key-section");
+  const line = el("p", "wf-note", "Key: reading the pool…");
+  const pick = el("button", "wf-btn option", "Change key…");
+  pick.type = "button";
+  pick.disabled = true;
+  pick.title = "restart this session on another key of the same pool";
+  pick.addEventListener("click", () => openKeyPicker(s.name, poolProfile));
+  box.append(line, pick);
+  fetchKeyPool(poolProfile).then((pool) => {
+    if (!pool || !pool.pooled || (pool.keys || []).length < 2) {
+      box.remove();
+      return;
+    }
+    const keys = pool.keys || [];
+    const pinned = s.key_id ? keys.find((k) => k.id === s.key_id) : null;
+    const current = pinned || keys.find((k) => k.current) || keys[0];
+    const shown = current.label || current.masked;
+    line.textContent = `Key: ${shown}${pinned ? " (pinned)" : ""}`
+      + ` of ${keys.length} in ${pool.owner || poolProfile}'s pool`
+      + (s.auto_key_switch
+        ? " — switched automatically on a usage limit"
+        : "");
+    pick.disabled = false;
+  }).catch(() => { line.textContent = "Key: the daemon did not answer"; });
+  return box;
+}
+
 function sessReborrow(data) {
   const s = data.session || {};
   const harness = data.harness || {};
   const box = el("div", "sess-reborrow");
   box.appendChild(el("h3", null, "Restart settings"));
+
+  // The key half of the same restart (claunch-d2t79). Before this the panel
+  // could say whose token a session runs on but not *which key* of a multi-key
+  // pool it spends, and could not change it: the answers here were the three
+  // auth modes only, and switching keys meant finding the rail's key chip.
+  // It is drawn before the borrowability gate below because a pool is not a
+  // borrow: a harness with no shared-token route can still have several keys.
+  const keySection = sessKeySection(s);
+  if (keySection) box.appendChild(keySection);
 
   // Borrowability comes from the packaged/custom harness auth contract. Keep
   // Claude as the old-daemon fallback, but do not infer every other harness is
@@ -52776,6 +54829,7 @@ function keyPoolSignature() {
 function decorateKeyRow(li, s) {
   const actions = li && li.querySelector(".rail-actions");
   if (!actions) return;
+  decorateAutoKeyBadge(actions, s);
   const existing = actions.querySelector(".sess-key");
   const chip = railKeyChip(s);
   if (chip) {
@@ -52788,6 +54842,37 @@ function decorateKeyRow(li, s) {
   if (existing && (!poolProfile || (hit && (!hit.data || !hit.data.pooled)))) {
     existing.remove();
   }
+}
+
+/* The auto-switch badge on a session's card (claunch-d2t79). Drawn from the
+   session's own answer (``auto_key_switch``), not from the pool cache: the
+   answer is what the daemon will do on a usage limit, and it is a fact about
+   the session that arrives on the rail poll, while the pool behind it is
+   fetched lazily and may not have arrived yet. Idempotent like the chip
+   beside it — replaced when present, removed when the answer is off. */
+function decorateAutoKeyBadge(actions, s) {
+  const existing = actions.querySelector(".sess-auto-key");
+  if (!s || !s.auto_key_switch) {
+    if (existing) existing.remove();
+    return;
+  }
+  const badge = document.createElement("button");
+  badge.className = "sess-auto-key on";
+  badge.type = "button";
+  badge.dataset.name = s.name;
+  badge.textContent = "AUTO";
+  badge.title = "on a usage limit this session is switched onto another "
+    + "usable key of its pool and told to continue — click for the key settings";
+  if (typeof badge.setAttribute === "function") {
+    badge.setAttribute("aria-label", "automatic key switch on");
+  }
+  badge.addEventListener("click", (e) => {
+    e.stopPropagation();     // the row itself attaches; this button does not
+    const poolProfile = keyPoolProfile(s);
+    if (poolProfile) openKeyPicker(s.name, poolProfile);
+  });
+  if (existing) existing.replaceWith(badge);
+  else actions.appendChild(badge);
 }
 
 /* The usage selector for a session's pool: the profile asked with the
@@ -52851,10 +54936,20 @@ function keyPickerFillUsage(options, doc, nextId) {
    The pool's own profile is the target — a session on a child profile reads
    its ancestor's pool, and a write to the child's nonexistent one would
    silently do nothing (the split ``h_profile_key_strategy`` documents). */
-async function keyPickerWrite(profileName, leaf, body) {
+/* One write to the key machinery. Three of the modal's writes are the
+   *pool's* (``/api/profiles/<name>/keys/<leaf>``: strategy, roll, and the
+   pin) and one is the *session's* (``/api/sessions/<name>/auto-key-switch``,
+   claunch-d2t79): whether this session may be switched under a usage limit
+   is a fact about the session, not about the pool every other session of the
+   profile also reads. ``opts.session`` picks the second route — the first
+   argument is then the session name. */
+async function keyPickerWrite(profileName, leaf, body, opts = {}) {
+  const where = opts.session
+    ? `/api/sessions/${encodeURIComponent(profileName)}/${leaf}`
+    : `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`;
   try {
     const resp = await api(
-      `/api/profiles/${encodeURIComponent(profileName)}/keys/${leaf}`,
+      where,
       { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}) });
     const doc = await resp.json().catch(() => null);
@@ -52878,7 +54973,7 @@ async function keyPickerWrite(profileName, leaf, body) {
    `paint` is called with whatever the next pick currently is (the pool's
    stored pick at open, the peek when the usage read lands, a fresh draw after
    a roll), so the line always names the key the next launch would spend. */
-function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
+function keyPickerControls({ profileName, keys, strategy, onStrategy, auto, onAuto }) {
   const box = el("div", "key-picker-controls");
   const row = el("div", "key-picker-row");
   const label = el("label", "key-picker-strategy");
@@ -52899,7 +54994,28 @@ function keyPickerControls({ profileName, keys, strategy, onStrategy }) {
   row.append(label, roll);
   const next = el("p", "key-picker-next");
   const note = el("p", "key-picker-note muted");
-  box.append(row, next, note);
+  /* The automatic switch (claunch-d2t79). Off unless the session asked for
+     it: the answer says the daemon may restart this session on its own when a
+     usage limit appears, which is a bigger thing than picking a key for it.
+     When it is on, the sentence names the two halves a person needs — the
+     rule the key is chosen by, and that a session with nothing usable falls
+     back to the pause. */
+  const autoRow = el("div", "key-picker-row key-picker-auto");
+  const autoLabel = el("label", "key-picker-auto-label");
+  const autoBox = document.createElement("input");
+  autoBox.type = "checkbox";
+  autoBox.id = "key-picker-auto";
+  autoBox.checked = !!auto;
+  autoLabel.append(autoBox, document.createTextNode(" switch keys on a usage limit"));
+  const autoNote = el("p", "key-picker-auto-note muted");
+  autoNote.textContent = autoBox.checked
+    ? "Restarts this session on the usable key with the lowest usage "
+      + "(5-hour, weekly and monthly windows together) and types continue. "
+      + "A session with nothing usable left is paused as before."
+    : "Off: a usage limit pauses this session until the plan resets.";
+  autoBox.addEventListener("change", () => onAuto(autoBox.checked));
+  autoRow.append(autoLabel);
+  box.append(row, next, note, autoRow, autoNote);
 
   const nameOf = (id) => {
     const hit = keys.find((k) => k.id === id);
@@ -53000,7 +55116,26 @@ async function openKeyPicker(name, profile) {
   const controls = keyPickerControls({
     profileName: poolName, keys, strategy,
     onStrategy: (name) => writeStrategy(name),
+    auto: !!(session && session.auto_key_switch),
+    onAuto: (on) => writeAuto(on),
   });
+
+  /* The automatic switch's answer is the session's, not the pool's: it is a
+     definition edit on the daemon and costs no restart, so the modal writes
+     it and repaints without touching the key list or the strategy. */
+  async function writeAuto(on) {
+    const res = await keyPickerWrite(name, "auto-key-switch", { enabled: !!on },
+      { session: true });
+    if (!res.ok) {
+      controls.paint({ nextPick, strategy, pinned: !!pinnedTo,
+                       flash: `not saved: ${res.error}` });
+      return;
+    }
+    const row = (typeof sessionsCache !== "undefined" && sessionsCache || [])
+      .find((x) => x.name === name);
+    if (row) row.auto_key_switch = !!(res.doc && res.doc.auto_key_switch);
+    requestSessionsRefresh();
+  }
 
   /* Change the pool's strategy. Under manual the key the operator marked in
      the list is the one it names, so "manual" and the press on a key are one
@@ -53675,12 +55810,18 @@ function sessCompact(data) {
    `claunch migrate-session`, from the panel that names the session. Claude
    keeps transcripts per working directory, so this is more than a cwd edit:
    the daemon stops the session, re-files its conversation under the target
-   directory's slug, and relaunches it there — same name, same conversation,
-   same mesh memberships. The picker offers the checkouts that make sense
-   from where the session stands: the repository's original checkout, its
-   existing worktrees, or a new one cut on the spot. Directories outside the
-   repository stay a CLI affair (`--to DIR`), the same way free-text paths
-   are kept out of the create form. */
+   directory's slug, moves its cflow run slots and relaunches it there — same
+   name, same conversation, same mesh memberships. The picker offers the
+   checkouts that make sense from where the session stands: the repository's
+   original checkout, its existing worktrees, or a new one cut on the spot.
+   Directories outside the repository stay a CLI affair (`--to DIR`), the same
+   way free-text paths are kept out of the create form.
+
+   A move is also where a session filed under the wrong project gets re-filed
+   (`--project`), so the second row offers the projects this daemon knows.
+   It defaults to keeping the current filing: a cwd change is not a filing
+   change, and the two are separate questions the operator answers one at a
+   time. */
 function sessMigrate(data) {
   const s = data.session || {};
   const box = el("div", "sess-migrate");
@@ -53719,10 +55860,36 @@ function sessMigrate(data) {
   kids.append(kidsBox, el(
     "span", null, "also move children standing in this directory"
   ));
+  // Re-filing travels with the same move: a session whose workspace was set
+  // wrong usually sits under the wrong project as well, and the daemon already
+  // re-files `project` on a migrate. First entry keeps the filing, which is
+  // the default — changing the directory is not, by itself, a change of
+  // project.
+  let projSel = null;
+  const projRow = el("div", "sess-send-row");
+  if (projectsCache.length) {
+    const current = s.project || "";
+    projSel = document.createElement("select");
+    projSel.title = "the project this session is filed under";
+    const addProject = (value, label) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      projSel.appendChild(opt);
+    };
+    addProject("", `project: keep ${current || "default"} as it is`);
+    if (current) addProject("default", "project: default (unfiled)");
+    for (const p of projectsCache) {
+      if (p.name !== current) addProject(p.name, `project: ${p.name}`);
+    }
+    projRow.appendChild(projSel);
+  }
   const moveBtn = el("button", "wf-btn option", "Migrate");
   moveBtn.disabled = true;
   const status = el("p", "wf-note hidden");
-  form.append(row, nameIn, kids, moveBtn, status);
+  form.append(row);
+  if (projSel) form.append(projRow); // no empty row when there is nothing to pick
+  form.append(nameIn, kids, moveBtn, status);
 
   const say = (msg, cls) => {
     status.className = cls || "wf-note";
@@ -53789,6 +55956,9 @@ function sessMigrate(data) {
     const target = dest.value === "root"
       ? { cwd: root }
       : { worktree: dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3) };
+    // Only a picked filing travels: sending the current project would ask the
+    // daemon to re-file under the name it already holds.
+    if (projSel && projSel.value) target.project = projSel.value;
     moveBtn.disabled = true;
     say("migrating… (stopping it, moving its transcript, relaunching)");
     let doc = {};
@@ -53812,8 +55982,25 @@ function sessMigrate(data) {
     }
     const kidsOk = (doc.children || []).filter((c) => c.ok);
     const kidsFailed = (doc.children || []).filter((c) => !c.ok);
+    // What travelled besides the session itself, so the operator can tell a
+    // plain directory change from one that also re-filed the session, carried
+    // its cflow runs over, or moved a mesh mirror it had built.
+    const slots = doc.slots_moved || [];
+    const mirrors = doc.mirrors_refiled || [];
+    const carried = [
+      doc.project ? `project: ${doc.project}` : "",
+      slots.length
+        ? `${slots.length} cflow run slot${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}`
+        : "",
+      mirrors.length
+        ? `${mirrors.length} mesh row${mirrors.length === 1 ? "" : "s"} re-filed: ${mirrors
+            .map((m) => `${m.mesh} (${m.was} → ${m.now})`)
+            .join(", ")}`
+        : "",
+    ].filter(Boolean);
     say(
       `migrated to ${doc.cwd}` +
+      (carried.length ? ` — ${carried.join("; ")}` : "") +
       (kidsOk.length ? ` — ${kidsOk.map((c) => c.name).join(", ")} too` : "") +
       (kidsFailed.length
         ? `; NOT moved: ${kidsFailed
@@ -55332,7 +57519,11 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "note", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
+    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt",
+    // Asked on the face of the form on both tabs (claunch-d2t79). Without
+    // the name here renderSessionForm greys the box and sessionFormPayload
+    // drops the tick, so the answer would read as taken and never travel.
+    "auto_key_switch"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
@@ -55340,7 +57531,7 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "resume", "fork_session", "key_id"] },
+        "resume", "fork_session", "key_id", "auto_key_switch"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
@@ -55348,11 +57539,12 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "opening_files", "opening_contexts", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "workspace_prompt", "prompter_contexts",
-        "fork", "connect", "over_limit", "auto_compact"] },
+        "fork", "connect", "over_limit", "auto_compact", "auto_key_switch"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
-        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge"],
-      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs"] },
+        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge",
+        "quick_fork_copy_plan", "quick_fork_copy_qa", "quick_fork_copy_threads"],
+      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed", "cflow_inputs", "copy"] },
   };
   return modes[mode] || modes.new;
 }
@@ -62000,8 +64192,17 @@ function noticeElapsed(at) {
   return `${h}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
 }
 
-function noticeAgeText(at) {
-  return `${noticeStamp(at)} · ${noticeElapsed(at)} ago`;
+/* The clock reading, then what the elapsed half MEANS.
+   "… · 5m ago" counts from the moment a request arrived, which reads as
+   time the reader has been holding the run. For a door the run is not held
+   on that is the wrong sentence (claunch-hbmhk): the run was never waiting,
+   so the same span is said as how long the door has been OPEN — "… · open
+   5m". Same stamp, same tick, one word different. */
+function noticeAgeText(at, optional) {
+  const el = noticeElapsed(at);
+  return optional
+    ? `${noticeStamp(at)} · open ${el}`
+    : `${noticeStamp(at)} · ${el} ago`;
 }
 
 /* The pair sits at the bottom of every card and every panel row, and it
@@ -62010,12 +64211,12 @@ function noticeAgeText(at) {
    without waiting for a repaint. The set keeps the text span rather than
    the line, because a history row draws "ended …" beside it
    (noticePanelHistoryRow). */
-const noticeAges = new Set();      // {node, at}
-function noticeAgeLine(at) {
+const noticeAges = new Set();      // {node, at, optional}
+function noticeAgeLine(at, optional) {
   const line = el("div", "notice-sub notice-when");
-  const text = el("span", null, noticeAgeText(at));
+  const text = el("span", null, noticeAgeText(at, optional));
   line.appendChild(text);
-  const rec = { node: text, at };
+  const rec = { node: text, at, optional: !!optional };
   noticeAges.add(rec);
   // The record rides on the line so a card that already drew it can be
   // re-aged in place when the daemon's `opened` reaches it (noticeAgeSetFor).
@@ -62027,14 +64228,19 @@ function noticeAgeLine(at) {
    (claunch-l9znm.1). A gate's age is the run's own stamp for when it started
    waiting on a person; a row written before that answer carried the stamp
    gets it on a later poll, and the card must say the true age then rather
-   than keep counting from the arrival it was drawn with. */
-function noticeAgeSetFor(root, at) {
+   than keep counting from the arrival it was drawn with. `optional` rides
+   along because it is what the wording is built from, not the stamp
+   (claunch-hbmhk): a card that learns both at once must not keep "ago". */
+function noticeAgeSetFor(root, at, optional) {
   if (!root || !Number.isFinite(at) || typeof root.querySelector !== "function") return;
   const line = root.querySelector(".notice-when");
   const rec = line && line.__noticeAge;
-  if (!rec || rec.at === at) return;
+  if (!rec) return;
+  const opt = !!optional;
+  if (rec.at === at && rec.optional === opt) return;
   rec.at = at;
-  const text = noticeAgeText(at);
+  rec.optional = opt;
+  const text = noticeAgeText(at, opt);
   if (rec.node.textContent !== text) rec.node.textContent = text;
 }
 
@@ -62043,7 +64249,7 @@ function noticeAgesPaint() {
     // A card put away or a panel redrawn leaves its node behind; the tick
     // drops it here rather than every painter having to remember to.
     if (rec.node.isConnected === false) { noticeAges.delete(rec); continue; }
-    const text = noticeAgeText(rec.at);
+    const text = noticeAgeText(rec.at, rec.optional);
     if (rec.node.textContent !== text) rec.node.textContent = text;
   }
 }
@@ -62168,7 +64374,11 @@ function dismissNotice(key) {
   if (!rec) return;
   notices.delete(key);
   if (rec.timer) clearTimeout(rec.timer);
-  if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
+  // Marked, not only removed: a card still held by noticeCardAdd is not on
+  // the page yet, and the release that puts held cards up must not revive
+  // one that was put away while it waited (claunch-zrf3n).
+  if (rec.node) rec.node.__noticeDropped = true;
+  if (rec.node && rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
 }
 
 /* What a session name's hover tooltip adds on top of the surface's own
@@ -62527,11 +64737,11 @@ function noticeNewerFirst(a, b) {
    `fatal`, `blocking` and `expiring` are read off the notice; `urgent` and
    `deferrable` are declared by the step. `deferrable` is the one
    subtraction: a question that can wait is still `blocking` — the run
-   stands on it — but a folded list leaves it out, because nothing else is
-   waiting on that answer. */
+   stands on it — but nothing else is waiting on that answer. (The panel's
+   "Waiting on you" fold that read these words to hide the deferrable ones
+   was replaced by the panel's sub tabs, claunch-slab3; the vocabulary
+   stays.) */
 const NOTICE_CRITERIA = ["fatal", "blocking", "urgent", "expiring", "deferrable"];
-/* What a folded "Waiting on you" keeps: fatal ∪ urgent ∪ (blocking − deferrable). */
-const NOTICE_FOLD_KEEPS = ["fatal", "urgent", "blocking"];
 /* How near a deadline has to be to count as `expiring`. */
 const NOTICE_EXPIRING_MS = 30 * 60 * 1000;
 
@@ -62557,21 +64767,6 @@ function noticeCriteriaOf(entry) {
     if (!isNaN(dead) && dead - Date.now() <= NOTICE_EXPIRING_MS) out.add("expiring");
   }
   return out;
-}
-
-/* Whether a folded list shows this notice: it carries one of the kept words
-   and none of the dropped ones. A notice with no criteria at all is not
-   shown — it is what the "외 N건" line stands for.
-
-   `deferrable` loses to the words that say otherwise: a step that marks a
-   question deferrable and also `urgent` (or a notice that is `fatal`) is
-   still shown, because those two are declarations that it cannot wait and
-   the fold must not overturn one declaration with another. */
-function noticeFoldedShows(criteria) {
-  if (criteria.has("deferrable") && !criteria.has("urgent") && !criteria.has("fatal")) {
-    return false;
-  }
-  return NOTICE_FOLD_KEEPS.some((w) => criteria.has(w));
 }
 
 /* Whether this reader asked the page not to animate. A person who set
@@ -62727,10 +64922,32 @@ function noticeFoldScan() {
    cards newer than it. A child with no stamp predates this rule or is not
    a notice card at all, and is treated as the oldest thing there — the new
    card goes above it, which is the order the strip always drew. */
-function noticeCardAdd(host, node, at) {
+function noticeCardAdd(host, node, at, opts) {
+  if (noticeCardsHeld) {
+    noticeCardsHeldQueue.push({ host, node, at, opts });
+    return;
+  }
+  noticeCardPlace(host, node, at, opts);
+}
+
+/* Cards raised while the page is still coming up are held here and put up
+   by noticeCardsRelease once the first frame is standing (claunch-zrf3n):
+   boot()'s first pass polls the gates while the rail and the dashboard are
+   still being drawn, and a card that arrived then hung over an empty page.
+   A held card is a card that has been asked for, not a card that is on
+   screen: dismissNotice marks it, and the release skips it.
+
+   `noticeCardsHeld` is armed by boot() and not by this declaration: the page
+   is loading exactly while boot() runs its first pass, and a harness that
+   slices this section without boot() deals its cards directly. */
+let noticeCardsHeld = false;
+const noticeCardsHeldQueue = [];
+
+/* Puts one card up, in the place its stamp gives it (see noticeCardAdd). */
+function noticeCardPlace(host, node, at, opts) {
   const stamp = Number.isFinite(at) ? at : Date.now();
   node.__noticeAt = stamp;
-  node.appendChild(noticeAgeLine(stamp));
+  node.appendChild(noticeAgeLine(stamp, opts && opts.optionalAge));
   const tops = noticeFlipRead(host);
   let ref = null;
   for (const child of host.children) {
@@ -62747,6 +64964,21 @@ function noticeCardAdd(host, node, at) {
   else host.appendChild(node);
   noticeFlipMove(tops);
   noticeFoldClassify(node);
+}
+
+/* The first frame is up: the held cards go on screen, in the order they
+   arrived (noticeCardPlace re-sorts by stamp anyway, so a card that aged
+   while it waited lands where its own age says). Called once, from boot().
+   `__noticeDropped` is what the cards put away while they were held carry:
+   a request that was answered, hidden or reminded before the page stood has
+   nothing left to show. */
+function noticeCardsRelease() {
+  if (!noticeCardsHeld) return;
+  noticeCardsHeld = false;
+  for (const one of noticeCardsHeldQueue.splice(0)) {
+    if (one.node.__noticeDropped) continue;
+    noticeCardPlace(one.host, one.node, one.at, one.opts);
+  }
 }
 
 /* Each row carries `read` (claunch-x76l8): set by a click on its card or
@@ -62919,18 +65151,22 @@ function noticeFilterOf(value) {
 }
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
-/* Whether the panel's "Waiting on you" list is folded (thread th-3b3470).
-   Folded keeps only the notices whose criteria say they cannot wait
-   (noticeFoldedShows) and puts everything else behind one "N more" line.
-   The choice is this browser's, like the history filter, and it defaults to
-   expanded: a list that hides requests by default is a list that hides the
-   one that mattered. */
-const NOTICE_WAITING_FOLDED_KEY = "claunch.noticeWaitingFolded";
-let noticeWaitingFolded = noticeLoad(NOTICE_WAITING_FOLDED_KEY, false) === true;
+/* Which of the panel's two sub tabs is open (claunch-slab3): "waiting" —
+   the requests waiting on you, unread then "Read, still open" — or
+   "history", the past notices with their filters. The tabs replace the
+   fold the "Waiting on you" list had (thread th-3b3470): one list at a
+   time, each whole, instead of one long page whose first part could be
+   folded. "Waiting on you" is the first tab, and its tab carries the count
+   of unread waiting requests as a badge, so the number is in sight from
+   the History tab too. Which tab an open starts on is noticePanelToggle's
+   rule (Waiting when something waits, History otherwise); a press switches
+   it until the panel closes, so nothing is kept in storage. */
+const NOTICE_PANEL_TABS = ["waiting", "history"];
 
-function noticeWaitingFoldSet(folded) {
-  noticeWaitingFolded = !!folded;
-  noticeSave(NOTICE_WAITING_FOLDED_KEY, noticeWaitingFolded);
+let noticePanelTab = "waiting";
+
+function noticePanelTabSet(tab) {
+  noticePanelTab = NOTICE_PANEL_TABS.includes(tab) ? tab : "waiting";
   noticePanelPaint();
 }
 /* The pending requests of each gate as its last poll answered them. */
@@ -63584,7 +65820,15 @@ function noticePanelOpen() {
 function noticePanelToggle(force) {
   const panel = $("notice-panel");
   if (!panel) return;
-  const open = force === undefined ? !noticePanelOpen() : !!force;
+  const was = noticePanelOpen();
+  const open = force === undefined ? !was : !!force;
+  // Opening picks the sub tab (claunch-slab3): "Waiting on you" when any
+  // request of a shown kind is waiting — unread or read and still open —
+  // and History otherwise, so the panel does not open on an empty list.
+  // The tab stays as it is while the panel is open (a press, or a request
+  // that arrives, does not move the reader off the list they are reading;
+  // the badge says when something new waits).
+  if (open && !was) noticePanelTab = gatePendingCount() > 0 ? "waiting" : "history";
   panel.classList.toggle("hidden", !open);
   // While the panel is open the corner strip is hidden: the panel already
   // lists every notice and every waiting request with its buttons, so a card
@@ -63668,6 +65912,37 @@ function noticePanelButton(label, cls, title, onClick) {
   return btn;
 }
 
+/* The panel's sub tab bar (claunch-slab3): "Waiting on you" first, then
+   History. The open tab is `active`; the Waiting tab carries the number of
+   unread waiting requests as a badge (the same count the bell's "waiting"
+   colour stands for), and the badge is left out at zero so an empty tab
+   does not read as a count to act on. */
+function noticePanelTabsRow(waitingCount) {
+  const bar = el("div", "notice-tabs");
+  if (bar.setAttribute) bar.setAttribute("role", "tablist");
+  for (const [name, label, title] of [
+    ["waiting", "Waiting on you",
+     "the requests waiting on you, unread first, then the ones read and still open"],
+    ["history", "History", "every notice shown in this browser, with its filters"],
+  ]) {
+    const on = noticePanelTab === name;
+    const tab = noticePanelButton(
+      label, `notice-tab${on ? " active" : ""}`, title, () => noticePanelTabSet(name)
+    );
+    if (tab.dataset) tab.dataset.tab = name;
+    if (tab.setAttribute) {
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    if (name === "waiting" && waitingCount > 0) {
+      tab.appendChild(el("span", "notice-tab-badge", String(waitingCount)));
+      tab.title = `${waitingCount} unread request(s) waiting on you — ${title}`;
+    }
+    bar.appendChild(tab);
+  }
+  return bar;
+}
+
 /* One waiting request in the panel: what the card says, with its buttons.
    The decisions post to the same endpoints the card does; a hidden card gets
    a Show card press that puts it back in the corner, and every row gets a
@@ -63711,8 +65986,10 @@ function noticePanelGateRow(type, rec) {
   ));
   row.appendChild(actions);
   // The same bottom line the card carries (claunch-egqrq): a request that
-  // has waited an hour says so here as well as in the corner.
-  row.appendChild(noticeAgeLine(gateSeenAt(type, rid)));
+  // has waited an hour says so here as well as in the corner. A door nobody
+  // has to take reads the same way in both places — "open 5m", not "5m ago"
+  // (claunch-hbmhk).
+  row.appendChild(noticeAgeLine(gateSeenAt(type, rid), !!rec.optional));
   return row;
 }
 
@@ -64022,8 +66299,9 @@ function noticePanelHistoryRow(entry) {
     row.appendChild(who);
   }
   // Arrival and age, the same pair a card carries (claunch-egqrq); a settled
-  // row says when it ended beside them.
-  const when = noticeAgeLine(entry.at);
+  // row says when it ended beside them. `optional` is the row's own copy of
+  // the card's wording (claunch-hbmhk).
+  const when = noticeAgeLine(entry.at, !!entry.optional);
   if (entry.settledAt) {
     when.appendChild(el("span", null, ` · ended ${noticeStamp(entry.settledAt)}`));
   }
@@ -64175,9 +66453,9 @@ function noticePanelState() {
     [...gateRemindIds],
     [...noticeSourcesHidden],
     noticeFilter,
-    // Folding "Waiting on you" changes what the open panel draws and nothing
-    // else in this list moves with it (thread th-3b3470), so it belongs here.
-    noticeWaitingFolded,
+    // The open sub tab changes what the open panel draws and nothing else in
+    // this list moves with it (claunch-slab3), so it belongs here.
+    noticePanelTab,
     runGateNudgeNotes,
     restartGateStale,
   ]);
@@ -64237,136 +66515,112 @@ function noticePanelPaint() {
   if (shownHidden) keep(shownHidden.key, () => shownHidden.node);
   const unread = waiting.filter(([type, rec]) => !gateIsRead(type, String(rec.id)));
   const read = waiting.filter(([type, rec]) => gateIsRead(type, String(rec.id)));
-  // Folded, the list shows only what its criteria say cannot wait and puts
-  // the rest behind one line (thread th-3b3470). The unfurled list is
-  // unchanged, and so is the order in both (noticeNewerFirst).
-  const criteriaOf = ([type, rec]) => noticeCriteriaOf(Object.assign(
-    { gateType: type }, rec
-  ));
-  const shownUnread = noticeWaitingFolded
-    ? unread.filter((one) => noticeFoldedShows(criteriaOf(one)))
-    : unread;
-  const keptBack = unread.length - shownUnread.length;
-  // Its own row class rather than notice-panel-section-row: the History head
-  // below carries the filter presses, and a second row of that class would
-  // make "the section head" name two nodes (tests/web/noticehistory_check.js
-  // reads the first one for its All/Kept/Not read presses).
-  const foldHead = el("div", "notice-waiting-head");
-  foldHead.appendChild(el("h3", "notice-panel-section", `Waiting on you (${unread.length})`));
-  foldHead.appendChild(noticePanelButton(
-    noticeWaitingFolded ? "Expand" : "Fold",
-    noticeWaitingFolded ? "fold-open" : "fold",
-    noticeWaitingFolded
-      ? `show all ${unread.length} waiting request(s) again`
-      : "show only the ones that cannot wait — the rest stay counted here",
-    () => noticeWaitingFoldSet(!noticeWaitingFolded)
-  ));
-  keep(`head:waiting:${unread.length}:${noticeWaitingFolded ? "folded" : "open"}`,
-       () => foldHead);
-  if (!waiting.length) {
-    keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
-  } else if (!unread.length) {
-    keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
-  }
-  for (const [type, rec] of shownUnread) {
-    keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
-         () => noticePanelGateRow(type, rec));
-  }
-  if (keptBack > 0) {
-    // One line for what folding keeps back, so nothing is hidden silently and
-    // the count is still the count: the heading said how many there are.
-    keep(`note:folded:${keptBack}`, () => el(
-      "p", "wf-note notice-folded-note",
-      `${keptBack} more waiting — Expand shows them; each is answerable from here`
-    ));
-  }
-  if (read.length) {
-    keep(`head:read:${read.length}`, () => el(
-      "h3", "notice-panel-section", `Read, still open (${read.length})`
-    ));
-    for (const [type, rec] of read) {
-      keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
+  // The two sub tabs (claunch-slab3): "Waiting on you" first, with the
+  // unread count as its badge, then History. Only the open tab's list is
+  // drawn; the badge is drawn on both, so a request that arrives while
+  // History is open still shows its number.
+  keep(`tabs:${noticePanelTab}:${unread.length}`, () => noticePanelTabsRow(unread.length));
+  const paintWaiting = () => {
+    if (!waiting.length) {
+      keep("note:none-waiting", () => el("p", "wf-note", "no request is waiting on a person"));
+    } else if (!unread.length) {
+      keep("note:all-read", () => el("p", "wf-note", "every waiting request has been read"));
+    }
+    for (const [type, rec] of unread) {
+      keep(`gate:${type}:${rec.id}:unread:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
            () => noticePanelGateRow(type, rec));
     }
-  }
-
-  const past = noticeHistory.filter(
-    (e) => !(e.gate && e.status === "pending") && noticeEntryShown(e)
-  );
-  const markedCount = past.filter((e) => e.marked).length;
-  const unreadCount = past.filter(noticeUnread).length;
-  // History is the same feed the corner strip draws, newest first, by the
-  // one ordering rule (noticeNewerFirst). `noticeHistory` is already
-  // newest-first, so this sort is what says so here rather than leaving the
-  // order to depend on how the array happens to be held.
-  const shown = (noticeFilter === "marked" ? past.filter((e) => e.marked)
-    : noticeFilter === "unread" ? past.filter(noticeUnread) : past.slice())
-    .sort(noticeNewerFirst);
-  const sectionHead = el("div", "notice-panel-section-row");
-  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
-  const filters = el("div", "notice-filter");
-  for (const [name, label, title] of [
-    ["all", "All", `every row (${past.length})`],
-    ["marked", "Kept", `only the ★ rows (${markedCount})`],
-    ["unread", "Not read", `only the unread rows (${unreadCount})`],
-  ]) {
-    filters.appendChild(noticePanelButton(
-      label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
-    ));
-  }
-  sectionHead.appendChild(filters);
-  const unreadIds = shown.filter(noticeUnread).map((e) => e.id);
-  if (unreadIds.length) {
-    sectionHead.appendChild(noticePanelButton(
-      "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
-      () => noticeMarkRead(unreadIds, true)
-    ));
-  }
-  // Clear only in the All view: in Kept or Not read it would forget rows
-  // the view does not show (claunch-knuet.1).
-  if (noticeFilter === "all" && past.length > markedCount) {
-    sectionHead.appendChild(noticePanelButton(
-      "Clear", "clear",
-      "forget the history in this browser (waiting requests, ★ rows and " +
-        "the rows of hidden kinds stay)",
-      () => {
-        for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
-          const e = noticeHistory[i];
-          if (!(e.gate && e.status === "pending") && !e.marked && noticeEntryShown(e)) {
-            noticeHistory.splice(i, 1);
-          }
-        }
-        noticeHistorySave();
-        noticePanelPaint();
-        noticeBellPaint();
+    if (read.length) {
+      keep(`head:read:${read.length}`, () => el(
+        "h3", "notice-panel-section", `Read, still open (${read.length})`
+      ));
+      for (const [type, rec] of read) {
+        keep(`gate:${type}:${rec.id}:read:${noticeGateRowShape(rec)}:${noticeGateRemindShape(type, rec.id)}`,
+             () => noticePanelGateRow(type, rec));
       }
-    ));
-  }
-  // The section head carries the filter buttons' active state and the two
-  // count-driven presses, so its key carries all of that: a rebuild that
-  // changes any of it builds the head again instead of keeping one whose
-  // buttons say the old thing. It never moves (it is the first row of its
-  // list), so rebuilding it costs no animation.
-  const headKey = [
-    "section-head", noticeFilter, past.length, markedCount, unreadCount,
-    unreadIds.length, shown.length,
-  ].join(":");
-  keep(headKey, () => sectionHead);
-  if (!shown.length) {
-    keep("note:none-shown", () => el("p", "wf-note", noticeFilter === "marked"
-      ? "no row is kept — ☆ on a row keeps it here"
-      : noticeFilter === "unread" ? "every row has been read"
-      : "nothing has been shown in this browser yet"));
-  }
-  for (const entry of shown) {
-    // The key carries what the row draws, not only its identity: a row that
-    // is rebuilt because its own state moved (read, ★, settled) must be a
-    // new key, or the kept node would keep the old wording. What a key does
-    // NOT carry is anything the panel state does not already list — that is
-    // why the clock is excluded (noticePanelState says why).
-    keep(`history:${entry.id}:${noticeRowShape(entry)}`,
-         () => noticePanelHistoryRow(entry));
-  }
+    }
+  };
+
+  const paintHistory = () => {
+    const past = noticeHistory.filter(
+      (e) => !(e.gate && e.status === "pending") && noticeEntryShown(e)
+    );
+    const markedCount = past.filter((e) => e.marked).length;
+    const unreadCount = past.filter(noticeUnread).length;
+    // History is the same feed the corner strip draws, newest first, by the
+    // one ordering rule (noticeNewerFirst). `noticeHistory` is already
+    // newest-first, so this sort is what says so here rather than leaving the
+    // order to depend on how the array happens to be held.
+    const shown = (noticeFilter === "marked" ? past.filter((e) => e.marked)
+      : noticeFilter === "unread" ? past.filter(noticeUnread) : past.slice())
+      .sort(noticeNewerFirst);
+    const sectionHead = el("div", "notice-panel-section-row");
+    sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
+    const filters = el("div", "notice-filter");
+    for (const [name, label, title] of [
+      ["all", "All", `every row (${past.length})`],
+      ["marked", "Kept", `only the ★ rows (${markedCount})`],
+      ["unread", "Not read", `only the unread rows (${unreadCount})`],
+    ]) {
+      filters.appendChild(noticePanelButton(
+        label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
+      ));
+    }
+    sectionHead.appendChild(filters);
+    const unreadIds = shown.filter(noticeUnread).map((e) => e.id);
+    if (unreadIds.length) {
+      sectionHead.appendChild(noticePanelButton(
+        "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
+        () => noticeMarkRead(unreadIds, true)
+      ));
+    }
+    // Clear only in the All view: in Kept or Not read it would forget rows
+    // the view does not show (claunch-knuet.1).
+    if (noticeFilter === "all" && past.length > markedCount) {
+      sectionHead.appendChild(noticePanelButton(
+        "Clear", "clear",
+        "forget the history in this browser (waiting requests, ★ rows and " +
+          "the rows of hidden kinds stay)",
+        () => {
+          for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
+            const e = noticeHistory[i];
+            if (!(e.gate && e.status === "pending") && !e.marked && noticeEntryShown(e)) {
+              noticeHistory.splice(i, 1);
+            }
+          }
+          noticeHistorySave();
+          noticePanelPaint();
+          noticeBellPaint();
+        }
+      ));
+    }
+    // The section head carries the filter buttons' active state and the two
+    // count-driven presses, so its key carries all of that: a rebuild that
+    // changes any of it builds the head again instead of keeping one whose
+    // buttons say the old thing. It never moves (it is the first row of its
+    // list), so rebuilding it costs no animation.
+    const headKey = [
+      "section-head", noticeFilter, past.length, markedCount, unreadCount,
+      unreadIds.length, shown.length,
+    ].join(":");
+    keep(headKey, () => sectionHead);
+    if (!shown.length) {
+      keep("note:none-shown", () => el("p", "wf-note", noticeFilter === "marked"
+        ? "no row is kept — ☆ on a row keeps it here"
+        : noticeFilter === "unread" ? "every row has been read"
+        : "nothing has been shown in this browser yet"));
+    }
+    for (const entry of shown) {
+      // The key carries what the row draws, not only its identity: a row that
+      // is rebuilt because its own state moved (read, ★, settled) must be a
+      // new key, or the kept node would keep the old wording. What a key does
+      // NOT carry is anything the panel state does not already list — that is
+      // why the clock is excluded (noticePanelState says why).
+      keep(`history:${entry.id}:${noticeRowShape(entry)}`,
+           () => noticePanelHistoryRow(entry));
+    }
+  };
+  if (noticePanelTab === "history") paintHistory(); else paintWaiting();
   noticePanelPlace(body, rows);
   // The panel's rows fold the way the corner cards do (claunch-qf41a.1): a
   // row above the threshold keeps its head and shows a five-line preview of
@@ -66163,6 +68417,10 @@ const RUN_GATE_WORDS = {
   acceptance: "waits on its acceptance check",
   // A run stopped until the user decides in its plan panel (claunch-rzepk).
   "plan-wait": "waits on your plan decision",
+  // A door the run is not held on (claunch-hbmhk): the lane words above all
+  // say the run is stopped, and this one is not. Kept beside them so one map
+  // still answers "what does this card say".
+  optional: "has an optional gate open",
   waiting_approval: "waits on your approval", waiting_selection: "waits on your pick",
   waiting_answer: "waits on your answer",
 };
@@ -66171,6 +68429,10 @@ function runGateTitle(rec) {
   // A plan wait names no step to answer: what it asks for is the plan's own
   // decisions, and the card body carries the run's sentence about them.
   if (rec.kind === "plan-wait") return RUN_GATE_WORDS["plan-wait"];
+  // An optional choice is not waited on: saying "waits on your pick" would
+  // be false, and the fix a reader takes from a false "waiting" is to drop
+  // what they are doing (claunch-hbmhk).
+  if (rec.optional) return `${RUN_GATE_WORDS.optional}: ${rec.label}`;
   return `${RUN_GATE_WORDS[rec.kind] || "waits on you"}: ${rec.label}`;
 }
 
@@ -66297,9 +68559,12 @@ function applyRunGate(pending, settled) {
     const key = RUN_GATE_PREFIX + rec.id;
     gateHistoryOpen("ask", String(rec.id), `${rec.session} ${runGateTitle(rec)}`,
                     rec.prompt || "",
-                    rec.opened === undefined
-                      ? { session: rec.session }
-                      : { session: rec.session, opened: rec.opened });
+                    Object.assign({ session: rec.session },
+                                  rec.opened === undefined ? {} : { opened: rec.opened },
+                                  // The history row counts its age the way the
+                                  // card does: "open …" for a door the run is
+                                  // not held on (claunch-hbmhk).
+                                  rec.optional ? { optional: true } : {}));
     // The run's own stamp for when it started waiting lands on the row even
     // when the row was written before the answer carried it: the age is
     // about the request, not about this browser (claunch-l9znm.1). A card
@@ -66310,7 +68575,8 @@ function applyRunGate(pending, settled) {
     if (rec.opened !== undefined
         && gateHistoryOpened("ask", rec.id, rec.opened)
         && notices.get(key)) {
-      noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened));
+      noticeAgeSetFor(notices.get(key).node, openedOnThisClock(rec.opened),
+                      !!rec.optional);
     }
     if (gateCardAside("ask", rec.id)) continue;
     seen.add(key);
@@ -66331,6 +68597,14 @@ function applyRunGate(pending, settled) {
     title.appendChild(gateSessionLink(rec.session));
     title.appendChild(el("span", null, ` ${runGateTitle(rec)}`));
     node.appendChild(title);
+    if (rec.optional) {
+      // What "optional" means for THIS kind of gate, in the card's own words:
+      // nothing is lost by leaving it alone, and it goes by itself
+      // (claunch-hbmhk). The one-line `prompt` below is the driver's, and
+      // the run page still offers the press.
+      node.appendChild(el("div", "notice-sub gate-optional",
+        "optional — the run carries on without it, and this closes by itself"));
+    }
     if (rec.prompt || rec.prompt_md) node.appendChild(noticeAskBody("notice-sub gate-reason", rec));
     node.appendChild(el("div", "notice-sub gate-nudge" + (note ? "" : " hidden"), note));
     if (rec.workflow) {
@@ -66347,7 +68621,8 @@ function applyRunGate(pending, settled) {
     node.appendChild(actions);
     node.title = sessionInfoTooltip(rec.session, `open ${rec.session}`);
     node.addEventListener("click", () => runGateGo(rec, key));
-    noticeCardAdd(host, node, gateSeenAt("ask", rec.id));
+    noticeCardAdd(host, node, gateSeenAt("ask", rec.id),
+                  { optionalAge: !!rec.optional });
     notices.set(key, { node, timer: null });
   }
   for (const key of [...notices.keys()]) {
@@ -66734,6 +69009,13 @@ function setDaemonOnline(up) {
 }
 
 async function boot() {
+  // The first pass is the page's loading window: the gate polls below run
+  // while the rail and the dashboard are still being drawn, and a card that
+  // arrived then hung over an empty page (claunch-zrf3n). Cards are held
+  // until the first frame stands, at the end of this function. A later boot
+  // (the daemon came back) re-reads a page that is already standing, so it
+  // holds nothing.
+  if (!booted) noticeCardsHeld = true;
   let info;
   try {
     const resp = await api("/api/daemon");
@@ -66809,6 +69091,10 @@ async function boot() {
     // The rail to the attached session's card, as ⇱ card would. Guarded:
     // reduced harnesses slice boot() alone.
     if (typeof armBootGoto === "function") armBootGoto();
+    // The first frame is standing, so the cards held while it was being
+    // drawn go up now (claunch-zrf3n). Guarded like the line above: reduced
+    // harnesses slice boot() and may not carry the strip's helpers.
+    if (typeof noticeCardsRelease === "function") noticeCardsRelease();
   }
 }
 

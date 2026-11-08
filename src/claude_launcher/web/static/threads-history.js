@@ -383,7 +383,24 @@
     return sess;
   }
 
-  function message(m, session) {
+  // The guest marks of one thread (claunch-br084): nothing when it has fewer
+  // than two guests, since a single guest is already unambiguous. The number
+  // and colour come from the thread's guest order, the same way the session's
+  // pane (threads-pane.js guestTags) draws them, so a guest reads the same on
+  // both screens.
+  const GUEST_MARKS = 6;
+  function guestTags(t) {
+    const names = ((t && t.guests) || []).map((g) => g && g.session).filter(Boolean);
+    const tags = new Map();
+    if (names.length < 2) return tags;
+    names.forEach((name, i) => tags.set(name, {
+      n: i + 1, name, cls: `th-guest-mark-${(i % GUEST_MARKS) + 1}`,
+    }));
+    return tags;
+  }
+
+  function message(m, thread, tags) {
+    const session = thread.session;
     const msg = node("div", `thh-msg thh-${m.author}`);
     msg.dataset.seq = m.seq;
     const meta = node("div", "thh-meta");
@@ -392,6 +409,12 @@
     const who = m.author === "user" ? "user"
       : m.author === "guest" ? `${m.guest || "guest"} (guest)`
         : m.author === "system" ? "daemon" : session;
+    const tag = m.author === "guest" && tags ? tags.get(m.guest) : null;
+    if (tag) {
+      const mark = node("span", `th-guest-mark ${tag.cls}`, String(tag.n));
+      mark.title = `guest ${tag.n} · ${tag.name}`;
+      meta.append(mark);
+    }
     meta.append(node("span", "thh-who", who),
       node("span", "thh-at", when(m.at)));
     if (m.body) msg.append(meta, body(node("div", "thh-body"), m.body));
@@ -445,7 +468,8 @@
       box.append(node("p", "wf-note", `${t.omitted} older message(s) not shown — the session's threads pane has the whole thread.`));
     }
     if (!t.messages.length) box.append(node("p", "wf-note", "no messages yet"));
-    for (const m of t.messages) box.append(message(m, t.session));
+    const tags = guestTags(t);
+    for (const m of t.messages) box.append(message(m, t, tags));
     return box;
   }
 
@@ -604,7 +628,8 @@
     box.append(head);
     const msgs = node("div", "thh-msgs");
     if (!d.messages.length) msgs.append(node("p", "wf-note", "no messages yet"));
-    for (const m of d.messages) msgs.append(message(m, t.session));
+    const tags = guestTags(t);
+    for (const m of d.messages) msgs.append(message(m, t, tags));
     box.append(msgs);
     if (d.more) {
       box.append(node("p", "wf-note", "Later messages not shown — the session's threads pane has the whole thread."));

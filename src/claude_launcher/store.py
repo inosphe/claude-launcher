@@ -686,6 +686,23 @@ DAEMON_DEFAULTS = {
     # resumed by a person before the reset is not paused again for the same
     # limit. Read live on every pass.
     "fault_auto_pause": True,
+    # Resume grace (daemon/fault_pause.py, claunch-x9agn): seconds after a
+    # session is brought back (respawn, wake, resume out of a pause, hold or
+    # kill) or restarted on another key or borrowed profile during which the
+    # fault pause and the automatic key switch leave it alone, so a limit
+    # line still painted from before the resume does not pause it again at
+    # once. Drawn on the session's timer line. 0 turns it off. Read live.
+    "fault_resume_grace": 30.0,
+    # Automatic key switch (daemon/key_switch.py, claunch-d2t79): a session
+    # whose own definition asks for it (``SessionDef.auto_key_switch``) and
+    # that hit a usage limit is restarted on another usable key of its
+    # profile's pool before the fault pause would take it. This is how many
+    # times one session may be switched for the *same* fault — the counter is
+    # per (session, fault reset) and lives in the session directory, so it
+    # survives a daemon restart. 0 turns the switch off fleet-wide without
+    # touching each session's own answer. A session that runs out falls back
+    # to the pause exactly as before. Read live on every pass.
+    "fault_key_switch_retries": 1,
     # Staggered restore (daemon/restore_queue.py, claunch-0j6gb.2): at a
     # daemon start, the sessions to bring back are not all launched at once.
     # Each one that would come back with its conversation is filed
@@ -764,12 +781,15 @@ DAEMON_DEFAULTS = {
     # daemon start. cflow2_poll is its tick in seconds (read at start).
     "cflow2_clock": True,
     "cflow2_poll": 10.0,
-    # The v2 clock's re-nudge (daemon/cflow2_clock.py, claunch-slia4.1):
-    # seconds between "the run moved -- waiting on you" notices resent to a
-    # driver whose run still waits on it (an unreported task, an agent choose
-    # nobody picked). A choose has no wait to fire, so without this the run is
-    # silent from its entry until a restart's resume nudge. 0 or less
-    # disables the re-nudge. Read live by the clock on every pass.
+    # The v2 clock's re-nudge (daemon/cflow2_clock.py, claunch-slia4.1,
+    # claunch-3sen5): seconds a run that still waits on its driver (an
+    # unreported task, an agent choose nobody picked) waits before it is sent
+    # ONE more "the run moved -- waiting on you" notice. A choose has no wait
+    # to fire, so without this the run is silent from its entry until a
+    # restart's resume nudge. The notice is owed once per wait, not once per
+    # interval: a different wait (another task or choose) earns its own single
+    # nudge. 0 or less disables the re-nudge. Read live by the clock on every
+    # pass.
     "cflow2_renudge_interval": 600.0,
     # A cflow v2 ``fork`` delegation (a quick-fork of the run's driver per
     # group member, claunch-dm09i): the tokens that must be left before the

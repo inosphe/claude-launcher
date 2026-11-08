@@ -264,7 +264,8 @@ new Function(
   + slice("railMeasureRows") + slice("railWindowForPass")
   + optionalSlice("railSliceCovers")
   + slice("railWireWindowScroll") + optionalSlice("railClearWindow")
-  + slice("railScrollTopMarked") + slice("scrollSessionListTop")
+  + slice("railScrollTopMarked") + optionalSlice("railPressMark")
+  + slice("scrollSessionListTop")
   + optionalSlice("railTakeAnchor") + optionalSlice("railPlanAnchor")
   + optionalSlice("railRestoreAnchor")
   + slice("refreshSessions")
@@ -707,6 +708,43 @@ const resetWindow = () => {
     check("...and covers the viewport below it",
           zTop.offsets[zTop.last] >= Math.min(listViewport, zTop.total), true);
   }
+
+  /* ---- 13. a poll mid-press leaves the rows the scroll is moving over -----
+     The `⇱ card` reveal moves the reader with a smooth scroll of its own
+     (revealSessionCard), and it had the same failure as the scroll to the top:
+     "여전히 세션 카드 이동 (#term-goto) 시 끊기는 상황이 있네. 끊긴 상태에서
+     다시 누르면 찾아가긴해" (claunch-7vd4v.1). The animation travels to a row,
+     not to the top, so the pass that ran mid-flight did two things the
+     scroll-to-top press survives: it emptied the list -- taking the row being
+     scrolled to out of the page -- and the emptying clamped scrollTop to 0,
+     where the position restore is skipped while the mark stands. Both are
+     shut while the press's mark is up: no teardown, so the pass that comes
+     after the mark draws what this one left. */
+  const rSessions = await settle("r", 300);
+  const rPlan = list._railWindowPlan;
+  const rDrawn = drawn();
+  assert.ok(rPlan, "the press's rail is windowed");
+  A.top();                             // the press: railPressMark, then scroll
+  check("the press marks the rail for its animation",
+        list._railScrollTopUntil > Date.now(), true);
+  list.scrollTop = (rPlan.offsets[150] || 0);   // mid-animation
+  topWrites = 0;
+  served = { sessions: rSessions.map((s) => (
+    s.name === "r301" ? { ...s, status: "busy" } : s)) };
+  await refresh();
+  check("a poll mid-animation tears nothing down",
+        list._railWindowPlan === rPlan, true);
+  check("...so the rows the scroll is moving over stay drawn",
+        drawn(), rDrawn);
+  check("...and no position is written",
+        [topWrites, list.scrollTop], [0, rPlan.offsets[150] || 0]);
+
+  // The mark comes off (its `scrollend`, or the deadline): the pass that runs
+  // now draws the change it held back.
+  list._railScrollTopUntil = 0;
+  await refresh();
+  check("the pass after the mark draws what the press held back",
+        list._railWindowPlan !== rPlan, true);
 
   /* ---- 9. the helpers the page keeps are the ones under test ---------- */
   assert.strictEqual(typeof railClearWindow, "function",

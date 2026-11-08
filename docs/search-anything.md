@@ -12,7 +12,9 @@ task reference alone does not qualify an issue. Unassigned issues with no live
 creator, and issues associated only with killed or archived sessions, are excluded.
 Exited, paused, archived and removed sessions are excluded. Changing the mode
 reruns the current query and cancels the previous response. Both JSON and SSE
-search endpoints accept `kind=all&mode=active`; omitted `mode` or
+search endpoints accept `kind=unified&mode=active` (`all` was that corpus's
+name before the rename and is refused now, with a 400 that lists the names
+that do answer); omitted `mode` or
 `mode=general` keeps the existing search. The server filters vector and exact
 match candidates before applying the result limit and reranking, so old
 session records cannot consume the active mode's result window. Index coverage
@@ -60,7 +62,7 @@ opening tasks, identities, notes and summaries; Observer events and direct
 reports/answers; briefing and checks; and session lifecycle/borrow/worktree
 events. Long records are split into independently searchable passages
 without the older eight-chunk cap. Embedding and optional reranking use the
-existing oMLX-compatible client. `/api/search?kind=all&q=...` exposes the
+existing oMLX-compatible client. `/api/search?kind=unified&q=...` exposes the
 same search to API clients.
 Unified search combines BM25 keyword retrieval over passage titles and bodies
 with vector retrieval using reciprocal rank fusion. Query terms may match

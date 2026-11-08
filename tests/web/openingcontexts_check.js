@@ -14,7 +14,7 @@ const src = fs.readFileSync(
   path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
             "app.js"),
   "utf8"
-);
+).replace(/\r\n/g, "\n"); // a Windows checkout (core.autocrlf) has CRLF
 
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);

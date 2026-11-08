@@ -319,7 +319,9 @@ def test_set_by_on_a_required_input_warns():
                    "  issue: {type: string, required: true, set_by: [agent]}\n"
                    "  goal: {type: text, required: true}\n"
                    "nodes:\n  a: {prompt: A}\nbody: a\n")
+    # set-by-unread (claunch-cetzf.1) is a separate concern: nothing here
+    # reads the input
     got = [(f.level, f.code, f.message) for f in check.check(chart)
-           if f.code.startswith("set-by-")]
+           if f.code.startswith("set-by-") and f.code != "set-by-unread"]
     assert [(lvl, code) for lvl, code, _ in got] == [("warning", "set-by-required")]
     assert "'issue'" in got[0][2]

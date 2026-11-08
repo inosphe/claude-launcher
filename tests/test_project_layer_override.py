@@ -33,13 +33,16 @@ now live (``tests/test_sweep.py``, ``tests/test_changed_tests.py``).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
+from claude_launcher import cli_gate
 from claude_launcher.cflow import model, state as state_mod
 
-OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+OVERRIDES = ROOT / ".claunch" / "workflows"
 SYNC = Path(__file__).resolve().parents[1] / "tools" / "sync_project_layer.py"
 
 
@@ -150,6 +153,32 @@ def _runs_project_code(command: str) -> bool:
     return not (head and head[0] in _OUTSIDE_TOOLS)
 
 
+#: ``claunch gate <name>``: a PATH binary, but a dispatcher rather than a
+#: copy. In a claude-launcher checkout it runs that checkout's
+#: ``tools/<module>.py`` (``cli_gate.checkout_script``), which is what this
+#: rule asks for; it falls back to the installed package only somewhere no
+#: checkout exists.
+_GATE_RE = re.compile(r"^claunch gate (\S+)")
+
+
+def _packaged_gate_runs_this_checkout(command: str) -> bool:
+    """Whether ``claunch gate <name>`` provably reaches this tree.
+
+    Asked of the in-tree ``cli_gate`` rather than taken on the command's
+    word: the exemption holds only while ``checkout_script`` resolves a file
+    under this worktree. Move the command out of a checkout and this returns
+    False, so the offender is reported instead of silently excused.
+    """
+    m = _GATE_RE.match(command)
+    if not m:
+        return False
+    module = cli_gate.GATES.get(m.group(1))
+    if module is None:
+        return False
+    script = cli_gate.checkout_script(module, str(ROOT))
+    return script is not None and ROOT in script.parents
+
+
 def gate_commands(step) -> list:
     """Every command a step arms, whichever field holds it.
 
@@ -198,12 +227,6 @@ GATES = {
     # A path into this checkout is the only form that does not depend on what
     # is installed. tests/test_gates_run_this_checkout.py holds all six to it.
     ("improv-worker", "wrapup"): "tools/report_check.py",
-    # Two git calls, no suite: "is there a merge commit on another branch with
-    # my frozen tip as a parent?". Asked that way on purpose -- "does any
-    # branch contain my tip" answers yes for a child stacked on it, which in a
-    # nested formation is the normal shape, so containment reads as landed
-    # when nothing landed.
-    ("improv-worker", "landed"): "tools/landed_check.py",
     # The measurement the leader's rejection used to be. A worker files a
     # landing request, waits out a 300s batch window plus a sweep, and the
     # target moves while it sits there; the leader then measures the
@@ -292,6 +315,51 @@ def test_the_waiting_probe_is_the_gate_the_worker_already_passed():
         "without it the daemon's signal shows the command, which is true and "
         "does not say what the waiting was about"
     )
+
+
+def test_the_landed_gate_asks_the_packaged_gate_not_this_checkout():
+    """The worker's landed gate names ``claunch gate landed-check``.
+
+    It used to name ``uv run --no-sync python tools/landed_check.py``, and
+    that was right for this repository and wrong for every other one: the
+    definition ships to repositories that have no ``tools/landed_check.py``,
+    where python exits 2 on the missing file and 2 is also the gate's own
+    "cannot tell" -- so a round in one of them asked a person again, every
+    round (claunch-eyajw, claunch-weo4k). ``claunch gate`` runs this
+    checkout's script when it stands in one and the installed package's copy
+    anywhere else (``cli_gate.checkout_script``), so the packaged form keeps
+    the answer portable without giving up "the gate runs the tree it checks".
+
+    Two git calls, no suite: "is there a merge commit on another branch with
+    my frozen tip as a parent?". Asked that way on purpose -- "does any
+    branch contain my tip" answers yes for a child stacked on it, which in a
+    nested formation is the normal shape, so containment reads as landed
+    when nothing landed.
+    """
+    # The packaged copies are what ships; the project copies are this
+    # repository's, and they graft their own checklist back (see
+    # ``GRAFT_FIELDS``). Both halves are asserted so neither can be
+    # "fixed" by editing the other.
+    bundled = Path(__file__).resolve().parents[1] / "src" / "claude_launcher" / "workflows"
+    wf = model.load(bundled / "improv-worker.yaml")
+    merged = wf.steps["landed"].checklist.item("merged")
+    assert merged is not None
+    assert merged.check == "claunch gate landed-check"
+    remote = state_mod.load_bundled("improv-worker-remote")
+    remote_merged = remote.steps["landed"].checklist.item("merged")
+    assert remote_merged is not None
+    assert remote_merged.check.startswith("claunch gate landed-check --fetch")
+    assert "tools/landed_check.py" not in remote_merged.check
+
+    # This repository's own layer carries the packaged command too. It does
+    # not need its own spelling: `claunch gate` resolves to this checkout's
+    # `tools/landed_check.py` when it runs in one (``checkout_script``), which
+    # is the property a gate here must keep, and spelling the path twice would
+    # be one more copy to forget (claunch-weo4k review).
+    local = model.load(OVERRIDES / "improv-worker.yaml")
+    local_merged = local.steps["landed"].checklist.item("merged")
+    assert local_merged is not None
+    assert local_merged.check == "claunch gate landed-check"
 
 
 @pytest.mark.parametrize("key, script", sorted(GATES.items()))
@@ -400,6 +468,13 @@ def test_no_gate_calls_a_binary_off_PATH():
     remembered to list there. This walks the files instead, so a gate added to
     the layer without touching either table is still held to the rule.
 
+    One command is excused, and only after being checked: ``claunch gate
+    <name>`` (``_packaged_gate_runs_this_checkout``). It is the packaged
+    spelling the shipped workflows carry, and inside a checkout it runs that
+    checkout's script -- the property this rule is about. The excuse is
+    conditional, so it does not cover a ``claunch`` subcommand with no
+    checkout-resolving module behind it, which is the shape that failed.
+
     A prefix is all this checks, and a prefix turned out not to be enough:
     ``uv run --no-sync python -m claude_launcher.cli ...`` starts with the
     right words and still resolves out of site-packages, and so does an
@@ -424,6 +499,8 @@ def test_no_gate_calls_a_binary_off_PATH():
                     # alternative is writing `uv run --no-sync python -c
                     # "subprocess.run(['git', ...])"` to satisfy a check about
                     # something else entirely.
+                    continue
+                if _packaged_gate_runs_this_checkout(command):
                     continue
                 if not command.startswith(NO_SYNC):
                     offenders.append(f"{path.name}:{step_id} -> {command}")

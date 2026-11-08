@@ -194,6 +194,20 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 폴백끼리 같은 창에 서면 위치가 가른다. 맨 상태 코드(`API Error: 500`) 아래에 이 줄이 있으면 `network`, 위에 있으면 그 코드의 kind(`api_status`)다 — 둘 다 원인을 말하지 않는 판독이라 규칙이 정한 순서대로 아래 행이 이긴다.
 
+### 상태 코드 없는 API 오류 재시도 줄: `api_status`
+
+관측된 화면 하나(2026-11-06, `s6183`, `claude`, claunch-al4lg):
+
+```
+✻ API error · Retrying in 0s · attempt 1/10
+```
+
+API 오류 뒤 클라이언트가 재시도하는 동안 그리는 스피너 줄이다. 상태 코드가 없어 `API Error: <숫자>` 항목으로는 읽히지 않는다. 원인 미상. kind는 `api_status`, 항목은 `fallback: true`, 목록은 `common:`이다.
+
+- `api_status`인 이유: 줄이 API가 오류로 답했다고 적는다. 전송 계층을 의심하는 문구는 없다.
+- `fallback`인 이유: 원인을 말하지 않는다. 같은 창에 원인 문구가 있으면 그쪽이 이긴다.
+- 패턴은 `API error` 바로 뒤의 `·`를 요구한다. `API Error: 529 Overloaded — retrying in 30s`는 이 항목에 걸리지 않고 `overloaded`로 남는다.
+
 ## 판정 규칙
 
 한 스캔 창(아래 16행)에 fault 문구가 둘 이상 있으면 어느 것이 kind를 정하는지가
@@ -269,8 +283,52 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
   (`daemon/fault_pause.py`, 30초 주기, `ended_by`는 `daemon`/`usage-limit`).
   pause된 세션은 입력을 받지 않고, 리더면 아래 카드도 내려간다. 바쁜 세션은
   pause하지 않는다(화면 판정의 오탐 대비). 리셋 전에 사람이 resume한 세션은
-  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 설정 키
+  같은 한도(`until`이 같음)로 다시 pause하지 않는다. 그 기억은 세션 디렉터리의
+  `fault-pause.json`에 `pause_key`(판독의 `until`, 하네스가 리셋 시각을 적지
+  않았으면 빈 문자열)로 함께 남아 데몬 재기동을 넘긴다 — 메모리 맵만 있던 동안은
+  재기동 뒤 첫 pass가 사람이 되돌린 결정을 다시 pause로 덮었다(claunch-ijot0.1).
+  기록이 `until`을 추정해 채운 경우 그 값은 신원이 아니므로, 옛 기록은 하네스가
+  시각을 적었을 때만 `until`로 맞춘다. 설정 키
   `daemon.fault_auto_pause`(기본 켬)로 끈다. 리셋 뒤 resume은 사람이 한다.
+- 재개 후 유예 (claunch-x9agn): 세션이 pause·hold·kill에서 다시 실행되거나
+  (respawn·wake·resume) 키 변경·borrow·redefine으로 재시작되면, 데몬은 그 시각을
+  `Session.resumed_at`에 남기고 그 뒤 `daemon.fault_resume_grace`초(기본 30, 0이면
+  끔) 동안 그 세션을 자동 pause하지도 자동 키 전환하지도 않는다. 재개한 대화가
+  이전 실행이 멈춘 한도 문구를 화면에 다시 그리면, 그 문구가 새 키·프로필이
+  응답하기 전에 세션을 다시 pause했다. 유예 중에는 세션 상단 timer line에
+  `fault`/`grace` chip(⛨ `usage-limit grace`)이 남은 시간을 보인다. chip은 세션이
+  active `usage_limit` 판독을 내는 동안에만 보이고, 한도가 해소되면 유예 시간이
+  남아 있어도 사라진다(claunch-xn9ir). 유예가 끝난
+  뒤의 pass에서 한도 문구가 아직 화면 하단에 있으면 이전처럼 pause한다(pass가
+  30초 주기라 재개부터 최대 약 60초). 데몬 재기동 뒤의 자동 복원은 유예 대상이
+  아니다(`resumed_at`은 메모리에만 있다).
+- 자동 키 전환 (claunch-d2t79): 키 풀을 가진 프로필의 세션이 `usage_limit`을
+  맞으면, 그 세션이 스스로 켜 둔 경우(`SessionDef.auto_key_switch`, 기본 꺼짐)
+  pause 전에 다른 키로 갈아탄다(`daemon/key_switch.py`). 같은 pass에서 이 전환이
+  먼저 돌고, 살아난 세션은 fault 판독이 새 화면이라 pause 대상에서 빠진다 —
+  clock을 둘로 나누면 전환이 재시작하려는 세션을 pause가 먼저 잡는 창이 생긴다.
+  - 켜는 자리는 셋이다. (1) 키 모달 — 세션 카드의 키 칩이나 detail panel의
+    Restart settings에서 연 「Change key…」 모달 안의 체크박스이고, 값을 쓰는
+    라우트는 `POST /api/sessions/<name>/auto-key-switch`다. Restart settings 줄은
+    지금 키와 이 값의 상태를 함께 보여 준다. (2) new session 폼과 spawn child
+    폼의 체크박스 — 체크되었을 때만 `auto_key_switch: true`를 바디에 싣고,
+    생성 라우트와 `spawn.check()`가 각각 정의에 옮긴다. 요청에 값이 없으면
+    자식은 꺼짐으로 시작한다(상속하지 않는다). (3) Settings 페이지의
+    `fault_key_switch_retries` — 세션별 스위치가 아니라 재시도 횟수다.
+  - 고르는 키는 `usage min` 하나로 고정한다(`profile_keys.switch_candidate`).
+    후보는 풀의 키 가운데 (1) 어느 윈도도 한도에 닿지 않았고 (2) 지금 이 세션이
+    쓰는 키가 아닌 것이다. 순서는 윈도별 사용률의 **최댓값**이 작은 순이고,
+    동률이면 5시간 → 1주 → 1개월 순으로 낮은 쪽이다(`usage.tie_break_key`).
+    사용량을 읽을 수 없는 키는 건너뛴다 — 읽히지 않은 키에는 비교할 최솟값이 없다.
+  - 전환은 `SessionManager.set_key`(정의에 핀을 쓰고 재시작)로 하고, 프로세스가
+    입력을 받을 수 있게 되면 `continue`를 한 줄 넣는다(`key_switch.CONTINUE`).
+  - 한 fault당 시도 횟수는 설정 키 `daemon.fault_key_switch_retries`(기본 1, 0이면
+    전 기능 끔)로 제한한다. 시도 횟수는 세션 디렉터리의 `key-switch.json`에
+    fault의 리셋 시각과 함께 남으므로 데몬을 재기동해도 이어진다 — pause 쪽의
+    같은 문제(claunch-ijot0.1)도 이제 `fault-pause.json`의 `pause_key`로 같은
+    방식으로 넘긴다(위 「자동 pause」 절). 횟수를 다 쓰거나 남은 키가 없으면 지금까지처럼
+    pause한다. 갈 곳이 없다는 판정은 10분간 유지해, 며칠짜리 한도 동안 30초마다
+    provider에 키마다 묻지 않는다(`key_switch.RECONSULT`).
 - pause는 beads 이슈를 open으로 돌리지 않는다. hold와 같이 in_progress로
   남고, pause된 기록을 kill·archive·remove할 때 `SESSION ENDED` 정리가 돈다
   (`SessionManager.unpause`/`settle_pause`, `beads.Board.session_settled`).

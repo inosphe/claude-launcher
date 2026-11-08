@@ -65,6 +65,16 @@ procedures:
       format: {type: str, default: decision, description: 질문 형식(question_types의 이름)}
       choices: {type: list, default: null, description: 선택지 이름을 고정할 때 그 목록. 부르는 쪽이 답으로 분기할 때 쓴다}
       from: {type: list, default: null, description: ask.from과 같은 후보 목록. null이면 사람만 답한다}
+      # 부모 세션이 답할 때 고를 수 있는 선택지 목록(claunch-vjp4y.2):
+      # {allow: [<선택지 이름>...]}. 부모는 선택지를 전부 보지만 여기 없는
+      # 것을 고르면 그 답은 적용되지 않고 추상으로 기록되어 사람에게 내려간다.
+      # null이면 제한 없음 — 부모는 답할 수 있는 후보가 아니거나(from에
+      # {role: parent}가 없다) 제한을 두지 않은 질문이다.
+      delegate: {type: dict, default: null, description: "부모 세션의 답을 제한하는 허용 목록 {allow: [...]}. null이면 제한 없음"}
+      # 이 질문이 한 후보 그룹을 붙잡고 있을 수 있는 시간(초). 그룹이 답하지
+      # 않으면 다음 후보로, 후보가 다 떨어지면 사람으로 넘어간다. null이면
+      # 기한 없음.
+      timeout: {type: int, default: null, description: "후보 그룹이 답할 때까지 기다리는 초. null이면 기한 없음"}
       require_reason: {type: bool, default: false, description: true면 모든 답에 이유를 요구한다(reframe은 항상 요구)}
       # 이 질문이 사람을 기다리는 동안 대시보드 알림을 올리라는 지시 문구.
       # 비우면(기본값) 아무것도 하지 않는다 — 부르는 쪽이 쓸 때만 실린다.
@@ -132,6 +142,8 @@ procedures:
           format: ${params.format}
           choices: ${params.choices}
           from: ${params.from}
+          timeout: ${params.timeout}
+          delegate: ${params.delegate}
           require_reason: ${params.require_reason}
           criteria: ${params.criteria}
           otherwise: human

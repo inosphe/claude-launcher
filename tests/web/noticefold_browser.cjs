@@ -92,6 +92,10 @@ const SHORT_ASK = {
       await page.addInitScript(() => localStorage.setItem("claunch_token:/", "fixture-token"));
       await page.goto(`http://127.0.0.1:${server.address().port}`);
       await page.waitForFunction(() => typeof applyRunGate === "function" && !!document.getElementById("notices"));
+      // Cards are held until the dashboard's first frame stands
+      // (claunch-zrf3n), so a card dealt by hand waits for that frame first —
+      // the same point the page's own polls run from.
+      await page.waitForFunction(() => booted === true);
       await page.evaluate(() => { window.runGateFeed = () => {}; });
     };
     const settle = () => page.evaluate(() => new Promise(done => {

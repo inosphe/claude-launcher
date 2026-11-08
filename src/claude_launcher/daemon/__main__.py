@@ -21,6 +21,7 @@ from aiohttp import web
 from .. import config, daemon_client, providers, routing, session_env, store
 from . import basetemp_reaper
 from . import host_watch
+from . import pr_stamps
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, pools, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
@@ -506,6 +507,10 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # generations, and names no session owns, once per tick (claunch-ssroc).
     reaper_clock = basetemp_reaper.BasetempClock(reaper)
     reaper_clock.start()
+    # The PR page's rows that carry no title: the list handler reads the title
+    # cache only, and the ``gh`` lookups that fill it are allowed from here —
+    # no other process (a test, a CLI read) may start them.
+    pr_stamps.enable()
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones
     # a person watching a terminal has no way to see coming, and the ones

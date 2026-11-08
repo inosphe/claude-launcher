@@ -176,9 +176,17 @@ const server = http.createServer((req, res) => {
     await page.locator("#modal-overlay").waitFor({ state: "hidden" });
     assert.equal(posts.length, 0, "Cancel sent no request");
 
-    // 5. The safe default -- the first option -- is the key that gets asked for.
+    // 5. The default is the answer already true: the key this session is on
+    //    (the picker passes `selected`, so a modal dismissed with Enter keeps
+    //    the session where it is). s1 is pinned to the second key, so moving
+    //    it off that key has to be a deliberate pick, not the opening state.
     await chip("s1").click();
     await page.locator("#modal-overlay").waitFor({ state: "visible" });
+    assert.equal(await options.nth(1).locator("input").isChecked(), true,
+                 "the modal opens on the key the session is already on");
+    // Picking the other key is what moves the session: the option that is
+    // pressed is the one asked for, not the one the box opened on.
+    await options.nth(0).locator("input").check();
     await page.locator("#modal-actions button", { hasText: "Restart on this key" }).click();
     await page.waitForFunction(() => !document.querySelector("#modal-overlay:not(.hidden)"));
     await until(() => posts.length === 1, "the switch POST");

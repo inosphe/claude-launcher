@@ -72,9 +72,9 @@ const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
                          "static");
-const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
-const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
-const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
+const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8").replace(/\r\n/g, "\n"); // CRLF on a Windows checkout
+const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8").replace(/\r\n/g, "\n");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8").replace(/\r\n/g, "\n");
 
 function slice(from, to) {
   const a = src.indexOf(from);
@@ -309,8 +309,8 @@ function build(opts) {
     " setRailSkew(v) { railClockSkew = v; }," +
     " noticeClocksPaint," +
     " noticeCardAdd, noticeFlipRead, noticeFlipMove, noticeNewerFirst," +
-    " noticeWaitingFoldSet, noticeCriteriaOf, noticeFoldedShows," +
-    " get noticeWaitingFolded() { return noticeWaitingFolded; }," +
+    " noticePanelTabSet, noticeCriteriaOf," +
+    " get noticePanelTab() { return noticePanelTab; }," +
     " mk: (cls, text) => el(\"div\", cls, text)," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -340,6 +340,19 @@ function build(opts) {
     panel: () => nodes["notice-panel-body"].text(),
     badge: () => bell.children[0].textContent,
     panelRows: () => nodes["notice-panel-body"].children.filter((c) => c.classList.contains("notice-row")),
+    // The sub tab bar (claunch-slab3): which tab is open, and the number the
+    // "Waiting on you" tab's badge shows (0 when the badge is left out).
+    tabBar: () => nodes["notice-panel-body"].children.find((c) => c.classList.contains("notice-tabs")),
+    tabOpen: () => {
+      const bar = nodes["notice-panel-body"].children.find((c) => c.classList.contains("notice-tabs"));
+      const on = bar && bar.children.find((c) => c.classList.contains("active"));
+      return on ? on.textContent : null;
+    },
+    waitingBadge: () => {
+      const bar = nodes["notice-panel-body"].children.find((c) => c.classList.contains("notice-tabs"));
+      const badge = bar && bar.querySelector(".notice-tab-badge");
+      return badge ? Number(badge.textContent) : 0;
+    },
     press: (root, label) => all(root, []).find((n) => n.textContent === label),
   };
 }
@@ -752,7 +765,7 @@ function gotoRec(rec) {
 
     w.api.noticePanelToggle(true);
     check("the panel lists it as waiting, with the reason and the countdown",
-          /Waiting on you \(1\)/.test(w.panel()) && /restart requested/.test(w.panel()) &&
+          w.waitingBadge() === 1 && /restart requested/.test(w.panel()) &&
             /serve master 1234abcd/.test(w.panel()) && /auto-approves in 5:00/.test(w.panel()),
           w.panel());
     const body = w.nodes["notice-panel-body"];
@@ -795,7 +808,7 @@ function gotoRec(rec) {
     await w.api.refreshRestartGate();
     check("Reject in the panel posts the gate's reject",
           w.apiCalls.includes("/api/daemon/restart-request/reject"), w.apiCalls);
-    check("the waiting list empties", /Waiting on you \(0\)/.test(w.panel()), w.panel());
+    check("the waiting list empties", w.waitingBadge() === 0, w.panel());
     check("and the history row says how it ended",
           w.api.noticeHistory.some((e) => e.gate && e.gate.rid === "r1" && e.status === "rejected"),
           w.api.noticeHistory);
@@ -816,12 +829,12 @@ function gotoRec(rec) {
     w.api.noticePanelToggle(true);
     const body = w.nodes["notice-panel-body"];
     check("two requests wait and the panel counts both",
-          /Waiting on you \(2\)/.test(w.panel()) && w.badge() === "2", [w.panel(), w.badge()]);
+          w.waitingBadge() === 2 && w.badge() === "2", [w.panel(), w.badge()]);
     check("each waiting row carries Mark read", !!w.press(body, "Mark read"), w.panel());
 
     w.press(body, "Mark read").click();
     check("Mark read takes the request off the waiting count",
-          /Waiting on you \(1\)/.test(w.panel()), w.panel());
+          w.waitingBadge() === 1, w.panel());
     check("and lists it under Read, still open",
           /Read, still open \(1\)/.test(w.panel()) && w.panelRows().length === 2, w.panel());
     check("with its countdown and its buttons still there",
@@ -837,7 +850,7 @@ function gotoRec(rec) {
 
     w.press(body, "Mark unread").click();
     check("Mark unread counts it again",
-          /Waiting on you \(2\)/.test(w.panel()) && !/Read, still open/.test(w.panel()),
+          w.waitingBadge() === 2 && !/Read, still open/.test(w.panel()),
           w.panel());
     check("and the bell counts it again", w.badge() === "2", w.badge());
 
@@ -849,13 +862,13 @@ function gotoRec(rec) {
     await again.api.refreshGotoGate();
     again.api.noticePanelToggle(true);
     check("a reload keeps the read request read",
-          /Waiting on you \(1\)/.test(again.panel()) &&
+          again.waitingBadge() === 1 &&
             /Read, still open \(1\)/.test(again.panel()), again.panel());
     check("and out of the bell", again.badge() === "1", again.badge());
 
     again.press(again.nodes["notice-panel-body"], "Mark read").click();
     check("with every request read the list says so",
-          /Waiting on you \(0\)/.test(again.panel()) &&
+          again.waitingBadge() === 0 &&
             /every waiting request has been read/.test(again.panel()) &&
             /Read, still open \(2\)/.test(again.panel()), again.panel());
     check("and the bell counts none", again.badge() === "", again.badge());
@@ -868,7 +881,7 @@ function gotoRec(rec) {
     again.gate.restart = restartRec();         // the daemon gives the id again
     await again.api.refreshRestartGate();
     check("so a later request with the same id waits again",
-          /Waiting on you \(1\)/.test(again.panel()), again.panel());
+          again.waitingBadge() === 1, again.panel());
   }
 
   /* --- a reload keeps the history and the hidden card ------------------- */
@@ -1285,7 +1298,7 @@ function gotoRec(rec) {
             !w.press(w.nodes.notices, "reframe") && /needs a reason/.test(w.said()), w.said());
     w.api.noticePanelToggle(true);
     check("the panel lists it as waiting with an Open press",
-          /Waiting on you \(1\)/.test(w.panel()) && !!w.press(w.nodes["notice-panel-body"], "Open"),
+          w.waitingBadge() === 1 && !!w.press(w.nodes["notice-panel-body"], "Open"),
           w.panel());
     w.press(w.nodes["notice-panel-body"], "Open").click();
     check("Open goes to the session and leaves the panel open (claunch-0fdx7)",
@@ -1348,7 +1361,7 @@ function gotoRec(rec) {
     check("and the next poll does not draw it again", w.strip().length === 0, w.said());
     w.api.noticePanelToggle(true);
     check("the panel keeps it, so nothing is lost by going in",
-          /Waiting on you \(1\)/.test(w.panel()), w.panel());
+          w.waitingBadge() === 1, w.panel());
   }
   {
     // the card's own body is the same way in
@@ -1633,7 +1646,7 @@ function gotoRec(rec) {
           b.badge() === "", b.badge());
     b.api.noticePanelToggle(true);
     check("and lists it as read there",
-          /Waiting on you \(0\)/.test(b.panel()) && /Read, still open \(1\)/.test(b.panel()),
+          b.waitingBadge() === 0 && /Read, still open \(1\)/.test(b.panel()),
           b.panel());
     check("the other tab does not echo it back",
           hub.sent.filter((m) => m.t === "gate-read").length === 1,
@@ -1709,7 +1722,10 @@ function gotoRec(rec) {
           JSON.stringify(Object.keys(w.api.gatePending).sort()) === JSON.stringify([...gates].sort()),
           Object.keys(w.api.gatePending));
     // Opened first: opening re-polls the gates, which would empty the store.
+    // Nothing waits yet, so it opens on History; the rows checked here are
+    // the Waiting tab's (claunch-slab3).
     w.api.noticePanelToggle(true);
+    w.api.noticePanelTabSet("waiting");
     for (const type of gates) {
       w.api.gatePending[type] = [gateRec(type, `${type}-1`)];
       w.api.gateHistoryOpen(type, `${type}-1`, `${type} asked`, "", {});
@@ -1734,6 +1750,7 @@ function gotoRec(rec) {
           w.strip().map((c) => c.text()));
     check("the history has the newest row first", w.api.noticeHistory[0].title === "second");
     w.api.noticePanelToggle(true);
+    w.api.noticePanelTabSet("waiting");
     w.api.gatePending.kill = [gateRec("kill", "k-old")];
     w.api.gateHistoryOpen("kill", "k-old", "kill old", "", {});
     w.clock.at += 1000;
@@ -2143,8 +2160,10 @@ function gotoRec(rec) {
     // other (the failure tests/test_related_surfaces.py exists for).
     const defs = src.split("function noticeNewerFirst(").length - 1;
     check("the feed's order is defined once", defs === 1, defs);
+    // The placement itself moved into noticeCardPlace, which noticeCardAdd
+    // hands every card to once the page is up (claunch-zrf3n).
     check("the strip places a card by that one rule",
-          /function noticeCardAdd\([\s\S]*?noticeNewerFirst\(/.test(src));
+          /function noticeCardPlace\([\s\S]*?noticeNewerFirst\(/.test(src));
     check("and the panel's history sorts by it",
           /\.sort\(noticeNewerFirst\)/.test(src));
   }
@@ -2314,7 +2333,8 @@ function gotoRec(rec) {
     // Mark read while the list says it has been read.
     w.api.gatePending.spawn = [gateRec("spawn", "sp-1")];
     w.api.gateHistoryOpen("spawn", "sp-1", "spawn asked", "", {});
-    w.api.noticePanelPaint();
+    // The request is on the Waiting tab; the panel opened on History.
+    w.api.noticePanelTabSet("waiting");
     const gateRow = () => w.panelRows().find((r) => r.classList.contains("pending"));
     check("a waiting request offers Mark read", !!w.press(gateRow(), "Mark read"),
           gateRow().text());
@@ -2618,7 +2638,8 @@ function gotoRec(rec) {
           !!rowFoot && /· 0s ago$/.test(rowFoot.text().trim()),
           rowFoot && rowFoot.text());
     w.api.notify("plain result", "copied", { source: "page" });
-    w.api.noticePanelPaint();
+    // History rows are on their own tab (claunch-slab3).
+    w.api.noticePanelTabSet("history");
     const hist = w.panelRows().find((r) => !r.classList.contains("pending"));
     const histFoot = hist && hist.querySelector(".notice-when");
     check("a history row carries the pair as well",
@@ -2808,6 +2829,7 @@ function gotoRec(rec) {
   {
     const w = build();
     w.api.noticePanelToggle(true);
+    w.api.noticePanelTabSet("waiting");
     const rec = (id, opened) => ({
       id: `ask-${id}`, session: `s-${id}`, cwd: `/w/${id}`, scope: `s-${id}`,
       workflow: "improv-worker-v2", version: 2, kind: "ask", label: "landing-review",
@@ -2927,16 +2949,14 @@ function gotoRec(rec) {
           w.api.railSkewOf(undefined, null) === null,
           w.api.railSkewOf(undefined, null));
   }
-  /* --- the criteria a notice carries, and the folded waiting list -------
-     (thread th-3b3470, 2026-10-30)
+  /* --- the criteria a notice carries (thread th-3b3470, 2026-10-30) ----
 
      The reader asked for a few consistent criteria instead of one card
      being ordered against another. The words are derived from what a notice
      already is (`fatal`, `blocking`, `urgent`, `expiring`) plus one a step
-     declares (`deferrable`, from ask.criteria), and a folded "Waiting on
-     you" keeps fatal ∪ urgent ∪ (blocking − deferrable). The fold starts
-     expanded, its state is this browser's, and a folded list still counts
-     everything: the heading's number is the whole waiting set. */
+     declares (`deferrable`, from ask.criteria). The "Waiting on you" fold
+     that read them was replaced by the panel's sub tabs (claunch-slab3,
+     below); the vocabulary stays. */
   {
     const w = build();
     check("a gate is blocking", w.api.noticeCriteriaOf(
@@ -2957,15 +2977,14 @@ function gotoRec(rec) {
     check("deferrable is read off the record",
       w.api.noticeCriteriaOf({ gateType: "ask", criteria: ["deferrable"] })
         .has("deferrable"), null);
-    check("folded keeps blocking but drops deferrable",
-      w.api.noticeFoldedShows(new Set(["blocking"])) &&
-        !w.api.noticeFoldedShows(new Set(["blocking", "deferrable"])), null);
-    check("folded keeps fatal and urgent",
-      w.api.noticeFoldedShows(new Set(["fatal"])) &&
-        w.api.noticeFoldedShows(new Set(["urgent"])), null);
-    check("folded shows nothing for a notice with no criterion",
-      !w.api.noticeFoldedShows(new Set()), null);
   }
+  /* --- the panel's sub tabs (claunch-slab3) ----------------------------
+
+     The reader asked for "Waiting on you" and History as sub tabs in place
+     of the fold, Waiting first, with a number badge. Only the open tab's
+     list is drawn; the badge is the unread waiting count and is drawn on
+     either tab; an open starts on Waiting when something waits and on
+     History otherwise. */
   {
     const w = build();
     const landing = { id: "ask2-land", session: "s3", cwd: "/w/s3", scope: "s3",
@@ -2974,40 +2993,72 @@ function gotoRec(rec) {
     const ending = { id: "ask2-end", session: "s4", cwd: "/w/s4", scope: "s4",
       version: 2, kind: "ask", label: "release-decision", prompt: "end or hold?",
       criteria: ["deferrable"], presses: [] };
+    w.api.notify("a plain notice", "its sub", { key: "plain-1", source: "thread" });
     w.api.runGateSync([landing, ending], []);
     w.api.noticePanelToggle(true);
-    check("both waiting requests are listed while the list is expanded",
-          /Waiting on you \(2\)/.test(w.panel()) && w.panelRows().length === 2, w.panel());
-    check("the fold starts expanded", w.api.noticeWaitingFolded === false, null);
-    check("and offers a Fold press", !!w.press(w.nodes["notice-panel-body"], "Fold"),
-          w.panel());
-    w.press(w.nodes["notice-panel-body"], "Fold").click();
-    check("folding keeps the blocking request",
-          w.panelRows().length === 1 && /landing-review/.test(w.panel()), w.panel());
-    check("and keeps the deferred one counted, not hidden silently",
-          /Waiting on you \(2\)/.test(w.panel()) && /1 more waiting/.test(w.panel()),
-          w.panel());
-    check("the choice is this browser's", w.storage.getItem("claunch.noticeWaitingFolded") === "true",
-          [...w.storage.data.entries()]);
-    const again = build({ storage: w.storage });
-    again.api.runGateSync([landing, ending], []);
-    again.api.noticePanelToggle(true);
-    check("a reload comes back folded",
-          again.api.noticeWaitingFolded === true && again.panelRows().length === 1,
-          again.panel());
-    again.press(again.nodes["notice-panel-body"], "Expand").click();
-    check("Expand shows them all again",
-          again.panelRows().length === 2 && !/more waiting/.test(again.panel()),
-          again.panel());
-    check("an urgent request survives the fold even when its step also deferred it",
-          (() => {
-            const w2 = build();
-            w2.api.runGateSync([{ ...ending, urgent: true }], []);
-            w2.api.noticeWaitingFoldSet(true);
-            w2.api.noticePanelToggle(true);
-            return w2.panelRows().length === 1;
-          })(), null);
+    const bar = w.tabBar();
+    check("the panel has a tab bar as its first list row",
+          !!bar && w.nodes["notice-panel-body"].children[0] === bar, w.panel());
+    check("Waiting on you is the first tab and History the second",
+          bar.children.map((c) => c.textContent).join("|") === "Waiting on you|History",
+          bar.children.map((c) => c.textContent));
+    check("an open with requests waiting starts on Waiting on you",
+          w.tabOpen() === "Waiting on you", w.tabOpen());
+    check("the Waiting tab's badge counts the unread waiting requests",
+          w.waitingBadge() === 2 && w.badge() === "3", [w.waitingBadge(), w.badge()]);
+    check("the badge sits on the Waiting tab, not on History",
+          !!bar.children[0].querySelector(".notice-tab-badge") &&
+            !bar.children[1].querySelector(".notice-tab-badge"), null);
+    check("the Waiting tab lists both requests, deferrable or not, and no history row",
+          w.panelRows().length === 2 &&
+            w.panelRows().every((r) => r.classList.contains("pending")) &&
+            !/a plain notice/.test(w.panel()), w.panel());
+    check("no fold press is left", !w.press(w.nodes["notice-panel-body"], "Fold") &&
+            !w.press(w.nodes["notice-panel-body"], "Expand"), w.panel());
+    w.press(bar, "History").click();
+    check("the History press opens History", w.tabOpen() === "History", w.tabOpen());
+    check("History lists the history rows and no waiting request",
+          /a plain notice/.test(w.panel()) && /History \(/.test(w.panel()) &&
+            !w.panelRows().some((r) => r.classList.contains("pending")), w.panel());
+    check("the badge is still drawn on the History tab", w.waitingBadge() === 2,
+          w.waitingBadge());
+    w.press(w.tabBar(), "Waiting on you").click();
+    check("the Waiting press opens it again",
+          w.tabOpen() === "Waiting on you" && w.panelRows().length === 2, w.panel());
+    w.press(w.panelRows()[0], "Mark read").click();
+    check("Mark read takes one off the badge and lists it under Read, still open",
+          w.waitingBadge() === 1 && /Read, still open \(1\)/.test(w.panel()), w.panel());
+    w.press(w.panelRows().find((r) => !r.classList.contains("read")), "Mark read").click();
+    check("with every request read the badge is left out",
+          w.waitingBadge() === 0 && !w.tabBar().querySelector(".notice-tab-badge"), w.panel());
+    w.api.noticePanelToggle(false);
+    w.api.noticePanelToggle(true);
+    check("read requests still open keep the open on Waiting on you",
+          w.tabOpen() === "Waiting on you", w.tabOpen());
+    check("the tab is not kept in storage",
+          ![...w.storage.data.keys()].some((k) => /noticePanelTab|noticeWaitingFolded/.test(k)),
+          [...w.storage.data.keys()]);
   }
+  {
+    const w = build();
+    w.api.notify("only history", "", { key: "h-1", source: "page" });
+    w.api.noticePanelToggle(true);
+    check("an open with nothing waiting starts on History",
+          w.tabOpen() === "History" && /only history/.test(w.panel()), w.panel());
+    w.api.runGateSync([{ id: "ask2-late", session: "s5", cwd: "/w/s5", scope: "s5",
+      version: 2, kind: "ask", label: "landing-review", prompt: "land?", presses: [] }], []);
+    w.api.noticePanelPaint();
+    check("a request that arrives while History is open does not move the tab",
+          w.tabOpen() === "History", w.tabOpen());
+    check("but its count shows on the Waiting tab's badge", w.waitingBadge() === 1,
+          w.waitingBadge());
+    w.press(w.tabBar(), "Waiting on you").click();
+    check("and the Waiting tab lists it",
+          w.panelRows().length === 1 && /landing-review/.test(w.panel()), w.panel());
+  }
+  check("the fold's code is gone",
+        !/noticeWaitingFolded|noticeWaitingFoldSet|noticeFoldedShows/.test(src), null);
+  check("the tab badge is styled", /\.notice-tab-badge\s*\{/.test(css), null);
   /* --- what the corner shows is in the panel (claunch-0z1ij) -------------
 
      The reader's report: with several floating cards up, the notification
@@ -3034,15 +3085,19 @@ function gotoRec(rec) {
     check("the corner is showing several cards of different kinds",
           w.strip().length === 5, said);
     w.api.noticePanelToggle(true);
+    // The panel is two sub tabs (claunch-slab3): the waiting requests are on
+    // one and the history on the other, so "in the panel" is in either.
     const panel = w.panel();
+    w.api.noticePanelTabSet("history");
+    const historyPanel = w.panel();
+    const historyClasses = w.panelRows().map((r) => r.className).join(" ");
     for (const t of ["a plain notice", "a warning", "a stopped leader",
                      "daemon restart requested", "run move requested"]) {
-      check(`the panel lists the card "${t}"`, panel.includes(t), panel);
+      check(`the panel lists the card "${t}"`,
+            panel.includes(t) || historyPanel.includes(t), [panel, historyPanel]);
     }
     check("and the fatal card keeps its grade inside the panel",
-          /notice-row[^"]*fatal/.test(
-            w.panelRows().map((r) => r.className).join(" ")),
-          w.panelRows().map((r) => r.className));
+          /notice-row[^"]*fatal/.test(historyClasses), historyClasses);
     check("no history row was lost raising them",
           w.api.noticeHistory.length === before + 5, w.api.noticeHistory.length);
   }

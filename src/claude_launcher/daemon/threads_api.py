@@ -90,7 +90,9 @@ is typed only into the sessions named, the owner included only when it is
 named; the author never receives its own message, and a name that is not a
 participant of the thread is reported back as ``unknown_mentions`` instead
 of delivered (daemon/threads_api.session_mentions, threads/store.py
-``parse_mentions``).
+``parse_mentions``). ``@user`` (claunch-ikcvw) names the person reading the
+thread and no session: a guest writes it to answer the user alone, and a
+message carrying only ``@user`` is typed into nobody, the owner included.
 
 Fork mode (claunch-uaxp8). ``fork: true`` on open starts the thread in a
 COPY of the session's conversation: the daemon quick-forks the session
@@ -282,7 +284,9 @@ def guest_invited_text(thread: dict, by: str) -> str:
         f"session {owner}.",
         _guest_role(tid, owner),
         "A message is typed in here only when it names you (@<your session>) or names everyone (@all); the rest "
-        f"-- {owner}'s replies included -- you read with thread_read. thread_list lists this thread under "
+        f"-- {owner}'s replies included -- you read with thread_read. To answer the user alone, write @user: "
+        f"the message stays in the thread and no session -- {owner} included -- is typed into. "
+        "thread_list lists this thread under "
         "guest_threads, whose guest.owner_unread counts messages since your last read. You cannot close or "
         f"rename it; thread_uninvite(thread_id=\"{tid}\") leaves it."])
 
@@ -529,13 +533,26 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         ``@<session>`` or by ``@all`` (the owner and every guest). A body that
         names only sessions that are no participant is typed into nobody, and
         the author never receives its own message.
+
+        ``@user`` (claunch-ikcvw) names the person reading the thread, not a
+        session: it is what a guest writes to answer the user alone. Because
+        the token matches no participant it also cancels the no-mention
+        default, so ``@user`` by itself is typed into nobody -- the owner is
+        not woken for a message meant for the user. Naming a session or
+        ``@all`` alongside it still reaches those sessions (``@all`` names
+        every participant, so it wins over the narrower ``@user``).
         """
         tokens = thread_store.parse_mentions((message or {}).get("body") or "")
         owner = thread["session"]
         guests = [g["session"] for g in thread.get("guests") or []]
         everyone = [owner, *guests]
         all_named = thread_store.MENTION_ALL in tokens
-        named = [n for n in everyone if n in tokens]
+        # ``@user`` is the user even when a session of this thread is named
+        # ``user`` (claunch-ikcvw): the alias is reserved, so it never names
+        # that session here. ``@all`` still reaches it -- it is a real
+        # participant of the thread.
+        named = [n for n in everyone
+                 if n in tokens and n != thread_store.MENTION_USER]
         if all_named:
             chosen = everyone
         elif named:
@@ -544,12 +561,18 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             chosen = []          # names nobody here: reported, delivered to nobody
         else:
             chosen = [owner]     # no mention: as if the thread had no guests
+        # ``@user`` names the user, who reads the thread rather than a
+        # terminal: it adds no target and is not an unknown name
+        # (claunch-ikcvw).
         return {
             "all": all_named,
             "named": named,
             "tokens": tokens,
+            "user": thread_store.MENTION_USER in tokens,
             "targets": [n for n in chosen if n != author],
-            "unknown": [t for t in tokens if t != thread_store.MENTION_ALL and t not in everyone],
+            "unknown": [t for t in tokens
+                        if t not in (thread_store.MENTION_ALL, thread_store.MENTION_USER)
+                        and t not in everyone],
         }
 
     def mention_fields(res: dict, route: dict) -> None:
@@ -558,6 +581,8 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         nobody answers as it always did."""
         if route["tokens"]:
             res["mentions"] = {"all": route["all"], "targets": route["targets"]}
+            if route.get("user"):
+                res["mentions"]["user"] = True
         if route["unknown"]:
             res["unknown_mentions"] = route["unknown"]
 
@@ -1045,6 +1070,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if err:
             return err
         await asyncio.to_thread(link, [t], t["session"])
+        # ``call`` attaches paths only to a ``{"message": ...}`` envelope, and
+        # ``record_delivery`` returns the message itself -- so the block
+        # rebuilt below read images with no ``path`` (a 500 on every resend of
+        # an image message) and ``_file_lines`` dropped the attachment lines
+        # without a word (claunch-sp0ut).
+        await asyncio.to_thread(thread_images.attach, updated)
+        await asyncio.to_thread(uploads.attach, updated)
         out = {"message": updated}
         # This attempt gets its own notice id: a resend to an exited session
         # must land in the durable queue even when the original notice (or a

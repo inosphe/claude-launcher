@@ -9,6 +9,7 @@ D3 a preview made before another change landed on other paths is accepted by
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -47,7 +48,12 @@ def repo(tmp_path):
     return r
 
 
-def run_preview(repo, scratch, branch, measure="true", base="master"):
+# `true` / `false` are not on every host's PATH (the sweep's Windows process has none).
+PASS = shlex.join([Path(sys.executable).as_posix(), "-c", "pass"])
+FAIL = shlex.join([Path(sys.executable).as_posix(), "-c", "raise SystemExit(1)"])
+
+
+def run_preview(repo, scratch, branch, measure=PASS, base="master"):
     return subprocess.run(
         [sys.executable, str(PREVIEW), "--repo", str(repo), "--branch", branch, "--base", base,
          "--scratch", str(scratch), "--measure-cmd", measure],
@@ -68,7 +74,7 @@ def test_green_measurement_leaves_a_two_parent_preview_ref(repo, tmp_path):
 
 
 def test_failed_measurement_and_conflict_leave_no_ref(repo, tmp_path):
-    red = run_preview(repo, tmp_path / "scratch", "a", measure="false")
+    red = run_preview(repo, tmp_path / "scratch", "a", measure=FAIL)
     assert red.returncode == 1
     git(repo, "switch", "-q", "-c", "clash", "master")
     commit(repo, "a.txt", "other\n", "clash")

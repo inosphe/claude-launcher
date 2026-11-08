@@ -6,6 +6,11 @@ import urllib.parse
 import pytest
 
 from claude_launcher import daemon_client, search_mcp
+# `search_mcp` keeps its own copy of the corpus names because the MCP server
+# must not import the index (claunch-7aujp.2). The copy is pinned to the
+# original here: a name added or renamed on one side alone would otherwise be
+# accepted by the MCP and refused by the daemon.
+from claude_launcher.daemon import rag as daemon_rag
 
 
 class _Client:
@@ -34,7 +39,7 @@ def _params(path):
 
 
 UNIFIED = {
-    "kind": "all",
+    "kind": "unified",
     "root": None,
     "reranked": True,
     "warnings": [],
@@ -65,7 +70,9 @@ def test_search_defaults_to_the_unified_corpus_and_compacts_rows(monkeypatch):
     answer = search_mcp.call_tool("search", {"query": "grid view"})
 
     params = _params(client.calls[0])
-    assert params == {"q": "grid view", "kind": "all", "limit": "10", "rerank": "1", "wait": "2"}
+    assert params == {"q": "grid view", "kind": "unified", "mode": "general",
+                      "limit": "10", "rerank": "1", "wait": "2"}
+    assert answer["mode"] == "general"
     assert answer["coverage"] == "90/100 indexed, sync in progress"
     assert answer["reranked"] is True
     comment, session = answer["results"]
@@ -112,12 +119,73 @@ def test_search_sessions_corpus_rows_read_as_sessions(monkeypatch):
                    "excerpt": "did x", "read": "session:s355"}
 
 
+def test_search_mode_active_rides_on_the_unified_corpus(monkeypatch):
+    client = _use(monkeypatch, {"/api/search?": {
+        "kind": "unified", "index": {}, "results": []}})
+    answer = search_mcp.call_tool("search", {"query": "x", "kind": "unified", "mode": "active"})
+    params = _params(client.calls[0])
+    assert params["kind"] == "unified" and params["mode"] == "active"
+    assert answer["mode"] == "active"
+
+
+def test_search_refuses_the_pre_rename_all_name(monkeypatch):
+    # `all` was the combined corpus's name and is refused with the rename
+    # (claunch-7aujp.1): the error lists the names that answer, and no
+    # request goes out carrying a name the daemon would 400.
+    client = _use(monkeypatch, {"/api/search?": UNIFIED})
+    with pytest.raises(search_mcp.SearchMcpError,
+                       match="kind must be one of unified, beads, sessions"):
+        search_mcp.call_tool("search", {"query": "x", "kind": "all"})
+    assert client.calls == []
+
+
+def test_the_corpus_names_match_the_daemons_and_all_is_refused_on_both_sides(monkeypatch):
+    # The two tables are copies by design, so they are compared as a set: the
+    # MCP lists `unified` first (it is its default) and the daemon lists it
+    # last. Duplicates are refused separately — a set comparison would hide a
+    # name that appears twice on one side.
+    assert set(search_mcp.KINDS) == set(daemon_rag.KINDS)
+    assert len(search_mcp.KINDS) == len(daemon_rag.KINDS) == len(set(daemon_rag.KINDS))
+    # `all` was the combined corpus's name before the rename (claunch-7aujp.1).
+    # Checking both tables keeps the equality above honest: putting the old
+    # name back on both sides would leave the sets equal, and this stays red.
+    assert "all" not in search_mcp.KINDS
+    assert "all" not in daemon_rag.KINDS
+
+    # The MCP side accepts every name the daemon answers, unchanged.
+    client = _use(monkeypatch, {"/api/search?": UNIFIED})
+    for kind in daemon_rag.KINDS:
+        client.calls.clear()
+        search_mcp.call_tool("search", {"query": "x", "kind": kind})
+        assert _params(client.calls[0])["kind"] == kind
+
+    # ...and refuses `all` before sending it, naming exactly the daemon's set.
+    client.calls.clear()
+    with pytest.raises(search_mcp.SearchMcpError) as caught:
+        search_mcp.call_tool("search", {"query": "x", "kind": "all"})
+    assert client.calls == []
+    names = str(caught.value).removeprefix("kind must be one of ").split(", ")
+    assert set(names) == set(daemon_rag.KINDS)
+
+
+def test_search_rejects_active_with_a_narrower_kind_before_asking(monkeypatch):
+    client = _use(monkeypatch, {})
+    for kind in ("beads", "sessions"):
+        with pytest.raises(search_mcp.SearchMcpError,
+                           match="mode must be general, or active with kind=unified"):
+            search_mcp.call_tool("search", {"query": "a", "kind": kind, "mode": "active"})
+    assert client.calls == []
+
+
 def test_search_rejects_bad_input(monkeypatch):
-    _use(monkeypatch, {})
+    client = _use(monkeypatch, {})
     with pytest.raises(search_mcp.SearchMcpError):
         search_mcp.call_tool("search", {"query": "  "})
     with pytest.raises(search_mcp.SearchMcpError):
         search_mcp.call_tool("search", {"query": "a", "kind": "files"})
+    with pytest.raises(search_mcp.SearchMcpError):
+        search_mcp.call_tool("search", {"query": "a", "kind": "unified", "mode": "fuzzy"})
+    assert client.calls == []
 
 
 def test_search_unconfigured_names_the_fallback(monkeypatch):

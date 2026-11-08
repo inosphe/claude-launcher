@@ -3,7 +3,11 @@
    a daemon-shaped /api/git answer, and pin the contracts: the original is
    listed first, the checkout the session already stands in is shown but
    cannot be picked, and picking the original posts it as 'cwd' (a
-   'worktree' would cut a new checkout under .claude/worktrees instead). */
+   'worktree' would cut a new checkout under .claude/worktrees instead).
+
+   The same move is where a session re-files its project (claunch-51gyl.1):
+   the second picker keeps the current filing unless one is chosen, and the
+   answer line names the project and the cflow run slots that travelled. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -85,13 +89,24 @@ const posts = [];
 const api = async (url, opts) => {
   if (opts && opts.method === "POST") {
     posts.push({ url, body: JSON.parse(opts.body) });
-    return { ok: true, status: 200, json: async () => ({ cwd: "moved", children: [] }) };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        cwd: "moved",
+        children: [],
+        slots_moved: ["w@main"],
+        project: "hq",
+        mirrors_refiled: [{ mesh: "m@pcA", was: "claunch", now: "hq" }],
+      }),
+    };
   }
   return { ok: true, status: 200, json: async () => GIT };
 };
 const stubs = `
 let sessMigrateBox = null;
 let currentName = null;
+let projectsCache = [];
 function detach() {}
 async function refreshSessions() {}
 function attach() {}
@@ -103,6 +118,7 @@ new Function(
 Object.assign(exports, {
   render: sessMigrate,
   drop: () => { sessMigrateBox = null; },
+  setProjects: (list) => { projectsCache = list; },
 });`
 )(ctx, document, el, api);
 
@@ -133,6 +149,8 @@ async function main() {
     o[1].text === "worktree: s1-a (here)" && o[1].disabled, o[1]);
   check("the original is pickable from a worktree", !o[0].disabled, o[0]);
   check("the original is the default destination", sel.value === "root", sel.value);
+  check("no project picker is drawn when the daemon knows no projects",
+    tags(inWt, "select").length === 1, tags(inWt, "select").length);
 
   await button(inWt).fire("click");
   check("picking the original posts it as cwd, not as a worktree",
@@ -163,6 +181,45 @@ async function main() {
   await button(inRoot).fire("click");
   check("new worktree posts the trimmed name",
     posts.length === 3 && posts[2].body.worktree === "fresh", posts[2]);
+
+  // ---- re-filing the session under another project (claunch-51gyl.1) ----
+  ctx.drop();
+  ctx.setProjects([{ name: "claunch" }, { name: "hq" }]);
+  const refile = ctx.render({
+    session: { name: "p", cwd: "F:/works/repo", project: "claunch" },
+  });
+  await settle();
+  const proj = tags(refile, "select")[1];
+  check("a project picker is drawn beside the checkout picker", !!proj,
+    tags(refile, "select").length);
+  const po = opts(proj);
+  check("keeping the current filing is the default",
+    po[0].value === "" && po[0].text === "project: keep claunch as it is"
+      && proj.value === "", po);
+  check("the current project is not offered twice, the others are",
+    po.map((x) => x.value).join(",") === ",default,hq", po);
+
+  await button(refile).fire("click");
+  check("a move with no filing picked does not send one",
+    posts.length === 4 && !("project" in posts[3].body), posts[3]);
+
+  proj.value = "hq";
+  await button(refile).fire("click");
+  check("a picked project travels with the move",
+    posts.length === 5 && posts[4].body.project === "hq", posts[4]);
+  const said = tags(refile, "p").pop().text;
+  check("the answer names the new project and the run slots that moved",
+    said.includes("project: hq") && said.includes("1 cflow run slot: w@main"), said);
+  check("the answer names a mesh mirror the re-filing took with it",
+    said.includes("1 mesh row re-filed: m@pcA (claunch → hq)"), said);
+
+  // A session under no project: "keep default" first, every project after it.
+  ctx.drop();
+  const noProject = ctx.render({ session: { name: "q", cwd: "F:/works/repo" } });
+  await settle();
+  const po2 = opts(tags(noProject, "select")[1]);
+  check("a session under no project keeps 'default' and offers the rest",
+    po2.map((x) => x.value).join(",") === ",claunch,hq", po2);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

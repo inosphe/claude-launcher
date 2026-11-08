@@ -142,6 +142,10 @@ _GATED_FIELDS = (
     ("worktree", "allow_worktree"),
 )
 
+#: The gated fields a person's fleet launch may set on a child regardless of
+#: the policy (:func:`check`'s ``person_fields``).
+PERSON_FIELDS = ("profile", "model", "effort")
+
 #: What ``worktree: true`` becomes between :func:`check` and
 #: :func:`make_worktree`. "A checkout of its own, you name it" is a question
 #: neither of them can answer alone: the name is ``<parent>-<child>-<stamp>``
@@ -310,6 +314,7 @@ def check(
     children: int,
     warnings: Optional[List[str]] = None,
     exempt_depth: bool = False,
+    person_fields: bool = False,
 ) -> dict:
     """Validate a spawn request and return the child's inherited overrides.
 
@@ -345,6 +350,15 @@ def check(
     its tree unable to have its own PR watched. ``enabled: false`` still
     refuses -- the exemption is about counts, not about whether spawning is
     on at all.
+
+    ``person_fields`` lifts the gates of :data:`PERSON_FIELDS` (whose login
+    and which model) for this one request. Like ``exempt_depth`` it is the
+    daemon's own keyword, never a request field: the one caller is the
+    dashboard's fleet launch (``daemon/fleet_api``), which a person runs and
+    in which that person picked each member's profile by hand. The gates
+    exist so an *agent* cannot choose whose credentials a child holds; a
+    person who can start a top-level session on any profile is not that
+    case. Every other gate (cwd, args, env, ...) still applies.
 
     Raises :class:`SpawnDenied` with a message written for the agent that will
     read it: what was refused, and which config key would allow it.
@@ -440,7 +454,7 @@ def check(
                 continue
         elif value in (None, "", [], {}) or value is False:
             continue
-        if not getattr(policy, gate):
+        if not getattr(policy, gate) and not (person_fields and key in PERSON_FIELDS):
             raise SpawnDenied(
                 _DENIALS.get(key)
                 or (
@@ -547,6 +561,17 @@ def check(
         child["env"] = auto_compact_mod.with_auto_compact(
             child["env"], enabled=enabled, window=window
         )
+
+    if request.get("auto_key_switch") is not None:
+        # Ungated on purpose, like auto_compact and --null above: it hands the
+        # child no credential it would not already have had. The pool belongs
+        # to the profile the child inherits (or one the allow_profile gate
+        # already let the caller name); this only says that when the key it
+        # launched on hits a usage limit the daemon may restart it on another
+        # usable key of that same pool and type ``continue``. It is the
+        # operator's answer about what happens to the child's own faults, and
+        # a child that had it while its siblings did not is not a wider grant.
+        child["auto_key_switch"] = bool(request.get("auto_key_switch"))
 
     if "model" in request:
         # After the profile re-resolution: a preset names a slot in the

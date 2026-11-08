@@ -184,7 +184,7 @@ claunch run work:claude                  # explicit Claude selector
 | `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claude-launcher/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claude-launcher/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
-| `search <query> [--kind beads\|sessions]` | Rank the repository board or the daemon's sessions by meaning (needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
+| `search <query> [--kind beads\|sessions\|unified]` | Rank the repository board or the daemon's sessions by meaning, or both corpora with `unified` (`all` was that corpus's name before the rename and is refused now; needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
 | `rag status\|reindex`  | The semantic-search index: configuration, coverage, and a sync. |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
 | `usage <name[:harness]>` | Query Claude, Codex, or managed Kimi subscription usage (`--json` for the raw response). |
@@ -581,12 +581,16 @@ next launch fall back to `rotation` and report that in `claunch keys select`.
 
 `usage-min`/`usage-max` read each key's own usage, so they only work where the
 launcher token *is* the account credential (a Claude provider key, a Kimi
-provider key, a Fireworks key, an OpenCode Go key). A harness whose usage
-belongs to its own login (`codex`, the `kimi` CLI) has nothing to compare per
+provider key, a Fireworks key, an OpenCode Go key, a Command Code key). A
+harness whose usage belongs to its own login (`codex`, the `kimi` CLI) has nothing to compare per
 key: the strategy falls back to `rotation` for that launch and says so in
 `claunch keys select`, naming the reason from one table
 (`usage.LOGIN_SCOPED_READERS`; a reader with no per-key path at all is reported
-as such rather than as a login). Each `usage-*` launch reads every key's
+as such rather than as a login). The keys of one pool need not report the
+same windows -- a Command Code pool can hold a Provider-plan key (monthly only)
+beside a key with 5-hour and weekly limits. A tie on the peak is broken window
+by window on the 5-hour / week / month ladder, a window a key does not report
+counting as 0. Each `usage-*` launch reads every key's
 usage, so expect one usage request per key (and for Claude setup-tokens, one
 minimal API call per key) at launch time.
 
@@ -1598,6 +1602,60 @@ sessions on the same provider worked — the header was applied inside the shim,
 and the briefing never goes through the shim. The same failure reached every
 observer pass and every search index sync for the same reason.
 
+### Running Claude Code on an OpenAI-only backend (`anthropic_translation`)
+
+Some backends serve a model on the OpenAI protocol only. Command Code's
+`deepseek/deepseek-v4.1-flash` answers `/provider/v1/chat/completions` and is
+refused on `/provider/messages` (`Model is not supported on this endpoint`),
+so the Claude harness, which speaks only Anthropic Messages, cannot reach it.
+`anthropic_translation: openai` on the provider makes the shim translate:
+
+| Request at the shim | What goes upstream |
+|---|---|
+| `POST /v1/messages` (Claude Code) | `POST <endpoints.openai>/chat/completions`, body translated; the answer (JSON or SSE stream) is translated back to the Messages shape |
+| `POST /v1/messages/count_tokens` | nothing — answered by the shim with an estimate (4 characters per token) |
+| anything else (`/chat/completions` from Pi) | forwarded unchanged |
+
+The key is opt-in and read live. Without it nothing is translated. With it the
+provider always goes through the shim, and the shim's upstream is the
+`endpoints.openai` base whether or not `endpoints.anthropic` is set; a value
+other than `openai`, or a missing `endpoints.openai`, refuses the launch (and
+the shim answers 502 for a value edited in later). The mapping lives in
+`src/claude_launcher/anthropic_openai.py`:
+
+- request: `system`, text/image/`tool_use`/`tool_result` blocks, `tools`
+  (server tools such as web search are dropped), `tool_choice`,
+  `max_tokens`, `stop_sequences`, `temperature`, `top_p`, and `thinking`
+  carried as `openai_reasoning_format` says (`deepseek`: `thinking` +
+  `reasoning_effort`, and earlier thinking returned as `reasoning_content`;
+  `openai`: `reasoning_effort`; unset: dropped). A configured
+  `reasoning_effort` wins over one derived from `budget_tokens`.
+- response: `content` → text, `reasoning_content` (or `reasoning`) →
+  thinking, `tool_calls` → `tool_use`, `finish_reason` → `stop_reason`,
+  `usage` (cached prompt tokens → `cache_read_input_tokens`), and an
+  upstream error body → an Anthropic error body with the same status.
+- not carried: `top_k`, `cache_control`, `metadata`, non-text documents.
+
+The credential is sent as `Authorization: Bearer`, the OpenAI form; an
+`x-api-key` from the harness is moved there. The daemon's own LLM calls
+(briefing, observer, search) do not go through the shim and do not read this
+key.
+
+```yaml
+providers:
+  commandcode:
+    allowed_harnesses: [claude, pi]
+    anthropic_translation: openai
+    context_window: 1000000
+    endpoints:
+      openai: https://api.commandcode.ai/provider/v1
+    models:
+      default: deepseek/deepseek-v4.1-flash
+      large: deepseek/deepseek-v4.1-flash
+      small: deepseek/deepseek-v4.1-flash
+    openai_reasoning_format: deepseek
+```
+
 ### Prompt-cache TTL
 
 Claude Code decides how long a prompt-cache entry lives: the setting
@@ -2560,7 +2618,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness (`pi/pi-durable` when a kind was declared), profile, size, cwd, and `\| <progress>` when the session published one. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
-| `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, and relaunches it there. `--children` moves the descendants standing in the same directory too; `--project P` also re-files the session under that project (its cflow runs and future beads issues follow the new directory; followers keep their own project); `-a` attaches. Also a **Move to worktree** picker in the web UI's session panel. |
+| `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, moves its cflow v2 run slots, and relaunches it there. `--children` moves the descendants standing in the same directory too; `--project P` also re-files the session under that project (its cflow runs and future beads issues follow the new directory; followers keep their own project); the result line names the project and the run slots that travelled; `-a` attaches. Also a **Move to checkout** picker in the web UI's session panel, with the same project picker beside it (keep the current filing unless one is chosen — `default (unfiled)` puts it back). |
 | `reborrow S [NAME]`   | Restart a token-capable session on another answer to "whose token": base profile `NAME` borrows its shared token (`--borrow`), `--none` uses the runtime profile's own, and Claude also supports `--null`. Stops and relaunches the session — same name, same conversation, same directory. `-a` attaches. The Web detail pane's **Borrowed auth** picker includes live credential validation. |
 | `skip-permissions S on\|off` | Restart a session with claude's `--dangerously-skip-permissions` added (`on`) or removed (`off`) — the flag lives in the definition's args, so toggling it stops and relaunches the session: same name, same conversation, same directory. `-a` attaches. Also a **Permissions** toggle in the web UI's session panel. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
@@ -2576,7 +2634,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). From inside a managed session it files a kill request for a person instead; if the target's run stands on its end decision the person is asked to answer 'end' there (`--skip-end-decision` or `--force` files the kill request anyway). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `detach S`            | End a session's parent/child relation: it becomes a root, its own children stay under it. The operator's form of the agents' `detach` MCP tool (scoped to the caller's own subtree). Cuts the private parent channel the daemon opened for the pair; there is no re-attach verb beyond `reparent`. Also a `detach` button on the detail panel's "spawned by" row. |
-| `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs. Names are not freed either way: auto-assigned numbers come from a counter that only moves forward, so a cleared session's `sN` is never handed out again. |
+| `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their session directories — the captured output, scratch and uploads (the same clean `archive` performs). Names are not freed either way: auto-assigned numbers come from a counter that only moves forward, so a cleared session's `sN` is never handed out again. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
 | `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
@@ -3258,7 +3316,7 @@ work-branch push; the line under the picker says what the chosen mode does:
 For A or B, choose a live or held **parent session**. When a mesh leader works
 in this repository, only its leaders are offered: while the child's
 `reposync-merge-push-v2` run stands in `prepare` through `execute`, ordinary
-merges into the repository pause (`tools/delayed_sweep.py admit` refuses every
+merges into the repository pause (`claunch delayed-sweep admit` refuses every
 candidate but the sync's own issue, naming the sync session and its base local
 commit). The pause ends at `receipt`, when the run ends or is aborted, or when
 the child session ends; it lasts at most until the approval card's deadline
@@ -4203,7 +4261,7 @@ Records therefore accumulate, and only you drop them:
 
 ```bash
 claunch clear-sessions      # drop every exited record; running sessions stay
-claunch clear-sessions --logs   # ...and delete their output logs too
+claunch clear-sessions --logs   # ...and delete their session directories (output, scratch, uploads)
 ```
 
 Dropping a record is the one thing that makes a session unresumable, which is
@@ -4926,7 +4984,7 @@ with a `stack` sub run beside it).
   default `master`), checks `gh auth status --hostname <host>` — a private
   GitHub Enterprise host is just a hostname to `gh` — and points the branch's
   upstream at `<remote>/<base>`, which is how the unchanged
-  `merge_ready.py` / `landed_check.py --target @{upstream}` gates come to
+  `merge_ready.py` / `claunch gate landed-check --target @{upstream}` gates come to
   measure against the remote. After peer review a `pr-open` step pushes the
   reviewed tip with an explicit refspec (a bare `git push` is forbidden for
   the round) and opens the PR with `gh pr create -R <host>/<owner>/<repo>`;
@@ -5750,6 +5808,19 @@ The supported cases are deliberately narrow:
   `monthly`, each a percentage with its reset time. The endpoint is not in
   OpenCode's published API docs; a reply without these windows is reported
   as an error.
+- A profile whose provider declares an endpoint on Command Code
+  (`api.commandcode.ai`, the OpenAI one a translated provider has or an
+  Anthropic one) is read the way the `command-code` CLI reads `/usage`:
+  `GET /alpha/whoami?limits=1` for the org, then `/alpha/billing/credits` and
+  `/alpha/billing/subscriptions`, with the profile's API key. What it shows
+  depends on the account's plan. A Provider-plan account has no rolling
+  limits and reads one `monthly` window: the plan's monthly credits (plus any
+  purchased or free credits) against what is left, in dollars, resetting at
+  the end of the billing period. A plan with rolling limits (Go, Pro, Max,
+  ...) adds `five_hour` and `weekly` before it. The output names the plan
+  (`plan: Provider`). Without an active subscription, or with one whose plan
+  the CLI's plan table does not name, the pool is what is left plus what the
+  period has spent (`/alpha/usage/summary`).
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
 - `usage work:kimi` starts the Kimi Code local server under that profile's

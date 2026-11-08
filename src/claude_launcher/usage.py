@@ -19,9 +19,21 @@ a Claude-compatible Kimi provider can call it with that profile's API key.
 A Fireworks provider has no plan limit; its reading is the account's spend
 (claunch-f5w4x.5): the month to date from the ``monthly-spend-usd`` quota,
 and, when the configuration records a credit balance, what is left of it.
+The account's quota is one number however many keys spend it, so the reading
+also rates each API key separately (``usageCosts:query`` grouped by
+``API_KEY``) and names each key: the local profile whose launcher token is
+that key when the launcher can tell, else the console's own key name
+(claunch-uqnek).
 An OpenCode Go provider (``opencode.ai/zen/go``) reports its plan windows --
 the rolling 5 hours, the week and the month, each a percentage and a reset
 time -- at ``/zen/go/v1/usage``, read with the profile's API key.
+A Command Code provider (``api.commandcode.ai``) is read the way its own CLI
+reads ``/usage``: ``/alpha/whoami`` for the org, then the billing credits and
+subscription, with the profile's API key (claunch-j43qd). Every plan has the
+monthly credit pool; the plans the CLI runs under (Go, Pro, Max, ...) add the
+rolling 5-hour and weekly limits, which a Provider-plan account reports as
+absent (``windowLimits.limited`` false). The reading has the windows the
+account reports, so two keys of one pool on different plans read differently.
 An OpenGateway provider (``apis.opengateway.ai``) has no endpoint a key can
 read: its management surface answers ``401`` to a data-plane key and the data
 plane carries no usage route (claunch-firtc). Its reading is therefore what
@@ -43,11 +55,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from . import config, credentials, harnesses, lineage, metering, providers, runner, store
+from . import profile as profile_mod
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -59,11 +72,58 @@ _FIREWORKS_HOSTS = {"api.fireworks.ai", "api.fireworks.ai:443"}
 _FIREWORKS_API = "https://api.fireworks.ai/v1"
 #: The quota value an account without a spend limit reports.
 _FIREWORKS_NO_LIMIT = 9_999_999
+#: The ``usageCosts:query`` grouping that rates each API key separately.
+_FIREWORKS_KEY_GROUP = "API_KEY"
+#: What the page says when an account has no key-by-key rows. The three are
+#: different answers and the page shows the one that holds (claunch-uqnek.1):
+#: nothing has been spent yet, the API would not rate the keys, or the account
+#: does not rate keys at all.
+API_KEYS_NO_SPEND = (
+    "No spend this month yet, so there is nothing to break down by API key."
+)
+API_KEYS_UNREAD = (
+    "The account's key-by-key spend could not be read; only the account total is shown."
+)
+API_KEYS_NO_BREAKDOWN = (
+    "This account did not break its spend down by API key; only the account total is shown."
+)
 _OPENCODE_GO_HOSTS = {"opencode.ai", "opencode.ai:443"}
 _OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 #: OpenCode Go's window names, and the names a reading gives them.
 _OPENCODE_GO_WINDOWS = (("rolling", "five_hour"), ("weekly", "weekly"), ("monthly", "monthly"))
 _OPENGATEWAY_HOSTS = {"apis.opengateway.ai", "apis.opengateway.ai:443"}
+_COMMANDCODE_HOSTS = {"api.commandcode.ai", "api.commandcode.ai:443"}
+_COMMANDCODE_API = "https://api.commandcode.ai"
+#: Monthly credits (USD) each Command Code plan grants, by plan-id prefix,
+#: longest first so ``individual-pro-v1`` is not read as ``individual-pro``.
+#: The table and the longest-prefix lookup are the ones the ``command-code``
+#: CLI (1.88.3, ``getPlanInfo``) uses for its own ``/usage`` bar. A plan id
+#: that no prefix matches has no grant; its pool is the balance left plus what
+#: the period has spent (``/alpha/usage/summary``), as the CLI computes it.
+_COMMANDCODE_PLAN_CREDITS = {
+    "individual-go-v1": 10.0,
+    "individual-go": 10.0,
+    "individual-goat": 70.0,
+    "individual-pro-v1": 80.0,
+    "individual-pro": 30.0,
+    "individual-provider": 15.0,
+    "individual-max": 150.0,
+    "individual-ultra": 300.0,
+    "teams-pro": 40.0,
+}
+_COMMANDCODE_PLAN_NAMES = {
+    "individual-go-v1": "Go",
+    "individual-go": "Go",
+    "individual-goat": "Goat",
+    "individual-pro-v1": "Pro",
+    "individual-pro": "Pro",
+    "individual-provider": "Provider",
+    "individual-max": "Max",
+    "individual-ultra": "Ultra",
+    "teams-pro": "Teams Pro",
+}
+#: ``windowLimits`` keys of a credits reply, and the names a reading gives them.
+_COMMANDCODE_WINDOWS = (("fiveHour", "five_hour"), ("weekly", "weekly"))
 #: What :func:`metering.load` matches in a record's ``upstream``: the shim
 #: records the endpoint it forwarded to, with whatever path the harness used.
 _OPENGATEWAY_UPSTREAM = "apis.opengateway.ai"
@@ -95,10 +155,32 @@ class UsageWindow:
 
 
 @dataclass(frozen=True)
+class UsageKeyAmount:
+    """One API key's rated cost inside an account several keys share.
+
+    A Fireworks account reports one monthly spend whoever spends it, so two
+    profiles that hold different keys of that account print the same number
+    until the reading names the keys (:func:`_fetch_fireworks`). ``label``
+    is the local profile that holds the key when the launcher can tell,
+    else the console's own name for the key, else ``key_id``.
+    """
+
+    key_id: str
+    label: str
+    used_dollars: float
+
+
+@dataclass(frozen=True)
 class UsageReport:
     windows: List[UsageWindow]
     raw: dict
     source: str = "oauth-usage"
+    #: The account's spend split by API key, when its API rates keys apart.
+    api_keys: List[UsageKeyAmount] = field(default_factory=list)
+    #: Why ``api_keys`` is empty, worded for the page; empty when the list
+    #: has rows or the reader has nothing to explain (:data:`API_KEYS_NO_SPEND`
+    #: and its two siblings). A reader that does not split spend leaves it "".
+    api_keys_note: str = ""
 
 
 def _headers(token: str) -> dict:
@@ -564,6 +646,235 @@ def _fetch_opencode_go(profile: Profile, token: str) -> UsageReport:
     return UsageReport(windows=_opencode_go_windows(payload), raw=payload, source="opencode-go")
 
 
+def _commandcode_context(profile: Profile) -> Optional[str]:
+    """The bearer credential of a profile whose provider is Command Code, or
+    ``None`` when its provider is another backend.
+
+    The provider is recognised by any endpoint it declares on
+    ``api.commandcode.ai`` -- the OpenAI one a translated provider has
+    (``anthropic_translation: openai``) as well as an Anthropic base URL --
+    because the usage API is the account's, whichever protocol the harness
+    speaks to it.
+    """
+    provider = providers.resolve_name(profile)
+    if provider == providers.DEFAULT_PROVIDER:
+        return None
+    declared_env = providers.provider_env(provider)
+    declared_env.update(lineage.effective_env(profile))
+    candidates = [str(declared_env.get("ANTHROPIC_BASE_URL") or "")]
+    try:
+        candidates.extend(str(v or "") for v in providers.spec(provider).endpoints.values())
+    except providers.ProviderError:
+        pass
+    if not any(_is_commandcode_url(url) for url in candidates):
+        return None
+    # Not ``runner.child_env(with_token=True)``: a translated provider starts
+    # the routing shim for a harness, and a listing must not.
+    stored = lineage.stored_auth_token(profile)
+    try:
+        declared_key = providers.auth_token(provider)
+    except providers.ProviderError:
+        declared_key = None
+    return str(
+        stored
+        or declared_key
+        or declared_env.get("ANTHROPIC_AUTH_TOKEN")
+        or declared_env.get("ANTHROPIC_API_KEY")
+        or ""
+    ).strip()
+
+
+def _is_commandcode_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == "https" and parsed.netloc.lower() in _COMMANDCODE_HOSTS
+
+
+def _commandcode_get(profile: Profile, path: str, token: str, query: Optional[dict] = None) -> dict:
+    params = {k: v for k, v in (query or {}).items() if v is not None}
+    url = _COMMANDCODE_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "claude-launcher",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        if exc.code in (401, 403):
+            raise UsageError(
+                f"Command Code rejected the API key ({exc.code}); "
+                f"run 'claunch set-token {profile.name}' with a current key"
+            ) from exc
+        raise UsageError(f"Command Code {path} request failed ({exc.code}): {detail[:200]}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise UsageError(f"could not reach the Command Code API: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"unexpected (non-JSON) Command Code {path} response: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise UsageError(f"unexpected Command Code {path} response: {json.dumps(payload)[:200]}")
+    return payload
+
+
+def _commandcode_plan(plan_id: object) -> Optional[str]:
+    """The key of :data:`_COMMANDCODE_PLAN_CREDITS` a plan id falls under."""
+    text = str(plan_id or "").strip().lower().replace("_", "-")
+    if not text:
+        return None
+    for prefix in sorted(_COMMANDCODE_PLAN_CREDITS, key=len, reverse=True):
+        if text.startswith(prefix):
+            return prefix
+    return None
+
+
+def _commandcode_reset(value: object) -> Optional[str]:
+    """A window's ``resetAt`` as ISO 8601. The CLI compares it with
+    ``Date.now()``, so a number is epoch milliseconds; a value small enough
+    to be seconds is read as seconds, and a string is passed through."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return None
+    return str(value)
+
+
+def _commandcode_windows(
+    credits_reply: dict, subscription: Optional[dict], spent: Optional[float] = None
+) -> List[UsageWindow]:
+    """The windows of one Command Code account: 5-hour and weekly when its
+    plan has them, then the monthly credit pool.
+
+    The pool is computed the way the CLI's ``/usage`` bar computes it: an
+    active subscription's pool is its plan's grant (or the remaining monthly
+    credits, if larger) plus purchased and free credits; without one, what is
+    left plus what the period has spent is all the reply allows.
+    """
+    windows: List[UsageWindow] = []
+    limits = credits_reply.get("windowLimits")
+    exceeded = ""
+    if isinstance(limits, dict):
+        exceeded = str(limits.get("exceeded") or "").strip()
+        for key, name in _COMMANDCODE_WINDOWS:
+            row = limits.get(key)
+            if not isinstance(row, dict):
+                continue
+            used = _number(row.get("used"))
+            cap = _number(row.get("cap"))
+            if used is None or cap is None:
+                continue
+            pct = 0.0 if cap <= 0 else max(0.0, min(100.0, used / cap * 100.0))
+            windows.append(UsageWindow(
+                name=name,
+                utilization=pct,
+                resets_at=_commandcode_reset(row.get("resetAt")),
+                status="exceeded" if exceeded in (key, name) else None,
+            ))
+
+    balance = credits_reply.get("credits")
+    if isinstance(balance, dict):
+        monthly = max(0.0, _number(balance.get("monthlyCredits")) or 0.0)
+        purchased = max(0.0, _number(balance.get("purchasedCredits")) or 0.0)
+        free = max(0.0, _number(balance.get("freeCredits")) or 0.0)
+        remaining = monthly + purchased + free
+        sub = subscription if isinstance(subscription, dict) else {}
+        plan = _commandcode_plan(sub.get("planId"))
+        grant = _COMMANDCODE_PLAN_CREDITS.get(plan) if plan else None
+        if sub.get("status") == "active" and grant is not None:
+            pool = max(grant, monthly) + purchased + free
+        else:
+            pool = remaining + max(0.0, spent or 0.0)
+        used = max(0.0, pool - remaining)
+        pct = 0.0 if pool <= 0 else max(0.0, min(100.0, used / pool * 100.0))
+        status = None
+        if remaining <= 0 and pool > 0:
+            status = "exceeded"
+        elif balance.get("belowThreshold") is True:
+            status = "low"
+        end = sub.get("currentPeriodEnd")
+        windows.append(UsageWindow(
+            name="monthly",
+            utilization=pct,
+            resets_at=str(end) if end else None,
+            used_dollars=round(used, 4),
+            limit_dollars=round(pool, 4),
+            remaining_dollars=round(remaining, 4),
+            status=status,
+        ))
+    if not windows:
+        raise UsageError(
+            f"unexpected Command Code credits response: {json.dumps(credits_reply)[:200]}"
+        )
+    return windows
+
+
+def _fetch_commandcode(profile: Profile, token: str) -> UsageReport:
+    if not token:
+        raise credentials.CredentialsError(
+            f"no Command Code API key for profile {profile.name!r}; "
+            f"run 'claunch set-token {profile.name}' first"
+        )
+    whoami = _commandcode_get(profile, "/alpha/whoami", token, {"limits": "1"})
+    org = whoami.get("org") if isinstance(whoami.get("org"), dict) else None
+    org_id = org.get("id") if org else None
+    credits_reply = _commandcode_get(profile, "/alpha/billing/credits", token, {"orgId": org_id})
+    try:
+        sub_reply = _commandcode_get(
+            profile, "/alpha/billing/subscriptions", token, {"orgId": org_id}
+        )
+    except UsageError:
+        # The CLI shows the balance without a subscription too; a plan we
+        # cannot name only loses the pool's plan grant, not the reading.
+        sub_reply = {}
+    subscription = sub_reply.get("data") if isinstance(sub_reply.get("data"), dict) else None
+    spent = None
+    granted = (
+        subscription is not None
+        and subscription.get("status") == "active"
+        and _commandcode_plan(subscription.get("planId")) is not None
+    )
+    if not granted:
+        # Without an active plan whose grant is known, the pool is "left +
+        # spent this period", so the period's spend is needed; with one, the
+        # plan grant fixes it. An active plan the table does not name lands
+        # here too, as it does in the CLI (whose plan info is then null).
+        since = subscription.get("currentPeriodStart") if subscription else None
+        try:
+            summary = _commandcode_get(
+                profile, "/alpha/usage/summary", token, {"orgId": org_id, "since": since}
+            )
+            spent = _number(summary.get("totalCost"))
+        except UsageError:
+            spent = None
+    windows = _commandcode_windows(credits_reply, subscription, spent)
+    plan = _commandcode_plan(subscription.get("planId") if subscription else None)
+    limits = credits_reply.get("windowLimits")
+    raw = {
+        "plan": plan,
+        "plan_name": _COMMANDCODE_PLAN_NAMES.get(plan) if plan else None,
+        "plan_status": subscription.get("status") if subscription else None,
+        # "provider" when the account reports no rolling limits: the
+        # Provider plan, measured by its monthly credits alone.
+        "mode": (
+            "windowed"
+            if isinstance(limits, dict) and limits.get("limited")
+            else "provider" if plan == "individual-provider" else "credits"
+        ),
+        "credits": credits_reply.get("credits"),
+        "windowLimits": limits,
+    }
+    return UsageReport(windows=windows, raw=raw, source="commandcode")
+
+
 def _opengateway_context(profile: Profile) -> Optional[str]:
     """The upstream whose local records a profile's OpenGateway traffic lands
     under, or ``None`` when its provider is another backend.
@@ -769,12 +1080,17 @@ def credit_setting(profile: Profile) -> Optional[tuple[float, date]]:
     return balance, as_of
 
 
-def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
-    url = f"{_FIREWORKS_API}/{path}"
-    if query:
-        url += "?" + urllib.parse.urlencode(query)
+def _fireworks_request(url: str, token: str, body: Optional[dict] = None) -> dict:
+    """One Fireworks API call: ``GET``, or ``POST`` when ``body`` is given."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        url,
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -797,6 +1113,13 @@ def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
     return payload
 
 
+def _fireworks_get(path: str, token: str, query: Optional[dict] = None) -> dict:
+    url = f"{_FIREWORKS_API}/{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    return _fireworks_request(url, token)
+
+
 def _money(value) -> float:
     """A ``google.type.Money`` value (``units`` string, ``nanos``) in units."""
     if not isinstance(value, dict):
@@ -816,6 +1139,154 @@ def _fireworks_spent_since(account: str, token: str, since: date, today: date) -
         },
     )
     return sum(_money(item.get("totalCost")) for item in summary.get("lineItems") or [])
+
+
+def _fireworks_stamp(moment: datetime) -> str:
+    """``moment`` as the RFC 3339 stamp ``usageCosts:query`` takes."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _stored_tokens() -> List[tuple]:
+    """``(profile name, launcher token)`` for every profile that holds one.
+
+    The profile's *own* token file, not the token it inherits: a profile with
+    no token of its own launches with its ancestor's, and naming it here
+    would repeat one key under every descendant that borrows it.
+    """
+    pairs: List[tuple] = []
+    try:
+        profiles = profile_mod.list_all()
+    except (OSError, profile_mod.ProfileError):
+        return pairs
+    for candidate in profiles:
+        try:
+            token = credentials.stored_token(candidate)
+        except (OSError, credentials.CredentialsError, profile_mod.ProfileError):
+            token = None
+        token = str(token or "").strip()
+        if token:
+            pairs.append((candidate.name, token))
+    return pairs
+
+
+def _fireworks_key_owners(keys: List[dict]) -> Dict[str, List[str]]:
+    """The local profiles that hold each of ``keys``, keyed by ``keyId``.
+
+    The console names a key whatever the person typed there (``default``,
+    ``rni-kimdaejin``), which answers "which key" but not "which of my
+    profiles". The launcher knows that: a Fireworks key here *is* the
+    launcher token of the profile that holds it, and the console reports
+    each key's leading characters as ``prefix``. So a profile whose stored
+    token starts with the prefix holds that key, and two profiles on one
+    account come out named instead of numbered.
+
+    Every profile is asked, not only the Fireworks ones: the prefix already
+    identifies the holder, and resolving each profile's provider would read
+    the configuration once per profile for a filter that cannot change the
+    answer.
+    """
+    pairs = _stored_tokens()
+    owners: Dict[str, List[str]] = {}
+    if not pairs:
+        return owners
+    for item in keys:
+        key_id = str(item.get("keyId") or "").strip()
+        prefix = str(item.get("prefix") or "").strip()
+        if not key_id or not prefix:
+            continue
+        names = [name for name, token in pairs if token.startswith(prefix)]
+        if names:
+            owners[key_id] = names
+    return owners
+
+
+def _fireworks_api_keys(account: str, token: str) -> List[dict]:
+    """The account's API keys, as ``keyId``/``displayName``/``prefix``."""
+    users = _fireworks_get(f"{account}/users", token).get("users") or []
+    user = ""
+    if users and isinstance(users[0], dict):
+        user = str(users[0].get("name") or "").rsplit("/", 1)[-1].strip()
+    if not user:
+        return []
+    reply = _fireworks_get(f"{account}/users/{user}/apiKeys", token)
+    return [item for item in reply.get("apiKeys") or [] if isinstance(item, dict)]
+
+
+def _fireworks_key_amounts(
+    account: str, token: str, now: datetime
+) -> List[UsageKeyAmount]:
+    """Month-to-date rated cost per API key of ``account``.
+
+    The account-wide quota this reader already shows cannot tell two keys
+    apart, which is why two profiles on one account print the same spend.
+    ``usageCosts:query`` rates each key separately, and the account's own
+    total is the same answer's top-level subtotal.
+
+    The key list is asked separately because a key with no usage this month
+    has no cost row to carry its name; a failure there costs the labels, not
+    the amounts.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    month_start = now.astimezone(timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    reply = _fireworks_request(
+        f"{_FIREWORKS_API}/{account}/usageCosts:query",
+        token,
+        {
+            "startTime": _fireworks_stamp(month_start),
+            "endTime": _fireworks_stamp(now),
+            "scope": "ACCOUNT",
+            "groupBy": [_FIREWORKS_KEY_GROUP],
+        },
+    )
+    totals: Dict[str, float] = {}
+    for row in reply.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        dimensions = row.get("dimensions")
+        if not isinstance(dimensions, dict):
+            continue
+        key_id = str(dimensions.get("apiKeyId") or "").strip()
+        if not key_id:
+            # A row whose usage could not be attributed to a key. It still
+            # counts in the account total, which is the window above.
+            continue
+        totals[key_id] = totals.get(key_id, 0.0) + _money(row.get("subtotal"))
+    if not totals:
+        return []
+    labels: Dict[str, str] = {}
+    try:
+        keys = _fireworks_api_keys(account, token)
+        owners = _fireworks_key_owners(keys)
+        for item in keys:
+            key_id = str(item.get("keyId") or "").strip()
+            if not key_id:
+                continue
+            names = owners.get(key_id)
+            if names:
+                labels[key_id] = ", ".join(names)
+            elif item.get("displayName"):
+                labels[key_id] = str(item["displayName"])
+            else:
+                labels[key_id] = key_id
+    except (UsageError, credentials.CredentialsError, OSError):
+        # The amounts are still worth showing: an unnamed key is named by its
+        # id rather than dropping the breakdown over a label.
+        labels = {}
+    amounts = [
+        UsageKeyAmount(
+            key_id=key_id,
+            label=labels.get(key_id, key_id),
+            used_dollars=round(amount, 6),
+        )
+        for key_id, amount in totals.items()
+    ]
+    amounts.sort(key=lambda item: (-item.used_dollars, item.key_id))
+    return amounts
 
 
 def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = None) -> UsageReport:
@@ -863,7 +1334,31 @@ def _fetch_fireworks(profile: Profile, token: str, now: Optional[datetime] = Non
             )
         )
         raw["credit"] = {"balance_usd": balance, "as_of": as_of.isoformat(), "spent": used}
-    return UsageReport(windows=windows, raw=raw, source="fireworks-billing")
+    # The account total above cannot tell two keys of one account apart, so
+    # this profile's card would print the same spend as its siblings'. The
+    # per-key breakdown is what separates them; when the account's API will
+    # not rate keys (or the key list cannot be read) the card keeps the
+    # total alone rather than failing a reading that already has a number.
+    api_keys: List[UsageKeyAmount] = []
+    note = ""
+    try:
+        api_keys = _fireworks_key_amounts(account, token, now)
+    except (UsageError, credentials.CredentialsError, OSError) as exc:
+        raw["api_keys_error"] = str(exc)
+        note = API_KEYS_UNREAD
+    if not api_keys:
+        # An empty list is three different answers, and the card saying one
+        # sentence for all of them hid which one it was (claunch-uqnek.1).
+        # Nothing spent yet is not a failure and not a gap in the account's
+        # billing: it is the month before anything ran.
+        note = API_KEYS_NO_SPEND if spent <= 0 else note or API_KEYS_NO_BREAKDOWN
+    return UsageReport(
+        windows=windows,
+        raw=raw,
+        source="fireworks-billing",
+        api_keys=api_keys,
+        api_keys_note="" if api_keys else note,
+    )
 
 
 def _codex_window_name(minutes) -> str:
@@ -1206,6 +1701,8 @@ def reader(profile: Profile) -> str:
             return "fireworks-billing"
         if _opencode_go_context(profile) is not None:
             return "opencode-go"
+        if _commandcode_context(profile) is not None:
+            return "commandcode"
         if _opengateway_context(profile) is not None:
             return "opengateway-local"
         provider = providers.resolve_name(profile)
@@ -1242,6 +1739,11 @@ def fetch(profile: Profile) -> UsageReport:
         if token is None:
             raise UsageError(f"profile {profile.selector!r} no longer selects OpenCode Go")
         return _fetch_opencode_go(profile, token)
+    if kind == "commandcode":
+        token = _commandcode_context(profile)
+        if token is None:
+            raise UsageError(f"profile {profile.selector!r} no longer selects Command Code")
+        return _fetch_commandcode(profile, token)
     if kind == "opengateway-local":
         return _fetch_opengateway(profile)
     if kind == "anthropic":
@@ -1255,7 +1757,9 @@ def fetch(profile: Profile) -> UsageReport:
 #: Readers that measure usage *per key*: the token the pool holds is the
 #: credential the endpoint authenticates, so spreading launches over several
 #: keys spreads the usage the strategy compares.
-KEYED_READERS = ("anthropic", "kimi-provider", "fireworks-billing", "opencode-go")
+KEYED_READERS = (
+    "anthropic", "kimi-provider", "fireworks-billing", "opencode-go", "commandcode",
+)
 
 #: Readers whose usage belongs to the harness login, with the sentence a
 #: usage strategy quotes when it falls back to rotation. Rotating keys cannot
@@ -1308,6 +1812,8 @@ def report_for_token(profile: Profile, token: str) -> Optional[UsageReport]:
         return _fetch_fireworks(profile, token)
     if kind == "opencode-go":
         return _fetch_opencode_go(profile, token)
+    if kind == "commandcode":
+        return _fetch_commandcode(profile, token)
     return None
 
 
@@ -1325,12 +1831,171 @@ def utilization_for_token(profile: Profile, token: str) -> Optional[float]:
     drops the windows; :func:`report_for_token` is the same read for callers
     that display them.
     """
-    report = report_for_token(profile, token)
+    health = health_for_token(profile, token)
+    return None if health is None else health.peak
+
+
+#: Utilization (0-100) at or above which a window counts as spent. The readers
+#: report integers, so the line is the reported limit itself; a key sitting at
+#: 99% is still spent by the time a restart finishes, and the switch has no
+#: second chance to reconsider, so "about to stop" is not a useful answer here.
+AT_LIMIT = 100.0
+
+#: Window ``status`` words that mean the plan behind this key is spent whatever
+#: the percentage says. The readers pass three different vocabularies through
+#: (the OAuth header reader forwards the endpoint's own word, the balance
+#: readers set their own), so this is a set of the words seen so far and not a
+#: closed enum -- anything unrecognised is judged by its numbers instead.
+SPENT_STATUSES = ("blocked", "rejected", "rate_limited", "exceeded", "limited")
+
+
+@dataclass(frozen=True)
+class KeyHealth:
+    """One key's usage as a *selection* needs it.
+
+    ``peak`` is the highest utilization across the account's windows (the same
+    number :func:`utilization_for_token` has always answered) and is what the
+    "usage min" comparison orders by. ``blocked`` names the window that is
+    already spent, and is what makes a key unusable however low its other
+    windows are: switching onto it would run straight into the same stop.
+    """
+
+    peak: float
+    blocked: str = ""
+    #: ``(name, utilization)`` per window, in the report's own order. Kept so
+    #: two keys whose peaks tie can be told apart by the *shorter* window
+    #: first (see :func:`window_rank`): the 5-hour plan comes back within
+    #: hours and the monthly one does not, so the key that is lower on the
+    #: short window is the better bet for the next work session.
+    windows: Tuple[Tuple[str, float], ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return not self.blocked
+
+
+#: Substrings that place a window name on the 5-hour / week / month ladder.
+#: The readers name their windows freely (``five_hour``, ``7d``,
+#: ``monthly_spend``, a Codex ``duration`` spelling), so this matches substrings
+#: rather than an enum, shortest window first.
+_WINDOW_LADDER = (
+    ("five_hour", 0), ("5h", 0), ("7d", 1), ("seven_day", 1), ("week", 1),
+    ("month", 2), ("30d", 2),
+)
+
+
+def window_rank(name: str) -> int:
+    """Where a window name sits on the 5-hour(0) / week(1) / month(2) ladder.
+
+    ``3`` for a window this does not recognise (a credit balance, a per-model
+    bucket): it takes part in the "spent" test and in the peak, but sorts
+    after the three windows the operator's rule names.
+    """
+    text = str(name or "").strip().lower()
+    for needle, rank in _WINDOW_LADDER:
+        if needle in text:
+            return rank
+    return 3
+
+
+def tie_break_key(health: "KeyHealth") -> tuple:
+    """The ordering that separates two keys whose peaks are equal.
+
+    Shorter window first, then the next: a key lower on the 5-hour plan is
+    free sooner, which is what a restart is being spent on.
+
+    The comparison is made rung by rung of the 5-hour / week / month ladder,
+    so two keys whose accounts report different windows still compare like
+    with like (claunch-j43qd): a pool can hold a Command Code Provider-plan
+    key, which has only the monthly pool, beside a key on a plan with 5-hour
+    and weekly limits. A rung a key does not report is ``0`` -- that account
+    has no limit there to run into -- and several windows on one rung (a
+    per-model bucket) count by the highest.
+    """
+    rungs = [0.0] * 4
+    for name, value in health.windows:
+        rank = window_rank(name)
+        rungs[rank] = max(rungs[rank], float(value))
+    return (health.peak, tuple(rungs))
+
+
+def health_for_report(report: Optional[UsageReport]) -> Optional[KeyHealth]:
+    """The selection view of one :class:`UsageReport`, or ``None`` with none.
+
+    Peak first, then the spent windows: a key is unusable when ANY window has
+    reached its limit, because the session that lands on it will hit that
+    window next -- that is exactly the situation the switch exists to leave.
+    """
     if report is None:
         return None
     values = [
-        window.utilization
+        float(window.utilization)
         for window in report.windows
         if isinstance(window.utilization, (int, float))
     ]
-    return max(values) if values else None
+    windows = tuple(
+        (str(window.name or ""), float(window.utilization))
+        for window in report.windows
+        if isinstance(window.utilization, (int, float))
+    )
+    blocked = ""
+    for window in report.windows:
+        if _window_spent(window):
+            blocked = str(window.name or "")
+            break
+    if not values and not blocked:
+        return None
+    return KeyHealth(
+        peak=max(values) if values else AT_LIMIT, blocked=blocked, windows=windows
+    )
+
+
+def _window_spent(window: UsageWindow) -> bool:
+    status = str(window.status or "").strip().lower()
+    if status in SPENT_STATUSES:
+        return True
+    if window.remaining_dollars is not None and window.remaining_dollars <= 0:
+        return True
+    return isinstance(window.utilization, (int, float)) and float(
+        window.utilization
+    ) >= AT_LIMIT
+
+
+def health_for_token(profile: Profile, token: str) -> Optional[KeyHealth]:
+    """:func:`health_for_report` for one key's own token (see its docstring).
+
+    Same reader rules as :func:`report_for_token`: only the keyed readers can
+    answer, and the login-scoped ones answer ``None`` because their usage
+    belongs to the login.
+    """
+    return health_for_report(report_for_token(profile, token))
+
+
+def health_for_rows(
+    windows: Optional[Iterable[dict]],
+) -> Optional[KeyHealth]:
+    """:func:`health_for_report` for a reading already serialized as rows.
+
+    The create form's per-key answer (``profile_usage.key_usage``) is a list of
+    dicts rather than a :class:`UsageReport`. The selection rule -- a spent
+    window makes the key unusable -- is the same one the launch applies, so it
+    is applied here instead of being retyped in the caller that builds the
+    form's preview (claunch-hego3).
+    """
+    rows = []
+    for window in windows or ():
+        if not isinstance(window, dict):
+            continue
+        rows.append(
+            UsageWindow(
+                name=str(window.get("name") or ""),
+                utilization=window.get("utilization"),
+                resets_at=window.get("resets_at"),
+                used_dollars=window.get("used_dollars"),
+                limit_dollars=window.get("limit_dollars"),
+                status=window.get("status"),
+                remaining_dollars=window.get("remaining_dollars"),
+                detail=window.get("detail"),
+            )
+        )
+    return health_for_report(UsageReport(windows=rows, raw={}))

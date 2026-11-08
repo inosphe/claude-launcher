@@ -19,7 +19,9 @@ await          completed by
 ``pause``      :func:`wait_tick` (a loop's ``every`` between iterations)
 ``limit``      :func:`extend_loop` (a loop at its ``max``; the run is
                ``waiting_approval`` with reason ``loop_limit``; extend it
-               or reset its count) or
+               or reset its count), :func:`self_extend_loop` (the run's
+               driver opens it by one iteration, only when the loop's
+               declared ``self_answer`` check exits 0) or
                :func:`extend_visits` (a node entered more than the chart's
                ``max_visits`` times; reason ``visit_limit``)
 ``approval``   an ask's answer (:func:`approve`, :func:`answer`)
@@ -80,6 +82,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -99,6 +102,7 @@ except ImportError:  # pragma: no cover
 from . import expr as expr_mod
 from . import collections as col_mod
 from . import question as q_mod
+from .inputs import RULES_HEADER
 
 ST_RUNNING = "running"
 ST_WAITING = "waiting_approval"
@@ -161,6 +165,27 @@ MAX_ROSTER_DEFERRALS = 4
 
 CALLER_AGENT = "agent"
 CALLER_USER = "user"
+#: The driving session's parent session, answering a person's gate on its
+#: child's run (claunch-vjp4y). A person's gate -- a ``chooser: user`` choice,
+#: the driver's move/report request, a forced report -- is normally answered
+#: by a person; in a parent/child hierarchy the parent is the one who was
+#: going to be asked anyway, and it answers inside its own turn instead of
+#: waiting for somebody to look at the dashboard. The driver itself never
+#: counts (a grant the asker can give itself is not a grant), and neither
+#: does a sibling or any other session: the parent edge is read from the
+#: session registry and copied into the run (``DRIVER_PARENT``).
+CALLER_PARENT = "parent"
+
+#: The ``from`` candidate role that names the driver's own parent session
+#: (``{role: parent}``) instead of a mesh role (claunch-vjp4y.2). It is
+#: resolved by :mod:`.asks` from ``DRIVER_PARENT``, never from the roster: the
+#: parent relationship is not one the mesh knows.
+PARENT_ROLE = "parent"
+
+#: State key: the session that spawned the driver (``SessionDef.parent``),
+#: recorded at start and refreshed by the daemon's v2 scan. Empty means the
+#: run has no delegating parent -- the person answers every gate.
+DRIVER_PARENT = "driver_parent"
 
 #: State key of the driver's move request (:func:`request_move`): one per run,
 #: pending until a person answers; a refusal stays until the driver files
@@ -180,6 +205,20 @@ NUDGE_NOTE_LIMIT = 1500
 #: to a ``force_target`` node, or a report of one of its active tasks.
 MOVE_KIND_MOVE = "move"
 MOVE_KIND_REPORT = "report"
+
+#: What a *gate ask* answers (claunch-vjp4y.2.1): a ``chooser: user`` choice,
+#: or the driver's move/report request. A gate ask is an ordinary ask record
+#: (``kind: "gate"`` in its ``gate`` field) opened when the gate stands, so
+#: the candidate groups, deadline, ``_ask_escalate`` and ``delegate.allow``
+#: rules the ask path already has are the ones the gate is answered by; its
+#: answer applies as the pick or the move verdict rather than as a task's
+#: outcome. It exists only while the gate has somewhere to route: with no
+#: candidate that can answer, the gate is the person's alone, as before.
+GATE_CHOICE = "choice"
+GATE_MOVE = "move"
+GATE_TARGETS = (GATE_CHOICE, GATE_MOVE)
+#: The options a move/report gate is answered with (``resolve_move``).
+MOVE_VERDICTS = ("approve", "deny")
 
 #: Probe poll interval when a wait declares none.
 DEFAULT_POLL = 60.0
@@ -349,6 +388,34 @@ def driver_of(state: Dict[str, Any]) -> str:
         return str(state.get("driver") or "")
     scope = str(state.get("scope") or "")
     return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
+
+
+def driver_parent_of(state: Dict[str, Any]) -> str:
+    """The session that spawned the run's driver (``DRIVER_PARENT``), or "".
+
+    Written at start (``flow_start`` asks the daemon) and refreshed by the
+    daemon's v2 scan, so a reparent moves the delegation with it. An empty
+    value means nobody is delegated: the run's gates are a person's alone.
+    """
+    return str(state.get(DRIVER_PARENT) or "").strip()
+
+
+def gate_authority(state: Dict[str, Any], session: str) -> str:
+    """Who may answer this run's person gates: ``CALLER_USER`` when the
+    caller is a terminal outside the run's session, ``CALLER_PARENT`` when it
+    is the driver's parent session, "" when it is nobody.
+
+    The driver is never included, whoever asks: an agent answering its own
+    gate defeats the reason the gate exists. A gate an agent cannot take
+    stays a person's, so a run with no parent loses nothing.
+    """
+    session = str(session or "").strip()
+    if not session:
+        return CALLER_USER
+    if session == driver_of(state).strip():
+        return ""
+    parent = driver_parent_of(state)
+    return CALLER_PARENT if parent and session == parent else ""
 
 
 def _cap_on(value: Any) -> bool:
@@ -783,6 +850,8 @@ def _en_choose(r: Run, iid: str, node: ir.Node) -> None:
     r.inst[iid]["await"] = AW_CHOOSE
     r.emit("waiting", node=node.id, instance=iid, kind="choose",
            chooser=node.get("chooser") or ir.CHOOSER_AGENT)
+    if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
+        _gate_open_choice(r, iid, node)
 
 
 def _en_par(r: Run, iid: str, node: ir.Node) -> None:
@@ -976,11 +1045,21 @@ def _loop_limit(r: Run, iid: str) -> None:
         # notification's age is this stamp, not when a browser first saw it
         "opened_at": r.now,
     }
+    gate = node.get("self_answer") or None
+    if gate:
+        # A hold the driver may open itself, once its check passes
+        # (claunch-9poqc): the card keeps the person a person's, and says
+        # out loud that a machine check also stands on it.
+        approval["self_answer"] = {"describe": gate.get("describe") or "",
+                                   "tool": "flow_extend"}
     r.state.setdefault("approvals", []).append(approval)
     r.state["status"] = ST_WAITING
     r.state["reason"] = "loop_limit"
-    r.emit("waiting", node=node.id, instance=iid, kind="loop_limit",
-           iterations=frame.get("iter"), max=approval["max"])
+    event = {"node": node.id, "instance": iid, "kind": "loop_limit",
+             "iterations": frame.get("iter"), "max": approval["max"]}
+    if gate:
+        event["self_answer"] = True
+    r.emit("waiting", **event)
 
 
 def _loop_body_done(r: Run, iid: str, outcome: str, value: Any) -> None:
@@ -1162,6 +1241,60 @@ def _par_child_done(r: Run, iid: str, role: str, outcome: str, value: Any) -> No
     frame["decided"] = True
     _cancel_children(r, iid, f"par settled ({node.get('settle')})")
     _complete(r, iid, decided[0], decided[1])
+
+
+def optional_choice(inst: Dict[str, Dict[str, Any]], chart, iid: str) -> bool:
+    """Whether the choice instance ``iid`` is a door nobody has to take.
+
+    A choice parked in a branch of a region that settles without that
+    branch runs on by itself: :func:`_par_child_done` calls
+    :func:`_cancel_children` the moment the settle is satisfied, so
+    leaving the door alone changes nothing. ``improv-worker-v2``'s
+    ``test-skip-gate`` -- a ``skip`` button racing the targeted-test loop
+    under ``settle: race`` -- is the case this exists for
+    (claunch-dsr4o, claunch-hbmhk): the rail used to draw it exactly like
+    a gate the run was stopped on.
+
+    The nearest enclosing ``par`` answers it. ``race`` and ``any`` decide
+    on the first branch, so every branch is skippable while there are two
+    or more (with one branch they behave like ``all``). ``quorum:K``
+    decides on K, so a branch is skippable while K is below the number of
+    branches. ``all`` and ``allSettled`` need every branch. Everything
+    this cannot prove -- no enclosing par, an unreadable node, a settle
+    mode it does not know -- answers ``False``: a gate that really does
+    stop the run must never be drawn as optional.
+
+    Takes the run's instance map (``Run.inst``, or the ``inst`` document
+    of a saved state) and its chart, so the daemon's rail asks the same
+    question without building a :class:`Run` (``daemon/cflow2_web.py``
+    ``rail_entry`` reads the saved state directly).
+    """
+    seen = set()
+    cur = (inst.get(iid) or {}).get("parent")
+    while cur is not None and cur not in seen:
+        seen.add(cur)
+        rec = inst.get(cur)
+        if not rec:
+            return False
+        try:
+            node = chart.node(rec.get("node"))
+        except ir.IRError:
+            return False
+        if node.type == ir.T_PAR:
+            names = list((node.get("branches") or {}).keys())
+            if len(names) < 2:
+                return False
+            base, _, k = str(node.get("settle") or ir.SETTLE_ALL).partition(":")
+            if base in (ir.SETTLE_RACE, ir.SETTLE_ANY):
+                return True
+            if base == ir.SETTLE_QUORUM:
+                try:
+                    return int(k or 1) < len(names)
+                except (TypeError, ValueError):
+                    return False
+            return False
+        cur = rec.get("parent")
+    return False
 
 
 def _group_child_done(r: Run, iid: str, child: str, role: str, outcome: str, value: Any) -> None:
@@ -2031,14 +2164,19 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
             continue
         tasks.append({
             "node": n.id, "label": n.label or None, "title": n.get("title"),
-            "prompt": render(n.get("prompt"), env), "done_when": n.get("done_when"),
+            "prompt": node_prompt(r, n, env), "done_when": n.get("done_when"),
             "verify": n.get("verify"), "returns": returns_of(n),
             "effects": n.get("effects") or [],
         })
         for rid in n.get("rules") or []:
             if rid not in rule_ids:
                 rule_ids.append(rid)
-    rules = [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")} for rid in rule_ids]
+    rules = []
+    for rid in rule_ids:
+        body = r.chart.rules.get(rid) or {}
+        if not rule_active(body, env):
+            continue
+        rules.append({"id": rid, "text": body.get("text")})
     receipt = str(r.store.receipt_path(did))
     out = {
         "delegation": did, "node": node.id, "label": shown_label(r.chart, node),
@@ -2285,7 +2423,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
              inputs: Optional[Dict[str, Any]] = None,
              previous: Optional[Dict[str, Any]] = None,
              side: Optional[Dict[str, Any]] = None,
-             mesh: Optional[str] = None) -> Run:
+             mesh: Optional[str] = None,
+             driver_parent: str = "") -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -2300,6 +2439,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
         "probe": {}, "outcome": None, "value": None,
         "scope": st.scope, "cwd": str(st.cwd), "driver": driver or "",
         "mesh": str(mesh or "").strip(),
+        DRIVER_PARENT: str(driver_parent or "").strip(),
         store_mod.DAEMON_KEY: store_mod.daemon_of(st.scope),
     }
     if parent:
@@ -2450,7 +2590,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           inputs: Optional[Dict[str, Any]] = None,
           side: Optional[Dict[str, Any]] = None,
           next_round_of: Optional[str] = None,
-          mesh: Optional[str] = None, catalog: Any = None) -> Dict[str, Any]:
+          mesh: Optional[str] = None, catalog: Any = None,
+          driver_parent: Optional[str] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
 
     ``catalog`` checks the start inputs that declare ``options:`` (see
@@ -2467,6 +2608,11 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     ``next_round_of`` (:func:`start_next_round`): the run whose auto
     next-round request this start fulfils; under the lock the slot must still
     hold that run with the request, or the start is refused.
+
+    ``driver_parent`` is the session that spawned ``driver``
+    (``DRIVER_PARENT``): the one agent-side hand that may answer this run's
+    person gates (claunch-vjp4y). The MCP start asks the daemon for it; empty
+    means no parent is known and every gate stays a person's.
 
     ``driver`` is the session that drives the run -- its identity for asks
     and for the MCP tools' authority (default :func:`default_driver`). A
@@ -2524,7 +2670,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
                      driver=who, now=now, inputs=input_values,
                      previous=previous if (previous or {}).get("workflow") == chart.name
-                     else None, side=side, mesh=mesh)
+                     else None, side=side, mesh=mesh,
+                     driver_parent=str(driver_parent or "").strip())
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -2613,18 +2760,30 @@ def may_drive(state: Dict[str, Any], session: str) -> bool:
     return False
 
 
-def authorize(*, cwd: Optional[str], scope: Optional[str], session: str) -> None:
+def authorize(*, cwd: Optional[str], scope: Optional[str], session: str,
+              gate: bool = False) -> str:
     """Refuse an agent's call on a run it does not drive (no run: nothing to
-    refuse; starting is checked by the caller)."""
+    refuse; starting is checked by the caller).
+
+    ``gate=True`` widens the door to the one case a non-driver has over a run
+    that is not its own: the driver's parent session reading the gates its
+    child waits on (``gate_authority``). Returns the authority the call
+    stands on -- ``CALLER_AGENT`` for the driver, ``CALLER_PARENT`` for the
+    parent -- so the caller can journal which hand answered.
+    """
     st = RunStore(cwd, scope)
     if not st.exists():
-        return
+        return CALLER_AGENT
     try:
         state = st.load_state()
     except StoreError:
-        return
+        return CALLER_AGENT
     if may_drive(state, session):
-        return
+        return CALLER_AGENT
+    if gate:
+        authority = gate_authority(state, session)
+        if authority == CALLER_PARENT:
+            return CALLER_PARENT
     drv = driver_of(state) or "no session"
     raise FlowError(
         f"the cflow2 run in {st.cwd} scope {st.scope!r} is driven by {drv}; "
@@ -2772,13 +2931,59 @@ def expand_argv(command: Any, env: Dict[str, str]) -> Any:
     """An argv command with each ``$CFLOW_<NAME>`` replaced by that
     variable of ``env`` (empty when unset), as a shell would for the string
     form. An argv runs without a shell, so nothing else would expand it --
-    and on Windows the string form goes to cmd.exe, which does not read
-    ``$VAR`` either. Each value stays inside its one argument; it is never
-    parsed as a command. A string command is returned unchanged."""
+    and a command the author wrote for a POSIX shell may use ``$VAR`` this
+    function does not know about, which is why the string form is run by one
+    (:func:`shell_command`) rather than left to the platform's default. Each
+    value stays inside its one argument; it is never parsed as a command. A
+    string command is returned unchanged."""
     if not isinstance(command, list):
         return command
     return [_ARGV_REF.sub(lambda m: str(env.get(m.group(1), "")), str(part))
             for part in command]
+
+
+#: How a command string is handed to a shell: ``bash -c`` where one is
+#: available, the platform default otherwise. ``cmd`` forces the latter; any
+#: other value names a shell to run instead of ``bash``.
+SHELL_ENV = "CLAUNCH_CFLOW_SHELL"
+
+#: Values of :data:`SHELL_ENV` that mean "the platform's own shell".
+_PLATFORM_SHELLS = ("cmd", "cmd.exe", "default", "platform")
+
+
+def shell_command(command: Any) -> Tuple[Any, bool]:
+    """``(command, shell)`` -- what :func:`subprocess.Popen` takes for one
+    step command, so that a string command runs in a POSIX shell.
+
+    Step commands are written for a POSIX shell: ``"$CFLOW_IN_KEY"``, ``a ||
+    b``, ``true``. ``shell=True`` gives that on POSIX, and gives cmd.exe on
+    Windows, where none of those work -- a string verify reached its program
+    with the quotes still in it. Measured (claunch-2kz0r): the same
+    coordinator verify answered ``passed`` under bash and ``key must be
+    <canonical board directory>#<issue id>`` under cmd.exe, and a workflow
+    cannot be written once for both.
+
+    So a string command on Windows runs as ``bash -c <command>`` when a bash
+    is on PATH (Git for Windows ships one) and as ``shell=True`` otherwise --
+    on a machine with no POSIX shell, commands needing one could not have
+    worked under any policy. An argv command keeps running without a shell,
+    as it already does. ``CLAUNCH_CFLOW_SHELL`` overrides the choice: one of
+    ``cmd``, ``cmd.exe``, ``default``, ``platform`` keeps the platform shell;
+    anything else is a shell to run instead of ``bash``, on every platform.
+    """
+    if not isinstance(command, str):
+        return command, False
+    override = (os.environ.get(SHELL_ENV) or "").strip()
+    if override.lower() in _PLATFORM_SHELLS:
+        return command, True
+    if override:
+        return [override, "-c", command], False
+    if os.name != "nt":
+        return command, True
+    bash = shutil.which("bash")
+    if not bash:
+        return command, True
+    return [bash, "-c", command], False
 
 
 def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
@@ -2789,8 +2994,8 @@ def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
     killed (exit 124)."""
     import tempfile
 
-    shell = not isinstance(command, list)
     command = expand_argv(command, env)
+    command, shell = shell_command(command)
     kwargs: Dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
@@ -3193,42 +3398,88 @@ NUDGE_HINT = ("The user may not be watching this terminal. The dashboard already
               "flow_nudge(message) once to put its one-line summary on that card, then wait")
 
 
+def _select_check(r: Run, node: Optional[str], option: str, *, caller: str, who: str,
+                  reason: Optional[str],
+                  person: Optional[bool] = None) -> Tuple[str, ir.Node, Dict[str, Any]]:
+    """The checks every pick passes before it is taken: the caller's authority
+    over a person's choice, the choice's own gate, the option and its guard,
+    and the reason the choice asks for.
+
+    Shared by :func:`select` (a person, the parent, the driver) and by a gate
+    ask's answer (:func:`_gate_apply`), so a pick that arrives as a reply to
+    the parent is judged by the same rules as one typed into ``flow_select``."""
+    if person is None:
+        person = caller == CALLER_USER
+    if not person:
+        _require_no_move_request(r)
+    if caller == CALLER_PARENT and gate_authority(r.state, who) != CALLER_PARENT:
+        # the parent's hand is the one grant an agent-side caller has;
+        # check it here too, so a caller that names the wrong hand is
+        # refused at the engine and not only by the surface that called it
+        raise FlowError(
+            f"{who or 'this caller'} may not answer this run's person gate: only the "
+            f"driving session's parent ({driver_parent_of(r.state) or 'none'}) answers "
+            f"it in the hierarchy")
+    iid = _find(r, node, (AW_CHOOSE,), "choice")
+    n = r.node_of(iid)
+    chooser = n.get("chooser") or ir.CHOOSER_AGENT
+    if chooser == ir.CHOOSER_USER and caller not in (CALLER_USER, CALLER_PARENT):
+        parent = driver_parent_of(r.state)
+        extra = (f" Its parent {parent!r} may answer it too, with "
+                 f"flow_select(scope={r.state.get('scope')!r})." if parent else "")
+        raise FlowError(
+            f"choice {n.label or n.id} is the user's (chooser: user). Present the "
+            f"options and your recommendation to the user; they pick with "
+            f"'claunch cflow2 select {iid} <option>' or on the run page.{extra} "
+            f"{NUDGE_HINT}"
+        )
+    opts = {o["name"]: o for o in n.get("options") or []}
+    if option not in opts:
+        raise FlowError(f"no option {option!r} (options: {', '.join(opts)})")
+    opt = opts[option]
+    try:
+        allowed = _guard(r, iid, opt.get("guard"))
+    except expr_mod.ExprError as exc:
+        raise FlowError(f"option {option!r} guard could not be evaluated: {exc}")
+    if not allowed:
+        raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
+    # a person may always answer without a reason (docs 2.11); the
+    # requirement is the agent's
+    if (n.get("require_reason") and not person
+            and not (reason or "").strip()):
+        raise FlowError(f"choice {n.label or n.id} requires a reason")
+    return iid, n, opt
+
+
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
            caller: str = CALLER_AGENT, cwd: Optional[str] = None,
-           scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
-    """Pick an option of an active ``choose``."""
+           scope: Optional[str] = None, now: Optional[float] = None,
+           by: Optional[str] = None) -> Dict[str, Any]:
+    """Pick an option of an active ``choose``.
+
+    ``caller`` is the authority the pick stands on: ``CALLER_USER`` for a
+    person, ``CALLER_PARENT`` for the driver's parent session answering a
+    ``chooser: user`` choice (claunch-vjp4y), ``CALLER_AGENT`` for the driver.
+    ``by`` names the hand that picked -- the session name for a parent pick,
+    the caller kind otherwise -- and is what ``person_picks`` and the journal
+    record.
+
+    A parent pick delegates the answer only: the person still may answer, the
+    pacing window still holds, and a reason is still required where the choice
+    demands one. Apart from the chooser check the parent is treated as an
+    agent, not as a person.
+    """
+    person = caller == CALLER_USER
+    who = str(by or "").strip() or caller
+
     def op(r: Run) -> None:
         _require_progress(r)
-        if caller != CALLER_USER:
-            _require_no_move_request(r)
-        iid = _find(r, node, (AW_CHOOSE,), "choice")
-        n = r.node_of(iid)
-        chooser = n.get("chooser") or ir.CHOOSER_AGENT
-        if chooser == ir.CHOOSER_USER and caller != CALLER_USER:
-            raise FlowError(
-                f"choice {n.label or n.id} is the user's (chooser: user). Present the "
-                f"options and your recommendation to the user; they pick with "
-                f"'claunch cflow2 select {iid} <option>' or on the run page. {NUDGE_HINT}"
-            )
-        opts = {o["name"]: o for o in n.get("options") or []}
-        if option not in opts:
-            raise FlowError(f"no option {option!r} (options: {', '.join(opts)})")
-        opt = opts[option]
-        try:
-            allowed = _guard(r, iid, opt.get("guard"))
-        except expr_mod.ExprError as exc:
-            raise FlowError(f"option {option!r} guard could not be evaluated: {exc}")
-        if not allowed:
-            raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
-        # a person may always answer without a reason (docs 2.11); the
-        # requirement is the agent's
-        if (n.get("require_reason") and caller != CALLER_USER
-                and not (reason or "").strip()):
-            raise FlowError(f"choice {n.label or n.id} requires a reason")
+        iid, n, opt = _select_check(r, node, option, caller=caller, who=who, reason=reason,
+                                    person=person)
         frame = r.inst[iid]["frame"]
         held = frame.get("held")
         opens = _window_opens(r, n, opt)
-        if caller != CALLER_USER and opens is not None and r.now < opens:
+        if not person and opens is not None and r.now < opens:
             if held and held.get("option") == option:
                 held["reason"] = reason
                 held["updated"] = r.now
@@ -3237,9 +3488,9 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             else:
                 if held:
                     r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
-                           why=f"{caller} chose {option}")
+                           why=f"{who} chose {option}")
                 frame["held"] = {"option": option, "reason": reason, "opens_at": opens,
-                                 "since": r.now, "by": caller}
+                                 "since": r.now, "by": who}
                 r.emit("select_held", node=n.id, instance=iid, option=option, reason=reason,
                        opens_at=opens)
             out["held"] = dict(frame["held"])
@@ -3247,9 +3498,10 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
         if held:
             frame.pop("held", None)
             r.emit("hold_cancelled", node=n.id, instance=iid, option=held.get("option"),
-                   why=f"{caller} chose {option}")
-        override = caller == CALLER_USER and opens is not None and r.now < opens
-        _take_option(r, iid, n, opt, reason, caller, override=override)
+                   why=f"{who} chose {option}")
+        override = person and opens is not None and r.now < opens
+        _take_option(r, iid, n, opt, reason, who, override=override,
+                     delegated=caller == CALLER_PARENT)
     out: Dict[str, Any] = {}
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -3339,8 +3591,12 @@ def _batch_status(r: Run, opt: Dict[str, Any], opens: Optional[float]) -> Dict[s
 
 
 def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Optional[str],
-                 by: str, override: bool = False) -> None:
+                 by: str, override: bool = False, delegated: bool = False) -> None:
     option = opt["name"]
+    # the gate stands only while nobody has taken it: a pick -- a person's,
+    # the parent's through flow_select, a paced window's -- closes the gate
+    # ask the parent may still be holding (claunch-vjp4y.2.1)
+    _gate_close(r, target=GATE_CHOICE, instance=iid, why=f"{by} took {option!r}", by=by)
     r.inst[iid]["await"] = None
     r.inst[iid]["frame"]["option"] = option
     # the chooser's reason travels with the option: an ask opened under it
@@ -3350,11 +3606,16 @@ def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Opti
     if opt.get("interval"):
         r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
     r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
-           override=True if override else None)
-    if by == CALLER_USER:
+           override=True if override else None,
+           **({"delegated": True} if delegated else {}))
+    if by == CALLER_USER or delegated:
+        # a person's pick, or the driver's parent answering for the person
+        # (claunch-vjp4y): both are instructions the driver must see, and the
+        # ``by``/``delegated`` pair says which hand it came from.
         picks = r.state.setdefault(PERSON_PICKS, [])
         picks.append({"instance": iid, "node": n.id, "label": n.label or n.id,
-                      "option": option, "reason": reason, "at": _iso(r.now)})
+                      "option": option, "reason": reason, "at": _iso(r.now),
+                      "by": by, "delegated": bool(delegated)})
         del picks[:-PERSON_PICKS_KEPT]
     if opt.get("child"):
         _enter_child(r, iid, opt["child"], "option")
@@ -3504,9 +3765,207 @@ def _call_chain(state: Dict[str, Any], _depth: int = 0) -> List[str]:
         return []
 
 
+#: How a call runs (docs 2.12.2): in the session that drives the calling
+#: run, or in a quick-fork of it. ``auto`` (the default) forks when the task
+#: declares ``fork_calls`` and the procedure ``forkable``; ``inline`` never.
+CALL_MODE_AUTO = "auto"
+CALL_MODE_INLINE = "inline"
+CALL_MODE_FORK = "fork"
+CALL_MODES = (CALL_MODE_AUTO, CALL_MODE_INLINE)
+#: The fork of a fork-mode call: queued until the daemon decides, running
+#: once a copy drives the callee, ``fallback`` when it went inline instead.
+FORK_QUEUED = "queued"
+FORK_RUNNING = "running"
+FORK_FALLBACK = "fallback"
+#: Who asked for a call: the driver (``flow_call``) or a person (the
+#: dashboard's sub procedure picker, claunch-8t5r0.4).
+CALL_BY_AGENT = "agent"
+CALL_BY_USER = "user"
+
+
+def _call_target(procedure: str, cwd: str):
+    """``(chart, pack)`` of a call's procedure: a plain name from the layers,
+    a ``<pack>:<procedure>`` from an installed pack (docs 2.12.1)."""
+    from . import layers, procpacks
+
+    if procpacks.is_qualified(procedure):
+        hit = procpacks.find(procedure, cwd)
+        chart = procpacks.load(procedure, cwd)
+        return chart, (hit[0] if hit else None)
+    if not layers.is_name(procedure):
+        raise FlowError(f"call {procedure!r}: give a procedure name, not a path")
+    return layers.load(procedure, cwd), None
+
+
+def _role_specs(chart: Any, pack: Any) -> List[Tuple[str, Dict[str, Any]]]:
+    specs = []
+    own = (chart.meta or {}).get("filter_roles") if chart is not None else None
+    if own:
+        specs.append(("procedure", own))
+    if pack is not None and pack.roles:
+        specs.append((f"pack {pack.id}", pack.roles))
+    return specs
+
+
+def role_refusal(chart: Any, pack: Any, roles: Optional[Any]) -> str:
+    """Why a session holding ``roles`` may not call this procedure ("" when
+    it may): the procedure's own ``filter_roles`` and its pack's ``roles``
+    must both admit one of the roles held (docs 2.12.1)."""
+    from . import procpacks
+
+    held = list(roles) if roles else []
+    for what, spec in _role_specs(chart, pack):
+        if not procpacks.admits(spec, held):
+            shown = "+".join(held) if held else "no known role"
+            return (f"{what} admits {procpacks.describe(spec)}; the calling session "
+                    f"holds {shown}")
+    return ""
+
+
+def _held_for(cwd: Optional[str], scope: Optional[str], chart: Any, pack: Any,
+              roles: Optional[Any]) -> Optional[Any]:
+    """The roles to judge a call by: given by the caller (the daemon knows
+    them), else read off the mesh -- only when some filter asks."""
+    if roles is not None or not _role_specs(chart, pack):
+        return roles
+    from . import procpacks
+
+    try:
+        st = RunStore(cwd, scope)
+        state = st.load_state()
+    except (StoreError, OSError):
+        return None
+    return procpacks.held_roles(acting_session(state), state.get("mesh") or "",
+                                str(st.cwd))
+
+
+def callable_procedures(cwd: Optional[str] = None, scope: Optional[str] = None,
+                        node: Optional[str] = None, *, roles: Optional[Any] = None,
+                        catalog: bool = True, read_roles: bool = True) -> Dict[str, Any]:
+    """Every procedure a task of this run could be asked to call, each with
+    whether it can be called now and why not (docs 2.12.1): the active
+    task's ``calls``, every installed pack's procedures, and -- ``catalog``
+    -- the procedures of packs that are only in the package catalog. The
+    same judgement :func:`call` refuses on, so a picker that offers an entry
+    as available offers what the call accepts."""
+    from . import layers, procpacks
+
+    st = RunStore(cwd, scope)
+    r = Run.load(st, None)
+    state = r.state
+    tasks = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_TASK]
+    calling = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_CALL]
+    target = None
+    if node:
+        target = next((iid for iid in tasks if iid == node or r.node_of(iid).id == node
+                       or shown_label(r.chart, r.node_of(iid)) == node), None)
+    elif len(tasks) == 1:
+        target = tasks[0]
+    tnode = r.node_of(target) if target else None
+    declared = list((tnode.get("calls") if tnode is not None else None) or [])
+    fork_caller = bool(tnode is not None and tnode.get("fork_calls"))
+    if roles is None and read_roles:
+        roles = procpacks.held_roles(acting_session(state), state.get("mesh") or "",
+                                     str(st.cwd))
+    run_why = ""
+    if state.get("status") not in LIVE_STATUSES:
+        run_why = f"the run is {state.get('status')}"
+    elif _halted(r):
+        run_why = "the run is halted"
+    elif pending_move(state) is not None:
+        run_why = "a move request is open on the run"
+    elif target is None:
+        run_why = ("a call is already open on the active task" if calling and not tasks
+                   else "no active task to attach the call to" if not tasks
+                   else "several tasks are active; name the one that calls")
+    chain = _call_chain(state)
+    out: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(name: str, source: str, pack: Any = None, installed: bool = True) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        entry: Dict[str, Any] = {"name": name, "source": source,
+                                 "pack": pack.id if pack is not None else None,
+                                 "installed": installed, "declared": name in declared}
+        chart = None
+        why = run_why
+        try:
+            if procpacks.is_qualified(name):
+                chart = procpacks.load(name, str(st.cwd), installed_only=False)
+            else:
+                chart = layers.load(name, str(st.cwd))
+        except Exception as exc:  # noqa: BLE001 - listed with its reason
+            why = why or f"does not compile or resolve: {exc}"
+        if chart is not None:
+            entry.update({"description": chart.description or "",
+                          "params": chart.params or {},
+                          "returns": chart.returns or {},
+                          "forkable": bool((chart.meta or {}).get("forkable")),
+                          "filter_roles": (chart.meta or {}).get("filter_roles")})
+            if chart.kind != ir.KIND_PROCEDURE:
+                why = why or f"{chart.name} is a {chart.kind}, not a procedure"
+            blocks = [k for k, d in (chart.params or {}).items()
+                      if (d or {}).get("type") == "block"]
+            if blocks and not why:
+                why = f"block parameter(s) {', '.join(blocks)} need a call site"
+        if pack is not None:
+            entry["pack_roles"] = pack.roles
+        if not installed and not why:
+            why = f"pack {pack.id} is in the catalog only; install it into this workspace"
+        if not why and source == "calls" and name not in declared:
+            why = "the active task does not declare it in calls"
+        if not why:
+            why = role_refusal(chart, pack, roles)
+        if not why and name in chain:
+            why = f"recursive call: {' -> '.join(chain + [name])}"
+        if not why and len(chain) >= CALL_DEPTH_MAX:
+            why = f"call depth {CALL_DEPTH_MAX} reached"
+        entry["mode"] = (CALL_MODE_FORK if fork_caller and entry.get("forkable")
+                         else CALL_MODE_INLINE)
+        entry["available"] = not why
+        entry["why"] = why
+        out.append(entry)
+
+    for name in declared:
+        hit = procpacks.find(name, str(st.cwd)) if procpacks.is_qualified(name) else None
+        add(name, "calls", hit[0] if hit else None)
+    for pack in procpacks.all_packs(str(st.cwd)):
+        if not pack.installed and not catalog:
+            continue
+        for proc in pack.procedures:
+            add(procpacks.qualify(pack.id, proc), "pack", pack, pack.installed)
+    return {"run": state.get("run_id"), "scope": st.scope, "cwd": str(st.cwd),
+            "task": target, "task_label": shown_label(r.chart, tnode) if tnode else None,
+            "fork_calls": fork_caller, "roles": list(roles) if roles else None,
+            "refusal": run_why, "procedures": out}
+
+
+def _pack_calls(r: Run) -> List[str]:
+    """The installed pack procedures visible from the run's directory, by
+    qualified name (cached per status call on the Run)."""
+    cached = getattr(r, "_pack_calls_cache", None)
+    if cached is not None:
+        return cached
+    from . import procpacks
+
+    try:
+        names = [procpacks.qualify(p.id, proc)
+                 for p in procpacks.installed(str(r.store.cwd)) for proc in p.procedures]
+    except OSError:
+        names = []
+    try:
+        setattr(r, "_pack_calls_cache", names)
+    except AttributeError:
+        pass
+    return names
+
+
 def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, Any]] = None,
          *, cwd: Optional[str] = None, scope: Optional[str] = None,
-         now: Optional[float] = None) -> Dict[str, Any]:
+         now: Optional[float] = None, mode: Optional[str] = None,
+         roles: Optional[Any] = None, by: str = CALL_BY_AGENT) -> Dict[str, Any]:
     """An active task calls ``procedure`` (doc 2.12): the definition is
     resolved by name from the run's layers now, compiled, and started as a
     nested run ``<scope>~c<n>`` that the driver drives with the flow_* tools.
@@ -3516,11 +3975,30 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
     (default deny); one open call per task; no procedure twice in a chain
     and at most :data:`CALL_DEPTH_MAX` frames."""
     procedure = str(procedure or "").strip()
-    from . import layers
-    if not layers.is_name(procedure):
+    from . import layers, procpacks
+    if not (layers.is_name(procedure) or procpacks.is_qualified(procedure)):
         raise FlowError(f"call {procedure!r}: give a procedure name, not a path")
     if with_ is not None and not isinstance(with_, dict):
         raise FlowError("'with' must be an object of parameter -> value")
+    mode = str(mode or CALL_MODE_AUTO)
+    if mode not in CALL_MODES:
+        raise FlowError(f"call mode {mode!r}: one of {', '.join(CALL_MODES)}")
+    if by not in (CALL_BY_AGENT, CALL_BY_USER):
+        raise FlowError(f"call by {by!r}: one of {CALL_BY_AGENT}, {CALL_BY_USER}")
+    # Resolved before the run lock: compiling and reading the mesh roles
+    # (a daemon round trip) must not hold the run.
+    # A lookup error is held until the task's own checks ran: a name the
+    # task does not declare is refused as such, not as an unknown file.
+    st0 = RunStore(cwd, scope)
+    chart, pack, load_error = None, None, None
+    try:
+        chart, pack = _call_target(procedure, str(st0.cwd))
+    except FlowError as exc:
+        load_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - compile/lookup errors refuse the call
+        load_error = f"call {procedure!r}: {exc}"
+    is_pack = procpacks.is_qualified(procedure)
+    held = _held_for(cwd, scope, chart, pack, roles) if chart is not None else roles
     out: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
@@ -3529,20 +4007,24 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
         iid = _find(r, node, (AW_TASK,), "task")
         tnode = r.node_of(iid)
         allowed = tnode.get("calls") or []
-        if procedure not in allowed:
+        # Allowed: the task's own calls, or any procedure of an installed
+        # pack (docs 2.12.1, user decision qa-b9b833c7).
+        if procedure not in allowed and not is_pack:
             raise FlowError(
                 f"refused: task {shown_label(r.chart, tnode)} may not call {procedure!r} "
-                f"(its calls: {', '.join(allowed) or 'none declared'})")
+                f"(its calls: {', '.join(allowed) or 'none declared'}; a procedure of an "
+                f"installed pack is named <pack>:<procedure>)")
+        if load_error:
+            raise FlowError(load_error)
+        why = role_refusal(chart, pack, held)
+        if why:
+            raise FlowError(f"refused: call {procedure!r}: {why}")
         chain = _call_chain(r.state)
         if procedure in chain:
             raise FlowError(f"refused: recursive call: {' -> '.join(chain + [procedure])}")
         if len(chain) >= CALL_DEPTH_MAX:
             raise FlowError(f"refused: call depth {CALL_DEPTH_MAX} reached "
                             f"({' -> '.join(chain)})")
-        try:
-            chart = layers.load(procedure, str(r.store.cwd))
-        except Exception as exc:  # noqa: BLE001 - compile/lookup errors refuse the call
-            raise FlowError(f"call {procedure!r}: {exc}") from None
         if chart.kind != ir.KIND_PROCEDURE:
             raise FlowError(f"call {procedure!r}: {chart.name} is a {chart.kind}, not a "
                             f"procedure (kind: procedure)")
@@ -3562,20 +4044,31 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
         cid = f"c{len(calls) + 1}"
         sub = call_scope(r.store.scope, cid)
         returns = json.loads(json.dumps(chart.returns or {ir.OUTCOME_OK: {}}))
+        # Fork when both ends agree (docs 2.12.2): the caller declares
+        # fork_calls and the callee forkable. Until the daemon decides, the
+        # callee has no driver, so nobody drives it twice.
+        forked = (mode == CALL_MODE_AUTO and bool(tnode.get("fork_calls"))
+                  and bool((chart.meta or {}).get("forkable")))
         rec: Dict[str, Any] = {
             "id": cid, "instance": iid, "node": tnode.id,
             "label": shown_label(r.chart, tnode), "procedure": procedure,
             "with": params, "status": CALL_OPEN, "started": store_mod.utcnow(),
             "finished": None, "nested": {"cwd": str(r.store.cwd), "scope": sub},
             "returns": returns, "source": chart.source,
+            "mode": CALL_MODE_FORK if forked else CALL_MODE_INLINE,
+            "driver": driver, "by": by,
         }
+        if pack is not None:
+            rec["pack"] = pack.id
+        if forked:
+            rec["fork"] = {"status": FORK_QUEUED, "queued_at": store_mod.utcnow()}
         calls[cid] = rec
         frame = r.inst[iid]["frame"]
         frame.pop("call_result", None)
         frame["call"] = cid
         r.inst[iid]["await"] = AW_CALL
         r.emit("call_started", node=tnode.id, instance=iid, call=cid, procedure=procedure,
-               scope=sub, params=params)
+               scope=sub, params=params, mode=rec["mode"], by=by)
         link = {"cwd": str(r.store.cwd), "scope": r.store.scope, "call": cid,
                 "run": r.state.get("run_id"), "chain": chain + [procedure]}
         st = RunStore(str(r.store.cwd), sub)
@@ -3587,7 +4080,7 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             elif st.chart_path.exists():
                 st.chart_path.unlink()
             child = _new_run(st, chart, params=params, data=data, caps=r.state.get("caps"),
-                             driver=driver, now=r.now, parent=link)
+                             driver="" if forked else driver, now=r.now, parent=link)
             done = child.state.get("status") in FINISHED_STATUSES
             if done:
                 child.state["delivered"] = True  # applied below, in this lock
@@ -3595,7 +4088,11 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             child.after = []
             result = (child.state.get("status"), child.state.get("outcome"),
                       child.state.get("value"))
-        out.update({"call": cid, "instance": iid, "procedure": procedure, "scope": sub})
+        out.update({"call": cid, "instance": iid, "procedure": procedure, "scope": sub,
+                    "mode": rec["mode"]})
+        if forked:
+            out["fork"] = ("queued: the daemon quick-forks this session to drive the "
+                           "callee, or hands it back to you (inline) and says why")
         if done:
             _call_result(r, rec, *result)
     _mutate(cwd, scope, now, op)
@@ -3632,6 +4129,78 @@ def _call_result(r: Run, rec: Dict[str, Any], status_: Optional[str], outcome: A
     inst["frame"]["call_result"] = {"call": rec["id"], "procedure": rec["procedure"],
                                     "outcome": outcome, "value": value}
     inst["await"] = AW_TASK
+
+
+def _set_callee_driver(rec: Dict[str, Any], driver: str) -> None:
+    nested = rec.get("nested") or {}
+    st = RunStore(nested.get("cwd"), nested.get("scope"))
+    with st.lock():
+        if not st.exists():
+            return
+        state = st.load_state()
+        state["driver"] = driver or ""
+        st.save_state(state)
+
+
+def fork_calls_pending(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The open fork-mode calls of a run whose fork the daemon still has to
+    decide (queued) or watch (running)."""
+    return [rec for rec in (state.get("calls") or {}).values()
+            if isinstance(rec, dict) and rec.get("status") == CALL_OPEN
+            and (rec.get("fork") or {}).get("status") in (FORK_QUEUED, FORK_RUNNING)]
+
+
+def call_forked(call_id: str, copy: str, *, cwd: Optional[str] = None,
+                scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """The daemon quick-forked the driver for fork-mode call ``call_id``:
+    the copy drives the callee from now on (docs 2.12.2)."""
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("calls") or {}).get(call_id)
+        if not rec or rec.get("status") != CALL_OPEN:
+            raise FlowError(f"call {call_id}: not open")
+        fork = rec.setdefault("fork", {})
+        if fork.get("status") != FORK_QUEUED:
+            raise FlowError(f"call {call_id}: fork is {fork.get('status')}, not queued")
+        fork.update({"status": FORK_RUNNING, "session": copy, "started": store_mod.utcnow()})
+        r.emit("call_forked", call=call_id, node=rec.get("node"), procedure=rec.get("procedure"),
+               session=copy)
+        out.update(rec)
+    _mutate(cwd, scope, now, op)
+    _set_callee_driver(out, copy)
+    return out
+
+
+def call_fork_fallback(call_id: str, cause: str, *, cwd: Optional[str] = None,
+                       scope: Optional[str] = None, now: Optional[float] = None
+                       ) -> Dict[str, Any]:
+    """Fork-mode call ``call_id`` could not run in a fork (the harness has
+    no conversation to copy, the driver is a quick-fork, too little context
+    is left, the copy ended without the callee's result): it runs inline,
+    driven by the calling run's driver, and the fallback is recorded where
+    the session card, the header and the notification read it."""
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("calls") or {}).get(call_id)
+        if not rec or rec.get("status") != CALL_OPEN:
+            raise FlowError(f"call {call_id}: not open")
+        fork = rec.setdefault("fork", {})
+        was = fork.get("session")
+        fork.update({"status": FORK_FALLBACK, "cause": str(cause or ""),
+                     "at": store_mod.utcnow()})
+        rec["mode"] = CALL_MODE_INLINE
+        rec["fallback"] = {"cause": str(cause or ""), "at": fork["at"],
+                           **({"fork_session": was} if was else {})}
+        r.emit("fallback", cause=f"fork call refused: {cause}", route="inline",
+               decision="call", call=call_id, node=rec.get("node"),
+               procedure=rec.get("procedure"))
+        out.update(rec)
+        out["driver"] = rec.get("driver") or acting_session(r.state)
+    _mutate(cwd, scope, now, op)
+    _set_callee_driver(out, str(out.get("driver") or ""))
+    return out
 
 
 OPEN_DELEGATION = ("pending", "queued", "running")
@@ -4028,13 +4597,26 @@ def set_input(name: str, value: Any, *, session: str = "", caller: str = CALLER_
         except inputs_mod.InputsError as exc:
             raise FlowError(f"input not written: {exc}") from None
         was = current.get(name)
+        before = copy.deepcopy(data)
         current[name] = got
         data["inputs"] = current
         by = CALLER_USER if person else (session or "unmanaged")
         r.emit("input_set", name=name, value=got, by=by)
         r.events[-1]["was"] = was  # kept when empty: what the write replaced
+        # what the change turns on or off and which open tasks read it
+        # (claunch-cetzf.1); the nudge carries it as a block
+        open_tasks = [(iid, inst["node"]) for iid, inst in r.inst.items()
+                      if inst.get("await") == AW_TASK]
+        found = inputs_mod.impact(r.chart, name, before, data, open_tasks)
+        impact_box.append(found)
+        if found["rules"] or found["tasks"]:
+            r.emit("input_impact", name=name, rules=found["rules"], tasks=found["tasks"])
+    impact_box: List[Dict[str, Any]] = []
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    out = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if impact_box:
+        out["input_impact"] = impact_box[-1]
+    return out
 
 
 def mesh_of(state: Dict[str, Any]) -> str:
@@ -4104,6 +4686,79 @@ def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = Non
     return brief(r, delegation)
 
 
+def _clear_limit(r: Run, iid: str) -> None:
+    """Take one instance off a limit hold: its await and its card."""
+    r.inst[iid]["await"] = None
+    r.state["approvals"] = [a for a in r.state.get("approvals", [])
+                            if a.get("instance") != iid]
+
+
+def self_extend_loop(node: Optional[str] = None, *, reason: Optional[str] = None,
+                     runner: Optional[ProbeRunner] = None,
+                     cwd: Optional[str] = None, scope: Optional[str] = None,
+                     now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer a ``loop_limit`` as the run's driver, one iteration, and only
+    when the loop's ``self_answer`` check passes (claunch-9poqc).
+
+    A loop that declares ``self_answer: {probe, describe}`` names a fact that
+    ends its wait -- for ``improv-worker-v2``'s ``await`` loop, "my tip is in
+    the integration target". The daemon's own re-nudge may be the only clock
+    that was watching, and it can be hours late: a merge announced by a mesh
+    message or by a daemon notice wakes the driver's turn, and this is how
+    that turn moves the run on. The driver writes no verdict of its own: the
+    probe is run first, and a non-zero exit leaves the hold exactly where it
+    was, so a person still owns a limit the machine has not answered
+    ("머지 확인전 자체 미리 승인 금지").
+
+    A loop without ``self_answer`` is a person's: refused here with the path
+    a person answers by (:func:`extend_loop`)."""
+    if not str(reason or "").strip():
+        raise FlowError("say why in 'reason': the journal keeps it, and a self-answered "
+                        "limit without a stated reason cannot be reviewed")
+    st = RunStore(cwd, scope)
+    snap = Run.load(st)
+    iid = _find(snap, node, (AW_LIMIT,), "loop limit",
+                pred=lambda i: not snap.inst[i]["frame"].get("visit_limit"))
+    n = snap.node_of(iid)
+    gate = n.get("self_answer") or {}
+    if not gate.get("probe"):
+        raise FlowError(
+            f"{shown_label(snap.chart, n) or n.id} declares no self_answer: its loop limit is "
+            f"a person's to answer ('claunch cflow2 extend {iid} --by 1')")
+    ok, output = _probe_ok(_run_probe(snap, iid, runner or default_probe_runner,
+                                      gate.get("probe")))
+    if not ok:
+        raise FlowError(
+            f"{shown_label(snap.chart, n) or n.id} stays at its limit: the self_answer check "
+            f"did not pass ({str(output or '').strip()[-400:] or 'no output'}). The wait is "
+            f"not over; a person may still extend it ('claunch cflow2 extend')")
+
+    def op(r: Run) -> None:
+        _require_progress(r)
+        _require_no_move_request(r)
+        held = _find(r, node, (AW_LIMIT,), "loop limit",
+                     pred=lambda i: not r.inst[i]["frame"].get("visit_limit"))
+        if held != iid:
+            raise FlowError(f"the loop limit moved from {iid} to {held} while the check ran")
+        conf = r.node_of(held)
+        frame = r.inst[held]["frame"]
+        _clear_limit(r, held)
+        frame["extra"] = int(frame.get("extra") or 0) + 1
+        r.emit("selected", node=conf.id, instance=held, option="extend", by=1,
+               kind=HOLD_LOOP, by_self=True, reason=reason, check=gate.get("describe") or "")
+        if frame.get("phase") == "limit_par":
+            if len(frame["items"]) > _loop_max(r, held):
+                _loop_limit(r, held)
+                return
+            _foreach_par_start(r, held)
+        elif frame["iter"] == 0:
+            _loop_iterate(r, held)
+        else:
+            _loop_between(r, held)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
 def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
                 reset: bool = False, cwd: Optional[str] = None,
                 scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
@@ -4126,9 +4781,7 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
             raise FlowError("no iterations to reset: extend the loop (or stop it)")
         if not stop and not reset and by < 1:
             raise FlowError("extend by at least 1 (or stop the loop)")
-        r.inst[iid]["await"] = None
-        r.state["approvals"] = [a for a in r.state.get("approvals", [])
-                                if a.get("instance") != iid]
+        _clear_limit(r, iid)
         if stop:
             r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_LOOP)
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
@@ -4423,6 +5076,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         r.emit("move_superseded", request=pending.get("id"), node=pending.get("node"),
                forced_to=tid, by=by)
     r.state.pop(MOVE_REQUEST, None)
+    _gate_close(r, target=GATE_MOVE, why=f"the run moved ({by})", by=by)
     r.emit("forced", node=tid, label=node.label or None, by=by, reason=reason or None,
            at=r.inst[cur]["node"], left=left,
            **({"granted": granted.get("id"), "asked_by": granted.get("by")}
@@ -4686,8 +5340,9 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
     for its end decision -- and without this door the driver's only way
     forward was to do the work outside the run (claunch-kgfr5). A person
     answers with :func:`resolve_move` (the run page, ``claunch cflow2 move
-    --approve|--deny``), or moves the run elsewhere with :func:`force_move`,
-    which supersedes the request.
+    --approve|--deny``, or -- when the driver has a parent session -- that
+    parent with ``flow_move``, claunch-vjp4y), or moves the run elsewhere with
+    :func:`force_move`, which supersedes the request.
 
     With ``outcome`` the request is of the other kind (claunch-vwmoj): a
     person reports the active task ``target`` with ``outcome``/``value`` --
@@ -4728,6 +5383,9 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
         r.emit("move_requested", request=request["id"], node=tid, label=node.label or None,
                by=by, reason=note, left=request["from"],
                **({"replaces": previous.get("id")} if previous else {}))
+        # the request is a person's gate: the run's ``gates.move`` may route it
+        # to the parent too, with the verdicts it allows (claunch-vjp4y.2.1)
+        _gate_open_move(r, request)
         filed.update(request)
 
     _mutate(cwd, scope, now, op)
@@ -4776,6 +5434,7 @@ def _request_report(target: str, reason: str, outcome: str, value: Any, *, by: s
         r.emit("move_requested", request=request["id"], kind=MOVE_KIND_REPORT, node=n.id,
                instance=iid, label=n.label or None, by=by, reason=note, outcome=outcome,
                **({"replaces": previous.get("id")} if previous else {}))
+        _gate_open_move(r, request)
         filed.update(request)
 
     _mutate(cwd, scope, now, op)
@@ -4800,6 +5459,8 @@ def cancel_move_request(*, by: str, cwd: Optional[str] = None, scope: Optional[s
             raise FlowError("no pending move request on this run")
         r.state.pop(MOVE_REQUEST, None)
         r.emit("move_withdrawn", request=pending.get("id"), node=pending.get("node"), by=by)
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why="the driver withdrew the request", by=by)
 
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -4810,10 +5471,18 @@ def cancel_move_request(*, by: str, cwd: Optional[str] = None, scope: Optional[s
 def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] = None,
                  cwd: Optional[str] = None, scope: Optional[str] = None,
                  now: Optional[float] = None,
-                 verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
-    """A person answers the driver's pending move request. CLI / dashboard
-    only -- not exposed over MCP, for the reason ``approve`` is not: a grant
-    the asker can give itself is not a grant.
+                 verify_runner: Optional[VerifyRunner] = None,
+                 caller: str = CALLER_USER) -> Dict[str, Any]:
+    """Answer the driver's pending move request.
+
+    ``caller`` is the authority the answer stands on. ``CALLER_USER`` is a
+    person -- the CLI outside the driving session and the dashboard -- and
+    needs no check. ``CALLER_PARENT`` is the driver's parent session
+    (claunch-vjp4y); it is the one agent-side grade of grant, and it is
+    checked here rather than by its caller: the grant is the thing a bad
+    caller would most want to fake. The driver itself never qualifies -- a
+    grant the asker can give itself is not a grant -- and neither does any
+    session that is not the parent recorded on the run.
 
     ``approve`` performs the move asked for (:func:`_move_run`, journaled
     ``move_approved`` then ``forced`` with ``granted``); ``deny`` leaves the
@@ -4828,45 +5497,69 @@ def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] 
     job: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
+        if caller != CALLER_USER and gate_authority(r.state, by) != CALLER_PARENT:
+            raise FlowError(
+                f"{by or 'this caller'} may not answer this run's move request: it is the "
+                f"user's, and only the driving session's parent "
+                f"({driver_parent_of(r.state) or 'none'}) answers it in the hierarchy")
         pending = pending_move(r.state)
         if pending is None:
             raise FlowError("no pending move request on this run")
-        if verdict == "approve":
-            _require_progress(r)
-            if pending.get("kind") == MOVE_KIND_REPORT:
-                iid = str(pending.get("instance") or "")
-                if (r.inst.get(iid) or {}).get("await") != AW_TASK:
-                    raise FlowError(f"task {pending.get('label') or pending.get('node')} "
-                                    f"({iid}) is no longer waiting for a report; refuse the "
-                                    f"request (--deny) and let the driver ask again")
-                r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
-                       by=by, reason=note or None)
-                r.state.pop(MOVE_REQUEST, None)
-                text = (f"reported by a person on {pending.get('by') or 'the driver'}'s "
-                        f"request ({pending.get('id')}): {pending.get('reason')}"
-                        + (f" -- {note}" if note else ""))
-                _report_task(r, iid, pending["outcome"], pending.get("value"), text, by,
-                             verify_runner, now, job)
-                out.update(move_request={**pending, "decision": "approved"})
-                return
-            r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
-                   by=by, reason=note or None)
-            moved: Dict[str, Any] = {}
-            _move_run(r, pending["node"], note or pending.get("reason"), by, moved,
-                      granted=pending)
-            out.update(forced=moved, move_request={**pending, "decision": "approved"})
-            return
-        decided = {**pending, "decision": "denied", "decided_by": by,
-                   "decided_reason": note, "decided_at": _iso(r.now)}
-        r.state[MOVE_REQUEST] = decided
-        r.emit("move_denied", request=pending.get("id"), node=pending.get("node"), by=by,
-               reason=note or None)
-        out.update(move_request=decided)
+        out.update(_apply_move_verdict(r, pending, verdict, by=by, note=note,
+                                       verify_runner=verify_runner, now=now, job=job))
+        # a person's or the parent's own answer closes the gate ask that
+        # asked the parent too (claunch-vjp4y.2.1); it is one record per
+        # request, so no ``skip`` is needed here
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why=f"answered by {by}: {verdict}", by=by)
 
     _mutate(cwd, scope, now, op)
     payload = _with_verify_note(status(cwd=cwd, scope=scope, now=now, tick=False), job)
     payload.update(out)
     return payload
+
+
+def _apply_move_verdict(r: Run, pending: Dict[str, Any], verdict: str, *, by: str,
+                        note: str, verify_runner: Optional[VerifyRunner],
+                        now: Optional[float], job: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply an ``approve``/``deny`` verdict to the pending request.
+
+    Shared by :func:`resolve_move` (a person, or the parent typing the
+    answer) and by a gate ask's answer (:func:`_gate_apply`), so the two
+    doors do the same thing and journal it the same way."""
+    out: Dict[str, Any] = {}
+    if verdict == "approve":
+        _require_progress(r)
+        if pending.get("kind") == MOVE_KIND_REPORT:
+            iid = str(pending.get("instance") or "")
+            if (r.inst.get(iid) or {}).get("await") != AW_TASK:
+                raise FlowError(f"task {pending.get('label') or pending.get('node')} "
+                                f"({iid}) is no longer waiting for a report; refuse the "
+                                f"request (--deny) and let the driver ask again")
+            r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
+                   by=by, reason=note or None)
+            r.state.pop(MOVE_REQUEST, None)
+            text = (f"reported by a person on {pending.get('by') or 'the driver'}'s "
+                    f"request ({pending.get('id')}): {pending.get('reason')}"
+                    + (f" -- {note}" if note else ""))
+            _report_task(r, iid, pending["outcome"], pending.get("value"), text, by,
+                         verify_runner, now, job)
+            out.update(move_request={**pending, "decision": "approved"})
+            return out
+        r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
+               by=by, reason=note or None)
+        moved: Dict[str, Any] = {}
+        _move_run(r, pending["node"], note or pending.get("reason"), by, moved,
+                  granted=pending)
+        out.update(forced=moved, move_request={**pending, "decision": "approved"})
+        return out
+    decided = {**pending, "decision": "denied", "decided_by": by,
+               "decided_reason": note, "decided_at": _iso(r.now)}
+    r.state[MOVE_REQUEST] = decided
+    r.emit("move_denied", request=pending.get("id"), node=pending.get("node"), by=by,
+           reason=note or None)
+    out.update(move_request=decided)
+    return out
 
 # -- time and probes ---------------------------------------------------------
 
@@ -4886,8 +5579,9 @@ def default_probe_runner(probe: Any, cwd: str, timeout: float = 60.0,
     full = dict(os.environ)
     full.update(env or {})
     cmd = expand_argv(probe, full) if isinstance(probe, list) else str(probe)
+    cmd, shell = shell_command(cmd)
     try:
-        proc = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, capture_output=True,
+        proc = subprocess.run(cmd, shell=shell, cwd=cwd, capture_output=True,
                               text=True, timeout=timeout, env=full)
     except subprocess.TimeoutExpired:
         return 124, "probe timed out"
@@ -4929,6 +5623,11 @@ def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
     env = {"CFLOW2_RUN": str(r.state.get("run_id") or ""),
            "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
            store_mod.SESSION_ENV: _probe_session(r)}
+    rnd = _trigger_round(r)
+    if rnd is not None:
+        # The round the run is in, for a probe that compares it with a
+        # record of its own (gate plan-waiting, claunch-r3j1o.1).
+        env["CFLOW2_ROUND"] = str(rnd)
     env.update(_input_env(r))
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     if iid and iid in r.inst:
@@ -5177,6 +5876,8 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                 break
         if not fired and _expire_asks(r):
             fired = True
+        if not fired and _gate_sweep(r):
+            fired = True
         if not fired:
             break
         moved += 1
@@ -5283,7 +5984,8 @@ def quiescent(r: Run) -> bool:
 
     So it is a list of what a pass *would* do, each one ruled out, and it
     answers no for anything it does not recognise: a time-based await
-    (wait, pause, a timeout's deadline, a held choice's window, a verify that
+    (wait, pause, a timeout's deadline, a held choice's window, a batched
+    option's window with records waiting, a verify that
     may be lost), an ask still being routed or with a deadline or a notice
     not yet given, a delegation not settled (a child's receipt arrives as a
     file the clock settles over :data:`..daemon.cflow2_clock.RECEIPT_SETTLE`
@@ -5324,6 +6026,12 @@ def quiescent(r: Run) -> bool:
         if await_ == AW_APPROVAL:
             continue
         if await_ == AW_CHOOSE and not frame.get("held"):
+            # A batched option with records waiting has a window that opens
+            # by time alone (interval after the oldest arrival), and the
+            # clock announces it (claunch-1brxe): not quiescent.
+            if any(o.get("batch") and _batch_view(r, o)["count"]
+                   for o in r.chart.node(inst["node"]).get("options") or []):
+                return False
             continue
         if await_ == AW_TASK and not r.chart.node(inst["node"]).get("restart"):
             continue
@@ -5542,8 +6250,11 @@ def rule(name: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
     if name not in rules:
         raise FlowError(f"no rule {name!r} (rules: {', '.join(rules) or 'none'})")
     body = dict(rules[name] or {})
-    return {"rule": name, "text": body.get("text"), "why": body.get("why"),
-            "deliver": body.get("deliver"), "effect": body.get("effect")}
+    out = {"rule": name, "text": body.get("text"), "why": body.get("why"),
+           "deliver": body.get("deliver"), "effect": body.get("effect")}
+    if body.get("when") is not None:
+        out["when"] = body["when"]
+    return out
 
 
 def _instance_depth(inst: Dict[str, Any], iid: str) -> int:
@@ -5706,13 +6417,19 @@ def describe(r: Run) -> Dict[str, Any]:
                 "title": node.get("title"), "prompt": _task_prompt(r, iid, node, env),
                 "done_when": node.get("done_when"), "verify": node.get("verify"),
                 "returns": returns_of(node), "effects": node.get("effects") or [],
-                "rules": [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")}
-                          for rid in node.get("rules") or []],
+                "rules": rules_view(r, node, env),
                 "ask": node.get("ask"),
                 "item": env.get("item"),
             })
             if node.get("calls"):
                 tasks[-1]["calls"] = list(node.get("calls"))
+            if node.get("fork_calls"):
+                tasks[-1]["fork_calls"] = True
+            packs = _pack_calls(r)
+            if packs:
+                # every task may call an installed pack's procedures
+                # (docs 2.12.1); the roles are judged when it calls
+                tasks[-1]["pack_calls"] = packs
             if inst["frame"].get("call_result"):
                 tasks[-1]["call_result"] = inst["frame"]["call_result"]
             if inst["frame"].get("last_verify"):
@@ -5749,8 +6466,18 @@ def describe(r: Run) -> Dict[str, Any]:
                 # the node entered and started waiting on this pick then; the
                 # notification's age is this stamp (claunch-l9znm.1)
                 "opened_at": inst.get("entered_at"),
+                # nobody has to take this door: the region around it settles
+                # without it and cancels it (claunch-hbmhk). False when the
+                # structure cannot prove that, so a stopping gate is never
+                # drawn as a choice.
+                "optional": optional_choice(r.inst, r.chart, iid),
             })
             held = inst["frame"].get("held")
+            gate_view = _gate_view(s, GATE_CHOICE, iid)
+            if gate_view:
+                # the gate is also with the parent (claunch-vjp4y.2.1): who was
+                # asked, until when, and which options it may take
+                choices[-1]["gate"] = gate_view
             if held:
                 held_opens = _held_opens(r, node, held)
                 choices[-1]["held"] = {**held, "opens_at": _iso(held_opens)}
@@ -5785,10 +6512,17 @@ def describe(r: Run) -> Dict[str, Any]:
                                  "max": _max_visits(r, key),
                                  **_opened_at(r, iid, HOLD_VISIT)})
         elif aw == AW_LIMIT:
-            limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
-                           "iterations": _loop_count(inst["frame"]),
-                           "max": _loop_cap(r, iid),
-                           **_opened_at(r, iid, HOLD_LOOP)})
+            limit = {"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
+                     "iterations": _loop_count(inst["frame"]),
+                     "max": _loop_cap(r, iid),
+                     **_opened_at(r, iid, HOLD_LOOP)}
+            gate = node.get("self_answer") or None
+            if gate:
+                # the driver's own answer to this hold (claunch-9poqc): a
+                # check it may run, not a decision it may make
+                limit["self_answer"] = {"describe": gate.get("describe") or "",
+                                        "tool": "flow_extend"}
+            limits.append(limit)
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
             groups.append({
@@ -5818,6 +6552,10 @@ def describe(r: Run) -> Dict[str, Any]:
         entry = {k: rec.get(k) for k in ("id", "instance", "node", "label", "procedure",
                                          "status", "started", "finished")}
         entry["scope"] = rec["nested"]["scope"]
+        entry["mode"] = rec.get("mode") or CALL_MODE_INLINE
+        for k in ("pack", "fork", "fallback", "by"):
+            if rec.get(k):
+                entry[k] = rec[k]
         if rec.get("status") != CALL_OPEN:
             entry["outcome"] = rec.get("outcome")
         calls.append(entry)
@@ -5841,6 +6579,8 @@ def describe(r: Run) -> Dict[str, Any]:
         out["waiting_window"] = windows
     if asks:
         out["asks"] = asks
+    if driver_parent_of(s):
+        out["driver_parent"] = driver_parent_of(s)
     out["data"] = s.get("data")
     # Completed nodes' {outcome, value}, keyed by node label/id. The driver
     # reads its own status to decide what to do next, and a value can carry
@@ -5859,6 +6599,9 @@ def describe(r: Run) -> Dict[str, Any]:
                 and r.status in LIVE_STATUSES:
             # measured now, not when filed: the card shows what a grant does
             move_req = {**move_req, "plan": move_plan(r, str(move_req.get("node") or ""))}
+        gate_view = _gate_view(s, GATE_MOVE, str(move_req.get("id") or ""))
+        if gate_view:
+            move_req = {**move_req, "gate": gate_view}
         out["move_request"] = move_req
     hints = []
     if tasks:
@@ -5868,8 +6611,12 @@ def describe(r: Run) -> Dict[str, Any]:
     users = [c.get("instance") for c in choices
              if (c.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER]
     if users:
+        parent = driver_parent_of(s)
         hints.append(f"{', '.join(map(str, users))}: the user's choice (chooser: user) -- "
-                     f"brief them and stop your turn. {NUDGE_HINT}")
+                     + (f"brief them and your parent {parent} (flow_gates answers it from "
+                        f"there), then stop your turn. " if parent else "brief them and stop "
+                        f"your turn. ")
+                     + NUDGE_HINT)
     if any(d.get("status") == "pending" for d in dels):
         hints.append("run each pending delegation's brief in a sub-agent, then "
                      "flow_delegate(delegation, outcome, value)")
@@ -6038,11 +6785,14 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "prompt": str(raw.get("prompt") or ""),
         "brief": raw.get("brief"), "format": raw.get("format"),
         "choices": raw.get("choices"), "from_param": raw.get("from_param"),
+        "delegate": _ask_delegate(raw.get("delegate")),
+        "delegate_param": raw.get("delegate_param"),
         "require_reason": raw.get("require_reason") or False,
         "from": cands,
         "otherwise": base or ASK_OTHERWISE_HUMAN,
         "default_option": raw.get("default_option") or (default or None),
         "timeout": float(raw["timeout"]) if raw.get("timeout") else None,
+        "timeout_param": raw.get("timeout_param"),
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
         "on_unroutable": raw.get("on_unroutable") or None,
         "urgent": raw.get("urgent") is True,
@@ -6053,6 +6803,24 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
                      if isinstance(c, str)],
         "options": list(options) if options else None,
     }
+
+
+def _ask_delegate(raw: Any) -> Optional[Dict[str, Any]]:
+    """``ask.delegate`` normalised: ``{allow: [option, ...]}`` or ``None``.
+
+    ``allow`` names the options a delegated answerer -- the driver's parent
+    session -- may take. Every option stays visible to it (user decision,
+    thread th-ea5c7c: the parent picks within known bounds, so its answer is
+    a judgement rather than a guess), and taking one outside the list is
+    recorded as a refusal and drops the question to a person
+    (:func:`answer`). A person is never restricted."""
+    if not isinstance(raw, dict):
+        return None
+    allow = raw.get("allow")
+    if not isinstance(allow, list):
+        return None
+    names = [str(a).strip() for a in allow if str(a).strip()]
+    return {"allow": names} if names else None
 
 
 def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -6132,6 +6900,34 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
                 errors.append(f"from: {exc}")
         else:
             cands = []
+    dg = spec.get("delegate")
+    if spec.get("delegate_param") and not errors:
+        dg = _ask_delegate(param(spec["delegate_param"]))
+    timeout_v = spec.get("timeout")
+    if spec.get("timeout_param") and not errors:
+        # A shared procedure passes its caller's deadline through, so the
+        # definition that opens the question decides how long a candidate
+        # group holds it before the next one (or a person) gets it.
+        raw_t = param(spec["timeout_param"])
+        timeout_v = None
+        if raw_t not in (None, "", 0):
+            try:
+                timeout_v = float(raw_t)
+            except (TypeError, ValueError):
+                errors.append(f"timeout: {raw_t!r} is not a number of seconds")
+            else:
+                if timeout_v <= 0:
+                    errors.append(f"timeout: must be greater than 0, got {raw_t!r}")
+    if dg and decl is not None and brief is not None and not errors:
+        # The allow list names options of *this* brief, which only exists now:
+        # a shared procedure passes its caller's list through a param, so a
+        # name that the brief never offers is caught here.
+        offered = {str(o.get("name") or "").casefold()
+                   for o in (norm.get(decl["options"]) or [])}
+        missing = [a for a in dg["allow"] if a.casefold() not in offered]
+        if missing:
+            errors.append(f"delegate.allow names {', '.join(missing)}, which the brief's "
+                          f"options ({', '.join(sorted(offered))}) do not have")
     if errors:
         # A brief whose options do not match the fixed choices is a framing
         # slip the frame task can repair: it is asked again once, with the
@@ -6146,6 +6942,7 @@ def _brief_ask(r: Run, iid: str, node: ir.Node, spec: Dict[str, Any]) -> Optiona
         return None
     return {"format": fmt, "brief": norm, "options": q_mod.ask_options(norm, decl),
             "from": cands, "question_text": q_mod.render_text(norm, decl),
+            "delegate": dg, "timeout": timeout_v,
             "require_reason": bool(param(spec.get("require_reason")))}
 
 
@@ -6220,10 +7017,60 @@ def _ask_reframe(r: Run, iid: str, node: ir.Node, error: str) -> bool:
     return True
 
 
-def _task_prompt(r: Run, iid: str, node: ir.Node, env: Dict[str, Any]) -> str:
-    """The task's rendered prompt, plus the engine's note when this visit is
-    a re-ask (:func:`_ask_reframe`)."""
+
+
+def rule_active(rule: Dict[str, Any], env: Dict[str, Any]) -> bool:
+    """Whether a rule applies under ``env`` (docs 2.5 ``when``). A rule
+    without ``when`` always applies; one whose expression cannot be
+    evaluated applies too (a rule fails toward being shown)."""
+    cond = (rule or {}).get("when")
+    if cond is None:
+        return True
+    try:
+        return expr_mod.truthy(expr_mod.evaluate(cond, env))
+    except (expr_mod.ExprError, TypeError, ValueError, RecursionError, OverflowError):
+        return True
+
+
+def rules_view(r: Run, node: ir.Node, env: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The node's rules for a status payload: id, text and, for a
+    conditional rule, its ``when`` and whether it holds now."""
+    out = []
+    for rid in node.get("rules") or []:
+        body = (r.chart.rules or {}).get(rid) or {}
+        entry: Dict[str, Any] = {"id": rid, "text": body.get("text")}
+        if body.get("when") is not None:
+            entry["when"] = body["when"]
+            entry["active"] = rule_active(body, env)
+        out.append(entry)
+    return out
+
+
+def node_prompt(r: Run, node: ir.Node, env: Dict[str, Any]) -> str:
+    """The task's rendered prompt with the conditional rules that hold under
+    ``env`` appended under the rules header. Unconditional rules were baked
+    in at compile time (frontend); conditional ones are decided here, on
+    every read, so a changed input shows up in the next status, brief and
+    reminder (claunch-cetzf.1)."""
     text = render(node.get("prompt"), env)
+    extra = []
+    for rid in node.get("rules") or []:
+        body = (r.chart.rules or {}).get(rid) or {}
+        if body.get("when") is not None and rule_active(body, env):
+            extra.append(str(body.get("text") or "").strip())
+    extra = [t for t in extra if t]
+    if not extra:
+        return text
+    if RULES_HEADER in text:
+        return text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
+    return (text.rstrip("\n") + ("\n\n" if text.strip() else "") + RULES_HEADER + "\n"
+            + "\n".join(extra) + "\n")
+
+
+def _task_prompt(r: Run, iid: str, node: ir.Node, env: Dict[str, Any]) -> str:
+    """The task's rendered prompt (:func:`node_prompt`), plus the engine's
+    note when this visit is a re-ask (:func:`_ask_reframe`)."""
+    text = node_prompt(r, node, env)
     retry = (r.inst.get(iid) or {}).get("frame", {}).get("ask_retry")
     return text + "\n\n" + _retry_note(retry) if retry else text
 
@@ -6247,6 +7094,9 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         if brief is None:
             return
         spec["options"], spec["from"] = brief["options"], brief["from"]
+        spec["delegate"] = brief.get("delegate") or spec.get("delegate")
+        if brief.get("timeout") is not None:
+            spec["timeout"] = brief["timeout"]
     aid = f"ask2-{secrets.token_hex(4)}"
     rec: Dict[str, Any] = {
         "id": aid, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
@@ -6257,6 +7107,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "on_decline": None if spec["options"] else spec["on_decline"],
         "on_unroutable": spec.get("on_unroutable"), "urgent": bool(spec.get("urgent")),
         "criteria": list(spec.get("criteria") or []),
+        "delegate": spec.get("delegate"),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
@@ -6286,6 +7137,259 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
            otherwise=spec["otherwise"])
     if not spec["from"]:
         _ask_fall(r, rec, "the ask declares no 'from' candidates")
+
+
+# -- gate asks: a person's gate routed to the parent ------------------------
+#
+# A ``chooser: user`` choice and the driver's move/report request are gates
+# only a person may pass (docs 2.11). In a parent/child hierarchy the parent
+# is the one who would have been asked anyway (claunch-vjp4y); this is where
+# a gate declares *which of its options* that parent may take, for how long
+# it is asked, and what happens when it does not answer (claunch-vjp4y.2.1).
+#
+# The mechanism is the ask machinery, not a second copy of it: the gate is
+# opened as an ordinary ask record (its ``gate`` field says what its answer
+# applies to), so ``asks.route`` resolves the candidate groups, a
+# ``{role: parent}`` candidate is typed into the parent's terminal,
+# ``_expire_asks`` / ``_ask_escalate`` move the question on at the deadline,
+# ``_delegated_refusal`` enforces ``delegate.allow``, and a person's answer is
+# still the gate's own (``select`` / ``resolve_move``), never restricted.
+
+
+def _gate_decl(r: Run, target: str) -> Optional[Dict[str, Any]]:
+    """The run's ``gates:`` declaration for a move/report gate.
+
+    A ``report`` gate without its own entry is answered by the ``move`` one:
+    both are ``resolve_move`` verdicts (``approve`` / ``deny``), and a
+    definition that delegates the move gate has said how the run's off-route
+    requests are answered."""
+    gates = (r.chart.meta or {}).get("gates") or {}
+    kind = MOVE_KIND_REPORT if target == MOVE_KIND_REPORT else MOVE_KIND_MOVE
+    decl = gates.get(kind)
+    if decl is None and kind == MOVE_KIND_REPORT:
+        decl = gates.get(MOVE_KIND_MOVE)
+    return dict(decl) if isinstance(decl, dict) else None
+
+
+def _gate_spec(r: Run, target: str,
+               node: Optional[ir.Node] = None) -> Optional[Dict[str, Any]]:
+    """The gate's delegation, normalised: ``{from, timeout, delegate}`` or
+    ``None`` when the gate declares none (it is then the person's alone, as
+    before)."""
+    decl = (node.get("gate") if node is not None else None) if target == GATE_CHOICE \
+        else _gate_decl(r, target)
+    if not isinstance(decl, dict) or not decl:
+        return None
+    timeout = decl.get("timeout")
+    return {
+        "from": [{"role": str((c or {}).get("role") or "").lower(),
+                  "scope": str((c or {}).get("scope") or "any").lower(),
+                  "connect": bool((c or {}).get("connect"))}
+                 for c in decl.get("from") or []],
+        "timeout": float(timeout) if timeout else None,
+        "delegate": _ask_delegate(decl.get("delegate")),
+    }
+
+
+def _gate_routable(r: Run, spec: Dict[str, Any]) -> bool:
+    """Whether any declared candidate could answer now. A ``{role: parent}``
+    candidate needs the run to have a parent; with none, the gate would open
+    an ask that falls to a person on the spot, which is the state the gate is
+    in already."""
+    parent = driver_parent_of(r.state)
+    for c in spec.get("from") or []:
+        if c.get("role") != PARENT_ROLE or parent:
+            return True
+    return False
+
+
+def _gate_open_for(r: Run, target: str, instance: str) -> Optional[Dict[str, Any]]:
+    """The open gate ask of ``instance`` for ``target``, if one is."""
+    for rec in (r.state.get("asks") or {}).values():
+        g = rec.get("gate") or {}
+        if rec.get("status") == "open" and g.get("target") == target \
+                and g.get("instance") == instance:
+            return rec
+    return None
+
+
+def _gate_view(state: Dict[str, Any], target: str,
+               instance: str) -> Optional[Dict[str, Any]]:
+    """What ``status`` shows about a gate that is also with the parent: the
+    ask it is, its candidate groups, who was asked, the deadline, and the
+    options the parent may take. ``None`` when the gate declares nothing --
+    the run then behaves exactly as it did before delegation."""
+    rec = None
+    for cand in (state.get("asks") or {}).values():
+        g = cand.get("gate") or {}
+        if g.get("target") == target and str(g.get("instance") or "") == str(instance):
+            rec = cand
+    if rec is None:
+        return None
+    return {
+        "ask": rec.get("id"), "status": rec.get("status"),
+        "resolution": rec.get("resolution"),
+        "from": [_cand_text(c) for c in rec.get("from") or []],
+        "asked": [e.get("handle") for e in rec.get("asked") or []],
+        "deadline": rec.get("deadline"),
+        "allow": (rec.get("delegate") or {}).get("allow"),
+        **({"skipped": [s.get("reason") for s in rec.get("skipped") or []]}
+           if rec.get("skipped") else {}),
+    }
+
+
+def _gate_prompt(asked: str, chosen: List[str], options: List[str], why: str) -> str:
+    allowed = ", ".join(chosen) if chosen else "(none)"
+    names = ", ".join(options)
+    return (f"{asked}\n\nAs the run's parent you may take: {allowed}. "
+            f"Its options are: {names}. Any other option is recorded and the question "
+            f"goes on to the person -- so pick only what you would answer for them."
+            + (f"\n\n{why}" if why else ""))
+
+
+def _gate_open(r: Run, target: str, *, instance: str, node_id: str, label: str,
+               spec: Dict[str, Any], options: List[Dict[str, Any]], prompt: str,
+               require_reason: bool = False) -> Dict[str, Any]:
+    """Open the gate as an ask record routed by the ask machinery."""
+    aid = f"ask2-{secrets.token_hex(4)}"
+    rec: Dict[str, Any] = {
+        "id": aid, "instance": instance, "node": node_id, "label": label,
+        "kind": "decision",
+        "gate": {"id": f"g-{secrets.token_hex(3)}", "target": target,
+                 "instance": instance, "node": node_id},
+        "prompt": prompt, "require_reason": bool(require_reason),
+        "from": spec["from"], "otherwise": ASK_OTHERWISE_HUMAN,
+        "default_option": None, "timeout": spec.get("timeout"),
+        "on_decline": None, "on_unroutable": None, "urgent": False, "criteria": [],
+        "delegate": spec.get("delegate"),
+        "options": list(options), "status": "open",
+        "resolution": RES_ROUTING, "group": 0, "asked": [], "skipped": [],
+        "deadline": None, "deferrals": 0, "retry_at": None,
+        "opened": store_mod.utcnow(), "opened_at": r.now,
+        "visit": int((r.state.get("visits") or {}).get(node_id) or 0),
+    }
+    r.state.setdefault("asks", {})[aid] = rec
+    r.emit("gate_delegated", node=node_id, instance=instance, target=target, ask=aid,
+           candidates=[_cand_text(c) for c in spec["from"]],
+           timeout=spec.get("timeout"),
+           allow=(spec.get("delegate") or {}).get("allow") or None)
+    return rec
+
+
+def _gate_open_choice(r: Run, iid: str, node: ir.Node) -> Optional[Dict[str, Any]]:
+    """A ``chooser: user`` choice stood: ask the parent too, if the choice
+    declared candidates and one of them can answer now."""
+    spec = _gate_spec(r, GATE_CHOICE, node)
+    if not spec or not spec["from"] or not _gate_routable(r, spec):
+        return None
+    if _gate_open_for(r, GATE_CHOICE, iid) is not None:
+        return None
+    options = [{"name": o["name"], "outcome": None,
+                "description": o.get("description") or ""}
+               for o in node.get("options") or []]
+    label = shown_label(r.chart, node) or node.id
+    body = (render(node.get("prompt"), r.env(iid)) or "").strip()
+    asked = f"The choice {label!r} stands on a person" + (f":\n\n{body}" if body else ".")
+    allow = (spec.get("delegate") or {}).get("allow") or [o["name"] for o in options]
+    return _gate_open(r, GATE_CHOICE, instance=iid, node_id=node.id, label=label,
+                      spec=spec, options=options,
+                      prompt=_gate_prompt(asked, allow, [o["name"] for o in options], ""),
+                      require_reason=bool(node.get("require_reason")))
+
+
+def _gate_open_move(r: Run, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The driver filed a move/report request: ask the parent too, if the run
+    declares ``gates.move`` (or ``gates.report``) and a candidate can answer."""
+    if pending_move(r.state) is not request:
+        return None
+    target = GATE_MOVE
+    spec = _gate_spec(r, MOVE_KIND_REPORT if request.get("kind") == MOVE_KIND_REPORT
+                      else MOVE_KIND_MOVE)
+    if not spec or not spec["from"] or not _gate_routable(r, spec):
+        return None
+    if _gate_open_for(r, target, str(request["id"])) is not None:
+        return None
+    label = request.get("label") or request.get("node") or ""
+    what = ("report the task" if request.get("kind") == MOVE_KIND_REPORT
+            else "move the run to")
+    asked = (f"{request.get('by') or 'The driver'} asks you to {what} {label!r}:\n\n"
+             f"{request.get('reason') or ''}".rstrip())
+    options = [{"name": "approve", "outcome": None,
+                "description": "grant it: the run does what the request asks"},
+               {"name": "deny", "outcome": None,
+                "description": "refuse it: the run stays where it stands"}]
+    allow = (spec.get("delegate") or {}).get("allow") or list(MOVE_VERDICTS)
+    return _gate_open(r, target, instance=str(request["id"]), node_id=str(request.get("node") or ""),
+                      label=label, spec=spec, options=options,
+                      prompt=_gate_prompt(asked, allow, list(MOVE_VERDICTS), ""))
+
+
+def _gate_close(r: Run, *, target: Optional[str] = None, instance: Optional[str] = None,
+                why: str = "", by: Optional[str] = None,
+                skip: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The gate is answered or gone: its ask is closed with ``why``, and the
+    responders still holding it are told. ``skip`` leaves one record alone
+    (the answer being applied)."""
+    closed = []
+    for rec in (r.state.get("asks") or {}).values():
+        if rec.get("status") != "open" or not rec.get("gate"):
+            continue
+        g = rec["gate"]
+        if target is not None and g.get("target") != target:
+            continue
+        if instance is not None and str(g.get("instance") or "") != str(instance):
+            continue
+        if skip is not None and rec.get("id") == skip:
+            continue
+        _withdraw(r, rec, why or "the gate is answered")
+        rec["status"] = "closed"
+        rec["closed"] = store_mod.utcnow()
+        rec["closed_why"] = why
+        r.emit("ask_closed", ask=rec["id"], node=rec.get("node"),
+               instance=g.get("instance"), target=g.get("target"),
+               why=why or None, by=by)
+        closed.append(rec)
+    return closed
+
+
+def _gate_apply(r: Run, rec: Dict[str, Any], choice: str, *, by: str,
+                reason: Optional[str], job: Dict[str, Any]) -> None:
+    """Apply a gate ask's answer as the gate's own answer.
+
+    The pick is judged by the same rules a typed ``flow_select`` is
+    (:func:`_select_check`), and the move verdict by the code path a person's
+    ``resolve_move`` takes (:func:`_apply_move_verdict`) -- the answer's
+    authority is the routing, the application is the gate's."""
+    g = rec.get("gate") or {}
+    target = g.get("target")
+    if target == GATE_CHOICE:
+        iid = str(g.get("instance") or "")
+        inst = r.inst.get(iid) or {}
+        if inst.get("await") != AW_CHOOSE:
+            raise FlowError(
+                f"the choice {rec.get('label') or iid!r} is no longer waiting for a pick; "
+                f"nothing was applied -- refuse it instead ({ASK_ABSTAIN})")
+        _iid, n, opt = _select_check(r, iid, choice, caller=CALLER_PARENT, who=by,
+                                     reason=reason)
+        opens = _window_opens(r, n, opt)
+        if opens is not None and r.now < opens:
+            raise FlowError(
+                f"option {choice!r} is paced (interval); its window opens at "
+                f"{_iso(opens)} -- answer again then")
+        _take_option(r, iid, n, opt, reason, by, delegated=True)
+        return
+    if target == GATE_MOVE:
+        pending = pending_move(r.state)
+        if pending is None or str(pending.get("id")) != str(g.get("instance")):
+            raise FlowError(
+                f"the request {g.get('instance')!r} is no longer pending; nothing was "
+                f"applied -- refuse it instead ({ASK_ABSTAIN})")
+        _apply_move_verdict(r, pending, choice, by=by, note=(reason or "").strip(),
+                            verify_runner=None, now=r.now, job=job)
+        _gate_close(r, target=GATE_MOVE, instance=str(pending.get("id")),
+                    why=f"answered by {by}: {choice}", by=by, skip=rec.get("id"))
+        return
+    raise FlowError(f"unknown gate {target!r}: nothing was applied")
 
 
 def _ask_because(r: Run, iid: str) -> Optional[Dict[str, Any]]:
@@ -6531,6 +7635,33 @@ def _expire_asks(r: Run) -> bool:
     return moved
 
 
+def _gate_sweep(r: Run) -> bool:
+    """Close the gate asks whose gate is gone: the choice was taken or
+    dropped, the request was answered, withdrawn or superseded. A gate ask is
+    a question about a gate, and a question about something that no longer
+    stands has no answer left to give -- its responders are told."""
+    closed = False
+    for rec in list((r.state.get("asks") or {}).values()):
+        g = rec.get("gate") or {}
+        if rec.get("status") != "open" or not g:
+            continue
+        target = g.get("target")
+        why = None
+        if target == GATE_CHOICE:
+            inst = r.inst.get(str(g.get("instance") or ""))
+            if not inst or inst.get("await") != AW_CHOOSE:
+                why = "the choice is no longer waiting for a pick"
+        elif target == GATE_MOVE:
+            pending = pending_move(r.state)
+            if pending is None or str(pending.get("id")) != str(g.get("instance")):
+                why = "the request is no longer pending"
+        else:
+            why = f"the gate {target!r} is not one this build knows"
+        if why and _gate_close(r, target=target, instance=str(g.get("instance")), why=why):
+            closed = True
+    return closed
+
+
 def asks_to_route(r: Run) -> List[Dict[str, Any]]:
     """Open asks whose next candidate group has to be resolved now."""
     out = []
@@ -6629,13 +7760,18 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
     return {
         "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "title": node.get("title"), "ask": rec["id"], "kind": rec.get("kind"),
-        "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
+        "prompt": rec.get("prompt"), "task_prompt": node_prompt(r, node, env),
         "options": [{"name": o["name"], "description": o.get("description") or ""}
                     for o in _ask_choices(rec)],
         "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),
         "criteria": [str(c) for c in (rec.get("criteria") or [])],
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
+        # Which options a delegated answerer -- the driver's parent -- may
+        # take (claunch-vjp4y.2). Present only when the definition declared
+        # ``ask.delegate``; it is shown with the question so the parent's
+        # answer is a choice within known bounds (user decision).
+        "delegate": rec.get("delegate"),
         # when the ask was opened (``_open_ask``): the notification's age is
         # this stamp, not when a browser first saw the card (claunch-l9znm.1)
         "opened_at": rec.get("opened_at"),
@@ -6725,6 +7861,23 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
     return payload
 
 
+def _delegated_refusal(r: Run, rec: Dict[str, Any], choice: str, *, session: str) -> bool:
+    """Whether this answer must be refused instead of applied: a *delegated*
+    answerer picked an option outside the ask's ``delegate.allow``.
+
+    Only the driver's parent session is restricted (``gate_authority`` says
+    ``CALLER_PARENT``); a person, and any responder of a routed group, is
+    not. ``abstain`` and ``reframe`` always pass: they say "not mine to
+    decide" and "these options do not fit", which a bounded answerer must
+    still be able to say."""
+    allow = (rec.get("delegate") or {}).get("allow") or []
+    if not allow or choice in (ASK_ABSTAIN, q_mod.REFRAME):
+        return False
+    if gate_authority(r.state, session) != CALLER_PARENT:
+        return False
+    return str(choice).casefold() not in {str(a).casefold() for a in allow}
+
+
 def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
            by_session: str, cwd: Optional[str] = None, scope: Optional[str] = None,
            now: Optional[float] = None) -> Dict[str, Any]:
@@ -6766,18 +7919,36 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
         receipt.update({"ask": ask_id, "decision": choice, "reason": reason, "as": handle,
                         "workflow": r.state.get("workflow"), "task": rec.get("label")
                         or rec["node"], "prompt": rec.get("prompt")})
-        if choice == ASK_ABSTAIN:
+        refused = _delegated_refusal(r, rec, choice, session=session)
+        if choice == ASK_ABSTAIN or refused:
+            channel = "responder"
+            if refused:
+                # A delegated answerer's pick outside the declared allow list
+                # is not applied: it is recorded and counted as that
+                # answerer's abstention, so the question goes on to the rest
+                # of its group and then to a person (user decision, thread
+                # th-ea5c7c: no retry).
+                r.emit("ask_delegated_refused", ask=ask_id, node=rec["node"],
+                       instance=rec["instance"], decision=choice, by=handle,
+                       by_session=session, reason=reason,
+                       allow=list((rec.get("delegate") or {}).get("allow") or []),
+                       channel="responder")
             r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
                    decision=ASK_ABSTAIN, by=handle, by_session=session, reason=reason,
-                   channel="responder")
+                   channel=channel)
             # one member's abstention leaves the question with the rest of
             # its group; it moves on when every member abstained (or the
             # group's deadline passes) -- to the group's next untried member
             # when the group asks one at a time, else to the next group
             rec.setdefault("abstained", []).append(session)
             asked = {e.get("session") for e in rec.get("asked") or []}
+            why = "every responder of the group abstained"
+            if refused:
+                why = (f"{handle} chose {choice!r}, which is not in this ask's delegate.allow "
+                       f"({', '.join((rec.get('delegate') or {}).get('allow') or [])}); "
+                       f"recorded as its abstention")
             if asked <= set(rec["abstained"]):
-                _ask_escalate(r, rec, "every responder of the group abstained"
+                _ask_escalate(r, rec, why
                               + (f" (last: {handle}: {reason})" if reason else ""))
                 receipt["moved"] = True
                 receipt["note"] = ("recorded as an abstention; everyone asked abstained, so "
@@ -6787,6 +7958,33 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
                 receipt["moved"] = False
                 receipt["note"] = ("recorded as an abstention; the others asked with you may "
                                    "still answer")
+            if refused:
+                receipt["refused"] = choice
+                receipt["note"] = (f"{choice!r} is not one of the options this answerer may "
+                                   f"take ({', '.join((rec.get('delegate') or {}).get('allow') or [])}); "
+                                   f"nothing was applied. " + receipt["note"])
+            return
+        if rec.get("gate"):
+            # A gate ask is answered by the gate itself: the pick (or the move
+            # verdict) is applied under the same rules as a typed answer, and
+            # the question closes with it (claunch-vjp4y.2.1).
+            job: Dict[str, Any] = {}
+            _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
+            _gate_apply(r, rec, choice, by=handle, reason=reason, job=job)
+            rec["status"] = "answered"
+            rec["closed"] = store_mod.utcnow()
+            rec["answer"] = {"decision": choice, "by": handle, "reason": reason,
+                             "channel": "responder"}
+            r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                                    if not (a.get("kind") == "ask"
+                                            and a.get("ask") == rec["id"])]
+            r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
+                   decision=choice, by=handle, by_session=session, reason=reason,
+                   channel="responder")
+            receipt["note"] = ("recorded; the gate is answered and the run continues from "
+                               "it")
+            if job:
+                receipt["verify"] = job
             return
         _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
         _ask_resolve(r, rec, choice, by=handle, reason=reason, channel="responder")
@@ -7048,7 +8246,10 @@ def start_side(name: str, *, cwd: Optional[str] = None, main: Optional[str] = No
     return start(chart, cwd=str(mst.cwd), scope=store_mod.side_scope(main, name),
                  params=params, caps=caps, force=force, now=now, driver=who, caller=caller,
                  inputs=inputs, side={"name": name, "main": main,
-                                      "main_run": mstate.get("run_id")})
+                                      "main_run": mstate.get("run_id")},
+                 # the side run belongs to the same session, so its person
+                 # gates are the same parent's to answer
+                 driver_parent=driver_parent_of(mstate))
 
 
 def abort_sides(session: str, cwd: str, reason: str,
@@ -7430,6 +8631,7 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
         rec: Dict[str, Any] = {"id": tid, "run": str(r.state.get("run_id") or ""),
                                "node": node.id, "label": node.label or None,
                                "instance": iid, "at": at, "do": do,
+                               "round": _trigger_round(r),
                                "queued_at": store_mod.utcnow()}
         if push is not None:
             rec["push"] = copy.deepcopy(push)
@@ -7443,6 +8645,21 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
         r.state.setdefault("triggers", []).append(rec)
         r.emit("trigger_queued", trigger=tid, node=node.id, label=node.label or None,
                instance=iid, at=at, do=do)
+
+
+def _trigger_round(r: "Run") -> Optional[int]:
+    """The round a trigger is recorded in: :func:`current_round` (the
+    iteration of the ``rounds: true`` loop, or a recurring slot's round),
+    else ``state.round``. ``plan-round`` opens the driver's plan of this
+    round (claunch-r3j1o.1); the value is taken now, as the record is
+    performed later."""
+    try:
+        value = current_round(r.state, r.chart)
+    except Exception:  # noqa: BLE001 -- a trigger never holds the run
+        value = None
+    if value is None:
+        value = r.state.get("round")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 #: A claim older than this many seconds is released and handed out again

@@ -19,6 +19,9 @@ What this module pins is the shape of the fix, in the workflow itself:
 * the person's three answers map onto ``land``'s existing outcomes, so the
   procedure's returns do not grow (``tests/test_cflow2_improv_worker.py``
   pins ``{"landed", "held", "rework", "blocked"}``);
+* the ``1`` is not acted on at once (claunch-sp0ut.1): the branch re-measures
+  it three times, a minute apart, before it asks a person, and a target that
+  appears in between takes the normal landing path instead;
 * the board is not touched on the way -- no ``in_review`` move, no
   ``LANDING REQUEST`` comment;
 * the marker this leaves on the board is not one of the three the landing
@@ -192,11 +195,13 @@ def test_no_target_asks_the_person_and_does_not_route_upward():
 # --------------------------------------------------------------------------- #
 # the person's gate
 # --------------------------------------------------------------------------- #
-def test_the_person_gets_three_named_choices():
+def test_the_person_gets_four_named_choices():
     """Named here rather than left to the prompt: the ``cases`` keys are the
-    answers, so these words are the interface a person answers through."""
+    answers, so these words are the interface a person answers through.
+    claunch-yzwut added the fourth, ``merge-by-agent``."""
     choices = {key for n in _gate_subtree() for key in (n.get("cases") or [])}
-    assert choices == {"rebase-and-repost", "merge-by-person", "freeze-and-close"}
+    assert choices == {"rebase-and-repost", "merge-by-person", "freeze-and-close",
+                       "merge-by-agent"}
 
 
 def test_the_three_choices_map_onto_lands_declared_outcomes():
@@ -222,6 +227,10 @@ def test_the_three_choices_map_onto_lands_declared_outcomes():
     # measured on s6086 across two rounds (claunch-i8cj4 30083 -> 30727 ->
     # 30737). Every answer the gate gives now ends the round.
     assert raised == {"blocked", "held"}, raised
+    # claunch-yzwut: merge-by-agent is the one answer that does not end the
+    # round -- the gate returns ok and land carries on to its own landing
+    # steps, so land's returns do not grow.
+    assert _the_ask()["cases"]["merge-by-agent"]["return"] == "ok"
     # the declaration's shape is what makes these land's answers, not the
     # ask procedure's: each carries the fields land declares for it. The
     # optionals are the recorded decision (claunch-1aj1a.1) -- decision, its
@@ -326,7 +335,12 @@ def test_the_same_question_is_not_asked_twice_for_the_same_place():
     cases = replay["cases"]
     # every answer the gate can give has a case, and the unanswered key asks
     assert set(cases) == {"merge-by-person", "rebase-and-repost",
-                          "freeze-and-close", "ask-again"}, cases
+                          "freeze-and-close", "merge-by-agent", "ask-again"}, cases
+    # claunch-yzwut: a replayed merge-by-agent does not end the round; it marks
+    # the round as a self-landing and the seq goes on (re-measure, then on)
+    arm = cases["merge-by-agent"]
+    assert arm["call"] == "self-merge-arm" and arm["bind"] == "self_merge", arm
+    assert arm["with"]["armed"] is True, arm
     # the replayed answers go to the same outcomes the gate returns for them
     assert cases["merge-by-person"]["return"] == "blocked"
     assert cases["rebase-and-repost"]["return"] == "blocked"
@@ -437,12 +451,128 @@ def test_the_gate_call_binds_the_answer_for_the_next_round():
 
 
 def test_the_gate_is_still_asked_when_nothing_is_recorded():
-    """The replay must not swallow the first question: the call sits in the
-    same seq, after it, and its ``ask-again`` case is an empty tree."""
+    """The replay must not swallow the first question: the branch runs it
+    first, its ``ask-again`` case is an empty tree, and the re-measure and the
+    person's gate come after it in the same seq."""
     tree = _land_no_target()
     seq = tree.get("seq") or []
     ids = [n.get("id") for n in seq if isinstance(n, dict)]
-    assert ids == ["landing-target-replay", "landing-target-ask"], ids
+    assert ids == ["landing-target-replay", "landing-target-retry",
+                   "landing-target-reroute"], ids
+    # ...and the gate is still reached on that seq: the ask is the else of the
+    # re-route, so a run that never sees a target still ends at the person
+    # (the middle branch is the replayed merge-by-agent, claunch-yzwut)
+    assert _find(seq[-1]["cond"][-1]["else"], "call", "landing-target-gate") is not None
+
+
+def _land_no_target_retry() -> dict:
+    retry = _find(_land_no_target(), "id", "landing-target-retry")
+    assert retry is not None, "the no-target branch lost its re-measure"
+    return retry
+
+
+def test_the_no_target_branch_re_measures_the_gate_before_a_person_is_asked():
+    """claunch-sp0ut.1: the sixth check's ``1`` is a momentary value.
+
+    The measured failure (claunch-sp0ut, 2026-11-03): the gate answered 1 at
+    21:51 while the leader was between rounds, this workflow opened the person
+    question, and at 22:13 the leader's round 583 came up and the same command
+    answered 0 -- the question then stayed open for a day on a premise that no
+    longer held. So the branch spends three more measurements before it asks.
+
+    The probe is the sixth check's own command: two different commands would
+    re-measure something the verdict is not about.
+    """
+    retry = _land_no_target_retry()
+    assert "wait" in retry, retry
+    wait = retry["wait"]
+    assert wait["probe"] == ["claunch", "gate", "landing-target", "--json"], wait
+    # exit 0 holds, exit 1 keeps polling, anything else is undecided
+    assert wait["poll"] == 60, wait
+    assert wait["undecided_max"] == 3, wait
+    # the engine polls at t=0/60/120 (three re-measurements) and the clock runs
+    # out at 180 -- pin the arithmetic, not just the two numbers
+    assert wait["seconds"] == 3 * wait["poll"], wait
+
+
+def test_both_retry_failures_continue_to_the_person_instead_of_escaping_the_gate():
+    """``timeout``/``undecidable`` have to be handled at the wait.
+
+    Left unhandled they leave ``land`` as outcomes it does not declare, and the
+    round loop is left through a ``fail`` -- the accident ``blocked`` was
+    introduced for (claunch-improver-integration-request-blocked-o6paj). The
+    handler is an empty tree because the branch judges the result itself, in
+    the cond below: the question still opens, the outcome does not leak.
+    """
+    retry = _land_no_target_retry()
+    # read the compiled node, not the yaml mapping: a bare ``on:`` key loads as
+    # ``True`` under YAML 1.1 (``yaml.safe_load``), while the workflow's own
+    # loader reads 1.2 booleans. ``Node.on`` is normalised either way.
+    assert "wait" in retry, retry
+    node = _chart().nodes["round/land/landing-target-retry"]
+    assert set(node.on) == {"timeout", "undecidable"}, node.on
+    for outcome, handler in node.on.items():
+        assert _chart().nodes[handler].type == "seq", (outcome, handler)
+        assert not _chart().nodes[handler].get("children"), (outcome, handler)
+
+
+def test_a_target_that_appears_during_the_retries_takes_the_normal_landing_path():
+    """One 0 among the three re-measurements ends the branch, not the round.
+
+    The re-route's ``then`` is an empty tree, so it completes ``ok``; because
+    the cond is the last node of the option's tree, the ``no-target`` option
+    completes ``ok`` too and the ``landing`` choose finishes ``ok``. ``land``'s
+    seq then goes on to ``submit`` (align -> peer review -> landing request) --
+    the same path a ``request`` answer takes. The person's question sits only
+    in the ``else``.
+    """
+    reroute = _find(_land_no_target(), "id", "landing-target-reroute")
+    assert reroute is not None, "no branch between the re-measure and the gate"
+    [hit, replayed, miss] = reroute["cond"]
+    assert hit["if"] == "$result['landing-target-retry'].outcome == 'ok'", hit
+    # claunch-yzwut: the only work on that path is to clear the self-landing
+    # mark a replayed merge-by-agent may have set -- a round with a receiver
+    # lands through the request, never through the agent's own merge
+    assert hit["then"]["call"] == "self-merge-arm", hit
+    assert hit["then"]["with"]["armed"] is False, hit
+    assert hit["then"]["bind"] == "self_merge", hit
+    # a replayed merge-by-agent goes on without asking only when the three
+    # re-measurements all said "no receiver" (the wait ran out: timeout).
+    # undecidable did not measure that, so it falls to the question below
+    # (claunch-yzwut.1)
+    assert replayed["if"] == ("$data.self_merge.armed == true and "
+                              "$result['landing-target-retry'].outcome == 'timeout'"), replayed
+    assert replayed["then"] == [], replayed
+    assert "if" not in miss, miss
+    ask = _find(miss["else"], "id", "landing-target-ask")
+    assert ask is not None and ask.get("call") == "landing-target-gate", miss
+    # the ask appears nowhere else: a question on the ok path would mean the
+    # branch still asks after a target appeared
+    elsewhere = [n for n in _land_no_target()["seq"]
+                 if isinstance(n, dict) and n.get("id") == "landing-target-ask"]
+    assert elsewhere == [], elsewhere
+
+
+def test_the_re_measure_comes_after_the_replayed_decision():
+    """A recorded answer is not delayed by three minutes of re-measuring.
+
+    claunch-1aj1a.1's replay answers for the same place and ends the round; the
+    re-measure only serves the path that would otherwise ask a person.
+    """
+    ids = [n.get("id") for n in _land_no_target().get("seq") or []
+           if isinstance(n, dict)]
+    assert ids.index("landing-target-replay") < ids.index("landing-target-retry") \
+        < ids.index("landing-target-reroute"), ids
+
+
+def test_the_sixth_check_tells_the_agent_the_answer_is_re_measured():
+    """The prompt is the agent's instruction. Told 「1이면 곧바로 사람」 the
+    agent waits on a question that the branch first spends three minutes
+    re-measuring."""
+    prompt = _words(_landing().get("prompt") or "")
+    assert "landing-target-retry" in prompt
+    assert "재측정 세 번이 끝난 뒤" in prompt
+    assert "1은 순간값이다" in prompt
 
 
 def test_the_two_rework_consumers_read_a_blocked_result_as_no_rework():
@@ -491,14 +621,27 @@ def test_the_question_carries_the_routing_reason_verbatim():
     assert "그대로" in evidence
 
 
-def test_the_gate_asks_nobody_but_a_person():
-    """The three answers all belong to a person. No ``from:`` list and no
-    ``otherwise`` other than the human default: a worker that could answer
-    this itself would be choosing its own landing path, which is the rule
-    this workflow keeps everywhere else."""
-    ask = _the_ask()
-    assert "from" not in ask["with"], "the gate may not delegate this to a session"
-    assert "otherwise" not in ask["with"]
+def test_the_gate_asks_a_person_and_only_the_parent_within_the_allow_list():
+    """The three answers belong to a person, and the driving session's
+    **parent** may take one of them on its behalf (claunch-vjp4y.2): the
+    answer that needs nobody to receive the request, ``merge-by-agent``.
+    Everything else still falls back to the person -- ``delegate.allow``
+    limits what the parent may land, and the deadline (900s) sends an
+    unanswered question there too.
+
+    The worker still cannot answer its own: ``{role: parent}`` resolves to
+    the driver's parent from ``driver_parent``, never to the driver, which
+    is the rule this workflow keeps everywhere else."""
+    with_ = _the_ask()["with"]
+    assert with_["from"] == [{"role": "parent"}], (
+        "only the driver's parent may take this answer; a mesh role would "
+        "let the worker choose its own landing path")
+    assert with_["delegate"] == {"allow": ["merge-by-agent"]}, (
+        "the parent may land merge-by-agent only; any other answer goes "
+        "back to the person")
+    assert with_["timeout"] == 900, (
+        "an unanswered question has to reach the person")
+    assert "otherwise" not in with_
 
 
 def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
@@ -518,7 +661,8 @@ def test_a_reframed_question_ends_as_blocked_not_as_a_failed_round():
     # is no ``rework`` any more: claunch-1aj1a.1 made every choice end the
     # round (rework could only re-run the batch), so the declaration would
     # name an outcome nothing raises.
-    assert set(proc["returns"]) == {"blocked", "held"}
+    # claunch-yzwut: ok is merge-by-agent's, the one answer that goes on.
+    assert set(proc["returns"]) == {"blocked", "held", "ok"}
     # ...and the try's catch handles it
     choice = _find(proc["body"], "id", "landing-target-choice")
     assert choice is not None and "try" in choice, choice

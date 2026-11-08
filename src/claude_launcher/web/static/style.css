@@ -1,3 +1,11 @@
+/* Viewport breakpoints (claunch-0a5nk.1). A width @media query uses one of
+   three steps, and tools/check_breakpoints.py refuses any other value:
+     phone    (max-width: 600px)   / (min-width: 601px)
+     compact  (max-width: 820px)   / (min-width: 821px)  -- MOBILE_MQ in app.js
+     wide     (max-width: 1100px)  / (min-width: 1101px)
+   (min-width: 1500px) is the one listed exception (the cflow pane margin).
+   @container queries size to their box, not the viewport, and are not
+   checked. */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 /* The page itself never scrolls: every scrollable region (session list,
    terminal, mesh/workflow pages) owns its own overflow, so a swipe lands on
@@ -29,6 +37,32 @@ option, optgroup {
    grey against the popup, not the popup's own colour. */
 option:disabled { color: #6b7280; }
 .error { color: #ff7b72; font-size: 12px; margin-top: 6px; }
+
+/* ---- One palette for a session's life and an issue's status ----
+   Four surfaces draw these states and each picked its own shades: `delayed`
+   was amber on the category page and purple in the hive, `paused` purple
+   there and blue here, `in_ready` green on a beads badge and cyan on a hive
+   chip. A word that means one thing reads as one colour, so the pairs live
+   here and every surface reads them. `delayed` keeps a pair of its own: it is
+   a hold whose relaunch is already scheduled, and the rail learned that a
+   person reads hold's amber as "failed to come back" on a record that will
+   start by itself. `killed`/`archived` share "done" — the chip still
+   separates them by shape and opacity. Colour never carries the state alone;
+   every surface that uses these also prints the word. */
+:root {
+  --life-running: #3fb950;  --life-running-rim: #238636;
+  --life-hold: #d29922;     --life-hold-rim: #9e6a03;
+  --life-delayed: #39c5cf;  --life-delayed-rim: #1b6f78;
+  --life-paused: #58a6ff;   --life-paused-rim: #1f6feb;
+  --life-failed: #ff7b72;   --life-failed-rim: #da3633;
+  --life-done: #8b949e;     --life-done-rim: #30363d;
+  --issue-open: #79c0ff;    --issue-open-bg: #1c2a3a;
+  --issue-ready: #39c5cf;   --issue-ready-bg: #123236;
+  --issue-busy: #e3b341;    --issue-busy-bg: #3a2f0b;
+  --issue-review: #d2a8ff;  --issue-review-bg: #2b1d4d;
+  --issue-blocked: #ff7b72; --issue-blocked-bg: #4a1d1d;
+  --issue-closed: #8b949e;  --issue-closed-bg: #21262d;
+}
 
 #layout { display: flex; height: 100vh; position: relative; }
 
@@ -78,6 +112,13 @@ option:disabled { color: #6b7280; }
   font-size: 14px; line-height: 1; padding: 2px 5px;
 }
 #refresh-archived { margin-left: 0; font-size: 11px; }
+/* Beside the title, not with the buttons on the right: it names this window. */
+#tab-title-edit {
+  flex: none; align-self: center; cursor: pointer;
+  background: none; border: none; color: #7d8590;
+  font-size: 13px; line-height: 1; padding: 2px 4px;
+}
+#tab-title-edit:hover, #tab-title-edit.custom { color: #58a6ff; }
 #refresh-all:hover, #refresh-archived:hover { color: #58a6ff; }
 #refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -187,6 +228,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-ymax { fill: var(--term-
 html[data-theme="light"] #term-tps-overlay .term-series-key.compaction::before { border-left-color: var(--term-tps-err); }
 html[data-theme="light"] #term-tps-overlay .term-series-key.swap::before { background: var(--term-swap); }
 html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term-strong); }
+html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(--term-muted); }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
@@ -666,27 +708,36 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
    scroll position for a card that is already in hand.
 
    min       one line: dot, name, role. Reviewer and oneshot rows.
-   compact   two lines: name, briefing one-line, plus the status-check chips.
-             The default.
+   compact   the name line, the briefing one-line, the status-check chips,
+             and the reader's own note when the session has one. The default.
    expanded  every line the row has, plus the briefing card.
 
-   `.rail-actions` belongs to expanded cards, with one named pair of
-   exceptions: the spawn `+` and the 📌 pin (claunch-g6ecv, operator
-   request — the child-add button the operator asked back onto the default
-   card, in its remembered place directly left of the pin, on the card's
-   own buttons line). Everything else
-   in the
-   box — the API-key picker, briefing/check refresh controls, observe, note
-   and ⓘ — is available after opening the card. Keeping asynchronous
-   refresh labels off the identity line also keeps the profile position
-   stable.
+   `.rail-actions` belongs to expanded cards, and to them only. The spawn
+   `+` and the 📌 pin rode the compact card for a while (claunch-g6ecv,
+   operator request) as a named pair of exceptions; the operator withdrew
+   both on 2026-11-04 (claunch-5b12o.1: "collapsed 상태에서는 📌 버튼및 '+'
+   버튼 미노출") — the folded card is the row a reader scans, and two
+   buttons on it compete with the lines that say what the session is doing.
+   Everything in the box — the API-key picker, briefing/check refresh
+   controls, observe, note, ⓘ, `+` and 📌 — is available after opening the
+   card. Keeping asynchronous refresh labels off the identity line also
+   keeps the profile position stable.
 
-   `.rail-quiet` (next paragraph) and `.rail-status-checks` are the opposite
-   case: they SAY something the name and the dot cannot, so both survive the
-   compact card. The chips are what the agent reported about its own work.
+   `.rail-quiet` (next paragraph), `.rail-status-checks` and `.rail-note` are
+   the opposite case: they SAY something the name and the dot cannot, so all
+   three survive the compact card. The chips are what the agent reported about
+   its own work; the note is the one line on the card the reader wrote — a
+   folded card that hid it would hide the reader's own words from the rail
+   they annotate it on (claunch-5b12o, operator request: "카드가 fold 상태일
+   때도 'note' 가 표시되도록"). A session with no note draws no line at all
+   (app.js decorateNoteRow removes it), so the extra height is paid only by
+   the rows somebody annotated.
+
+   The chips are what the agent reported about its own work.
    They do not reach the one-line card: that card exists for roles a fleet
    holds many of at once, it is specified as the dot, the name and the role,
-   and "collapsed" in the reader's request names the compact card.
+   and "collapsed" in the reader's request names the compact card. The note
+   does not reach it either, for the same reason (see the block above).
 
    Hidden with `display: none` rather than `visibility`, so an expanded row
    is the only one whose height counts these lines at all -- which is what
@@ -742,7 +793,6 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 #session-list li[data-rail-mode="compact"] .rail-seen,
 #session-list li[data-rail-mode="compact"] .rail-life,
 #session-list li[data-rail-mode="compact"] .rail-quiet:not(:has(.quiet-fault, .quiet-hold, .quiet-waiting)),
-#session-list li[data-rail-mode="compact"] .rail-note,
 #session-list li[data-rail-mode="compact"] .rail-progress,
 #session-list li[data-rail-mode="compact"] .rail-procs,
 #session-list li[data-rail-mode="compact"] .rail-commits,
@@ -751,28 +801,18 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 #session-list li[data-rail-mode="compact"] .sess-brief {
   display: none;
 }
-/* The buttons line is the expanded card's, EXCEPT the spawn+pin pair the
-   operator asked back onto the collapsed card (claunch-g6ecv): the `+`
-   spawns a child of the session and sits directly left of the 📌, the
-   arrangement the card wore before the density split. The pair takes the
-   buttons line of its own — riding the name line was tried first and
-   fails on the real rail: a name line's flex bases already fill the 260px
-   rail (dot + name group + a borrow-naming meta), so a fourth base always
-   wraps (measured live: every compact card took a second line). Exited
-   sessions have no `+` (nothing to spawn from) and wear the pin alone.
-   Placing the visible part by exclusion, not by hiding the box, is what
-   keeps the pair reachable: an ancestor `display: none` would take them
-   with the other buttons. The exceptions are listed by name rather than
-   left implicit, so a further control kept on the compact card has to be
-   decided about rather than inherited. */
-#session-list li[data-rail-mode="compact"] .rail-actions
-  > :not(.sess-plus, .sess-pin) {
-  display: none;
-}
-/* ...and a box that holds nothing visible must not cost height. A box
-   whose every child is hidden measures as holding nothing. */
-#session-list li[data-rail-mode="compact"] .rail-actions:not(:has(
-    .sess-plus, .sess-pin)) {
+/* The buttons line belongs to the expanded card. The spawn `+` and the 📌
+   were the operator's named exceptions on the collapsed card
+   (claunch-g6ecv); on 2026-11-04 the operator withdrew them
+   (claunch-5b12o.1: "collapsed 상태에서는 📌 버튼및 '+' 버튼 미노출"), so
+   the box is hidden whole. Hiding the box, rather than listing the children
+   to keep, is what makes a control added to it later invisible on the
+   compact card by default — the exception list this replaces did the
+   opposite, hiding a new control only after someone had decided about it.
+   `.rail-note` is not in this box and keeps its own case: the compact card
+   still shows the reader's note (paragraph above).
+   The one-line card's hide list already names `.rail-actions` (above). */
+#session-list li[data-rail-mode="compact"] .rail-actions {
   display: none;
 }
 /* Workflow state remains visible at every card density. */
@@ -1036,25 +1076,25 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
 .dot.idle { background: #3fb950; }
 .dot.busy { background: #d29922; }
 .dot.starting { background: #58a6ff; }
-.dot.exited { background: #6e7681; }
+.dot.exited { background: var(--life-done); }
 /* A paused record: exited underneath, but the operator's temporary stop —
    drawn in the reminder-pause blue rather than the grey of a kill, so the
    rail tells the two apart at the dot. */
-.dot.exited.paused { background: #58a6ff; }
+.dot.exited.paused { background: var(--life-paused); }
 /* A held record (claunch-5l35i): asleep, wakes when opened. */
-.dot.exited.hold { background: #8b7fd6; }
+.dot.exited.hold { background: var(--life-hold); }
 /* A delayed record (claunch-0j6gb.2, claunch-v4uyt): waiting in the boot's
    restore queue. Its own colour and a slow pulse, apart from hold's violet,
    because it starts by itself — a person read the violet as "failed to come
    back". */
 .dot.exited.delayed {
-  background: transparent; box-shadow: inset 0 0 0 2px #39c5cf;
+  background: transparent; box-shadow: inset 0 0 0 2px var(--life-delayed);
   animation: restore-queue-pulse 2s ease-in-out infinite;
 }
 @keyframes restore-queue-pulse { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .dot.exited.delayed { animation: none; } }
 /* A failed record (claunch-0j6gb.1): ended by itself with an error. */
-.dot.exited.failed { background: #f85149; }
+.dot.exited.failed { background: var(--life-failed); }
 /* The dot's grade (dotGrade in app.js). Busy steps up from a dim amber — a
    turn parked on a tool call — to a bright orange with a halo for a screen
    moving hundreds of rows a minute. Idle fades as the quiet ages: full
@@ -1398,6 +1438,10 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   min-width: 0; white-space: normal; overflow-wrap: anywhere;
 }
 #session-list .sess-cflow2.gated { color: #d29922; font-weight: 600; }
+/* A door the run is not held on (claunch-hbmhk): no amber and no weight, so
+   the row does not read as "stopped on you". The muted default colour is the
+   point — the word "optional" carries the meaning, the calm carries the rest. */
+#session-list .sess-cflow2.optional { color: #7d8590; }
 #session-list :is(a.sess-cflow, a.sess-cflow2) {
   text-decoration: none; cursor: pointer;
 }
@@ -2137,9 +2181,9 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   #rail-nav-dock {
     /* Must be at least the number of links in #rail-nav, or the rows past it
        are unreachable while the dock is hovered (the pin shows them all).
-       26 links as of claunch-ijkge (the PR page added the last one); keep
-       this ahead of that count. */
-    --rail-nav-rows: 27;
+       29 links as of claunch-d0hji (the Fleet page added the last one; the
+       count had already passed 27 before it); keep this ahead of that count. */
+    --rail-nav-rows: 30;
     --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
     padding-right: var(--rail-nav-pin); background: #1b1e24;
@@ -2168,8 +2212,15 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost { color: var(--term
   }
   #rail-nav-pin:hover { opacity: 0.9; background: #22262d; }
   #rail-nav-pin[aria-pressed="true"] { opacity: 1; filter: none; }
-  #rail-nav-dock.pinned { height: auto; }
-  #rail-nav-dock.pinned #rail-nav { position: static; max-height: none; box-shadow: none; }
+  /* The page list keeps growing (26 links at claunch-ijkge, 27 now), and
+     past a certain count the pinned rows no longer fit under the rail's
+     header: the dock used to grow past the window's bottom edge with no way
+     to reach the rows below it. So the pinned dock gives up room like the
+     list does and the nav scrolls inside it; the pin is the dock's child,
+     not the scroller's, so it stays where it can always be pressed. */
+  #rail-nav-dock.pinned { height: auto; flex: 0 1 auto; min-height: 0; }
+  #rail-nav-dock.pinned #rail-nav { position: static; height: 100%; max-height: none;
+    box-shadow: none; overflow-y: auto; }
 }
 @media (min-width: 821px) and (hover: hover) and (prefers-reduced-motion: reduce) {
   #rail-nav { transition: none; }
@@ -2630,10 +2681,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-refresh:hover:not(:disabled) { border-color: #58a6ff; color: #e6edf3; }
 .new-usage-refresh:disabled { opacity: .6; cursor: default; }
 .new-usage-windows, .new-usage-keys { margin: 5px 0 0; padding: 0; list-style: none; }
-.new-usage-window { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
-.new-usage-pct.low { color: #3fb950; }
-.new-usage-pct.mid { color: #d29922; }
-.new-usage-pct.high { color: #f85149; }
+/* One row per window, with the name in its own column: the short window is
+   always first and the pct/bar/countdown columns line up under each other
+   (claunch-hz9ma). */
+.new-usage-window {
+  display: grid; align-items: center; gap: 8px; padding: 1px 0;
+  grid-template-columns: 46px 90px minmax(40px, 150px) minmax(0, 1fr);
+}
+.new-usage-window-label { color: #6e7681; }
+.new-usage-window-reset {
+  color: #6e7681; font-size: 11px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.new-usage-window-status { color: #d29922; font-size: 11px; }
+.new-usage-pct.low, .new-usage-cell-pct.low { color: #3fb950; }
+.new-usage-pct.mid, .new-usage-cell-pct.mid { color: #d29922; }
+.new-usage-pct.high, .new-usage-cell-pct.high { color: #f85149; }
 .new-usage-bar {
   flex: 1 1 60px; max-width: 140px; height: 4px; border-radius: 2px;
   background: #21262d; overflow: hidden;
@@ -2641,10 +2704,19 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .new-usage-bar i { display: block; height: 100%; background: #3fb950; }
 .new-usage-bar.mid i { background: #d29922; }
 .new-usage-bar.high i { background: #f85149; }
+/* The bar's place in a row that has no percentage to fill it — a detail
+   sentence, or an amount with no limit. It keeps the column, so the
+   countdown after it stays in the fourth column instead of moving into the
+   bar's own (claunch-hz9ma.1), and it draws nothing. */
+.new-usage-bar-slot { min-width: 0; height: 4px; }
+.new-usage-cell .new-usage-bar-slot { flex: none; width: 100%; }
 /* The key rows: what the next launch takes, which key is in the token file
    now, and that key's own numbers. */
 .new-usage-keys { border-top: 1px solid #21262d; padding-top: 4px; }
-.new-usage-key { display: flex; align-items: baseline; gap: 7px; padding: 1px 0; }
+.new-usage-key {
+  display: grid; align-items: center; gap: 7px; padding: 2px 0;
+  grid-template-columns: 42px minmax(44px, 140px) max-content minmax(0, 1.8fr) max-content max-content;
+}
 .new-usage-key.next { color: #e6edf3; }
 .new-usage-key-mark {
   flex: none; min-width: 42px; color: #6e7681; font-size: 10px;
@@ -2652,13 +2724,53 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .new-usage-key.next .new-usage-key-mark { color: #3fb950; }
 .new-usage-key-name {
-  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
 }
-.new-usage-key-token { flex: none; color: #6e7681; font-size: 11px; }
-.new-usage-key-use { flex: 1 1 auto; color: #7d8590; overflow-wrap: anywhere; }
-.new-usage-key-used { flex: none; color: #6e7681; font-size: 11px; }
+.new-usage-key-token { min-width: 0; color: #6e7681; font-size: 11px; white-space: nowrap; }
+/* The window columns. Every row draws the same number of cells in the same
+   order, so the pct, the bar and the countdown of one account sit directly
+   under another's — the comparison this block exists for (claunch-hz9ma). */
+.new-usage-key-use {
+  min-width: 0; display: grid; align-items: start; gap: 8px;
+  grid-template-columns: repeat(var(--window-count, 1), minmax(0, 1fr));
+  color: #7d8590;
+}
+.new-usage-cell { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.new-usage-cell-head { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.new-usage-cell-label {
+  color: #6e7681; font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+}
+.new-usage-cell-pct {
+  color: #9da5b0; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.new-usage-cell-reset {
+  color: #6e7681; font-size: 10px; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.new-usage-cell .new-usage-bar { flex: none; width: 100%; max-width: none; }
+.new-usage-cell.empty .new-usage-cell-pct { color: #484f58; }
+.new-usage-key-used { color: #6e7681; font-size: 11px; white-space: nowrap; }
 .new-usage-key-use.bad { color: #d29922; }
+/* A narrow form keeps the key columns but drops the row's less needed parts
+   to a second line, so the pct columns still line up instead of scrolling
+   sideways (claunch-hz9ma). The placements are explicit: an auto-placed
+   `used`/button pair would land in the 42px marker column and centre the
+   button under the cells. */
+@media (max-width: 820px) {
+  .new-usage-key { grid-template-columns: 42px minmax(0, 1fr) max-content max-content; }
+  .new-usage-key-mark { grid-area: 1 / 1; }
+  .new-usage-key-name { grid-area: 1 / 2; max-width: none; }
+  .new-usage-key-token { display: none; }
+  .new-usage-key-used { grid-area: 1 / 3; }
+  .new-usage-key-take { grid-area: 1 / 4; }
+  .new-usage-key-use { grid-area: 2 / 1 / 3 / 5; }
+  .new-usage-window { grid-template-columns: 40px 64px minmax(0, 1fr); }
+  .new-usage-window .new-usage-bar { display: none; }
+  .new-usage-window .new-usage-bar-slot { display: none; }
+  .new-usage-window-reset { text-align: right; }
+}
 /* The manual choice per row (claunch-i985h): small, quiet, and never the
    loudest thing on a row — the usage numbers are what the block exists for. */
 .new-usage-key-take {
@@ -3064,22 +3176,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
-.badge.exited { background: #30363d; color: #8b949e; }
+.badge.exited { background: var(--life-done-rim); color: var(--life-done); }
 /* The attached session's last tokens/s, next to its status. */
 .badge.tps {
   background: #2b2308; color: #e3b341;
   font-family: SFMono-Regular, Consolas, monospace;
 }
 .badge.tps.stale { background: #1c1f24; color: #7d8590; }
-.badge.exited.paused { background: #172947; color: #58a6ff; }
-.badge.exited.hold { background: #231f3d; color: #a99cf0; }
-.badge.exited.delayed { background: #0d2a2e; color: #56d4dd; }
+.badge.exited.paused { background: #172947; color: var(--life-paused); }
+.badge.exited.hold { background: #3a2f0b; color: var(--life-hold); }
+.badge.exited.delayed { background: #0d2a2e; color: var(--life-delayed); }
+.badge.exited.failed { background: #4a1d1d; color: var(--life-failed); }
 .restore-queue-banner {
   margin: 4px 0; padding: 4px 8px; border-radius: 6px;
   background: #0d2a2e; color: #56d4dd; border: 1px solid #1b4b52;
   font-size: 12px; font-variant-numeric: tabular-nums;
 }
-.badge.exited.failed { background: #3d1d20; color: #ff7b72; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined
    like its neighbours because it is only ever up when something is wrong —
@@ -3390,6 +3502,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: #2a2108; border-bottom: 1px solid #6e5000; color: #e3b341;
 }
 #term-cflow.hidden { display: none; }
+/* A v2 run whose answers are all optional (claunch-hbmhk.1): the strip stays
+   (its button is still a real press) but wears the rail chip's optional
+   colour instead of the gate amber, so the line does not claim the reader
+   must answer. The buttons keep their own styles -- the press is unchanged. */
+#term-cflow.optional {
+  background: #21262d; border-bottom-color: #30363d; color: #7d8590;
+}
+#term-cflow.optional .tcf-question { color: #8b949e; }
+#term-cflow.optional .tcf-btn { border-color: #30363d; }
 #term-cflow .tcf-head {
   display: flex; align-items: baseline; gap: 6px; flex: none;
   color: inherit; text-decoration: none; font-weight: 600; white-space: nowrap;
@@ -3793,7 +3914,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 #term-score-goal .term-score-opt { display: inline-flex; align-items: center; gap: 0.15rem; white-space: nowrap; font-size: 0.85rem; cursor: pointer; }
 #term-score-goal .term-score-opt:has(input:disabled) { cursor: default; opacity: 0.6; }
 #term-score-counts { font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-score-goal:not(.hidden)) { flex-wrap: wrap; }
   #term-score-goal { order: 2; flex-basis: 100%; }
 }
@@ -3813,7 +3934,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
 /* On a phone the note takes its own row under the bar, so it does not take
    the little width the field has left beside the buttons. After the rule
    above, which it overrides. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input:has(#term-input-note:not(.hidden)) { flex-wrap: wrap; }
   #term-input-note { order: 3; flex-basis: 100%; max-width: none; }
 }
@@ -3822,7 +3943,7 @@ html[data-theme="light"] .term-offline-note { color: #c9d1d9; }
    took the field to 22px at 380px. Four pixels of gap across the row's
    separators gives the field back what that button took, so it keeps the
    minimum this bar promises (terminputlayout_browser.cjs). */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #term-input { gap: 4px; }
 }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
@@ -4138,6 +4259,20 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: SFMono-Regular, Consolas, monospace;
 }
+/* The automatic key switch is ON for this session (claunch-d2t79). Deliberately
+   a different shape from the key chip beside it (a short word, not a masked
+   key) so the two never read as the same fact: the chip names the key, this
+   says the daemon may move the session to another one on a usage limit. */
+#session-list .sess-auto-key {
+  flex: none; background: none; border: 1px solid #9e6a03;
+  border-radius: 9px; color: #d29922; font-size: 9px; line-height: 1;
+  letter-spacing: .04em; padding: 2px 5px; cursor: pointer;
+}
+#session-list .sess-auto-key:hover { color: #e3b341; border-color: #e3b341; }
+.sess-key-section { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.key-picker-auto { margin-top: 8px; }
+.key-picker-auto-label { display: flex; align-items: center; gap: 6px; }
+.key-picker-auto-note { margin-top: 4px; }
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
@@ -4208,6 +4343,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   border: none; color: #7d8590; font-size: 17px; line-height: 1; padding: 0 4px;
 }
 .sess-close:hover { color: #ff7b72; }
+/* The head's ⋯ and its box (sessHeadMoreButton, claunch-0a5nk.5): wider
+   than a phone the box is not a box and the ⋯ is not there. */
+.sess-head-extra { display: contents; }
+.sess-head-more { display: none; }
 .sess-meta {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px; font-size: 13px;
@@ -4734,6 +4873,27 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .rag-index-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .rag-index-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rag-index-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 260px; min-width: 0; }
+/* the RAG card's DB blocks: one heading per DB, its buckets underneath */
+.rag-db-block { border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+.rag-db-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rag-db-head strong { flex: 1 1 auto; }
+.rag-db-head .wf-btn { flex: none; margin: 0; }
+.rag-notice { border-left: 3px solid #1f6feb; padding-left: 8px; }
+.rag-queue-line .wf-btn { margin: 0 0 0 6px; padding: 1px 8px; font-size: 11px; }
+.rag-badge { display: inline-block; width: max-content; font-size: 11px; padding: 1px 8px; border-radius: 10px; border: 1px solid #30363d; color: #9da5b0; }
+.rag-badge-ok { border-color: #238636; color: #3fb950; }
+.rag-badge-busy { border-color: #1f6feb; color: #58a6ff; }
+.rag-badge-failed { border-color: #da3633; color: #f85149; }
+.rag-badge-pending { border-color: #9e6214; color: #f0883e; }
+.rag-state-text { font-size: 11px; color: #9da5b0; overflow-wrap: anywhere; }
+.rag-state-failed { color: #f85149; }
+.rag-state-busy { color: #58a6ff; }
+/* A collection on disk that no index has opened yet: drawn, not offered.
+   Greyed so it reads as "there, but not running" beside the rows that are
+   (claunch-c7vjm). */
+.rag-row-unopened { opacity: 0.6; }
+.rag-badge-unopened { border-style: dashed; }
+.rag-state-unopened { color: #9da5b0; }
 /* the GitHub CLI card: the same rows as the RAG card, coloured by verdict */
 .gh-head { display: flex; align-items: center; gap: 10px; }
 .gh-head h3 { flex: 1 1 auto; margin: 0; }
@@ -4795,7 +4955,7 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 .beads-new-desc { resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
 .beads-new-board { padding-top: 5px; overflow-wrap: anywhere; }
 .beads-new-actions { display: flex; gap: 8px; margin-top: 4px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   .beads-new-row { grid-template-columns: 1fr; }
   .beads-new-row small { grid-column: 1; }
 }
@@ -4842,7 +5002,7 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
 }
 .beads-sess.idle { background: #1f4428; color: #3fb950; }
 .beads-sess.busy { background: #4d3800; color: #d29922; }
-.beads-sess.exited { background: #30363d; color: #8b949e; }
+.beads-sess.exited { background: var(--life-done-rim); color: var(--life-done); }
 /* The third state a kept session can be in, and the fourth word for it: a
    paused record's process is gone exactly like a killed one, so its status
    reads `exited` and this is what says otherwise. The blue is the terminal
@@ -4851,13 +5011,20 @@ mark.beads-hit { background: #d29922; color: #0d1117; border-radius: 2px; paddin
    sessionChip in search-anything.js), which is why the state word gets a
    rule here: the chip says its state in colour and in text, and the text is
    what a reader without the colour still gets. */
-.beads-sess.paused { background: #172947; color: #58a6ff; }
+.beads-sess.paused { background: #172947; color: var(--life-paused); }
 .beads-sess-state { margin-left: 5px; opacity: .75; }
 .badge.beads-status { white-space: nowrap; }
-.badge.beads-status.open { background: #1c2a3a; color: #79c0ff; }
-.badge.beads-status.ready { background: #173b2b; color: #56d364; }
-.badge.beads-status.review { background: #2b1d4d; color: #d2a8ff; }
-.badge.beads-status.blocked { background: #4a1d1d; color: #ff7b72; }
+/* One pair per issue status, from the palette at the top of this file. The
+   class names are the badge's (`beadsStatusBadge` maps in_progress -> busy,
+   closed -> exited); `busy`/`exited` used to fall through to the generic
+   session badge, which is why an in_progress issue and a busy session shared
+   a colour that meant two different things. */
+.badge.beads-status.open { background: var(--issue-open-bg); color: var(--issue-open); }
+.badge.beads-status.ready { background: var(--issue-ready-bg); color: var(--issue-ready); }
+.badge.beads-status.busy { background: var(--issue-busy-bg); color: var(--issue-busy); }
+.badge.beads-status.review { background: var(--issue-review-bg); color: var(--issue-review); }
+.badge.beads-status.blocked { background: var(--issue-blocked-bg); color: var(--issue-blocked); }
+.badge.beads-status.exited { background: var(--issue-closed-bg); color: var(--issue-closed); }
 .beads-detail {
   padding: 12px 16px; background: #1b1e24; border: 1px solid #2a2e36;
   border-radius: 8px; min-width: 0; align-self: start; position: sticky; top: 0;
@@ -5061,6 +5228,20 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .beads-rel-link { color: #58a6ff; text-decoration: none; font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
 .beads-rel-link:hover { text-decoration: underline; }
 .beads-rel-title { color: #c6cdd5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* The depth of one row in the opened issue's family: ancestors step in as they
+   come down to the issue, and the subtree steps in under it. Classes rather
+   than inline padding so the indentation stays with the pane's other rules;
+   deeper than six levels share six's indent, which the daemon's own read cap
+   keeps rare. */
+.beads-rel-d1 { padding-left: 14px; }
+.beads-rel-d2 { padding-left: 28px; }
+.beads-rel-d3 { padding-left: 42px; }
+.beads-rel-d4 { padding-left: 56px; }
+.beads-rel-d5 { padding-left: 70px; }
+.beads-rel-d6 { padding-left: 84px; }
+/* The issue the pane is about, between its ancestors and its subtree. It is a
+   position in the family, not a link: the reader is already there. */
+.beads-rel-self .beads-rel-link { color: #e6edf3; }
 .sess-wf-run { display: flex; align-items: center; gap: 8px; }
 .sess-wf-name { font-size: 14px; color: #e6edf3; }
 .sess-wf-run .meta { color: #7d8590; font-size: 11px; }
@@ -6533,6 +6714,145 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .provider-affinity-name input[type="checkbox"] { margin: 0; }
 .provider-affinity-note { color: #7d8590; font-size: 12px; }
 .provider-affinity-note.error { color: #f85149; }
+/* Settings > Model tiers (claunch-61vj3.1): a tier is a panel with its own
+   head and one grid row per entry, the field names drawn once in a column
+   header instead of before every select. The card therefore reads top-down
+   (what the tier is, what its entries are, how to add one) and two entries
+   are compared by reading down one column. The card keeps one primary
+   action, Add tier, at its foot; adding an entry and deleting one are
+   secondary and sit beside the row they act on. Every control here was
+   unstyled before this rule set: the selects took the browser's own face and
+   the labels repeated on every row, so the rows wrapped and no two selects
+   lined up. */
+.model-tiers-settings { padding: 14px 18px 18px; }
+.model-tier-card-head { display: flex; align-items: baseline; gap: 10px; }
+.model-tiers-settings .model-tier-card-head h3 { margin: 0; }
+.model-tier-card-meta { color: #7d8590; font-size: 12px; }
+.model-tier-help { margin: 8px 0 2px; max-width: 640px; }
+.model-tier-source { margin-bottom: 4px; color: #6e7681; font-size: 12px; }
+.model-tier {
+  margin: 12px 0; padding: 12px 14px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+}
+.model-tier-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.model-tier-name { color: #e6edf3; font-size: 13px; font-weight: 600; }
+.model-tier-meta { color: #7d8590; font-size: 12px; }
+.model-tier-empty { margin: 0; }
+.model-tier-row {
+  display: grid; align-items: center; gap: 8px; padding: 5px 0;
+  grid-template-columns:
+    56px minmax(110px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto;
+}
+.model-tier-row-head { padding: 0 0 5px; margin-bottom: 2px; border-bottom: 1px solid #2a2e36; }
+.model-tier-row-head .model-tier-col { font-size: 11px; color: #7d8590;
+  text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+.model-tier-row-head .model-tier-col:first-child { text-align: center; }
+.model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: 1px solid #21262d; }
+.model-tier-row select, .model-tier-add-field select, .model-tier-add-tier input {
+  width: 100%; min-width: 0; padding: 4px 6px; font-size: 12px;
+  color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.model-tier-row select:disabled, .model-tier-add-field select:disabled,
+.model-tier-add-tier input:disabled { color: #7d8590; background: #161b22; }
+.model-tier-radio { margin: 0; justify-self: center; }
+.model-tier-del { margin: 0; justify-self: end; }
+.model-tier-add {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid #21262d;
+}
+.model-tier-add-field { display: flex; align-items: center; gap: 6px;
+  flex: 0 1 260px; min-width: 0; }
+.model-tier-add-label, .model-tier-add-tier-label {
+  color: #7d8590; font-size: 12px; white-space: nowrap;
+}
+.model-tier-add-btn { margin: 0; padding: 4px 12px; font-size: 12px; }
+.model-tier-add-tier {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid #30363d;
+}
+.model-tier-add-tier-field { display: flex; align-items: center; gap: 6px;
+  flex: 0 1 380px; min-width: 0; }
+.model-tier-add-tier .wf-btn { margin: 0; }
+@media (max-width: 820px) {
+  .model-tier-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .model-tier-row-head { display: none; }
+  .model-tier-row:not(.model-tier-row-head) + .model-tier-row { border-top: none; }
+  .model-tier-row select { flex: 1 1 130px; width: auto; }
+  .model-tier-del { margin-left: auto; }
+  .model-tier-add-field { flex: 1 1 180px; }
+  .model-tier-add-tier-field { flex: 1 1 200px; }
+}
+/* Settings > the other cards (claunch-61vj3.1.1): delegated child session,
+   post-merge sweep batching, key switch, web debug and sim defaults. Like the
+   Model tiers card above, these had no rule of their own, so their controls
+   fell in at the browser's inline defaults and a field's name sat on the same
+   line as an input of the browser's sizing. Each card is a few named fields
+   and one action, so the shape is the same everywhere: labelled fields in a
+   two-column grid where the fields are short and independent (delegate, sim
+   defaults), one field per line where each carries its own explanation
+   (sweep batching, key switch, web debug), and at most one primary button.
+   The last three share .sweep-batch-field/.sweep-batch-row — their builders
+   already reuse those classes across the three cards. */
+.delegate-settings {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px; align-items: start;
+}
+/* The prose and an error span the grid; the fields share the rows below. */
+.delegate-settings > h3, .delegate-settings > .wf-note,
+.delegate-settings > .error { grid-column: 1 / -1; }
+.delegate-field {
+  display: flex; flex-direction: column; gap: 5px; min-width: 0;
+  color: #7d8590; font-size: 12px;
+}
+.delegate-field select {
+  width: 100%; min-width: 0; box-sizing: border-box; padding: 8px;
+  font-size: 13px; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+/* One field per line: its label, value and Reset form a single row, and the
+   explanation of what the value does sits directly under that row. */
+.sweep-batch-field, .sweep-batch-row {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid #21262d;
+}
+/* The first field of a card follows its prose, so it needs no divider. */
+.sweep-batch-settings > .sweep-batch-field:first-of-type,
+.key-switch-settings .sweep-batch-row,
+.webdebug-settings > .sweep-batch-field:first-of-type {
+  margin-top: 4px; padding-top: 0; border-top: none;
+}
+.sweep-batch-label {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  color: #c9d1d9; font-size: 12.5px;
+}
+.sweep-batch-label input[type="number"] {
+  width: 7ch; min-width: 52px; box-sizing: border-box; padding: 6px 8px;
+  font-size: 13px; text-align: right; color: #c9d1d9; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.sweep-batch-label input[type="checkbox"] { margin: 0; }
+.sweep-batch-unit { color: #7d8590; }
+/* Reset is the row's only action; at the far right the values read straight
+   down the card. */
+.sweep-batch-label .wf-btn { margin: 0 0 0 auto; padding: 4px 10px; font-size: 12px; }
+.sweep-batch-field > .wf-note, .sweep-batch-row > .wf-note { margin: 0; }
+/* Sim defaults picks its two models in a .llm-settings-form; what the card
+   adds is the Save row (the form's only button) spanning the grid. */
+.sim-defaults-settings .llm-settings-form > p { grid-column: 1 / -1; }
+.sim-defaults-settings .llm-settings-form .wf-btn {
+  grid-column: 1 / -1; justify-self: start;
+}
+@media (max-width: 820px) {
+  .delegate-settings { grid-template-columns: minmax(0, 1fr); }
+  /* .llm-settings-form collapses at 600px for cards that sit alone; on this
+     page the block next to it has folded at 820px, and one card still holding
+     two columns reads as a mistake. */
+  .sim-defaults-settings .llm-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .delegate-field select { font-size: 16px; }
+  .sweep-batch-label input[type="number"] { font-size: 16px; }
+  .sweep-batch-label .wf-btn { margin-left: 0; }
+}
 /* Settings > Providers (#/settings/providers): the installed list on top, the
    install form under it. One field per row -- label column, control, note --
    so a long list of schema keys stays scannable, and the note sits under the
@@ -6663,6 +6983,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-remote { display: flex; align-items: center; gap: 6px; }
 .ws-sync-remote .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ws-sync-targets .ws-sync-form { margin: 4px 0 0; }
+.ws-sync-remote { flex-wrap: wrap; }
+.ws-sync-remote-target { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.ws-sync-remote-basis { display: inline-flex; align-items: center; gap: 4px; }
+.ws-sync-remote-basis input:disabled + span { opacity: .55; }
+.ws-sync-remote-off .ws-sync-remote-target { opacity: .65; }
+.ws-sync-remote-why { font-size: 12px; }
+.ws-sync-basis-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0; }
 .ws-sync-order { margin: 6px 0 0; }
 .ws-sync-order h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
 .ws-sync-order-row { font-size: 12px; padding: 1px 0; }
@@ -6729,7 +7056,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-unmerged-row > * { min-width: 0; max-width: 100%; }
 .ws-sync-unmerged-row .ws-sync-unmerged-branch { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* On a narrow screen the groups wrap onto lines of their own: no dividers. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .ws-action-group + .ws-action-group { padding-left: 0; border-left: none; }
   .ws-action-group.ws-group-end { margin-left: 0; }
   .ws-sync-unmerged-row { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 5em); }
@@ -6952,7 +7279,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-packs-summary-note { margin: 4px 0 0; }
 .pack-chip-mini { padding: 0 6px; border-radius: 999px; background: #21262d; white-space: nowrap; max-width: 100%; }
 .new-packs-summary-list .pack-chip-mini { white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .pack-chip-mini { white-space: normal; }
 }
 .new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
@@ -7059,7 +7386,7 @@ a.seq-tab { text-decoration: none; }
    sections promoted to tabs, with the session you'd return to pinned along
    the bottom. These three elements exist only for that — desktop never
    shows them. */
-#mobile-top, #mobile-bottom { display: none; }
+#mobile-top, #mobile-bottom, #mobile-tabs { display: none; }
 
 /* Embedded (`?embed=1`, set on <body> by app.js): another page's side panel
    holds this UI in an iframe and wants the terminal only. Everything that is
@@ -7067,11 +7394,24 @@ a.seq-tab { text-decoration: none; }
    breakpoint below still applies inside a narrow iframe — that is fine, since
    the elements it promotes to modes are the ones hidden here. */
 body.embed #sidebar, body.embed #rail-split, body.embed #mobile-top,
-body.embed #mobile-bottom, body.embed #detail-split, body.embed #sess-view {
+body.embed #mobile-bottom, body.embed #mobile-tabs, body.embed #detail-split, body.embed #sess-view {
   display: none !important;
 }
 body.embed #main { width: 100%; }
 
+/* A phone's bar keeps the title readable: the dot already wears the
+   session's state (dotClassOf, with the paused/hold/failed marker), so the
+   badge that spells it out is the part left off (claunch-0a5nk.2). Two ids,
+   so it holds against the .badge rules wherever they sit. */
+@media (max-width: 600px) {
+  #mobile-top #m-status { display: none; }
+  /* The link chip is up only while the socket is down, and the terminal's
+     own overlay (#term-offline) says the rest; on a phone the chip's colour
+     and first word are what fit beside the title. `body` raises the gap
+     rule over the compact block below, which sets 8px. */
+  #mobile-top #m-link { max-width: 64px; }
+  body #mobile-top { gap: 6px; }
+}
 @media (max-width: 820px) {
   /* --app-h is the *visual* viewport: an on-screen keyboard shrinks that
      but not 100dvh, and the terminal has to fit what's left or type into
@@ -7118,6 +7458,40 @@ body.embed #main { width: 100%; }
   }
   #mobile-top #m-zoom .m-act:active { background: #363d49; }
   #mobile-top #m-zoom .m-act:disabled { opacity: 0.4; }
+  /* Which controls the bar carries depends on the page (claunch-0a5nk.2).
+     The size knob only sizes a terminal, so it is up on the terminal page
+     alone. The badge describes the open session, which is what the terminal
+     and the session page show; on any other page the title names the page
+     and the dot keeps the session's colour. The link chip reports that same
+     session's socket, so it follows the badge. */
+  body:not([data-page="terminal"]) #mobile-top #m-zoom { display: none; }
+  body:not([data-page="terminal"]):not([data-page="session"]) #mobile-top :is(#m-status, #m-link) { display: none; }
+  /* The link chip's words ("reconnecting… 4/8") give up width before the
+     title and the buttons do. */
+  #mobile-top #m-link {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* ⋯ and the menu it opens. The menu hangs under the bar's right edge, over
+     the page, and holds the session's rare moves and the debug chip. */
+  #mobile-top { position: relative; }
+  #mobile-top #m-more {
+    min-width: 38px; padding: 6px 0; font-size: 16px; line-height: 1;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more[aria-expanded="true"] { border-color: #58a6ff; }
+  #m-more-menu {
+    position: absolute; top: 100%; right: 8px; z-index: 60;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 168px; max-width: calc(100vw - 16px); padding: 8px;
+    background: #1b1e24; border: 1px solid #3a414d; border-radius: 8px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  }
+  #mobile-top #m-more-menu .m-act {
+    min-height: 44px; text-align: left; font-size: 13px;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-more-menu #m-kill { background: #8b2e2e; color: #fff; border-color: #8b2e2e; }
   /* Stacked, #main's automatic minimum size is its content's height, and a
      terminal full of rows is content: without this it refuses to shrink when
      the keyboard takes half the screen, and the prompt ends up behind the
@@ -7257,6 +7631,122 @@ body.embed #main { width: 100%; }
   /* a <select> is as wide as its longest option — a session name or a full
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
+}
+
+/* ---- the phone's bottom tabs and #/menu (claunch-0a5nk.3) ----
+   On a phone the rail's 29-link grid took the bottom ~500px of home and left
+   two session rows on screen. Here it gives way to five tabs pinned under
+   every page but the terminal, whose bottom is its input line and, while
+   typing, the keyboard. #/menu lists the rest. After the compact block, so
+   its #rail-nav-dock and #mobile-bottom rules do not win over these. */
+#menu-view { padding: 14px 12px; overflow-y: auto; overscroll-behavior: contain; }
+#menu-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 10px 12px;
+  font-size: 16px; color: #d8dbe0; background: #14161a;
+  border: 1px solid #3a414d; border-radius: 6px;
+}
+#menu-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#menu-list a {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px;
+  font-size: 14px; color: #d8dbe0; text-decoration: none;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 6px;
+}
+#menu-list a[hidden] { display: none; }
+#menu-list a:active { background: #22262d; }
+#menu-list .menu-icon { flex: none; width: 18px; text-align: center; color: #7d8590; }
+@media (max-width: 600px) {
+  #rail-nav-dock { display: none; }
+  #mobile-tabs {
+    display: grid; grid-template-columns: repeat(5, 1fr); flex: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: #1b1e24; border-top: 1px solid #2a2e36;
+  }
+  body[data-page="terminal"] #mobile-tabs { display: none; }
+  #mobile-tabs a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-width: 0; min-height: 52px; font-size: 12px; color: #9da5b0; text-decoration: none;
+    border-top: 2px solid transparent;
+  }
+  #mobile-tabs a span { font-size: 17px; line-height: 1.2; }
+  #mobile-tabs a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+  /* the return bar sits on the tabs, so its own inset is the tabs' */
+  #mobile-bottom { padding-bottom: 10px; }
+}
+
+/* ---- the phone's touch and type sizes (claunch-0a5nk.4) ----------------
+   Measured at 390px before this: 33 of 38 targets on home, 44/52 on the
+   session detail, 43/51 on new and 33/38 on beads were under 44px, and 36
+   of 66 text runs on home were under 12px (the filter counts at 9px). The
+   three tokens below are the phone's floor; they are read only inside the
+   phone block, so the desktop and the 601-820px shell keep their sizes.
+   The pages they apply to are the four the measurement covered. A row of
+   chips that no longer fits at 44px a chip scrolls sideways instead of
+   wrapping into a second and third row. */
+@media (max-width: 600px) {
+  :root { --tap-min: 44px; --fs-body: 13px; --fs-meta: 12px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(button, select, summary, a.seq-tab, [role="button"],
+        input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])) {
+    min-height: var(--tap-min);
+  }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split) button {
+    min-width: var(--tap-min);
+  }
+  /* Exception: the ancestor band's lines stay 20px tall. fitRailLead (app.js)
+     reserves RAIL_ANCESTOR_LINE_PX per line above the first row, so a taller
+     line would cover that row. */
+  #sidebar #rail-ancestors .rail-ancestor { min-height: 0; min-width: 0; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input[type="checkbox"], input[type="radio"]) { flex: none; width: 20px; height: 20px; }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(input:not([type="checkbox"], [type="radio"]), select, textarea) { font-size: 16px; }
+  #session-list .sess-card, #new-view, #beads-view, #sess-view, #detail-split { font-size: var(--fs-body); }
+  :is(#sidebar, #new-view, #beads-view, #sess-view, #detail-split)
+    :is(.session-filter-count, .mesh-role, .meta, .session-origin-option, .status-text,
+        .project-tab, .project-header-detail, legend, small, .badge, .wf-btn,
+        .sess-group-head, .sess-flag-state, .sess-storage-when, .sess-spawn-step,
+        .sess-spawn-group-blurb, .new-task-images-hint, #daemon-info, #mb-meta,
+        #cwd-hint, #new-claude-runtime-hint, #worktree-hint) {
+    font-size: var(--fs-meta);
+  }
+  .session-view-tabs label > span, .session-group-toggle span, #mb-meta { font-size: var(--fs-meta); }
+  #project-manage { min-width: var(--tap-min); }
+  #new-session label.check input { width: 20px; height: 20px; }
+  #new-session label.with-link a {
+    display: inline-flex; align-items: center; min-height: var(--tap-min); font-size: var(--fs-meta);
+  }
+  /* the top bar's buttons are on every page; the floating dock's are sized
+     in operator_fab.css, next to the toasts in chat.css that clear it */
+  #mobile-top :is(#m-menu, #m-more, #m-notice-bell) { min-width: var(--tap-min); min-height: var(--tap-min); }
+  /* chip rows: one line, sideways scroll */
+  .session-filters button { flex: 0 0 auto; padding: 3px 8px; }
+  .seq-tabs:not(.beads-filters) { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .seq-tabs:not(.beads-filters) > .seq-tab { flex-shrink: 0; }
+  .seq-tabs.beads-filters > .seq-tabs { flex-basis: 100%; min-width: 0; }
+  .seq-tab { display: inline-flex; align-items: center; }
+}
+
+/* ---- the session detail head on a phone (claunch-0a5nk.5) --------------
+   Measured at 390px before this, the head's five verbs took three lines
+   above the facts. Here Spawn and Open terminal stay on the line and the
+   other three are a menu under ⋯. */
+@media (max-width: 600px) {
+  .sess-head { position: relative; }
+  /* Two lines: the name, its badges and × first; the verbs under them. The
+     ::before is a zero-height full-width item that breaks the line between
+     them (the cwd line keeps its order 9 and stays last). */
+  .sess-head::before { content: ""; flex-basis: 100%; height: 0; order: 1; }
+  .sess-head > .wf-btn { order: 2; }
+  .sess-head-more { display: inline-flex; align-items: center; justify-content: center; }
+  .sess-head-more[aria-expanded="true"] { outline: 1px solid #58a6ff; }
+  .sess-head-extra {
+    display: none; position: absolute; right: 0; top: 100%; z-index: 20;
+    flex-direction: column; gap: 6px; min-width: 200px; padding: 8px;
+    background: #1b1e24; border: 1px solid #3a414d; border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  }
+  .sess-head.more-open .sess-head-extra { display: flex; }
+  .sess-head-extra > button { width: 100%; margin: 0; text-align: left; }
 }
 
 /* ---- the session modal's two tabs ----------------------------------- */
@@ -7859,17 +8349,29 @@ body.embed #main { width: 100%; }
 .notice-panel-section-row { display: flex; align-items: baseline; gap: 8px; }
 .notice-panel-section-row .notice-panel-section { flex: 1; }
 .notice-panel-section-row .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
-/* Folding "Waiting on you" (thread th-3b3470): the line left behind says how
-   many the fold keeps back, so a folded list never hides a request silently. */
-.notice-folded-note { margin: 2px 0 8px; }
-.notice-panel-section-row .wf-btn.fold-open { color: #58a6ff; }
-/* The Waiting head carries the fold press beside its heading (thread
-   th-3b3470). Its own class, not notice-panel-section-row: that one names
-   the History head, which is where the filter presses live. */
-.notice-waiting-head { display: flex; align-items: baseline; gap: 8px; }
-.notice-waiting-head .notice-panel-section { flex: 1; }
-.notice-waiting-head .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
-.notice-waiting-head .wf-btn.fold-open { color: #58a6ff; }
+/* The panel's sub tabs (claunch-slab3): "Waiting on you" first, then
+   History; the open one is underlined, and the Waiting tab carries the
+   unread waiting count as a badge. They replace the fold the Waiting list
+   had (thread th-3b3470). */
+.notice-tabs {
+  display: flex; gap: 2px; margin: 8px 0 6px;
+  border-bottom: 1px solid #2a2e36;
+}
+.notice-tabs .wf-btn.notice-tab {
+  margin: 0 0 -1px; padding: 5px 10px; font-size: 12px;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: #8b949e;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.notice-tabs .wf-btn.notice-tab:hover { color: #c9d1d9; }
+.notice-tabs .wf-btn.notice-tab.active {
+  color: #e6edf3; border-bottom-color: #58a6ff; font-weight: 600;
+}
+.notice-tab-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
+  border-radius: 9px; background: #d29922; color: #0d1117;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+}
 .notice-row {
   background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
   border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
@@ -7945,7 +8447,7 @@ body.embed #main { width: 100%; }
    mobile bar instead of floating over the session it is reporting on —
    and "under" is measured (--notices-top, claunch-lolft), because the
    status line's own buttons are in that bar. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #notices { top: var(--notices-top, 8px); right: 8px; left: 8px; width: auto; }
 }
 @media (max-width: 820px) {
@@ -8052,7 +8554,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .window-footnote {
   max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .window-row {
     grid-template-columns: 40px 68px minmax(80px, 1fr) 58px auto;
     gap: 7px; padding: 8px;
@@ -8139,18 +8641,30 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 .usage-detail-head { display: flex; align-items: baseline; gap: 8px; }
 .usage-stats-link { margin-left: auto; font-size: 11px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-session { flex: 1 1 100%; }
   .stats-chart { height: 120px; }
 }
 /* The window overview: the fleet's sessions over today / 7 / 30 days, the
    provider strip that narrows them, and the detail panel beside the table. */
+/* The page takes the view's whole width (claunch-kd9lg): the 980px cap the
+   Window page's tiles and sections carry left half a wide screen empty
+   beside the table, so inside the Stats page the main column grows with the
+   view and the detail panel grows with it, between 420px and 720px. */
 .stats-layout {
-  display: flex; gap: 14px; align-items: flex-start; max-width: 1500px;
+  display: flex; gap: 14px; align-items: flex-start;
 }
 .stats-main { flex: 1 1 auto; min-width: 0; }
+#stats-view .window-summary,
+#stats-view .window-section,
+#stats-view .stats-window-note { max-width: none; }
+#stats-view .window-summary {
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+}
+.stats-part-cell { color: #8b949e; font-variant-numeric: tabular-nums; }
 .stats-detail {
-  flex: 0 0 460px; max-width: 460px; position: sticky; top: 8px;
+  flex: 0 0 clamp(420px, 30vw, 720px); max-width: 720px;
+  position: sticky; top: 8px;
   border: 1px solid #22262d; border-radius: 8px; background: #14171c;
   max-height: calc(100vh - 40px); overflow-y: auto;
 }
@@ -8228,6 +8742,14 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   border-radius: 3px; overflow: hidden; vertical-align: middle;
 }
 .stats-rowbar-fill, .stats-llm-rowbar-fill { display: block; height: 100%; background: #58a6ff; }
+/* A session row's bar split into its four usage parts (claunch-qs2ev.1). The
+   track keeps the width the row's share of the busiest gives it; the segments
+   inside add up to that width, and their colours are the detail panel chart's
+   `.usage-in` / `.usage-cr` / `.usage-cw` / `.usage-out`. */
+.stats-rowbar-split { display: flex; background: transparent; }
+.stats-rowbar-part { display: block; height: 100%; }
+.stats-rowbar-unknown { background: #58a6ff; }
+.stats-rowbar-legend { margin: 0 0 6px; }
 .stats-rowvalue { margin-left: 8px; font-variant-numeric: tabular-nums; }
 .stats-unmetered, .stats-llm-unreported { color: #6e7681; }
 .stats-model-cell {
@@ -8323,7 +8845,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   display: flex; justify-content: space-between; gap: 8px;
   color: #6e7681; font-size: 10px;
 }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .stats-share-name { flex-basis: 72px; }
   .stats-lines { height: 120px; }
 }
@@ -8382,7 +8904,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .reports-board { color: #58a6ff; text-decoration: none; font-size: 11px; margin-left: auto; }
 .reports-board:hover { text-decoration: underline; }
 /* A phone reads a round as two lines: what it is, then when and how big. */
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .reports-row { gap: 8px; padding: 8px 4px; }
   .reports-open { flex: 1 1 100%; }
   .reports-order, .reports-board { margin-left: 0; }
@@ -8581,7 +9103,11 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings .rag-db-table { width: 100%; min-width: 600px; border-collapse: collapse; font-size: 12px; }
 .search-settings .rag-db-table th { text-align: left; font-weight: 600; color: #9da5b0; padding: 4px 6px; border-bottom: 1px solid #30363d; white-space: nowrap; }
 .search-settings .rag-db-table td { padding: 4px 6px; border-bottom: 1px solid #21262d; vertical-align: middle; overflow-wrap: anywhere; }
-.search-settings .rag-db-entry td:nth-child(2), .search-settings .rag-db-entry td:nth-child(5) { white-space: nowrap; }
+/* Named by class, not nth-child: a DB's rows share the first and last cells
+   by rowspan, so a row's positions differ from the group's first one. */
+.search-settings .rag-db-entry .rag-db-corpus, .search-settings .rag-db-entry .rag-db-dims,
+.search-settings .rag-db-entry .rag-db-form { white-space: nowrap; }
+.search-settings .rag-db-entry .rag-db-model { color: #9da5b0; }
 .search-settings .rag-db-use { white-space: nowrap; background: none; border: none; padding: 0; margin: 0; color: #58a6ff; cursor: pointer; font: inherit; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .search-settings .rag-db-use:hover:not(:disabled) { text-decoration: underline; }
 .search-settings .rag-db-use:disabled { color: inherit; cursor: default; }
@@ -8724,7 +9250,7 @@ a.commit-link { color: inherit; text-decoration: none; }
 tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e; }
 .cd-hunk-head { background: rgba(56, 139, 253, .1); color: #8b949e; padding: 3px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cd-note-text { color: #8b949e; font-style: italic; padding: 0 10px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   #commit-view { padding: 12px 16px; }
   .cd-tools { margin-left: 0; }
   .cd-num { min-width: 28px; padding: 0 4px; }
@@ -8744,7 +9270,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-muted { color: #8b949e; font-size: 12px; }
 .chart-error { color: #ff7b72; font-size: 13px; }
 .chart-toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 10px 0 14px; }
-.chart-seg, .chart-select, .chart-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.chart-seg, .chart-select, .chart-check, .chart-tree { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 .chart-seg-label { color: #8b949e; margin-right: 2px; }
 .chart-seg-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 3px 9px; font-size: 12px; cursor: pointer; }
 .chart-seg-btn:first-of-type { border-radius: 6px 0 0 6px; }
@@ -8782,11 +9308,31 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-row.chart-series-row, .chart-row.chart-series-row:hover { cursor: default; background: none; }
 .chart-row.selected, .chart-row.selected:hover { background: #1f2d3d; box-shadow: inset 3px 0 0 #388bfd; }
 .chart-row:focus-visible { outline: 1px solid #388bfd; outline-offset: -1px; }
+/* A session row that holds the keyboard takes the session card's keys
+   (app.js chartRowKey), so it says so the way a focused card does
+   (#session-list li.sess-card:focus, .rail-keys.on-card): a red inset ring
+   that moves nothing, and the "⌨ card" chip at the track's right end. */
+.chart-row:not(.chart-axis):not(.chart-series-row):focus {
+  outline: none; box-shadow: inset 0 0 0 1px #6e2c2c;
+}
+.chart-row.selected:focus { box-shadow: inset 3px 0 0 #388bfd, inset 0 0 0 1px #6e2c2c; }
+.chart-keys {
+  display: none; position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  z-index: 3; font-size: 10px; line-height: 12px; padding: 0 4px; border-radius: 9px;
+  white-space: nowrap; pointer-events: none;
+  background: #3d1a1a; color: #f85149; border: 1px solid #6e2c2c;
+}
+.chart-row:focus .chart-keys { display: inline-block; }
 .chart-axis { position: sticky; top: 0; z-index: 3; background: #0d1117; color: #8b949e; font-size: 11px; min-height: 26px; border-bottom: 1px solid #30363d; }
 .chart-group-head { margin-top: 12px; padding: 4px 2px; font-weight: 600; color: #c9d1d9; border-bottom: 1px solid #30363d; overflow-wrap: anywhere; }
 .chart-name { display: flex; align-items: center; gap: 6px; min-width: 0; color: #c9d1d9; text-decoration: none; }
 .chart-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chart-role { flex: none; color: #8b949e; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; padding: 0 4px; }
+/* A child row steps in under its parent (claunch-h0wi6.2): --chart-depth is
+   the capped depth chart-page.js sets, the step is narrower in the rail. */
+.chart-name { --chart-indent: 14px; }
+.chart-name.chart-child { padding-left: calc(var(--chart-depth, 0) * var(--chart-indent)); box-sizing: border-box; }
+.chart-branch { flex: none; margin-right: -2px; color: #6e7681; font-size: 11px; line-height: 1; }
 .chart-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #6e7681; }
 .chart-track { position: relative; height: 14px; background: #161b22; border-radius: 3px; }
 .chart-axis .chart-track { background: transparent; height: 16px; }
@@ -8880,7 +9426,13 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-main { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 18px; }
 .chart-divider { cursor: col-resize; background: transparent; border-left: 1px solid #30363d; margin-left: 2px; touch-action: none; }
 .chart-divider:hover, .chart-divider.dragging, .chart-divider:focus-visible { border-left: 3px solid #388bfd; margin-left: 1px; outline: none; }
-.chart-detail { min-width: 0; min-height: 0; overflow-y: auto; padding: 0 4px 18px 14px; font-size: 12px; color: #c9d1d9; }
+/* The column is a fixed top (name, presses, gates, 요약 | Detail) over a body
+   that alone scrolls (claunch-h82vq.1). */
+.chart-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 0 4px 0 14px; font-size: 12px; color: #c9d1d9; }
+/* A long gate prompt on a short window must not push the radio out of the
+   column: past 70% of it the top scrolls on its own. */
+.chart-detail-top { flex: none; max-height: 70%; overflow-y: auto; padding-bottom: 8px; border-bottom: 1px solid #30363d; }
+.chart-detail-body { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 18px; }
 .chart-detail-hint { padding: 16px 2px; }
 .chart-detail-head { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px; border-bottom: 1px solid #30363d; }
 .chart-detail-name { margin: 0; font-size: 15px; font-weight: 600; color: #e6edf3; overflow-wrap: anywhere; flex: 1; min-width: 0; }
@@ -8897,14 +9449,69 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .chart-detail-token-value { font-variant-numeric: tabular-nums; }
 .chart-detail-tokens { margin: 3px 0 0; padding-left: 16px; color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-detail-open { color: #58a6ff; text-decoration: none; }
+/* The column's lifecycle presses, its run gates and its two views
+   (claunch-h82vq). The gate block wears the terminal strip's amber, since
+   it is the same "a person owes this run an answer". */
+.chart-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.chart-detail-actions .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; text-decoration: none; }
+.chart-detail-actions .wf-btn.deny { border-color: #da3633; color: #ffa198; }
+.chart-detail-gates { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; }
+.chart-gate { border: 1px solid #6e5000; border-radius: 6px; padding: 6px 8px; background: #2a2210; }
+.chart-gate.optional { border-color: #30363d; background: none; }
+.chart-gate-head { color: #e3b341; text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
+.chart-gate-head:hover { text-decoration: underline; }
+.chart-gate-question { margin: 3px 0 0; color: #c9b27a; overflow-wrap: anywhere; }
+.chart-gate-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chart-gate-buttons .tcf-btn {
+  padding: 3px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+  background: #21262d; border: 1px solid #6e5000; color: #e6edf3; cursor: pointer;
+}
+.chart-gate-buttons .tcf-btn:hover { background: #4d3800; }
+.chart-gate-buttons .tcf-btn.approve { background: #238636; border-color: #2ea043; }
+.chart-gate-buttons .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
+.chart-detail-tabs { margin: 10px 0 0; }
+.chart-detail-host { margin-top: 8px; }
+/* The dashboard's session detail, borrowed into the column: the column's
+   body scrolls, so the panel neither scrolls itself nor pads like a page. */
+#sess-view.guest { padding: 0; overflow: visible; flex: none; }
+#sess-view.guest .wf-head { flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
+#sess-view.guest .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
+#sess-view.guest .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 .chart-detail-open:hover { text-decoration: underline; }
-@media (max-width: 760px) {
+@media (max-width: 820px) {
   #chart-view { padding: 12px 16px 0; overflow-y: auto; }
   .chart-split { display: flex; flex-direction: column; flex: none; }
   .chart-main { overflow-x: auto; overflow-y: visible; min-width: var(--chart-main-min); }
   .chart-divider { display: none; }
   .chart-detail { padding: 12px 0 18px; border-top: 1px solid #30363d; overflow: visible; }
+  .chart-detail-top, .chart-detail-body { max-height: none; overflow: visible; }
 }
+/* The rail's Chart view (#session-chart, chart-page.js openRail): the page's
+   timeline in the session rail's width. The box scrolls down as a whole and
+   the timeline scrolls sideways inside .chart-main. Three columns -- name,
+   bar, lifetime: the window tokens and the cflow line are on the row's hover
+   card (rowTip), and a rail of 260px has no room for their 300px of sticky
+   columns, which would cover the bars. */
+#session-chart {
+  --chart-main-min: 0px;
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  padding: 2px 6px 8px; font-size: 12px;
+}
+#session-chart .chart-toolbar { gap: 6px 10px; margin: 4px 0 8px; }
+#session-chart .chart-seg-btn { padding: 2px 6px; font-size: 11px; }
+#session-chart .chart-summary { gap: 4px; margin-bottom: 8px; }
+#session-chart .chart-stat { min-width: 0; padding: 3px 6px; }
+#session-chart .chart-stat-value { font-size: 14px; }
+#session-chart .chart-usage { padding: 6px 8px; margin-bottom: 8px; }
+#session-chart .chart-split { display: block; }
+#session-chart .chart-main { overflow-x: auto; overflow-y: visible; padding-bottom: 8px; }
+#session-chart .chart-grid { min-width: 0; }
+#session-chart .chart-row { grid-template-columns: minmax(64px, 110px) minmax(80px, 1fr) 44px; gap: 6px; }
+#session-chart .chart-tokens, #session-chart .chart-flow { display: none; }
+#session-chart .chart-life { right: 0; }
+#session-chart .chart-role { display: none; }
+#session-chart .chart-name { --chart-indent: 7px; gap: 4px; }
+.session-filters.view-hidden { display: none; }
 #spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 .spec-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .spec-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
@@ -8919,7 +9526,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .spec-preview h3 { margin: 14px 0 6px; }
 .spec-preview .spec-table td:first-child { white-space: pre; }
 /* Glossary: scoped design tokens keep controls consistent with the dark shell. */
-#glossary-view, #knowledge-view {
+#glossary-view, #knowledge-view, #retrospection-view {
   --gl-border: #303843; --gl-muted: #a4afbd; --gl-panel: #1b2028;
   flex: 1; overflow-y: auto; padding: 36px clamp(16px, 3vw, 48px); min-height: 0;
   container-type: inline-size;
@@ -8930,21 +9537,21 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .glossary-head h2 { font-size: clamp(22px, 2.5vw, 30px); font-weight: 650; letter-spacing: -.04em; margin-bottom: 6px; }
 .glossary-muted { color: var(--gl-muted); font-size: 13px; }
 .glossary-scope { flex: 0 0 200px; font-size: 11px; color: var(--gl-muted); display: grid; gap: 6px; }
-:is(#glossary-view, #knowledge-view) input, :is(#glossary-view, #knowledge-view) textarea, :is(#glossary-view, #knowledge-view) select {
+:is(#glossary-view, #knowledge-view, #retrospection-view) input, :is(#glossary-view, #knowledge-view, #retrospection-view) textarea, :is(#glossary-view, #knowledge-view, #retrospection-view) select {
   font: inherit; color: #e3e9f0; background: #12171e; border: 1px solid #3b4552;
   border-radius: 8px; padding: 10px 12px; min-width: 0; max-width: 100%; color-scheme: dark;
 }
-:is(#glossary-view, #knowledge-view) :is(input, textarea, select, button):focus-visible { outline: 2px solid #79aeff; outline-offset: 3px; }
-:is(#glossary-view, #knowledge-view) textarea { resize: vertical; }
-:is(#glossary-view, #knowledge-view) .wf-btn { margin: 0; min-height: 38px; padding: 8px 14px; border: 1px solid var(--gl-border); background: #242d38; border-radius: 8px; font-weight: 550; white-space: nowrap; }
-:is(#glossary-view, #knowledge-view) .wf-btn:hover { background: #354153; }
-:is(#glossary-view, #knowledge-view) .glossary-primary { background: #427fdf; color: #fff; border-color: #6099ef; }
-:is(#glossary-view, #knowledge-view) .glossary-primary:hover { background: #5390ed; }
-:is(#glossary-view, #knowledge-view) .glossary-danger { background: transparent; color: #f0a4a0; border-color: transparent; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) :is(input, textarea, select, button):focus-visible { outline: 2px solid #79aeff; outline-offset: 3px; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) textarea { resize: vertical; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .wf-btn { margin: 0; min-height: 38px; padding: 8px 14px; border: 1px solid var(--gl-border); background: #242d38; border-radius: 8px; font-weight: 550; white-space: nowrap; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .wf-btn:hover { background: #354153; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-primary { background: #427fdf; color: #fff; border-color: #6099ef; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-primary:hover { background: #5390ed; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-danger { background: transparent; color: #f0a4a0; border-color: transparent; }
 .glossary-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--gl-border); margin-bottom: 28px; padding-bottom: 12px; }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .wf-btn { border-color: transparent; background: transparent; color: var(--gl-muted); }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .is-active { background: #253753; color: #b6d4ff; border-color: #3b5377; }
-:is(#glossary-view, #knowledge-view) .glossary-tabs .glossary-refresh { margin-left: auto; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .wf-btn { border-color: transparent; background: transparent; color: var(--gl-muted); }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .is-active { background: #253753; color: #b6d4ff; border-color: #3b5377; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .glossary-refresh { margin-left: auto; }
 .glossary-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
 .glossary-layout.is-editing { grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); }
 .glossary-main, .glossary-aside { min-width: 0; }
@@ -8964,7 +9571,7 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 .glossary-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--gl-border); margin-top: 18px; padding-top: 12px; }
 .glossary-card-footer code { font-size: 11px; color: #8998ae; min-width: 0; overflow-wrap: anywhere; }
 .glossary-actions { display: flex; gap: 6px; flex: none; }
-:is(#glossary-view, #knowledge-view) .glossary-actions .wf-btn { font-size: 12px; min-height: 34px; padding: 6px 11px; }
+:is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-actions .wf-btn { font-size: 12px; min-height: 34px; padding: 6px 11px; }
 .glossary-help { background: #1d293b; border: 1px solid #354962; padding: 22px; border-radius: 12px; }
 .glossary-help p { color: #b3c2d7; font-size: 13px; margin-top: 12px; line-height: 1.8; }
 .glossary-help code { display: block; color: #c2daff; background: #141e2d; padding: 12px; border-radius: 6px; margin-top: 18px; }
@@ -8992,9 +9599,9 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
   .glossary-scope { flex-basis: auto; width: 100%; }
 }
 @media (max-width: 600px) {
-  #glossary-view, #knowledge-view { padding: 24px 16px; }
+  #glossary-view, #knowledge-view, #retrospection-view { padding: 24px 16px; }
   .glossary-tabs { gap: 3px; flex-wrap: wrap; }
-  :is(#glossary-view, #knowledge-view) .glossary-tabs .wf-btn { padding: 8px 10px; }
+  :is(#glossary-view, #knowledge-view, #retrospection-view) .glossary-tabs .wf-btn { padding: 8px 10px; }
   .glossary-toolbar { flex-wrap: wrap; }
   .glossary-search { flex-basis: 100%; }
   .glossary-card, .glossary-form { padding: 16px; }
@@ -9015,6 +9622,32 @@ tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e;
 #knowledge-view .knowledge-version.is-current { border-left-color: #6f9ad8; }
 #knowledge-view .knowledge-version > p { font-size: 12px; margin-bottom: 6px; }
 #knowledge-view .knowledge-version-body { color: #c6d1df; font-size: 13px; line-height: 1.7; }
+/* Retrospection (#/retrospection, retrospection-page.js) rides the glossary
+   shell on its own scroll container (the selector above). Its list is a stack
+   of cards: the selected one is marked, a long excerpt is cut to three lines,
+   and a record body taller than the window scrolls inside the sticky aside
+   instead of running past its bottom edge. */
+#retrospection-view .glossary-toolbar { flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+#retrospection-view .glossary-toolbar .glossary-search { flex: 1 1 260px; }
+#retrospection-view .glossary-toolbar > select { width: auto; flex: 0 1 220px; }
+#retrospection-view .retrospection-card { transition: border-color .12s ease, background .12s ease; }
+#retrospection-view .retrospection-card:hover { border-color: #4a5c75; }
+#retrospection-view .retrospection-card.is-selected { border-color: #5b8bdc; background: #1d2836; }
+#retrospection-view .retrospection-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+#retrospection-view .retrospection-card-head h4 { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+#retrospection-view .retrospection-excerpt {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+#retrospection-view .glossary-card-footer { flex-wrap: wrap; }
+/* 190px is the app header plus the shell's own header above the layout: the
+   pane has to end inside an 800px window both while it sits under that header
+   and once the list scrolls it up to the view's top edge (sticky, top: 0). */
+#retrospection-view .retrospection-detail { max-height: calc(100vh - 190px); overflow-y: auto; }
+#retrospection-view .retrospection-detail .glossary-toolbar h3 { min-width: 0; overflow-wrap: anywhere; }
+#retrospection-view .retrospection-body { color: #ccd5df; font-size: 13.5px; line-height: 1.75; }
+@container (max-width: 760px) {
+  #retrospection-view .retrospection-detail { max-height: none; overflow-y: visible; }
+}
 /* Composer suggestions remain outside the textarea and preserve its caret. */
 .glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
 .glossary-composer[hidden] { display: none; }
@@ -9152,6 +9785,10 @@ a.ar-name:hover { color: #58a6ff; }
 .ar-cwd { font-size: 11px; color: #8b949e; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; max-width: 46ch; }
 .ar-session-head .wf-btn { margin-left: auto; margin-right: 0; padding: 3px 10px; }
+/* The head's buttons move together: only the group takes the free space, so
+   the second button does not sit apart from the first. */
+.ar-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.ar-session-head .ar-actions .wf-btn { margin-left: 0; margin-right: 0; padding: 3px 10px; }
 .ar-size { font-size: 12px; color: #b8c8db; white-space: nowrap; margin-left: auto; }
 .ar-session-head .ar-size { margin-left: 0; }
 .ar-rows { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -9168,6 +9805,21 @@ a.ar-name:hover { color: #58a6ff; }
 .wt-chip.ar-why { background: #3a2422; color: #ffa198; }
 .wt-chip.ar-running { background: #1c2d4a; color: #79c0ff; }
 .wt-chip.ar-scheduled { background: #3d2e00; color: #e3b341; }
+.wt-chip.ar-plan-chip { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-plan-ready { background: #12301c; color: #3fb950; }
+/* One chip per path: not walked, walking, walked (size shown next to it), or
+   failed (the reason is the chip's title). Four states, four colours -- the
+   reader's complaint was that they all looked the same. */
+.wt-chip.ar-status { background: #30363d; color: #b8c8db; }
+.wt-chip.ar-status-unmeasured { background: #2b2f36; color: #8b949e; }
+.wt-chip.ar-status-running { background: #1c2d4a; color: #79c0ff; }
+.wt-chip.ar-status-done { background: #12301c; color: #3fb950; }
+.wt-chip.ar-status-failed { background: #3a2422; color: #ffa198; }
+.wt-chip.ar-status-missing { background: #30363d; color: #8b949e; }
+.wt-chip.ar-measure-state { background: #1c2d4a; color: #79c0ff; }
+.ar-row.is-running { background: #101c2e; }
+.wf-btn.is-busy { opacity: .65; cursor: progress; }
+.ar-plan-reason { flex: 1 1 200px; overflow-wrap: anywhere; }
 .wt-chip.ar-receipt { background: #30363d; color: #8b949e; }
 .ar-cleanup { display: flex; flex-direction: column; gap: 2px; padding-top: 4px;
   border-top: 1px dashed #2a2e36; }
@@ -9274,7 +9926,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 /* The page's own cards get the width the Sync panel needs. */
 #workspaces-view :is(.ws-add, .ws-list, .ws-card) { max-width: 980px; }
 .vscode-server .ws-text .error { display: block; }
-@media (max-width: 640px) {
+@media (max-width: 820px) {
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }
 }
@@ -9295,11 +9947,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2 .md .md-p { margin-bottom: 6px; }
 .cf2 .md-h1, .cf2 .md-h2, .cf2 .md-h3 { font-size: 13px; }
 .cf2 .wf-note { font-size: 12px; }
+/* The head card (claunch-jc99t): ways out, then the name and status with the
+   run presses level on the right, then the facts and any warning. */
+.cf2-head {
+  padding: 10px 14px 12px; background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px; display: flex; flex-direction: column; gap: 8px;
+}
 .cf2-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .cf2-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
 .cf2-nav .wf-session { font-size: 12px; }
-.cf2-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
-.cf2-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.cf2-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; align-items: center; }
+.cf2-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .cf2-title h2 { margin: 0; font-size: 18px; font-weight: 600; color: #e6edf3; overflow-wrap: anywhere; }
 .cf2-title .cf2-badge { margin-right: 0; }
 .cf2-status {
@@ -9311,6 +9969,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-status.ok { background: #1f4428; color: #3fb950; }
 .cf2-status.bad { background: #442022; color: #ff7b72; }
 .cf2-meta, .cf2-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: #9da5b0; }
+.cf2-head .cf2-meta { margin-top: 0; gap: 6px; }
+.cf2-head .cf2-meta .cf2-fact {
+  padding: 2px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 12px; color: #c9d1d9;
+}
+.cf2-head .wf-warning.cf2-drift-note {
+  margin: 0; padding: 6px 10px; border: 1px solid #9e6a03; border-left-width: 3px;
+  border-radius: 6px; background: #2b2111; color: #e3b341; line-height: 1.5;
+}
 .cf2-fact { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
 .cf2-fact-k { color: #6e7681; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .cf2 > .wf-warning { margin: 8px 0 0; }
@@ -9394,6 +10060,18 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-legend-known::before, .cf2-legend-unknown::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
 .cf2-legend-known::before { background: #58a6ff; }
 .cf2-legend-unknown::before { border: 1px dashed #8b949e; }
+.cf2-gates { margin-top: 12px; }
+.cf2-gates-title { font-size: 12px; font-weight: 600; color: #9da5b0; margin: 0 0 4px; }
+.cf2-gates svg { width: 100%; display: block; }
+.cf2-gate-closed { fill: #d29922; }
+.cf2-gate-open { fill: #f85149; }
+.cf2-gate-cut { fill: #8b949e; }
+.cf2-legend-gate-closed::before, .cf2-legend-gate-open::before, .cf2-legend-gate-cut::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+.cf2-legend-gate-closed::before { background: #d29922; }
+.cf2-legend-gate-open::before { background: #f85149; }
+.cf2-legend-gate-cut::before { background: #8b949e; }
+.cf2-depth-line { fill: none; stroke: #58a6ff; stroke-width: 1.5; stroke-linejoin: round; }
+.cf2-legend-depth::before { content: ""; display: inline-block; width: 12px; height: 0; border-top: 2px solid #58a6ff; margin-right: 5px; vertical-align: 3px; }
 .cf2-throughput details { margin-top: 6px; }
 .cf2-throughput summary { cursor: pointer; font-size: 12px; color: #9da5b0; }
 .cf2-throughput-compare > .cf2-throughput-controls { margin: 6px 0; }
@@ -9757,15 +10435,56 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-kid:hover { background: rgba(110, 118, 129, .12); }
 .cf2-jgrid-node { grid-template-columns: auto auto minmax(0, 1fr); max-height: 260px; }
 
-/* the run's inputs, folded */
-.cf2-run-inputs { margin-top: 8px; font-size: 12px; }
-.cf2-run-inputs > summary { cursor: pointer; color: #9da5b0; }
-.cf2-run-input { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 10px; padding: 3px 0; align-items: baseline; }
-.cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* the run's inputs, folded (claunch-jc99t): one table, the name column as
+   wide as the longest name (subgrid), each value or editor on its name's line */
+.cf2-run-inputs { margin-top: 10px; font-size: 12px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; }
+.cf2-run-inputs > summary {
+  cursor: pointer; color: #c9d1d9; font-weight: 600; padding: 7px 12px;
+  display: flex; align-items: center; gap: 6px; list-style: none;
+}
+.cf2-run-inputs > summary::-webkit-details-marker { display: none; }
+.cf2-run-inputs > summary::before {
+  content: "▸"; display: inline-block; width: 10px; color: #8b949e; transition: transform .12s;
+}
+.cf2-run-inputs[open] > summary::before { transform: rotate(90deg); }
+.cf2-run-inputs > summary:hover { background: #161b22; border-radius: 8px; }
+.cf2-run-inputs[open] > summary { border-bottom: 1px solid #30363d; border-radius: 8px 8px 0 0; }
+.cf2-run-inputs .cf2-count { font-weight: 400; }
+.cf2-run-inputs .cf2-count-edit { color: #58a6ff; background: #172947; }
+.cf2-run-input-grid {
+  display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  column-gap: 16px; padding: 4px 0 6px;
+}
+.cf2-run-input-group {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px;
+  color: #8b949e; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+}
+.cf2-run-input-group + .cf2-run-input { border-top: 0; }
+.cf2-run-input {
+  grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;
+  align-items: center; min-height: 30px; padding: 3px 12px; border-top: 1px solid #21262d;
+}
+.cf2-run-input:hover { background: #161b22; }
+.cf2-run-input.settable > .cf2-run-input-k { color: #c9d1d9; }
+.cf2-run-input-k { color: #8b949e; font-size: 12px; overflow-wrap: anywhere; }
+.cf2-run-input-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; color: #e6edf3; }
 .cf2-run-input-value.empty { color: #484f58; }
-.cf2-run-input-edit { grid-column: 2; display: flex; gap: 6px; align-items: flex-start; }
+.cf2-run-input-edit { display: flex; gap: 6px; align-items: center; max-width: 480px; }
 .cf2-run-input-edit textarea, .cf2-run-input-edit input[type=text],
-.cf2-run-input-edit input[type=number] { flex: 1; min-width: 0; font: inherit; }
+.cf2-run-input-edit input[type=number], .cf2-run-input-edit select {
+  flex: 1; min-width: 0; font: inherit; height: 24px; padding: 0 6px; box-sizing: border-box;
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px;
+}
+.cf2-run-input-edit textarea { height: auto; padding: 3px 6px; }
+.cf2-run-input-edit input[type=number] { flex: 0 1 120px; }
+.cf2-run-input-edit select { flex: 0 1 200px; }
+.cf2-run-input-edit :is(input, textarea, select):focus { outline: none; border-color: #1f6feb; box-shadow: 0 0 0 2px rgba(31, 111, 235, .3); }
+.cf2-run-input-edit .wf-btn.sm { height: 24px; padding: 0 12px; }
+.cf2-run-input-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.cf2-run-input-toggle input { margin: 0; width: 14px; height: 14px; accent-color: #1f6feb; }
+.cf2-run-input-state { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #8b949e; }
+.cf2-run-input-toggle input:checked + .cf2-run-input-state { color: #3fb950; font-weight: 600; }
 .cf2-undecidable { color: #d29922; }
 
 /* A v2 workflow's start inputs (docs/cflow-v2.md 2.6). A workflow declares a
@@ -9908,6 +10627,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .profile-usage-bar.high > span { background: #f85149; }
 .profile-usage-pct.mid { color: #e3b341; }
 .profile-usage-pct.high { color: #ff7b72; }
+.profile-usage-keys { margin-top: 4px; border-top: 1px solid #21262d; padding-top: 4px; }
+.profile-usage-keys-head { margin: 4px 0 0; }
+.profile-usage-key { padding-left: 14px; }
+.profile-usage-key strong { font-weight: 500; }
 .profile-usage-updated { margin-top: 4px; }
 .profile-usage-other { margin: 16px 0; color: #8b949e; }
 .profile-usage-other summary { cursor: pointer; }
@@ -10410,6 +11133,20 @@ body.split-max #term-wf { flex: 1 1 0; }
 .th-msg.th-guest { align-self: flex-start; background: #1a1428; border: 1px solid #4b3477;
   border-bottom-left-radius: 3px; }
 .th-msg.th-guest .th-msg-who { color: #d2a8ff; }
+/* Guest marks (claunch-br084): with two or more guests the shared purple
+   bubble is not enough to tell them apart, so each guest also carries a
+   numbered mark whose colour cycles. The bubble background stays the same
+   for every guest; only this mark differs. */
+.th-guest-mark { display: inline-flex; align-items: center; justify-content: center; min-width: 15px;
+  height: 15px; padding: 0 4px; margin-right: 4px; border-radius: 8px; font-size: 10px; font-weight: 700;
+  line-height: 1; color: #0d1117; background: #d2a8ff; vertical-align: middle; }
+.th-guest-mark-1 { background: #d2a8ff; }
+.th-guest-mark-2 { background: #7ee787; }
+.th-guest-mark-3 { background: #79c0ff; }
+.th-guest-mark-4 { background: #ffa657; }
+.th-guest-mark-5 { background: #ff7b72; }
+.th-guest-mark-6 { background: #e3b341; }
+.th-guest-chip .th-guest-mark { margin-right: 3px; }
 .qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
 /* A thread's chips never push the conversation off screen: the box holds
    at most a few rows and scrolls inside, and it gives way first when the
@@ -10545,15 +11282,22 @@ body.split-max #term-wf { flex: 1 1 0; }
 a.category-ref { text-decoration: none; }
 a.category-ref:hover { text-decoration: underline; }
 .category-chip { font-size: 11px; border: 1px solid var(--cat-border); border-radius: 4px; padding: 0 5px; color: #c9d1d9; }
-.category-status-running { color: #3fb950; border-color: #238636; }
-.category-status-gone, .category-status-exited { color: #6e7681; }
-.category-status-hold, .category-status-delayed { color: #d29922; border-color: #9e6a03; }
-.category-status-paused { color: #bc8cff; border-color: #8957e5; }
-.category-status-failed { color: #ff7b72; border-color: #da3633; }
-.category-status-killed, .category-status-archived { color: #6e7681; border-color: #30363d; }
+.category-status-running { color: var(--life-running); border-color: var(--life-running-rim); }
+.category-status-gone, .category-status-exited { color: var(--life-done); }
+.category-status-hold { color: var(--life-hold); border-color: var(--life-hold-rim); }
+.category-status-delayed { color: var(--life-delayed); border-color: var(--life-delayed-rim); }
+.category-status-paused { color: var(--life-paused); border-color: var(--life-paused-rim); }
+.category-status-failed { color: var(--life-failed); border-color: var(--life-failed-rim); }
+.category-status-killed, .category-status-archived { color: var(--life-done); border-color: var(--life-done-rim); }
 .category-filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
 .category-filter { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--cat-muted); cursor: pointer; }
 .category-filter input { margin: 0; }
+/* The "running only" preset beside the partition boxes: a button, not a box,
+   because it sets several of them at once. Pressed state is derived from the
+   set, so it never contradicts the boxes next to it. */
+.category-preset { font: inherit; font-size: 12px; color: var(--cat-muted); background: none;
+  border: 1px solid var(--cat-border); border-radius: 10px; padding: 1px 9px; cursor: pointer; }
+.category-preset[aria-pressed="true"] { color: var(--cat-text, inherit); border-color: currentColor; }
 .category-proposal-opt { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--cat-muted); margin-top: 6px; cursor: pointer; }
 .category-proposal-opt input { margin: 0; }
 .category-loose { margin-top: 14px; }
@@ -10573,7 +11317,7 @@ a.category-ref:hover { text-decoration: underline; }
 .category-job { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .category-job-failed .category-chip { color: #ff7b72; border-color: #da3633; }
 .category-job-done .category-chip { color: #3fb950; border-color: #238636; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .category-node-tools { visibility: visible; }
   .category-scope { flex-basis: 100%; }
 }
@@ -10631,6 +11375,7 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-item-head { display: flex; gap: 8px; align-items: baseline; }
 .plan-title { overflow-wrap: anywhere; }
 .plan-chip { font-size: 11px; padding: 0 6px; border: 1px solid var(--plan-border); border-radius: 10px; color: var(--plan-muted); white-space: nowrap; }
+.plan-id { font-size: 11px; color: var(--plan-muted); font-family: var(--mono, monospace); white-space: nowrap; user-select: all; }
 .plan-detail { margin: 2px 0 0 4px; color: var(--plan-muted); white-space: pre-wrap; font-size: 12px; }
 .plan-option-head { display: flex; gap: 6px; align-items: baseline; }
 .plan-effect { color: #9fd8a8; }
@@ -10647,6 +11392,12 @@ a.category-ref:hover { text-decoration: underline; }
 .plan-feedback textarea { width: 100%; box-sizing: border-box; background: #0f1318; color: inherit; border: 1px solid var(--plan-border); border-radius: 5px; padding: 4px 6px; font: inherit; resize: vertical; }
 .plan-feedback .wf-btn { justify-self: start; }
 .plan-joint-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+/* Rounds (claunch-r3j1o.1): the current plan and the sealed rounds. */
+.plan-round-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 6px; }
+.plan-round-bar .wf-btn { font-size: 11px; padding: 1px 6px; }
+.plan-round-bar .plan-round-on { border-color: var(--accent, #58a6ff); }
+.plan-sealed { color: var(--plan-muted); margin: 2px 0 6px; font-style: italic; }
+.plan-from { margin-left: 4px; }
 .plan-joint { list-style: none; margin: 0; padding: 0; }
 .plan-joint-member { padding: 6px 0 6px 8px; border-left: 2px solid var(--plan-border); margin-top: 4px; }
 .plan-joint-member p { margin: 2px 0; }
@@ -10711,6 +11462,16 @@ a.category-ref:hover { text-decoration: underline; }
 .ptree-chosen > .ptree-opt { border-color: #2ea043; background: #15261b; }
 .ptree-steps .ptree > .ptree-chosen::after { border-top: 2px solid #2ea043; }
 .ptree-unchosen > .ptree-opt { opacity: 0.5; }
+/* claunch-vmcg7: an option the session ruled out, a decision it answered
+   with its default, and the nodes under an option that is not the path taken. */
+.ptree-rejected > .ptree-opt { opacity: 0.6; border-style: dashed; }
+.ptree-rejected > .ptree-opt .plan-option-head strong, .ptree-rejected > .ptree-opt .plan-effect,
+.ptree-rejected > .ptree-opt .plan-risk { text-decoration: line-through; }
+.plan-rejected { color: var(--plan-muted); }
+.plan-chip.plan-chip-rejected { color: #ff7b72; border-color: #da3633; }
+.plan-chip.plan-chip-auto, .ptree-decided > .ptree-label .plan-chip.plan-chip-auto { color: #79b8ff; border-color: #427fdf; }
+.ptree-inactive > .ptree-label, .ptree-inactive > .plan-detail { opacity: 0.5; }
+.ptree-branch-note { color: var(--plan-muted); font-size: 11px; list-style: none; }
 /* Each project is the root of its tree (claunch-7jzp8.5.2). */
 .ptree-root + .ptree-root { margin-top: 14px; }
 .ptree-project > .ptree-label { background: var(--plan-panel); border-color: var(--plan-border); font-size: 14px; padding: 3px 10px; }
@@ -10893,7 +11654,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-create-foot { display: flex; align-items: center; gap: 10px; }
 .mt-create-foot .mt-new-hint { flex: 1 1 auto; }
 .mt-create-foot .mt-new-create { width: auto; min-width: 140px; }
-@media (max-width: 700px) {
+@media (max-width: 820px) {
   .mt-create-overlay { padding: 0; }
   .mt-create-card { width: 100vw; height: 100vh; border-radius: 0; }
 }
@@ -10931,7 +11692,7 @@ a.category-ref:hover { text-decoration: underline; }
 .mt-log-body { color: #d8dbe0; font-size: 12px; margin: 2px 0; word-break: break-word; }
 .mt-log-scores { color: #c6cdd5; font-variant-numeric: tabular-nums; }
 .mt-log-sent { color: #3fb950; }
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .mt-inner { grid-template-columns: 1fr; grid-auto-rows: min-content; }
   .mt-list, .mt-log { border: none; }
 }
@@ -10995,11 +11756,14 @@ a.category-ref:hover { text-decoration: underline; }
    prices (claunch-i6xl2). A caption under the small chart, and under the
    zoomed chart's legend; the number is right-aligned so its last digit sits
    over the plot's right edge. Nothing is drawn where the table has no rates
-   for the session's model -- the chart's tooltip says so instead. */
+   for the session's model -- the chart's tooltip says so instead. The second
+   line splits that total by what was billed -- read, cached read, output,
+   and cache write when the window wrote any (claunch-kr3wr). */
 #term-tps-overlay .term-series-cost {
   font-size: 10px; line-height: 12px; color: #c9d1d9; text-align: right;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
+#term-tps-overlay .term-series-cost-parts { color: #8b949e; }
 /* The zoomed chart is exactly as wide as its plot, and two fixed rows under
    the legend are reserved for the readout (claunch-k5udr, claunch-k5udr.1).
    The readout's text changes as the pointer moves, and it used to widen the
@@ -11153,15 +11917,15 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-issue.hive-ref .hive-core { color: #c9d1d9; }
 
 /* session states */
-.hive-chip.s-busy { --core: #3fb950; --rim: #2e6b3a; }
+.hive-chip.s-busy { --core: var(--life-running); --rim: #2e6b3a; }
 .hive-chip.s-idle { --core: #2f7d40; --rim: #284a31; }
 .hive-chip.s-starting { --core: #58a6ff; --rim: #24456e; }
-.hive-chip.s-hold { --core: #d29922; --rim: #5a4517; }
-.hive-chip.s-delayed { --core: #bc8cff; --rim: #4b3a6a; }
-.hive-chip.s-paused { --core: #58a6ff; --rim: #2b4766; }
-.hive-chip.s-failed { --core: #f85149; --rim: #6e2b2a; }
-.hive-chip.s-killed { --core: #6e7681; --rim: #30363d; opacity: 0.7; }
-.hive-chip.s-archived { --core: #484f58; --rim: #30363d; opacity: 0.55; border-style: dashed; }
+.hive-chip.s-hold { --core: var(--life-hold); --rim: #5a4517; }
+.hive-chip.s-delayed { --core: var(--life-delayed); --rim: #1b4b52; }
+.hive-chip.s-paused { --core: var(--life-paused); --rim: #2b4766; }
+.hive-chip.s-failed { --core: var(--life-failed); --rim: #6e2b2a; }
+.hive-chip.s-killed { --core: var(--life-done); --rim: var(--life-done-rim); opacity: 0.7; }
+.hive-chip.s-archived { --core: #484f58; --rim: var(--life-done-rim); opacity: 0.55; border-style: dashed; }
 .hive-chip.s-killed .hive-name, .hive-chip.s-archived .hive-name { text-decoration: line-through; text-decoration-color: #6e7681; }
 .hive-chip.ghost { opacity: 0.45; border-style: dashed; }
 .hive-chip.s-busy .hive-core { animation: hive-pulse 1.6s ease-in-out infinite; }
@@ -11179,11 +11943,11 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-issue.p-2 { --core: #d29922; }
 .hive-issue.p-3 { --core: #8b949e; }
 .hive-issue.p-4 { --core: #6e7681; }
-.hive-issue.st-in_progress { --rim: #2e6b3a; border-left: 3px solid #3fb950; }
-.hive-issue.st-in_review { --rim: #4b3a6a; border-left: 3px solid #bc8cff; }
-.hive-issue.st-blocked { --rim: #6e2b2a; border-left: 3px solid #f85149; }
-.hive-issue.st-in_ready { --rim: #1f4f5c; border-left: 3px solid #39c5cf; }
-.hive-issue.st-open { --rim: #30363d; }
+.hive-issue.st-in_progress { --rim: #2e6b3a; border-left: 3px solid var(--issue-busy); }
+.hive-issue.st-in_review { --rim: #4b3a6a; border-left: 3px solid var(--issue-review); }
+.hive-issue.st-blocked { --rim: #6e2b2a; border-left: 3px solid var(--issue-blocked); }
+.hive-issue.st-in_ready { --rim: #1f4f5c; border-left: 3px solid var(--issue-ready); }
+.hive-issue.st-open { --rim: #30363d; border-left: 3px solid var(--issue-open); }
 
 /* -- trees: chip on top, its issues beside it, its children below one size
    smaller, joined by a rail on the left. */
@@ -11221,17 +11985,18 @@ a.category-ref:hover { text-decoration: underline; }
 
 /* count dots: the same colours as the cores */
 .hive-dot { display: inline-flex; align-items: center; padding: 0 0.45em; border-radius: 0.7em; font-size: 0.72em; line-height: 1.5; background: #30363d; color: #c9d1d9; white-space: nowrap; }
-.hive-dot.s-busy { background: #3fb950; color: #0d1117; }
+.hive-dot.s-busy { background: var(--life-running); color: #0d1117; }
 .hive-dot.s-idle { background: #2f7d40; color: #e6edf3; }
-.hive-dot.s-starting, .hive-dot.s-paused { background: #1f6feb; color: #fff; }
-.hive-dot.s-hold { background: #d29922; color: #0d1117; }
-.hive-dot.s-delayed { background: #8957e5; color: #fff; }
-.hive-dot.s-failed { background: #da3633; color: #fff; }
+.hive-dot.s-starting { background: var(--life-paused-rim); color: #fff; }
+.hive-dot.s-paused { background: var(--life-paused-rim); color: #fff; }
+.hive-dot.s-hold { background: var(--life-hold); color: #0d1117; }
+.hive-dot.s-delayed { background: var(--life-delayed); color: #0d1117; }
+.hive-dot.s-failed { background: var(--life-failed-rim); color: #fff; }
 .hive-dot.s-killed, .hive-dot.s-archived { background: #484f58; color: #e6edf3; }
-.hive-dot.st-in_progress { background: #3fb950; color: #0d1117; }
-.hive-dot.st-in_review { background: #8957e5; color: #fff; }
-.hive-dot.st-blocked { background: #da3633; color: #fff; }
-.hive-dot.st-in_ready { background: #1b7c83; color: #fff; }
+.hive-dot.st-in_progress { background: var(--issue-busy); color: #0d1117; }
+.hive-dot.st-in_review { background: var(--issue-review); color: #0d1117; }
+.hive-dot.st-blocked { background: var(--issue-blocked); color: #0d1117; }
+.hive-dot.st-in_ready { background: var(--issue-ready); color: #0d1117; }
 .hive-dot.st-open { background: #484f58; color: #e6edf3; }
 
 /* -- semantic zoom: far out the chips keep their cores and the cells their
@@ -11278,7 +12043,7 @@ a.category-ref:hover { text-decoration: underline; }
 .hive-detail-list dt { color: #8b949e; }
 .hive-detail-list dd { color: #d8dbe0; word-break: break-word; white-space: pre-line; }
 .hive-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 720px) {
+@media (max-width: 820px) {
   #hive-view { padding: 12px 10px 8px; }
   .hive-frame { flex-direction: column; }
   .hive-detail { width: auto; max-height: 40%; }
@@ -11380,3 +12145,226 @@ a.category-ref:hover { text-decoration: underline; }
   margin-top: 8px; padding: 8px 10px; border: 1px solid #f8514966;
   border-radius: 6px; background: #2d1517; color: #ffa198; font-size: 12px;
 }
+/* One row's panel: live state from the daemon, and the merge. */
+.pr-clickable { cursor: pointer; }
+.pr-detail-box {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid #30363d;
+  border-radius: 6px; background: #0d1117;
+}
+.pr-detail-head { display: flex; align-items: baseline; gap: 8px; }
+.pr-detail-heading { font-size: 13px; color: #e6edf3; overflow-wrap: anywhere; flex: 1; }
+.pr-detail-close {
+  flex: none; background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.pr-detail-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; font-size: 11px; }
+.pr-detail-external { color: #58a6ff; text-decoration: none; }
+.pr-detail-external:hover { text-decoration: underline; }
+.pr-detail-hint { color: #8b949e; font-size: 11px; }
+.pr-detail-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin-top: 8px; font-size: 11.5px; }
+.pr-detail-row { display: contents; }
+.pr-detail-key { color: #8b949e; }
+.pr-detail-val { color: #c9d1d9; overflow-wrap: anywhere; }
+.pr-verdict { margin-top: 8px; padding: 6px 9px; border-radius: 5px; font-size: 12px; border: 1px solid #30363d; }
+.pr-verdict-ok { background: #0f2417; border-color: #2ea04366; color: #7ee787; }
+.pr-verdict-stop { background: #241c0f; border-color: #9e6a0366; color: #e3b341; }
+.pr-detail-section { margin-top: 10px; font-size: 12px; }
+.pr-detail-section h4 { font-size: 11px; color: #8b949e; margin: 0 0 4px; letter-spacing: 0.3px; }
+.pr-conflicts {
+  margin: 0; padding-left: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: #ffa198; overflow-wrap: anywhere;
+}
+.pr-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.pr-merge, .pr-rebase, .pr-merge-cancel, .pr-merge-method, .pr-rebase-note {
+  font-size: 12px; border-radius: 5px; border: 1px solid #30363d;
+  background: #21262d; color: #c9d1d9; padding: 3px 10px;
+}
+.pr-merge, .pr-rebase { cursor: pointer; }
+.pr-merge-go { background: #238636; border-color: #2ea043; color: #ffffff; font-weight: 600; }
+.pr-merge-cancel { cursor: pointer; }
+.pr-rebase-note { flex: 1; min-width: 180px; padding: 3px 8px; }
+.pr-detail-raw {
+  margin: 6px 0 0; padding: 6px 8px; max-height: 180px; overflow: auto;
+  background: #161b22; border: 1px solid #30363d; border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: #c9d1d9; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fleet page (#/fleet, fleet-page.js, claunch-d0hji): launch an agent */
+/* tree from a preset; edit presets. Scoped tokens, dark by default.   */
+/* ------------------------------------------------------------------ */
+#fleet-view {
+  --fl-bg: #0f1318; --fl-panel: #161b22; --fl-raise: #1c232d; --fl-border: #2a323d;
+  --fl-text: #e3e9f0; --fl-muted: #93a0b0; --fl-line: #3a4553; --fl-accent: #6aa6ff;
+  --fl-coordinator: #b48cff; --fl-sub-lead: #58a6ff; --fl-worker: #3fb950; --fl-reviewer: #e3b341;
+  --fl-independent: #39c5cf; --fl-stacked: #d2a8ff;
+  flex: 1; overflow-y: auto; min-height: 0; padding: 28px clamp(14px, 2.6vw, 40px);
+  background: var(--fl-bg); color: var(--fl-text); container-type: inline-size;
+}
+html[data-theme="light"] #fleet-view {
+  --fl-bg: #f6f7f9; --fl-panel: #ffffff; --fl-raise: #f1f4f8; --fl-border: #d8dee6;
+  --fl-text: #1f2328; --fl-muted: #5b6673; --fl-line: #c3ccd7; --fl-accent: #2f6fdb;
+  --fl-coordinator: #8250df; --fl-sub-lead: #0969da; --fl-worker: #1a7f37; --fl-reviewer: #9a6700;
+  --fl-independent: #1b7c83; --fl-stacked: #8250df;
+}
+.fl-shell { max-width: 1520px; margin: 0 auto; font-size: 13.5px; line-height: 1.55; }
+.fl-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.fl-head h2 { font-size: clamp(22px, 2.4vw, 30px); font-weight: 650; letter-spacing: -.03em; margin: 2px 0 4px; }
+.fl-eyebrow { color: var(--fl-accent); font-size: 11px; font-weight: 650; letter-spacing: .12em; }
+.fl-muted { color: var(--fl-muted); font-size: 12px; }
+.fl-desc { color: var(--fl-muted); white-space: pre-wrap; margin: 8px 0 0; font-size: 12.5px; }
+#fleet-view .wf-btn {
+  margin: 0; min-height: 34px; padding: 6px 14px; border-radius: 9px; font-weight: 550;
+  border: 1px solid var(--fl-border); background: var(--fl-raise); color: var(--fl-text); cursor: pointer;
+  transition: background .15s, border-color .15s, transform .08s;
+}
+#fleet-view .wf-btn:hover:not(:disabled) { border-color: var(--fl-accent); }
+#fleet-view .wf-btn:active:not(:disabled) { transform: translateY(1px); }
+#fleet-view .wf-btn:disabled { opacity: .45; cursor: default; }
+#fleet-view .fl-primary { background: var(--fl-accent); border-color: var(--fl-accent); color: #fff; }
+#fleet-view .fl-danger { background: transparent; color: #f0827a; border-color: transparent; }
+#fleet-view :is(input, select, textarea) {
+  font: inherit; color: var(--fl-text); background: var(--fl-bg); border: 1px solid var(--fl-border);
+  border-radius: 8px; padding: 7px 10px; min-width: 0; max-width: 100%; box-sizing: border-box;
+}
+html:not([data-theme="light"]) #fleet-view :is(input, select, textarea) { color-scheme: dark; }
+#fleet-view :is(input, select, textarea, button):focus-visible { outline: 2px solid var(--fl-accent); outline-offset: 2px; }
+.fl-seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--fl-border); border-radius: 11px; background: var(--fl-panel); }
+#fleet-view .fl-seg .wf-btn { border-color: transparent; background: transparent; min-height: 30px; }
+#fleet-view .fl-seg .wf-btn.fl-on { background: var(--fl-raise); border-color: var(--fl-border); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+
+.fl-grid { display: grid; grid-template-columns: minmax(340px, 460px) minmax(0, 1fr); gap: 18px; align-items: start; }
+.fl-grid-edit { grid-template-columns: 230px minmax(0, 1fr) minmax(300px, 420px); }
+@container (max-width: 1100px) { .fl-grid, .fl-grid-edit { grid-template-columns: minmax(0, 1fr); } }
+.fl-panel { background: var(--fl-panel); border: 1px solid var(--fl-border); border-radius: 14px; padding: 18px; min-width: 0; }
+.fl-side { position: sticky; top: 0; }
+.fl-panel h3 { margin: 0 0 10px; font-size: 14px; font-weight: 650; }
+.fl-step { margin: 18px 0 8px !important; font-size: 12px !important; letter-spacing: .04em; color: var(--fl-muted); text-transform: uppercase; }
+.fl-step:first-child { margin-top: 0 !important; }
+.fl-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.fl-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 140px; min-width: 0; }
+.fl-label { font-size: 11.5px; color: var(--fl-muted); font-weight: 600; white-space: pre; }
+.fl-hint { font-size: 11px; color: var(--fl-muted); }
+.fl-task { width: 100%; resize: vertical; }
+.fl-check { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 12.5px; }
+.fl-levels { display: grid; gap: 8px; }
+.fl-levels .fl-field { flex-direction: row; align-items: center; gap: 10px; }
+.fl-levels .fl-label { flex: 0 0 46%; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
+.fl-levels select { flex: 1; }
+.fl-levels .fl-hint { flex: 0 0 100%; display: none; }
+.fl-adv { margin-top: 12px; border-top: 1px dashed var(--fl-border); padding-top: 8px; }
+.fl-adv summary { cursor: pointer; color: var(--fl-muted); font-size: 12px; }
+.fl-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.fl-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#fleet-view .fl-pill { min-height: 24px; padding: 1px 10px; font-size: 11.5px; border-radius: 999px; }
+#fleet-view .fl-pill.fl-on { border-color: var(--fl-accent); color: var(--fl-accent); }
+
+.fl-presets { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.fl-list { display: grid; gap: 8px; align-content: start; }
+#fleet-view .fl-preset {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; height: auto;
+  padding: 10px 12px; white-space: normal;
+}
+#fleet-view .fl-preset.fl-on { border-color: var(--fl-accent); box-shadow: inset 3px 0 0 var(--fl-accent); }
+#fleet-view .fl-preset.fl-bad { border-style: dashed; }
+
+/* The tree reads left to right: a card, then its children stacked in a
+   column, each joined to a shared spine by a short tick. */
+.fl-side-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.fl-legend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 4px 0 14px; font-size: 11.5px; color: var(--fl-muted); }
+.fl-key { display: inline-flex; gap: 5px; align-items: center; }
+.fl-tree { overflow-x: auto; padding: 4px 2px 10px; }
+.fl-node { display: flex; align-items: center; }
+.fl-kids { display: flex; flex-direction: column; gap: 8px; padding-left: 30px; position: relative; }
+.fl-node > .fl-kids::before { content: ""; position: absolute; left: 0; top: 50%; width: 15px; border-top: 2px solid var(--fl-line); }
+.fl-kids > .fl-node { position: relative; }
+.fl-kids > .fl-node::before { content: ""; position: absolute; left: -15px; top: 50%; width: 15px; border-top: 2px solid var(--fl-line); }
+.fl-kids > .fl-node::after { content: ""; position: absolute; left: -15px; top: -4px; bottom: -4px; border-left: 2px solid var(--fl-line); }
+.fl-kids > .fl-node:first-child::after { top: 50%; }
+.fl-kids > .fl-node:last-child::after { bottom: 50%; }
+.fl-kids > .fl-node:only-child::after { display: none; }
+.fl-card {
+  --k: var(--fl-worker);
+  flex: 0 0 auto; width: 210px; box-sizing: border-box; padding: 9px 11px; border-radius: 11px;
+  background: var(--fl-raise); border: 1px solid var(--fl-border); border-left: 3px solid var(--k);
+  box-shadow: 0 1px 0 rgba(0,0,0,.18);
+}
+.fl-kind-coordinator { --k: var(--fl-coordinator); }
+.fl-kind-sub-lead { --k: var(--fl-sub-lead); }
+.fl-kind-worker { --k: var(--fl-worker); }
+.fl-kind-reviewer { --k: var(--fl-reviewer); }
+.fl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--k); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--k) 22%, transparent); }
+.fl-card-head { display: flex; align-items: center; gap: 7px; }
+.fl-handle { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-kind { margin-left: auto; font-size: 10.5px; color: var(--k); font-weight: 650; }
+.fl-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.fl-chip { font-size: 10.5px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--fl-border); color: var(--fl-muted); white-space: nowrap; }
+.fl-rel-independent { color: var(--fl-independent); border-color: color-mix(in srgb, var(--fl-independent) 45%, transparent); }
+.fl-rel-stacked { color: var(--fl-stacked); border-color: color-mix(in srgb, var(--fl-stacked) 45%, transparent); }
+.fl-issue-lane { color: var(--fl-text); }
+.fl-issue-pending { border-style: dashed; }
+.fl-card-foot { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+#fleet-view .fl-card-profile { padding: 3px 6px; font-size: 11.5px; }
+.fl-facts { display: grid; gap: 2px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--fl-bg); border: 1px solid var(--fl-border); font-size: 12px; overflow-wrap: anywhere; }
+.fl-plan { margin: 8px 0 0; padding-left: 22px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--fl-muted); }
+.fl-yaml { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--fl-bg); border: 1px solid var(--fl-border); font-size: 11.5px; max-height: 360px; overflow: auto; white-space: pre; }
+.fl-yaml-edit { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; resize: vertical; }
+.fl-err { white-space: pre-wrap; font-size: 12px; }
+
+/* The editor: the group tree beside the selected group's form. */
+.fl-split { display: grid; grid-template-columns: minmax(170px, 230px) minmax(0, 1fr); gap: 14px; align-items: start; }
+@container (max-width: 760px) { .fl-split { grid-template-columns: minmax(0, 1fr); } }
+.fl-gtree { display: grid; gap: 4px; align-content: start; }
+#fleet-view .fl-gnode {
+  --k: var(--fl-worker); display: flex; align-items: center; gap: 7px; justify-content: flex-start;
+  min-height: 30px; padding: 4px 10px; text-align: left; border-left: 3px solid var(--k);
+}
+#fleet-view .fl-gnode.fl-on { border-color: var(--fl-accent); border-left-color: var(--k); background: var(--fl-bg); }
+#fleet-view .fl-gnode .fl-muted { margin-left: auto; font-size: 10.5px; }
+.fl-group-form { display: grid; gap: 10px; padding: 12px; border-radius: 11px; border: 1px solid var(--fl-border); background: var(--fl-bg); }
+.fl-params { display: grid; gap: 8px; }
+.fl-params .fl-field { flex: 1 1 80px; }
+
+/* Sub procedures (subprocs.js, claunch-8t5r0.3-.5). The card line sits
+   under the run's v2 line (same order slot, after it in the DOM); the header
+   chip says the same for the attached session. A fork that fell back to
+   inline is amber on both, with the cause in the title. */
+#session-list .sess-subproc {
+  flex-basis: 100%; min-width: 0; padding-left: 28px; font-size: 11px;
+  color: #79c0ff; order: 3; overflow-wrap: anywhere;
+}
+#session-list .sess-subproc.fallback { color: #d29922; font-weight: 600; }
+.term-subproc {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: #10202e; color: #79c0ff; border: 1px solid #1f3a52;
+  cursor: pointer; white-space: nowrap; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.term-subproc.fallback { background: #3a2f0b; color: #e3b341; border-color: #6b5313; }
+.subproc-host { padding: 8px 12px; overflow: auto; height: 100%; box-sizing: border-box; }
+.subproc-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px; }
+.subproc-task { font-weight: 600; }
+.subproc-muted { color: #7d8590; font-size: 11px; }
+.subproc-filter { font-size: 12px; cursor: pointer; }
+.subproc-refusal { color: #d29922; font-size: 12px; margin: 6px 0; }
+.subproc-note { color: #79c0ff; font-size: 12px; margin: 6px 0; }
+.subproc-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.subproc-item { border-bottom: 1px solid #21262d; padding: 6px 0; }
+.subproc-item.disabled { opacity: 0.55; }
+.subproc-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.subproc-name { font-family: SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.subproc-tag {
+  font-size: 10px; padding: 0 5px; border-radius: 6px;
+  border: 1px solid #30363d; color: #8b949e;
+}
+.subproc-tag-fork { color: #a371f7; border-color: #3c2a5e; }
+.subproc-desc { font-size: 11px; color: #8b949e; margin-top: 2px; }
+.subproc-why { font-size: 11px; color: #d29922; margin-top: 2px; }
+.subproc-btn { font-size: 11px; margin-left: auto; }
+.subproc-row .subproc-btn ~ .subproc-btn { margin-left: 4px; }
+.subproc-form { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.subproc-params { font-family: SFMono-Regular, Consolas, monospace; font-size: 11px; width: 100%; }
+.subproc-error { color: #f85149; font-size: 11px; }
+.subproc-roles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+.subproc-roles input[type="text"] { min-width: 180px; font-size: 11px; }

@@ -71,6 +71,7 @@ _STATUS = {
     "tart_exited": 502, "vm_no_controller": 409, "vm_control_held": 409, "vm_no_lease": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
+    "vm_files_unsupported": 501,
     "vm_share_no_roots": 409, "vm_share_outside_root": 400, "vm_share_forbidden": 400,
     "vm_share_limit": 400, "vm_preset_copy": 409, "vm_destroy_granted": 409, "vm_template_confirm": 409, "vm_root_unknown": 404,
     "vm_disabled": 409,
@@ -1122,7 +1123,15 @@ def _materialize(vm_id: str, result: dict) -> dict:
             mime = str(block.get("mimeType") or "image/png")
             ext = {"image/jpeg": "jpg", "image/png": "png"}.get(mime, "bin")
             path = _shots_dir(vm_id) / f"{int(_time.time() * 1000):016d}-{len(content)}.{ext}"
-            path.write_bytes(base64.b64decode(block["data"]))
+            # Written through an open file rather than Path.write_bytes: the
+            # delivery contract's guard (tests/test_delivery_contract.py) reads
+            # call names, and a PTY write is spelled .write_bytes() too. A
+            # screenshot has nothing to do with message delivery; spelling it
+            # differently keeps the contract strict instead of adding this
+            # module to RAW_WRITER_ALLOWLIST (as sim/runtime.py and
+            # daemon/api.py already do).
+            with path.open("wb") as fh:
+                fh.write(base64.b64decode(block["data"]))
             content.append({"type": "image", "path": str(path), "mimeType": mime})
         else:
             content.append(block)

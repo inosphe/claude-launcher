@@ -690,7 +690,8 @@ def parse_skips(path: Path) -> Optional[list]:
         mark = case.find("skipped")
         if mark is None or mark.get("type") == "pytest.xfail":
             continue
-        file = case.get("file") or ""
+        # pytest writes the path with the host separator; node ids use "/".
+        file = (case.get("file") or "").replace("\\", "/")
         classname = case.get("classname") or ""
         module = file[:-3].replace("/", ".") if file.endswith(".py") else ""
         if not classname:

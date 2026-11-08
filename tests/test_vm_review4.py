@@ -130,4 +130,15 @@ def test_a_command_that_runs_past_its_time_is_killed():
 
 # 6 ------------------------------------------------------------------------- #
 def test_a_capture_removes_what_an_interrupted_one_left():
-    assert vm_frames.CAPTURE.startswith("/bin/rm -f /tmp/claunch-frame-*.jpg;")
+    """The cleanup comes first, so a file an earlier capture left (its tart
+    exec was killed on a timeout) is gone before the next one writes.
+
+    Its name carries the VM: the command line is one this repository
+    executes, and ``tools/check_tmp_paths.py`` refuses a fixed name under
+    ``/tmp`` (claunch-xf9dp). Two VMs also never name the same file, so one
+    guest's leftover cannot be the prefix another sweeps.
+    """
+    cmd = vm_frames.capture_argv(Vm(id="a", tart_name="a"))[-1]
+    assert cmd.startswith("/bin/rm -f /tmp/claunch-frame-a-*.jpg;")
+    assert "/tmp/claunch-frame-*.jpg" not in cmd
+    assert vm_frames.capture_argv(Vm(id="b", tart_name="b"))[-1] != cmd

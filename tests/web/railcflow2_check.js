@@ -79,7 +79,7 @@ const ctx = {};
 new Function(
   "exports", "$", "document", "location", "cflow2RailCache",
   [wfGlyphTable(), slice("cflow2RailMarkState"), slice("cflow2RailLabel"),
-   slice("applyCflow2Badges")].join("\n") + `
+   slice("cflow2RailTip"), slice("applyCflow2Badges")].join("\n") + `
 exports.apply = applyCflow2Badges;
 exports.setRows = (rows) => { cflow2RailCache = rows; };
 `)(ctx, (id) => (id === "session-list" ? list : null),
@@ -136,6 +136,7 @@ check("the line shows the round the run is in, not the slot round",
       lineText(rows.s1), "improv-worker-v2 · running · round 3 · 목표 수립");
 const first = line(rows.s1);
 ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
+                    blocking: true,
                     owed: ["loop_limit: rounds", "choose: landing"] } });
 ctx.apply();
 check("an owed run is flagged as the reader's move",
@@ -146,6 +147,45 @@ check("the mark says it is yours", line(rows.s1).children[0].textContent, "◆")
 check("the hover lists what is owed", line(rows.s1).title,
       "loop_limit: rounds\nchoose: landing");
 check("the element is reused across polls", line(rows.s1) === first, true);
+
+// A door the run is not held on (claunch-hbmhk): a choice in a settle: race
+// region, which the engine cancels when a sibling finishes. The row keeps a
+// line -- it is still the one thing the reader may do here -- but wears a
+// hollow mark and no amber, and never the flag that says the run is stopped.
+ctx.setRows({ s1: { ...running, status: "running", gated: true, blocking: false,
+                    owed: [], optional: ["optional: test-skip-gate"] } });
+ctx.apply();
+check("an optional door is not amber", line(rows.s1).className,
+      "sess-cflow2 optional");
+check("...its mark is the hollow one, not 'yours'",
+      [line(rows.s1).children[0].className, line(rows.s1).children[0].textContent],
+      ["wf-mark wf-mark-optional", "○"]);
+check("...and it names the door without the held flag",
+      lineText(rows.s1), "improv-worker-v2 · optional: test-skip-gate");
+check("...the hover says the run carries on without it", line(rows.s1).title,
+      "optional: test-skip-gate — the run carries on without it, " +
+      "and closes it by itself");
+
+// Both at once: what stops the run is named first and keeps the flag.
+ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
+                    blocking: true, owed: ["loop_limit: rounds"],
+                    optional: ["optional: test-skip-gate"] } });
+ctx.apply();
+check("a stopped run with a door open reads as both, stop first",
+      lineText(rows.s1),
+      "improv-worker-v2 · ⚑ loop_limit: rounds · optional: test-skip-gate");
+check("...and the row is amber, because something really is stopped",
+      [line(rows.s1).className, line(rows.s1).children[0].textContent],
+      ["sess-cflow2 gated", "◆"]);
+
+// An older daemon sends `gated` and no `blocking`: absent is read as a stop,
+// which is what every one of these used to be.
+ctx.setRows({ s1: { ...running, status: "waiting_approval", gated: true,
+                    owed: ["choose: landing"] } });
+ctx.apply();
+check("a payload without `blocking` keeps the old reading",
+      [line(rows.s1).className, line(rows.s1).children[0].textContent],
+      ["sess-cflow2 gated", "◆"]);
 
 ctx.setRows({ s1: { ...running, status: "done", current: [] } });
 ctx.apply();
@@ -171,6 +211,8 @@ check("the stylesheet gives the v2 line a full-width line of its own",
       /#session-list \.sess-cflow2 \{[^}]*flex-basis: 100%/.test(css), true);
 check("...and the amber of a reader's move",
       /#session-list \.sess-cflow2\.gated \{[^}]*#d29922/.test(css), true);
+check("...while an optional door keeps the calm colour (claunch-hbmhk)",
+      /#session-list \.sess-cflow2\.optional \{[^}]*#7d8590/.test(css), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

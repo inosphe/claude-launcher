@@ -21,6 +21,7 @@ the user decides. These tests pin the boundary, not the terminal protocol
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -72,6 +73,19 @@ async def _wait_for(shell, needle: str, timeout: float = 20.0) -> dict:
     raise AssertionError(f"{needle!r} never appeared; tail={last and last['text'][-500:]!r}")
 
 
+#: Escape sequences the PTY carries between the characters of a line (cursor
+#: moves, colour, bracketed paste). Echo of the typed line and the child's
+#: output both arrive with them, and a full sweep once failed to find
+#: ``second`` in a read that held it split by one (claunch-etcs6; the same
+#: file passed on its own, 20 of 20 twice). Comparing on the stripped text
+#: makes the match independent of where a repaint falls.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>]")
+
+
+def _plain(text: str) -> str:
+    return _ANSI.sub("", text)
+
+
 async def _wait_peek(shell, needle: str, timeout: float = 20.0) -> None:
     """Wait until ``needle`` is in the output, reading without the cursor.
 
@@ -81,7 +95,7 @@ async def _wait_peek(shell, needle: str, timeout: float = 20.0) -> None:
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if needle in clipty.ShellPty.read_output(shell, shell.read_cursor)["text"]:
+        if needle in _plain(clipty.ShellPty.read_output(shell, shell.read_cursor)["text"]):
             return
         await asyncio.sleep(0.05)
     raise AssertionError(f"{needle!r} never appeared; total={shell.total}")
@@ -352,8 +366,12 @@ def test_the_read_cursor_is_the_daemons_and_a_default_read_continues_from_it(tmp
 
         # No offset: continue from the cursor, which is what is unread.
         first = await req("GET", base + "/output")
-        assert "first" in first["text"]
-        assert first["offset"] == first["total"] == shell.total
+        assert "first" in _plain(first["text"])
+        # The read reaches the end of the ring as the read saw it. The live
+        # ``shell.total`` is not compared: the terminal's repaint of the line
+        # keeps arriving after the response under load (1137 against 1164 in
+        # a 12-way parallel run, claunch-etcs6).
+        assert first["offset"] == first["total"]
         after = await req("GET", base)
         assert after["last_read"] == first["offset"]
         assert after["unread_bytes"] == 0
@@ -362,12 +380,12 @@ def test_the_read_cursor_is_the_daemons_and_a_default_read_continues_from_it(tmp
         await _wait_peek(shell, "second")
         second = await req("GET", base + "/output")
         # Only what arrived since: the new line is there, the old one is not.
-        assert "second" in second["text"] and "first" not in second["text"]
+        assert "second" in _plain(second["text"]) and "first" not in _plain(second["text"])
         assert second["start"] == first["offset"]
 
         # An explicit offset is still honoured: 0 is the whole ring.
         whole = await req("GET", base + "/output?offset=0")
-        assert "first" in whole["text"] and "second" in whole["text"]
+        assert "first" in _plain(whole["text"]) and "second" in _plain(whole["text"])
 
         # The cursor is per shell: reading s1's ring moved s1's cursor, and
         # s2 has its own (its own reads moved that one).
