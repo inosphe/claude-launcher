@@ -6238,7 +6238,15 @@ async function refreshSessions(options) {
      typeof keyPoolSignature === "function" ? keyPoolSignature() : null,
      // The checks' names and questions, which no row carries
      // (claunch-hwbuc.2 review).
-     defsStamp],
+     defsStamp,
+     // The table the card's cost lines are priced at. A row built while the
+     // table was still in flight drew no cost block, and refreshRailSeen only
+     // swaps a block that is already there -- so the table's arrival (or a
+     // rate edited under Settings) has to be a reason to draw the rows again,
+     // or every row on the rail keeps the empty one it built without it
+     // (claunch-ge1ap). Guarded like the other signature members: the node
+     // harnesses slice this function without the price state.
+     typeof modelPricesKey === "string" ? modelPricesKey : null],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -6367,7 +6375,12 @@ async function refreshSessions(options) {
   const rowSignature = (s, depth, meshGroup, kin) => JSON.stringify(
     [s, depth, meshGroup || null, !!kin, s.name === currentName, s.name === sessName,
      pins.includes(s.name), briefingLLM, sessMeshes(s.name), handleTag(s.name),
-     railMeshTags(s.name, meshGroup || null), railMetaText(s)],
+     railMeshTags(s.name, meshGroup || null), railMetaText(s),
+     // The price table the cost lines are priced at: the same record draws a
+     // different card under a different table, so a row kept across the
+     // table's arrival would keep the card that had no cost block at all
+     // (claunch-ge1ap).
+     typeof modelPricesKey === "string" ? modelPricesKey : null],
     unstamped,
   );
   const takeKeptRow = (name, sig) => {
@@ -6988,10 +7001,12 @@ async function refreshSessions(options) {
     label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // What the conversation has cost so far, and its subagents beside it,
+    // for a harness whose transcript the daemon totals -- absent otherwise.
     // Guarded like the detail panel's late rows: node harnesses slice the
-    // row builder without the bucket line and its price helpers.
-    const railCtxTokens = typeof ctxTokensLine === "function"
-      ? ctxTokensLine(s) : null;
+    // row builder without the cost lines and their price helpers.
+    const railCosts = typeof railCostLines === "function"
+      ? railCostLines(s) : null;
     // And how fast its backend answered last time, for a session that goes
     // through the metering shim -- one more full-width line, absent for
     // the sessions that have no such record. Guarded like the kill-state
@@ -7137,7 +7152,7 @@ async function refreshSessions(options) {
                    ...(pin ? [pin] : []),
                    ...(observePin ? [observePin] : []), info);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
-              ...(railCtxTokens ? [railCtxTokens] : []),
+              ...(railCosts ? [railCosts] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(railLife ? [railLife] : []), actions);
@@ -9365,6 +9380,7 @@ let modelPricesKey = "";
 let modelPricesError = "";
 
 async function refreshModelPrices() {
+  const before = modelPricesKey;
   try {
     const resp = await api("/api/model-prices");
     const data = await resp.json().catch(() => ({}));
@@ -9374,6 +9390,15 @@ async function refreshModelPrices() {
     modelPricesError = "";
   } catch (err) {
     modelPricesError = String(err);
+  }
+  // The rail's rows price their cost lines off this table, so a table that
+  // arrived after the rows were drawn has to draw them again: a row built
+  // without one has no cost block for refreshRailSeen to swap, and would
+  // keep going without one until some unrelated record changed
+  // (claunch-ge1ap). A cached redraw reads the records already in hand — the
+  // signature carries the key, so only the price change rebuilds anything.
+  if (modelPricesKey !== before && typeof refreshSessions === "function") {
+    refreshSessions({ cached: true });
   }
   if (wsOpen) renderWorkspaces();
 }
@@ -9687,42 +9712,56 @@ function ctxRailLine(s) {
   return line;
 }
 
-/* The line under the gauge: how the reading's total splits into the three
-   billed input buckets — read (fresh input), cached (replayed from cache),
-   write (written to cache) — and, where the person priced this model, what
-   that request cost at those rates. Counts use the same usageShort scale as
-   the usage line below, so a figure means the same thing on both; the ≈
-   figure is computed from entered rates, not read off a meter, and says so
-   in the tooltip along with the multiplication. Nothing at all where the
-   harness has recorded no reading — the gauge's own "?" already carries
-   that. */
-function ctxTokensLine(s) {
-  const c = s && s.context;
-  if (!c) return null;
+/* The card's cost lines: what the conversation itself has spent, priced at
+   the Settings → Model prices rates, and — on its own line, where the
+   session has subagents — what they spent. The two are separate spends, so
+   they get separate rows: adding them into one figure hides which half came
+   from subagents. The conversation row prices the session's own requests,
+   which is the same set the terminal overlay's chart totals
+   (sessionstats.series leaves subagent requests out), so the two surfaces
+   read the same quantity. The ≈ figure is computed from entered rates, not
+   read off a meter, and its tooltip carries the multiplication. The token
+   totals stay on the usage line above, so this block does not repeat them.
+   Nothing at all where the daemon has no cumulative reading (the harness
+   has no reader, or has not read the transcript yet) and nothing where the
+   model has no rates: a card with nothing to price shows no cost, and a
+   zero would read as a measured one. The per-request split this card used
+   to draw here lives in the detail panel's "last request" row and in the
+   gauge's tooltip. */
+function railCostLines(s) {
+  const u = s && s.token_usage;
+  if (!u) return null;
   const provider = sessionPriceProvider(s);
-  const rates = priceRateFor(c.model, provider);
-  const cost = readingCost(c, rates);
-  const line = el("span", "rail-ctx-tokens");
-  line.append(
-    el("span", "rct-part", `read ${usageShort(c.input || 0)}`),
-    el("span", "rct-sep", "·"),
-    el("span", "rct-part", `cached ${usageShort(c.cache_read || 0)}`),
-    el("span", "rct-sep", "·"),
-    el("span", "rct-part", `write ${usageShort(c.cache_write || 0)}`),
-  );
-  if (cost !== null) {
-    line.append(el("span", "rct-sep", "·"),
-                el("span", "rct-cost", costText(cost)));
+  const model = u.model || (s.context && s.context.model);
+  const rates = priceRateFor(model, provider);
+  // No rates, no estimate: the usage line still carries the token totals, and
+  // this block draws nothing rather than a zero or a "not priced" row on
+  // every card whose model nobody has priced.
+  if (!rates) return null;
+  const box = el("span", "rail-usage-cost" + (u.partial ? " partial" : ""));
+  const row = (label, part, tip) => {
+    const line = el("span", "ruc-row");
+    line.append(el("span", "ruc-label", label),
+                el("span", "ruc-cost", costText(readingCost(part, rates))));
+    line.title = tip;
+    return line;
+  };
+  const spend = (what, part) =>
+    what + ", estimated from Settings → Model prices:\n" +
+    costBreakdown(part, rates).replace(
+      /^estimated from Settings → Model prices:\n/, "");
+  box.append(row("conversation", u,
+    spend("conversation", u) +
+    "\nthe conversation's own requests — the same set the terminal overlay's " +
+    "chart prices"));
+  const sub = u.subagents;
+  if (sub && sub.requests) {
+    box.append(row("subagents", sub,
+      spend("subagents", sub) +
+      "\nspent by this session's subagents; the conversation row does not " +
+      "include it"));
   }
-  line.title = [
-    `last request: read ${(c.input || 0).toLocaleString()} fresh input · ` +
-    `cached ${(c.cache_read || 0).toLocaleString()} replayed from cache · ` +
-    `write ${(c.cache_write || 0).toLocaleString()} written to cache`,
-    rates ? costBreakdown(c, rates)
-          : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
-            " — add them in Settings → Model prices to see an estimate",
-  ].join("\n");
-  return line;
+  return box;
 }
 
 /* ------------------------------------------------------------------ */
@@ -12084,18 +12123,19 @@ function refreshRailSeen(list) {
         if (ctx.title !== title) ctx.title = title;
       }
     }
-    // The bucket line under the gauge: rebuilt when the reading or the
-    // price table moves (modelPricesKey is the table serialized once per
-    // read, so a poll that changed neither costs this row nothing). Only
-    // swapped where it exists — a row whose harness records no reading has
-    // no line to replace, and the row builder hangs a fresh one the moment
-    // a reading lands.
-    const tk = li.querySelector(".rail-ctx-tokens");
-    if (tk && typeof ctxTokensLine === "function") {
-      const tkKey = JSON.stringify([s.context || null, s.profile || "",
-                                    s.borrow || "", modelPricesKey]);
+    // The cost lines under the gauge: rebuilt when the cumulative reading,
+    // the session's profile, or the price table moves (modelPricesKey is the
+    // table serialized once per read, so a poll that changed none of them
+    // costs this row nothing). Only swapped where the line exists — a row
+    // whose harness has no reading has none to replace, and the row builder
+    // hangs a fresh one the moment a reading lands.
+    const tk = li.querySelector(".rail-usage-cost");
+    if (tk && typeof railCostLines === "function") {
+      const tkKey = JSON.stringify([s.token_usage || null, s.context || null,
+                                    s.profile || "", s.borrow || "",
+                                    modelPricesKey]);
       if (tk._railKey !== tkKey) {
-        const fresh = ctxTokensLine(s);
+        const fresh = railCostLines(s);
         if (fresh) swap(tk, fresh)._railKey = tkKey;
         else tk.remove();
       }
@@ -41858,6 +41898,11 @@ async function modelPricesSave() {
     modelPricesKey = JSON.stringify(data);
     modelPricesDraft = null;
     modelPricesNotice = "Saved. New readings price against this table.";
+    // The saved table is the one the card's cost lines are priced at, so the
+    // rail is drawn again from the records in hand (the rows' signature
+    // carries the key; only the price change rebuilds them). Guarded for the
+    // node harness that slices this function alone (claunch-ge1ap).
+    if (typeof refreshSessions === "function") refreshSessions({ cached: true });
   } catch (err) {
     modelPricesError = String(err);
   }
