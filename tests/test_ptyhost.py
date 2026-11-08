@@ -514,10 +514,6 @@ def test_daemon_setting_on_installs_a_host_client(home, monkeypatch):
         c.shutdown_host()
 
 
-@pytest.mark.skipif(
-    not os.path.exists("/proc/self"),
-    reason="the leak check reads a host's owner mark from /proc/<pid>/environ (Linux only)",
-)
 def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
     """The conftest leak check sees hosts this process did not start (a
     daemon subprocess's) by the owner mark they inherit (claunch-xnnct.1)."""
@@ -534,9 +530,28 @@ def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
     assert pid and pid not in [p.pid for p in hc._started]
     try:
         assert conftest._owned_host_pids(tmp_path) == [pid]
-        with open(f"/proc/{pid}/environ", "rb") as fh:
-            assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
+        if os.path.exists("/proc/self"):
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
     finally:
         conftest._end_pid(pid)
     assert _wait(lambda: not _pid_alive(pid))
     assert conftest._owned_host_pids(tmp_path) == []
+
+
+def test_leak_check_ignores_a_pid_file_naming_another_program(tmp_path):
+    """A pid file whose pid belongs to an unrelated program is not a host the
+    run owns, with or without /proc, so the leak check never ends it."""
+    import subprocess
+
+    import conftest
+
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        directory = tmp_path / "stale"
+        directory.mkdir()
+        (directory / "ptyhost.pid").write_text(f"{other.pid}\n", encoding="ascii")
+        assert conftest._owned_host_pids(tmp_path) == []
+    finally:
+        other.kill()
+        other.wait(timeout=5)

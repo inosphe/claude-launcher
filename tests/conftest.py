@@ -296,15 +296,25 @@ def vm_on(home):
 def _owned_host_pids(root: Path) -> list:
     """Live PTY hosts under ``root`` (by their pid files) that this test
     process owns -- found by the owner mark in their environment, so a host a
-    daemon subprocess started is caught too."""
+    daemon subprocess started is caught too. Where there is no /proc to read
+    that environment from (macOS), a pid file under ``root`` is this test's
+    own, so the process counts when its command line says it is the host for
+    that directory (``client._is_host_process``)."""
     found = []
     try:
         pid_files = list(root.rglob("ptyhost.pid"))
     except OSError:
         return found
+    have_proc = os.path.exists("/proc/self")
     for pid_file in pid_files:
         try:
             pid = int(pid_file.read_text(encoding="ascii").strip())
+            if not have_proc:
+                from claude_launcher.daemon.ptyhost import client
+
+                if client._is_host_process(pid, pid_file.parent):
+                    found.append(pid)
+                continue
             with open(f"/proc/{pid}/environ", "rb") as fh:
                 env = fh.read().split(b"\0")
         except (OSError, ValueError):
