@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import config, provider_presets, pytest_venv, test_tiers, test_window
+from claude_launcher import config, harnesses, provider_presets, pytest_venv, test_tiers, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -249,6 +249,10 @@ def home(tmp_path, monkeypatch):
     # (claunch-llmi1: 24 failures in the delayed sweep, none in a shell).
     for name in _DAEMON_INSTANCE_VARS:
         monkeypatch.delenv(name, raising=False)
+    # Harness availability is remembered per process (a miss for 30 s). A test
+    # that asked about `pi` earlier in the same xdist worker leaves a miss that
+    # hides the `shutil.which` patch of a later one (claunch-qpl.1.1).
+    harnesses.reset_which_cache()
     # Workflow check commands say `python`. A runner that starts pytest by
     # absolute interpreter path has no `python` on PATH unless the venv's bin
     # directory is (the runner now adds it; this keeps a bare shell the same).
