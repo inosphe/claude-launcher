@@ -1025,9 +1025,24 @@ def test_plan_round_opens_the_drivers_round_once(tmp_path):
 
 
 def test_plan_round_without_a_round_or_a_driver_is_a_skip(tmp_path):
+    """claunch-6rjgg.1: the fallback's skip branch, pinned word for word. A
+    record whose round is absent is read off the run state, and here there is
+    no run in the directory to read (the run read is answered with nothing),
+    so the record's own ``run`` is not enough and the skip sentence stands.
+    """
+    from claude_launcher.daemon import paths
+    from claude_launcher.plan import store as plan_store
+
     ok, detail = asyncio.run(cflow2_triggers.perform(
         Manager(), str(tmp_path), "w1", {"do": "plan-round", "run": "r1"}, driver="w1"))
-    assert not ok and "no run and round" in detail
+    assert not ok
+    assert detail == "the trigger record carries no run and round"
+    assert plan_store.PlanStore(paths.plan_db()).get("w1") is None
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        Manager(), str(tmp_path), "w1", {"do": "plan-round"}, driver="w1"))
+    assert not ok
+    assert detail == "the trigger record carries no run and round"
+    assert plan_store.PlanStore(paths.plan_db()).get("w1") is None
     ok, detail = asyncio.run(cflow2_triggers.perform(
         Manager(), str(tmp_path), "w1", {"do": "plan-round", "run": "r1", "round": 1}, driver=""))
     assert not ok and "no driver" in detail
@@ -1061,6 +1076,31 @@ def test_plan_round_reads_a_record_without_run_and_round_off_the_run(tmp_path):
 
     ok, detail = asyncio.run(cflow2_triggers.perform(
         Manager(), str(tmp_path), "w1", {"do": "plan-round"}, driver="w1"))
+    assert ok and f"opened round {state['run_id']}/3" in detail
+    from claude_launcher.daemon import paths
+    from claude_launcher.plan import store as plan_store
+
+    plan = plan_store.PlanStore(paths.plan_db()).get("w1")
+    assert (plan["run"], plan["round"]) == (state["run_id"], 3)
+
+
+def test_plan_round_reads_a_record_with_only_a_run_off_the_run(tmp_path):
+    """claunch-6rjgg.1: the case between the two above. A record written by a
+    process older than the ``round`` field may still carry ``run``, and a
+    record's run does not name its round -- the round is read off that run's
+    state. Here ``{"do": "plan-round", "run": <run id>}`` opens the run's third
+    round, so the fallback did not treat the record's run as the whole answer.
+    """
+    _start(tmp_path, ROUND_LOOP, "w1")
+    for _ in range(2):
+        task = runtime.status(cwd=str(tmp_path), scope="w1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=str(tmp_path), scope="w1")
+    state = _state(tmp_path, "w1")
+    assert state["round"] == 1
+
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        Manager(), str(tmp_path), "w1",
+        {"do": "plan-round", "run": state["run_id"]}, driver="w1"))
     assert ok and f"opened round {state['run_id']}/3" in detail
     from claude_launcher.daemon import paths
     from claude_launcher.plan import store as plan_store
