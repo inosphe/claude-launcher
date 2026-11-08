@@ -34,6 +34,14 @@ class N {
     this.handlers = {};
     this.attrs = {};
     this.innerHTML = "";
+    this.checked = false;
+    this.hidden = false;
+    this.classList = {
+      add: (...cs) => { this.className = [...new Set([...this.className.split(/\s+/), ...cs])].join(" "); },
+      remove: (...cs) => { this.className = this.className.split(/\s+/).filter((c) => !cs.includes(c)).join(" "); },
+      toggle: (c, on) => (on ? this.classList.add(c) : this.classList.remove(c)),
+      contains: (c) => this.className.split(/\s+/).includes(c),
+    };
   }
   set textContent(t) { this.children = []; this._text = String(t); }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
@@ -72,12 +80,14 @@ function frameModule() {
   const f = F.mount(host, {
     kind: "category", title: "⌘ category", max: false,
     onMax: (on) => asked.push(on ? "max" : "min"),
+    onFloat: (on) => asked.push(on ? "float:true" : "float:false"),
     onClose: () => asked.push("close"),
   });
   assert.equal(host.children.length, 1);
   const root = host.children[0];
   assert.ok(root.has("split-frame") && root.dataset.kind === "category");
-  assert.deepEqual(root.children.map((c) => c.className), ["split-frame-head", "split-frame-body"]);
+  assert.deepEqual(root.children.map((c) => c.className),
+                   ["split-frame-head", "split-frame-body", "split-frame-grip"]);
   assert.equal(f.body, root.children[1]);
   assert.equal(f.lead.textContent, "⌘ category", "the head names the pane");
   const big = root.find("split-frame-max");
@@ -92,18 +102,39 @@ function frameModule() {
   assert.equal(big.attrs["aria-pressed"], "true");
   big.fire("click");
   assert.deepEqual(asked, ["max", "min"], "enlarged, ⤡ asks to shrink");
+  // The float checkbox (claunch-xkw8o): off is the docked split; pressing it
+  // asks the page like the other two, and the page decides.
+  const floatBox = root.find("split-frame-floatbox");
+  assert.ok(floatBox, "the head carries the float checkbox");
+  assert.equal(floatBox.checked, false, "off by default — the pane is docked");
+  assert.ok(root.find("split-frame-float"), "...inside a label that names it");
+  floatBox.checked = true;
+  floatBox.fire("change");
+  assert.deepEqual(asked, ["max", "min", "float:true"], "the checkbox asks; the page decides");
+  assert.equal(f.float(), false, "...and does not flip by itself when a page owns it");
+  F.setFloat(host, true);
+  assert.equal(floatBox.checked, true);
+  assert.equal(f.float(), true);
+  assert.ok(root.has("floating"), "the frame marks itself floating");
+  assert.equal(big.hidden, true, "⤢ has nothing to enlarge while the pane floats");
+  F.setFloat(host, false);
+  assert.equal(big.hidden, false, "docking again gives ⤢ back");
   shut.fire("click");
-  assert.deepEqual(asked, ["max", "min", "close"]);
+  assert.deepEqual(asked, ["max", "min", "float:true", "close"]);
   assert.equal(F.of(host), f);
   F.unmount(host);
   assert.equal(F.of(host), null);
   assert.equal(host.children.length, 0);
 
-  // Without an owner the buttons act on the frame itself.
+  // Without an owner the controls act on the frame itself.
   const solo = new N("div");
   F.mount(solo, {});
   solo.children[0].find("split-frame-max").fire("click");
   assert.equal(F.of(solo).max(), true);
+  const soloFloat = solo.children[0].find("split-frame-floatbox");
+  soloFloat.checked = true;
+  soloFloat.fire("change");
+  assert.equal(F.of(solo).float(), true, "no owner: the checkbox flips the frame");
   solo.children[0].find("split-frame-close").fire("click");
   assert.equal(solo.children.length, 0);
 }
