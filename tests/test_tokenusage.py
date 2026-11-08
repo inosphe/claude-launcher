@@ -507,6 +507,14 @@ def test_the_list_and_the_meta_carry_the_reading_but_the_list_skips_archived(
             detail = (await (await client.get("/api/sessions/cx/meta", headers=bearer))
                       .json())["session"]
             assert detail["token_usage"] == listed["token_usage"]
+            # The rail poll is a whitelist (RAIL_FIELDS): the card's cost
+            # lines read this reading and nothing else, so a field the rail
+            # view drops leaves them unbuilt on every live row
+            # (claunch-ge1ap).
+            railed = (await (await client.get("/api/sessions?view=rail",
+                                               headers=bearer))
+                      .json())["sessions"][0]
+            assert railed["token_usage"] == listed["token_usage"]
 
             mgr._sessions["cx"] = DeadSession(
                 sdef, exit_code=0, archived_at="2026-09-27T00:00:00+00:00")

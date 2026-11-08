@@ -11754,6 +11754,12 @@ RAIL_FIELDS = {
     "delayed_at", "failed_at", "restore_queue",
     "pending_deliveries", "compacting", "fault",
     "context", "branch", "briefing", "winddown", "session_reminder",
+    # What the conversation has spent so far, and its subagents beside it:
+    # the card draws the two cost lines off this poll and nothing else. It
+    # was attached to every live row and then dropped here by the whitelist,
+    # so the rail read a session with no cumulative figure at all and only
+    # the last request's cost (claunch-ge1ap).
+    "token_usage",
     # Whose conversation this session is a copy of, and the merge or
     # handoff the operator has already asked for. The header's
     # fork/merge pair reads both off this list and nothing else

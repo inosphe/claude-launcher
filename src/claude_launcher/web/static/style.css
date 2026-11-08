@@ -757,7 +757,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(
 #session-list li[data-rail-mode="min"] .rail-actions,
 #session-list li[data-rail-mode="min"] .rail-cwd,
 #session-list li[data-rail-mode="min"] .rail-ctx-line,
-#session-list li[data-rail-mode="min"] .rail-ctx-tokens,
+#session-list li[data-rail-mode="min"] .rail-usage-cost,
 #session-list li[data-rail-mode="min"] .rail-tps-line,
 #session-list li[data-rail-mode="min"] .rail-usage-line,
 #session-list li[data-rail-mode="min"] .rail-seen,
@@ -787,7 +787,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(
    sessions of the same job apart. */
 #session-list li[data-rail-mode="compact"] .rail-cwd,
 #session-list li[data-rail-mode="compact"] .rail-ctx-line,
-#session-list li[data-rail-mode="compact"] .rail-ctx-tokens,
+#session-list li[data-rail-mode="compact"] .rail-usage-cost,
 #session-list li[data-rail-mode="compact"] .rail-tps-line,
 #session-list li[data-rail-mode="compact"] .rail-usage-line,
 #session-list li[data-rail-mode="compact"] .rail-seen,
@@ -906,20 +906,20 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(
 /* Keep these ordinary row children: incremental polling replaces them in
    place. Their visibility belongs to the card, so updates preserve it. */
 #session-list li[data-rail-mode="expanded"] > :is(
-  .rail-cwd, .rail-ctx-tokens, .rail-tps-line, .rail-usage-line,
+  .rail-cwd, .rail-usage-cost, .rail-tps-line, .rail-usage-line,
   .rail-life, .rail-commits
 ) {
   order: 7; margin-top: 0; padding-left: var(--rail-inset);
   background: transparent; border: 0;
 }
 #session-list li[data-rail-mode="expanded"]:not(.rail-details-open) > :is(
-  .rail-cwd, .rail-ctx-tokens, .rail-tps-line, .rail-usage-line,
+  .rail-cwd, .rail-usage-cost, .rail-tps-line, .rail-usage-line,
   .rail-life, .rail-commits
 ) { display: none; }
-#session-list li.sess-card :is(.rail-cwd, .rail-ctx-tokens) {
+#session-list li.sess-card :is(.rail-cwd, .rail-usage-cost) {
   font-size: 10px; color: #7d8999; line-height: 1.5;
 }
-#session-list li.sess-card :is(.rail-ctx-tokens, .rail-life) {
+#session-list li.sess-card :is(.rail-usage-cost, .rail-life) {
   flex-wrap: wrap; white-space: normal; overflow: visible;
 }
 /* Expanded cards put their refresh controls in the actions row. */
@@ -1124,7 +1124,7 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-actions, .rail-cwd, .rail-ctx-line, .rail-ctx-tokens, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
+   (.rail-actions, .rail-cwd, .rail-ctx-line, .rail-usage-cost, .rail-usage-line, .rail-seen, .rail-life, .rail-quiet,
    .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .rail-talk,
    .sess-cflow, .sess-cflow2, .sess-brief) are full-width, and they
    carry an `order` above the sub-lines' so the name line and the buttons
@@ -1867,22 +1867,27 @@ html[data-theme="light"] #term-tps-overlay .term-series-cost-parts { color: var(
   font-size: 11px; color: #7d8590; line-height: 16px;
 }
 #session-list .rail-ctx.unknown { color: #6e7681; font-style: italic; }
-/* The billed-bucket line under the gauge: how the reading splits into read
-   (fresh input), cached (replayed from cache) and write (written to cache),
-   with the estimated cost of the request where the model is priced. Same
-   indent and order as the gauge so it reads as part of the same block;
-   monospace figures because they are compared across rows; the cost in the
-   green no other rail element uses, marking it as computed from entered
-   rates rather than read off a meter. */
-#session-list .rail-ctx-tokens {
-  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+/* The cost lines under the gauge: what the conversation itself has spent,
+   and -- where the session has subagents -- what they spent, each with the
+   estimate at Settings → Model prices rates. Two rows, stacked, because the
+   two are separate spends. Same indent and order as the gauge so it reads
+   as part of the same block; monospace figures because they are compared
+   across rows; the cost in the green no other rail element uses, marking it
+   as computed from entered rates rather than read off a meter. A `partial`
+   reading dims the block while the daemon is still reading a long
+   transcript. */
+#session-list .rail-usage-cost {
+  flex-basis: 100%; order: 2; display: flex; flex-direction: column;
   min-width: 0; padding-left: 16px; line-height: 16px;
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px; color: #7d8590;
 }
-#session-list .rail-ctx-tokens .rct-part { flex: none; }
-#session-list .rail-ctx-tokens .rct-sep { flex: none; opacity: 0.6; }
-#session-list .rail-ctx-tokens .rct-cost { flex: none; color: #3fb950; }
+#session-list .rail-usage-cost.partial { opacity: 0.75; }
+#session-list .rail-usage-cost .ruc-row {
+  display: flex; align-items: baseline; gap: 6px; min-width: 0;
+}
+#session-list .rail-usage-cost .ruc-label { flex: none; }
+#session-list .rail-usage-cost .ruc-cost { flex: none; color: #3fb950; }
 /* The throughput line under the gauge: how fast the backend answered the
    last call, for a session that goes through the metering shim. Same
    indent and order as the gauge line so it reads as part of the same

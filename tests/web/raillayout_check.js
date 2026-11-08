@@ -381,9 +381,9 @@ ctx.setMeshes([
      railbeads_check; .rail-tps-line only for a session whose calls go
      through the metering shim — see tpsRailLine in app.js;
      .rail-usage-line only for a session whose transcript the daemon can
-     total — see usage_check; .rail-ctx-tokens only under a recorded
-     context reading, naming its billed buckets and the cost estimate where
-     the model is priced — see modelprice_check; .rail-note only
+     total — see usage_check; .rail-usage-cost only where the daemon has a
+     cumulative reading, pricing the conversation and (when it has any) its
+     subagents — see modelprice_check; .rail-note only
      for a session the reader annotated, and .rail-note-editor in its place
      while that note is being edited on the row — see railnote_check;
      .rail-progress only for a session that published progress — see
@@ -400,7 +400,7 @@ ctx.setMeshes([
     "#session-list .rail-status-checks", "#session-list .rail-talk",
     "#session-list .rail-tps-line",
     "#session-list .rail-usage-line",
-    "#session-list .rail-ctx-tokens",
+    "#session-list .rail-usage-cost",
     "#session-list .rail-note", "#session-list .rail-note-editor",
     "#session-list .rail-procs",
     "#session-list .rail-commits",

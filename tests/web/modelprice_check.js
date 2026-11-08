@@ -1,13 +1,18 @@
-/* The billed-bucket line under the context gauge and its price, run against
-   the real functions from app.js.
+/* The card's cost lines and the detail panel's per-request price, run
+   against the real functions from app.js.
 
-   The line shows how the reading splits into read (fresh input), cached
-   (replayed from cache) and write (written to cache), and — only where the
-   person priced this model — what that request cost. The rules these
-   checks hold:
+   The card draws what the conversation itself has spent, and — where the
+   session has subagents — what they spent, each priced at the rates the
+   person entered. The detail panel keeps the last request's billed buckets.
+   The rules these checks hold:
 
+   - The card's figure is the cumulative reading (`token_usage`), not the
+     single last request (`context`): those are different spends, and the
+     cumulative one is the figure the terminal overlay's chart prices.
+   - Subagent spend gets its own row. Folding it into the conversation
+     figure would hide which half came from subagents.
    - Abbreviation is the usageShort scale (k from 1k, M from 1M), so a
-     figure means the same thing here and on the usage line below.
+     figure means the same thing here and on the usage line above.
    - "Not priced" never reads as "costs nothing": no rate row means no
      estimate, and the counts still show.
    - The estimate is the multiplication the tooltip claims it is — checked
@@ -51,7 +56,7 @@ new Function(
   ["priceCurrency", "priceAnyProvider", "sessionPriceProvider",
    "priceRateFor", "cacheWriteRate", "readingCost", "costText",
    "costBreakdown", "contextCost", "contextCostBreakdown",
-   "ctxTokensLine", "ctxCostDetailRow", "ctxCostOnRow"].map(slice).join("\n") + `
+   "railCostLines", "ctxCostDetailRow", "ctxCostOnRow"].map(slice).join("\n") + `
 let modelPrices = null;
 /* The two formatting helpers the context row composes with. Their own text is
    ctxsize_check's subject; here the row only has to carry whatever they say,
@@ -65,7 +70,7 @@ exports.contextCost = contextCost;
 exports.contextBreakdown = contextCostBreakdown;
 exports.text = costText;
 exports.breakdown = costBreakdown;
-exports.line = ctxTokensLine;
+exports.line = railCostLines;
 exports.detail = ctxCostDetailRow;
 exports.costOnRow = ctxCostOnRow;
 `
@@ -168,9 +173,10 @@ check("the same reading costs what each provider charges",
          api.provider({ profile: "sr" }))))],
       [api.text((2000 * 0.3 + 150000 * 0.006 + 4000 * 0.3 + 3000 * 1.2) / 1e6),
        api.text(EXPECTED)]);
-check("the rail line prices the session under its provider",
-      texts(api.line({ name: "p", harness: "claude", profile: "ds4",
-                       context: READING })).slice(-1),
+check("the card prices the session under its provider",
+      api.line({ name: "p", harness: "claude", profile: "ds4",
+                 token_usage: { ...READING, total: 156000, requests: 1 } })
+        .kids[0].kids.slice(-1).map((k) => k.textContent),
       [api.text((2000 * 0.3 + 150000 * 0.006 + 4000 * 0.3 + 3000 * 1.2) / 1e6)]);
 
 /* ---- the text of it ---- */
@@ -184,35 +190,57 @@ check("the currency is the one the table carries",
 check("no table at all falls back to $",
       (api.setPrices(null), api.text(1.5)), "≈ $1.50");
 
-/* ---- the rail line ---- */
-function texts(line) {
-  return line.kids.map((k) => k.textContent);
+/* ---- the card's cost lines ---- */
+function rows(box) {
+  return box.kids.map((r) => r.kids.map((k) => k.textContent));
 }
+const USAGE = {
+  input: 2000, cache_read: 150000, cache_write: 4000, output: 3000,
+  total: 159000, requests: 4, model: "claude-opus-5",
+};
 api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
-const priced = api.line({ name: "a", harness: "claude", context: READING });
-check("priced line: the three buckets abbreviated, then the estimate",
-      texts(priced),
-      ["read 2.00k", "·", "cached 150k", "·", "write 4.00k", "·",
-       "≈ $0.5550"]);
-check("priced line tooltip carries the multiplication",
-      priced.title.includes("estimated from Settings → Model prices") &&
-      priced.title.includes("cached read 150,000 × $1.5/1M"), true);
+const priced = api.line({ name: "a", harness: "claude", token_usage: USAGE });
+check("the conversation row: its label and the estimate",
+      rows(priced), [["conversation", "≈ $0.5550"]]);
+check("the conversation row's tooltip carries the multiplication",
+      priced.kids[0].title.includes(
+        "conversation, estimated from Settings → Model prices") &&
+      priced.kids[0].title.includes("cached read 150,000 × $1.5/1M"), true);
+check("the conversation row says which spend it is",
+      priced.kids[0].title.includes("the conversation's own requests"), true);
+
+const WITH_SUB = { ...USAGE, subagents: {
+  input: 500, cache_read: 10000, cache_write: 0, output: 1000,
+  total: 11500, requests: 2 } };
+const two = api.line({ name: "e", harness: "claude", token_usage: WITH_SUB });
+check("subagent spend gets its own row, not folded into the conversation's",
+      rows(two),
+      [["conversation", "≈ $0.5550"], ["subagents", "≈ $0.0975"]]);
+check("a session with no subagent requests draws no subagent row",
+      rows(api.line({ name: "f", harness: "claude",
+                      token_usage: { ...USAGE, subagents: { requests: 0 } } }))
+        .length,
+      1);
 
 api.setPrices({ prices: {}, currency: "$" });
-const unpriced = api.line({ name: "b", harness: "claude", context: READING });
-check("unpriced line keeps the buckets and drops the estimate",
-      texts(unpriced), ["read 2.00k", "·", "cached 150k", "·", "write 4.00k"]);
-check("unpriced line tooltip says how to price it, not that it is free",
-      unpriced.title.includes("no per-1M rates for this model"), true);
+check("unpriced: no block at all — the usage line still shows the counts, " +
+      "and no row claims zero",
+      api.line({ name: "b", harness: "claude", token_usage: USAGE }), null);
 
-check("no reading means no line at all",
-      api.line({ name: "c", harness: "claude" }), null);
-check("an empty reading still draws its zeros, like the usage line would",
-      texts(api.line({ name: "d", harness: "claude",
-                       context: { tokens: 0, input: 0, cache_read: 0,
-                                  cache_write: 0, output: 0,
-                                  model: "m" } })),
-      ["read 0", "·", "cached 0", "·", "write 0"]);
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
+check("no cumulative reading means no line at all — the last request's " +
+      "reading is not a spend",
+      api.line({ name: "c", harness: "claude", context: READING }), null);
+check("a partial reading marks the block",
+      api.line({ name: "g", harness: "claude",
+                 token_usage: { ...USAGE, partial: true } }).className,
+      "rail-usage-cost partial");
+check("a zero-request reading still prices its zeros",
+      rows(api.line({ name: "d", harness: "claude",
+                      token_usage: { input: 0, cache_read: 0, cache_write: 0,
+                                     output: 0, total: 0, requests: 1,
+                                     model: "claude-opus-5" } })),
+      [["conversation", "≈ $0.0000"]]);
 
 /* ---- the detail-panel row ---- */
 function detailTexts(s) {
@@ -231,6 +259,13 @@ check("detail row unpriced says so instead of estimating",
        "dd:read 2.00k · cached 150k · write 4.00k · not priced"]);
 check("detail row absent without a reading", detailTexts({}), []);
 
+/* ---- the estimate's own scale ---- */
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
+check("a sub-dollar conversation keeps four decimals",
+      rows(api.line({ token_usage: {
+        input: 999, cache_read: 1000, cache_write: 0, output: 50,
+        total: 2000, requests: 1, model: "claude-opus-5" } })),
+      [["conversation", "≈ $0.0202"]]);
 /* ---- the estimate on the context row itself (claunch-wyhog) ---- */
 /* The row answers "how full is the context"; the price of that fill belongs
    on it, and it is the context's own price: the answer tokens are not part
@@ -275,11 +310,11 @@ check("no reading means no append", contextRow({}).parts, []);
 
 /* ---- the abbreviation scale itself ---- */
 check("the scale abbreviates at K and M as the task asks",
-      api.line({ context: { tokens: 1, input: 999, cache_read: 1000,
-                            cache_write: 1500000, output: 0,
-                            model: "m-no-price" } })
-        .kids.map((k) => k.textContent).filter((_, i) => i % 2 === 0),
-      ["read 999", "cached 1.00k", "write 1.50M"]);
+      detailTexts({ context: { tokens: 1, input: 999, cache_read: 1000,
+                               cache_write: 1500000, output: 0,
+                               model: "m-no-price" } }),
+      ["dt:last request",
+       "dd:read 999 · cached 1.00k · write 1.50M · not priced"]);
 
 /* ---- the Settings card: its header and what Save sends ---- */
 // A second sandbox for the card and its save, which reach for the DOM and
