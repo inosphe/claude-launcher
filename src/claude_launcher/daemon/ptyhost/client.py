@@ -438,18 +438,40 @@ STOP_TIMEOUT = 10.0
 
 def _is_host_process(pid: int, directory: Path) -> bool:
     """Whether ``pid`` is a PTY host for ``directory``, by its command line.
-    Where there is no /proc to read, the pid file the host wrote is taken
-    at its word."""
+    Where there is no /proc to read (macOS), ``ps`` supplies the command
+    line; when that cannot be read either, the answer is no, so a pid the
+    system reused for another program is not signalled."""
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except FileNotFoundError:
         # No such entry: either no /proc on this system, or the process
         # just ended (the caller checks again).
-        return not Path("/proc/self").exists()
+        if Path("/proc/self").exists():
+            return False
+        return _ps_says_host(pid, directory)
     except OSError:
         return False
     argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
     return "claude_launcher.daemon.ptyhost" in argv and str(directory) in argv
+
+
+def _ps_says_host(pid: int, directory: Path) -> bool:
+    """:func:`_is_host_process` for a system without /proc. ``ps`` joins the
+    arguments with spaces, so the module name must stand as a word of its own
+    and the directory is matched as the text it was started with."""
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if done.returncode != 0:
+        return False
+    return (
+        "claude_launcher.daemon.ptyhost" in done.stdout.split()
+        and str(directory) in done.stdout
+    )
 
 
 def _gone(pid: int) -> bool:
