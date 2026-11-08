@@ -302,7 +302,12 @@ const server = http.createServer(async (req,res) => {
     assert.equal(await embed.inputValue(),'embed');
     assert.equal(await card.locator('.rag-badge-on').textContent(),'활성');
     await card.locator('.rag-summary-value').filter({hasText:'omlx'}).waitFor();
-    await card.locator('.rag-preset-state').filter({hasText:'남은 문서 3 / 10건'}).waitFor();
+    // The summary carries the preset in force and nothing else: the backfill
+    // progress line ("남은 문서 N / M건") and its pause control moved to the
+    // Semantic search card, and drawing a second copy here is what made the two
+    // screens look like they disagreed (claunch-i2i95, claunch-rk0od.1).
+    assert.deepEqual(await card.locator('.rag-summary-key').allTextContents(),['활성 프리셋']);
+    assert.equal(await card.getByText(/남은 문서/).count(),0);
     // No stray class names leak into the text (the old card printed
     // "rag-preset-db" and "rag-preset-rename" as labels).
     assert.equal(/rag-preset-|rag-db-/.test(await card.innerText()),false);
@@ -321,8 +326,15 @@ const server = http.createServer(async (req,res) => {
     // The connection test reports the model's width and marks DBs of another width.
     await card.getByRole('button',{name:'연결 테스트',exact:true}).click();
     await card.getByText(/이 모델의 차원 2560/).waitFor();
-    assert.equal(await dbRows.filter({hasText:'shared'}).getByText('차원 불일치').count(),1);
-    assert.equal(await dbRows.nth(0).getByText('차원 불일치').count(),0);
+    // A DB of another width is marked as the sentence the click puts in the
+    // status line (checked below). The table itself carries the widths as their
+    // own column; the "차원 불일치" badge left with the old column set
+    // (claunch-i2i95, claunch-rk0od.1).
+    assert.deepEqual(await card.locator('.rag-db-table th').allTextContents(),
+                     ['DB 이름','corpus','형식','이 컬렉션을 채택하는 프리셋','폭','모델','']);
+    assert.equal(await dbRows.filter({hasText:'shared'}).locator('.rag-db-dims').textContent(),'768');
+    assert.equal(await dbRows.nth(0).locator('.rag-db-dims').textContent(),'2560');
+    assert.equal(await card.getByText('차원 불일치').count(),0);
     // Clicking a DB name fills the field; the legacy row fills its model's slug.
     await card.getByRole('button',{name:'shared',exact:true}).click();
     assert.equal(await dbField.inputValue(),'shared');
