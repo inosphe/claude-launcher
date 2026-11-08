@@ -624,7 +624,9 @@ def build_app(
     #: settled move reaches the child driver the same way a human's goto does.
     #: The approval gate a session's repository sync waits behind; see
     #: reposync_gate. Unanswered expires as a refusal.
-    app["reposync_gate"] = reposync_gate.ReposyncGate()
+    app["reposync_gate"] = reposync_gate.ReposyncGate(
+        notify=functools.partial(_deliver_to_session, manager),
+    )
     #: The approval gate an agent's request to resume an exited session
     #: waits behind; see resume_gate. No deadline, kept on disk.
     app["resume_gate"] = resume_gate.ResumeGate(
