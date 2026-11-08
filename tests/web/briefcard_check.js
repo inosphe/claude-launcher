@@ -147,7 +147,10 @@ const ctx = {};
 const noChip = () => null;
 new Function(
   "exports", "$", "document", "api", "ctxChip",
-  [sliceConst("BRIEFING_OFF_HINT"), slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+  [sliceConst("BRIEFING_OFF_HINT"), sliceConst("CFLOW2_CHOOSE_PREFIX"),
+   slice("el"), slice("fmtAge"), slice("briefingStateClass"),
+   slice("cflow2RailUserChoices"), slice("railBeadsTally"), slice("railMovedAgo"),
+   slice("railStatusFallback"),
    slice("sessionStatusChecks"), slice("statusCheckText"), slice("statusCheckIcon"),
    slice("statusCheckName"), slice("statusCheckRefreshState"),
    slice("paintStatusCheckRefresh"), slice("appendStatusChecks"),
@@ -159,7 +162,16 @@ const briefingCache = new Map();
 const sessionsCache = [];
 const statusCheckRefreshes = new Map();
 let briefingLLM = true;
+// What the fallback summary reads: the v2 rail row and the board's queues.
+// Empty by default, which is the no-run session every other check here is.
+let cflow2RailCache = {};
+let railBeads = new Map();
+const setRun = (rows) => { cflow2RailCache = rows || {}; };
+const setBeads = (rows) => { railBeads = rows || new Map(); };
 exports.apply = applyBriefingCards;
+exports.setRun = setRun;
+exports.setBeads = setBeads;
+exports.fallback = railStatusFallback;
 exports.setLLM = (v) => { briefingLLM = v; };
 exports.statusSessions = sessionsCache;
 /* The same builder without the rail's trim — what the detail panel and the
@@ -230,6 +242,65 @@ const kv = (li) => kvOf(card(li));
   check("the empty card has an enabled refresh", rows.s1.querySelector(".sess-brief-refresh").disabled, false);
   ctx.apply();
   check("repainting empty rows still makes no request", calls, []);
+
+  /* P1 (claunch-np69t): until someone presses ⟳, the card answers from what
+     the row already knows — the run's tasks and clock, the person's open
+     decisions, and the board's queue. */
+  const now = Math.floor(Date.now() / 1000);
+  const run = (extra) => ({ s1: {
+    workflow: "improv-worker-v2", status: "running", round_now: 1,
+    current: ["목표 수립"], owed: [], optional: [], gated: false, blocking: false,
+    updated: now - 180, ...extra,
+  } });
+  ctx.setRun(run({}));
+  ctx.apply();
+  let fb = note(rows.s1);
+  check("a run with nothing owed says where it is and when it last moved",
+        fb.textContent, "목표 수립 · moved 3m ago");
+  check("the line is marked as a fallback, so the rail keeps it off the chip row",
+        [fb.dataset.fallback, fb.className.split(" ").includes("sess-brief-fallback")],
+        ["working", true]);
+
+  ctx.setRun(run({ owed: ["choose: 접수 중단"], gated: true, blocking: true }));
+  ctx.apply();
+  fb = note(rows.s1);
+  check("a decision only the reader can answer leads the line, marked as theirs",
+        [fb.textContent, fb.dataset.fallback],
+        ["your decision: 접수 중단 · moved 3m ago", "user"]);
+
+  ctx.setRun(run({ optional: ["optional: 리뷰 마감"], gated: true, blocking: false }));
+  ctx.apply();
+  check("a door the run walks past is not a decision of the reader's",
+        [note(rows.s1).dataset.fallback, note(rows.s1).textContent],
+        ["door", "optional: 리뷰 마감 · moved 3m ago"]);
+
+  ctx.setRun(run({}));
+  ctx.setBeads(new Map([["s1", {
+    issues: [{ id: "a-1", status: "in_progress" }, { id: "a-2", status: "open" }],
+    done: 3,
+  }]]));
+  check("and the board's half names what the session holds",
+        ctx.fallback("s1").text,
+        "목표 수립 · 2 board issues · 1 in progress · 3 done · moved 3m ago");
+  ctx.setBeads(new Map([["s1", { issues: [], done: 0 }]]));
+  check("an empty queue adds nothing to the line",
+        ctx.fallback("s1").text, "목표 수립 · moved 3m ago");
+  // The run state carries its clock as an ISO-8601 string (store.utcnow) and
+  // the per-instance stamp as epoch seconds; the rail entry passes both
+  // through, so both have to read.
+  ctx.setRun(run({ updated: new Date(Date.now() - 120_000).toISOString() }));
+  check("the run's own clock may arrive as an ISO string",
+        ctx.fallback("s1").text, "목표 수립 · moved 2m ago");
+  ctx.setRun(run({ updated: null }));
+  check("an absent clock adds nothing rather than a wrong age",
+        ctx.fallback("s1").text, "목표 수립");
+
+  ctx.setRun({});
+  ctx.apply();
+  check("a session with no v2 run keeps the notice it always had",
+        note(rows.s1).textContent, "No summary yet");
+  check("and has no line to fall back to", ctx.fallback("s1"), null);
+
   click(rows.s1.querySelector(".sess-brief-refresh"));
   check("an explicit request starts summarising", note(rows.s1).textContent, "summarising…");
   check("the explicit action uses refresh=1", calls, ["/api/sessions/s1/briefing?refresh=1"]);

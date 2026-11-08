@@ -8347,6 +8347,19 @@ function cflow2RailTip(r) {
   return lines.join("\n");
 }
 
+/* The open choices on this row that only a person can answer. The daemon
+   writes a user-chooser choice into `owed` as `choose: <title>`
+   (cflow2_web.rail_entry); every other entry there is a hold, an ask that
+   fell to a human, or a plan decision, and each says what it is on its own.
+   So the prefix is the whole fact, and the row wears these apart from the
+   rest (claunch-np69t P4). */
+const CFLOW2_CHOOSE_PREFIX = "choose: ";
+function cflow2RailUserChoices(r) {
+  return (r && r.owed || [])
+    .filter((x) => String(x).startsWith(CFLOW2_CHOOSE_PREFIX))
+    .map((x) => String(x).slice(CFLOW2_CHOOSE_PREFIX.length));
+}
+
 function applyCflow2Badges() {
   const list = $("session-list");
   if (!list) return;
@@ -8373,7 +8386,13 @@ function applyCflow2Badges() {
     // its own class so the stylesheet, and anyone reading the DOM, can tell
     // the two apart (claunch-hbmhk).
     const blocking = r.gated && r.blocking !== false;
-    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`;
+    // A choice whose chooser is the person is the one thing on this row that
+    // nobody but the reader can clear, so the row says so instead of reading
+    // like every other amber gate (claunch-np69t P4). `blocking` gates it for
+    // the same reason the amber does: a door the run walks past is not a stop.
+    const yours = blocking ? cflow2RailUserChoices(r) : [];
+    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`
+      + (yours.length ? " user-choice" : "");
     const state = cflow2RailMarkState(r);
     const mark = document.createElement("span");
     mark.className = `wf-mark wf-mark-${state}`;
@@ -8388,13 +8407,25 @@ function applyCflow2Badges() {
     const linkLabel = document.createElement("span");
     linkLabel.className = "sess-cflow-link";
     linkLabel.textContent = "Run ↗";
+    const bits = [mark, tag];
+    if (yours.length) {
+      const badge = document.createElement("span");
+      badge.className = "sess-cflow2-you";
+      badge.textContent = "⚠ your decision";
+      // Which choice it is stays off the badge: the row already names it in
+      // the label right beside the badge, and a second copy is what this
+      // width cannot afford.
+      badge.title = `only you can answer: ${yours.join(" / ")}`;
+      bits.push(badge);
+    }
+    bits.push(txt, linkLabel);
     const holder = document.createElement("span");
     if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
-      holder.append(mark, tag, txt, linkLabel);
+      holder.append(...bits);
       if (line.innerHTML === holder.innerHTML) continue;
     }
     line.textContent = "";
-    line.append(mark, tag, txt, linkLabel);
+    line.append(...bits);
   }
 }
 
@@ -11259,14 +11290,19 @@ function railBeadsIndex(data) {
       if (!lane.session || !lane.known) continue;
       const cur = out.get(lane.session);
       const done = (lane.summary && lane.summary.done) || 0;
+      // Each issue carries the board it came from, so a session holding work
+      // on two boards can say which pill belongs to which (claunch-np69t P3).
+      // The concatenation below loses the lane's own `root`, so it is stamped
+      // on the issues before they are merged.
+      const onBoard = (list) => (list || []).map((i) => ({ ...i, board: b.root }));
       if (cur) {
-        cur.issues = cur.issues.concat(lane.issues || []);
-        cur.created = cur.created.concat(lane.created || []);
+        cur.issues = cur.issues.concat(onBoard(lane.issues));
+        cur.created = cur.created.concat(onBoard(lane.created));
         cur.done += done;
       } else {
         out.set(lane.session, {
-          issues: [...(lane.issues || [])],
-          created: [...(lane.created || [])],
+          issues: onBoard(lane.issues),
+          created: onBoard(lane.created),
           summary: lane.summary || {},
           done,
           root: b.root,
@@ -11318,8 +11354,20 @@ function railBeadsLine(name, lane) {
   const shown = all.slice(0, RAIL_BEADS_MAX);
   line._railSig = JSON.stringify([name, next || null, all, lane.done || 0]);
   line.appendChild(railBeadsCount(lane));
+  // A session can hold work on two boards (railBeadsIndex concatenates both
+  // queues); only then does a pill need to say which board its issue is on.
+  const boards = new Set(all.map(({ i }) => i.board).filter(Boolean));
   for (const { i, created } of shown) {
-    const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
+    const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`);
+    // The id leads and the status follows it (claunch-np69t P3): the pill
+    // used to be the bare id, so the only place the state appeared was the
+    // colour and the hover card. The two are separate spans because the rail
+    // is 260px wide -- the status must not be the part that gets cut, so the
+    // id is the one that ellipsises (style.css .rail-bead-id).
+    pill.appendChild(el("span", "rail-bead-id", i.id || "?"));
+    let state = railBeadStatusWord(i.status);
+    if (boards.size > 1 && i.board) state += ` · ${railBoardName(i.board)}`;
+    pill.appendChild(el("span", "rail-bead-st", state));
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
     // An empty `title`, set on purpose: the hover card already says the id,
     // the status, the title and the facts, and a native tooltip would land on
@@ -11353,18 +11401,50 @@ const RAIL_BEADS_COUNTS = [
   ["blocked", (s) => s === "blocked"],
 ];
 
-/* The count at the head of a row's beads line: "N left" over the assigned
+/* The status in the Queues page's words, for the tail of a pill. The pill's
+   own class keeps the raw status (the tint and the hover card read that);
+   this is the word a reader sees, and it is the same vocabulary as the counts
+   beside the pills, so "1 landing" and a pill's "· landing" say one thing. */
+const RAIL_BEAD_STATUS_WORDS = {
+  open: "open",
+  in_ready: "ready",
+  in_progress: "working",
+  in_review: "landing",
+  blocked: "blocked",
+};
+function railBeadStatusWord(status) {
+  return RAIL_BEAD_STATUS_WORDS[status] || String(status || "");
+}
+
+/* A board's name for the tail of a pill: the last segment of the board root
+   (`/home/me/works/claunch` -> `claunch`). Drawn only when the session holds
+   issues on more than one board. */
+function railBoardName(root) {
+  const s = String(root || "").replace(/[\\/]+$/, "");
+  const parts = s.split(/[\\/]/);
+  return parts[parts.length - 1] || s;
+}
+
+/* The count at the head of a row's beads line: "N issues" over the assigned
    issues, then one count per status that has any, then "N done". Counted
    from the issues themselves rather than the lane summary, because a
    session on two boards carries both boards' issues but only the first
    board's summary (railBeadsIndex). The native `title` spells it out in
-   full, zeros included. */
+   full, zeros included.
+
+   The head used to read "N left", which named no subject: the number is what
+   the BOARD assigns this session, not what the cflow run has left, and the
+   two differ on a session that also drives a run (claunch-np69t P2). The
+   word "issues" names the board half, and the title says outright which
+   queue this is so the two are never read as one. The run's own progress
+   belongs to the card's fallback summary (railStatusFallback), not here. */
 function railBeadsCount(lane) {
   const issues = lane.issues || [];
   const done = lane.done || 0;
   const box = el("span", "rail-beads-count");
-  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, `${issues.length} left`));
-  const full = [`${issues.length} left`];
+  const label = `${issues.length} issue${issues.length === 1 ? "" : "s"}`;
+  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, label));
+  const full = [label];
   for (const [word, has] of RAIL_BEADS_COUNTS) {
     const n = issues.filter((i) => has(i.status)).length;
     full.push(`${n} ${word}`);
@@ -11372,8 +11452,93 @@ function railBeadsCount(lane) {
   }
   full.push(`${done} done`);
   if (done) box.appendChild(el("span", "rail-beads-n done", `${done} done`));
-  box.title = `assigned issues: ${full.join(" · ")}`;
+  box.title = `board issues assigned to this session (not the cflow run's queue): ${full.join(" · ")}`;
   return box;
+}
+
+/* The board's half of the fallback summary: what this session holds, in the
+   Queues page's words. Assigned issues only — a follow-up it filed for
+   somebody else is not work it owes the reader, and the count line beside the
+   pills already keeps the two apart. Empty when the board knows nothing about
+   the session, so a session with no queue adds nothing to the line. */
+function railBeadsTally(name) {
+  const beads = typeof railBeads === "object" && railBeads;
+  const lane = beads && typeof beads.get === "function" ? beads.get(name) : null;
+  if (!lane) return "";
+  const issues = lane.issues || [];
+  if (!issues.length) return "";
+  const bits = [`${issues.length} board issue${issues.length === 1 ? "" : "s"}`];
+  const working = issues.filter((i) => i.status === "in_progress").length;
+  if (working) bits.push(`${working} in progress`);
+  const landing = issues.filter((i) => i.status === "in_review").length;
+  if (landing) bits.push(`${landing} in review`);
+  const done = lane.done || 0;
+  if (done) bits.push(`${done} done`);
+  return bits.join(" · ");
+}
+
+/* The run's own clock as a phrase: when its state last moved. The rail prints
+   the same age on its `moved` line, in the same units.
+
+   The daemon's `updated` is not always the same kind of value: a run's state
+   carries an ISO-8601 string (store.utcnow) while the per-instance
+   `entered_at` is a float of epoch seconds, and the rail entry passes both
+   through. Either is read here; anything else contributes nothing rather
+   than a wrong age. */
+function railMovedAgo(updated) {
+  let at = null;
+  if (typeof updated === "number" && isFinite(updated)) {
+    at = updated;
+  } else if (typeof updated === "string" && updated) {
+    const ms = Date.parse(updated);
+    if (isFinite(ms)) at = ms / 1000;
+  }
+  if (at === null) return "";
+  const secs = Math.max(0, Math.floor(Date.now() / 1000 - at));
+  return `moved ${fmtAge(secs)} ago`;
+}
+
+/* The one line the briefing card can say before anyone has asked the
+   summariser (claunch-np69t P1).
+
+   The card used to say "No summary yet" until ⟳ was pressed, although the row
+   already knows most of it: the run names what it is stopped on, the board
+   names what the session holds, and the run's clock says when it last moved.
+   A line built from those beats a prompt to go and ask for one, and it is
+   overwritten the moment a real briefing lands.
+
+   Returns null when there is no v2 run on this row. That is a real answer:
+   a session outside cflow has nothing here to fall back to, and its card
+   keeps saying exactly what it said before. Everything comes from fields the
+   daemon already sends (cflow2_web.rail_entry, /api/beads/queues); nothing
+   here counts anything the row does not show. `kind` names which of the three
+   waits this is — a person's decision, a door nobody has to take, or the run
+   simply working — so the stylesheet can colour them apart. */
+function railStatusFallback(name) {
+  const cache = typeof cflow2RailCache === "object" && cflow2RailCache;
+  const r = (cache && cache[name]) || null;
+  if (!r) return null;
+  const owed = r.owed || [];
+  const optional = r.optional || [];
+  const parts = [];
+  const decisions = cflow2RailUserChoices(r);
+  if (decisions.length) parts.push(`your decision: ${decisions.join(" / ")}`);
+  const rest = owed.filter((x) => !String(x).startsWith(CFLOW2_CHOOSE_PREFIX));
+  if (rest.length) parts.push(rest.join(" · "));
+  for (const x of optional) parts.push(x);
+  if (!owed.length && !optional.length) {
+    const where = (r.current || []).join(", ");
+    if (where) parts.push(where);
+  }
+  const tally = railBeadsTally(name);
+  if (tally) parts.push(tally);
+  const moved = railMovedAgo(r.updated);
+  if (moved) parts.push(moved);
+  if (!parts.length) return null;
+  return {
+    text: parts.join(" · "),
+    kind: owed.length ? "user" : optional.length ? "door" : "working",
+  };
 }
 
 /* The hover card: one element for the whole rail, filled per pill. Fixed
@@ -12205,7 +12370,24 @@ function renderBriefingCard(name, entry, opts) {
     card.appendChild(el("div", "sess-brief-note", BRIEFING_OFF_HINT));
   } else if (!entry) {
     if (!summaryOnly || !String(opts.rowSummary || "").trim()) {
-      card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+      // Before anyone asks the summariser, the row's own facts can answer the
+      // question the card is there for (railStatusFallback, claunch-np69t P1).
+      // A session with no v2 run gets null and keeps the old notice: there is
+      // nothing on that row to fall back to, and an invented line would be a
+      // new way for the card to be wrong.
+      const fallback = typeof railStatusFallback === "function"
+        ? railStatusFallback(name) : null;
+      if (fallback) {
+        const note = el("div", `sess-brief-note sess-brief-fallback fb-${fallback.kind}`,
+                        fallback.text);
+        // The marker, not the class list: the rail branch below reads it to
+        // know it must not overwrite the line with the old notice.
+        note.dataset.fallback = fallback.kind;
+        note.title = fallback.text;
+        card.appendChild(note);
+      } else {
+        card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+      }
     }
   } else if (loading && !data) {
     card.appendChild(el("div", "sess-brief-note", "summarising…"));
@@ -12261,7 +12443,11 @@ function renderBriefingCard(name, entry, opts) {
   if (summaryOnly) {
     // Empty/loading/error states share the summary's metadata line.
     const note = card.querySelector(".sess-brief-note");
-    if (note) {
+    // The fallback stays in the body of the card: it is a sentence built from
+    // the run and the board, not a state of the summariser, and the metadata
+    // line is one row of chips this width cannot wrap a sentence into.
+    const fallbackNote = note && note.dataset && note.dataset.fallback;
+    if (note && !fallbackNote) {
       note.title = note.textContent;
       if (!entry && briefingLLM) note.textContent = "No summary yet";
       if (!briefingLLM || (entry && entry.phase === "unconfigured")) {
