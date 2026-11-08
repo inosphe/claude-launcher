@@ -276,3 +276,52 @@ def test_person_can_switch_approval_off(home, monkeypatch):
     monkeypatch.setattr(cli_sessions.daemon_client, "connect", lambda: None)
     assert cli_sessions._cmd_daemon_config(argparse.Namespace(key="reposync_push", value="auto")) == 0
     assert flow.approval_mode() == flow.AUTO
+
+
+# --------------------------------------------------------------------------- #
+# the asker is told (claunch-qpl)
+# --------------------------------------------------------------------------- #
+def _told():
+    sent = []
+    return sent, (lambda session, text: sent.append((session, text)) or True)
+
+
+def test_approve_types_the_outcome_into_the_asking_session():
+    sent, notify = _told()
+    gate = reposync_gate.ReposyncGate(notify=notify)
+    rec = gate.submit(session="s12", plan=_card())
+    assert sent == []
+    settled = gate.approve(rec["id"])
+    assert settled["told"] is True
+    (session, text), = sent
+    assert session == "s12"
+    assert rec["id"] in text and "approved" in text and f"request={rec['id']}" in text
+
+
+def test_reject_and_expiry_are_told_once():
+    sent, notify = _told()
+    gate = reposync_gate.ReposyncGate(timeout=0, notify=notify)
+    expired = gate.submit(session="s1", plan=_card())
+    time.sleep(1.1)
+    gate.get(expired["id"])
+    gate.list()
+    assert len(sent) == 1 and "expired" in sent[0][1]
+    gate2 = reposync_gate.ReposyncGate(notify=notify)
+    rec = gate2.submit(session="s2", plan=_card())
+    gate2.reject(rec["id"])
+    assert len(sent) == 2 and "rejected" in sent[1][1] and sent[1][0] == "s2"
+
+
+def test_a_failing_notify_does_not_undo_the_answer():
+    def boom(session, text):
+        raise RuntimeError("gone")
+    gate = reposync_gate.ReposyncGate(notify=boom)
+    rec = gate.submit(session="s1", plan=_card())
+    assert gate.approve(rec["id"])["status"] == "approved"
+
+
+def test_a_request_without_a_session_tells_nobody():
+    sent, notify = _told()
+    gate = reposync_gate.ReposyncGate(notify=notify)
+    gate.approve(gate.submit(session="", plan=_card())["id"])
+    assert sent == []

@@ -20,15 +20,23 @@ Settlement:
   counts as rejected. The restart and goto gates default the other way
   because what they hold is reversible; a push to a shared remote is not.
 
+Every settlement (approved, rejected, expired) is also typed into the asking
+session's terminal (``notify``, as in :mod:`.kill_gate`): the MCP tool does not
+block, so a session that ended its turn after ``waiting_approval`` would not
+learn of a later approval and would wait for the user to tell it.
+
 State is in memory, like the other gates: the page that decides is served by
 this daemon, and a request that outlived it would be a card nobody can press.
 """
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 #: How long an unanswered request stays open before it expires (= rejected).
 GATE_TIMEOUT = 1800.0
@@ -57,9 +65,39 @@ def _iso(when: datetime) -> str:
     return when.isoformat(timespec="seconds")
 
 
+def outcome_message(record: dict) -> str:
+    """The block typed into the asking session when its request settles."""
+    rid = record.get("id") or "?"
+    plan = record.get("plan") or {}
+    what = f"{plan.get('action') or 'sync'} {plan.get('remote') or '?'}/{plan.get('branch') or '?'}"
+    status = record.get("status")
+    by = record.get("decided_by") or "?"
+    head = f"[claunch reposync-request {rid}]"
+    if status == APPROVED:
+        body = (
+            f"approved ({what}, by {by}). Call repo_sync again with "
+            f"request={rid} (same action, workspace, remote and branch) to carry "
+            "it out; the approval covers only the tips the card showed, so a "
+            "'stale_approval' answer means replan and ask again."
+        )
+    elif status == REJECTED:
+        body = (
+            f"rejected ({what}, by {by}); nothing was pushed. Do not ask again "
+            "for the same plan; carry on without it, or ask the user what they want."
+        )
+    else:
+        body = (
+            f"{status} ({what}); nothing was pushed. Ask again with a new "
+            "repo_sync call if the user still wants it."
+        )
+    return f"{head} {body}"
+
+
 class ReposyncGate:
-    def __init__(self, timeout: float = GATE_TIMEOUT) -> None:
+    def __init__(self, timeout: float = GATE_TIMEOUT,
+                 notify: Optional[Callable[[str, str], bool]] = None) -> None:
         self.timeout = float(timeout)
+        self._notify = notify
         self._requests: Dict[str, dict] = {}
         self._order: List[str] = []
 
@@ -110,6 +148,7 @@ class ReposyncGate:
         record["status"] = status
         record["decided_by"] = decided_by
         record["decided_at"] = _iso(_now())
+        self._tell(record)
         return dict(record)
 
     def _expire(self) -> None:
@@ -119,6 +158,17 @@ class ReposyncGate:
                 record["status"] = EXPIRED
                 record["decided_by"] = "timeout"
                 record["decided_at"] = now
+                self._tell(record)
+
+    def _tell(self, record: dict) -> None:
+        if self._notify is None or not record.get("session"):
+            return
+        try:
+            record["told"] = bool(self._notify(record["session"], outcome_message(record)))
+        except Exception:  # noqa: BLE001 -- the answer stands without the note
+            log.exception("could not tell %s about reposync request %s",
+                          record.get("session"), record.get("id"))
+            record["told"] = False
 
     def _trim(self) -> None:
         settled = [rid for rid in self._order if self._requests[rid]["status"] != PENDING]
