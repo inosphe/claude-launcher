@@ -6236,17 +6236,11 @@ async function refreshSessions(options) {
      // The key pools the rows' chips are drawn from, read beside this poll
      // rather than in it (keyPoolSignature).
      typeof keyPoolSignature === "function" ? keyPoolSignature() : null,
+     // The table the card's cost lines are priced at (claunch-ge1ap).
+     typeof modelPricesKey === "string" ? modelPricesKey : null,
      // The checks' names and questions, which no row carries
      // (claunch-hwbuc.2 review).
-     defsStamp,
-     // The table the card's cost lines are priced at. A row built while the
-     // table was still in flight drew no cost block, and refreshRailSeen only
-     // swaps a block that is already there -- so the table's arrival (or a
-     // rate edited under Settings) has to be a reason to draw the rows again,
-     // or every row on the rail keeps the empty one it built without it
-     // (claunch-ge1ap). Guarded like the other signature members: the node
-     // harnesses slice this function without the price state.
-     typeof modelPricesKey === "string" ? modelPricesKey : null],
+     defsStamp],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
