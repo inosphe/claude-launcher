@@ -48,6 +48,11 @@ function node(tag) {
   const n = {
     tag, attrs: {}, kids: [], text: "", classes: new Set(), handlers: {},
     title: "",
+    style: { vars: {}, setProperty(k, v) { this.vars[k] = String(v); } },
+    // #main's box for the floating pane (floatBox): big enough that nothing
+    // is clamped away in these checks.
+    getBoundingClientRect: () => ({ width: 900, height: 620, top: 40, left: 260,
+                                    right: 1160, bottom: 660 }),
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
     appendChild(c) { this.kids.push(c); return c; },
@@ -124,7 +129,7 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-vmbtn", "term-wrapupbtn", "term-planbtn"]) nodes[id] = node(id);
+  for (const id of ["main", "term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-categorybtn", "term-chartbtn", "term-rebrief", "term-qabtn", "term-threadsbtn", "term-clibtn", "term-vmbtn", "term-wrapupbtn", "term-planbtn"]) nodes[id] = node(id);
   const body = node("body");
   const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [], cleared: [] };
   const ctx = {};
@@ -133,7 +138,7 @@ function build(o = {}) {
     "el", "refitSoon", "refreshSession", "calls",
     prelude +
     sliceTo("const SESSLAYOUT_KEY =", "/* Bind the terminal to a session") +
-    sliceLine("let splitWasUp") +
+    sliceLine("let splitWasCanvas") +
     sliceFn("sessionLineOnPage") + "\n" +
     sliceFn("syncSplitPane") + "\n" + sliceFn("sessRailTabs") +
     expose

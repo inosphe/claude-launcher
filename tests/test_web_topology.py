@@ -687,6 +687,7 @@ CHECKS = [
         "planpage_check.js",
         "globalscope_check.js",
         "splitframe_check.js",
+        "floatpane_check.js",
         "sessioncli_check.js",
         "specpage_check.js",
         "specpage_tools_check.js",

@@ -3077,7 +3077,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-variant-numeric: tabular-nums; color: #6e7681;
 }
 
-#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* relative: the floating split pane (body.split-float) is a box in this
+   column's corner rather than a share of its height (claunch-xkw8o). */
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 #session-tabs {
   display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 4px;
   padding: 5px 8px; min-width: 0; background: #11151b;
@@ -4222,9 +4224,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   display: flex; flex-direction: column; overflow: hidden;
 }
 /* The frame every pane in the slot sits in (split-frame.js): one head row
-   with the pane's name (or the conversation pane's tabs) and the ⤢ and ×
-   they all share, over the body the pane draws into. */
-.split-frame { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+   with the pane's name (or the conversation pane's tabs) and the float
+   checkbox, ⤢ and × they all share, over the body the pane draws into.
+   position: relative holds the floating pane's resize grip. */
+.split-frame { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .split-frame-head {
   flex: none; display: flex; align-items: center; gap: 8px;
   padding: 3px 10px 0 16px; border-bottom: 1px solid #21262d;
@@ -4232,10 +4235,24 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .split-frame-lead { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
 .split-frame-title { color: #7d8590; font-size: 12px; padding: 3px 0 4px; }
 .split-frame-ctl { flex: none; display: flex; gap: 2px; align-items: center; }
+/* The float checkbox (claunch-xkw8o): off is the docked split, on takes the
+   pane out of the column and over the terminal. */
+.split-frame-float {
+  flex: none; display: inline-flex; align-items: center; gap: 3px;
+  color: #7d8590; font-size: 11px; line-height: 1; padding: 0 3px 0 0;
+  cursor: pointer; user-select: none;
+}
+.split-frame-float:hover { color: #e6edf3; }
+.split-frame-floatbox {
+  margin: 0; width: 12px; height: 12px; cursor: pointer;
+  accent-color: #58a6ff;
+}
 .split-frame-btn { background: transparent; color: #7d8590; border: 1px solid transparent; border-radius: 5px;
   font: inherit; font-size: 14px; line-height: 1; padding: 2px 7px; cursor: pointer; }
 .split-frame-btn:hover { color: #e6edf3; background: #161b22; border-color: #30363d; }
 .split-frame-max[aria-pressed="true"] { color: #58a6ff; }
+/* The floating pane's resize corner; only drawn while the pane floats. */
+.split-frame-grip { display: none; }
 .split-frame-body {
   flex: 1 1 0; min-height: 0;
   /* Its own scroller, apart from the terminal's scrollback above it: a wheel
@@ -4265,6 +4282,39 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   content: ""; width: 44px; height: 2px; border-radius: 2px; background: #4d5566;
 }
 #term-split:hover::after, #term-split.dragging::after { background: #58a6ff; }
+/* ---- floating: the pane over the terminal instead of under it ----
+   body.split-float (syncSplitPane) takes the pane out of #main's column:
+   it keeps the box app.js paints (--float-w/-h/-right/-bottom, px from
+   #main's right and bottom edges) and the terminal keeps the whole height
+   it had. Sizing the pane, moving it or closing it therefore no longer
+   resizes the terminal underneath — the reason for the mode (claunch-
+   xkw8o). The bar between the two is gone with the boundary it dragged. */
+body.split-float #term-split { display: none; }
+body.split-float #term-wf {
+  position: absolute; z-index: 6; flex: none;
+  right: var(--float-right, 12px); bottom: var(--float-bottom, 12px);
+  width: min(var(--float-w, 560px), calc(100% - 24px));
+  height: min(var(--float-h, 380px), calc(100% - 24px));
+  min-height: 0;
+  background: #0d1117;
+  border: 1px solid #30363d; border-radius: 8px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .6);
+}
+/* The head drags the box; its own controls are presses, not a drag. */
+body.split-float #term-wf .split-frame-head { cursor: grab; }
+body.split-float #term-wf.float-dragging .split-frame-head { cursor: grabbing; }
+body.split-float #term-wf .split-frame-head,
+body.split-float #term-wf .split-frame-head * { user-select: none; }
+body.split-float #term-wf.float-dragging { box-shadow: 0 18px 52px rgba(0, 0, 0, .7); }
+body.split-float .split-frame-grip {
+  display: block; position: absolute; right: 0; bottom: 0;
+  width: 16px; height: 16px; touch-action: none;
+  cursor: nwse-resize; border-bottom-right-radius: 8px;
+  background: linear-gradient(135deg, transparent 50%, #4d5566 50%);
+}
+body.split-float .split-frame-grip:hover {
+  background: linear-gradient(135deg, transparent 50%, #58a6ff 50%);
+}
 /* session detail. One node, two homes: the page slot on a phone (these
    rules) and the right-hand rail on a wide screen (.docked, further down),
    where there is room for a second column beside the terminal. The JS moves

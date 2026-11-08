@@ -26056,7 +26056,9 @@ syncZoomControls();
    Two choices a reader makes about a session's screen and expects to find
    again: which panel the right rail shows (the details, or the workflow run),
    and whether the run page is halved into the bottom of the terminal's
-   column — with where they left the bar between the two. Remembered per
+   column — with where they left the bar between the two, and whether that
+   pane floats over the terminal instead of being in the column
+   (claunch-xkw8o). Remembered per
    SESSION, unlike the font size: "watch s15's run under its terminal" is a
    fact about s15, not about the reader, and walking to another session must
    not drag it along. One key with a map inside rather than a key per
@@ -26066,6 +26068,11 @@ const SESSLAYOUT_KEY = `claunch_sesslayout:${BASE}`;
 const SPLIT_DEFAULT = 0.6;   // the terminal's share of the column
 const SPLIT_MIN = 0.2;       // past either end the loser is too short to read
 const SPLIT_MAX = 0.8;
+/* The floating pane's box: small enough to stay a card over the terminal,
+   never so small that its content has nothing to show. */
+const FLOAT_MIN_W = 260;
+const FLOAT_MIN_H = 160;
+const FLOAT_EDGE = 12;       // the pane never touches #main's edge
 
 /* The Details panel's sub-tabs: `all` draws every section in one column,
    grouped under the other five's names; each of the five draws its group
@@ -26187,6 +26194,16 @@ const SPLIT_PANES = {
 
 function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
+  // A stored px length, or null when the reader has not moved or sized the
+  // floating pane yet (which is what lets the default follow the window).
+  // Only a number or a numeric string counts — a hand-edited `true` must
+  // read as "not set", not as one pixel from the edge.
+  const pxLen = (x) => {
+    if (typeof x !== "number" && typeof x !== "string") return null;
+    if (typeof x === "string" && x.trim() === "") return null;
+    const n = Number(x);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+  };
   return {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
@@ -26202,6 +26219,16 @@ function sessLayoutFor(name) {
     // claunch-qkvb1): the terminal and the bar step aside until it is
     // pressed again or the pane closes. Only a conversation pane enlarges.
     max: !!raw.max,
+    // Floats over the terminal instead of taking a share of the column
+    // (the frame's float checkbox, claunch-xkw8o): the pane is a box in
+    // #main's own corner, so sizing it or closing it never resizes what is
+    // underneath. The box is in px from #main's right/bottom edges; null
+    // means the reader has not moved or sized it yet.
+    float: !!raw.float,
+    floatW: pxLen(raw.floatW),
+    floatH: pxLen(raw.floatH),
+    floatRight: pxLen(raw.floatRight),
+    floatBottom: pxLen(raw.floatBottom),
     // The session's view the reader last had up: its terminal (cli) or its
     // conversation page (html). route() writes it on every in-session page
     // and reads it back when a link brings the reader in from another
@@ -27180,6 +27207,7 @@ function refitSoon(delay = 150) {
 window.addEventListener("resize", () => {
   refitSoon();
   if (currentPage === "cli") cliRefit(150);
+  clampFloatPane();   // a shrinking window pulls the floating pane back in
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
@@ -28289,7 +28317,7 @@ function syncDetailPanel() {
    the same path. Wide screens only: below the breakpoint the terminal is
    already fighting a keyboard for rows, and half of that is no use to
    anybody — the choice is kept, not honoured, until the screen comes back. */
-let splitWasUp = false, splitWasMax = false;
+let splitWasCanvas = false, splitWasMax = false;
 
 function syncSplitPane() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
@@ -28308,11 +28336,16 @@ function syncSplitPane() {
         || (talkShows(remembered.pane, "qa") && !operatorQa(name)));
   const lay = talkAway ? null : remembered;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
-  $("term-split").classList.toggle("hidden", !up);
+  // Floating takes the pane out of the column: no bar to drag (the box is
+  // sized by its own grip), and the terminal keeps the whole height it had.
+  const float = up && lay.float;
+  $("term-split").classList.toggle("hidden", !up || float);
   $("term-wf").classList.toggle("hidden", !up);
   document.body.classList.toggle("term-split", up);
-  // Every kind of pane enlarges: ⤢ sits in the frame they all share.
-  const max = up && lay.max;
+  document.body.classList.toggle("split-float", float);
+  // Every kind of pane enlarges: ⤢ sits in the frame they all share. A
+  // floating pane is not in the column, so it has nothing to enlarge into.
+  const max = up && !float && lay.max;
   document.body.classList.toggle("split-max", max);
   // Pressed is the session's remembered choice, not what fits this screen:
   // the button must read "on" on a narrowed window too, or pressing it there
@@ -28353,16 +28386,22 @@ function syncSplitPane() {
   if ((qaOn || threadsOn) && typeof applyTalkRows === "function") applyTalkRows();
   if (up) {
     applySplitRatio(lay.ratio);
+    if (float) paintFloatBox(floatBox(name));
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
   } else if (splitFor) {
     closeSplit();
   }
   // The pane takes height off the terminal and gives it back, and no resize
   // event announces that — same deal as the detail rail docking beside it.
-  if (up !== splitWasUp || max !== splitWasMax) refitSoon(60);
-  splitWasUp = up;
+  // A floating pane takes no height at all, so opening, closing, moving or
+  // sizing it leaves the terminal's box alone (that is the point): only a
+  // change in *docked* occupancy, or in ⤢, resizes the canvas.
+  const canvasShared = up && !float;
+  if (canvasShared !== splitWasCanvas || max !== splitWasMax) refitSoon(60);
+  splitWasCanvas = canvasShared;
   splitWasMax = max;
   globalThis.SplitFrame?.setMax($("term-wf"), max);
+  globalThis.SplitFrame?.setFloat($("term-wf"), float);
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
@@ -29336,15 +29375,18 @@ function renderSplit(data) {
 }
 
 /* The frame every kind of pane sits in (split-frame.js): the head row with
-   the pane's name and the ⤢ and × all of them share, and the body the pane
-   draws into. ⤢ and × only ask; the session's layout remembers them and
-   syncSplitPane draws them back. */
+   the pane's name, the float checkbox and the ⤢ and × all of them share, and
+   the body the pane draws into. The controls only ask; the session's layout
+   remembers their answers and syncSplitPane draws them back. */
 function mountSplitFrame(name, kind) {
   const host = $("term-wf");
+  const lay = sessLayoutFor(name);
   return globalThis.SplitFrame?.mount(host, {
     kind, title: SPLIT_PANES[kind]?.title,
-    max: sessLayoutFor(name).max,
+    max: lay.max,
+    float: lay.float,
     onMax: (on) => setSessLayout(name, { max: !!on }),
+    onFloat: (on) => setSessLayout(name, { float: !!on }),
     onClose: () => setSessLayout(name, { split: false, max: false }),
   }) || { body: host, lead: null };
 }
@@ -29581,6 +29623,121 @@ const endSplitDrag = () => {
 };
 $("term-split").addEventListener("pointerup", endSplitDrag);
 $("term-split").addEventListener("pointercancel", endSplitDrag);
+
+/* ---- the floating pane's box (claunch-xkw8o) ----
+   body.split-float takes #term-wf out of #main's column (style.css), and
+   these four numbers say where it sits: px from #main's right and bottom
+   edges, and its own width and height. Read from the session's layout, with
+   a default that follows the window (about the share the docked pane would
+   have taken, as a card in the corner) until the reader moves or sizes it.
+   Everything is clamped to #main, so a window that shrinks under a remembered
+   box pulls it back in instead of leaving it half off screen. */
+function clampFloat(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, Math.round(v)));
+}
+
+/* The default corner keeps a margin from #main's bottom — and, when the
+   session's input line is showing, clears it: a card over the terminal is
+   useful, one over the box the reader types into is not. */
+function floatFloor(main) {
+  const shelf = $("term-composer");
+  const r = shelf && typeof shelf.getBoundingClientRect === "function"
+    ? shelf.getBoundingClientRect() : null;
+  if (!r || !r.height) return FLOAT_EDGE;
+  return Math.max(FLOAT_EDGE, Math.round(main.bottom - r.top + FLOAT_EDGE));
+}
+
+function floatBox(name) {
+  const main = $("main").getBoundingClientRect();
+  const lay = name ? sessLayoutFor(name) : null;
+  const maxW = Math.max(FLOAT_MIN_W, Math.round(main.width - FLOAT_EDGE * 2));
+  const maxH = Math.max(FLOAT_MIN_H, Math.round(main.height - FLOAT_EDGE * 2));
+  const wantW = lay && lay.floatW != null ? lay.floatW : main.width * 0.55;
+  const wantH = lay && lay.floatH != null ? lay.floatH : main.height * 0.5;
+  const w = clampFloat(wantW, FLOAT_MIN_W, maxW);
+  const h = clampFloat(wantH, FLOAT_MIN_H, maxH);
+  const right = clampFloat(lay && lay.floatRight != null ? lay.floatRight : FLOAT_EDGE,
+                           0, Math.max(0, Math.round(main.width - w - FLOAT_EDGE)));
+  const bottom = clampFloat(lay && lay.floatBottom != null ? lay.floatBottom : floatFloor(main),
+                            0, Math.max(0, Math.round(main.height - h - FLOAT_EDGE)));
+  return { w, h, right, bottom, main };
+}
+
+function paintFloatBox(box) {
+  const host = $("term-wf");
+  host.style.setProperty("--float-w", `${box.w}px`);
+  host.style.setProperty("--float-h", `${box.h}px`);
+  host.style.setProperty("--float-right", `${box.right}px`);
+  host.style.setProperty("--float-bottom", `${box.bottom}px`);
+}
+
+/* A window that shrinks must not leave the box outside #main. The remembered
+   numbers are untouched — this only pulls the painted box back in, so the
+   pane returns to where the reader left it when the window grows again. */
+function clampFloatPane() {
+  if (!currentName || !document.body.classList.contains("split-float")) return;
+  paintFloatBox(floatBox(currentName));
+}
+
+/* Dragging the head moves the box; dragging its corner sizes it. Both paint
+   live and write to the session's layout once at release — localStorage is
+   not a place to stream pointer events into. The head's own controls are
+   presses, not a drag of the pane. `box` is the box the drag started from and
+   stays put: every move is measured from there, so a burst of pointermoves
+   cannot compound on itself. */
+let floatDrag = null;   // non-null only mid-drag
+
+function floatDragMode(e) {
+  const t = e.target;
+  if (!t || typeof t.closest !== "function") return null;
+  if (t.closest(".split-frame-grip")) return "size";
+  if (!t.closest(".split-frame-head")) return null;
+  if (t.closest("button, input, label, select, a")) return null;
+  return "move";
+}
+
+$("term-wf").addEventListener("pointerdown", (e) => {
+  if (!currentName || !document.body.classList.contains("split-float")) return;
+  const mode = floatDragMode(e);
+  if (!mode) return;
+  const host = $("term-wf");
+  e.preventDefault();   // a drag must not start selecting the pane's text
+  host.setPointerCapture(e.pointerId);
+  host.classList.add("float-dragging");
+  floatDrag = { mode, id: e.pointerId, x: e.clientX, y: e.clientY,
+                box: floatBox(currentName), live: null };
+});
+$("term-wf").addEventListener("pointermove", (e) => {
+  if (!floatDrag || e.pointerId !== floatDrag.id) return;
+  const { mode, box } = floatDrag;
+  const dx = e.clientX - floatDrag.x;
+  const dy = e.clientY - floatDrag.y;
+  if (mode === "size") {
+    // The box grows from its corner while its right/bottom edges stay put.
+    const maxW = Math.max(FLOAT_MIN_W, box.main.width - box.right - FLOAT_EDGE);
+    const maxH = Math.max(FLOAT_MIN_H, box.main.height - box.bottom - FLOAT_EDGE);
+    floatDrag.live = { ...box, w: clampFloat(box.w + dx, FLOAT_MIN_W, maxW),
+                             h: clampFloat(box.h + dy, FLOAT_MIN_H, maxH) };
+  } else {
+    // Moving right (or down) takes that much off the offset from the edge.
+    floatDrag.live = { ...box,
+      right: clampFloat(box.right - dx, 0,
+                        Math.max(0, box.main.width - box.w - FLOAT_EDGE)),
+      bottom: clampFloat(box.bottom - dy, 0,
+                         Math.max(0, box.main.height - box.h - FLOAT_EDGE)) };
+  }
+  paintFloatBox(floatDrag.live);
+});
+const endFloatDrag = (e) => {
+  if (!floatDrag || (e && e.pointerId !== floatDrag.id)) return;
+  $("term-wf").classList.remove("float-dragging");
+  const { w, h, right, bottom } = floatDrag.live || floatDrag.box;
+  floatDrag = null;
+  if (currentName) setSessLayout(currentName, { floatW: w, floatH: h,
+                                               floatRight: right, floatBottom: bottom });
+};
+$("term-wf").addEventListener("pointerup", endFloatDrag);
+$("term-wf").addEventListener("pointercancel", endFloatDrag);
 
 /* ------------------------------------------------------------------ */
 /* the rail's width: the bar between the sidebar and #main             */
