@@ -6319,6 +6319,20 @@ def current_round(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
     return None if best is None else best[1]
 
 
+def round_of(state: Dict[str, Any], chart: ir.Chart) -> Optional[int]:
+    """The round a record or a page names: :func:`current_round`, else the
+    slot's ``state["round"]``. One rule for the recorder (:func:`_trigger_round`)
+    and for a performer deriving a round from the run state when the record
+    itself carries none (claunch-6rjgg). ``None`` when neither applies."""
+    try:
+        value = current_round(state, chart)
+    except Exception:  # noqa: BLE001 -- a trigger never holds the run
+        value = None
+    if value is None:
+        value = state.get("round")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def status(*, cwd: Optional[str] = None, scope: Optional[str] = None,
            now: Optional[float] = None, tick: bool = True) -> Dict[str, Any]:
     """The run as the driver needs it: active tasks with rendered prompts,
@@ -8008,7 +8022,10 @@ def open_asks(r: Run) -> List[Dict[str, Any]]:
 #                full address (``side:stack:signals``) for a peer's;
 #                ``<key>#<record name>`` is a named consume's position
 #   cursor_epochs: {address: epoch} -- the peer log a peer cursor was moved on
-#   triggers:    [{id, node, label, instance, at, do, push?, queued_at}]
+#   triggers:    [{id, run, node, label, instance, at, do, round?, push?,
+#                 queued_at}] -- ``round`` is :func:`round_of` at queue time; a
+#                 record queued by an older process may lack it, and the
+#                 performer then reads the run state (claunch-6rjgg)
 #   trigger_seq: the last trigger id's number
 #   watch_checked: {name: {str(key): epoch}} -- the last watch probe of a record
 
@@ -8648,18 +8665,12 @@ def _queue_triggers(r: "Run", iid: str, node: ir.Node, at: str,
 
 
 def _trigger_round(r: "Run") -> Optional[int]:
-    """The round a trigger is recorded in: :func:`current_round` (the
-    iteration of the ``rounds: true`` loop, or a recurring slot's round),
-    else ``state.round``. ``plan-round`` opens the driver's plan of this
-    round (claunch-r3j1o.1); the value is taken now, as the record is
-    performed later."""
-    try:
-        value = current_round(r.state, r.chart)
-    except Exception:  # noqa: BLE001 -- a trigger never holds the run
-        value = None
-    if value is None:
-        value = r.state.get("round")
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    """The round a trigger is recorded in (:func:`round_of`: the iteration of
+    the ``rounds: true`` loop, or a recurring slot's round, else
+    ``state.round``). ``plan-round`` opens the driver's plan of this round
+    (claunch-r3j1o.1); the value is taken now, as the record is performed
+    later."""
+    return round_of(r.state, r.chart)
 
 
 #: A claim older than this many seconds is released and handed out again

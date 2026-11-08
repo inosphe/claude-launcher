@@ -2831,8 +2831,11 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 
 **상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq, epoch}}`,
 `cursors: {주소: seq}`(자기 log는 이름, 다른 런의 log는 주소 전체, 이름별 cursor는
-`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
-둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
+`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, label, instance, at, do, round?, push?, queued_at, claimed_at?, claim_boot?}]`를
+둔다. `round`는 기록할 때의 회차(`runtime.round_of`)다. 이 필드가 없는 레코드는 그
+필드를 쓰지 않던 프로세스가 남긴 것이며, 수행하는 쪽이 런 상태에서 같은 값
+(`round_of`)을 읽는다 — 기록하는 프로세스와 수행하는 프로세스는 따로 재기동되므로
+두 코드가 어긋날 수 있다(claunch-6rjgg). 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
 `triggers`, `do` 필드다.
 
 **적용 순서.** 노드 인스턴스에 들어갈 때: `do`(at enter) → trigger(at enter) 기록 →
