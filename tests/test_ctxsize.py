@@ -1000,8 +1000,14 @@ def test_both_endpoints_carry_a_codex_rollout_reading(home, tmp_path):
 def test_both_endpoints_carry_a_pi_session_reading(home, tmp_path):
     from claude_launcher.daemon.manager import SessionManager
 
+    from claude_launcher import store
+
     sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
     _pi_spec_profile()
+    # staging resolves the harness executable; a machine without ``pi`` on PATH
+    # still has to stage the row this test reads back
+    store.update(lambda doc: doc.setdefault("harnesses", {}).setdefault("pi", {}).update(
+        {"command": [sys.executable]}))
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)

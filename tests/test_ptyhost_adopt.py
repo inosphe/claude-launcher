@@ -86,7 +86,15 @@ def _pid_alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             return fh.read().split(")")[-1].split()[0] != "Z"
     except OSError:
-        return True
+        # No procfs (macOS): ask ps for the process state.
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return bool(out) and not out.startswith("Z")
 
 
 def _wait(pred, timeout: float = 10.0) -> bool:
@@ -1151,6 +1159,10 @@ def test_losses_older_than_the_window_do_not_count_toward_the_cap(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.skipif(
+    not os.path.exists("/proc/self"),
+    reason="without /proc the client trusts the pid file, so the pid of this process would be signalled",
+)
 def test_stop_refusing_host_signals_only_a_host(tmp_path):
     """The pid file is all it has to go on; a reused pid must not be shot."""
     from claude_launcher.daemon.ptyhost import pid_path

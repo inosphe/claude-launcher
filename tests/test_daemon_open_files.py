@@ -102,7 +102,7 @@ print(json.dumps({{
         "why": "",
     }
     assert got["after"] == [hard, hard]
-    assert f"{STARTING_SOFT} -> {hard}" in got["line"]
+    assert f"{STARTING_SOFT} -> {open_files._label(hard)}" in got["line"]
 
 
 def test_it_never_raises_when_the_kernel_refuses(tmp_path):
@@ -168,7 +168,8 @@ def test_describe_is_silent_where_there_is_no_limit():
 
 
 def test_an_unlimited_hard_limit_still_raises(tmp_path):
-    """``RLIM_INFINITY`` is ``-1``, so a numeric compare calls 256 the maximum.
+    """``RLIM_INFINITY`` is ``-1`` on Linux (a large number on macOS), so a
+    numeric compare can call 256 the maximum.
 
     macOS ships ``RLIMIT_NOFILE`` as soft 256 with an unlimited hard limit.
     Comparing the two numbers directly makes ``soft >= hard`` true there, the
@@ -210,11 +211,12 @@ print(json.dumps({
         tmp_path,
     )
 
-    assert got["infinity"] == -1, "the premise: resource reports infinity as -1"
-    assert got["calls"] == [[-1, -1]], "setrlimit must be reached"
+    inf = got["infinity"]
+    assert inf == int(open_files._resource.RLIM_INFINITY), "the premise: the module's infinity is resource's"
+    assert got["calls"] == [[inf, inf]], "setrlimit must be reached"
     assert got["record"]["why"] == ""
-    assert got["record"]["before"] == [256, -1]
-    assert got["record"]["after"] == [-1, -1]
+    assert got["record"]["before"] == [256, inf]
+    assert got["record"]["after"] == [inf, inf]
     assert "raised 256 -> unlimited" in got["line"]
 
 
@@ -233,7 +235,7 @@ def refuse(which, values):
     raise AssertionError("setrlimit must not be called")
 
 
-open_files._resource.getrlimit = lambda which: (-1, -1)
+open_files._resource.getrlimit = lambda which: (open_files._INFINITY, open_files._INFINITY)
 open_files._resource.setrlimit = refuse
 record = open_files.raise_soft_limit()
 print(json.dumps({"record": record, "line": open_files.describe(record)}))
@@ -242,7 +244,8 @@ print(json.dumps({"record": record, "line": open_files.describe(record)}))
     )
 
     assert got["record"]["why"] == ""
-    assert got["record"]["before"] == got["record"]["after"] == [-1, -1]
+    inf = int(open_files._resource.RLIM_INFINITY)
+    assert got["record"]["before"] == got["record"]["after"] == [inf, inf]
     assert "already at its maximum (unlimited/unlimited)" in got["line"]
 
 
@@ -263,7 +266,8 @@ def test_a_system_wide_exhaustion_does_not_blame_this_process_limit():
 
     if open_files.limits() is not None:
         soft, hard = open_files.limits()
-        assert f"soft limit of {soft} of {hard}" in open_files.exhaustion_note(emfile)
+        want = f"soft limit of {open_files._label(soft)} of {open_files._label(hard)}"
+        assert want in open_files.exhaustion_note(emfile)
 
     assert open_files.exhaustion_note(OSError(13, "Permission denied")) == ""
 

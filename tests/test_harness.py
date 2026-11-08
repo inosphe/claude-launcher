@@ -949,7 +949,9 @@ def test_pi_restore_reopens_the_repinned_session_file(home, tmp_path):
     i = argv.index("--session")
     path = argv[i + 1]
     assert path.endswith("2026-09-15T01-00-00-000Z_newid.jsonl")
-    assert "_newid" in path and "old" not in path
+    # the file name only: a directory above it may contain "old" ("folders")
+    name = os.path.basename(path)
+    assert "_newid" in name and "old" not in name
 
 
 def test_codex_restore_resumes_its_pinned_conversation_id(

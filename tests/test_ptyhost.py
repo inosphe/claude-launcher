@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -55,7 +56,15 @@ def _pid_alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             return fh.read().split(")")[-1].split()[0] != "Z"
     except OSError:
-        return True
+        # No procfs (macOS): ask ps for the process state.
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return bool(out) and not out.startswith("Z")
 
 
 def _wait(pred, timeout: float = 10.0) -> bool:
@@ -505,6 +514,10 @@ def test_daemon_setting_on_installs_a_host_client(home, monkeypatch):
         c.shutdown_host()
 
 
+@pytest.mark.skipif(
+    not os.path.exists("/proc/self"),
+    reason="the leak check reads a host's owner mark from /proc/<pid>/environ (Linux only)",
+)
 def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
     """The conftest leak check sees hosts this process did not start (a
     daemon subprocess's) by the owner mark they inherit (claunch-xnnct.1)."""
