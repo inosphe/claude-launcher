@@ -1031,3 +1031,39 @@ def test_plan_round_without_a_round_or_a_driver_is_a_skip(tmp_path):
     ok, detail = asyncio.run(cflow2_triggers.perform(
         Manager(), str(tmp_path), "w1", {"do": "plan-round", "run": "r1", "round": 1}, driver=""))
     assert not ok and "no driver" in detail
+
+
+ROUND_LOOP = """cflow: 2
+name: round-loop
+nodes:
+  a: {prompt: A}
+body:
+  loop: {while: "$visits.a == null or $visits.a < 3", max: 10, do: a, rounds: true}
+"""
+
+
+def test_plan_round_reads_a_record_without_run_and_round_off_the_run(tmp_path):
+    """claunch-6rjgg: the record is written by the session's own process and
+    performed by the daemon, and the two are restarted apart. An agent process
+    started before ``round`` joined the record kept queueing
+    ``{"do": "plan-round", ...}``, and the daemon skipped every one of them
+    -- ``the trigger record carries no run and round`` -- so the round's plan
+    never opened. The run the record belongs to names both, so they are read
+    off its state: the loop's iteration here, which ``state["round"]`` alone
+    would report as 1 while the run is on its third round.
+    """
+    _start(tmp_path, ROUND_LOOP, "w1")
+    for _ in range(2):
+        task = runtime.status(cwd=str(tmp_path), scope="w1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=str(tmp_path), scope="w1")
+    state = _state(tmp_path, "w1")
+    assert state["round"] == 1
+
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        Manager(), str(tmp_path), "w1", {"do": "plan-round"}, driver="w1"))
+    assert ok and f"opened round {state['run_id']}/3" in detail
+    from claude_launcher.daemon import paths
+    from claude_launcher.plan import store as plan_store
+
+    plan = plan_store.PlanStore(paths.plan_db()).get("w1")
+    assert (plan["run"], plan["round"]) == (state["run_id"], 3)

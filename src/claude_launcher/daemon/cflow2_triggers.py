@@ -16,6 +16,8 @@ is a reason string.
 * ``plan-round``: seal the driver session's plan and open the one of the
   record's (run, round) (:meth:`..plan.store.PlanStore.new_round`,
   claunch-r3j1o.1). Idempotent on (run, round); the driver need not be live.
+  A record that carries neither is read off the run state instead of skipped
+  (:func:`plan_round`, claunch-6rjgg).
 * ``push`` / ``enqueue-landing``: facts measured now in the run's checkout
   (:func:`measure_facts`), ``each``/``item`` evaluated with the v2 expression
   language over ``{facts, each}``, then the record goes to the one run of the
@@ -621,7 +623,7 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
             return await cflow_clock.request_checks(session, deliver)
         return await cflow_clock.recompose_briefing(session)
     if do == DO_PLAN_ROUND:
-        return await asyncio.to_thread(plan_round, driver, trig)
+        return await asyncio.to_thread(plan_round, driver, trig, cwd=cwd, scope=scope)
     if do in (DO_PUSH, DO_ENQUEUE_LANDING):
         if not driver:
             return False, "the run has no driver session"
@@ -635,15 +637,25 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
     return False, f"this daemon has no trigger action named {do!r}"
 
 
-def plan_round(driver: Optional[str], trig: Dict[str, Any], store: Any = None) -> Result:
+def plan_round(driver: Optional[str], trig: Dict[str, Any], store: Any = None, *,
+               cwd: Optional[str] = None, scope: Optional[str] = None) -> Result:
     """``plan-round``: the driver's plan moves to the record's round. The
     session's own write path (the plan API) is not used: the daemon is the
-    store's process, and the write is the driver's own plan."""
+    store's process, and the write is the driver's own plan.
+
+    A record queued by a process older than the ``run``/``round`` fields
+    carries neither (:func:`..cflow2.runtime._queue_triggers`, claunch-6rjgg):
+    the run the record belongs to still names both, so they are read off its
+    state (:func:`_state_round`) rather than skipped."""
     if not driver:
         return False, "the run has no driver session"
     run = str(trig.get("run") or "")
-    rnd = trig.get("round")
-    if not run or not isinstance(rnd, int) or isinstance(rnd, bool):
+    rnd = _record_round(trig)
+    if not run or rnd is None:
+        state_run, state_round = _state_round(cwd, scope)
+        run = run or state_run
+        rnd = state_round if rnd is None else rnd
+    if not run or rnd is None:
         return False, "the trigger record carries no run and round"
     from ..plan import store as plan_store
     from . import paths
@@ -658,6 +670,34 @@ def plan_round(driver: Optional[str], trig: Dict[str, Any], store: Any = None) -
     sealed = (res.get("sealed") or {}).get("key")
     return True, (f"plan of {driver} opened round {key}" + (f", sealed {sealed}" if sealed else "")
                   + (f", carried {', '.join(res['carried'])}" if res["carried"] else ""))
+
+
+def _record_round(trig: Dict[str, Any]) -> Optional[int]:
+    """The ``round`` a trigger record carries, or ``None`` (a bool is not a
+    round, and neither is a string)."""
+    rnd = trig.get("round")
+    return rnd if isinstance(rnd, int) and not isinstance(rnd, bool) else None
+
+
+def _state_round(cwd: Optional[str], scope: Optional[str]) -> Tuple[str, Optional[int]]:
+    """``(run id, round)`` read off the run state -- the reading the recorder
+    makes (:func:`..cflow2.runtime.round_of`, claunch-6rjgg). ``("", None)``
+    when there is no run there to read or it cannot be read."""
+    if not cwd or not scope:
+        return "", None
+    from ..cflow2 import store as cstore
+    try:
+        st = cstore.RunStore(cwd, scope)
+        if not st.exists():
+            return "", None
+        state = st.load_state()
+        chart = st.load_chart()
+    except Exception:  # noqa: BLE001 -- a trigger never holds the run
+        return "", None
+    try:
+        return str(state.get("run_id") or ""), runtime.round_of(state, chart)
+    except Exception:  # noqa: BLE001
+        return str(state.get("run_id") or ""), None
 
 
 def trigger_tid(cwd: str, scope: str, trig: Dict[str, Any]) -> str:
