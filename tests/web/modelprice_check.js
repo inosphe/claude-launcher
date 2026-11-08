@@ -50,16 +50,24 @@ new Function(
   "exports", "el", "usageShort", "usageCost",
   ["priceCurrency", "priceAnyProvider", "sessionPriceProvider",
    "priceRateFor", "cacheWriteRate", "readingCost", "costText",
-   "costBreakdown", "ctxTokensLine", "ctxCostDetailRow"].map(slice).join("\n") + `
+   "costBreakdown", "contextCost", "contextCostBreakdown",
+   "ctxTokensLine", "ctxCostDetailRow", "ctxCostOnRow"].map(slice).join("\n") + `
 let modelPrices = null;
+/* The two formatting helpers the context row composes with. Their own text is
+   ctxsize_check's subject; here the row only has to carry whatever they say,
+   so a fixed sentence keeps a change in their wording out of these checks. */
+function ctxSentence(s) { return s && s.context ? "context SENTENCE" : ""; }
 exports.setPrices = (p) => { modelPrices = p; };
 exports.rateFor = priceRateFor;
 exports.provider = sessionPriceProvider;
 exports.cost = readingCost;
+exports.contextCost = contextCost;
+exports.contextBreakdown = contextCostBreakdown;
 exports.text = costText;
 exports.breakdown = costBreakdown;
 exports.line = ctxTokensLine;
 exports.detail = ctxCostDetailRow;
+exports.costOnRow = ctxCostOnRow;
 `
 )(api,
   (tag, cls, text) => ({
@@ -222,6 +230,48 @@ check("detail row unpriced says so instead of estimating",
       ["dt:last request",
        "dd:read 2.00k · cached 150k · write 4.00k · not priced"]);
 check("detail row absent without a reading", detailTexts({}), []);
+
+/* ---- the estimate on the context row itself (claunch-wyhog) ---- */
+/* The row answers "how full is the context"; the price of that fill belongs
+   on it, and it is the context's own price: the answer tokens are not part
+   of the context, so they are left to the `last request` row.
+
+   The append is what has to be tested, so the fake dl hands back the dd the
+   row above just wrote as `lastChild` — the same element the real DOM gives
+   the helper. */
+function contextRow(s) {
+  const dd = { tag: "dd", className: "", textContent: "context SENTENCE",
+               title: "breakdown", kids: [],
+               appendChild(c) { this.kids.push(c); return c; } };
+  const dl = { kids: [dd], lastChild: dd,
+               appendChild(c) { this.kids.push(c); return c; } };
+  api.costOnRow(dl, s);
+  return { text: dd.textContent, title: dd.title,
+           parts: dd.kids.map((k) => `${k.className}:${k.textContent}`) };
+}
+api.setPrices({ prices: { "*": { "claude-opus-5": RATES } }, currency: "$" });
+check("the context's own price leaves the answer out",
+      [api.contextCost(READING, api.rateFor(READING.model)),
+       api.cost(READING, api.rateFor(READING.model))],
+      [(2000 * 15 + 150000 * 1.5 + 4000 * 18.75) / 1e6, EXPECTED]);
+const pricedRow = contextRow({ context: READING });
+check("the context row carries the estimate", pricedRow.parts,
+      [`ctx-row-cost: · ${api.text(
+        (2000 * 15 + 150000 * 1.5 + 4000 * 18.75) / 1e6)}`]);
+check("the sentence it was appended to is untouched", pricedRow.text,
+      "context SENTENCE");
+check("the tooltip shows the multiplication and the context's share",
+      [pricedRow.title.includes("this context only"),
+       pricedRow.title.includes("cached read 150,000 × $1.5/1M"),
+       pricedRow.title.includes("output 0 × $75/1M"),
+       pricedRow.title.endsWith(
+         `= $${((2000 * 15 + 150000 * 1.5 + 4000 * 18.75) / 1e6).toFixed(4)}`)],
+      [true, true, true, true]);
+api.setPrices({ prices: {}, currency: "$" });
+check("an unpriced model leaves the context row as it was",
+      contextRow({ context: READING }),
+      { text: "context SENTENCE", title: "breakdown", parts: [] });
+check("no reading means no append", contextRow({}).parts, []);
 
 /* ---- the abbreviation scale itself ---- */
 check("the scale abbreviates at K and M as the task asks",
