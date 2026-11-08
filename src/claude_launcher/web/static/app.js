@@ -9474,8 +9474,10 @@ function costText(cost) {
 }
 
 /* The multiplication, for the tooltip: which rate applied to which bucket,
-   so an estimate can be checked against the bill it stands in for. */
-function costBreakdown(c, rates) {
+   so an estimate can be checked against the bill it stands in for. `note`
+   qualifies what the figure covers, in parentheses after the table's name —
+   the context row's estimate leaves the answer out and says so there. */
+function costBreakdown(c, rates, note) {
   if (!c || !rates) return "";
   const row = (label, tokens, rate) =>
     `  ${label} ${(tokens || 0).toLocaleString()} × ` +
@@ -9487,8 +9489,29 @@ function costBreakdown(c, rates) {
     row("output", c.output, +rates.output || 0),
   ];
   const cost = readingCost(c, rates);
-  return "estimated from Settings → Model prices:\n" + lines.join("\n") +
+  return "estimated from Settings → Model prices" +
+    (note ? ` (${note})` : "") + ":\n" + lines.join("\n") +
     (cost === null ? "" : `\n= ${priceCurrency()}${usageCost(cost)}`);
+}
+
+/* What the context alone costs to send once: the reading's three input
+   buckets at the rates entered for its model. `readingCost` prices the whole
+   request, its answer included; the context is the input side, and the row
+   below it (`last request`) is where the answer is priced. */
+function contextCost(c, rates) {
+  if (!c || !rates) return null;
+  return readingCost({ input: c.input || 0, cache_read: c.cache_read || 0,
+                       cache_write: c.cache_write || 0, output: 0 }, rates);
+}
+
+/* The multiplication behind that figure, for the tooltip — with the note that
+   says why it is smaller than the row below's. */
+function contextCostBreakdown(c, rates) {
+  if (!c || !rates) return "";
+  return costBreakdown(
+    { input: c.input || 0, cache_read: c.cache_read || 0,
+      cache_write: c.cache_write || 0, output: 0 }, rates,
+    "this context only — the answer is priced in the row below");
 }
 
 /* The whole sentence, for a tooltip or a details row. Empty where there is
@@ -11125,6 +11148,33 @@ function usageRailLine(s) {
               usageBar(u, "rail-usage-bar"));
   line.title = usageTooltip(u) + "\nbar: fresh input · cache read · cache write · output";
   return line;
+}
+
+/* The estimate on the detail panel's context row, appended to the dd
+   metaRow just wrote. The row that answers "how full is the context" is
+   where the price of that fill belongs (claunch-wyhog), and it is the
+   context's own price — the answer tokens are not part of it and are priced
+   in the `last request` row below. Appended rather than composed into the
+   sentence because that sentence is also the rail's tooltip, where no price
+   is shown. An unpriced model leaves the row as it was: the row below
+   already says "not priced", and a second one here would read as a property
+   of the context rather than of the table.
+
+   Guarded at its call site like the other late helpers, so a reduced node
+   harness still draws the row itself. The guard inside is the same condition
+   metaRow used to write the row — without it the append would land on
+   whichever dd came before. */
+function ctxCostOnRow(dl, s) {
+  const c = s && s.context;
+  const dd = dl && dl.lastChild;
+  if (!c || !dd || !ctxSentence(s)) return;
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
+  const cost = contextCost(c, rates);
+  if (cost === null) return;
+  dd.appendChild(el("span", "ctx-row-cost", ` · ${costText(cost)}`));
+  dd.title = [dd.title, contextCostBreakdown(c, rates)]
+    .filter(Boolean).join("\n\n");
 }
 
 /* The detail panel's row for the reading's billed buckets: read (fresh
@@ -53786,6 +53836,11 @@ function renderSession(data) {
     // Under the conversation, because it is a fact about the conversation and
     // not about the process: how much of it the harness last carried.
     metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
+    // ...and what that context costs to send once, at the rates entered for
+    // its model (Settings → Model prices). Appended to the row above, so the
+    // row itself carries the estimate (claunch-wyhog). Guarded like the rows
+    // below: node harnesses slice this renderer without the late helpers.
+    if (typeof ctxCostOnRow === "function") ctxCostOnRow(dl, s);
     // Under the size, the same reading's three billed buckets and what they
     // cost at the rates entered for this model (Settings → Model prices).
     // Guarded like the usage row below: node harnesses slice this renderer
