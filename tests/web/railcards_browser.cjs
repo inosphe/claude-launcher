@@ -623,6 +623,22 @@ const READ = `(() => {
     assert.equal(await lead.locator(".rail-usage-cost").isVisible(), true);
     assert.equal(await lead.locator(".rail-commits").isVisible(), true);
     assert.equal(await lead.locator(".rail-tps-line").isVisible(), true, "TPS remains available in Details");
+    /* The `⇱ card` reveals above start a smooth scroll to the top and mark the
+       rail for the animation's run (`railPressMark`, a 3 s deadline). While the
+       mark stands `refreshSessions` keeps the rows on purpose -- the pass below
+       would otherwise tear down the row that animation is travelling to -- so a
+       pass in that window postpones the redraw to the next poll instead of
+       rebuilding. Measured on 3fe42e63b: the mark still had 341 ms to run when
+       this assertion fired, and it failed; the same line passed whenever the
+       machine got through the block faster than the deadline (claunch-h0wi6.1
+       reported a pass, claunch-ge1ap.1 the failure). Wait the hold out, so what
+       is measured here is still the rebuild a changed record causes. */
+    await page.waitForFunction(() => {
+      const list = document.getElementById("session-list");
+      const marked = list && typeof list._railScrollTopUntil === "number"
+        && list._railScrollTopUntil > Date.now();
+      return !marked && !(typeof railHeld === "function" && railHeld());
+    }, null, { timeout: 8000 });
     await lead.evaluate(e => { e.dataset.rebuildProbe = "old"; });
     sessions[0].profile = "nc2";
     await page.evaluate(() => refreshSessions());
