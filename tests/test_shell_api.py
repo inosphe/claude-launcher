@@ -374,14 +374,27 @@ def test_the_read_cursor_is_the_daemons_and_a_default_read_continues_from_it(tmp
         assert first["offset"] == first["total"]
         after = await req("GET", base)
         assert after["last_read"] == first["offset"]
-        assert after["unread_bytes"] == 0
+        # Not compared with 0: the ConPTY repaint of the line can land between
+        # the read and this status (``assert 11 == 0`` in a 4-way run,
+        # claunch-3lgwo). What is unread is whatever the ring holds past the
+        # cursor, and the status states it in its own terms.
+        assert after["unread_bytes"] == after["offset"] - after["last_read"]
 
         await shell.write_bytes(b"print('second')\r")
         await _wait_peek(shell, "second")
         second = await req("GET", base + "/output")
-        # Only what arrived since: the new line is there, the old one is not.
-        assert "second" in _plain(second["text"]) and "first" not in _plain(second["text"])
+        assert "second" in _plain(second["text"])
         assert second["start"] == first["offset"]
+        # Only what arrived since: the text is exactly the ring from the
+        # cursor to where the read stopped. The old line is not compared by
+        # content: the terminal repaints it into the ring after the first
+        # read (``first`` in the second read, 12019 passed / 1 failed,
+        # claunch-3lgwo), and that repaint is new bytes the cursor rightly
+        # hands back.
+        ring = clipty.ShellPty.read_output(
+            shell, first["offset"], limit=second["offset"] - first["offset"]
+        )
+        assert second["text"] == ring["text"]
 
         # An explicit offset is still honoured: 0 is the whole ring.
         whole = await req("GET", base + "/output?offset=0")
