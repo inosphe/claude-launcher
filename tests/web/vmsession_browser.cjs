@@ -34,6 +34,7 @@ let VMS = [
   mk("locked1", { grants: { s1: ["view"] }, locked: true }),
   mk("tmplcopy", { tart_name: "preset-gold", template: "gold" }),
   mk("free", {}),
+  mk("held", { grants: { other: ["view", "control"] } }),
   mk("s1-vm", {}),
 ];
 let PRESETS = [{ name: "gold", present: true }, { name: "silver", present: true }];
@@ -79,8 +80,27 @@ const server = http.createServer((req, res) => {
     }
     if ((m = /^\/api\/vm\/([^/]+)\/grant$/.exec(p))) {
       const vm = VMS.find((v) => v.id === m[1]);
+      if ((body.scopes || []).includes("control")) {
+        const holders = Object.entries(vm.grants).filter(([n, sc]) => n !== body.session && sc.includes("control")).map(([n]) => n);
+        if (holders.length && !body.steal) {
+          return json(res, { ok: false, code: "vm_control_held", holders, error: `vm_control_held: ${vm.id}의 control은 ${holders.join(", ")}이(가) 가지고 있습니다` }, 409);
+        }
+        for (const h of holders) {
+          vm.grants[h] = vm.grants[h].filter((x) => x !== "control");
+          vm.leases = [...(vm.leases || []), { from: h, to: body.session, scopes: ["control"], at: 1 }];
+        }
+      }
       vm.grants[body.session] = [...new Set([...(vm.grants[body.session] || []), ...body.scopes])];
       return json(res, vm);
+    }
+    if ((m = /^\/api\/vm\/([^/]+)\/return_steal$/.exec(p))) {
+      const vm = VMS.find((v) => v.id === m[1]);
+      for (const l of (vm.leases || []).filter((x) => x.to === body.session)) {
+        vm.grants[body.session] = vm.grants[body.session].filter((x) => x !== "control");
+        vm.grants[l.from] = [...new Set([...(vm.grants[l.from] || []), "view", ...l.scopes])];
+      }
+      vm.leases = (vm.leases || []).filter((x) => x.to !== body.session);
+      return json(res, { ok: true, vm });
     }
     if ((m = /^\/api\/vm\/([^/]+)\/revoke$/.exec(p))) {
       const vm = VMS.find((v) => v.id === m[1]);
@@ -197,6 +217,34 @@ const server = http.createServer((req, res) => {
     await page.waitForTimeout(300);
     assert.match(asked.pop(), /프리셋 gold의 복사본/);
     assert.equal(posts.some(([u]) => u === "/api/vm/tmplcopy/grant"), false, "dismissed: nothing granted");
+
+    // 5b. control is held by one session: the steal box names the holder and is sent only when ticked
+    await pick.selectOption("s1-vm");
+    assert.equal(await page.locator("#vm-sess-steal-row").isHidden(), true, "no holder: no steal box");
+    await pick.selectOption("held");
+    await page.locator("#vm-sess-ex-control").check();
+    await page.locator("#vm-sess-steal-row").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await page.locator("#vm-sess-steal-label").innerText(), /other에서 control을 빼앗아 부여/);
+    await page.locator("#vm-sess-connect").click();
+    await page.locator("#vm-activity", { hasText: /vm_control_held.*other/ }).waitFor({ timeout: 5000 });
+    assert.equal(posts.filter(([u]) => u === "/api/vm/held/grant").pop()[1].steal, undefined, "unticked: refused, nothing stolen");
+    assert.deepEqual(VMS.find((v) => v.id === "held").grants.other, ["view", "control"]);
+    await page.locator("#vm-sess-steal").check();
+    await page.locator("#vm-sess-connect").click();
+    await page.waitForFunction(() => [...document.querySelectorAll("#vm-sess-list .vm-sess-pick")].some((b) => b.textContent === "held"));
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm/held/grant").pop()[1], { session: "s1", scopes: ["view", "control"], steal: true });
+    assert.deepEqual(VMS.find((v) => v.id === "held").grants.other, ["view"], "the holder keeps its other scopes");
+
+    // 5c. the loan: the stolen control is listed on the stealer's pane, and one press gives it back
+    await page.locator("#vm-sess-list .vm-sess-pick", { hasText: "held" }).click();
+    await page.locator("#vm-leases").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await page.locator("#vm-leases-list li").innerText(), /s1이\(가\) other에게서 빼앗은 control/);
+    await page.getByRole("button", { name: "s1이(가) 빼앗은 control 반환" }).click();
+    await page.locator("#vm-activity", { hasText: "s1의 control 반환 완료" }).waitFor({ timeout: 5000 });
+    assert.deepEqual(posts.filter(([u]) => u === "/api/vm/held/return_steal").pop()[1], { session: "s1" });
+    await page.locator("#vm-leases").waitFor({ state: "hidden", timeout: 5000 });
+    assert.deepEqual(VMS.find((v) => v.id === "held").grants.other, ["view", "control"], "the owner has it back");
+    assert.ok(!VMS.find((v) => v.id === "held").grants.s1.includes("control"));
 
     // 7. no document scrollbar
     const m = await page.evaluate(() => ({ win: innerHeight, doc: document.documentElement.scrollHeight }));

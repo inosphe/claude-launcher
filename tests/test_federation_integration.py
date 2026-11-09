@@ -498,22 +498,26 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     assert b"READY" in repaint.data or b"echo:" in repaint.data
                     # more output than one relay frame (64 KiB) carries: 25
                     # lines of ~3000 characters (under a tty's 4095-byte
-                    # canonical line), each typed and echoed back
-                    for i in range(25):
+                    # canonical line), each typed and echoed back. macOS caps
+                    # a canonical line at 1024 bytes (MAX_CANON), so there the
+                    # lines are shorter and more numerous for the same volume.
+                    n_lines, line_fill = (25, 3000) if sys.platform != "darwin" else (80, 900)
+                    for i in range(n_lines):
                         async with http.post(
                             base + "/api/shadows/pca/sa/line",
-                            json={"text": f"line{i:02d}-" + "x" * 3000,
+                            json={"text": f"line{i:02d}-" + "x" * line_fill,
                                   "input_id": f"relay-{i}"},
                         ) as resp:
                             assert resp.status == 200, await resp.text()
                     seen = b""
                     deadline = time.monotonic() + 30
-                    while b"echo:line24-" not in seen and time.monotonic() < deadline:
+                    last = f"echo:line{n_lines - 1:02d}-".encode()
+                    while last not in seen and time.monotonic() < deadline:
                         msg = await asyncio.wait_for(ws.receive(), 30)
                         if msg.type == aiohttp.WSMsgType.BINARY:
                             seen += msg.data
                     assert len(seen) > 2 * 65536
-                    for i in range(25):
+                    for i in range(n_lines):
                         assert f"echo:line{i:02d}-".encode() in seen, i
 
                     # one line near shadow.MAX_LINE (claunch-an4fd): the host
@@ -529,6 +533,11 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     ) as resp:
                         assert resp.status == 200, await resp.text()
                         assert (await resp.json())["bytes"] == len(long_line) + 1
+                    if sys.platform == "darwin":
+                        # the tty discards a canonical line over 1024 bytes,
+                        # so the child never answers; ``bytes`` above is the
+                        # check that the host typed all of it
+                        return
                     seen = b""
                     deadline = time.monotonic() + 30
                     while b"echo:long-" not in seen and time.monotonic() < deadline:

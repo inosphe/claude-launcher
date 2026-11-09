@@ -355,6 +355,48 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
         'the New form task draft returns after closing Spawn');
     }
   }
+  // s2-vmlease: the fork form lists the origin's VMs; view/files are inherited,
+  // control/exec start off and a held control needs the steal box. The grants go
+  // out through the user-only grant route once the copy has a name.
+  await page.evaluate(()=>{
+    window.posts=[]; window.alertAsked=[]; window.api0=api; window.confirm0=window.confirm;
+    window.confirm=(m)=>{ alertAsked.push(m); return true; };
+    const vms=[{id:'vm1',grants:{lead:['view','control','files'],other:['view']}},
+               {id:'vm2',grants:{lead:['view'],holder:['view','control']}},
+               {id:'vm3',grants:{other:['view']}}];
+    api=async(url,opts)=>{
+      if(!opts?.method) return url==='/api/vm'?{ok:true,json:async()=>({vms})}:{ok:true,json:async()=>({})};
+      posts.push({url,body:JSON.parse(opts.body)});
+      if(url.endsWith('/quick-fork')) return {ok:true,json:async()=>({session:{name:'lead-qf1'}})};
+      return {ok:true,json:async()=>({ok:true})};
+    };
+    return openQuickForkModal('lead');
+  });
+  await page.locator('#new-quick-fork-vms').waitFor({state:'visible'});
+  assert.deepEqual(await page.locator('#new-quick-fork-vm-rows .qf-vm-row').evaluateAll(r=>r.map(x=>x.dataset.vm)),['vm1','vm2'],
+    'only the VMs the origin holds');
+  const ticks=async id=>page.evaluate(id=>Object.fromEntries([...document.querySelectorAll(`.qf-vm-row[data-vm=${id}] input[data-scope]`)].map(i=>[i.dataset.scope,i.checked])),id);
+  assert.deepEqual(await ticks('vm1'),{view:true,files:true,control:false,exec:false},'control and exec are off even where the origin has control');
+  assert.deepEqual(await ticks('vm2'),{view:true,files:false,control:false,exec:false});
+  assert.match(await page.locator('.qf-vm-row[data-vm=vm1] label:has(input[data-steal])').innerText(),/lead에서 control을 빼앗아 부여/);
+  assert.match(await page.locator('.qf-vm-row[data-vm=vm2] label:has(input[data-steal])').innerText(),/holder에서 control을 빼앗아 부여/);
+  assert.equal(await page.locator('.qf-vm-row[data-vm=vm1] input[data-steal]').isChecked(),false,'steal starts unchecked');
+  // control without the steal box is refused before anything is sent
+  await page.getByLabel('vm1 control').check();
+  await page.getByRole('button',{name:'Fork',exact:true}).click();
+  assert.match(await page.locator('#create-error').innerText(),/vm1: control은 lead이\(가\) 가지고 있습니다/);
+  assert.equal(await page.evaluate(()=>posts.length),0);
+  await page.getByLabel('vm1 steal').check();
+  await page.getByLabel('vm2 exec').check();
+  await page.getByRole('button',{name:'Fork',exact:true}).click();
+  await page.waitForFunction(()=>posts.length===3);
+  assert.deepEqual(await page.evaluate(()=>posts.slice(1)),[
+    {url:'/api/vm/vm1/grant',body:{session:'lead-qf1',scopes:['view','files','control'],steal:true}},
+    {url:'/api/vm/vm2/grant',body:{session:'lead-qf1',scopes:['view','exec']}}]);
+  assert.match(await page.evaluate(()=>alertAsked[0]),/exec/,'exec asks first');
+  await page.waitForFunction(()=>location.hash==='#/s/lead-qf1');
+  assert.equal(await page.locator('#modal-overlay').isVisible(),false);
+  await page.evaluate(()=>{ api=window.api0; window.confirm=window.confirm0; window.posts=[]; });
   assert.deepEqual(errors,[]);
   console.log('sessionform browser: page tabs, Spawn-only dialog, Fork fields/payload/error and draft restoration passed');
  } finally {await browser.close();}

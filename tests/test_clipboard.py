@@ -215,6 +215,10 @@ def test_a_served_app_reads_no_clipboard_under_the_suite(home, monkeypatch):
         app = build_app(mgr, "secret", started_at=time.monotonic())
         history = app["clipboard"]
         await history.sample()
-        assert history.items == [] and history.error is None
+        # Off Linux there is no route to read: sample() reports that, and it
+        # reads nothing either way.
+        unsupported = None if sys.platform.startswith("linux") else (
+            f"Host clipboard is not supported on {sys.platform}")
+        assert history.items == [] and history.error == unsupported
         await mgr.shutdown_all()
     asyncio.run(run())

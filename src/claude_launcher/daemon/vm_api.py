@@ -68,7 +68,7 @@ _STATUS = {
     "vm_tool_not_allowed": 403, "vm_suspend_timeout": 504, "vm_unknown_preset": 404, "vm_port_taken": 409, "vm_allow_too_wide": 400,
     "vm_allow_holds_host": 400, "vm_preset_exists": 409, "vm_locked": 423, "vm_only_refused": 409, "vm_share_confirm_rw": 400, "vm_request_changed": 409, "vm_lock_needs_stop": 409,
     "vm_name_taken": 409, "vm_disk_low": 507, "vm_confirm": 400, "vm_presets_unreadable": 500, "vm_host_locked": 423, "vm_bad_address": 502,
-    "tart_exited": 502, "vm_no_controller": 409, "vm_reason_required": 400,
+    "tart_exited": 502, "vm_no_controller": 409, "vm_control_held": 409, "vm_no_lease": 409, "vm_reason_required": 400,
     "vm_files_unsafe": 400, "vm_files_missing": 404, "vm_files_exists": 409,
     "vm_files_failed": 502, "vm_files_limit": 413, "vm_files_busy": 409,
     "vm_files_unsupported": 501,
@@ -166,6 +166,14 @@ OBSERVE_TOOLS = frozenset({"get_desktop_state", "get_window_state", "zoom"})
 SHOTS_KEEP = 20
 
 
+def _steal(body: dict):
+    """The user's explicit wish to take ``control`` from its holder(s):
+    ``steal: true`` (all) or ``steal_from: "session"``. Absent means no."""
+    if body.get("steal_from"):
+        return body["steal_from"]
+    return True if body.get("steal") is True else None
+
+
 def _err(exc: VmError) -> web.Response:
     return web.json_response(exc.as_dict(), status=_STATUS.get(exc.code, 400))
 
@@ -224,7 +232,7 @@ def _viewable(reg: Registry, session: str):
 #: Host details a session has no use for: where the daemon's key lives and how
 #: the guest is reached. The user's page and shell still get them.
 HOST_ONLY = ("ssh_key", "ssh_user", "cua_path", "channel_error", "expose", "allow", "net_pending",
-             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows", "cloned_from", "template")
+             "net_applied_known", "locked_but_running", "files_dir", "requests", "share_rows", "cloned_from", "template", "leases")
 
 
 def _for_session(row: dict, session: str) -> dict:
@@ -752,7 +760,7 @@ async def h_approve(request: web.Request) -> web.Response:
         _trace(request, reg, vm_id, "user_approve", to=session, scopes=row["scopes"],
                shares=[f"{s['name']}:{s['mode']}" for s in checked])
         if row["scopes"]:
-            reg.grant(vm_id, session, row["scopes"])
+            reg.grant(vm_id, session, row["scopes"], steal=_steal(body))
         for share in checked:
             reg.share_add(vm_id, {**share, "origin": vm_share.make_origin(vm_share.ORIGIN_REQUEST, session)})
         reg.request_drop(vm_id, session)
@@ -957,8 +965,10 @@ async def h_grant(request: web.Request) -> web.Response:
         session = str(body.get("session") or "")
         if not session:
             raise VmError("vm_bad_request", "'session' is required")
-        got = reg.grant(request.match_info["id"], session, body.get("scopes") or [])
-        _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got)
+        steal = _steal(body)
+        got = reg.grant(request.match_info["id"], session, body.get("scopes") or [], steal=steal)
+        _trace(request, reg, request.match_info["id"], "user_grant", to=session, scopes=got,
+               steal=steal if steal else None)
         await vm_pack.sync(request.app.get("manager"), reg, session)
         out = {"ok": True, "grants": got}
         preset = _template(request, {"tart_name": reg.get(request.match_info["id"]).tart_name})["template"]
@@ -983,6 +993,28 @@ async def h_revoke(request: web.Request) -> web.Response:
         _trace(request, reg, request.match_info["id"], "user_revoke", to=session, left=left)
         await vm_pack.sync(request.app.get("manager"), reg, session)
         return web.json_response({"ok": True, "grants": left})
+    except VmError as exc:
+        return _err(exc)
+
+
+async def h_return_steal(request: web.Request) -> web.Response:
+    """The user gives the control a session took by stealing back to its owner
+    now (the same chain rules as when that session ends)."""
+    if (refused := _user_only(request)) is not None:
+        return refused
+    reg, _ = _hub(request)
+    vm_id = request.match_info["id"]
+    try:
+        body = await _body(request)
+        session = str(body.get("session") or "")
+        if not session:
+            raise VmError("vm_bad_request", "'session' is required")
+        done = reg.return_leases(vm_id, session, "manual")
+        _trace(request, reg, vm_id, "user_return_steal", frm=session,
+               to=[r["to"] for r in done])
+        for name in {session, *(r["to"] for r in done if r["to"])}:
+            await vm_pack.sync(request.app.get("manager"), reg, name)
+        return web.json_response({"ok": True, "returned": done, "vm": reg.view(vm_id)})
     except VmError as exc:
         return _err(exc)
 
@@ -1490,6 +1522,26 @@ def exit_hook(app: web.Application):
     return hook
 
 
+def merge_hook(app: web.Application):
+    """A quick-fork that merged gives back the control it took by stealing."""
+    def hook(manager, source: str, settled: dict, body: str) -> None:
+        if settled.get("kind") == "merge" and "vm_registry" in app:
+            app["vm_registry"].return_all(source, "merge")
+    return hook
+
+
+def session_alive(manager):
+    """Whether a session still lives, for walking a chain of steals: it is in
+    the manager and has not exited (a held session is waiting, not gone)."""
+    def alive(name: str) -> bool:
+        try:
+            sess = manager.get(name)
+        except Exception:
+            return False
+        return (not sess.exited) or bool(getattr(sess, "held_at", None))
+    return alive
+
+
 class _GatedRouter:
     """``app.router`` whose routes are behind :func:`_gated` unless
     ``gate=False`` says the route works while the feature is off."""
@@ -1574,6 +1626,7 @@ def install(app: web.Application, registry: Optional[Registry] = None,
     r.add_post("/api/vm/{id}/grant", h_grant)
     r.add_post("/api/vm/{id}/revoke", h_revoke)
     r.add_post("/api/vm/{id}/revoke_controller", h_revoke_controller)
+    r.add_post("/api/vm/{id}/return_steal", h_return_steal)
     r.add_post("/api/vm/{id}/extra_controller", h_extra)
     r.add_post("/api/vm/{id}/human", h_human)
     r.add_post("/api/vm/{id}/acquire", h_acquire)

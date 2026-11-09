@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -216,6 +217,9 @@ def test_log_is_not_reached_through_the_logger_registry(tmp_path):
 
 
 def test_read_counters_on_this_machine():
+    if (sysperf._psutil() is None and sys.platform != "win32"
+            and not os.path.exists("/proc/stat")):
+        pytest.skip("no psutil and no /proc: this platform has no counter source")
     reading = sysperf.read_counters()
     assert reading["cpu_total"] > 0
     assert reading["mem_total"] > 0

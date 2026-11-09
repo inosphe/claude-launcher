@@ -86,7 +86,15 @@ def _pid_alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             return fh.read().split(")")[-1].split()[0] != "Z"
     except OSError:
-        return True
+        # No procfs (macOS): ask ps for the process state.
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return bool(out) and not out.startswith("Z")
 
 
 def _wait(pred, timeout: float = 10.0) -> bool:
@@ -1160,6 +1168,59 @@ def test_stop_refusing_host_signals_only_a_host(tmp_path):
     assert hc.stop_refusing_host(d, timeout=0.5) is False
     pid_path(d).unlink()
     assert hc.stop_refusing_host(d, timeout=0.5) is True
+
+
+def _fake_host(directory, *words):
+    """A process whose command line carries ``words`` after a sleeping script,
+    standing in for a host (or for another program) without starting one."""
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", *words],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def test_ps_check_tells_a_host_from_another_program(tmp_path):
+    """Without /proc the command line comes from ps (claunch-6zy): the module
+    and this directory together mark a host, either alone does not."""
+    d = tmp_path / "h"
+    d.mkdir()
+    procs = [
+        _fake_host(d, "claude_launcher.daemon.ptyhost", str(d)),
+        _fake_host(d, "claude_launcher.daemon.ptyhost", str(tmp_path / "other")),
+        _fake_host(d, str(d)),
+    ]
+    try:
+        assert hc._ps_says_host(procs[0].pid, d) is True
+        assert hc._ps_says_host(procs[1].pid, d) is False
+        assert hc._ps_says_host(procs[2].pid, d) is False
+        assert hc._ps_says_host(os.getpid(), d) is False
+    finally:
+        for proc in procs:
+            proc.kill()
+            proc.wait()
+    assert hc._ps_says_host(procs[0].pid, d) is False  # gone
+
+
+def test_ps_check_refuses_when_ps_cannot_answer(tmp_path, monkeypatch):
+    """No answer from ps is a no: the pid is left alone."""
+    def broken(*args, **kwargs):
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(hc.subprocess, "run", broken)
+    assert hc._ps_says_host(os.getpid(), tmp_path) is False
+
+
+def test_without_proc_the_pid_file_is_checked_by_ps(tmp_path, monkeypatch):
+    """_is_host_process falls through to ps where /proc does not exist, and
+    does not where it does (Linux keeps reading /proc)."""
+    seen = []
+    monkeypatch.setattr(hc, "_ps_says_host", lambda pid, directory: seen.append(pid) or True)
+    if os.path.exists("/proc/self"):
+        assert hc._is_host_process(2**22 + 12345, tmp_path) is False
+        assert seen == []
+    else:
+        assert hc._is_host_process(2**22 + 12345, tmp_path) is True
+        assert seen == [2**22 + 12345]
 
 
 def test_cli_shell_never_runs_in_the_host(host, tmp_path):

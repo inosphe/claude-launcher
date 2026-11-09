@@ -273,6 +273,10 @@ class Vm:
     extra_controllers: Dict[str, str] = field(default_factory=dict)  # session -> reason
     epoch: int = 0
     grants: Dict[str, List[str]] = field(default_factory=dict)
+    #: Steals not yet given back, oldest first: ``{from, to, scopes, at}`` means
+    #: ``to`` took ``scopes`` (control, and exec when it went with it) from ``from``.
+    #: Saved. A steal is a loan: see :meth:`Registry.return_leases`.
+    leases: List[dict] = field(default_factory=list)
     human: str = "idle"  # idle | driving
     human_since: float = 0.0
     needs_observe: bool = False
@@ -342,6 +346,7 @@ class Vm:
             "controller": self.controller,
             "extra_controllers": dict(self.extra_controllers),
             "epoch": self.epoch, "grants": {k: list(v) for k, v in self.grants.items()},
+            "leases": [dict(x, scopes=list(x["scopes"])) for x in self.leases],
             "human": self.human, "human_since": self.human_since,
             "needs_observe": self.needs_observe, "softnet": self.softnet, "locked": self.locked,
             "expose": list(self.expose), "allow": list(self.allow),
@@ -395,6 +400,7 @@ class Vm:
             str(s): [x for x in SCOPES if x in (v or [])]
             for s, v in (raw.get("grants") or {}).items()
         }
+        vm.leases = _clean_leases(vm.id, raw.get("leases"))
         return vm
 
 
@@ -449,6 +455,27 @@ def not_ready(vm: "Vm") -> VmError:
         f"{vm.id} is {vm.state} (ssh={vm.ssh_ready} gui={vm.gui_ready} cua={vm.cua_ready})")
 
 
+def _clean_leases(vm_id: str, raw) -> List[dict]:
+    """The saved steal records. A list that is malformed anywhere is dropped
+    whole: a chain is read link by link, and a guessed link would hand control
+    to the wrong session. With no record the holder simply keeps what it has."""
+    if not raw:
+        return []
+    try:
+        out = []
+        for row in raw:
+            frm, to = row["from"], row["to"]
+            scopes = [x for x in (CONTROL, EXEC) if x in row["scopes"]]
+            if not (isinstance(frm, str) and isinstance(to, str) and frm and to and frm != to
+                    and CONTROL in scopes):
+                raise ValueError(row)
+            out.append({"from": frm, "to": to, "scopes": scopes, "at": float(row.get("at") or 0)})
+        return out
+    except (TypeError, KeyError, ValueError, AttributeError):
+        log.warning("%s: the steal records are damaged; they are dropped and nothing is given back", vm_id)
+        return []
+
+
 def _normal(scopes) -> List[str]:
     wanted = set(scopes or ())
     unknown = wanted - set(SCOPES)
@@ -477,6 +504,11 @@ class Registry:
         self._lock = threading.RLock()
         self._vms: Dict[str, Vm] = {}
         self._rejected: list = []
+        #: Whether a session still lives. The daemon sets it from the session
+        #: manager; unset, every session counts as alive until it is reported
+        #: exited here (``_ended``). Chains of steals are walked with it.
+        self.session_alive: Optional[Callable[[str], bool]] = None
+        self._ended: set = set()
         self.audit_log: List[dict] = []
         #: Recent file transfers per VM (path and byte count, never contents).
         self.files_log: Dict[str, deque] = {}
@@ -847,9 +879,50 @@ class Registry:
             return vm
 
     # ---- grants (the user's) --------------------------------------------- #
-    def grant(self, vm_id: str, session: str, scopes) -> List[str]:
+    def control_holders(self, vm_id: str) -> List[str]:
+        """Sessions whose grant on ``vm_id`` includes ``control``."""
+        with self._lock:
+            return sorted(s for s, sc in self.get(vm_id).grants.items() if CONTROL in sc)
+
+    def grant(self, vm_id: str, session: str, scopes, *, steal=None) -> List[str]:
+        """Add ``scopes`` to ``session``'s grant. ``control`` is held by at most
+        one session per VM: granting it while another session holds it is
+        refused (``vm_control_held``) unless ``steal`` names every current
+        holder (``True`` names them all). A stolen session loses ``control``
+        (and what rides on it) and any running controller role; its other
+        scopes stay. Grants made before this rule that left several holders
+        stay as they are; a new grant then has to steal from all of them."""
+        want = set(_normal(scopes))
         with self._lock:
             vm = self.get(vm_id)
+            others = [s for s in self.control_holders(vm_id) if s != session]
+            if CONTROL in want and CONTROL not in vm.grants.get(session, []) and others:
+                if steal is True:
+                    named = set(others)
+                elif isinstance(steal, str) and steal:
+                    named = {steal}
+                elif isinstance(steal, (list, tuple)) and all(isinstance(x, str) for x in steal):
+                    named = set(steal)
+                elif steal in (None, False):
+                    named = set()
+                else:
+                    raise VmError("vm_bad_request", "steal is true or a session name")
+                if not named:
+                    raise VmError("vm_control_held",
+                                  f"{vm_id}의 control은 {', '.join(others)}이(가) 가지고 있습니다. "
+                                  "한 VM의 control은 한 세션만 가질 수 있습니다. "
+                                  "빼앗아 부여하려면 사용자가 명시적으로 steal을 지정해야 합니다",
+                                  holders=others)
+                left = [s for s in others if s not in named]
+                if left:
+                    raise VmError("vm_control_held",
+                                  f"{vm_id}의 control 보유자 {', '.join(others)} 모두에게서 빼앗아야 합니다 "
+                                  f"(빠진 보유자: {', '.join(left)})", holders=others)
+                for victim in others:
+                    lost = [x for x in (CONTROL, EXEC) if x in vm.grants.get(victim, [])]
+                    self.revoke(vm_id, victim, [CONTROL], _keep_leases=True)
+                    vm.leases.append({"from": victim, "to": session, "scopes": lost, "at": self._clock()})
+                    self._log(vm_id, session, "steal_control", scopes=lost, **{"from": victim, "to": session})
             got = sorted(set(vm.grants.get(session, [])) | set(_normal(scopes)),
                          key=SCOPES.index)
             vm.grants[session] = got
@@ -862,7 +935,7 @@ class Registry:
         with self._lock:
             return any(vm.grants.get(session) for vm in self._vms.values())
 
-    def revoke(self, vm_id: str, session: str, scopes=None) -> List[str]:
+    def revoke(self, vm_id: str, session: str, scopes=None, *, _keep_leases: bool = False) -> List[str]:
         """Drop ``scopes`` (all when omitted). Losing ``control`` ends the
         control the session holds; losing ``view`` loses control and exec too
         (files is independent and is dropped only by naming it)."""
@@ -892,6 +965,10 @@ class Registry:
                 vm.grants.pop(session, None)
             if CONTROL not in have:
                 self._drop_session_control(vm, session, why="control revoked")
+                if not _keep_leases:
+                    # The user took control away by hand: that is not a steal, and
+                    # nothing is given back for it.
+                    self._cancel_chain(vm, session)
             self._log(vm_id, session, "revoke", left=sorted(have))
             self._save()
             return sorted(have)
@@ -991,13 +1068,98 @@ class Registry:
         with self._lock:
             self._drop_control(self.get(vm_id), why="user revoked")
 
-    def session_exited(self, session: str) -> None:
-        """A session ended: hand back whatever it held. Grants stay."""
+    # ---- steals are loans ------------------------------------------------ #
+    def _cancel_chain(self, vm: Vm, session: str) -> None:
+        """Drop the record of ``session``'s steal and the links it inherited from
+        (``A -> B``, ``B -> session``)."""
+        want = {session}
+        while True:
+            hit = [x for x in vm.leases if x["to"] in want]
+            if not hit:
+                return
+            vm.leases = [x for x in vm.leases if x not in hit]
+            want = {x["from"] for x in hit}
+
+    def _alive(self, name: str) -> bool:
+        if self.session_alive is not None:
+            return bool(self.session_alive(name))
+        return name not in self._ended
+
+    def _give_back(self, vm: Vm, holder: str, reason: str) -> List[dict]:
+        """``holder`` took control by stealing and now gives it back, along the
+        chain: to the one it stole from, or -- when that session has ended -- to
+        the one *that* one had stolen from, and so on. Control is left empty when
+        nobody on the way is alive. Only a holder that still has the control it
+        took gives anything back; otherwise the record is dropped."""
+        mine = [x for x in vm.leases if x["to"] == holder]
+        if not mine:
+            return []
+        done = []
+        if CONTROL not in vm.grants.get(holder, []):
+            return done     # it was stolen from in turn: its record stays as a link of the chain
+        for lease in mine:
+            vm.leases.remove(lease)
+            scopes, target = lease["scopes"], lease["from"]
+            seen = {holder}
+            while target not in seen and not self._alive(target):
+                seen.add(target)
+                prev = next((x for x in vm.leases if x["to"] == target), None)
+                if prev is None:
+                    target = ""
+                    break
+                vm.leases.remove(prev)
+                scopes, target = prev["scopes"], prev["from"]
+            if target in seen:
+                target = ""
+            done.append({"from": holder, "to": target, "scopes": scopes})
+        # one holder per VM: the borrower's control goes, the recipient's comes
+        left = [x for x in vm.grants.get(holder, []) if x not in (CONTROL, EXEC)]
+        if left:
+            vm.grants[holder] = left
+        else:
+            vm.grants.pop(holder, None)
+        self._drop_session_control(vm, holder, why=f"steal returned ({reason})")
+        for row in done:
+            if row["to"]:
+                have = set(vm.grants.get(row["to"], [])) | {VIEW} | set(row["scopes"])
+                vm.grants[row["to"]] = [x for x in SCOPES if x in have]
+            self._log(vm.id, holder, "steal_return", reason=reason, scopes=row["scopes"],
+                      **{"from": holder, "to": row["to"]})
+        return done
+
+    def return_leases(self, vm_id: str, session: str, reason: str = "manual") -> List[dict]:
+        """Give back the control ``session`` took by stealing (``reason``:
+        ``kill``, ``merge`` or ``manual``)."""
         with self._lock:
+            vm = self.get(vm_id)
+            if not any(x["to"] == session for x in vm.leases) or CONTROL not in vm.grants.get(session, []):
+                raise VmError("vm_no_lease", f"{session}은(는) {vm_id}에서 빼앗아 가진 control이 없습니다")
+            done = self._give_back(vm, session, reason)
+            self._save()
+            return done
+
+    def return_all(self, session: str, reason: str) -> List[dict]:
+        """Every VM's loan ``session`` holds is given back (it ended, or its
+        quick-fork merged)."""
+        out = []
+        with self._lock:
+            for vm in self._vms.values():
+                got = self._give_back(vm, session, reason)
+                out += [dict(r, vm=vm.id) for r in got]
+            if out:
+                self._save()
+        return out
+
+    def session_exited(self, session: str) -> None:
+        """A session ended: hand back whatever it held, and give back what it
+        stole. Grants stay (a resumed session of the same name keeps its access)."""
+        with self._lock:
+            self._ended.add(session)
             for pending in self.requests.values():
                 pending.pop(session, None)
             for vm in self._vms.values():
                 self._drop_session_control(vm, session, why="session exited")
+            self.return_all(session, "kill")
 
     def _drop_session_control(self, vm: Vm, session: str, *, why: str) -> None:
         if session == vm.controller:

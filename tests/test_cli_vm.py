@@ -63,6 +63,13 @@ def test_grant_names_the_scopes_and_exec_is_only_there_when_asked(client, capsys
         run("grant", "a", "s1", "root")
 
 
+def test_grant_steal_flag_is_sent_only_when_given(client):
+    run("grant", "a", "s1", "control", "--steal")
+    assert client.calls[-1][2] == {"session": "s1", "scopes": ["control"], "steal": True}
+    run("grant", "a", "s1", "control")
+    assert "steal" not in client.calls[-1][2]
+
+
 def test_a_refusal_is_printed_and_exits_1(client, capsys):
     client.error = daemon_client.DaemonClientError("POST /api/vm/a/start: vm_slots_full: 2 of 2",
                                                    status=409)

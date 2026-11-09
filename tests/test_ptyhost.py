@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -55,7 +56,15 @@ def _pid_alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             return fh.read().split(")")[-1].split()[0] != "Z"
     except OSError:
-        return True
+        # No procfs (macOS): ask ps for the process state.
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return bool(out) and not out.startswith("Z")
 
 
 def _wait(pred, timeout: float = 10.0) -> bool:
@@ -521,9 +530,28 @@ def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
     assert pid and pid not in [p.pid for p in hc._started]
     try:
         assert conftest._owned_host_pids(tmp_path) == [pid]
-        with open(f"/proc/{pid}/environ", "rb") as fh:
-            assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
+        if os.path.exists("/proc/self"):
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
     finally:
         conftest._end_pid(pid)
     assert _wait(lambda: not _pid_alive(pid))
     assert conftest._owned_host_pids(tmp_path) == []
+
+
+def test_leak_check_ignores_a_pid_file_naming_another_program(tmp_path):
+    """A pid file whose pid belongs to an unrelated program is not a host the
+    run owns, with or without /proc, so the leak check never ends it."""
+    import subprocess
+
+    import conftest
+
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        directory = tmp_path / "stale"
+        directory.mkdir()
+        (directory / "ptyhost.pid").write_text(f"{other.pid}\n", encoding="ascii")
+        assert conftest._owned_host_pids(tmp_path) == []
+    finally:
+        other.kill()
+        other.wait(timeout=5)

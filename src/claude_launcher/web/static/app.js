@@ -20722,6 +20722,7 @@ function configureSessionFork(source) {
     syncQuickForkRole();
   };
   f.quick_fork_workflow.onchange = () => { view.forkWfPicked = true; syncQuickForkInputs(); };
+  renderQuickForkVms(source, view, load);
   view.forkWorkflows = [];
   view.forkInputsFor = null;
   syncQuickForkInputs();
@@ -20838,6 +20839,99 @@ async function syncQuickForkRole() {
   note.classList.toggle("wf-warning", !!state.error);
 }
 
+/* The VMs a quick-fork's origin holds a grant on, with the copy's scopes per VM.
+   The defaults are the origin's view and files; control and exec start off, and
+   control that another session holds is taken only with the steal box. The
+   grants are applied after the copy has a name, through the user-only grant
+   route (a session cannot call it). */
+const QF_VM_SCOPES = ["view", "files", "control", "exec"];
+async function renderQuickForkVms(source, view, load) {
+  const box = $("new-quick-fork-vms");
+  const rows = $("new-quick-fork-vm-rows");
+  view.forkVms = [];
+  box.classList.add("hidden");
+  rows.innerHTML = "";
+  let data = null;
+  try {
+    const resp = await api("/api/vm");
+    data = resp && resp.ok ? await resp.json() : null;
+  } catch (_) { data = null; }
+  if (view.forkLoad !== load) return;
+  const mine = ((data && data.vms) || []).filter((v) => (v.grants || {})[source.name]);
+  if (!mine.length) return;
+  for (const vm of mine) {
+    const had = vm.grants[source.name] || [];
+    const holders = Object.entries(vm.grants).filter(([n, sc]) => n !== source.name && sc.includes("control")).map(([n]) => n);
+    const sourceHolds = had.includes("control");
+    const stealFrom = [...(sourceHolds ? [source.name] : []), ...holders];
+    const row = document.createElement("div");
+    row.className = "qf-vm-row";
+    row.dataset.vm = vm.id;
+    const name = document.createElement("b");
+    name.textContent = vm.id;
+    row.appendChild(name);
+    for (const scope of QF_VM_SCOPES) {
+      const lab = document.createElement("label");
+      lab.className = "check";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.scope = scope;
+      cb.checked = scope === "view" || scope === "files" ? had.includes(scope) : false;
+      cb.setAttribute("aria-label", `${vm.id} ${scope}`);
+      lab.append(cb, document.createTextNode(` ${scope}`));
+      row.appendChild(lab);
+    }
+    if (stealFrom.length) {
+      const lab = document.createElement("label");
+      lab.className = "check";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.dataset.steal = "1";
+      cb.setAttribute("aria-label", `${vm.id} steal`);
+      lab.append(cb, document.createTextNode(` ${stealFrom.join(", ")}에서 control을 빼앗아 부여 (체크할 때만)`));
+      row.appendChild(lab);
+    }
+    row.dataset.holders = stealFrom.join(",");
+    rows.appendChild(row);
+  }
+  view.forkVms = mine.map((v) => v.id);
+  box.classList.remove("hidden");
+}
+
+/* [{id, scopes, steal}] for the VM rows, or {error}. */
+function quickForkVmGrants() {
+  const out = [];
+  for (const row of document.querySelectorAll("#new-quick-fork-vm-rows .qf-vm-row")) {
+    const scopes = QF_VM_SCOPES.filter((s) => row.querySelector(`input[data-scope="${s}"]`).checked);
+    if (!scopes.length) continue;
+    const steal = !!(row.querySelector("input[data-steal]") || {}).checked;
+    if (scopes.includes("control") && row.dataset.holders && !steal) {
+      return { error: `${row.dataset.vm}: control은 ${row.dataset.holders.replace(/,/g, ", ")}이(가) 가지고 있습니다. 빼앗아 부여를 체크하거나 control을 끄십시오` };
+    }
+    out.push({ id: row.dataset.vm, scopes: ["view", ...scopes.filter((s) => s !== "view")], steal: steal && scopes.includes("control") });
+  }
+  return { grants: out };
+}
+
+async function applyQuickForkVmGrants(child, grants) {
+  const failed = [];
+  for (const g of grants) {
+    try {
+      const resp = await api(`/api/vm/${encodeURIComponent(g.id)}/grant`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: child, scopes: g.scopes, ...(g.steal ? { steal: true } : {}) }),
+      });
+      if (!resp.ok) {
+        const info = await resp.json().catch(() => ({}));
+        failed.push(`${g.id}: ${info.message || info.error || `HTTP ${resp.status}`}`);
+      }
+    } catch (err) {
+      failed.push(`${g.id}: ${err && err.message ? err.message : "request failed"}`);
+    }
+  }
+  if (failed.length) await modalInfo(`'${child}'에 VM 권한을 부여하지 못했습니다`, failed.join("\n"));
+}
+
 function quickForkSourceName(view) {
   return ((view && view.source) || {}).name || "the origin";
 }
@@ -20883,11 +20977,20 @@ async function submitSessionFork(f) {
     $("create-error").classList.remove("hidden");
     return;
   }
+  const vmGrants = quickForkVmGrants();
+  if (vmGrants.error) {
+    $("create-error").textContent = vmGrants.error;
+    $("create-error").classList.remove("hidden");
+    return;
+  }
+  if (vmGrants.grants.some((g) => g.scopes.includes("exec")) &&
+      !window.confirm("복사본에 exec를 줍니다. 게스트 셸 실행과 설치·설정 변경을 허용합니다. 계속합니까?")) return;
   createBusy = true;
   setActionPending(f.querySelector("button[type=submit]"), true, "Forking…");
   $("create-error").classList.add("hidden");
   try {
     await quickForkSession(view.source.name, f.quick_fork_task.value.trim(), options, {
+      vmGrants: vmGrants.grants,
       onError: (message) => {
         $("create-error").textContent = message;
         $("create-error").classList.remove("hidden");
@@ -20937,6 +21040,8 @@ async function quickForkSession(name, task, options, view = {}) {
     return null;
   }
   if (view.onCreated) view.onCreated(info);
+  const forked = (info.session || {}).name;
+  if (forked && view.vmGrants && view.vmGrants.length) await applyQuickForkVmGrants(forked, view.vmGrants);
   await refreshSessions({ state: "current" });
   // Straight to the copy: a quick-fork is made to be worked in, and the
   // origin's terminal is where the reader already was.

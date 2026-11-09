@@ -7911,6 +7911,9 @@ body.embed #main { width: 100%; }
 #new-session #new-quick-fork > label > select { margin-top: 6px; }
 #new-session #new-quick-fork > p { margin: 0; line-height: 1.5; }
 #new-session #new-quick-fork > .wf-note { margin-top: -6px; }
+#new-session #new-quick-fork > #new-quick-fork-vms { grid-column: 1 / -1; }
+#new-quick-fork-vms .qf-vm-row { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin: 4px 0; }
+#new-quick-fork-vms .qf-vm-row > b { min-width: 7em; }
 @container session-form (max-width: 560px) {
   #new-session #new-quick-fork:not(.session-field-hidden) { grid-template-columns: minmax(0, 1fr); }
 }
