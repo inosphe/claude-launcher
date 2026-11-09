@@ -66,6 +66,19 @@ log = logging.getLogger(__name__)
 PREFIX = "[claunch plan]"
 
 
+def _paused_in_plan_gate(outbox, session: str) -> bool:
+    """Whether ``session``'s v2 run waits in the plan gate's ``pause``.
+
+    The pause is the run's (``daemon/cflow2_pause``), not the session's
+    reminder pause, so the wake and recovery paths see an ordinary session.
+    """
+    try:
+        from . import cflow2_pause
+        return cflow2_pause.session_paused(outbox.manager, session)
+    except Exception:  # noqa: BLE001 - unreadable is not paused
+        return False
+
+
 def _quote(text: str) -> str:
     return "\n".join("  > " + line for line in (text or "").splitlines()) or "  > (empty)"
 
@@ -553,6 +566,14 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
         node = res["node"]
         text = decided_text(session, node, res["previous"])
         key = f"{session}:{node['id']}"
+        if _paused_in_plan_gate(outbox, session):
+            # pause(라운드 막바지 plan 게이트, claunch-umf88.1): 사용자가 이 세션을
+            # 재촉하지 않기로 고른 동안에는 블록을 타이핑하지 않는다. 결정은 이미
+            # plan에 저장됐고, 이 세션은 pause에서 깨어날 때 plan_get으로 읽는다.
+            res["delivery"] = {"state": "deferred", "queued_at": None, "settled_at": None,
+                               "forced": False, "kind": "decide"}
+            res["delivered"] = False
+            return web.json_response(res)
         outbox.send(key, session, "decide", lambda: text)
         res["delivery"] = outbox.view(key)
         res["delivered"] = res["delivery"]["state"] != "failed"
@@ -567,6 +588,12 @@ def install(app, store: Optional[plan_store.PlanStore] = None, runs_of=None, cre
             return err
         text = feedback_text(session, res["node"], res["text"])
         key = f"{session}:{(res['node'] or {}).get('id', '_feedback')}"
+        if _paused_in_plan_gate(outbox, session):
+            # pause 중에는 블록을 타이핑하지 않는다(claunch-umf88.1, decide와 같은 규칙).
+            return web.json_response({"delivery": {"state": "deferred", "queued_at": None,
+                                                   "settled_at": None, "forced": False,
+                                                   "kind": "feedback"},
+                                      "delivered": False})
         outbox.send(key, session, "feedback", lambda: text)
         delivery = outbox.view(key)
         return web.json_response({"delivery": delivery, "delivered": delivery["state"] != "failed"})

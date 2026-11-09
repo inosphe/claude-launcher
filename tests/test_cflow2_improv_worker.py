@@ -1317,17 +1317,114 @@ def test_settle_waits_for_plan_closure_without_a_deadline_when_required(tmp_path
     assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
 
 
-def test_settle_goes_on_after_three_minutes_when_closure_is_not_required(tmp_path, monkeypatch):
+def test_settle_asks_pause_skip_reject_after_a_minute_when_closure_is_not_required(
+        tmp_path, monkeypatch):
+    """라운드 막바지 plan 게이트(claunch-umf88.1): 60초를 기다린 뒤, 미결이 그대로면
+    자동 진행 대신 사용자에게 pause / skip / reject를 묻는다."""
     from claude_launcher.cflow2 import runtime
 
     st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}], {})
     [w] = st["waits"]
-    assert w["node"].endswith("closure-wait-timed") and w["seconds"] == 180
-    st = runtime.wait_tick(100.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert w["node"].endswith("closure-wait-timed") and w["seconds"] == 60
+    st = runtime.wait_tick(30.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
     assert [x["node"] for x in st["waits"]] == [w["node"]]
-    st = runtime.wait_tick(200.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not st.get("asks")
+    # 60초가 지나면 기다리지 않고 묻는다 — 정산은 아직 열리지 않았다.
+    st = runtime.wait_tick(70.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
     assert not any("closure" in x["node"] for x in st.get("waits") or [])
+    assert not any(c["label"] == "settle-check" for c in st.get("choices") or [])
+    [frame] = st["tasks"]
+    assert frame["label"] == "closure-choice/ask-frame"
+    st = runtime.report(frame["instance"], "ok", {"brief": GATE_BRIEF}, **kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "closure-choice/ask-pose"
+    assert [o["name"] for o in ask["options"]] == ["pause", "skip", "reject", "reframe"]
+
+
+def _ask_answer(st, kw, decision, reason=None):
+    from claude_launcher.cflow2 import runtime
+
+    [ask] = st["asks"]
+    return runtime.approve(ask["instance"], decision=decision, reason=reason, **kw)
+
+
+#: The plan gate's question, composed as ask-frame must compose it: the cases
+#: keys of `closure-choice` are the option names (frontend turns them into
+#: ask-user's `choices`).
+GATE_BRIEF = {
+    "problem": "계획 패널의 미결이 남아 있다",
+    "options": [
+        {"name": "pause", "summary": "s", "risk": "r", "outcome": "o",
+         "reversibility": "reversible"},
+        {"name": "skip", "summary": "s", "risk": "r", "outcome": "o",
+         "reversibility": "reversible"},
+        {"name": "reject", "summary": "s", "risk": "r", "outcome": "o",
+         "reversibility": "costly"},
+    ],
+    "recommendation": "skip",
+    "why": "w",
+}
+
+
+def _gate_open(tmp_path, monkeypatch):
+    """Drive the real settle to the plan gate's question and return (st, kw)."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _procedure_run(tmp_path, monkeypatch, [{"call": "settle"}], {})
+    st = runtime.wait_tick(70.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    [frame] = st["tasks"]
+    st = runtime.report(frame["instance"], "ok", {"brief": GATE_BRIEF}, **kw)
+    return st, kw
+
+
+def test_pause_keeps_waiting_without_a_deadline(tmp_path, monkeypatch):
+    """pause는 기한 없이 다시 기다린다 — 정산으로 넘어가지 않는다."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _gate_open(tmp_path, monkeypatch)
+    # 답의 결과를 그대로 읽는다 — status()는 probe를 진짜 셸로 재므로 여기서는
+    # 쓰지 않는다(테스트에는 `claunch`가 없다).
+    st = _ask_answer(st, dict(kw, now=71.0), "pause", "천천히 볼게요")
+    [w] = st["waits"]
+    assert w["node"].endswith("closure-pause-wait") and w["seconds"] is None
+    assert not any(c["label"] == "settle-check" for c in st.get("choices") or [])
+    # 하루를 기다려도, 미결이 남아 있는 한 정산으로 가지 않는다
+    st = runtime.wait_tick(86_400.0, lambda cmd, cwd: (1, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert [x["node"] for x in st["waits"]] == [w["node"]]
+    st = runtime.wait_tick(86_500.0, lambda cmd, cwd: (0, ""), cwd=kw["cwd"], scope=kw["scope"])
     assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
+
+
+def test_skip_goes_on_to_settle_check(tmp_path, monkeypatch):
+    st, kw = _gate_open(tmp_path, monkeypatch)
+    st = _ask_answer(st, dict(kw, now=71.0), "skip")
+    assert not st.get("waits")
+    assert any(c["label"] == "settle-check" for c in st.get("choices") or [])
+
+
+def test_reject_records_the_reason_and_leaves_settle_for_a_new_run(tmp_path, monkeypatch):
+    """reject는 settle을 정산까지 진행시키지 않는다 — 되돌리는 대신 같은 세션의
+    새 런이 같은 이슈를 다시 맡는다(settle이 finally라 여기서 회차를 되돌릴 수 없다)."""
+    st, kw = _gate_open(tmp_path, monkeypatch)
+    st = _ask_answer(st, dict(kw, now=71.0), "reject", "테스트 결과가 의도와 다르다")
+    assert [t["label"] for t in st["tasks"]] == ["closure-reject"]
+    assert st["data"]["closure_gate"]["decision"] == "reject"
+    assert not any(c["label"] == "settle-check" for c in st.get("choices") or [])
+
+
+def test_the_plan_gate_pause_is_read_from_the_run_not_the_session(tmp_path, monkeypatch):
+    """pause의 억제는 런이 표시한다 — 세션의 reminder pause(사람의 pause·hold)를
+    건드리지 않는다(사용자 지시: 「사람이 pause 한것처럼 처리하면 복구가 안되니까
+    다른 경로를 타야해」)."""
+    from claude_launcher.cflow2 import runtime
+    from claude_launcher.daemon import cflow2_pause
+
+    st, kw = _gate_open(tmp_path, monkeypatch)
+    assert not cflow2_pause.scope_paused(kw["cwd"], kw["scope"])
+    _ask_answer(st, dict(kw, now=71.0), "pause", "천천히 볼게요")
+    assert cflow2_pause.scope_paused(kw["cwd"], kw["scope"])
+    runtime.wait_tick(86_500.0, lambda cmd, cwd: (0, ""), cwd=kw["cwd"], scope=kw["scope"])
+    assert not cflow2_pause.scope_paused(kw["cwd"], kw["scope"])
 
 
 def test_moved_rule_prose_is_not_repeated_in_prompts():
