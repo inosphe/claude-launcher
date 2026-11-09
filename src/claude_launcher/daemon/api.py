@@ -15463,11 +15463,23 @@ async def h_config_doc_post(request: web.Request) -> web.Response:
                 status=409,
             )
         try:
-            current = config_doc.read()["doc"]
+            # Parse the bytes the hash was checked on: a second read would
+            # apply the ops to whatever another process wrote in between.
+            current = config_doc.parse(data)
             updated = config_doc.apply_ops(current, body["ops"])
             config_doc.validate(updated)
         except (config_doc.OpError, config_doc.InvalidDoc, store.StoreError) as exc:
             return json_error(422, str(exc))
+        # The lock above only orders this process's requests; the CLI writes
+        # the same file. Check once more right before the write, so a write
+        # that landed while the ops were applied is refused rather than
+        # overwritten. (The gap left is this check to the store's rename.)
+        now = config_doc.digest(config_doc.file_bytes())
+        if now != base_hash:
+            return json_response(
+                {"error": "the config file changed since base_hash was read", "hash": now},
+                status=409,
+            )
         try:
             store.save(updated)
         except store.StoreError as exc:

@@ -242,12 +242,20 @@ def credential_kinds(doc: dict) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def parse(data: bytes) -> Dict[str, Any]:
+    """The document ``data`` (the config file's bytes) holds.
+
+    Callers that check :func:`digest` of ``data`` parse these same bytes, so
+    the document they change is the one the hash names.
+    """
+    text = data.decode("utf-8") if data else ""
+    return store.parse_text(text, store.path()) if text else {"version": store.VERSION}
+
+
 def read() -> Dict[str, Any]:
     """The ``GET /api/config/doc`` answer, minus the machine name."""
     data = file_bytes()
-    text = data.decode("utf-8") if data else ""
-    doc = store.parse_text(text, store.path()) if text else {"version": store.VERSION}
-    return {"doc": doc, "hash": digest(data)}
+    return {"doc": parse(data), "hash": digest(data)}
 
 
 def machine() -> str:
