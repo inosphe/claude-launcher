@@ -5118,6 +5118,33 @@ nodes:
       keep-alive·delivery-hold 명령은 실행하지 않았다.
     effects: [board.write, mesh.send]
 
+  closure-reject:
+    title: 라운드 감사 거절 기록 (플랜 게이트의 reject)
+    prompt: |
+      사용자가 라운드 막바지 plan 게이트에서 reject를 골랐다 — 플랜 감사 통과
+      거절이다(예: 실제 테스트 결과가 의도와 다름). 이 회차는 정산으로 넘어가지
+      않고, 같은 세션의 새 런이 같은 이슈를 다시 맡는다(claunch-umf88.1).
+
+      답의 이유: ${data.closure_gate.reason}
+      회차 이슈: ${data.claim.issue}
+
+      1. 이 회차 이슈에 거절 기록을 남긴다. 본문은 `$CLAUNCH_SCRATCH` 아래 파일에
+         쓰고 `claunch beads comments add ${data.claim.issue} -f <그 파일>`로
+         넣는다(`-f/--file`이 본문 플래그다 — `--body-file`은 없다). 첫 줄은
+         `REJECT @ <이 런 id> — 플랜 감사 통과 거절`이고(런 id는 `claunch cflow2
+         status -t $CLAUNCH_SESSION`의 `run` 값이다), 그 아래에 사용자가 적은
+         이유를 그대로 옮긴다. 이유가 비어 있으면 「사용자가 이유를 적지 않았다」로
+         남긴다.
+      2. 답의 이유가 비어 있지 않으면 새 런이 읽을 수 있게 같은 코멘트 끝에
+         `REWORK: <이유 한 줄>`을 남긴다.
+      3. 보고의 issue는 `${data.claim.issue}`다 — 새 이슈를 만들지 않는다. 다음
+         단계(end-new-task)가 이 값을 읽어 같은 세션의 새 런을 세운다.
+    done_when: |
+      이 회차 이슈에 `REJECT @` 코멘트가 있고, 보고에 그 이슈 id가 있다.
+    returns:
+      ok: {issue: str}
+    effects: [board.write, fs.write]
+
   end-new-task:
     title: 새 작업으로 다음 런 시작 (사용자 지시)
     prompt: |
@@ -5130,7 +5157,11 @@ nodes:
 
       1. 새 작업의 이슈를 정한다. 선택의 reason과 사용자의 말(`claunch cflow2
          journal`, 터미널 지시)에서 작업을 읽는다. 기존 이슈 id를 받았으면 그
-         id다. 그 id가 이 런의 self-improve가 등록한 이슈(label `self-improve`,
+         id다. **reject 갈래에서 왔으면(`data.closure_gate`에 적힌 답이
+         `reject`일 때, settle의 closure-gate) 새 이슈를 만들지 않고 이 회차
+         이슈(`${data.claim.issue}`)를 그대로 쓴다** — 감사에서 되돌린 일을 새
+         런이 다시 맡는 것이고, `REJECT:`·`REWORK:` 코멘트는 앞의
+         closure-reject가 이미 남겼다. 그 id가 이 런의 self-improve가 등록한 이슈(label `self-improve`,
          assignee 없음)면 `claunch beads update <id> --assignee $CLAUNCH_SESSION`
          으로 잡는다 — 상태는 open 그대로다. 아니면 중복을 확인한 뒤(`claunch beads search "<핵심어>" --json`)
          만든다: `claunch beads create "<제목>" --type task --priority 2
@@ -8091,16 +8122,116 @@ procedures:
                           skipped: []
                   - {break: closure-watch}
           - else:
-              id: closure-wait-timed
-              wait:
-                probe: [claunch, gate, plan-waiting, --notify]
-                poll: 30
-                seconds: 180
-                undecided_max: 3
-                describe: "계획 패널의 미결이 해소되기를 180초 기다린다 — 만료되면 정산으로 진행한다(require_plan_closure=false)"
-              on:
-                timeout: []
-                undecidable: []
+              # 라운드 막바지 선택지(claunch-umf88.1, 사용자 지시 2026-11-08):
+              # 180초 자동 진행을 60초 + 질문으로 바꾼다. 60초 안에 미결이
+              # 해소되면 지금까지처럼 그대로 통과하고, 만료되면 사용자에게
+              # pause / skip / reject를 묻는다. 질문에도 5분 기한이 있어
+              # 무응답이면 skip과 같이 정산으로 간다(end-deadline과 같은 모양).
+              # require_plan_closure=true 갈래는 그대로다 — 그 입력은 「처음부터
+              # 기한 없이 기다린다」는 뜻이고, 이 갈래는 「60초 뒤에 사람에게
+              # 묻는다」는 뜻이다. 둘은 같은 선택지를 두 곳에서 정하는 것이
+              # 아니라 대기 정책의 두 가지 서로 다른 값이다.
+              #   pause  — 기한 없이 다시 기다린다(위 closure-watch와 같은 probe).
+              #            에이전트는 이 선택을 통지받지 않는다: pause 대기는
+              #            드라이버가 할 일이 아니고(_waits_on_driver), 그동안
+              #            데몬은 세션 리마인더와 plan 블록 타이핑을 멈춘다
+              #            (daemon/cflow2_pause.py). 세션 상태를 사람의 pause
+              #            (held)로 바꾸지 않는다 — 사용자 지시: 「사람이 pause
+              #            한것처럼 처리하면 복구가 안되니까 다른 경로를 타야해」.
+              #   skip   — 타이머를 더 기다리지 않고 정산으로 간다.
+              #   reject — 플랜 감사 통과 거절. settle은 finally이고 그 안의
+              #            비-ok 결과는 런을 끝내므로(cflow2/runtime.py:1453-1458)
+              #            회차를 되돌릴 손잡이가 없다. 그래서 되돌리는 대신
+              #            `REJECT:` 기록을 남기고 end-new-task로 같은 세션의
+              #            새 런이 같은 이슈를 다시 맡게 한다(사용자 결정).
+              id: closure-gate-timed
+              # 세 문장이다: 60초 기다린다 → 답이 없으면 5분 묻는다 → 답으로 갈래를
+              # 고른다. 갈래를 `cases`가 아니라 raise → catch로 옮긴 이유는 pause
+              # 때문이다 — pause는 기한이 없어야 하는데, `cases`의 갈래는 그 질문을
+              # 감싼 timeout 창 안에서 돌아 창이 닫히면 함께 끊긴다(실측: 360초에
+              # pause 대기가 취소되고 정산이 열렸다). 갈래는 창 밖의 catch에 있다.
+              seq:
+                - id: closure-wait-timed
+                  wait:
+                    probe: [claunch, gate, plan-waiting, --notify]
+                    poll: 30
+                    seconds: 60
+                    undecided_max: 3
+                    describe: "계획 패널의 미결이 해소되기를 60초 기다린다 — 만료되면 pause/skip/reject를 묻는다(require_plan_closure=false)"
+                  on:
+                    timeout: []
+                    undecidable: []
+                - try:
+                    - id: closure-choice-deadline
+                      timeout:
+                        seconds: 300
+                        do:
+                          - id: closure-choice
+                            call: ask-user
+                            bind: closure_gate
+                            with:
+                              # 선택지 이름은 cases의 키가 정한다(frontend가 그 키를
+                              # ask-user의 choices로 넘긴다).
+                              # 회차의 정산 자리에서 서는 질문이라 답이 늦어도 잃는
+                              # 것이 없다 — 알림이 `deferrable`을 선언해 창의 접힌
+                              # 목록에서 빠진다(종료 질문과 같은 이유, th-3b3470).
+                              criteria: [deferrable]
+                              # 이 질문은 5분 기한이 도는 것을 사용자가 알아야 답한다.
+                              nudge: |
+                                이 질문은 사람의 답을 기다리고, 5분 안에 답이 없으면
+                                skip과 같이 정산으로 간다. 질문 brief를 쓴 뒤, 턴을
+                                끝내기 전에 MCP `flow_nudge(message)`를 **한 번** 부른다.
+                                메시지는 한두 줄로 무엇을 정해야 하는지와 답하는 명령
+                                (`claunch cflow2 approve <instance> --option <선택지>`)을
+                                담는다. 답이 오지 않으면 다시 부르지 않는다.
+                              topic: |
+                                이 회차의 작업은 끝났고, 계획 패널에 아직 사용자가 답하지
+                                않은 항목(미결·closure)이 남아 있다. 60초 동안 기다렸지만
+                                해소되지 않았다. 정산으로 넘어가기 전에 무엇을 할지 고른다.
+
+                                pause:  더 기다린다 — 기한 없이, 계획 패널의 미결이
+                                        해소될 때까지. 이 세션은 그동안 재촉받지 않는다
+                                        (리마인더와 plan 답변 전달이 멈춘다). 에이전트는
+                                        pause가 걸린 것을 통지받지 못하고, 스스로 다음
+                                        경로로 넘어가지 않는다. 해소되면 그때 정산으로 간다.
+                                skip:   더 기다리지 않고 지금 정산으로 간다. 지금까지의
+                                        180초 만료와 같은 결과다.
+                                reject: 플랜 감사를 통과시키지 않는다 — 실제 테스트 결과가
+                                        의도와 다르거나, 이 회차의 산출물을 정산에 올릴 수
+                                        없을 때다. 이 회차는 정산하지 않고 `REJECT:` 기록을
+                                        남긴 뒤, 같은 세션의 새 런이 같은 이슈를 다시 맡는다.
+
+                                reject를 고르면 이유를 반드시 적는다 — 그 이유가 새 런의
+                                목표가 된다. pause·skip은 이유가 없어도 된다.
+                            cases:
+                              pause: [{raise: gate-pause}]
+                              skip: []
+                              reject: [{raise: gate-reject}]
+                        else: []
+                  catch:
+                    gate-pause:
+                      id: closure-pause
+                      loop:
+                        while: "true"
+                        max: 20
+                        do:
+                          - id: closure-pause-wait
+                            wait:
+                              probe: [claunch, gate, plan-waiting, --notify]
+                              poll: 30
+                              undecided_max: 3
+                              describe: "사용자가 pause를 골랐다 — 계획 패널의 미결이 해소될 때까지 기다린다(기한 없음)"
+                            on:
+                              undecidable:
+                                try: [plan-wait-unclear]
+                                catch:
+                                  ok: {continue: closure-pause}
+                                  skipped: []
+                          - {break: closure-pause}
+                    gate-reject:
+                      - closure-reject
+                      - end-new-task
+                      - {return: ok}
       - id: settle-watch
         loop:
           while: "true"
