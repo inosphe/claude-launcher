@@ -624,7 +624,8 @@ globalThis.ChartPage = (() => {
     const fallback = { group: "", groupPick: "", range: "7d",
                        archived: false, excludeKilled: false, sort: "created",
                        tree: true,
-                       split: SPLIT_DEFAULT, selected: "", scale: "log" };
+                       split: SPLIT_DEFAULT, selected: "", scale: "log",
+                       pane: "summary" };
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
       return Object.assign(fallback, saved && typeof saved === "object" ? saved : {});
@@ -1469,6 +1470,127 @@ globalThis.ChartPage = (() => {
     else hideTip();
   }
 
+  /* The column's two views (claunch-h82vq): the chart's own summary of the
+     row, or the dashboard's full session detail. A radio drawn as buttons,
+     the lit one dead, like the detail's own tabs; remembered with the view. */
+  function paneTabs() {
+    const bar = node("div", "seq-tabs chart-detail-tabs");
+    bar.setAttribute("role", "tablist");
+    for (const [id, label, title] of [
+      ["summary", "요약", "이 행의 생존 시간·토큰·cflow 요약"],
+      ["detail", "Detail", "대시보드의 세션 detail panel (메타데이터, 메시지, Workflow, Beads)"],
+    ]) {
+      const on = (state.pane || "summary") === id;
+      const tab = node("button", "seq-tab" + (on ? " on" : ""), label);
+      tab.type = "button";
+      tab.title = title;
+      tab.dataset.pane = id;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(on));
+      if (!on) tab.onclick = () => { state.pane = id; remember(); render(true); };
+      bar.appendChild(tab);
+    }
+    return bar;
+  }
+
+  /* After the press, the column redraws from the caches the press refreshed. */
+  function afterPress(p) {
+    Promise.resolve(p).catch(() => {}).finally(() => render(true));
+  }
+
+  function actionButton(label, title, onPress, cls = "") {
+    const b = node("button", "wf-btn chart-act" + (cls ? " " + cls : ""), label);
+    b.type = "button";
+    b.title = title;
+    b.onclick = () => {
+      b.disabled = true;
+      afterPress(onPress());
+    };
+    return b;
+  }
+
+  /* The session's lifecycle presses (claunch-h82vq), the header's and the
+     rail card's own: app.js killSession, pauseSession, holdSession,
+     archiveSession and respawnSession, which keep their confirms and their
+     error modals. What a state offers follows the terminal header: a live
+     session can be killed, paused, held or archived; an ended one resumed,
+     archived, and (paused, held or failed) filed as killed. Absent in a
+     harness that loads this file without app.js. */
+  function actionsBar(s) {
+    if (!s || !s.name || typeof killSession !== "function") return null;
+    const name = s.name;
+    const bar = node("div", "chart-detail-actions");
+    bar.setAttribute("aria-label", "session actions");
+    const open = node("a", "wf-btn chart-act", "터미널");
+    open.href = "#/s/" + encodeURIComponent(name);
+    open.title = "이 세션의 터미널을 연다";
+    bar.appendChild(open);
+    const cat = typeof sessionCategory === "function" ? sessionCategory(s) : category(s);
+    const live = s.status !== "exited";
+    if (!live && cat !== "archived" && typeof respawnSession === "function") {
+      bar.appendChild(actionButton("resume", "이 세션을 같은 이름·대화로 다시 띄운다",
+        () => respawnSession(name), "approve"));
+    }
+    if (live || cat === "hold" || cat === "paused" || cat === "failed" || cat === "delayed") {
+      const k = typeof killControlState === "function"
+        ? killControlState(s, typeof killUiState === "object" ? killUiState.get(name) : null)
+        : { label: "kill", disabled: false, title: "terminate the program running in this session" };
+      const kill = actionButton(k.label, k.title, () => killSession(name), "deny");
+      kill.dataset.act = "kill";
+      kill.disabled = !!k.disabled;
+      bar.appendChild(kill);
+    }
+    if (live && typeof pauseSession === "function") {
+      bar.appendChild(actionButton("pause", "지금 멈추고 paused로 남긴다 (resume으로 되살린다)",
+        () => pauseSession(name)));
+    }
+    if (live && typeof holdSession === "function") {
+      bar.appendChild(actionButton("hold", "프로그램을 내리고 기록은 남긴다 (메시지·cflow 알림이 깨운다)",
+        () => holdSession(name)));
+    }
+    if (cat !== "archived" && typeof archiveSession === "function") {
+      bar.appendChild(actionButton("archive", live
+        ? "프로그램을 끝내고 기록을 보관한다 (확인 후)"
+        : "기록을 보관한다", () => archiveSession(name)));
+    }
+    for (const b of bar.querySelectorAll("button")) if (!b.dataset.act) b.dataset.act = b.textContent;
+    return bar;
+  }
+
+  /* What the session's runs wait on a person for, with the presses the
+     terminal's cflow strip offers (app.js sessionGateViews and
+     pressGateAnswer, claunch-h82vq): every owed answer, not only the first. */
+  function gatesBlock(name) {
+    if (typeof sessionGateViews !== "function") return null;
+    const views = sessionGateViews(name);
+    if (!views.length) return null;
+    const box = node("div", "chart-detail-gates");
+    box.setAttribute("aria-label", "cflow gates");
+    for (const v of views) {
+      const item = node("div", "chart-gate" + (v.optional ? " optional" : ""));
+      const head = node("a", "chart-gate-head", `◆ ${v.what}`);
+      head.href = v.href;
+      head.title = "이 런의 페이지를 연다";
+      item.appendChild(head);
+      const q = node("div", "chart-gate-question", v.question);
+      q.title = v.question;
+      item.appendChild(q);
+      if (v.answers.length) {
+        const btns = node("div", "chart-gate-buttons");
+        for (const a of v.answers) {
+          const b = node("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
+          b.type = "button";
+          if (a.title) b.title = a.title;
+          b.onclick = () => afterPress(pressGateAnswer(a, v.after));
+          btns.appendChild(b);
+        }
+        item.appendChild(btns);
+      }
+      box.appendChild(item);
+    }
+    return box;
+  }
+
   /* The right column: everything known about the picked session. The record
      is looked up in every session the page holds, so a pick that the
      current filter hides still shows (with a note saying so). */
@@ -1495,6 +1617,11 @@ globalThis.ChartPage = (() => {
             meshes, role: roleOf(s, meshes, ""), cflow: appCflowOf(s.name) };
     }
     const s = r.session;
+    // Two parts (claunch-h82vq.1): the top -- name, presses, gates and the
+    // 요약 | Detail radio -- stays put, and only the body under it scrolls,
+    // so the controls are in reach however far down the detail is read.
+    const top = node("div", "chart-detail-top");
+    const body = node("div", "chart-detail-body");
     const head = node("div", "chart-detail-head");
     head.appendChild(node("span", `chart-dot cat-${r.category}`));
     head.appendChild(node("h3", "chart-detail-name", r.name));
@@ -1503,9 +1630,25 @@ globalThis.ChartPage = (() => {
     close.title = "선택 해제";
     close.onclick = () => pick(r.name);
     head.appendChild(close);
-    box.appendChild(head);
-    if (hidden) box.appendChild(node("p", "chart-muted chart-detail-note",
+    top.appendChild(head);
+    if (hidden) top.appendChild(node("p", "chart-muted chart-detail-note",
       "현재 필터 조건에는 이 세션이 포함되지 않는다."));
+    const acts = actionsBar(s);
+    if (acts) top.appendChild(acts);
+    const gates = gatesBlock(r.name);
+    if (gates) top.appendChild(gates);
+    top.appendChild(paneTabs());
+    box.appendChild(top);
+    box.appendChild(body);
+    if (state.pane === "detail") {
+      // The dashboard's own session detail (#sess-view) goes in here once
+      // the column is on the page (paint -> hostSessDetail): the same panel,
+      // its poll and its sub-tabs, moved rather than drawn twice.
+      const slot = node("div", "chart-detail-host");
+      slot.dataset.name = r.name;
+      body.appendChild(slot);
+      return box;
+    }
 
     const dl = node("dl", "chart-detail-list");
     const item = (label, value) => {
@@ -1578,10 +1721,10 @@ globalThis.ChartPage = (() => {
     } else {
       item("cflow", "없음");
     }
-    box.appendChild(dl);
+    body.appendChild(dl);
     const link = node("a", "chart-detail-open", "세션 열기 →");
     link.href = "#/s/" + encodeURIComponent(r.name);
-    box.appendChild(link);
+    body.appendChild(link);
     return box;
   }
 
@@ -1635,6 +1778,17 @@ globalThis.ChartPage = (() => {
     return typeof currentName === "string" ? currentName : "";
   }
 
+  function detailInUse() {
+    if (typeof document === "undefined") return false;
+    const host = document.querySelector && document.querySelector("#chart-view .chart-detail-host");
+    if (!host) return false;
+    const f = document.activeElement;
+    if (f && host.contains(f) && (f.tagName === "INPUT" || f.tagName === "TEXTAREA"
+        || f.tagName === "SELECT" || f.isContentEditable)) return true;
+    const sel = typeof getSelection === "function" ? getSelection() : null;
+    return !!(sel && !sel.isCollapsed && sel.anchorNode && host.contains(sel.anchorNode));
+  }
+
   function render(force = false) {
     const boxes = targets();
     if (!boxes.length) return;
@@ -1645,6 +1799,10 @@ globalThis.ChartPage = (() => {
     const focused = typeof document !== "undefined" && document.activeElement;
     if (!force && focused && focused.tagName === "SELECT"
         && boxes.some((b) => b.root.contains(focused))) return;
+    // The same for the borrowed session detail: a redraw moves its node,
+    // and a moved node drops the caret of whatever is being typed in it and
+    // the reader's text selection.
+    if (!force && detailInUse()) return;
     // The fleet's token use over the same window and the same picks
     // (claunch-x15q5) is read before the rows are built: the rows print their
     // own figures from the same payload, so the column and the chart cannot
@@ -1670,7 +1828,8 @@ globalThis.ChartPage = (() => {
          : focused.dataset && focused.dataset.name ? focused.dataset.name : "")
       : "";
     const oldMain = root.querySelector(".chart-main");
-    const oldSide = root.querySelector(".chart-detail");
+    // The detail column's scroller is its body; its top does not move.
+    const oldSide = root.querySelector(".chart-detail-body");
     const tops = [oldMain ? oldMain.scrollTop : 0, oldSide ? oldSide.scrollTop : 0];
     // The grid keeps its own horizontal place across a redraw; read it before
     // the rebuild replaces the node. The timeline column (.chart-main) is the
@@ -1680,6 +1839,12 @@ globalThis.ChartPage = (() => {
     const prevPct = prevScroll ? prevScroll.dataset.widthpct : null;
     // The rail box scrolls as a whole (style.css #session-chart); keep it.
     const railTop = rail ? root.scrollTop : 0;
+    // A borrowed session detail (hostSessDetail) is parked on the body for
+    // the length of the rebuild: app.js finds it by id, and a node inside a
+    // wiped column is not in the document. The rebuild hosts it again or
+    // hands it back.
+    const borrowed = !rail && root.querySelector ? root.querySelector("#sess-view") : null;
+    if (borrowed && document.body) document.body.appendChild(borrowed);
     root.innerHTML = "";
     if (!rail) {
       const head = node("div", "wf-head");
@@ -1737,11 +1902,23 @@ globalThis.ChartPage = (() => {
       split.classList.add("solo");
     }
     root.appendChild(split);
+    // The Detail tab's slot takes the dashboard's own session panel now that
+    // it is on the page; any other arrangement hands a borrowed one back.
+    const slot = side ? side.querySelector(".chart-detail-host") : null;
+    if (slot && typeof hostSessDetail === "function") {
+      if (!hostSessDetail(slot, slot.dataset.name, () => { state.pane = "summary"; remember(); render(true); })) {
+        slot.appendChild(node("p", "chart-muted chart-detail-hint",
+          "이 세션의 detail이 오른쪽 레일(?detail=)에 열려 있다. 레일을 닫으면 여기에 나온다."));
+      }
+    } else if (!rail && typeof releaseSessDetail === "function") {
+      releaseSessDetail();
+    }
     // The tick spacing is a question about pixels, so it waits for the column
     // to have a width.
     layoutTicks(main, model);
     main.scrollTop = tops[0];
-    if (side) side.scrollTop = tops[1];
+    const sideBody = side ? side.querySelector(".chart-detail-body") : null;
+    if (sideBody) sideBody.scrollTop = tops[1];
     // Same axis width: the viewer keeps their place. A new width (range or
     // cap changed) opens on the newest time -- the right edge.
     const sameWidth = prevPct !== null && prevPct === String(model.axisWidthPct);
@@ -1796,6 +1973,8 @@ globalThis.ChartPage = (() => {
 
   function stop() {
     pageOpen = false;
+    // Leaving the page hands the borrowed session detail back to its rail.
+    if (typeof releaseSessDetail === "function") releaseSessDetail();
     stopTimerIfIdle();
     hideTip();
   }

@@ -448,7 +448,8 @@ function harness() {
     assert.ok(!/"⤢"|talk-max|talk-close/.test(src), "the conversation pane draws no ⤢ or × of its own");
     assert.ok(app.includes("onClose: () => setSessLayout(name, { split: false, max: false }),"));
     assert.ok(app.includes("onMax: (on) => setSessLayout(name, { max: !!on }),"));
-    assert.ok(app.includes("const max = up && lay.max;"), "every kind of pane enlarges");
+    assert.ok(app.includes("const max = up && !float && lay.max;"),
+              "every docked kind of pane enlarges (a floating one has no column)");
     assert.ok(app.includes('globalThis.SplitFrame?.setMax($("term-wf"), max);'));
     assert.ok(app.includes('document.body.classList.toggle("split-max", max);'));
     assert.ok(/body\.split-max #terminal[^{]*\{ display: none; \}/.test(css), "enlarged, the terminal steps aside");

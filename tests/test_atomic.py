@@ -224,6 +224,9 @@ def test_a_scratch_that_was_renamed_away_is_not_an_error(tmp_path):
 
 def test_a_reader_refused_by_a_replace_in_flight_is_retried(tmp_path, monkeypatch):
     """claunch-labxh.1: a read that lands inside a writer's replace is retried."""
+    # _read_refused retries EACCES only on Windows (the errno a sharing refusal
+    # carries there), so the platform is pinned for this Windows-specific case.
+    monkeypatch.setattr(atomic.sys, "platform", "win32")
     doc = tmp_path / "pool.json"
     doc.write_text("whole", encoding="utf-8")
     real = type(doc).read_text

@@ -447,7 +447,7 @@ def _read_paths(service, base, cfg):
     return out
 
 
-def _store_rows(service, base):
+def _store_rows(service, base, *, sizes=True):
     """Every collection on disk, marked with who reads it.
 
     ``rag.rag_stores`` answers what exists; this adds the two facts the DB
@@ -455,10 +455,12 @@ def _store_rows(service, base):
     running config is the one reading it. Both are answered by the path the
     runtime would open — ``_index_path`` — so a collection adopted under the
     pre-preset rule is attributed to its reader like any other
-    (claunch-fhs7f.1).
+    (claunch-fhs7f.1). ``sizes`` is passed through: the search card lists
+    these to find unopened collections and does not need the size walk
+    (claunch-c7vjm).
     """
     cfg = service.config()
-    rows = rag.rag_stores(base)
+    rows = rag.rag_stores(base, sizes=sizes)
     readers = _read_paths(service, base, cfg)
     active = readers.get("", set())
     for row in rows:
@@ -758,9 +760,15 @@ def install(app):
         falls back to its model identity; either way this lists what is
         there — name, width, model, size — so the reader can point a preset
         at a store it already has before a model swap (claunch-fhs7f.1).
+
+        ``?sizes=0`` skips the per-collection walk that totals the files.
+        The search card asks for the list to find collections no index has
+        opened yet, and it asks on a timer; the size it does not draw there
+        is the expensive part (claunch-c7vjm).
         """
         cfg = service.config()
-        rows = _store_rows(service, _rag_base(service))
+        sizes = request.query.get("sizes", "1") not in ("0", "false", "no")
+        rows = _store_rows(service, _rag_base(service), sizes=sizes)
         return web.json_response({
             "dbs": rows,
             "active": cfg.get("db") or "",

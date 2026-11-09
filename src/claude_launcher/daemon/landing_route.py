@@ -223,7 +223,12 @@ class Router:
         session = self._session(name)
         if session is None:
             return None, "is not a session of this daemon"
-        if getattr(session, "exited", False):
+        if getattr(session, "exited", False) and not getattr(session, "held_at", None):
+            # A held session is asleep, not gone (Session.held_at): its runs
+            # and their queues stay, the push is a write to its slot, and the
+            # clock wakes the driver when the queue's window opens
+            # (claunch-5l35i). Refusing it routed a request away from an idle
+            # leader as if it had ended (claunch-1brxe).
             return None, "has exited"
         why = self.merger_role(scope, name, blind)
         if why:

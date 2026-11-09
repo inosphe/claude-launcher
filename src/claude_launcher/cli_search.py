@@ -2,8 +2,8 @@
 
 ``search`` asks the running daemon to rank the board (``--kind beads``, the
 default), the fleet (``--kind sessions``) or the combined corpus
-(``--kind unified``; its deprecated name ``all`` still parses and prints one
-deprecation line) for a query: the same ``GET /api/search`` the dashboard's
+(``--kind unified``; its pre-rename name ``all`` is refused at the parser)
+for a query: the same ``GET /api/search`` the dashboard's
 search boxes call, so an
 agent looking for "the issue about X" gets the answer the operator would.
 ``--mode active`` (only with ``--kind unified``) drops the documents of sessions
@@ -69,19 +69,14 @@ def _fmt_row(row: dict, kind: str) -> str:
 
 
 def _kind_of(args) -> str:
-    """The corpus the caller named, under its current name.
+    """The corpus the caller named.
 
-    ``all`` is the deprecated name of the combined corpus. The daemon owns the
-    mapping (``daemon/rag.py`` ``ALIASES``); it is imported here rather than
-    restated so the two cannot drift, and the caller is told once on stderr.
+    The names are the daemon's (``daemon/rag.py`` ``KINDS``) and this parser's
+    ``choices`` is the same list, so a name that reaches here is one the
+    daemon answers. ``all`` — the combined corpus's name before the rename
+    (claunch-7aujp.1) — is not among them and argparse refuses it.
     """
-    from .daemon import rag as rag_mod
-
-    kind = rag_mod.canonical(args.kind)
-    if kind != args.kind:
-        print(f"claunch: --kind {args.kind} is deprecated; use --kind {kind}",
-              file=sys.stderr)
-    return kind
+    return args.kind
 
 
 def _cmd_search(args) -> int:
@@ -199,10 +194,10 @@ def register(sub) -> None:
         ),
     )
     p.add_argument("query", nargs="+", help="the query, in any language the model reads")
-    p.add_argument("--kind", choices=("beads", "sessions", "unified", "all"),
+    p.add_argument("--kind", choices=("beads", "sessions", "unified"),
                    default="beads",
                    help="what to search: this board, the fleet, or the combined corpus "
-                        "(default beads; 'all' is the deprecated name of unified)")
+                        "(default beads)")
     p.add_argument("--mode", choices=("general", "active"), default="general",
                    help="general, or active to drop documents of sessions that are no "
                         "longer live (only with --kind unified)")
@@ -228,12 +223,11 @@ def register(sub) -> None:
     pr = rsub.add_parser("reindex", help="start an index sync for a corpus")
     # The daemon's KINDS is the list, not this file: `unified` is the combined
     # corpus, and a CLI that refused it made the whole corpus unreachable from
-    # a shell while `/api/rag/reindex` accepted it (claunch-i2i95.1). `all` is
-    # its deprecated name and still parses (claunch-7aujp).
-    pr.add_argument("--kind", choices=("beads", "sessions", "unified", "all"),
+    # a shell while `/api/rag/reindex` accepted it (claunch-i2i95.1). Its
+    # pre-rename name `all` is gone with the rename (claunch-7aujp.1).
+    pr.add_argument("--kind", choices=("beads", "sessions", "unified"),
                     default="beads",
-                    help="which corpus (default beads; unified is the combined one, "
-                         "and 'all' is its deprecated name)")
+                    help="which corpus (default beads; unified is the combined one)")
     pr.add_argument("--force", action="store_true", help="re-embed every document")
     pr.add_argument("-C", "--cwd", help="a directory inside the repository whose board to index")
     pr.set_defaults(func=_cmd_rag_reindex)

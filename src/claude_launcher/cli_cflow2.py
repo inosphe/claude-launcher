@@ -366,6 +366,12 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
     for lim in payload.get("loop_limits") or []:
         print(f"  loop limit {lim['instance']}: {lim['iterations']}/{lim['max']} "
               f"(claunch cflow2 extend {lim['instance']} [--by N | --stop])")
+        gate = lim.get("self_answer") or {}
+        if gate:
+            # the session may open this one itself, once its check passes
+            # (claunch-9poqc) -- worth saying next to the person's verb
+            print(f"    self_answer: {gate.get('describe') or 'the loop declares a check'} "
+                  f"(the session's flow_extend, only when it passes)")
 
 
 def _parse_params(items: List[str]) -> Dict[str, Any]:

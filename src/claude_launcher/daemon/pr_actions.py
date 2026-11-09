@@ -590,9 +590,16 @@ def sweep_after_merge(host: str, owner: str, name: str, number: int, *,
     if not root:
         answer["why"] = "이 데몬에 그 저장소의 로컬 체크아웃이 없습니다."
         return answer
-    tool = Path(root) / "tools" / "delayed_sweep.py"
+    # The sweep module the job runs, from the verified repository: the queue
+    # tool itself now ships in the package (``claunch delayed-sweep``), so what
+    # a checkout still has to provide is its own ``tools/sweep.py``
+    # (claunch-sr6ex). Recording ``delayed_sweep.py`` here named a module that
+    # has no ``cmd_run``/``is_green``, so a job enqueued from this page could
+    # never reach a verdict.
+    tool = Path(root) / "tools" / "sweep.py"
     if not tool.exists():
-        answer["why"] = f"로컬 체크아웃에 {tool} 가 없습니다."
+        answer["why"] = (f"로컬 체크아웃에 {tool} 가 없습니다 — 이 저장소의 스윕을 "
+                         "실행할 모듈이 없어 검증 작업을 걸지 않았습니다.")
         return answer
     named = [str(i) for i in issues if str(i or "").strip()]
     issue = named[0] if named else f"pr-tab:{number}"

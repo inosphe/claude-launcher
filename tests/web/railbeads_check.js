@@ -22,10 +22,14 @@
    4. painting adds the line under the cwd line whenever either list is
       non-empty or the session has done work, replaces it on a repaint, and
       removes it when all three are gone;
-   5. the line opens with the work count (claunch-9f8ag): "N left" over the
+   5. the line opens with the work count (claunch-9f8ag): "N issues" over the
       assigned issues only, one count per status that has any in the Queues
       page's words, "N done" summed over every board, and a `title` that
-      spells out every count, zeros included.
+      spells out every count, zeros included and says this is the board's
+      queue rather than the cflow run's (claunch-np69t P2);
+   6. each pill carries its issue's state beside the id, in the counts' own
+      words, and names the board when the session holds work on more than one
+      (claunch-np69t P3).
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
@@ -136,14 +140,17 @@ let listEl = null;
 function $(id) { return id === "session-list" ? listEl : null; }
 function setList(l) { listEl = l; }
 function setBeads(m) { railBeads = m; }
-` + src.match(/const RAIL_BEADS_COUNTS = \[[\s\S]*?\n\];/)[0] + "\n";
+` + src.match(/const RAIL_BEADS_COUNTS = \[[\s\S]*?\n\];/)[0] + "\n"
+  + src.match(/const RAIL_BEAD_STATUS_WORDS = \{[\s\S]*?\n\};/)[0] + "\n";
 
 const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
   + slice("refreshRailBeads") + slice("railBeadsIndex") + slice("applyRailBeads")
-  + slice("railBeadsLine") + slice("railBeadsCount") + slice("showBeadPop") + slice("hideBeadPop")
+  + slice("railBeadsLine") + slice("railBeadsCount")
+  + slice("railBeadStatusWord") + slice("railBoardName")
+  + slice("showBeadPop") + slice("hideBeadPop")
   + slice("beadsStripMeta") + slice("beadPopExcerpt")
   + `
 Object.assign(exports, {
@@ -181,6 +188,8 @@ check("a name on two boards keeps both queues",
       idx.get("s1").issues.map((i) => i.id), ["a-1", "b-1"]);
 check("and both boards' follow-ups",
       idx.get("s1").created.map((i) => i.id), ["a-2", "b-2"]);
+check("each issue carries the board it came from, so the pill can name it",
+      idx.get("s1").issues.map((i) => i.board), ["/a", "/b"]);
 check("an empty queue is an empty lane, not a missing one", idx.get("s2").issues, []);
 check("a lane with no follow-ups gets an empty list, not a missing one",
       idx.get("s2").created, []);
@@ -200,9 +209,14 @@ const LANE = {
 const line = ctx.line("s1", LANE);
 const pills = line.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more"));
 check("one pill per issue in queue order, capped at four",
-      pills.map((p) => p.text), ["x-1", "x-2", "x-3", "x-4"]);
-check("tinted by status", pills.map((p) => p.classes.has(p.text === "x-1" ? "in_progress" : "open") || [...p.classes].join(" ")),
+      pills.map((p) => p.children[0].text), ["x-1", "x-2", "x-3", "x-4"]);
+check("tinted by status", pills.map((p) => p.classes.has(p.children[0].text === "x-1" ? "in_progress" : "open") || [...p.classes].join(" ")),
       [true, true, "rail-bead in_ready", "rail-bead in_review"]);
+// P3 (claunch-np69t): the state is on the pill, in the counts' own vocabulary,
+// so the row answers "live issue and its state" without a hover.
+check("the pill states its status beside the id",
+      pills.map((p) => p.children[1].text),
+      ["working", "open", "ready", "landing"]);
 check("the next one is outlined", pills.map((p) => p.classes.has("next")), [false, true, false, false]);
 check("a pill links to the issue", pills[0].href, "#/beads/x-1");
 check("and carries no native tooltip -- the hover card is the only one",
@@ -217,6 +231,12 @@ check("the rest is counted and named", [more.text, more.title], ["+2", "x-5 [blo
 let stopped = 0;
 pills[0].fire("click", { stopPropagation: () => stopped++ });
 check("a pill's click does not attach the row", stopped, 1);
+// P3, second half: a session holding work on two boards carries both queues
+// (railBeadsIndex), so each pill says which board its issue is on.
+check("a session on two boards names each pill's board",
+      ctx.line("s1", { issues: idx.get("s1").issues, summary: {} })
+        .find("rail-bead").map((p) => p.children[1].text),
+      ["working · a", "open · b"]);
 check("no queue draws no pill, only the count",
       ctx.line("s1", { issues: [], summary: {} }).children.map((k) => k.className),
       ["rail-beads-count"]);
@@ -228,12 +248,12 @@ const withCreated = ctx.line("s1", {
 });
 const wcPills = withCreated.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more"));
 check("assigned work first, then a follow-up, marked apart",
-      wcPills.map((p) => [p.text, p.classes.has("created")]),
+      wcPills.map((p) => [p.children[0].text, p.classes.has("created")]),
       [["m-1", false], ["m-2", true]]);
 check("a follow-up carries no native tooltip either", wcPills[1].title, "");
 check("a lane with only follow-ups still draws pills",
       ctx.line("s1", { issues: [], created: [{ id: "n-1", status: "open" }], summary: {} })
-        .find("rail-bead").map((p) => p.text),
+        .find("rail-bead").map((p) => p.children[0].text),
       ["n-1"]);
 const capLine = ctx.line("s1", {
   issues: [{ id: "p-1", status: "open" }, { id: "p-2", status: "open" }, { id: "p-3", status: "open" }],
@@ -241,7 +261,7 @@ const capLine = ctx.line("s1", {
   summary: {},
 });
 check("assigned and follow-up pills share one cap, assigned first",
-      capLine.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more")).map((p) => p.text),
+      capLine.find("rail-bead").filter((p) => !p.classes.has("rail-bead-more")).map((p) => p.children[0].text),
       ["p-1", "p-2", "p-3", "p-4"]);
 check("the remainder names issues from both lists",
       capLine.find("rail-bead-more")[0].title, "p-5 [open]\np-6 [open]");
@@ -318,7 +338,7 @@ check("a session with no queue gets none", r2.find("rail-beads").length, 0);
 ctx.setBeads(new Map([["s1", { issues: [{ id: "z", status: "open" }], summary: {} }], ["s2", LANE]]));
 ctx.apply();
 check("a repaint replaces the line in place and adds one where the queue appeared",
-      [r1.children.map((k) => [...k.classes][0]), r1.find("rail-bead").map((p) => p.text),
+      [r1.children.map((k) => [...k.classes][0]), r1.find("rail-bead").map((p) => p.children[0].text),
        r2.find("rail-beads").length],
       [["dot", "rail-cwd", "rail-beads", "rail-seen"], ["z"], 1]);
 ctx.setBeads(new Map([
@@ -327,7 +347,7 @@ ctx.setBeads(new Map([
 ]));
 ctx.apply();
 check("a session with only follow-ups still gets the line",
-      [r1.find("rail-beads").length, r1.find("rail-bead").map((p) => p.text)],
+      [r1.find("rail-beads").length, r1.find("rail-bead").map((p) => p.children[0].text)],
       [1, ["f-1"]]);
 check("a session with neither still gets none", r2.find("rail-beads").length, 0);
 ctx.setBeads(new Map());
@@ -339,22 +359,26 @@ check("a queue that is gone takes its line with it",
 const counted = ctx.line("s1", { ...LANE, created: [{ id: "c-1", status: "open" }], done: 3 });
 const count = counted.children[0];
 check("the count opens the line", count.className, "rail-beads-count");
-check("left is the assigned issues, every status, follow-ups out; then each status; then done",
+check("the head counts the assigned issues, every status, follow-ups out; then each status; then done",
       count.children.map((k) => [k.className, k.text]),
-      [["rail-beads-left", "6 left"], ["rail-beads-n waiting", "3 waiting"],
+      [["rail-beads-left", "6 issues"], ["rail-beads-n waiting", "3 waiting"],
        ["rail-beads-n working", "1 working"], ["rail-beads-n landing", "1 landing"],
        ["rail-beads-n blocked", "1 blocked"], ["rail-beads-n done", "3 done"]]);
-check("its title spells every count out",
-      count.title, "assigned issues: 6 left · 3 waiting · 1 working · 1 landing · 1 blocked · 3 done");
+check("its title spells every count out and says which queue it is",
+      count.title,
+      "board issues assigned to this session (not the cflow run's queue): "
+      + "6 issues · 3 waiting · 1 working · 1 landing · 1 blocked · 3 done");
 const sparse = ctx.line("s1", { issues: [{ id: "q-1", status: "in_progress" }], summary: {} }).children[0];
 check("a status with none draws no count, and nothing done draws no done",
-      sparse.children.map((k) => k.text), ["1 left", "1 working"]);
+      sparse.children.map((k) => k.text), ["1 issue", "1 working"]);
 check("but the title keeps the zeros",
-      sparse.title, "assigned issues: 1 left · 0 waiting · 1 working · 0 landing · 0 blocked · 0 done");
+      sparse.title,
+      "board issues assigned to this session (not the cflow run's queue): "
+      + "1 issue · 0 waiting · 1 working · 0 landing · 0 blocked · 0 done");
 const finished = ctx.line("s1", { issues: [], summary: {}, done: 2 }).children[0];
 check("a finished queue reads as finished",
       finished.children.map((k) => [k.className, k.text]),
-      [["rail-beads-left none", "0 left"], ["rail-beads-n done", "2 done"]]);
+      [["rail-beads-left none", "0 issues"], ["rail-beads-n done", "2 done"]]);
 check("done is part of the line's signature, so a close repaints it",
       ctx.line("s1", { issues: [], summary: {}, done: 2 })._railSig
         === ctx.line("s1", { issues: [], summary: {}, done: 3 })._railSig, false);

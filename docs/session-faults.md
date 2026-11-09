@@ -194,6 +194,20 @@ kind가 진단이라면 `resolved_by`는 **무엇이 이 정지를 풀어 주는
 
 폴백끼리 같은 창에 서면 위치가 가른다. 맨 상태 코드(`API Error: 500`) 아래에 이 줄이 있으면 `network`, 위에 있으면 그 코드의 kind(`api_status`)다 — 둘 다 원인을 말하지 않는 판독이라 규칙이 정한 순서대로 아래 행이 이긴다.
 
+### 상태 코드 없는 API 오류 재시도 줄: `api_status`
+
+관측된 화면 하나(2026-11-06, `s6183`, `claude`, claunch-al4lg):
+
+```
+✻ API error · Retrying in 0s · attempt 1/10
+```
+
+API 오류 뒤 클라이언트가 재시도하는 동안 그리는 스피너 줄이다. 상태 코드가 없어 `API Error: <숫자>` 항목으로는 읽히지 않는다. 원인 미상. kind는 `api_status`, 항목은 `fallback: true`, 목록은 `common:`이다.
+
+- `api_status`인 이유: 줄이 API가 오류로 답했다고 적는다. 전송 계층을 의심하는 문구는 없다.
+- `fallback`인 이유: 원인을 말하지 않는다. 같은 창에 원인 문구가 있으면 그쪽이 이긴다.
+- 패턴은 `API error` 바로 뒤의 `·`를 요구한다. `API Error: 529 Overloaded — retrying in 30s`는 이 항목에 걸리지 않고 `overloaded`로 남는다.
+
 ## 판정 규칙
 
 한 스캔 창(아래 16행)에 fault 문구가 둘 이상 있으면 어느 것이 kind를 정하는지가

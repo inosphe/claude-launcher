@@ -129,6 +129,10 @@ sides:
 #                            (착지 요청 수신자와의 메시지 채널 점검 — land의 submit에서
 #                            integration-request·await-landing 바로 앞. 채널이 없을 때만
 #                            사람의 조치와 승인·거절에 선다. claunch-101wi)
+#   (v2 전용)              -> already-merged(choose, agent)
+#                            (이미 머지된 회차 — land의 landing 바로 앞. 이 회차 커밋이
+#                            이미 통합 대상에 있으면 confirm-landed로 landed. 이 워커나
+#                            부모 워커가 고른다. claunch-yzwut.2)
 #   (v2 전용)              -> category-tag, category-refresh
 #                            (워크스페이스 카테고리 배치 — intake 뒤·코딩 전과
 #                            wrapup 뒤. 세션의 wrap-up 임시본으로 남기고 사용자가
@@ -534,9 +538,12 @@ data:
   claim: {issue: null, how: null}
   # 이 회차의 착지 매체(landing-medium이 회차 시작에, pr-publish가 PR을 연 뒤
   # 채운다). integration-request의 push trigger가 pr_url·pr_number를 착지
-  # 큐 레코드에 싣는다(claunch-yq80p.5).
+  # 큐 레코드에 싣는다(claunch-yq80p.5). `at`은 착지 시각이다 — PR 탭이 이
+  # 값으로 날짜 타임라인을 세우므로, 컬렉션 항목이 정산 뒤 빠져도 행은 날짜를
+  # 잃지 않는다(claunch-ijkge.4.1.3). `title`은 PR을 여는 단계가 이미 아는
+  # 제목이고, 모르는 갈래(로컬 착지)에서는 null로 남긴다 — 지어내지 않는다.
   landing: {medium: local, reason: "", remote: null, repo: null, base: null,
-            pr_url: null, pr_number: null}
+            pr_url: null, pr_number: null, at: null, title: null}
   work_report: {}
   # 이번 일감을 누가 구현하는가(claunch-yl0to). route-* 작업이 확정할 때마다
   # 덮어쓴다: mode는 direct(이 세션) | delegate(하위 설정 자식). 위임 작업의
@@ -1770,9 +1777,12 @@ nodes:
     done_when: |
       `git ls-remote <remote> refs/heads/<브랜치>`의 SHA가 HEAD와 같고, OPEN PR이
       그 tip(headRefOid == HEAD)을 가리키며, PR url·번호가 반환값에 있다. bare
-      push는 쓰지 않았다. 연관 PR이 있었으면 양쪽 링크가 있다.
+      push는 쓰지 않았다. 연관 PR이 있었으면 양쪽 링크가 있다. 열거나 갱신한
+      PR의 제목을 `title`로 함께 보고한다(`gh pr view <번호> -R <repo> --json title`이
+      주는 값 그대로) — 착지 기록이 그 값을 실어 PR 탭의 행이 제목을 갖는다.
     returns:
-      ok: {url: str, number: int, branch: str, base: str, tip: str, issues: list}
+      ok: {url: str, number: int, branch: str, base: str, tip: str, issues: list,
+           title: "str?"}
       failed: {reason: str}
     do:
       - push: {to: prs, item: {number: "$result['pr-open'].value.number",
@@ -4111,7 +4121,10 @@ nodes:
         loop_limit에 닿아 사람의 승인을 기다리게 되면 `flow_nudge`로
         대시보드 카드를 올린다. await-landing이 상위를 기다리는 동안은
         런이 사람에게 빚진 것이 없어 `flow_nudge`가 거절된다
-        (daemon/flow_nudge.py의 `owed`).
+        (daemon/flow_nudge.py의 `owed`). 그 카드는 사람이 extend하는 자리이고,
+        상한에 선 뒤 착지가 실렸다는 통지를 받아 깨어났다면 세션이
+        `flow_extend`로 그 상한을 스스로 닫는다(await-landing의 「상한에 선 뒤
+        깨어났을 때」 — 엔진이 착지 판정을 먼저 돌린다).
       이 스텝에서 하지 않는 것부터 적는다.
 
       · 브랜치를 건드리지 않는다. 동결은 그대로다 — 커밋도, rebase도,
@@ -4973,7 +4986,7 @@ nodes:
          경로를 보고에 적는다.
       5. **자식 리뷰어 정리 (claunch-phkt1).** 이 세션의 직속 자식 리뷰어를
          찾는다. MCP `children`의 자식 행에는 role이 없다(name·status·
-         children·cflow·cflow_declined·quick_fork_of뿐이다) — 그래서 두 출력을
+         children·cflow·cflow_declined·quick_fork_of·held뿐이다) — 그래서 두 출력을
          맞춘다: `children`의 자식 이름 가운데 `claunch mesh members <이 런의
          메시> --state all`에서 role 열(둘째 열)에 reviewer가 든 행의 셋째
          열과 같은 것이 직속 자식 리뷰어다. 역할이 여럿이면 그 열은
@@ -5078,6 +5091,12 @@ nodes:
       사람이나 생성 설정이 세워 둔 keep-alive·delivery-hold는 여기서 내리지
       않는다 — 사람의 설정이다.
 
+      이 질문(과 뒤의 release-decision)은 부모 세션도 답할 수 있다 — 부모는
+      `flow_gates`로 이 런의 열린 선택을 보고 `flow_select`로 고른다(hold된
+      자식도 살아 있는 자식으로 세어진다, claunch-7vf2z). 부모가 답하면 그
+      reason에 작업 이슈 id와 근거를 싣는다 — new-task는 새 작업을 그 reason에서
+      읽는다. 에이전트는 reason을 적극적으로 쓴다(docs/cflow-v2.md 2.11).
+
       1. 보류 사유를 읽는다 — 선택의 reason과 사람의 말이 저널에 있다
          (`claunch cflow2 journal`). 없으면 묻지 않고 「사유 없음」으로
          적는다(곧 hold되므로 답을 받을 턴이 없다).
@@ -5100,6 +5119,33 @@ nodes:
       keep-alive·delivery-hold 명령은 실행하지 않았다.
     effects: [board.write, mesh.send]
 
+  closure-reject:
+    title: 라운드 감사 거절 기록 (플랜 게이트의 reject)
+    prompt: |
+      사용자가 라운드 막바지 plan 게이트에서 reject를 골랐다 — 플랜 감사 통과
+      거절이다(예: 실제 테스트 결과가 의도와 다름). 이 회차는 정산으로 넘어가지
+      않고, 같은 세션의 새 런이 같은 이슈를 다시 맡는다(claunch-umf88.1).
+
+      답의 이유: ${data.closure_gate.reason}
+      회차 이슈: ${data.claim.issue}
+
+      1. 이 회차 이슈에 거절 기록을 남긴다. 본문은 `$CLAUNCH_SCRATCH` 아래 파일에
+         쓰고 `claunch beads comments add ${data.claim.issue} -f <그 파일>`로
+         넣는다(`-f/--file`이 본문 플래그다 — `--body-file`은 없다). 첫 줄은
+         `REJECT @ <이 런 id> — 플랜 감사 통과 거절`이고(런 id는 `claunch cflow2
+         status -t $CLAUNCH_SESSION`의 `run` 값이다), 그 아래에 사용자가 적은
+         이유를 그대로 옮긴다. 이유가 비어 있으면 「사용자가 이유를 적지 않았다」로
+         남긴다.
+      2. 답의 이유가 비어 있지 않으면 새 런이 읽을 수 있게 같은 코멘트 끝에
+         `REWORK: <이유 한 줄>`을 남긴다.
+      3. 보고의 issue는 `${data.claim.issue}`다 — 새 이슈를 만들지 않는다. 다음
+         단계(end-new-task)가 이 값을 읽어 같은 세션의 새 런을 세운다.
+    done_when: |
+      이 회차 이슈에 `REJECT @` 코멘트가 있고, 보고에 그 이슈 id가 있다.
+    returns:
+      ok: {issue: str}
+    effects: [board.write, fs.write]
+
   end-new-task:
     title: 새 작업으로 다음 런 시작 (사용자 지시)
     prompt: |
@@ -5112,7 +5158,11 @@ nodes:
 
       1. 새 작업의 이슈를 정한다. 선택의 reason과 사용자의 말(`claunch cflow2
          journal`, 터미널 지시)에서 작업을 읽는다. 기존 이슈 id를 받았으면 그
-         id다. 그 id가 이 런의 self-improve가 등록한 이슈(label `self-improve`,
+         id다. **reject 갈래에서 왔으면(`data.closure_gate`에 적힌 답이
+         `reject`일 때, settle의 closure-gate) 새 이슈를 만들지 않고 이 회차
+         이슈(`${data.claim.issue}`)를 그대로 쓴다** — 감사에서 되돌린 일을 새
+         런이 다시 맡는 것이고, `REJECT:`·`REWORK:` 코멘트는 앞의
+         closure-reject가 이미 남겼다. 그 id가 이 런의 self-improve가 등록한 이슈(label `self-improve`,
          assignee 없음)면 `claunch beads update <id> --assignee $CLAUNCH_SESSION`
          으로 잡는다 — 상태는 open 그대로다. 아니면 중복을 확인한 뒤(`claunch beads search "<핵심어>" --json`)
          만든다: `claunch beads create "<제목>" --type task --priority 2
@@ -5477,12 +5527,12 @@ procedures:
       reason: {type: str, required: true}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?"}
     body:
       seq:
         - local-landing-policy
         - return: ok
-          value: {medium: local, reason: "$params.reason"}
+          value: {medium: local, reason: "$params.reason", at: {expr: "now()"}}
 
   pr-or-local:
     description: >-
@@ -5497,7 +5547,7 @@ procedures:
       local_reason: {type: str, required: true, description: 사용자가 local을 골랐을 때 남기는 사유}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?", title: "str?"}
     body:
       id: attempts
       loop:
@@ -5526,13 +5576,13 @@ procedures:
                           - call: local-landing
                             with: {reason: "$params.local_reason"}
                           - return: ok
-                            value: {medium: local, reason: "$prev.reason"}
+                            value: {medium: local, reason: "$prev.reason", at: {expr: "now()"}}
                 - else:
                     waterfall:
                       - call: local-landing
                         with: {reason: "$prev.reason"}
                       - return: ok
-                        value: {medium: local, reason: "$prev.reason"}
+                        value: {medium: local, reason: "$prev.reason", at: {expr: "now()"}}
             failed: *recover
 
   landing-medium:
@@ -5543,7 +5593,7 @@ procedures:
       force_no_pr이면 로컬이다. 반환값은 data.landing에 묶인다.
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?"}
+           pr_url: "str?", pr_number: "int?", at: "str?", title: "str?"}
     body:
       id: medium-blocked
       call: pr-or-local
@@ -5568,7 +5618,8 @@ procedures:
                     reason: "$result['remote-setup'].value.reason",
                     remote: "$result['remote-setup'].value.remote",
                     repo: "$result['remote-setup'].value.repo",
-                    base: "$result['remote-setup'].value.base"}
+                    base: "$result['remote-setup'].value.base",
+                    at: {expr: "now()"}}
 
   pr-publish:
     description: >-
@@ -5581,7 +5632,7 @@ procedures:
       force_pr: {type: bool, default: false}
     returns:
       ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
-           pr_url: "str?", pr_number: "int?", tip: "str?"}
+           pr_url: "str?", pr_number: "int?", tip: "str?", at: "str?", title: "str?"}
     body:
       id: publish-blocked
       call: pr-or-local
@@ -5604,7 +5655,9 @@ procedures:
                     base: "$result['pr-open'].value.base",
                     pr_url: "$result['pr-open'].value.url",
                     pr_number: "$result['pr-open'].value.number",
-                    tip: "$result['pr-open'].value.tip"}
+                    tip: "$result['pr-open'].value.tip",
+                    at: {expr: "now()"},
+                    title: "$result['pr-open'].value.title"}
 
   resolve-issue:
     description: >-
@@ -6507,6 +6560,55 @@ procedures:
                   timeout: {call: cut-unreachable, with: {why: timeout}}
               - stack-merge
           - else: []
+      # 이미 머지된 회차(claunch-yzwut.2, 사용자 지시 th-e4c394). 이 회차의 커밋이
+      # 착지 요청 전에 다른 경로(사람의 PR 머지, 다른 브랜치의 머지)로 통합
+      # 대상에 이미 들어갔으면 아래 landing은 delta-0으로 escalate하고, 그
+      # 질문이나 착지 대상 없음 질문(landing-target-gate)이 사람 앞에 선다.
+      # 사람은 거기서 매번 merge-by-person·hold를 고르게 된다. 이 게이트는
+      # 그 한 경우만 에이전트가 정한다. chooser가 agent이므로 이 워커와 부모
+      # 워커(flow_select에 이 런의 scope)가 고를 수 있다. 사람 게이트는 그대로다.
+      # landed는 submit 안의 already-landed 갈래와 같은 경로다: confirm-landed가
+      # 같은 판정(landed-check와 깨끗한 트리)을 기계로 다시 재고 머지 해시를 남긴다.
+      # 에이전트가 잘못 골라도 그 프로브가 막는다(판정 불가 세 번이면 landed-unclear).
+      - id: already-merged
+        choose:
+          chooser: agent
+          require_reason: true
+          prompt: |
+            착지 절차에 들어가기 전에, 이 회차의 커밋이 이미 통합 대상에
+            머지됐는지 판정한다. 이미 머지됐으면 요청·리뷰·사람 질문이 필요 없다.
+            이 선택은 이 워커가 하고, 부모 워커도 이 런의 scope로
+            `flow_select`해서 고를 수 있다.
+
+            판정은 명령으로 한다. 셋이 전부 참일 때만 landed다:
+            1. 이 회차 브랜치에 자기 커밋이 있다:
+               `git rev-list --count ${result['branch-setup'].value.base_hash}..HEAD`가 1 이상.
+               0이면 착지할 것이 처음부터 없는 회차다(분석 회차). 그 경우는
+               not-landed이고, 아래 landing의 delta-0 갈래가 처리한다.
+            2. tip이 통합 대상에 들어 있다: `claunch gate landed-check --target
+               <통합 대상>` exit 0. 통합 대상은 merge-ready가 재는 대상과 같다.
+               이 브랜치의 git upstream이고, 없으면 master다. PR 착지면
+               (지금 medium=${data.landing.medium}) `<remote>/<base>`를 대상으로 주고
+               `--fetch`를 붙인다. exit 1(아직)이나 2(판정 불가)는 not-landed다.
+            3. 그 tip을 실은 커밋을 해시로 댈 수 있다. 예:
+               `git log --merges --ancestry-path --reverse --format=%H HEAD..<통합 대상>`의
+               첫 줄, 또는 fast-forward면 tip 자신.
+            reason에 세 명령과 출력, 머지 해시를 적는다.
+
+            squash·rebase 머지로 해시가 바뀌어 tip이 그대로 실리지 않았으면
+            2가 거짓이다. 그 회차는 not-landed이고 지금까지의 경로로 간다.
+            판단이 서지 않으면 not-landed를 고른다. 이 게이트가 사람 질문을
+            대신하는 것은 이미 머지됐다는 증거가 명령 출력으로 설 때뿐이다.
+          options:
+            landed:
+              description: 이 회차의 커밋이 이미 통합 대상에 머지됐다 — 착지를 기계로 확인하고 land를 landed로 끝낸다(요청·리뷰·사람 질문 없음)
+              then:
+                - call: confirm-landed
+                - return: landed
+                  value: {merge: "$result.landed.value.merge", tip: "$result.landed.value.tip"}
+            not-landed:
+              description: 아직 머지되지 않았거나 판정할 수 없다 — 지금까지의 착지 경로(landing)로 간다
+              then: []
       - id: landing
         choose:
           # agent가 닿을 수 있는 것은 request와 escalate뿐이고, 일을 줄이는 hold는
@@ -6534,6 +6636,11 @@ procedures:
                 git rev-list --count $(git merge-base <통합 대상> HEAD)..HEAD
             0이면 **escalate**다. hold가 아니다 — 동결은 여전히 상위의 답이고,
             워커가 직접 닿아서는 안 된다(아래 hold 원칙 그대로).
+            커밋이 이미 통합 대상에 머지된 회차는 여기 오지 않는다 — 바로 앞의
+            already-merged 게이트가 landed로 끝낸다(claunch-yzwut.2). 여기 온
+            delta-0은 그 게이트가 not-landed로 판정한 회차다(자기 커밋이 없는
+            분석 회차, 또는 머지 증거가 서지 않은 회차). escalate reason에 그
+            판정을 옮긴다.
             이 판별식은 내가 정하는 것이 아니라 보드의 정본이다:
             claunch-hold-round-cannot-close-hkkh 에 s131이 세우고 리더가 채택한
             델타-0 변별자와 **같은 값이어야 한다** — 같은 것을 두 자리에서 다르게
@@ -7322,6 +7429,26 @@ procedures:
                 # 닫혀, 상위가 머지해도 landed를 고를 수 없었다(s910, 머지 후 9분
                 # 이상 정지). interval이면 nudge만 보류되고 다른 갈래는 열려 있다 --
                 # 다른 갈래를 고르면 보류가 취소된다(docs 「choose interval」).
+                #
+                # 상한에 선 뒤에도 세션이 스스로 나아가는 길(claunch-9poqc).
+                # 이 루프가 loop_limit에 서면 지금까지는 사람의 extend 말고는
+                # 나갈 길이 없었다 — 머지가 끝났는데도 사람이 누를 때까지 회차의
+                # 정리가 멈췄다(2026-11-05 s695: 13:32Z 상한, 14:32Z 머지, 다음 날
+                # 09:02Z extend — 약 18.5시간). 재촉 타이머가 도는 것은 데몬의
+                # 사정이고, 착지 통지는 메시나 데몬 알림으로도 이 세션에 온다.
+                # 그래서 이 루프는 self_answer를 선언한다: 상한에 선 뒤 세션
+                # 에이전트가 통지로 깨어나 `flow_extend`를 부르면 엔진이 아래
+                # 명령을 먼저 돌리고, exit 0일 때만 이 반복을 한 번 더 연다.
+                # 0이 아니면 상한은 그대로 서 있어 사람의 판단이 남는다 —
+                # 게이트가 여는 것은 「대기」가 아니라 「착지 확인」이다
+                # (머지 확인 전 자기 승인 금지). 명령은 landed-wait와 같은
+                # 착지 판정이다(0=착지, 1=아직, 2=판정 불가): 통지의 말이 아니라
+                # git이 답한 값만 이 문을 연다.
+                self_answer:
+                  probe: 'claunch gate landed-check --landing'
+                  describe: >-
+                    동결된 tip이 통합 대상에 실렸는가 — 참이면 상한을 세우지 않고
+                    착지 갈래(confirm-landed)로 간다
                 do:
                   id: await-landing
                   choose:
@@ -7388,6 +7515,27 @@ procedures:
                       턴을 끝내고 idle로 있으면 된다. 착지는 남이 만드는 상태이고,
                       상위의 fyi와 창 열림이 깨우는 신호다. 슬롯 하나를 무는 값으로
                       「요청했는데 안 실렸다」를 잡는 것이 이 대기의 값이다.
+
+                      ── 상한(loop_limit)에 선 뒤 깨어났을 때 ──
+                      재촉이 상한(max 5)에 닿으면 런이 사람의 승인(`loop_limit`)에
+                      서고 이 선택은 닫힌다. 그때 데몬의 재촉 타이머가 도는지는
+                      데몬의 사정이다 — 착지 통지는 메시 메시지나 데몬 알림으로도
+                      이 세션의 턴을 깨운다. 깨어나 `flow_status`의 `loop_limits`에
+                      `self_answer`가 실려 있으면 할 일은 하나다: **`flow_extend`를
+                      부르고 이유를 적는다**(무엇이 깨웠고 무엇이 착지했다고 말하는지).
+                      엔진이 착지 판정(`claunch gate landed-check --landing`)을 먼저
+                      돌리고, exit 0일 때만 이 반복을 한 번 더 연다. 열리면 위의
+                      landed 갈래를 골라 `confirm-landed`로 넘어간다 — 판정은 거기서
+                      git으로 다시 잰다.
+                      · `flow_extend`가 거절하면 착지가 확인되지 않은 것이다. 그
+                        출력(판정 코드·메시지)을 그대로 인용해 보고하고, 다시 부르지
+                        않는다. 상한은 사람의 것이고, 다음은 사용자나 상위가 정한다.
+                      · 「머지했다는 메시지를 받았다」만으로 부르지 않는다. 부른 뒤
+                        엔진이 재는 값이 그 말과 다르면 거절되고, 그 거절은 상위의
+                        말이 틀렸다는 기록으로 남는다. 통지가 왔는데 거절되면 그
+                        통지의 출처(세션·머지 해시)를 사용자에게 알린다.
+                      · 상한에 서기 전에는 부르지 않는다. 이 도구는 대기를 연장하는
+                        수단이 아니라, 이미 끝난 대기를 기계의 답으로 닫는 문이다.
                       이 자리에는 착지를 따로 재는 프로브가 걸려 있지 않다. 깨어날
                       때마다(창 열림 포함) 위의 조상 확인을 한 번 돌린다 — 상위의 착지
                       통지가 이 세션에 닿지 않는 경우가 실제로 있었다(이슈가 in_progress로
@@ -7976,16 +8124,116 @@ procedures:
                           skipped: []
                   - {break: closure-watch}
           - else:
-              id: closure-wait-timed
-              wait:
-                probe: [claunch, gate, plan-waiting, --notify]
-                poll: 30
-                seconds: 180
-                undecided_max: 3
-                describe: "계획 패널의 미결이 해소되기를 180초 기다린다 — 만료되면 정산으로 진행한다(require_plan_closure=false)"
-              on:
-                timeout: []
-                undecidable: []
+              # 라운드 막바지 선택지(claunch-umf88.1, 사용자 지시 2026-11-08):
+              # 180초 자동 진행을 60초 + 질문으로 바꾼다. 60초 안에 미결이
+              # 해소되면 지금까지처럼 그대로 통과하고, 만료되면 사용자에게
+              # pause / skip / reject를 묻는다. 질문에도 5분 기한이 있어
+              # 무응답이면 skip과 같이 정산으로 간다(end-deadline과 같은 모양).
+              # require_plan_closure=true 갈래는 그대로다 — 그 입력은 「처음부터
+              # 기한 없이 기다린다」는 뜻이고, 이 갈래는 「60초 뒤에 사람에게
+              # 묻는다」는 뜻이다. 둘은 같은 선택지를 두 곳에서 정하는 것이
+              # 아니라 대기 정책의 두 가지 서로 다른 값이다.
+              #   pause  — 기한 없이 다시 기다린다(위 closure-watch와 같은 probe).
+              #            에이전트는 이 선택을 통지받지 않는다: pause 대기는
+              #            드라이버가 할 일이 아니고(_waits_on_driver), 그동안
+              #            데몬은 세션 리마인더와 plan 블록 타이핑을 멈춘다
+              #            (daemon/cflow2_pause.py). 세션 상태를 사람의 pause
+              #            (held)로 바꾸지 않는다 — 사용자 지시: 「사람이 pause
+              #            한것처럼 처리하면 복구가 안되니까 다른 경로를 타야해」.
+              #   skip   — 타이머를 더 기다리지 않고 정산으로 간다.
+              #   reject — 플랜 감사 통과 거절. settle은 finally이고 그 안의
+              #            비-ok 결과는 런을 끝내므로(cflow2/runtime.py:1453-1458)
+              #            회차를 되돌릴 손잡이가 없다. 그래서 되돌리는 대신
+              #            `REJECT:` 기록을 남기고 end-new-task로 같은 세션의
+              #            새 런이 같은 이슈를 다시 맡게 한다(사용자 결정).
+              id: closure-gate-timed
+              # 세 문장이다: 60초 기다린다 → 답이 없으면 5분 묻는다 → 답으로 갈래를
+              # 고른다. 갈래를 `cases`가 아니라 raise → catch로 옮긴 이유는 pause
+              # 때문이다 — pause는 기한이 없어야 하는데, `cases`의 갈래는 그 질문을
+              # 감싼 timeout 창 안에서 돌아 창이 닫히면 함께 끊긴다(실측: 360초에
+              # pause 대기가 취소되고 정산이 열렸다). 갈래는 창 밖의 catch에 있다.
+              seq:
+                - id: closure-wait-timed
+                  wait:
+                    probe: [claunch, gate, plan-waiting, --notify]
+                    poll: 30
+                    seconds: 60
+                    undecided_max: 3
+                    describe: "계획 패널의 미결이 해소되기를 60초 기다린다 — 만료되면 pause/skip/reject를 묻는다(require_plan_closure=false)"
+                  on:
+                    timeout: []
+                    undecidable: []
+                - try:
+                    - id: closure-choice-deadline
+                      timeout:
+                        seconds: 300
+                        do:
+                          - id: closure-choice
+                            call: ask-user
+                            bind: closure_gate
+                            with:
+                              # 선택지 이름은 cases의 키가 정한다(frontend가 그 키를
+                              # ask-user의 choices로 넘긴다).
+                              # 회차의 정산 자리에서 서는 질문이라 답이 늦어도 잃는
+                              # 것이 없다 — 알림이 `deferrable`을 선언해 창의 접힌
+                              # 목록에서 빠진다(종료 질문과 같은 이유, th-3b3470).
+                              criteria: [deferrable]
+                              # 이 질문은 5분 기한이 도는 것을 사용자가 알아야 답한다.
+                              nudge: |
+                                이 질문은 사람의 답을 기다리고, 5분 안에 답이 없으면
+                                skip과 같이 정산으로 간다. 질문 brief를 쓴 뒤, 턴을
+                                끝내기 전에 MCP `flow_nudge(message)`를 **한 번** 부른다.
+                                메시지는 한두 줄로 무엇을 정해야 하는지와 답하는 명령
+                                (`claunch cflow2 approve <instance> --option <선택지>`)을
+                                담는다. 답이 오지 않으면 다시 부르지 않는다.
+                              topic: |
+                                이 회차의 작업은 끝났고, 계획 패널에 아직 사용자가 답하지
+                                않은 항목(미결·closure)이 남아 있다. 60초 동안 기다렸지만
+                                해소되지 않았다. 정산으로 넘어가기 전에 무엇을 할지 고른다.
+
+                                pause:  더 기다린다 — 기한 없이, 계획 패널의 미결이
+                                        해소될 때까지. 이 세션은 그동안 재촉받지 않는다
+                                        (리마인더와 plan 답변 전달이 멈춘다). 에이전트는
+                                        pause가 걸린 것을 통지받지 못하고, 스스로 다음
+                                        경로로 넘어가지 않는다. 해소되면 그때 정산으로 간다.
+                                skip:   더 기다리지 않고 지금 정산으로 간다. 지금까지의
+                                        180초 만료와 같은 결과다.
+                                reject: 플랜 감사를 통과시키지 않는다 — 실제 테스트 결과가
+                                        의도와 다르거나, 이 회차의 산출물을 정산에 올릴 수
+                                        없을 때다. 이 회차는 정산하지 않고 `REJECT:` 기록을
+                                        남긴 뒤, 같은 세션의 새 런이 같은 이슈를 다시 맡는다.
+
+                                reject를 고르면 이유를 반드시 적는다 — 그 이유가 새 런의
+                                목표가 된다. pause·skip은 이유가 없어도 된다.
+                            cases:
+                              pause: [{raise: gate-pause}]
+                              skip: []
+                              reject: [{raise: gate-reject}]
+                        else: []
+                  catch:
+                    gate-pause:
+                      id: closure-pause
+                      loop:
+                        while: "true"
+                        max: 20
+                        do:
+                          - id: closure-pause-wait
+                            wait:
+                              probe: [claunch, gate, plan-waiting, --notify]
+                              poll: 30
+                              undecided_max: 3
+                              describe: "사용자가 pause를 골랐다 — 계획 패널의 미결이 해소될 때까지 기다린다(기한 없음)"
+                            on:
+                              undecidable:
+                                try: [plan-wait-unclear]
+                                catch:
+                                  ok: {continue: closure-pause}
+                                  skipped: []
+                          - {break: closure-pause}
+                    gate-reject:
+                      - closure-reject
+                      - end-new-task
+                      - {return: ok}
       - id: settle-watch
         loop:
           while: "true"
@@ -8364,6 +8612,12 @@ procedures:
                         남는다. 답하면(또는 메시지·뷰어 접속이 오면) 대화를 유지한 채
                         깨어난다.
                         new-task: 같은 세션에서 새 작업의 런을 시작한다(목표 수립부터).
+
+                        이 질문은 부모 세션도 답할 수 있다 — 부모는 `flow_gates`로
+                        이 런의 열린 선택을 보고 `flow_select`로 고른다. 부모가 답하면
+                        그 reason에 작업 이슈 id와 근거를 싣는다 — new-task는 새 작업을
+                        그 reason에서 읽는다(에이전트는 reason을 적극적으로 쓴다,
+                        docs/cflow-v2.md 2.11).
 
                         이 질문에 답하지 않고 세션을 그냥 kill해도 결과는 end와 같다:
                         데몬이 열린 질문을 닫고 런을 done으로 마감하며 종결 기록을 남긴다.

@@ -582,6 +582,19 @@ class SessionReminderService:
             return bool(reader())
         return bool(getattr(getattr(session, "sdef", None), "reminder_paused", False))
 
+    def paused_in_plan_gate(self, name: str) -> bool:
+        """Whether the session's v2 run waits in the plan gate's ``pause``.
+
+        The person asked that a paused session look held without being held:
+        the run keeps its own record (``cflow2_pause``), and nothing is
+        written to the session, so the wake and recovery paths are untouched.
+        """
+        try:
+            from . import cflow2_pause
+        except Exception:  # noqa: BLE001 - no v2 clock at all
+            return False
+        return cflow2_pause.session_paused(self.manager, name)
+
     def session_faulted(self, name: str) -> bool:
         """Whether ``name`` is stopped by an active session fault
         (:mod:`session_fault`: a usage limit, a rejected login ...). Such a
@@ -1064,13 +1077,15 @@ class SessionReminderService:
         for cwd, scope, block, kind in cflow_due:
             if kind == "signal":
                 await self._deliver(cwd, scope, block, kind)
-            elif not self.session_paused(scope) and not self.session_faulted(scope):
+            elif not self.session_paused(scope) and not self.session_faulted(scope) \
+                    and not self.paused_in_plan_gate(scope):
                 reminders[scope] = (cwd, block)
 
         for name in sorted(
             set(reminders) | set(roles_due) | set(packs_due) | goals_due
         ):
-            if self.session_paused(name) or self.session_faulted(name):
+            if self.session_paused(name) or self.session_faulted(name) \
+                    or self.paused_in_plan_gate(name):
                 continue
             cflow_item = reminders.get(name)
             if cflow_item is not None:

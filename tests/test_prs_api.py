@@ -17,7 +17,7 @@ import pytest
 
 from claude_launcher.cflow2 import frontend
 from claude_launcher.cflow2.store import RunStore
-from claude_launcher.daemon import api, pr_actions
+from claude_launcher.daemon import api, pr_actions, pr_stamps
 
 
 def _session(name, project, cwd):
@@ -101,6 +101,22 @@ def test_the_cache_answers_the_second_read_without_rescanning(home, tmp_path, fr
     api._recorded_prs(manager)
     api._recorded_prs(manager)
     assert calls == ["s1"]
+
+
+def test_the_list_never_runs_gh_for_a_missing_title(home, tmp_path, fresh_cache,
+                                                    monkeypatch):
+    """A row without a title is filled by the daemon's background pass; this
+    read answers from the local cache and never waits on the forge
+    (claunch-ijkge.4.1.3, user directive: cache first, ``gh`` only on a miss)."""
+    a = tmp_path / "a"
+    a.mkdir()
+    _run(a, "s1", [{"url": "https://ghe.example.com/o/r/pull/1", "number": 1}])
+    pr_stamps.disable()
+    monkeypatch.setattr(pr_actions, "detail",
+                        lambda *args, **kwargs: pytest.fail("the list called gh"))
+    rows, _ = api._recorded_prs(_manager([_session("s1", "p", str(a))]))
+    assert rows[0]["number"] == 1
+    assert "title" not in rows[0]
 
 
 def test_h_prs_filters_by_project_and_reports_the_unfiltered_count(home, tmp_path,
@@ -466,7 +482,7 @@ def test_a_merge_with_no_local_checkout_says_why_it_was_not_swept(monkeypatch):
 def test_the_sweep_is_queued_under_the_recorded_issue(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     (root / "tools").mkdir(parents=True)
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
     calls = []
 
@@ -484,7 +500,7 @@ def test_the_sweep_is_queued_under_the_recorded_issue(monkeypatch, tmp_path):
                       "ref": f"refs/heads/delayed-sweep/s1/{'d' * 40}",
                       "issue": "claunch-x", "why": ""}
     assert calls == [(str(root), "d" * 40, "claunch-x", "s1",
-                      str(root / "tools" / "delayed_sweep.py"))]
+                      str(root / "tools" / "sweep.py"))]
 
 
 def test_a_queued_sweep_leaves_a_real_job_in_the_queue(monkeypatch, home, tmp_path):
@@ -516,7 +532,7 @@ def test_a_queued_sweep_leaves_a_real_job_in_the_queue(monkeypatch, home, tmp_pa
     git("merge", "--no-ff", "-qm", "merge side", "side")
     merge_sha = git("rev-parse", "HEAD")
     (root / "tools").mkdir()
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
 
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
     monkeypatch.setattr(queue_module, "default_database", lambda: tmp_path / "jobs.sqlite3")
@@ -564,7 +580,7 @@ def test_an_unreadable_default_branch_is_a_skip_with_its_reason(monkeypatch):
 def test_a_merge_the_queue_refuses_is_a_skip_with_that_reason(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     (root / "tools").mkdir(parents=True)
-    (root / "tools" / "delayed_sweep.py").write_text("")
+    (root / "tools" / "sweep.py").write_text("")
     monkeypatch.setattr(pr_actions, "find_checkout", lambda *a, **k: str(root))
 
     class _Queue:

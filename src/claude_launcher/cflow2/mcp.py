@@ -105,7 +105,9 @@ TOOLS = [
             "allow now. 'waits' are external conditions the engine polls (this "
             "call checks them). 'delegations' with status 'pending' carry a "
             "'brief' to run in a fresh sub-agent. 'loop_limits' mean a loop hit "
-            "its max and a person must extend it. 'person_picks' are choices a "
+            "its max: a person extends it ('claunch cflow2 extend'), and one "
+            "whose entry carries 'self_answer' you may open yourself with "
+            "flow_extend once that check passes. 'person_picks' are choices a "
             "person took for you, newest last: each 'reason' is their note, an "
             "instruction to follow. Several tasks can be active at "
             "once under par/foreach/group: each has its own 'instance' id. "
@@ -167,7 +169,7 @@ TOOLS = [
             "properties": {
                 "node": {"type": "string", "description": "choice instance id or label"},
                 "option": {"type": "string"},
-                "reason": {"type": "string", "description": "why; journaled"},
+                "reason": {"type": "string", "description": "why; journaled. Always say why as an agent -- what you read and what you saw in it, not the option's name again. Steps downstream read your reason ('end-new-task' takes its new task from it), so when you answer for a child include the work issue id and the evidence. Only a person may leave it out"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["option"],
@@ -176,16 +178,19 @@ TOOLS = [
     {
         "name": "flow_gates",
         "description": (
-            "What your child sessions' runs wait on a person for: each live "
-            "child's open 'chooser: user' choices (prompt, options, which are "
-            "available now), a pending move/report request, and a loop or visit "
-            "limit. This is the list the delegation exists for -- a child's end "
-            "'new-task'/hold decision and its 'move to round' request are yours "
-            "to answer here instead of waiting for the user. Answer a choice with "
-            "flow_select(scope=<child run>), a request with flow_move(scope=<child "
-            "run>, decision approve|deny). Asks whose resolution is 'human' are "
-            "listed for information: those are a person's, not the parent's. A "
-            "child with no live parent-answerable gate does not appear."
+            "What your child sessions' runs wait on a person for: each live or "
+            "held child's open 'chooser: user' choices (prompt, options, which "
+            "are available now), a pending move/report request, and a loop or "
+            "visit limit. This is the list the delegation exists for -- a child's "
+            "end 'new-task'/hold decision and its 'move to round' request are "
+            "yours to answer here instead of waiting for the user. Answer a "
+            "choice with flow_select(scope=<child run>), a request with "
+            "flow_move(scope=<child run>, decision approve|deny). Asks whose "
+            "resolution is 'human' are listed for information: those are a "
+            "person's, not the parent's. A child that is held counts as live: "
+            "hold stops its program, its run and its question stay open, and "
+            "your answer wakes it. A child with no live parent-answerable gate "
+            "does not appear."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -207,7 +212,7 @@ TOOLS = [
             "properties": {
                 "decision": {"type": "string", "enum": ["approve", "deny"],
                              "description": "answer the pending request"},
-                "reason": {"type": "string", "description": "why; journaled in the run"},
+                "reason": {"type": "string", "description": "why; journaled in the run. Always say why as an agent -- what you read and what you saw in it, not the option's name again. Only a person may leave it out"},
                 "scope": _SCOPE, "cwd": _CWD,
             },
             "required": ["decision"],
@@ -240,13 +245,20 @@ TOOLS = [
     {
         "name": "flow_call",
         "description": (
-            "Call a procedure from an active task (doc 2.12). The task must list "
-            "it in 'calls' (flow_status task 'calls'; none listed: every call is "
-            "refused). The procedure is resolved by name now and starts as a nested "
-            "run you drive with the flow_* tools under the scope in 'called.scope' "
-            "(flow_status 'calls'). Meanwhile the task waits ('calling'); when the "
-            "callee finishes, the task is active again with 'call_result' (outcome, "
-            "value) and you report it as usual. One open call per task."
+            "Call a procedure from an active task (doc 2.12). Callable: a name the "
+            "task lists in 'calls', or a procedure of a pack installed in this "
+            "workspace, named '<pack>:<procedure>' (flow_status task 'pack_calls'); "
+            "the procedure's filter_roles and its pack's roles must admit your mesh "
+            "role. The procedure is resolved by name now and starts as a nested "
+            "run under the scope in 'called.scope' (flow_status 'calls'). When the "
+            "task declares fork_calls and the procedure is forkable, the call is "
+            "'fork' mode: the daemon quick-forks you and the copy drives the callee "
+            "in this same checkout -- do not drive it yourself; if the fork cannot "
+            "start, the call falls back to inline (a terminal block says so and "
+            "why) and you drive it. Otherwise you drive it with the flow_* tools. "
+            "Meanwhile the task waits ('calling'); when the callee finishes, the "
+            "task is active again with 'call_result' (outcome, value) and you "
+            "report it as usual. One open call per task."
         ),
         "inputSchema": {
             "type": "object",
@@ -255,6 +267,9 @@ TOOLS = [
                 "node": {"type": "string", "description": "the calling task's instance id "
                          "or name (omit when one task is active)"},
                 "with": {"type": "object", "description": "the procedure's params"},
+                "mode": {"type": "string", "enum": ["auto", "inline"],
+                         "description": "auto (default): fork when the task declares "
+                         "fork_calls and the procedure is forkable; inline: never fork"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["procedure"],
@@ -319,9 +334,34 @@ TOOLS = [
                 "node": {"type": "string", "description": "ask's task instance id or name"},
                 "option": {"type": "string", "description": "the option (asks with options)"},
                 "decline": {"type": "boolean"},
-                "reason": {"type": "string"},
+                "reason": {"type": "string", "description": "why; journaled. Always say why as an agent -- what you read and what you saw in it, not the option's name again. Only a person may leave it out"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
+        },
+    },
+    {
+        "name": "flow_extend",
+        "description": (
+            "Open a loop_limit of your own run by one iteration, when the loop declares "
+            "a 'self_answer' check (flow_status 'loop_limits' entries that carry one). The "
+            "workflow's command is run first: it must exit 0 or the limit stays exactly "
+            "where it is, and a person still owns it ('claunch cflow2 extend'). So this "
+            "does not approve anything -- it produces the machine's answer that the wait "
+            "is over, and then the loop's own options (e.g. the 'landed' branch) become "
+            "reachable again. Use it when something woke you (a mesh message, a daemon "
+            "notice) and the fact the check names is now true; do not call it to buy more "
+            "waiting. Say why in 'reason'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description": "loop instance id or label "
+                         "(omit when one loop limit is open)"},
+                "reason": {"type": "string", "description": "why; journaled. Name what "
+                           "woke you and what the check measured"},
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
+            },
+            "required": ["reason"],
         },
     },
     {
@@ -341,7 +381,7 @@ TOOLS = [
             "properties": {
                 "ask_id": {"type": "string"},
                 "decision": {"type": "string"},
-                "reason": {"type": "string"},
+                "reason": {"type": "string", "description": "why; journaled in the asking run. Always say why as an agent -- what you read and what you saw in it, not the option's name again. Only a person may leave it out"},
             },
             "required": ["ask_id", "decision"],
         },
@@ -583,8 +623,9 @@ def _daemon_parent(session: str) -> str:
 
 
 def _live_children(session: str):
-    """``[(name, cwd)]`` of ``session``'s children that are still live, in
-    the daemon's own order. Empty when there is no daemon or no session."""
+    """``[(name, cwd)]`` of ``session``'s children that are still live or
+    held, in the daemon's own order. Empty when there is no daemon or no
+    session."""
     client = _daemon()
     if client is None or not session:
         return []
@@ -597,7 +638,14 @@ def _live_children(session: str):
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "").strip()
-        if not name or str(row.get("status") or "") in ("exited", "archived"):
+        # A held child is live in the sense that matters here: its cflow run
+        # is running and its question is open, only its program is stopped
+        # (daemon/cflow2_triggers.live_session(include_held=True) reads the
+        # same pair). Its gate must reach the parent, which is what wakes it
+        # (claunch-7vf2z).
+        held = bool(row.get("held"))
+        ended = str(row.get("status") or "") in ("exited", "archived")
+        if not name or (ended and not held):
             continue
         cwd = str(row.get("cwd") or "").strip()
         if not cwd:
@@ -612,7 +660,7 @@ def _live_children(session: str):
 
 
 def _child_gates(session: str) -> Dict[str, Any]:
-    """What ``session``'s live children's runs wait on a person for
+    """What ``session``'s live or held children's runs wait on a person for
     (``flow_gates``). Read from each child's own run files, the same payload
     the child's ``flow_status`` shows; only the parts a parent may answer (or
     must know) are carried."""
@@ -702,7 +750,7 @@ def _foreign_run(args: dict) -> bool:
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-                "flow_move", "flow_call",
+                "flow_move", "flow_call", "flow_extend",
                 "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
         if not _foreign_run(args):
             cwd = str(args.get("cwd") or "").strip() or os.getcwd()
@@ -895,7 +943,8 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         cwd, scope = _where(args)
         return runtime.call(str(args.get("procedure") or ""),
                             str(args.get("node") or "").strip() or None,
-                            args.get("with"), cwd=cwd, scope=scope)
+                            args.get("with"), cwd=cwd, scope=scope,
+                            mode=str(args.get("mode") or "").strip() or None)
     if name == "flow_delegate":
         # A 'session' delegation is submitted by a child session that stands
         # in its own directory (often its own worktree) under its own name:
@@ -920,6 +969,19 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             str(args.get("node") or "").strip() or None, decision=option,
             decline=bool(args.get("decline")), reason=args.get("reason"),
             caller=runtime.CALLER_AGENT, cwd=cwd, scope=scope)
+    if name == "flow_extend":
+        cwd, scope, authority = _where_gate(args)
+        if authority != runtime.CALLER_AGENT:
+            # The driver's own answer to its own limit: a parent that holds a
+            # child's gate answers through flow_move, and this check reads the
+            # run's own checkout (its cwd), which a parent does not own.
+            raise runtime.FlowError(
+                "flow_extend answers this run's own loop limit as its driver; a run "
+                "that is not yours keeps the limit for its own session or a person "
+                "('claunch cflow2 extend')")
+        return runtime.self_extend_loop(
+            str(args.get("node") or "").strip() or None,
+            reason=args.get("reason"), cwd=cwd, scope=scope)
     if name == "flow_answer":
         from . import asks
 

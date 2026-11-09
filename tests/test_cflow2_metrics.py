@@ -199,3 +199,154 @@ def test_fresh_files_and_unreadable_runs(tmp_path, monkeypatch):
     for _ in range(20):
         metrics.observations(st)
     assert not any(isinstance(v, BaseException) for _, v in metrics._facts_cache.values())
+
+
+GATED = """\
+cflow: 2
+name: gated
+nodes:
+  a: {prompt: do a, ask: {prompt: "may I a?"}}
+  b: {prompt: do b}
+  r: {prompt: review, ask: {prompt: "ok?", from: [{role: reviewer}]}}
+body:
+  seq:
+    - choose:
+        prompt: which way?
+        chooser: user
+        options:
+          left: {then: a}
+          right: {then: b}
+    - r
+"""
+
+
+def gated_chart():
+    chart = compile_text(GATED, resolve_include=lambda _: None)
+    pick = next(n.id for n in chart.walk() if n.type == "choose")
+    return chart, pick
+
+
+def at(minute):
+    return f"2026-10-13T10:{minute:02d}:00Z"
+
+
+def test_human_gates_open_on_a_person_and_close_on_the_answer():
+    """(claunch-sbfsi.1) A user choice opens on its waiting event and an ask on
+    its fall to a person; the answer closes each. An ask routed to a responder
+    session waits on an agent and is not a human gate. Depth is the node's
+    chart ancestors, the frames the Callstack panel draws above it."""
+    chart, pick = gated_chart()
+    events = [
+        {"ts": at(0), "event": "waiting", "node": pick, "instance": pick + "@3",
+         "kind": "choose", "chooser": "user"},
+        {"ts": at(5), "event": "selected", "node": pick, "instance": pick + "@3", "option": "left"},
+        {"ts": at(6), "event": "waiting", "node": "a", "instance": "a@5", "kind": "ask", "otherwise": "human"},
+        {"ts": at(6), "event": "fallback", "decision": "ask", "node": "a", "instance": "a@5",
+         "route": "ask -> human"},
+        {"ts": at(20), "event": "ask_answered", "node": "a", "instance": "a@5", "decision": "approve"},
+        {"ts": at(21), "event": "waiting", "node": "r", "instance": "r@7", "kind": "ask", "otherwise": "self"},
+        {"ts": at(21), "event": "ask_routed", "node": "r", "instance": "r@7", "to": ["s-rev"]},
+        {"ts": at(30), "event": "ask_answered", "node": "r", "instance": "r@7", "decision": "pass"},
+    ]
+    gates = metrics.human_gates(chart, events)
+    assert [(g["kind"], g["node"], g["opened"], g["closed"]) for g in gates] == [
+        ("choice", pick, at(0), at(5)), ("ask", "a", at(6), at(20))]
+    assert gates[0]["depth"] == len(chart.ancestors(pick))
+    assert gates[1]["depth"] == len(chart.ancestors("a")) > gates[0]["depth"]
+    assert gates[1]["label"] == "a"
+
+
+def test_open_gate_waits_until_now_in_a_live_run_and_ends_with_a_finished_one(tmp_path):
+    chart, pick = gated_chart()
+    waiting = {"ts": at(10), "event": "waiting", "node": pick, "instance": pick + "@3",
+               "kind": "choose", "chooser": "user"}
+    st = RunStore(str(tmp_path), "s")
+    saved(st, "live", end=None, status="waiting_approval", events=[waiting])
+    st.chart_path.write_text(chart.to_json())
+    row = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]
+    assert row["gates"] == [dict(row["gates"][0], opened=at(10), closed="2026-10-13T12:00:00Z", open=True)]
+    saved(st, "aborted", end="2026-10-13T11:00:00Z", status="aborted", events=[waiting])
+    st.chart_path.write_text(chart.to_json())
+    gate = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]["gates"][0]
+    assert (gate["closed"], gate["open"]) == ("2026-10-13T11:00:00Z", True)
+
+
+def test_a_gate_without_a_placeable_end_is_counted_not_drawn(tmp_path):
+    # claunch-b6z8m: a finished run that saved no finish time gives an open
+    # gate no end; it used to reach the page as closed=None and vanish there.
+    chart, pick = gated_chart()
+    open_gate = {"node": pick, "label": "pick", "within": None, "kind": "choice",
+                 "opened": at(10), "closed": None, "depth": 1}
+    facts = {"gates": [open_gate], "state": {"finished": None}}
+    assert metrics._gate_rows(facts, True, False, "2026-10-13T12:00:00Z") == ([], 1)
+    closed = dict(open_gate, closed=at(20))
+    assert metrics._gate_rows(dict(facts, gates=[closed, open_gate]), True, True,
+                              "2026-10-13T12:00:00Z")[1] == 0
+    # Through the observations: an opening the journal wrote in no readable
+    # time is left out of the gates and counted on the run.
+    waiting = {"ts": "not-a-time", "event": "waiting", "node": pick, "instance": pick + "@3",
+               "kind": "choose", "chooser": "user"}
+    st = RunStore(str(tmp_path), "s")
+    saved(st, "done", end="2026-10-13T11:00:00Z", status="done", events=[waiting])
+    st.chart_path.write_text(chart.to_json())
+    row = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]
+    assert (row["gates"], row["gates_unended"]) == ([], 1)
+
+
+def test_move_request_is_a_gate_until_decided():
+    chart, _ = gated_chart()
+    events = [
+        {"ts": at(1), "event": "move_requested", "request": "mv1", "node": "b"},
+        {"ts": at(4), "event": "move_denied", "request": "mv1", "node": "b"},
+        {"ts": at(5), "event": "waiting", "node": "a", "instance": "a@9", "kind": "loop_limit"},
+    ]
+    gates = metrics.human_gates(chart, events)
+    assert [(g["kind"], g["closed"]) for g in gates] == [("move", at(4)), ("loop_limit", None)]
+
+
+def test_depth_steps_follow_the_deepest_active_node():
+    """(claunch-d54gw) The depth line is the deepest node among the instances
+    the journal entered and has not left. Parallel instances keep the max;
+    changes at one time collapse to the last; nothing active is None."""
+    chart, pick = gated_chart()
+    da, dpick = len(chart.ancestors("a")), len(chart.ancestors(pick))
+    assert da > dpick
+    events = [
+        {"ts": at(0), "event": "entered", "node": pick, "instance": "p@1"},
+        {"ts": at(1), "event": "entered", "node": "a", "instance": "a@2"},
+        {"ts": at(1), "event": "entered", "node": "b", "instance": "b@3"},
+        {"ts": at(2), "event": "left", "node": "b", "instance": "b@3"},
+        {"ts": at(3), "event": "left", "node": "a", "instance": "a@2"},
+        {"ts": at(3), "event": "reported", "node": "a", "instance": "a@2"},
+        {"ts": at(4), "event": "left", "instance": "gone@9"},
+        {"ts": at(5), "event": "left", "node": pick, "instance": "p@1"},
+    ]
+    assert metrics.depth_steps(chart, events) == [
+        {"at": at(0), "depth": dpick}, {"at": at(1), "depth": da},
+        {"at": at(3), "depth": dpick}, {"at": at(5), "depth": None}]
+    # Entered and left at one time: the transient depth never shows.
+    blink = [events[0], {**events[1], "ts": at(0)}, {**events[4], "ts": at(0)}]
+    assert metrics.depth_steps(chart, blink) == [{"at": at(0), "depth": dpick}]
+
+
+def test_depth_steps_of_a_cut_journal_end_at_its_last_event(tmp_path):
+    # A journal the scan limit cut says nothing past its last event: the line
+    # stops there instead of holding the last depth to the run's end.
+    chart, pick = gated_chart()
+    events = [{"ts": at(0), "event": "entered", "node": pick, "instance": "p@1"},
+              {"ts": at(7), "event": "waiting", "node": pick, "instance": "p@1",
+               "kind": "choose", "chooser": "user"}]
+    depth = len(chart.ancestors(pick))
+    assert metrics.depth_steps(chart, events, complete=False) == [
+        {"at": at(0), "depth": depth}, {"at": at(7), "depth": None}]
+    assert metrics.depth_steps(chart, events) == [{"at": at(0), "depth": depth}]
+    # Through the observations: a finished run's line ships on its row, and a
+    # run without valid times ships none.
+    st = RunStore(str(tmp_path), "s")
+    saved(st, "done", events=events)
+    st.chart_path.write_text(chart.to_json())
+    row = metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]
+    assert row["depth"] == [{"at": at(0), "depth": depth}]
+    saved(st, "bad", start="not-a-time", events=events)
+    st.chart_path.write_text(chart.to_json())
+    assert metrics.observations(st, now="2026-10-13T12:00:00Z")["runs"][0]["depth"] == []

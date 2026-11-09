@@ -705,6 +705,104 @@ def test_a_transcript_rows_tokens_ride_its_declared_provider_unpriced(
     assert row["cost"] is None and row["unpriced_tokens"] == 1050
 
 
+def test_each_session_row_carries_its_own_estimate(tmp_path, ledger):
+    """The Sessions table prices each row with the model table's own sum.
+
+    Row ``a`` ran a priced and an unpriced model: its estimate covers the
+    priced part and reports the rest as unpriced. Row ``b`` ran only the
+    unpriced model, so its cost is None -- a dash on the page, never a zero.
+    Each ledger provider entry carries its part of the estimate too.
+    """
+    write_ledger(tmp_path / "metering", [
+        record("a", hour=9, model="m1", fresh=1_000_000, cached=0, output=0),
+        record("a", hour=10, model="noprice", fresh=400, cached=0, output=0),
+        record("b", hour=11, model="noprice", fresh=300, cached=0, output=0),
+    ])
+    ledger.refresh(NOW)
+    prices = {"fireworks": {"m1": {"input": 2.0}}}
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST, sessions=[meta("a"), meta("b")],
+        ledger=ledger, labels={}, prices=prices)
+    rows = {r["session"]: r for r in payload["sessions"]}
+    assert rows["a"]["cost"] == pytest.approx(2.0)
+    assert rows["a"]["priced_tokens"] == 1_000_000
+    assert rows["a"]["unpriced_tokens"] == 400
+    entry = rows["a"]["providers"][0]
+    assert entry["cost"] == pytest.approx(2.0)
+    assert entry["unpriced_tokens"] == 400
+    assert rows["b"]["cost"] is None
+    assert rows["b"]["unpriced_tokens"] == 300
+    # The rows add up to the window's estimate.
+    assert sum(r["cost"] or 0 for r in payload["sessions"]) == pytest.approx(
+        payload["estimate"]["cost"])
+
+
+def test_a_transcript_row_is_priced_at_its_last_model(tmp_path, ledger,
+                                                      monkeypatch):
+    """A transcript reading names no model per bucket, only its newest turn's.
+
+    Given a model reader, the row carries that model (``model_basis:
+    "last"``) and is priced at it under its declared provider -- the same
+    model the rail prices the session at -- and the model table files its
+    tokens under that model rather than the empty one.
+    """
+    monkeypatch.setattr(statsboard, "declared_provider",
+                        lambda profile, borrow="", doc=None: "claude")
+    ledger.refresh(NOW)
+    reader = statsboard.Transcripts(
+        zone=KST,
+        reader=lambda sdef: reading(
+            ("2026-10-21T09:00:00+09:00", 1_000_000, 0, 0, 4)),
+        model_reader=lambda sdef: "claude-x")
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth", harness="claude"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader,
+        prices={"claude": {"claude-x": {"input": 5.0}}})
+    row = payload["sessions"][0]
+    assert row["model"] == "claude-x" and row["model_basis"] == "last"
+    assert row["cost"] == pytest.approx(5.0)
+    assert row["unpriced_tokens"] == 0
+    model = payload["models"][0]
+    assert model["model"] == "claude-x" and model["model_basis"] == "last"
+    assert model["cost"] == pytest.approx(5.0)
+    assert payload["estimate"]["unpriced_tokens"] == 0
+
+
+def test_a_model_reader_that_fails_leaves_the_row_unpriced(tmp_path, ledger,
+                                                          monkeypatch):
+    monkeypatch.setattr(statsboard, "declared_provider",
+                        lambda profile, borrow="", doc=None: "claude")
+    ledger.refresh(NOW)
+
+    def broken(sdef):
+        raise OSError("gone")
+
+    reader = statsboard.Transcripts(
+        zone=KST,
+        reader=lambda sdef: reading(("2026-10-21T09:00:00+09:00", 10, 0, 0, 1)),
+        model_reader=broken)
+    sdef = SimpleNamespace(name="oauth", harness="claude")
+    payload = statsboard.overview(
+        window="today", now=NOW, zone=KST,
+        sessions=[{**meta("oauth", harness="claude"), "sdef": sdef}],
+        ledger=ledger, labels={}, transcripts=reader, prices={})
+    row = payload["sessions"][0]
+    assert row["model"] == "" and "model_basis" not in row
+    assert row["cost"] is None and row["unpriced_tokens"] == 10
+
+
+def test_the_default_model_reader_is_ctxsize_s_newest_turn(monkeypatch):
+    from claude_launcher.daemon import ctxsize
+
+    monkeypatch.setattr(ctxsize, "for_session",
+                        lambda sdef: {"model": "claude-y", "tokens": 1})
+    assert statsboard.Transcripts(zone=KST).model(SimpleNamespace()) == "claude-y"
+    monkeypatch.setattr(ctxsize, "for_session", lambda sdef: None)
+    assert statsboard.Transcripts(zone=KST).model(SimpleNamespace()) == ""
+
+
 def test_the_payload_names_when_the_ledger_starts(tmp_path, ledger):
     write_ledger(tmp_path / "metering", [record("a", day=19, hour=9)])
     ledger.refresh(NOW)

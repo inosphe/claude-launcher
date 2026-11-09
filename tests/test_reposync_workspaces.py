@@ -1597,6 +1597,34 @@ def test_status_plans_each_checked_remote_and_orders_the_basis_first(world, tmp_
     _with_app(body)
 
 
+def test_status_names_the_basis_candidates_and_refuses_an_older_pick(world, tmp_path):
+    """The status says which checked remotes may be the basis and, for each
+    other one, which candidate holds its tip; a requested basis that is behind
+    is refused with the pick echoed back, so the panel can name both remotes
+    instead of showing one basis in the picker and another in the order
+    (claunch-j1894)."""
+    _mirror(world, tmp_path)
+    _commit(world["b"], "theirs.txt")
+    _git(world["b"], "push", "-q", "origin", "master")
+
+    async def body(client):
+        doc = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror&basis=mirror",
+            headers=AUTH)).json()
+        assert doc["basis_candidates"] == ["origin"]
+        assert doc["basis_behind"] == {"mirror": "origin"}
+        assert doc["basis"] == "origin"
+        assert doc["basis_requested"] == "mirror"
+        assert "behind origin" in doc["basis_error"]
+        ok = await (await client.get(
+            "/api/reposync/workspaces/proj/status?peers=0&remotes=origin,mirror&basis=origin",
+            headers=AUTH)).json()
+        assert "basis_error" not in ok and "basis_requested" not in ok
+        assert ok["basis_candidates"] == ["origin"]
+
+    _with_app(body)
+
+
 def test_status_names_remotes_that_are_not_on_one_line(world, tmp_path):
     mirror = _mirror(world, tmp_path)
     _commit(world["b"], "theirs.txt")

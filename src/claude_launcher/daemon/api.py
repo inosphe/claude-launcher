@@ -80,7 +80,7 @@ from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from . import agent_timers
 from . import rail_superseded, session_timers, session_prs, session_procs
-from . import pr_actions
+from . import pr_actions, pr_stamps
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import inputs as cflow2_inputs, ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -793,6 +793,10 @@ def build_app(
     fault_pause.install(app)
     from . import spec_api
     spec_api.install(app)
+    # Fleet presets (daemon/fleet_api.py, claunch-d0hji): agent trees that
+    # expand into a work spec and launch through its import.
+    from . import fleet_api
+    fleet_api.install(app)
     # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
     # ownership (released by an exit hook it adds), rounds, owner notices.
     from . import sim_api
@@ -1150,6 +1154,13 @@ def build_app(
     r.add_get("/api/gates", h_gates)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
+    # sub procedures (docs 2.12.1-2.12.3, claunch-8t5r0)
+    r.add_get("/api/cflow2/procedures", h_cflow2_procedures)
+    r.add_post("/api/cflow2/call", h_cflow2_call)
+    r.add_get("/api/cflow2/packs", h_cflow2_packs)
+    r.add_post("/api/cflow2/packs/install", h_cflow2_pack_install)
+    r.add_post("/api/cflow2/packs/remove", h_cflow2_pack_remove)
+    r.add_post("/api/cflow2/packs/roles", h_cflow2_pack_roles)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
     r.add_post("/api/cflow2/input", h_cflow2_input)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
@@ -7672,6 +7683,140 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
     return json_response(payload)
 
 
+NUDGE_CFLOW2_CALLED = (
+    "cflow2: {who} called sub procedure '{procedure}' through the daemon "
+    "(call {call}, {mode}) on task {label} - call the flow_status tool: {how}"
+)
+
+
+def _session_actor(request: web.Request) -> Optional[dict]:
+    """The session behind ``request`` when a session (an agent's shell or
+    a cflow run) sent it, else None -- the person at the dashboard or a
+    shell that is not a managed session's (claunch-8t5r0.7)."""
+    actor = actors.from_request(request) or {}
+    return actor if actor.get("kind") in (actors.AGENT, actors.CFLOW) else None
+
+
+async def h_cflow2_procedures(request: web.Request) -> web.Response:
+    """Every sub procedure a v2 run could call now, each with ``available``
+    and ``why`` (``runtime.callable_procedures``, docs 2.12.3):
+    ``?cwd=&scope=&node=``. The picker lists them all and greys out the
+    ones that are not available, with ``why`` as the tooltip."""
+    cwd, scope = _cflow2_slot(request)
+    node = request.query.get("node") or None
+    data = await asyncio.to_thread(cflow2_runtime.callable_procedures, cwd, scope, node)
+    return json_response(data)
+
+
+async def h_cflow2_call(request: web.Request) -> web.Response:
+    """Call a sub procedure through the daemon (docs 2.12.3): the same call
+    ``flow_call`` makes, on the run's active task, judged by the same rules.
+    The call records who asked: ``agent`` when a session sent the request
+    (its actor header), ``user`` otherwise (claunch-8t5r0.7). Body: cwd,
+    scope, procedure, node?, with?, mode?. The driver is told."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    procedure = str(body.get("procedure") or "").strip()
+    if not procedure:
+        return json_error(400, "'procedure' required in the JSON body")
+    with_ = body.get("with")
+    if with_ is not None and not isinstance(with_, dict):
+        return json_error(400, "'with' must be an object")
+    session = _session_actor(request)
+    payload = await asyncio.to_thread(
+        cflow2_runtime.call, procedure, str(body.get("node") or "") or None, with_,
+        cwd=cwd, scope=scope, mode=str(body.get("mode") or "") or None,
+        by=cflow2_runtime.CALL_BY_AGENT if session else cflow2_runtime.CALL_BY_USER)
+    called = payload.get("called") or {}
+    mode = called.get("mode") or "inline"
+    how = ("the daemon quick-forks you to drive it; wait for its result"
+           if mode == cflow2_runtime.CALL_MODE_FORK
+           else f"drive its callee run with scope {called.get('scope')!r}")
+    label = next((c.get("label") for c in payload.get("calls") or []
+                  if c.get("id") == called.get("call")), called.get("instance"))
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_CALLED.format(
+            who=(f"session {session['name']}" if session and session.get("name")
+                 else "a session" if session else "the user from the dashboard"),
+            procedure=procedure, call=called.get("call"), mode=mode, label=label, how=how))
+    return json_response(payload)
+
+
+def _pack_workspace(raw: str) -> str:
+    if not raw:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "'cwd' required"}),
+                                 content_type="application/json")
+    path = Path(raw).resolve()
+    if not path.is_dir():
+        raise web.HTTPBadRequest(text=json.dumps({"error": f"no such directory: {path}"}),
+                                 content_type="application/json")
+    return str(path)
+
+
+def _packs_payload(cwd: str) -> dict:
+    from ..cflow2 import procpacks
+
+    return {"cwd": cwd, "packs": [p.to_dict() for p in procpacks.all_packs(cwd)]}
+
+
+async def h_cflow2_packs(request: web.Request) -> web.Response:
+    """The procedure packs visible from ``?cwd=``: installed (project,
+    global) and the catalog (package), with their roles filter."""
+    cwd = _pack_workspace(request.query.get("cwd") or "")
+    return json_response(await asyncio.to_thread(_packs_payload, cwd))
+
+
+async def _pack_op(request: web.Request, op) -> web.Response:
+    """Install, remove or re-filter a pack: a person's action. A session's
+    request is refused -- a pack's roles filter decides which sessions may
+    call its procedures, and a session that wrote it could admit itself
+    (claunch-8t5r0.7, user decision: person only)."""
+    from ..cflow2 import procpacks
+
+    if _session_actor(request):
+        return json_error(403, "procedure packs are installed, removed and "
+                               "role-filtered by a person on the dashboard, "
+                               "not by a session")
+    body = await _json_body(request)
+    cwd = _pack_workspace(str(body.get("cwd") or ""))
+    pack = str(body.get("pack") or "").strip()
+    if not pack:
+        return json_error(400, "'pack' required in the JSON body")
+    try:
+        await asyncio.to_thread(op, cwd, pack, body)
+    except procpacks.PackError as exc:
+        return json_error(400, str(exc))
+    return json_response(await asyncio.to_thread(_packs_payload, cwd))
+
+
+async def h_cflow2_pack_install(request: web.Request) -> web.Response:
+    """Install a catalog pack into the workspace's project layer.
+    Body: cwd, pack, force?"""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.install(
+        cwd, pack, force=bool(body.get("force"))))
+
+
+async def h_cflow2_pack_remove(request: web.Request) -> web.Response:
+    """Remove a pack from the workspace's project layer. Body: cwd, pack."""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.remove(cwd, pack))
+
+
+async def h_cflow2_pack_roles(request: web.Request) -> web.Response:
+    """Edit an installed pack's roles filter (claunch-8t5r0.5).
+    Body: cwd, pack, roles ({type, roles} or null for every role)."""
+    from ..cflow2 import procpacks
+
+    return await _pack_op(request, lambda cwd, pack, body: procpacks.set_roles(
+        cwd, pack, body.get("roles")))
+
+
 async def h_cflow2_input(request: web.Request) -> web.Response:
     """Change a start input of a v2 run from the dashboard, as the user
     (claunch-umq1f): the input's ``set_by`` names ``user``; the value
@@ -9993,7 +10138,7 @@ def _reposync_pause(app, repo: str) -> dict:
 
 async def h_reposync_pause(request: web.Request) -> web.Response:
     """Whether a Workspaces sync agent holds the merge pause on ``?repo=``'s
-    repository (:mod:`daemon.reposync_pause`). ``tools/delayed_sweep.py admit``
+    repository (:mod:`daemon.reposync_pause`). ``claunch delayed-sweep admit``
     reads this and refuses every candidate but the sync's own issue."""
     repo = request.query.get("repo") or ""
     if not repo or not os.path.isabs(repo):
@@ -11207,6 +11352,14 @@ def _recorded_prs(manager) -> Tuple[List[dict], List[str]]:
             seen_projects.add(project)
             merged.setdefault(url, {**row, "session": name, "project": project})
     rows = list(merged.values())
+    # A row that has no title yet is looked up by a background ``gh`` pass and
+    # cached: this handler is polled, so it never waits on the forge for one.
+    # The cache is read here (``pr_stamps.stamp``, via ``for_session``), and
+    # the pass warms it when it fills; the next poll shows the title.
+    try:
+        pr_stamps.kick([r["url"] for r in rows if not r.get("title")])
+    except Exception:  # noqa: BLE001 -- a cache warm-up must not fail the list
+        pass
     rows.sort(key=lambda r: (r.get("at") or "", r.get("number") or 0), reverse=True)
     _prs_cache.update({"at": now, "rows": rows, "projects": sorted(seen_projects)})
     return rows, _prs_cache["projects"]
@@ -11609,6 +11762,12 @@ RAIL_FIELDS = {
     "delayed_at", "failed_at", "restore_queue",
     "pending_deliveries", "compacting", "fault",
     "context", "branch", "briefing", "winddown", "session_reminder",
+    # What the conversation has spent so far, and its subagents beside it:
+    # the card draws the two cost lines off this poll and nothing else. It
+    # was attached to every live row and then dropped here by the whitelist,
+    # so the rail read a session with no cumulative figure at all and only
+    # the last request's cost (claunch-ge1ap).
+    "token_usage",
     # Whose conversation this session is a copy of, and the merge or
     # handoff the operator has already asked for. The header's
     # fork/merge pair reads both off this list and nothing else
@@ -12761,6 +12920,12 @@ async def h_session_children(request: web.Request) -> web.Response:
                 "name": child,
                 "status": sess.status(),
                 "children": manager.children(child),
+                # A held session's process is gone but its run is not: the
+                # hold stops the program and leaves the cflow run live with
+                # its question still open (claunch-7vf2z). Without this row
+                # a parent reads a held child exactly like a dead one and
+                # never sees the gate it is waiting on.
+                "held": bool(sess.exited and getattr(sess, "held_at", None)),
             }
             run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
             if run:
@@ -12833,6 +12998,32 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     return json_response(payload, status=status)
 
 
+class _PersonRequest:
+    """What :func:`_spawn_child` reads off a request, for a child a person's
+    fleet launch creates with no HTTP request of its own in hand."""
+
+    def __init__(self, app, actor: dict) -> None:
+        self.app = app
+        self.headers = {actors.HEADER: actors.header_value(actors.USER, actor.get("name"))}
+        self.match_info: dict = {}
+
+    def get(self, key, default=None):
+        return default
+
+
+async def spawn_child_as_person(app, parent: str, body: dict, *,
+                                actor: dict) -> Tuple[int, dict]:
+    """A child of ``parent`` that a PERSON asked for, member by member, in
+    the dashboard's fleet launch (``daemon/fleet_api``): the spawn path an
+    agent takes, with the profile/model gates lifted
+    (:data:`claude_launcher.spawn.PERSON_FIELDS`). Every other policy check
+    -- enabled, depth, the other field gates -- is the agent's. Never
+    reached from a request body: the fleet route refuses an agent caller
+    before it gets here."""
+    return await _spawn_child_reported(_PersonRequest(app, actor), parent, dict(body),
+                                       created_by=actor, person_fields=True)
+
+
 def spawn_gate_exempt(body: dict) -> bool:
     """Whether an agent's child spawn skips the spawn-request gate: a
     ``reviewer`` child (the user's decision, th-17c48c)."""
@@ -12903,13 +13094,16 @@ def _first_line(text) -> str:
 
 
 async def _spawn_child(request, parent: str, body: dict, *,
-                       created_by: Optional[dict]) -> Tuple[int, dict]:
+                       created_by: Optional[dict],
+                       person_fields: bool = False) -> Tuple[int, dict]:
     """Stage, enrol and launch a child of ``parent`` -- the agent's spawn,
-    and the spawn gate's create of a child it approved."""
+    and the spawn gate's create of a child it approved. ``person_fields``
+    is the fleet launch's (see :func:`spawn_child_as_person`)."""
     manager: SessionManager = request.app["manager"]
     warnings: list = []
     try:
-        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by)
+        session = manager.stage_child(parent, body, warnings=warnings, created_by=created_by,
+                                      person_fields=person_fields)
     except spawn_mod.SpawnDenied as exc:
         return 403, {"error": str(exc)}
     except worktree_mod.WorktreeError as exc:
@@ -12938,7 +13132,8 @@ async def _spawn_child(request, parent: str, body: dict, *,
 
 
 async def _spawn_child_reported(request, parent: str, body: dict, *,
-                                created_by: Optional[dict]) -> Tuple[int, dict]:
+                                created_by: Optional[dict],
+                                person_fields: bool = False) -> Tuple[int, dict]:
     """:func:`_spawn_child`, with a refused creation recorded for the user.
 
     A spawn that answers 4xx/5xx has no session to look at afterwards: the
@@ -12948,7 +13143,11 @@ async def _spawn_child_reported(request, parent: str, body: dict, *,
     event on the parent -- the session the person was watching when the work
     was started -- and one warn notice over its terminal (claunch-is4o4).
     """
-    status, payload = await _spawn_child(request, parent, body, created_by=created_by)
+    # The keyword goes only when set: everything else calls _spawn_child
+    # exactly as before (tests stand in for it with that signature).
+    extra = {"person_fields": True} if person_fields else {}
+    status, payload = await _spawn_child(request, parent, body, created_by=created_by,
+                                         **extra)
     if status >= 400:
         _report_spawn_failure(
             request, parent, payload.get("error") or "", site="api.spawn",
@@ -15307,6 +15506,12 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     that project (validated against the registry); followers keep their own
     project — it is a filing of the session, not of the directory.
 
+    A mirror mesh the named session built by joining is filed where that
+    session stood (``MeshManager.join`` seeds it from the session), so the
+    same ``project`` re-files it too — while this session is its one local
+    member (``MeshManager.refile_mirrors_for``); the answer's
+    ``mirrors_refiled`` names what moved.
+
     The move itself is :meth:`SessionManager.migrate`: stop, carry the claude
     transcript to the new directory's slug, move the session's cflow v2 run
     slots to the same scope under the new directory (runs are keyed
@@ -15365,6 +15570,19 @@ async def h_session_migrate(request: web.Request) -> web.Response:
     migrated, carried, slots_moved = await manager.migrate(
         name, new_cwd, project=project
     )
+    # A mirror is filed where the session that built it stood (MeshManager.join
+    # seeds it from the session), so re-filing the session alone would leave
+    # that row in the project it came from. Asked of the mesh manager here, not
+    # done inside SessionManager, for the same reason as _mesh_holds: the
+    # manager knows nothing of meshes. Only when ``project`` was given — without
+    # it the filing did not change, and a mesh an operator filed by hand keeps
+    # its project.
+    mirrors_refiled = (
+        request.app["mesh"].refile_mirrors_for(
+            name, migrated.sdef.project or ""
+        )
+        if project is not None else []
+    )
     children = []
     for child in followers:
         try:
@@ -15388,6 +15606,9 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             # the scopes whose run slots travelled — an empty list is the
             # ordinary answer for a session driving no cflow run
             "slots_moved": slots_moved,
+            # mirrors this session's re-filing moved with it (see above) — an
+            # empty list is the ordinary answer for a session on no mesh
+            "mirrors_refiled": mirrors_refiled,
             "worktree": (
                 {
                     "name": wt.name,
@@ -18240,10 +18461,10 @@ async def _search_args(request: web.Request):
     """The query string a search reads, validated the same way for the JSON
     answer and the stream. ``(args, error_response)``."""
     service: rag_mod.RagService = request.app["rag"]
-    # ``all`` is the deprecated name of the combined corpus; it normalizes to
-    # ``unified`` here, so every answer below — and the index it reads — names
-    # the corpus by its current name (claunch-7aujp).
-    kind = rag_mod.canonical((request.query.get("kind") or "beads").strip())
+    # ``all`` was the combined corpus's name until the rename and is not a
+    # corpus any more: it falls through to the 400 below, which lists the
+    # names that do answer (claunch-7aujp.1).
+    kind = (request.query.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return None, json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     mode = request.query.get("mode", "general")
@@ -18270,7 +18491,8 @@ async def _search_args(request: web.Request):
 
 async def h_search(request: web.Request) -> web.Response:
     """Rank a corpus for a query: ``?q=`` (required), ``?kind=beads|sessions|unified``
-    (default beads; ``all`` is ``unified``'s deprecated name), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
+    (default beads; ``all`` was ``unified``'s name before the rename and is
+    refused), ``?limit=`` (1..50, default 10), ``?rerank=0`` to skip
     the reranker, ``?wait=`` seconds to give a running index sync (0..30,
     default 2), and for the board ``?cwd=`` or ``?parent=`` as the
     candidates picker takes them.
@@ -18408,7 +18630,8 @@ async def h_gh_status(request: web.Request) -> web.Response:
 
 async def h_rag_reindex(request: web.Request) -> web.Response:
     """Start (or restart) an index sync. Body: ``kind`` (beads|sessions|unified,
-    default beads; ``all`` is ``unified``'s deprecated name), ``cwd`` for the board, ``force`` to re-embed everything.
+    default beads; ``all`` was ``unified``'s name before the rename and is
+    refused), ``cwd`` for the board, ``force`` to re-embed everything.
 
     Returns 202 with the sync's progress and, in ``started`` / ``running`` /
     ``force_applied`` / ``force_pending``, what the request actually did. The
@@ -18423,7 +18646,7 @@ async def h_rag_reindex(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
+    kind = str(body.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     if not service.configured():
@@ -18469,7 +18692,7 @@ async def h_rag_cancel(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    kind = rag_mod.canonical(str(body.get("kind") or "beads").strip())
+    kind = str(body.get("kind") or "beads").strip()
     if kind not in rag_mod.KINDS:
         return json_error(400, f"kind must be one of {', '.join(rag_mod.KINDS)}")
     root = None

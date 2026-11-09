@@ -184,7 +184,7 @@ new Function(
    // The head now carries the session's directory line (railcwd_check's
    // subject); here these are only calls that have to resolve.
    slice("shortenPath"), slice("cwdSplit"), slice("cwdShort"), slice("cwdLine"),
-   slice("sessHead")].join("\n") +
+   slice("sessHead"), "// The phone \u22ef on the head (claunch-0a5nk.5) is mobiledetail_browser.cjs's\n// subject; here it only has to resolve.\nfunction sessHeadMoreButton() { return el(\"button\", \"wf-btn sess-head-more\", \"\u22ef\"); }\n"].join("\n") +
   `
 Object.assign(exports, {
   parseHash, syncDetailPanel, openDetail, closeDetail, dropDetail, showView,
@@ -412,20 +412,27 @@ check("...but still says which session", h.kids[0].text === "coder3");
 
 h = headOf("s7");
 // wf-btn is the head's verbs: Spawn, Spawn same setup, VS Code
-// (claunch-rvly4), Open PR, Open terminal. The × is its own class.
+// (claunch-rvly4), Open PR, Open terminal. The × is its own class. The
+// phone's ⋯ (claunch-0a5nk.5) is a wf-btn too but no verb, so it is left
+// out of the count, and three of the verbs sit in its box (span
+// .sess-head-extra, `display: contents` wider than a phone), so the box is
+// opened up; mobiledetail_browser.cjs holds what the ⋯ does.
+const verbs = (head) => head.kids
+  .flatMap((k) => (k.classes.has("sess-head-extra") ? k.kids : [k]))
+  .filter((k) => k.classes.has("wf-btn") && k.text !== "⋯");
 check("aimed elsewhere it keeps both ways out and the spawn and PR verbs",
-      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 5);
+      kidsOf(h, "sess-close").length === 1 && verbs(h).length === 5);
 check("...and says it is elsewhere", kidsOf(h, "sess-elsewhere").length === 1);
 
 termUp = false;                                // a page is over the terminal
 h = headOf("coder3");
 check("with the terminal covered both come back — there is no chip on screen",
-      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 5);
+      kidsOf(h, "sess-close").length === 1 && verbs(h).length === 5);
 
 termUp = true; narrow = true;                  // and a phone has no header at all
 h = headOf("coder3");
 check("on a phone both stay", kidsOf(h, "sess-close").length === 1 &&
-      kidsOf(h, "wf-btn").length === 5);
+      verbs(h).length === 5);
 narrow = false;
 ctx.setCur("coder2");
 

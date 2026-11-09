@@ -13,10 +13,8 @@ with no leader only sessions in no mesh, marked as pausing nothing.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -53,7 +51,8 @@ def compute(state, cards=(), precard=1800.0, now=NOW):
 # --------------------------------------------------------------------------- #
 # the span and its releases
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("node", ["prepare", "checks", "review", "execute"])
+@pytest.mark.parametrize("node", ["prepare", "checks", "review", "auto-execute",
+                                  "approval-check", "approval-wait", "retry-route", "execute"])
 def test_prepare_through_execute_pause(node):
     pause = compute(run_state(node))
     assert pause["node"] == node and not pause["expired"]
@@ -61,7 +60,7 @@ def test_prepare_through_execute_pause(node):
     assert pause["issue"] == "claunch-sync"
 
 
-@pytest.mark.parametrize("node", ["inspect", "receipt", None])
+@pytest.mark.parametrize("node", ["inspect", "stall-notice", "sync-stall", "receipt", None])
 def test_inspect_and_receipt_do_not_pause(node):
     assert compute(run_state(node)) is None
 
@@ -183,11 +182,12 @@ def test_for_repo_reports_an_expired_pause_without_pausing():
 # the leader's admit
 # --------------------------------------------------------------------------- #
 def load_tool():
-    path = Path(__file__).resolve().parents[1] / "tools" / "delayed_sweep.py"
-    spec = importlib.util.spec_from_file_location("delayed_sweep_tool_z6da6", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    # The tool moved into the package (claunch-sr6ex); ``tools/delayed_sweep.py``
+    # is now only a wrapper that exits on import, so the test imports the module
+    # the wrapper delegates to.
+    from claude_launcher import delayed_sweep_cli
+
+    return delayed_sweep_cli
 
 
 @pytest.fixture

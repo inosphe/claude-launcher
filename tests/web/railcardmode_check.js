@@ -224,7 +224,7 @@ function rule(sel) {
    same row becomes an expanded card when the reader picks it, and rebuilding
    the rail to reveal a line would lose focus, hover and the scroll position
    for a card already in hand. */
-for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-ctx-tokens",
+for (const line of [".rail-cwd", ".rail-ctx-line", ".rail-usage-cost",
                     ".rail-tps-line", ".rail-usage-line", ".rail-seen",
                     ".rail-life", ".rail-brief", ".rail-note", ".rail-beads",
                     ".rail-status-checks", ".rail-commits", ".rail-actions",

@@ -67,7 +67,9 @@ def test_async_verification_gates_and_merge_interval_are_declared():
     assert "handle-regression" in opts
     for label, action in (("checkpoint-check", "check-enqueued"),):
         run = by_label[label].get("verify")["run"]
-        assert run[4:6] == ["tools/delayed_sweep.py", action]
+        # The queue tool ships in the package (claunch-sr6ex); the verify runs
+        # the installed command, so it works in a repository without tools/.
+        assert run[:2] == ["claunch", "delayed-sweep"] and run[2] == action
     assert by_label["checkpoint-check"].get("verify")["run"][-1] == "CFLOW_DATA_MERGED"
 
 

@@ -34,6 +34,15 @@ globalThis.SearchAnything = (() => {
       return `프리셋은 ${max}개까지 저장됩니다. 프리셋을 삭제한 뒤 다시 시도하세요.`;
     return "";
   }
+  // A board collection's corpus key is the board's digest, not the literal
+  // "beads" (daemon/rag.py's `_key` keys a board by its root's digest), so the
+  // column shows the corpus a reader can act on and keeps the digest in the
+  // cell's title (claunch-rk0od).
+  function ragCorpusLabel(corpus) {
+    const name = String(corpus || "");
+    if (name.startsWith("beads-")) return "beads";
+    return name || "?";
+  }
   // The DB panel's rows: one per named DB (its collections across corpora
   // folded together), and one per collection of the pre-preset format,
   // which has no name to group by (claunch-r4796).
@@ -591,12 +600,24 @@ globalThis.SearchAnything = (() => {
         }
         const table = document.createElement("table"); table.className = "rag-db-table";
         const head = document.createElement("tr");
-        for (const h of ["DB 이름", "쓰는 프리셋", ""]) head.append(node("th", h));
+        // One row per collection, not per DB: a preset adopts one collection in
+        // each corpus, so the same presets repeat down a DB's rows. The column
+        // name says that, which is what the row-per-DB layout hid — it read as
+        // "the presets that write into this DB" (claunch-rk0od).
+        for (const h of ["DB 이름", "corpus", "형식", "이 컬렉션을 채택하는 프리셋", "폭", "모델", ""]) head.append(node("th", h));
         const thead = document.createElement("thead"); thead.append(head); table.append(thead);
         const body = document.createElement("tbody");
         for (const g of dbGroups) {
+          // A legacy collection is a group of one; a named DB carries one
+          // collection per corpus it covers.
+          const rows = g.collections.length ? g.collections : [{ corpus: "", identity: "", dims: 0, model: "", presets: [], in_use: false }];
+          let lastTr = null;
+          rows.forEach((row, index) => {
           const tr = document.createElement("tr"); tr.className = "rag-db-entry";
+          lastTr = tr;
+          if (index === 0) {
           const nameCell = node("td", "");
+          if (rows.length > 1) nameCell.rowSpan = rows.length;
           const use = button(g.legacy ? `${g.name} (이전 형식)` : g.name, "rag-db-use");
           use.dataset.db = g.fill;
           use.title = g.fill ? `DB 이름 칸에 ${g.fill}을 채웁니다` : "이 컬렉션은 이름으로 지정할 수 없습니다";
@@ -608,13 +629,23 @@ globalThis.SearchAnything = (() => {
               (width && testedDims && width !== testedDims ? ` 이 DB는 ${width}차원이고 마지막 연결 테스트의 모델은 ${testedDims}차원이라 저장이 거절됩니다.` : "");
           };
           nameCell.append(use);
-          if (!g.legacy && g.collections.length > 1) nameCell.append(node("span", ` 컬렉션 ${g.collections.length}개`, "rag-hint-inline"));
-          const readers = g.presets.length ? g.presets.join(", ") : (g.in_use ? "현재 활성 설정" : "없음");
+          if (!g.legacy && rows.length > 1) nameCell.append(node("span", ` 컬렉션 ${rows.length}개`, "rag-hint-inline"));
+          tr.append(nameCell);
+          }
+          const corpus = node("td", ragCorpusLabel(row.corpus), "rag-db-corpus");
+          corpus.title = row.corpus ? `corpus ${row.corpus}` : "";
+          tr.append(corpus,
+                    node("td", row.identity ? "이름 있음" : "이전 형식", "rag-db-form"),
+                    node("td", row.presets.length ? row.presets.join(", ") : (row.in_use ? "현재 활성 설정" : "없음"), "rag-db-readers"),
+                    node("td", row.dims ? String(row.dims) : "—", "rag-db-dims"),
+                    node("td", row.model || "—", "rag-db-model"));
+          if (index === 0) {
           const actions = node("td", "", "rag-db-actions");
+          if (rows.length > 1) actions.rowSpan = rows.length;
           const occupied = Boolean(g.presets.length || g.in_use);
           const del = button("삭제", "wf-btn clear rag-db-delete");
           del.disabled = occupied;
-          if (occupied) del.title = "이 DB를 쓰는 프리셋이 있어 삭제할 수 없습니다. 그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요.";
+          if (occupied) del.title = "이 DB를 읽는 프리셋이 있어 삭제할 수 없습니다. 그 프리셋의 DB를 다른 DB로 바꾼 뒤 삭제하세요.";
           del.onclick = async () => {
             if (!window.confirm(`DB ${g.name}과 그 벡터를 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`)) return;
             del.disabled = true;
@@ -628,17 +659,22 @@ globalThis.SearchAnything = (() => {
           };
           if (!g.legacy) {
             const ren = button("이름 변경", "wf-btn clear rag-db-rename");
-            ren.onclick = () => renameDbRow(tr, g);
+            // The rename row goes under the group's last row, not its first:
+            // with the DB cell spanning the group, an inserted row between
+            // them breaks the table (claunch-rk0od).
+            ren.onclick = () => renameDbRow(rows.length > 1 ? lastTr : tr, g);
             actions.append(ren);
           }
           actions.append(del);
-          tr.append(nameCell, node("td", readers), actions);
+          tr.append(actions);
+          }
           body.append(tr);
+          });
         }
         table.append(body);
         const scroller = node("div", "", "rag-db-scroll"); scroller.append(table);
         dbList.append(scroller);
-        hint("DB 하나는 corpus(sessions, all, 보드별 beads)마다 컬렉션을 하나씩 가집니다. ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션이고, 이름을 누르면 그 모델의 이름이 채워집니다.", dbList);
+        hint("한 행이 컬렉션 하나입니다. 프리셋은 corpus마다 컬렉션을 하나씩 채택하므로 같은 DB의 행들이 같은 프리셋을 적습니다. corpus가 beads인 행의 이름은 보드별 식별자이고, ‘이전 형식’은 프리셋 도입 전에 만든 컬렉션입니다.", dbList);
         showDbResolved();
       }
       // Rename one DB in place: an input row under it, the slug the daemon
@@ -648,7 +684,7 @@ globalThis.SearchAnything = (() => {
       function renameDbRow(tr, g) {
         if (tr.nextSibling && tr.nextSibling.classList && tr.nextSibling.classList.contains("rag-db-rename-row")) return;
         const row = document.createElement("tr"); row.className = "rag-db-rename-row";
-        const cell = document.createElement("td"); cell.colSpan = 3;
+        const cell = document.createElement("td"); cell.colSpan = 7;
         const input = document.createElement("input"); input.value = g.name; input.autocomplete = "off"; input.maxLength = 64;
         const shown = node("span", "", "rag-hint-inline");
         const go = button("이름 변경", "wf-btn option"), cancel = button("취소");
@@ -676,7 +712,7 @@ globalThis.SearchAnything = (() => {
             const repointed = (data.presets || []).includes(presetSelect.value);
             if (screenDb === g.name || repointed) dbInput.value = data.db;
             for (const p of presets) if (data.presets && data.presets.includes(p.id)) p.db = data.db;
-            const moved = data.presets && data.presets.length ? ` 이 DB를 쓰던 프리셋(${data.presets.join(", ")})도 새 이름을 쓰도록 바꿨습니다.` : "";
+            const moved = data.presets && data.presets.length ? ` 이 DB를 읽던 프리셋(${data.presets.join(", ")})도 새 이름을 쓰도록 바꿨습니다.` : "";
             status.textContent = `DB ${g.name}의 이름을 ${data.db}으로 바꿨습니다. 벡터는 그대로입니다.${moved}`;
             showPreset();
           } catch (error) {
@@ -686,7 +722,7 @@ globalThis.SearchAnything = (() => {
         };
         const wrap = node("div", "", "rag-actions-row");
         wrap.append(node("span", "새 DB 이름", "rag-field-title"), input, go, cancel, shown);
-        cell.append(wrap, hint("이 DB의 모든 컬렉션을 새 이름으로 옮기고, 이 DB를 쓰는 프리셋의 DB 이름도 함께 바꿉니다. 옮기는 동안 검색과 색인이 잠시 멈춥니다."));
+        cell.append(wrap, hint("이 DB의 모든 컬렉션을 새 이름으로 옮기고, 이 DB를 읽는 프리셋의 DB 이름도 함께 바꿉니다. 옮기는 동안 검색과 색인이 잠시 멈춥니다."));
         row.append(cell); tr.after(row); update(); input.focus();
       }
       async function loadDbs() {

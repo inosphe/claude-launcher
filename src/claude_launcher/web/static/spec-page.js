@@ -47,6 +47,7 @@ globalThis.SpecPage = (() => {
   /* The --leader value the choice spells, as `claunch spec` takes it. */
   function leaderChoice() {
     const s = leaderSession.trim();
+    if (spec && spec.leader_mode === "none") return "";
     if (spec && spec.mesh_mode === "attach") return s ? `shared:${s}` : "";
     if (leaderKind === "own") return "own";
     if (leaderKind === "shared") return s ? `shared:${s}` : "shared";
@@ -176,6 +177,22 @@ globalThis.SpecPage = (() => {
     const box = node("div", "spec-leader");
     box.appendChild(node("h3", null, "리더"));
     const row = node("div", "spec-row");
+    if (spec.leader_mode === "none") {
+      // A fleet's spec: no leader of its own, the tree's root is a
+      // top-level agent (parent: none). Its profile is the agent's, or
+      // this one when the agent names none.
+      row.appendChild(node("span", "wt-muted",
+        "리더 없음 — parent: none 인 최상위 에이전트가 트리의 뿌리다. 프로필이 없는 최상위 에이전트는 아래 프로필로 시작한다."));
+      const p = node("input");
+      p.setAttribute("aria-label", "프로필");
+      p.placeholder = "프로필(프로필 없는 최상위 에이전트에 쓴다)";
+      p.value = profile;
+      p.oninput = () => { profile = p.value; };
+      row.appendChild(p);
+      box.appendChild(row);
+      if (leaderError) box.appendChild(node("p", "wt-error", leaderError));
+      return box;
+    }
     if (spec.mesh_mode === "attach") {
       row.appendChild(node("span", "wt-muted",
         `attach — 메시 ${spec.mesh}의 현 리더를 쓴다. 세션을 적으면 그 세션이 현 리더인지 확인한다.`));
@@ -398,6 +415,18 @@ globalThis.SpecPage = (() => {
 
   function open() { render(); }
 
+  /* Another page hands a spec over (the Fleet page's "Spec에서 열기"):
+     it replaces the text, keeps the workspace and profile it was made for,
+     and is checked at once. */
+  function load(yamlText, opts = {}) {
+    if (importing) return false;
+    onText(String(yamlText || ""));
+    if (opts.workspace) workspace = String(opts.workspace);
+    if (opts.profile) profile = String(opts.profile);
+    check();
+    return true;
+  }
+
   /* Leaving the route: an answer still in flight no longer draws. */
   function stop() {
     sequence++; busy = false; importing = false;
@@ -405,5 +434,5 @@ globalThis.SpecPage = (() => {
     timer = null;
   }
 
-  return { open, stop, leaderChoice };
+  return { open, stop, leaderChoice, load };
 })();

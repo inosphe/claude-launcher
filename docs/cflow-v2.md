@@ -91,6 +91,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
 | `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
 | `sides` | side 런 선언 `{<이름>: <정의 이름>}`(2.9). IR의 `meta.sides` |
+| `gates` | 런 수준 gate의 위임 선언 `{move\|report: {from, timeout, delegate}}`(2.11). IR의 `meta.gates` |
 | `recur` | `true` 또는 `{auto: true}`. 끝난 회차 뒤에 다음 회차를 요청한다(아래 「recur」). IR의 `meta.recur`(`{auto: bool}`) |
 
 #### recur
@@ -667,7 +668,7 @@ body:
 | `cond` | `cond: [{if: EXPR, then: T}, …, {else: T}]` | 식으로 기계가 고르는 분기 |
 | `choose` | `choose: {prompt, chooser, options: {name: {description, then: T}}}` | 에이전트나 사용자가 고르는 분기. 옵션에 `when: EXPR`을 붙이면 거짓일 때 고를 수 없다. `interval: SECONDS`를 붙이면 에이전트의 선택이 그 간격으로 제한된다(아래 「choose interval」) |
 | `foreach` | `foreach: {in: EXPR, as: item, do: T, par: false}` | 목록의 항목마다 실행 |
-| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). |
+| `loop` | `loop: {while: EXPR \| until: EXPR, max: N, do: T, rounds: true, self_answer: {probe, describe}}` | 조건 루프. `max` 필수. `rounds: true`는 이 루프의 반복이 워크플로의 회차라는 선언이다(표시용 `round_now`가 이 값만 회차로 읽는다, 2.1). `self_answer`는 상한에 선 이 반복을 세션 에이전트가 `flow_extend`로 열 수 있게 하는 명령이다(4.2 — 통과할 때만 열린다) |
 | `par` | `par: {branches: {a: T, b: T}, settle: all}` | 병렬 실행. `settle`은 `all`, `allSettled`, `race`, `any`, `quorum:K` |
 | `retry` | `retry: {do: T, max: N, every: SECONDS, until: EXPR, between: T}` | 재시도. `between`은 시도 사이에 실행하는 트리 |
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
@@ -794,6 +795,11 @@ v1 `checklist:`의 대응:
   `integrate`가 쓴다(`size: 5`, `interval: 300`, `expire: 1800`) — 후속 스윕 배치(`delayed_sweep_batch_*`,
   기본 5건·300초)와 같은 규칙이다. 두 값은 워크플로 정본과 데몬 설정 기본값에 각각
   적혀 있고 `tests/test_cflow2_improv_leader.py`가 둘이 같은지 잰다.
+  운전자가 아직 고르지 않은 choose에서도 batch 창이 열리면(항목이 `size`건이거나 가장 이른
+  항목 + `interval`이 지났으면) 데몬 시계가 운전자에게 「the run moved」 알림을 창마다 한 번
+  보낸다(`Cflow2Clock._batch_open`, claunch-1brxe). 항목이 들어와도 그 choose는 같은 대기라
+  재알림(대기마다 한 번)이 이미 끝났으면 알릴 경로가 없었고, idle hold된 리더는 알림을 받아야만
+  깨어난다. 같은 이유로 그 옵션에 대기 항목이 있는 choose는 `runtime.quiescent`가 아니다.
 
 #### 명령 안의 값 참조
 
@@ -835,7 +841,8 @@ cmd.exe가 실행하므로 `$VAR`가 전개되지 않는다 — 이식성이 필
   `$visits.<node>`, `$caps.<capability>`. 시작 입력은 `$data.inputs.<name>`
   (프롬프트에서는 `${data.inputs.<name>}`)
 - 연산: `== != < <= > >=`, `in`, `not in`, `and`, `or`, `not`, 괄호
-- 함수: `len(x)`, `empty(x)`, `guide(name)`(질문 형식의 작성 지침, 2.10)
+- 함수: `len(x)`, `empty(x)`, `guide(name)`(질문 형식의 작성 지침, 2.10),
+  `now()`(현재 UTC 시각)
 
 ### 2.5 fragments, rules, include
 
@@ -1236,6 +1243,7 @@ until`)와 `consume`에만 쓰고, `push`·`set`·`remove`는 자기 런의 컬�
 | `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참. 위치는 log 전체 cursor와 NAME의 cursor 중 뒤의 것 |
 | `exists(ADDR)` | 주소의 런이 살아 있고 그 컬렉션을 선언했으면 참 |
 | `side(NAME)` | 이 세션의 side 런 NAME: `{name, scope, live, status, run, workflow}`. 경로로 읽는다: `side('stack').live` |
+| `now()` | 현재 UTC 시각. 런 스토어가 자기 기록에 찍는 것과 같은 ISO-8601 초 정밀도 문자열(`2026-11-06T07:26:18+00:00`)이라, 여기서 남긴 값이 런의 다른 시각 기록과 함께 정렬·묶인다 |
 
 `ADDR`은 문자열이다(`items('landing')`, `fresh('side:stack:signals', 'cut')`).
 프롬프트에서는 `${col.<이름>}`이 `self`의 레코드 목록을 JSON으로 렌더한다.
@@ -2149,6 +2157,25 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   `rail_entry`도 `flow_gates`도 나열하지 않는다 — 알림을 내면 `session_of(scope)`가
   주 런 이름을 만들어 부모를 주 런의 다른 gate로 보낸다. 그래서 중첩 런의 사람 gate는
   그 슬롯을 보는 쪽(`flow_status`·대시보드)이 답하고, 부모 위임은 그 범위 밖이다.
+- **hold된 자식도 자식이다** (claunch-7vf2z). `hold`는 세션의 프로그램을 내리는
+  상태이고(`Session.hold`가 `held_at`을 세운 뒤 kill한다) 런은 끝나지 않는다 —
+  `end-hold` 뒤의 `release-decision`처럼 기한 없는 질문이 그대로 열려 있다. 그래서
+  이 절의 세 술어는 「살아 있음」이 아니라 **「살아 있거나 hold됨」**이다.
+  - 자식 행: `/api/sessions/{name}/children`의 각 행이 `held`를 싣는다. 없으면
+    부모는 hold와 사망을 구별하지 못한다.
+  - 발견: `flow_gates`의 `_live_children`이 `held`인 자식을 거르지 않는다.
+  - 알림: `RunEventClock._scan_v2_gates`가 hold된 세션의 런도 스캔하고,
+    `child-gate`를 받을 부모가 hold면 `/deliver`가 그 부모를 깨워 전달한다.
+  둘 다 데몬의 다른 경로가 이미 쓰는 술어와 같다(`cflow2_triggers.live_session`의
+  `include_held`, `api._ws_parent_usable`의 `not session.exited or held_at`).
+- **에이전트는 `reason`을 적극적으로 쓴다** (관례, 엔진 강제 없음 — 사용자 결정
+  2026-11-06). `reason`은 선택지 이름을 다시 적는 자리가 아니라 근거를 남기는 자리다:
+  무엇을 읽었고 그 안에서 무엇을 보았는지. 생략 면제는 사람에게만 해당하고, 엔진은
+  사람 아닌 답에만 `reason`을 요구한다(`runtime._select_check`). 관례로 두는 이유는
+  그것이 다음 단계의 입력이기 때문이다 — `end-new-task`는 새 작업을 `end-decision`의
+  `reason`에서 읽고(`improv-worker-v2.yaml`), `end-hold`도 그 `reason`을 남기며, 저널
+  `selected.reason`과 `person_picks`가 그 답을 다시 읽는다. 부모가 자식의 gate에
+  답할 때는 그 자식의 작업 이슈 id와 근거를 함께 싣는다.
 - CLI: `claunch cflow2 select`·`move --approve|--deny`를 부모 세션의 셸에서 실행하면
   그 답도 `by: <부모 세션>`으로 남는다. 드라이버 셸에서는 지금처럼 거절한다
   (`_refuse_own_session`).
@@ -2195,6 +2222,88 @@ ask:
 - **공용 프로시저**: `ask-common`의 `ask-user`가 `delegate`·`timeout` 파라미터를
   그대로 받는다. 파라미터로 준 허용 목록은 ask가 열릴 때 그 질문의 선택지와 대조되어
   (`_brief_ask`), 없는 이름이면 그 ask가 `fail`로 끝난다.
+
+#### 선택지 게이트의 허용 목록과 기한 (claunch-vjp4y.2.1)
+
+앞 두 절은 위임의 **권한**과 ask의 **허용 목록**을 정했다. 이 절은 `chooser: user`
+선택과 드라이버의 이동·보고 요청에도 선택지 단위 허용 목록·후보·기한을 붙인다. 구조는
+새로 만들지 않고 ask 라우팅을 그대로 쓴다 — 후보 그룹·기한·escalate·허용 목록 강제가
+한 벌만 존재하고, 게이트와 ask가 같은 규칙으로 답한다.
+
+```yaml
+# 노드의 선택지 게이트: 선택지가 그 노드의 것이므로 노드 안에 선언한다
+choose:
+  chooser: user
+  prompt: …
+  from: [{role: parent}]
+  timeout: 600
+  delegate: {allow: [end]}
+  options: {new-task: …, hold: …, end: …}
+```
+
+```yaml
+# 런 수준 gate: 선택지가 approve/deny로 고정이므로 정의에 한 번 선언한다
+gates:
+  move:
+    from: [{role: parent}]
+    timeout: 900
+    delegate: {allow: [approve]}
+  report:            # 없으면 move 선언을 쓴다(둘 다 resolve_move의 판정이다)
+    from: [{role: parent}]
+    delegate: {allow: [approve, deny]}
+```
+
+| 요소 | 선택지 게이트(`choose`) | 런 수준 gate(`gates.move`/`gates.report`) |
+|---|---|---|
+| 선언 자리 | 그 `choose`의 `from`·`timeout`·`delegate` | 정의 최상위 `gates:` |
+| 후보 | `from`의 그룹. `{role: parent}`는 `driver_parent` | 같다 |
+| 허용 목록 | 노드의 선택지 이름만 (`frontend._choose_gate`) | `approve`/`deny`만 |
+| 답의 적용 | `select`와 같은 검사(`_select_check`) 후 `_take_option` | `resolve_move`와 같은 경로(`_apply_move_verdict`) |
+| 선언 조건 | `chooser: user`여야 한다 | 없다 |
+
+- **언제 열리는가**: 선택지는 `chooser: user` 선택이 `waiting_choice`에 들어설 때
+  (`_en_choose` → `_gate_open_choice`), 이동·보고 요청은 `move_request`가 설 때
+  (`request_move`·`_request_report` → `_gate_open_move`)다. 지금 답할 수 있는 후보가
+  없으면 열지 않는다 — 부모가 없는 런의 `{role: parent}`는 그 그룹이 「no parent
+  session」으로 건너뛰어져 사람 상태 그대로이므로, 게이트 레코드를 만들지 않는다
+  (`_gate_routable`).
+- **레코드**: 게이트는 보통의 ask 레코드(`state.asks`의 `ask2-…`)이고 `gate`
+  필드가 무엇에 대한 답인지 가리킨다(`{id, target: choice|move, instance, node}`).
+  선택지 게이트의 `instance`는 그 `choose` 인스턴스, 이동·보고 게이트의 `instance`는
+  `move_request`의 id다. 그래서 `asks.route`·`_expire_asks`·`_ask_escalate`·
+  `_delegated_refusal`·`flow_asks`·응답자 색인이 모두 그대로 동작한다. 저널에는
+  열릴 때 `gate_delegated`(후보·기한·허용 목록)가 남는다.
+- **답의 적용**: `flow_answer`가 부모의 답을 받으면 그 선택지를 그대로 적용한다.
+  선택지는 `select`와 같은 검사(옵션 존재, `when` guard, `require_reason`, 간격 창)를
+  거치고(`_select_check`를 두 경로가 함께 쓴다), 이동·보고는 `resolve_move`와 같은
+  함수(`_apply_move_verdict`)를 지난다. 그래서 부모의 답도 저널에 `by`(부모 세션),
+  `delegated: true`로 남고 `person_picks`에도 실린다. 간격 창이 아직 열리지 않은
+  선택지에 대한 답은 적용하지 않고 거절한다 — 질문은 열린 채 남는다.
+- **허용 목록 밖**: ask와 같은 규칙이다. 적용하지 않고 `ask_delegated_refused`로
+  남긴 뒤 그 응답자의 추상으로 기록되어, 그룹이 비면 다음 후보로, 후보가 다하면
+  사람에게 내려간다. 사람은 제한되지 않고, `abstain`은 언제나 허용된다.
+- **기한**: `timeout`이 지나면 `_expire_asks`가 그룹을 실패로 기록하고 다음 후보로
+  넘긴다(저널 `ask_timeout`). 후보가 다하면 게이트는 사람 몫으로 돌아간다
+  (`resolution: human`) — 선택·이동 요청은 그대로 서 있고, 사람이 지금처럼 답한다.
+  기한이 없으면 부모가 답할 때까지 선다.
+- **닫히는 때**: 게이트가 더 이상 서 있지 않으면 게이트 ask도 닫힌다
+  (`_gate_close`, 저널 `ask_closed`). 사람이 직접 답한 경우(`select`의
+  `caller: user`나 `resolve_move`)→ `_take_option`/`resolve_move`가 닫고, 드라이버가
+  요청을 철회하거나(`cancel_move_request`) 런이 옮겨졌거나(`_move_run`) 선택 인스턴스가
+  사라진 경우는 `_tick_time`의 `_gate_sweep`이 닫는다. 부모가 답한 경우는 그 답이
+  곧 닫힘이다.
+- **보이는 곳**: `flow_status`의 `choices[*].gate`와 `move_request.gate`에 후보·지금
+  물어본 세션·기한·허용 목록·건너뛴 그룹이 실린다. 응답자 쪽(`flow_asks`,
+  `asks.pending_for`)에는 `delegate.allow`가 실려 부모가 어느 선택지가 자기 것인지
+  본다.
+- **선언을 지키는 곳**: `frontend._choose_gate`·`frontend._gates`가 컴파일할 때
+  검사한다 — `chooser: user`, `otherwise: human`, 후보 최소 1개, 허용 목록 이름이 그
+  게이트가 실제로 답하는 선택지(`move`/`report`는 `approve`/`deny`)일 것, 중복 없음.
+  이 넷은 모두 컴파일 오류다.
+- **변하지 않은 것**: `gate_authority`(사람 | 부모, 드라이버 제외), 부모의
+  `flow_select`·`flow_move`, 데몬의 `child-gate` 알림, 중첩 런(`calls`·위임 슬롯)이
+  부모 위임의 범위 밖이라는 경계가 모두 그대로다. 게이트가 선언을 갖지 않으면 지금과
+  똑같이 사람만 답한다.
 
 ### 2.12 동적 호출: `calls`와 `flow_call` (claunch-z17c9)
 
@@ -2254,6 +2363,102 @@ nodes:
   나타난다.
 - 목표 수립 단계의 시뮬레이션 금지(claunch-efnbt.9)는 이 허용 목록 위에 정적 검사로
   얹는다: `sims: deny`인 작업이 `calls`에 시뮬레이션 프로시저를 두면 컴파일 오류다.
+
+#### 2.12.1 프로시저 팩과 역할 필터 (claunch-8t5r0.1, .5, .6)
+
+프롬프트 팩(`prompt_packs`)이 산문 규칙을 세션에 넣는 단위라면, 프로시저 팩은
+단계·반환·검증을 가진 프로시저를 묶어 배포하는 단위다. 같은 규약을 on-demand skill
+문서로 읽게 할 수도 있지만, 팩의 프로시저는 단계마다 보고와 반환 검사가 있고 런
+기록에 남는다.
+
+```
+<layer>/packs/<id>/pack.yaml      # 매니페스트
+<layer>/packs/<id>/<proc>.yaml    # kind: procedure 정의, 이름은 파일 이름
+```
+
+```yaml
+pack: 1                                   # 매니페스트 버전(필수)
+title: Unreal 작업 규약
+description: ...
+roles: {type: whitelist, roles: [unreal]} # 생략하면 모든 역할
+```
+
+- 위치는 세 레이어다: 프로젝트 `.claunch/workflows/v2/packs`, 전역
+  `~/.claude-launcher/workflows/v2/packs`, 패키지 `workflows/v2/packs`. 같은 id는 가까운
+  레이어가 이긴다. 패키지 레이어는 카탈로그이고 **설치된 것이 아니다**: 프로젝트나
+  전역 레이어에 있는 팩만 부를 수 있다. 설치는 카탈로그 사본을 프로젝트 레이어로
+  복사하는 것이다(`procpacks.install`, 웹의 ⤷ sub 패널, `POST /api/cflow2/packs/install`).
+- 레이어 목록(`layers._candidates`)은 최상위 `*.yaml`만 읽으므로 `packs/` 아래 파일은
+  일반 정의 이름으로 해석되지 않는다. 팩의 프로시저는 `<pack>:<proc>`로만 부른다.
+- 역할 필터는 v1과 같은 `RoleFilter`(whitelist | blacklist)이고 역할 이름은 소문자로
+  정규화한다. 판정 대상은 호출하는 런의 드라이버가 메시에서 가진 역할
+  (`responders.pool(...).me_roles`)이다. 역할을 읽을 수 없으면 역할 없음으로 판정한다:
+  whitelist는 거절하고 blacklist는 허용한다. 프로시저 자체의 `filter_roles`와 팩의
+  `roles`가 둘 다 있으면 둘 다 통과해야 한다(`runtime.role_refusal`).
+- 필터 편집은 프로젝트 레이어의 사본만 고친다(`procpacks.set_roles`,
+  `POST /api/cflow2/packs/roles`, body `roles: {type, roles} | null`). 카탈로그와 전역
+  사본은 고치지 않는다.
+- 팩 설치·제거·역할 필터 편집(`/api/cflow2/packs/install`·`remove`·`roles`)은 사람만
+  한다(claunch-8t5r0.7, 사용자 결정). 요청의 actor(`actors.from_request`)가 `agent`나
+  `cflow`이면 데몬이 403으로 거절한다. 역할 필터는 어느 세션이 그 팩을 부를 수 있는지
+  정하므로, 세션이 고칠 수 있으면 자기 역할을 스스로 넣을 수 있기 때문이다. 목록
+  조회(`GET /api/cflow2/packs`)는 거절하지 않는다.
+- 허용 규칙(사용자 결정 qa-b9b833c7): 부를 수 있는 것은 작업의 `calls`에 있는 이름과,
+  설치된 팩의 프로시저 중 역할 필터가 허용하는 것의 합집합이다. `calls`에
+  `<pack>:<proc>`를 적을 수도 있다. 에이전트의 `flow_call`과 웹의 호출이 같은 판정을
+  쓴다.
+- 예시 팩: 패키지의 `packs/unreal`(whitelist `[unreal]`). `editor-handoff`(forkable)는
+  에디터 전용 작업을 사람 `operator`에게 배정하는 beads 이슈로 만들고, `build-check`는
+  Build.cs 의존성·UHT 매크로·권위 경계를 점검한다. 규칙의 원문은 prompt pack
+  `unreal-operator`다.
+
+#### 2.12.2 포크 호출과 인라인 fallback (claunch-8t5r0.2)
+
+호출하는 작업이 `fork_calls: true`를 선언하고(작업 키) callee 정의가 최상위
+`forkable: true`를 선언하면(`kind: procedure`에서만 허용) 호출은 fork 모드다. 한쪽만
+선언하면 inline이다. `flow_call`의 `mode: inline`은 두 선언이 있어도 inline으로 부른다
+(`mode`는 `auto` | `inline`).
+
+- fork 모드 호출은 `calls[c<n>].fork.status = queued`로 기록되고, callee 런은 드라이버
+  없이 만들어진다(두 세션이 같은 callee를 진행하지 않도록).
+- 데몬의 클록(`Cflow2Clock._fork_calls`)이 다음 순서로 판정한다. 드라이버가 살아 있는가,
+  harness가 복사할 대화를 디스크에 가졌는가(`spawn.can_fork`), 드라이버가 quick-fork가
+  아닌가, 남은 컨텍스트가 `cflow2_fork_min_context` 이상인가(6.4의 fork 위임과 같은 검사).
+- 통과하면 드라이버를 quick-fork하고(`self_merge_allowed`), 사본이 callee를 진행한다
+  (`runtime.call_forked`: fork `running`, callee 드라이버 = 사본). 사본은 같은 워크트리와
+  브랜치에 서 있고 커밋하거나 브랜치를 바꾸지 않는다(사용자 결정 qa-d4b3e667). 돌아오는
+  것은 callee의 결과 값과 사본의 `handoff` 요약이다.
+- 판정이 거절이거나 quick-fork 요청이 실패하거나, 사본이 callee가 끝나기 전에 종료하면
+  inline fallback이다(`runtime.call_fork_fallback`): `mode = inline`,
+  `fallback {cause, at, fork_session?}`, callee 드라이버를 원래 드라이버로 되돌린다.
+  사용자에게는 두 경로로 알린다.
+  - 세션 헤더(`#term-subproc` 칩)와 세션 목록 카드(`.sess-subproc` 줄)가 호박색으로
+    `fork→inline`과 원인을 보여 준다(2.12.3의 rail 데이터).
+  - 알림: `spawn_events.report(kind="fallback", site="cflow2 sub procedure fork")`가
+    경고 세션 이벤트와 토스트를 낸다.
+  - 드라이버의 터미널에는 `call_fallback_block`이 들어가고, 런 저널에 `fallback`
+    이벤트(`route: inline`)가 남는다.
+
+#### 2.12.3 실행 상태 표시와 사용자 호출 (claunch-8t5r0.3, .4)
+
+- `/api/cflow2/rail`의 행에 `subprocs`가 있다(`cflow2_web.rail_subprocs`): 열린 호출마다
+  id, procedure, pack, label, mode, by(`agent` | `user`), scope, fork{status, session},
+  fallback. 세션 카드의 v2 줄 아래 `⤷ sub <procedure> · <mode>` 줄과 헤더 칩이 이 값을
+  그린다. 호출이 끝나면 둘 다 사라진다.
+- `GET /api/cflow2/procedures?cwd=&scope=&node=`(`runtime.callable_procedures`)는
+  작업의 `calls`, 설치된 팩의 프로시저, 카탈로그 팩의 프로시저를 **모두** 나열하고 각
+  항목에 `available`과 `why`를 싣는다. `why`는 `call`이 거절할 때와 같은 판정이다(런
+  상태, 활성 작업 없음, 이미 열린 호출, 카탈로그 전용, 역할 필터, 재귀, 깊이, 컴파일
+  오류).
+- 웹의 ⤷ sub 패널(`subprocs.js`)은 이 목록을 그대로 보여 주고, 부를 수 없는 항목은
+  비활성으로 두고 `why`를 마우스오버 툴팁과 본문에 적는다. 「available only」 체크박스가
+  목록을 거른다. 호출은 `POST /api/cflow2/call {cwd, scope, procedure, node, with,
+  mode}`이고 런의 활성 작업에 붙는다. 호출 기록의 `by`는 요청의 actor로 정한다:
+  관리 세션의 클라이언트가 보내는 actor 헤더(`agent`·`cflow`)가 있으면 `agent`, 그
+  밖(웹 쿠키, 관리 세션 밖의 셸)은 `user`다(claunch-8t5r0.7). 활성 작업이 없으면 모든
+  항목이 비활성이다. 호출 뒤 데몬이 드라이버에 알림을 넣고, 알림에 호출한 쪽(세션
+  이름 또는 사용자)을 적는다.
+- 같은 패널에서 팩을 설치·제거하고 역할 필터를 편집한다(2.12.1).
 
 ### 2.13 사용자 조율 워크플로우 (`improv-coordinator-v2`)
 
@@ -2539,6 +2744,18 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
   이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
   (항목 수가 `max`보다 많은 병렬 `foreach`)에는 `--reset`을 거절한다. `--stop`은
   그 반복을 `fail`로 끝낸다.
+- 상한의 자기 답(`loop.self_answer`, claunch-9poqc): 반복이 `self_answer: {probe,
+  describe}`를 선언하면, 상한에 선 그 반복을 **런의 driver(그 세션 에이전트)가**
+  `flow_extend`(MCP)로 한 회차만 열 수 있다. 이때 엔진이 `probe`를 먼저 돌리고
+  **exit 0일 때만** 연다 — 0이 아니면 상한은 그대로 서고 사람만 답할 수 있다.
+  그러므로 이것은 승인이 아니라 기계가 낸 답이다: 세션은 「대기가 끝났다」를
+  스스로 정하지 못하고, 워크플로가 지목한 사실(예: 착지)을 명령에게 물어 그
+  답을 얻을 때만 문이 열린다. 남의 런은 열 수 없다(그 런의 driver만). `probe`는
+  `wait.probe`와 같은 명령 규칙을 따르며 런 값은 환경변수(`CFLOW_DATA_<NAME>`,
+  `CFLOW_IN_<NAME>`)로만 읽는다. 선언하지 않은 반복의 상한은 사람의 것이다
+  (`claunch cflow2 extend`). 상한에 걸린 항목과 대기 카드에는 그 선언이
+  `self_answer`로 실려 `flow_status`의 `loop_limits`와 `waiting` 이벤트에서
+  보인다. 재촉 타이머가 돌지 않아도, 통지로 깨어난 턴이 이 문으로 진행한다.
 - 방문 상한: 방문 수는 노드별로 런 전체에서 센다. 차트 최상위 `max_visits`(기본
   200)를 넘는 진입은 그 노드의 본문이 시작되기 전에 멈추고, 런은
   `waiting_approval`(reason `visit_limit`)가 된다. 사람이
@@ -2614,8 +2831,11 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 
 **상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq, epoch}}`,
 `cursors: {주소: seq}`(자기 log는 이름, 다른 런의 log는 주소 전체, 이름별 cursor는
-`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
-둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
+`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, label, instance, at, do, round?, push?, queued_at, claimed_at?, claim_boot?}]`를
+둔다. `round`는 기록할 때의 회차(`runtime.round_of`)다. 이 필드가 없는 레코드는 그
+필드를 쓰지 않던 프로세스가 남긴 것이며, 수행하는 쪽이 런 상태에서 같은 값
+(`round_of`)을 읽는다 — 기록하는 프로세스와 수행하는 프로세스는 따로 재기동되므로
+두 코드가 어긋날 수 있다(claunch-6rjgg). 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
 `triggers`, `do` 필드다.
 
 **적용 순서.** 노드 인스턴스에 들어갈 때: `do`(at enter) → trigger(at enter) 기록 →
@@ -2667,13 +2887,14 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_status` | 활성 구성, 렌더된 현재 작업 프롬프트, 고를 수 있는 옵션, 시작 입력, 진행 중인 verify, 대기 항목 |
 | `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`). verify가 있으면 `verifying`으로 바로 돌아온다 |
 | `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`). 자기 런의 `chooser: user` 선택은 사람의 것이고, 부모 세션은 자식 런을 `scope`로 지목해 그 선택을 대신 답한다(2.11의 「부모 세션으로의 위임」) |
-| `flow_gates` | 이 세션의 살아 있는 자식 세션 런이 사람에게 기다리는 것: 열린 `chooser: user` 선택(프롬프트·옵션·지금 가용한지), 열린 이동·보고 요청, 루프·방문 한도. 부모만 답할 수 있는 항목과, 사람 몫이라 정보로만 싣는 ask를 함께 보여 준다 |
+| `flow_gates` | 이 세션의 살아 있거나 hold된 자식 세션 런이 사람에게 기다리는 것: 열린 `chooser: user` 선택(프롬프트·옵션·지금 가용한지), 열린 이동·보고 요청, 루프·방문 한도. 부모만 답할 수 있는 항목과, 사람 몫이라 정보로만 싣는 ask를 함께 보여 준다 |
 | `flow_move` | 자식 런의 열린 이동·보고 요청에 답함(`decision`: `approve`·`deny`, `reason`, `scope`, `cwd`). 부모 세션만 쓸 수 있고, 그 답은 `by: <부모 세션>`으로 저널에 남는다 |
 | `flow_fork` | `group`에 멤버 추가(`group`, `with`) |
 | `flow_call` | 활성 작업이 `calls`에 선언한 프로시저를 중첩 런으로 호출(`procedure`, `node`, `with`). 끝나면 같은 작업이 `call_result`와 함께 다시 활성이 된다(2.12) |
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
+| `flow_extend` | 자기 런의 `loop_limit`을 한 회차 연다(`node`, `reason`). 반복이 `self_answer`를 선언했고 그 명령이 exit 0일 때만 — 0이 아니면 상한은 그대로 서고 사람만 답한다(4.2). 남의 런은 열 수 없다 |
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`). 응답자의 도구 목록에는 v1 `answer`도 함께 있으므로 계열은 id가 정한다: `ask2-…`는 이 도구가, `ask-…`는 v1 게이트가 받는다 — 어느 도구로 불러도 그 ask를 받은 세션만 답할 수 있다(claunch-c3vq4) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
@@ -3626,7 +3847,7 @@ PR은 닫고 브랜치는 지웠다.
 ### 리더의 단계별 사후 검증 (claunch-61xvf)
 
 `improv-leader-v2`는 각 성공한 PR/로컬 머지 직후 그 누적 결과를
-`tools/delayed_sweep.py enqueue`로 기록한다. 예를 들어 A, B, C를 순서대로
+`claunch delayed-sweep enqueue`로 기록한다. 예를 들어 A, B, C를 순서대로
 머지하면 A, A+B, A+B+C의 SHA마다 고정 브랜치가 생긴다. 브랜치는
 `delayed-sweep/<리더>/<40자 SHA>`이며 이후 머지로 이동하지 않는다.
 `merges` 반환값은 `{issue, tip, merge_sha}` 행들의 목록이다. 동일 SHA를
@@ -3635,7 +3856,7 @@ PR은 닫고 브랜치는 지웠다.
 실행되어 다음 머지 회차를 지연시키지 않는다. 라이브 반영은 아래 입력이 제어한다.
 
 머지 보고는 **머지 SHA당 한 행**이다. 같은 브랜치·tip을 공유하는 다른 이슈는
-행의 `also: [...]`에 적는다(`tools/delayed_sweep.py check-merges`가 형태를
+행의 `also: [...]`에 적는다(`claunch delayed-sweep check-merges`가 형태를
 읽기 전용으로 확인한다). 검증 작업의 issue는 소유 귀속이라 한 SHA를 다른
 이슈로 다시 등록하지 못하고, 강한 관문(`check-enqueued --env`)은 이 불변식을
 그대로 지킨다. 그래서 한 SHA를 두 이슈의 행으로 나눠 보고하면 관문을 통과할 수
@@ -3694,7 +3915,7 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
   돌리지 않는다.
 - 주기 알림: 자식의 `wait`(probe `job-state`, 60초 poll)는 900초마다 timeout으로 런을 옮기고,
   데몬 clock이 드라이버에 「the run moved」 블록을 보내 idle hold된 자식도 깨운다(6.5).
-  깨어난 자식은 `tools/delayed_sweep.py nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
+  깨어난 자식은 `claunch delayed-sweep nudge --job <id>`의 문구를 읽는다: 창을 쥐고 돌 때는
   TEST WINDOW HELD(건드리지 않는다), 창 순번을 기다릴 때는 WAITING FOR WINDOW 또는 QUEUED
   (할 일 없음). 판정이 나면 `result` 단계가 passed는 보고만, failed는 `unbatch`와 원인 머지
   좁히기 후 리더에게 한 줄을 보낸다.
@@ -3763,16 +3984,18 @@ IR은 변경되지 않으므로 기존 run에는 정의 재로드가 확인된 �
 조회와 수동 복구 명령:
 
 ```sh
-uv run --no-sync python tools/delayed_sweep.py status --repo <repo>
-uv run --no-sync python tools/delayed_sweep.py admit --repo <repo> --issue <issue>
-uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
-uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
-uv run --no-sync python tools/delayed_sweep.py remeasure --repo <repo> --job <failed-job> --reason <why>
-uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
-uv run --no-sync python tools/delayed_sweep.py unbatch --job <failed-tip>
-uv run --no-sync python tools/delayed_sweep.py job-state --job <job>   # 0 판정 있음, 1 대기
-uv run --no-sync python tools/delayed_sweep.py nudge --job <job>
+claunch delayed-sweep status --repo <repo>
+claunch delayed-sweep admit --repo <repo> --issue <issue>
+claunch delayed-sweep enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
+claunch delayed-sweep repair --repo <repo> --job <failed-job> --issue <repair-issue>
+claunch delayed-sweep remeasure --repo <repo> --job <failed-job> --reason <why>
+claunch delayed-sweep release --repo <repo> --job <failed-job> --reason <사유>
+claunch delayed-sweep unbatch --job <failed-tip>
+claunch delayed-sweep job-state --job <job>   # 0 판정 있음, 1 대기
+claunch delayed-sweep nudge --job <job>
 ```
+
+큐 도구는 패키지에 들어 있다(`claunch delayed-sweep`, claunch-sr6ex) — 저장소마다 사본을 두지 않는다. 체크아웃의 `tools/delayed_sweep.py`는 같은 동작의 위임 wrapper이고, `enqueue`가 기록하는 스윕 모듈은 검증 대상 저장소의 `tools/sweep.py`다(`--tool`로 지정할 수도 있다).
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.
 기본 명령은 claunch 전체 스위트다. enqueue의 Python은 큐 실행기를 시작하는 데

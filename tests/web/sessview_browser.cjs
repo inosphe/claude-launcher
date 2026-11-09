@@ -35,6 +35,11 @@ const box = (page, sel) => page.locator(sel).evaluate(n => {
   const r = n.getBoundingClientRect();
   return {top: r.top, bottom: r.bottom, height: r.height};
 });
+const rect = (page, sel) => page.locator(sel).evaluate(n => {
+  const r = n.getBoundingClientRect();
+  return {top: r.top, left: r.left, right: r.right, bottom: r.bottom,
+          width: r.width, height: r.height};
+});
 (async () => {
   await safeListen(server);
   const browser = await chromium.launch({headless: true});
@@ -116,6 +121,73 @@ const box = (page, sel) => page.locator(sel).evaluate(n => {
     // Written by route() on the hashchange, which lands after the address.
     await page.waitForFunction(() =>
       JSON.parse(localStorage.getItem("claunch_sesslayout:/")).s1.view === "cli");
+
+    /* --- the float checkbox (claunch-xkw8o) -------------------------------
+       Floating takes the pane out of the terminal's column: the bar goes
+       away, the pane becomes a box over the canvas, and — the reason for it —
+       sizing that box no longer resizes the terminal. */
+    const floatBox = page.locator("#term-wf .split-frame-floatbox");
+    assert.ok(await floatBox.count() === 1, "the pane's head carries the float checkbox");
+    await floatBox.check();
+    await page.waitForFunction(() =>
+      document.body.classList.contains("split-float"));
+    assert.ok(await page.locator("#term-split").evaluate(n => n.classList.contains("hidden")),
+              "floating: the bar is gone (there is no boundary left to drag)");
+    assert.equal(await page.locator("#term-wf").evaluate(n => getComputedStyle(n).position),
+                 "absolute", "floating: the pane is a box over the canvas");
+    const termFloat = await rect(page, "#terminal");
+    const floatRect = await rect(page, "#term-wf");
+    const composerFloat = await box(page, "#term-composer");
+    assert.ok(floatRect.top > 0 && floatRect.left > 0
+              && floatRect.bottom <= composerFloat.top + 1,
+              "the floating pane sits over the canvas and clears the input line: "
+              + JSON.stringify({termFloat, floatRect, composerFloat}));
+
+    // Drag the corner up and left (the grip sits near the window's edge):
+    // the box shrinks, and the terminal underneath does not move by a pixel
+    // (that is what the mode is for).
+    const grip = await rect(page, "#term-wf .split-frame-grip");
+    assert.ok(grip.width > 0 && grip.height > 0, "the grip is drawn while floating");
+    await page.mouse.move(grip.left + grip.width / 2, grip.top + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.left + grip.width / 2 - 120,
+                          grip.top + grip.height / 2 - 80, {steps: 6});
+    await page.mouse.up();
+    const floatRect2 = await rect(page, "#term-wf");
+    const termAfter = await rect(page, "#terminal");
+    assert.ok(floatRect2.width < floatRect.width - 60
+              && floatRect2.height < floatRect.height - 40,
+              "the grip sizes the pane: " + JSON.stringify({before: floatRect, after: floatRect2}));
+    assert.ok(Math.abs(termAfter.width - termFloat.width) < 1
+              && Math.abs(termAfter.height - termFloat.height) < 1,
+              "sizing the floating pane leaves the terminal alone: "
+              + JSON.stringify({before: termFloat, after: termAfter}));
+    const floated = await page.evaluate(() => JSON.parse(localStorage.getItem("claunch_sesslayout:/")).s1);
+    assert.equal(floated.float, true);
+    assert.ok(floated.floatW > 0 && floated.floatH > 0, JSON.stringify(floated));
+
+    // The choice and the box survive a reload.
+    await page.reload();
+    await page.waitForFunction(() =>
+      document.body.classList.contains("split-float"));
+    await page.locator("#term-wf .split-frame-body").waitFor();
+    const floatRect3 = await rect(page, "#term-wf");
+    assert.ok(Math.abs(floatRect3.width - floatRect2.width) < 2
+              && Math.abs(floatRect3.height - floatRect2.height) < 2,
+              "the floating box is remembered: " + JSON.stringify({before: floatRect2, after: floatRect3}));
+
+    // Undocking gives the column back and the bar returns.
+    await page.locator("#term-wf .split-frame-floatbox").uncheck();
+    await page.waitForFunction(() =>
+      !document.body.classList.contains("split-float"));
+    assert.ok(!await page.locator("#term-split").evaluate(n => n.classList.contains("hidden")),
+              "docked again: the bar is back");
+    const barBack = await box(page, "#term-split");
+    const paneBack = await box(page, "#term-wf");
+    assert.ok(barBack.bottom <= paneBack.top + 1,
+              "docked again: the pane is under the bar, not over the terminal: "
+              + JSON.stringify({barBack, paneBack}));
+
     assert.deepEqual(errors, []);
     console.log("session view browser checks passed");
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

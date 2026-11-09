@@ -184,7 +184,7 @@ claunch run work:claude                  # explicit Claude selector
 | `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claude-launcher/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claude-launcher/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
-| `search <query> [--kind beads\|sessions\|unified]` | Rank the repository board or the daemon's sessions by meaning, or both corpora with `unified` (`all` is that corpus's deprecated name and is still accepted with a warning; needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
+| `search <query> [--kind beads\|sessions\|unified]` | Rank the repository board or the daemon's sessions by meaning, or both corpora with `unified` (`all` was that corpus's name before the rename and is refused now; needs the `rag:` block; see [docs/rag-search.md](docs/rag-search.md)). |
 | `rag status\|reindex`  | The semantic-search index: configuration, coverage, and a sync. |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
 | `usage <name[:harness]>` | Query Claude, Codex, or managed Kimi subscription usage (`--json` for the raw response). |
@@ -581,12 +581,16 @@ next launch fall back to `rotation` and report that in `claunch keys select`.
 
 `usage-min`/`usage-max` read each key's own usage, so they only work where the
 launcher token *is* the account credential (a Claude provider key, a Kimi
-provider key, a Fireworks key, an OpenCode Go key). A harness whose usage
-belongs to its own login (`codex`, the `kimi` CLI) has nothing to compare per
+provider key, a Fireworks key, an OpenCode Go key, a Command Code key). A
+harness whose usage belongs to its own login (`codex`, the `kimi` CLI) has nothing to compare per
 key: the strategy falls back to `rotation` for that launch and says so in
 `claunch keys select`, naming the reason from one table
 (`usage.LOGIN_SCOPED_READERS`; a reader with no per-key path at all is reported
-as such rather than as a login). Each `usage-*` launch reads every key's
+as such rather than as a login). The keys of one pool need not report the
+same windows -- a Command Code pool can hold a Provider-plan key (monthly only)
+beside a key with 5-hour and weekly limits. A tie on the peak is broken window
+by window on the 5-hour / week / month ladder, a window a key does not report
+counting as 0. Each `usage-*` launch reads every key's
 usage, so expect one usage request per key (and for Claude setup-tokens, one
 minimal API call per key) at launch time.
 
@@ -3329,7 +3333,7 @@ work-branch push; the line under the picker says what the chosen mode does:
 For A or B, choose a live or held **parent session**. When a mesh leader works
 in this repository, only its leaders are offered: while the child's
 `reposync-merge-push-v2` run stands in `prepare` through `execute`, ordinary
-merges into the repository pause (`tools/delayed_sweep.py admit` refuses every
+merges into the repository pause (`claunch delayed-sweep admit` refuses every
 candidate but the sync's own issue, naming the sync session and its base local
 commit). The pause ends at `receipt`, when the run ends or is aborted, or when
 the child session ends; it lasts at most until the approval card's deadline
@@ -5821,6 +5825,19 @@ The supported cases are deliberately narrow:
   `monthly`, each a percentage with its reset time. The endpoint is not in
   OpenCode's published API docs; a reply without these windows is reported
   as an error.
+- A profile whose provider declares an endpoint on Command Code
+  (`api.commandcode.ai`, the OpenAI one a translated provider has or an
+  Anthropic one) is read the way the `command-code` CLI reads `/usage`:
+  `GET /alpha/whoami?limits=1` for the org, then `/alpha/billing/credits` and
+  `/alpha/billing/subscriptions`, with the profile's API key. What it shows
+  depends on the account's plan. A Provider-plan account has no rolling
+  limits and reads one `monthly` window: the plan's monthly credits (plus any
+  purchased or free credits) against what is left, in dollars, resetting at
+  the end of the billing period. A plan with rolling limits (Go, Pro, Max,
+  ...) adds `five_hour` and `weekly` before it. The output names the plan
+  (`plan: Provider`). Without an active subscription, or with one whose plan
+  the CLI's plan table does not name, the pool is what is left plus what the
+  period has spent (`/alpha/usage/summary`).
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
 - `usage work:kimi` starts the Kimi Code local server under that profile's

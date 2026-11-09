@@ -130,7 +130,8 @@ def _drive(tmp_path, monkeypatch, review_answer):
             break
         if st.get("choices"):
             names = [o["name"] for o in st["choices"][0]["options"]]
-            pick = "request" if "request" in names else names[0]
+            # already-merged(claunch-yzwut.2): 이 회차는 아직 통합 대상에 없다
+            pick = next((n for n in ("request", "not-landed") if n in names), names[0])
             path.append("CHOICE:" + pick)
             st = runtime.select(st["choices"][0]["instance"], pick, "확인 셋이 참", **kw)
             continue

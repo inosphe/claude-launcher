@@ -129,7 +129,16 @@ Kept (as concepts or ported logic):
   (`expects_reply` is derived on read, never stored — interconnect's
   contract); unknown types are accepted but draw a reply-all advisory.
   A delivery batch of only no-reply intents is marked `needs_reply: false`
-  ("no reply expected"), and such deliveries never arm the heartbeat
+  ("no reply expected"), and such deliveries never arm the heartbeat.
+  Reply-optional is not the same as "nothing is owed": `decide` (the intent
+  cflow2 asks travel as) requires an action recorded where the message's
+  `ref` points. A batch containing one is marked `needs_action: true` and
+  its note says so — under the bare no-reply wording responders drained past
+  routed asks until they expired to the next group
+  (claunch-ask-decide-needs-reply-zaxct). Because the note names the entry's
+  `ref`, the entry carries it: a message's `ref` is relayed verbatim into the
+  delivery block, still uninterpreted, so the pointer the note gives resolves
+  instead of naming a field the block dropped
 - per-member delivery cursors into the log (durable "what was delivered")
 - settle-based burst coalescing before delivery
 - (phase 3) heartbeat / task-poll / stall-warning *policies*, running in the
@@ -522,6 +531,12 @@ via the mirror's rank list).
   mesh page's header) moves any mesh, own or mirrored; peers are not told.
   A mirror attached before this sits in the default project, so a project-
   narrowed rail or create form does not list it until it is moved.
+  The filing does not follow the session on its own: a mirror seeded from
+  the joining session is re-filed when that session is re-filed by
+  `claunch migrate-session --project` (`POST /api/sessions/{name}/migrate`,
+  `MeshManager.refile_mirrors_for`), and only while the session is the
+  mirror's one local member — with a second one the filing is theirs too.
+  A later `claunch mesh project` still overrides either.
 - **`local` is reserved** as the host part meaning "this daemon"; a daemon
   registered under that relay name logs a warning, since peers could not
   address its meshes.

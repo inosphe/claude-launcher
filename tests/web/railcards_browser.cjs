@@ -41,6 +41,15 @@ const fixtureChecks = [
     answer: "no", reported_at: "2026-10-26T03:00:00Z", source: "agent" },
 ];
 
+/* Settings → Model prices, as the daemon serves it: the card's cost lines
+   read this table and draw nothing where a model has no row (so a fixture
+   without it would draw no cost block at all). */
+const PRICE_TABLE = {
+  prices: { "*": { "claude-opus-4-5": { input: 15, cache_read: 1.5,
+                                        cache_write: 18.75, output: 75 } } },
+  currency: "$", any: "*", profiles: { nc: "claude", ds4: "deepseek" },
+};
+
 const sessions = [
   { name: "lead", status: "busy", role: "leader", profile: "nc", cwd: "/repo",
     parent: null, keep_alive: true, status_checks: fixtureChecks,
@@ -50,6 +59,17 @@ const sessions = [
     context: { tokens: 177000, input: 2, cache_read: 176000, cache_write: 1090,
       output: 210, model: "claude-opus-4-5", at: new Date().toISOString(),
       compact_window: 200000 },
+    // The cumulative reading and its two spends: the card prices these at the
+    // fixture's Model prices table (see PRICE_TABLE) and draws the subagent
+    // row only because this session spent some (claunch-ge1ap).
+    token_usage: {
+      harness: "claude", input: 310000, cache_read: 24000000,
+      cache_write: 12000, output: 90000, total: 24322012, requests: 320,
+      model: "claude-opus-4-5", since: "2026-10-25T12:00:00Z",
+      at: new Date().toISOString(),
+      subagents: { input: 1000, cache_read: 90000, cache_write: 0,
+                   output: 3000, total: 94000, requests: 4 },
+    },
     briefing: { one_line: "착지를 관리하고 자식을 배분한다", state: "working" } },
   { name: "w1", status: "busy", role: "worker", profile: "nc",
     cwd: "/repo/.claude/worktrees/w1", parent: "lead",
@@ -98,6 +118,7 @@ const server = http.createServer((req, res) => {
     let data = {};
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "card" };
     else if (url.pathname === "/api/cflow2/rail") data = { rows: workflowRows };
+    else if (url.pathname === "/api/model-prices") data = PRICE_TABLE;
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: true };
     else if (url.pathname === "/api/profiles/nc/keys") data = {
       pooled: true, keys: [{ id: "fixture-key", label: "rotation pool", current: true }],
@@ -599,9 +620,25 @@ const READ = `(() => {
     await page.keyboard.press("Enter");
     assert.equal(await details.getAttribute("aria-expanded"), "true");
     assert.ok(await actionsAligned(), "refreshes stay in the actions line with Details open");
-    assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), true);
+    assert.equal(await lead.locator(".rail-usage-cost").isVisible(), true);
     assert.equal(await lead.locator(".rail-commits").isVisible(), true);
     assert.equal(await lead.locator(".rail-tps-line").isVisible(), true, "TPS remains available in Details");
+    /* The `⇱ card` reveals above start a smooth scroll to the top and mark the
+       rail for the animation's run (`railPressMark`, a 3 s deadline). While the
+       mark stands `refreshSessions` keeps the rows on purpose -- the pass below
+       would otherwise tear down the row that animation is travelling to -- so a
+       pass in that window postpones the redraw to the next poll instead of
+       rebuilding. Measured on 3fe42e63b: the mark still had 341 ms to run when
+       this assertion fired, and it failed; the same line passed whenever the
+       machine got through the block faster than the deadline (claunch-h0wi6.1
+       reported a pass, claunch-ge1ap.1 the failure). Wait the hold out, so what
+       is measured here is still the rebuild a changed record causes. */
+    await page.waitForFunction(() => {
+      const list = document.getElementById("session-list");
+      const marked = list && typeof list._railScrollTopUntil === "number"
+        && list._railScrollTopUntil > Date.now();
+      return !marked && !(typeof railHeld === "function" && railHeld());
+    }, null, { timeout: 8000 });
     await lead.evaluate(e => { e.dataset.rebuildProbe = "old"; });
     sessions[0].profile = "nc2";
     await page.evaluate(() => refreshSessions());
@@ -634,7 +671,7 @@ const READ = `(() => {
       await lead.scrollIntoViewIfNeeded();
       await page.waitForFunction(() => {
         const li = document.querySelector('#session-list li[data-name="lead"]');
-        return li && [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"]
+        return li && [".rail-brief", ".rail-ctx-line", ".rail-usage-cost", ".rail-seen", ".rail-life", ".sess-brief"]
           .every(selector => {
             const e = li.querySelector(selector), r = e && e.getBoundingClientRect();
             return r && r.width > 0 && r.height > 0;
@@ -671,7 +708,7 @@ const READ = `(() => {
       }
       const sections = await lead.evaluate(li => {
         const rowBg = getComputedStyle(li).backgroundColor;
-        const names = [".rail-brief", ".rail-ctx-line", ".rail-ctx-tokens", ".rail-seen", ".rail-life", ".sess-brief"];
+        const names = [".rail-brief", ".rail-ctx-line", ".rail-usage-cost", ".rail-seen", ".rail-life", ".sess-brief"];
         return names.map(selector => {
           const e = li.querySelector(selector), c = getComputedStyle(e), box = e.getBoundingClientRect();
           const cells = [...e.querySelectorAll(".rail-seen-pair")].map(x => x.getBoundingClientRect());
@@ -693,7 +730,7 @@ const READ = `(() => {
     await page.evaluate(() => { document.getElementById("sidebar").style.width = "260px"; });
     const narrowMetadata = await lead.evaluate(li => {
       const edge = li.getBoundingClientRect().right;
-      return [...li.querySelectorAll(".rct-part, .rail-seen-pair")].map(e => {
+      return [...li.querySelectorAll(".ruc-label, .ruc-cost, .rail-seen-pair")].map(e => {
         const r=e.getBoundingClientRect();
         return {text:e.textContent,painted:r.width>0 && r.height>0,contained:r.right<=edge};
       });
@@ -704,7 +741,7 @@ const READ = `(() => {
     await page.evaluate(() => { document.getElementById("sidebar").style.width = ""; });
 
     await lead.locator(".rail-details-toggle").click();
-    assert.equal(await lead.locator(".rail-ctx-tokens").isVisible(), false);
+    assert.equal(await lead.locator(".rail-usage-cost").isVisible(), false);
     for (const width of [260, 440]) for (const theme of ["light", "dark"]) {
       await page.evaluate(({width, theme}) => {
         document.getElementById("sidebar").style.width = width + "px";

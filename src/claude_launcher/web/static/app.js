@@ -6236,6 +6236,8 @@ async function refreshSessions(options) {
      // The key pools the rows' chips are drawn from, read beside this poll
      // rather than in it (keyPoolSignature).
      typeof keyPoolSignature === "function" ? keyPoolSignature() : null,
+     // The table the card's cost lines are priced at (claunch-ge1ap).
+     typeof modelPricesKey === "string" ? modelPricesKey : null,
      // The checks' names and questions, which no row carries
      // (claunch-hwbuc.2 review).
      defsStamp],
@@ -6367,7 +6369,12 @@ async function refreshSessions(options) {
   const rowSignature = (s, depth, meshGroup, kin) => JSON.stringify(
     [s, depth, meshGroup || null, !!kin, s.name === currentName, s.name === sessName,
      pins.includes(s.name), briefingLLM, sessMeshes(s.name), handleTag(s.name),
-     railMeshTags(s.name, meshGroup || null), railMetaText(s)],
+     railMeshTags(s.name, meshGroup || null), railMetaText(s),
+     // The price table the cost lines are priced at: the same record draws a
+     // different card under a different table, so a row kept across the
+     // table's arrival would keep the card that had no cost block at all
+     // (claunch-ge1ap).
+     typeof modelPricesKey === "string" ? modelPricesKey : null],
     unstamped,
   );
   const takeKeptRow = (name, sig) => {
@@ -6988,10 +6995,12 @@ async function refreshSessions(options) {
     label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // What the conversation has cost so far, and its subagents beside it,
+    // for a harness whose transcript the daemon totals -- absent otherwise.
     // Guarded like the detail panel's late rows: node harnesses slice the
-    // row builder without the bucket line and its price helpers.
-    const railCtxTokens = typeof ctxTokensLine === "function"
-      ? ctxTokensLine(s) : null;
+    // row builder without the cost lines and their price helpers.
+    const railCosts = typeof railCostLines === "function"
+      ? railCostLines(s) : null;
     // And how fast its backend answered last time, for a session that goes
     // through the metering shim -- one more full-width line, absent for
     // the sessions that have no such record. Guarded like the kill-state
@@ -7137,7 +7146,7 @@ async function refreshSessions(options) {
                    ...(pin ? [pin] : []),
                    ...(observePin ? [observePin] : []), info);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
-              ...(railCtxTokens ? [railCtxTokens] : []),
+              ...(railCosts ? [railCosts] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(railLife ? [railLife] : []), actions);
@@ -7667,6 +7676,9 @@ function renderTermHandle() {
    so a write that says what it already said buys a re-measure of the whole
    bar five seconds at a time for nothing. */
 function renderTermNote() {
+  // The sub procedure chip beside it follows the same session switches and
+  // polls (subprocs.js); it writes only when what it shows changed.
+  globalThis.SubprocUi?.header();
   const chip = $("term-note");
   if (!chip) return;
   const s = currentName
@@ -8289,6 +8301,8 @@ async function refreshCflow2Rail() {
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
   if (typeof renderTermCflow === "function") renderTermCflow();
+  // and so does the header's sub procedure chip (subprocs.js)
+  globalThis.SubprocUi?.header();
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
@@ -8342,12 +8356,27 @@ function cflow2RailTip(r) {
   return lines.join("\n");
 }
 
+/* The open choices on this row that only a person can answer. The daemon
+   writes a user-chooser choice into `owed` as `choose: <title>`
+   (cflow2_web.rail_entry); every other entry there is a hold, an ask that
+   fell to a human, or a plan decision, and each says what it is on its own.
+   So the prefix is the whole fact, and the row wears these apart from the
+   rest (claunch-np69t P4). */
+const CFLOW2_CHOOSE_PREFIX = "choose: ";
+function cflow2RailUserChoices(r) {
+  return (r && r.owed || [])
+    .filter((x) => String(x).startsWith(CFLOW2_CHOOSE_PREFIX))
+    .map((x) => String(x).slice(CFLOW2_CHOOSE_PREFIX.length));
+}
+
 function applyCflow2Badges() {
   const list = $("session-list");
   if (!list) return;
   for (const li of list.querySelectorAll("li[data-name]")) {
     const old = li.querySelector(".sess-cflow2");
     const r = (cflow2RailCache || {})[li.dataset.name];
+    // The sub procedure line under it (subprocs.js, claunch-8t5r0.3).
+    globalThis.SubprocUi?.card(li, r);
     if (!r) { if (old) old.remove(); continue; }
     const line = old || document.createElement("a");
     if (!old) {
@@ -8366,7 +8395,13 @@ function applyCflow2Badges() {
     // its own class so the stylesheet, and anyone reading the DOM, can tell
     // the two apart (claunch-hbmhk).
     const blocking = r.gated && r.blocking !== false;
-    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`;
+    // A choice whose chooser is the person is the one thing on this row that
+    // nobody but the reader can clear, so the row says so instead of reading
+    // like every other amber gate (claunch-np69t P4). `blocking` gates it for
+    // the same reason the amber does: a door the run walks past is not a stop.
+    const yours = blocking ? cflow2RailUserChoices(r) : [];
+    line.className = `sess-cflow2${blocking ? " gated" : r.gated ? " optional" : ""}`
+      + (yours.length ? " user-choice" : "");
     const state = cflow2RailMarkState(r);
     const mark = document.createElement("span");
     mark.className = `wf-mark wf-mark-${state}`;
@@ -8381,13 +8416,25 @@ function applyCflow2Badges() {
     const linkLabel = document.createElement("span");
     linkLabel.className = "sess-cflow-link";
     linkLabel.textContent = "Run ↗";
+    const bits = [mark, tag];
+    if (yours.length) {
+      const badge = document.createElement("span");
+      badge.className = "sess-cflow2-you";
+      badge.textContent = "⚠ your decision";
+      // Which choice it is stays off the badge: the row already names it in
+      // the label right beside the badge, and a second copy is what this
+      // width cannot afford.
+      badge.title = `only you can answer: ${yours.join(" / ")}`;
+      bits.push(badge);
+    }
+    bits.push(txt, linkLabel);
     const holder = document.createElement("span");
     if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
-      holder.append(mark, tag, txt, linkLabel);
+      holder.append(...bits);
       if (line.innerHTML === holder.innerHTML) continue;
     }
     line.textContent = "";
-    line.append(mark, tag, txt, linkLabel);
+    line.append(...bits);
   }
 }
 
@@ -9327,6 +9374,7 @@ let modelPricesKey = "";
 let modelPricesError = "";
 
 async function refreshModelPrices() {
+  const before = modelPricesKey;
   try {
     const resp = await api("/api/model-prices");
     const data = await resp.json().catch(() => ({}));
@@ -9336,6 +9384,15 @@ async function refreshModelPrices() {
     modelPricesError = "";
   } catch (err) {
     modelPricesError = String(err);
+  }
+  // The rail's rows price their cost lines off this table, so a table that
+  // arrived after the rows were drawn has to draw them again: a row built
+  // without one has no cost block for refreshRailSeen to swap, and would
+  // keep going without one until some unrelated record changed
+  // (claunch-ge1ap). A cached redraw reads the records already in hand — the
+  // signature carries the key, so only the price change rebuilds anything.
+  if (modelPricesKey !== before && typeof refreshSessions === "function") {
+    refreshSessions({ cached: true });
   }
   if (wsOpen) renderWorkspaces();
 }
@@ -9411,8 +9468,10 @@ function costText(cost) {
 }
 
 /* The multiplication, for the tooltip: which rate applied to which bucket,
-   so an estimate can be checked against the bill it stands in for. */
-function costBreakdown(c, rates) {
+   so an estimate can be checked against the bill it stands in for. `note`
+   qualifies what the figure covers, in parentheses after the table's name —
+   the context row's estimate leaves the answer out and says so there. */
+function costBreakdown(c, rates, note) {
   if (!c || !rates) return "";
   const row = (label, tokens, rate) =>
     `  ${label} ${(tokens || 0).toLocaleString()} × ` +
@@ -9424,8 +9483,29 @@ function costBreakdown(c, rates) {
     row("output", c.output, +rates.output || 0),
   ];
   const cost = readingCost(c, rates);
-  return "estimated from Settings → Model prices:\n" + lines.join("\n") +
+  return "estimated from Settings → Model prices" +
+    (note ? ` (${note})` : "") + ":\n" + lines.join("\n") +
     (cost === null ? "" : `\n= ${priceCurrency()}${usageCost(cost)}`);
+}
+
+/* What the context alone costs to send once: the reading's three input
+   buckets at the rates entered for its model. `readingCost` prices the whole
+   request, its answer included; the context is the input side, and the row
+   below it (`last request`) is where the answer is priced. */
+function contextCost(c, rates) {
+  if (!c || !rates) return null;
+  return readingCost({ input: c.input || 0, cache_read: c.cache_read || 0,
+                       cache_write: c.cache_write || 0, output: 0 }, rates);
+}
+
+/* The multiplication behind that figure, for the tooltip — with the note that
+   says why it is smaller than the row below's. */
+function contextCostBreakdown(c, rates) {
+  if (!c || !rates) return "";
+  return costBreakdown(
+    { input: c.input || 0, cache_read: c.cache_read || 0,
+      cache_write: c.cache_write || 0, output: 0 }, rates,
+    "this context only — the answer is priced in the row below");
 }
 
 /* The whole sentence, for a tooltip or a details row. Empty where there is
@@ -9649,42 +9729,56 @@ function ctxRailLine(s) {
   return line;
 }
 
-/* The line under the gauge: how the reading's total splits into the three
-   billed input buckets — read (fresh input), cached (replayed from cache),
-   write (written to cache) — and, where the person priced this model, what
-   that request cost at those rates. Counts use the same usageShort scale as
-   the usage line below, so a figure means the same thing on both; the ≈
-   figure is computed from entered rates, not read off a meter, and says so
-   in the tooltip along with the multiplication. Nothing at all where the
-   harness has recorded no reading — the gauge's own "?" already carries
-   that. */
-function ctxTokensLine(s) {
-  const c = s && s.context;
-  if (!c) return null;
+/* The card's cost lines: what the conversation itself has spent, priced at
+   the Settings → Model prices rates, and — on its own line, where the
+   session has subagents — what they spent. The two are separate spends, so
+   they get separate rows: adding them into one figure hides which half came
+   from subagents. The conversation row prices the session's own requests,
+   which is the same set the terminal overlay's chart totals
+   (sessionstats.series leaves subagent requests out), so the two surfaces
+   read the same quantity. The ≈ figure is computed from entered rates, not
+   read off a meter, and its tooltip carries the multiplication. The token
+   totals stay on the usage line above, so this block does not repeat them.
+   Nothing at all where the daemon has no cumulative reading (the harness
+   has no reader, or has not read the transcript yet) and nothing where the
+   model has no rates: a card with nothing to price shows no cost, and a
+   zero would read as a measured one. The per-request split this card used
+   to draw here lives in the detail panel's "last request" row and in the
+   gauge's tooltip. */
+function railCostLines(s) {
+  const u = s && s.token_usage;
+  if (!u) return null;
   const provider = sessionPriceProvider(s);
-  const rates = priceRateFor(c.model, provider);
-  const cost = readingCost(c, rates);
-  const line = el("span", "rail-ctx-tokens");
-  line.append(
-    el("span", "rct-part", `read ${usageShort(c.input || 0)}`),
-    el("span", "rct-sep", "·"),
-    el("span", "rct-part", `cached ${usageShort(c.cache_read || 0)}`),
-    el("span", "rct-sep", "·"),
-    el("span", "rct-part", `write ${usageShort(c.cache_write || 0)}`),
-  );
-  if (cost !== null) {
-    line.append(el("span", "rct-sep", "·"),
-                el("span", "rct-cost", costText(cost)));
+  const model = u.model || (s.context && s.context.model);
+  const rates = priceRateFor(model, provider);
+  // No rates, no estimate: the usage line still carries the token totals, and
+  // this block draws nothing rather than a zero or a "not priced" row on
+  // every card whose model nobody has priced.
+  if (!rates) return null;
+  const box = el("span", "rail-usage-cost" + (u.partial ? " partial" : ""));
+  const row = (label, part, tip) => {
+    const line = el("span", "ruc-row");
+    line.append(el("span", "ruc-label", label),
+                el("span", "ruc-cost", costText(readingCost(part, rates))));
+    line.title = tip;
+    return line;
+  };
+  const spend = (what, part) =>
+    what + ", estimated from Settings → Model prices:\n" +
+    costBreakdown(part, rates).replace(
+      /^estimated from Settings → Model prices:\n/, "");
+  box.append(row("conversation", u,
+    spend("conversation", u) +
+    "\nthe conversation's own requests — the same set the terminal overlay's " +
+    "chart prices"));
+  const sub = u.subagents;
+  if (sub && sub.requests) {
+    box.append(row("subagents", sub,
+      spend("subagents", sub) +
+      "\nspent by this session's subagents; the conversation row does not " +
+      "include it"));
   }
-  line.title = [
-    `last request: read ${(c.input || 0).toLocaleString()} fresh input · ` +
-    `cached ${(c.cache_read || 0).toLocaleString()} replayed from cache · ` +
-    `write ${(c.cache_write || 0).toLocaleString()} written to cache`,
-    rates ? costBreakdown(c, rates)
-          : `no per-1M rates for this model${provider ? ` on ${provider}` : ""}` +
-            " — add them in Settings → Model prices to see an estimate",
-  ].join("\n");
-  return line;
+  return box;
 }
 
 /* ------------------------------------------------------------------ */
@@ -10307,6 +10401,37 @@ function termSeriesCostText(price, tokens) {
   return `≈ ${currency}${amount}`;
 }
 
+/* What that estimate breaks down into, as the caption's second line writes
+   it: "read $0.042 · cached read $8.31 · output $0.018". Cache write is
+   named only when the window wrote any — the rule the Stats table set for
+   the same four parts (claunch-60y0d.1). Each part is priced by readingCost
+   over its one bucket, at the same rates the total uses, so a cache-write
+   rate that falls back to the read rate counts the same way in both
+   (claunch-kr3wr). */
+function termSeriesCostParts(price, tokens) {
+  if (!price || !tokens || typeof readingCost !== "function") return "";
+  const currency = typeof priceCurrency === "function" ? priceCurrency() : "$";
+  const part = (label, key) => {
+    const cost = readingCost({ [key]: +(tokens[key] || 0) }, price.rates);
+    if (cost === null) return "";
+    const amount = cost > 0 && cost < 0.00005 ? cost.toFixed(6) : usageCost(cost);
+    return `${label} ${currency}${amount}`;
+  };
+  const parts = [part("read", "input"), part("cached read", "cache_read")];
+  if (+tokens.cache_write > 0) parts.push(part("cache write", "cache_write"));
+  parts.push(part("output", "output"));
+  return parts.filter(Boolean).join(" · ");
+}
+
+/* The caption: the window's estimate, then the split under it. Both lines
+   are right-aligned to the plot's right edge by `.term-series-cost`. */
+function termSeriesCostBox(cost, parts) {
+  const box = el("div", "term-series-cost");
+  box.appendChild(el("div", "term-series-cost-total", cost));
+  if (parts) box.appendChild(el("div", "term-series-cost-parts", parts));
+  return box;
+}
+
 function termSeriesChart(data, zoom, price) {
   const NS = "http://www.w3.org/2000/svg";
   /* The zoomed height comes from TERM_SERIES_ZOOM_HEIGHT because the tick
@@ -10466,6 +10591,7 @@ function termSeriesChart(data, zoom, price) {
      largest of its group, so summing points would undercount. With no rates
      the chart says so in its tooltip rather than writing a $0. */
   const cost = termSeriesCostText(price, data.totals);
+  const costParts = cost ? termSeriesCostParts(price, data.totals) : "";
   const costOf = price && price.model
     ? ` for ${price.model}${price.provider ? ` on ${price.provider}` : ""}` : "";
   const costLine = cost
@@ -10497,9 +10623,10 @@ function termSeriesChart(data, zoom, price) {
        sent. One line could not hold both -- a long one ran out of the box
        and across the terminal under it. Both lines are laid out whether or
        not they have text, so the reserved height does not change with the
-       pointer. The request's own estimate rides on the first line
-       (claunch-i6xl2): it names a request, so its cost belongs beside the
-       number, and the second line's token figures are the long one. */
+       pointer. It carries no cost: the axis is request order, so the estimate
+       for a slice of it describes no period a reader can act on (the window's
+       own estimate is under the legend), and the user asked for it gone
+       (claunch-kr3wr). */
     const readout = el("div", "term-series-readout");
     const when = el("div", "term-series-readout-line", " ");
     const what = el("div", "term-series-readout-line", " ");
@@ -10509,9 +10636,7 @@ function termSeriesChart(data, zoom, price) {
       /* Which request on one line (the group size belongs to it, not to the
          numbers), what it sent on the other: the numbers alone are the long
          line, and the widest of them still fits the plot's 320px. */
-      const pcost = termSeriesCostText(price, p);
-      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "") +
-        (pcost ? ` · ${pcost}` : "");
+      when.textContent = `#${p.n} · ${ago(p.t)}` + (p.count > 1 ? ` · max of ${p.count}` : "");
       what.textContent = `${usageShort(termSeriesTotal(p))} = in ${usageShort(p.input)}` +
         ` · cached ${usageShort(p.cache_read)} · write ${usageShort(p.cache_write)}`;
     };
@@ -10528,10 +10653,10 @@ function termSeriesChart(data, zoom, price) {
     });
     /* The window's estimate under the legend, where it describes the whole
        plot rather than the request under the pointer. */
-    const costBox = cost ? el("div", "term-series-cost", cost) : null;
+    const costBox = cost ? termSeriesCostBox(cost, costParts) : null;
     box.append(...[axis, legend, costBox, readout].filter(Boolean));
   }
-  if (!zoom && cost) box.appendChild(el("div", "term-series-cost", cost));
+  if (!zoom && cost) box.appendChild(termSeriesCostBox(cost, costParts));
   return box;
 }
 
@@ -11019,6 +11144,33 @@ function usageRailLine(s) {
   return line;
 }
 
+/* The estimate on the detail panel's context row, appended to the dd
+   metaRow just wrote. The row that answers "how full is the context" is
+   where the price of that fill belongs (claunch-wyhog), and it is the
+   context's own price — the answer tokens are not part of it and are priced
+   in the `last request` row below. Appended rather than composed into the
+   sentence because that sentence is also the rail's tooltip, where no price
+   is shown. An unpriced model leaves the row as it was: the row below
+   already says "not priced", and a second one here would read as a property
+   of the context rather than of the table.
+
+   Guarded at its call site like the other late helpers, so a reduced node
+   harness still draws the row itself. The guard inside is the same condition
+   metaRow used to write the row — without it the append would land on
+   whichever dd came before. */
+function ctxCostOnRow(dl, s) {
+  const c = s && s.context;
+  const dd = dl && dl.lastChild;
+  if (!c || !dd || !ctxSentence(s)) return;
+  const provider = sessionPriceProvider(s);
+  const rates = priceRateFor(c.model, provider);
+  const cost = contextCost(c, rates);
+  if (cost === null) return;
+  dd.appendChild(el("span", "ctx-row-cost", ` · ${costText(cost)}`));
+  dd.title = [dd.title, contextCostBreakdown(c, rates)]
+    .filter(Boolean).join("\n\n");
+}
+
 /* The detail panel's row for the reading's billed buckets: read (fresh
    input), cached (replayed from cache), write (written to cache), plus the
    estimated cost where the model is priced. Where it is not, the row still
@@ -11221,14 +11373,19 @@ function railBeadsIndex(data) {
       if (!lane.session || !lane.known) continue;
       const cur = out.get(lane.session);
       const done = (lane.summary && lane.summary.done) || 0;
+      // Each issue carries the board it came from, so a session holding work
+      // on two boards can say which pill belongs to which (claunch-np69t P3).
+      // The concatenation below loses the lane's own `root`, so it is stamped
+      // on the issues before they are merged.
+      const onBoard = (list) => (list || []).map((i) => ({ ...i, board: b.root }));
       if (cur) {
-        cur.issues = cur.issues.concat(lane.issues || []);
-        cur.created = cur.created.concat(lane.created || []);
+        cur.issues = cur.issues.concat(onBoard(lane.issues));
+        cur.created = cur.created.concat(onBoard(lane.created));
         cur.done += done;
       } else {
         out.set(lane.session, {
-          issues: [...(lane.issues || [])],
-          created: [...(lane.created || [])],
+          issues: onBoard(lane.issues),
+          created: onBoard(lane.created),
           summary: lane.summary || {},
           done,
           root: b.root,
@@ -11280,8 +11437,20 @@ function railBeadsLine(name, lane) {
   const shown = all.slice(0, RAIL_BEADS_MAX);
   line._railSig = JSON.stringify([name, next || null, all, lane.done || 0]);
   line.appendChild(railBeadsCount(lane));
+  // A session can hold work on two boards (railBeadsIndex concatenates both
+  // queues); only then does a pill need to say which board its issue is on.
+  const boards = new Set(all.map(({ i }) => i.board).filter(Boolean));
   for (const { i, created } of shown) {
-    const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
+    const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`);
+    // The id leads and the status follows it (claunch-np69t P3): the pill
+    // used to be the bare id, so the only place the state appeared was the
+    // colour and the hover card. The two are separate spans because the rail
+    // is 260px wide -- the status must not be the part that gets cut, so the
+    // id is the one that ellipsises (style.css .rail-bead-id).
+    pill.appendChild(el("span", "rail-bead-id", i.id || "?"));
+    let state = railBeadStatusWord(i.status);
+    if (boards.size > 1 && i.board) state += ` · ${railBoardName(i.board)}`;
+    pill.appendChild(el("span", "rail-bead-st", state));
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
     // An empty `title`, set on purpose: the hover card already says the id,
     // the status, the title and the facts, and a native tooltip would land on
@@ -11315,18 +11484,50 @@ const RAIL_BEADS_COUNTS = [
   ["blocked", (s) => s === "blocked"],
 ];
 
-/* The count at the head of a row's beads line: "N left" over the assigned
+/* The status in the Queues page's words, for the tail of a pill. The pill's
+   own class keeps the raw status (the tint and the hover card read that);
+   this is the word a reader sees, and it is the same vocabulary as the counts
+   beside the pills, so "1 landing" and a pill's "· landing" say one thing. */
+const RAIL_BEAD_STATUS_WORDS = {
+  open: "open",
+  in_ready: "ready",
+  in_progress: "working",
+  in_review: "landing",
+  blocked: "blocked",
+};
+function railBeadStatusWord(status) {
+  return RAIL_BEAD_STATUS_WORDS[status] || String(status || "");
+}
+
+/* A board's name for the tail of a pill: the last segment of the board root
+   (`/home/me/works/claunch` -> `claunch`). Drawn only when the session holds
+   issues on more than one board. */
+function railBoardName(root) {
+  const s = String(root || "").replace(/[\\/]+$/, "");
+  const parts = s.split(/[\\/]/);
+  return parts[parts.length - 1] || s;
+}
+
+/* The count at the head of a row's beads line: "N issues" over the assigned
    issues, then one count per status that has any, then "N done". Counted
    from the issues themselves rather than the lane summary, because a
    session on two boards carries both boards' issues but only the first
    board's summary (railBeadsIndex). The native `title` spells it out in
-   full, zeros included. */
+   full, zeros included.
+
+   The head used to read "N left", which named no subject: the number is what
+   the BOARD assigns this session, not what the cflow run has left, and the
+   two differ on a session that also drives a run (claunch-np69t P2). The
+   word "issues" names the board half, and the title says outright which
+   queue this is so the two are never read as one. The run's own progress
+   belongs to the card's fallback summary (railStatusFallback), not here. */
 function railBeadsCount(lane) {
   const issues = lane.issues || [];
   const done = lane.done || 0;
   const box = el("span", "rail-beads-count");
-  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, `${issues.length} left`));
-  const full = [`${issues.length} left`];
+  const label = `${issues.length} issue${issues.length === 1 ? "" : "s"}`;
+  box.appendChild(el("span", `rail-beads-left${issues.length ? "" : " none"}`, label));
+  const full = [label];
   for (const [word, has] of RAIL_BEADS_COUNTS) {
     const n = issues.filter((i) => has(i.status)).length;
     full.push(`${n} ${word}`);
@@ -11334,8 +11535,93 @@ function railBeadsCount(lane) {
   }
   full.push(`${done} done`);
   if (done) box.appendChild(el("span", "rail-beads-n done", `${done} done`));
-  box.title = `assigned issues: ${full.join(" · ")}`;
+  box.title = `board issues assigned to this session (not the cflow run's queue): ${full.join(" · ")}`;
   return box;
+}
+
+/* The board's half of the fallback summary: what this session holds, in the
+   Queues page's words. Assigned issues only — a follow-up it filed for
+   somebody else is not work it owes the reader, and the count line beside the
+   pills already keeps the two apart. Empty when the board knows nothing about
+   the session, so a session with no queue adds nothing to the line. */
+function railBeadsTally(name) {
+  const beads = typeof railBeads === "object" && railBeads;
+  const lane = beads && typeof beads.get === "function" ? beads.get(name) : null;
+  if (!lane) return "";
+  const issues = lane.issues || [];
+  if (!issues.length) return "";
+  const bits = [`${issues.length} board issue${issues.length === 1 ? "" : "s"}`];
+  const working = issues.filter((i) => i.status === "in_progress").length;
+  if (working) bits.push(`${working} in progress`);
+  const landing = issues.filter((i) => i.status === "in_review").length;
+  if (landing) bits.push(`${landing} in review`);
+  const done = lane.done || 0;
+  if (done) bits.push(`${done} done`);
+  return bits.join(" · ");
+}
+
+/* The run's own clock as a phrase: when its state last moved. The rail prints
+   the same age on its `moved` line, in the same units.
+
+   The daemon's `updated` is not always the same kind of value: a run's state
+   carries an ISO-8601 string (store.utcnow) while the per-instance
+   `entered_at` is a float of epoch seconds, and the rail entry passes both
+   through. Either is read here; anything else contributes nothing rather
+   than a wrong age. */
+function railMovedAgo(updated) {
+  let at = null;
+  if (typeof updated === "number" && isFinite(updated)) {
+    at = updated;
+  } else if (typeof updated === "string" && updated) {
+    const ms = Date.parse(updated);
+    if (isFinite(ms)) at = ms / 1000;
+  }
+  if (at === null) return "";
+  const secs = Math.max(0, Math.floor(Date.now() / 1000 - at));
+  return `moved ${fmtAge(secs)} ago`;
+}
+
+/* The one line the briefing card can say before anyone has asked the
+   summariser (claunch-np69t P1).
+
+   The card used to say "No summary yet" until ⟳ was pressed, although the row
+   already knows most of it: the run names what it is stopped on, the board
+   names what the session holds, and the run's clock says when it last moved.
+   A line built from those beats a prompt to go and ask for one, and it is
+   overwritten the moment a real briefing lands.
+
+   Returns null when there is no v2 run on this row. That is a real answer:
+   a session outside cflow has nothing here to fall back to, and its card
+   keeps saying exactly what it said before. Everything comes from fields the
+   daemon already sends (cflow2_web.rail_entry, /api/beads/queues); nothing
+   here counts anything the row does not show. `kind` names which of the three
+   waits this is — a person's decision, a door nobody has to take, or the run
+   simply working — so the stylesheet can colour them apart. */
+function railStatusFallback(name) {
+  const cache = typeof cflow2RailCache === "object" && cflow2RailCache;
+  const r = (cache && cache[name]) || null;
+  if (!r) return null;
+  const owed = r.owed || [];
+  const optional = r.optional || [];
+  const parts = [];
+  const decisions = cflow2RailUserChoices(r);
+  if (decisions.length) parts.push(`your decision: ${decisions.join(" / ")}`);
+  const rest = owed.filter((x) => !String(x).startsWith(CFLOW2_CHOOSE_PREFIX));
+  if (rest.length) parts.push(rest.join(" · "));
+  for (const x of optional) parts.push(x);
+  if (!owed.length && !optional.length) {
+    const where = (r.current || []).join(", ");
+    if (where) parts.push(where);
+  }
+  const tally = railBeadsTally(name);
+  if (tally) parts.push(tally);
+  const moved = railMovedAgo(r.updated);
+  if (moved) parts.push(moved);
+  if (!parts.length) return null;
+  return {
+    text: parts.join(" · "),
+    kind: owed.length ? "user" : optional.length ? "door" : "working",
+  };
 }
 
 /* The hover card: one element for the whole rail, filled per pill. Fixed
@@ -11881,18 +12167,19 @@ function refreshRailSeen(list) {
         if (ctx.title !== title) ctx.title = title;
       }
     }
-    // The bucket line under the gauge: rebuilt when the reading or the
-    // price table moves (modelPricesKey is the table serialized once per
-    // read, so a poll that changed neither costs this row nothing). Only
-    // swapped where it exists — a row whose harness records no reading has
-    // no line to replace, and the row builder hangs a fresh one the moment
-    // a reading lands.
-    const tk = li.querySelector(".rail-ctx-tokens");
-    if (tk && typeof ctxTokensLine === "function") {
-      const tkKey = JSON.stringify([s.context || null, s.profile || "",
-                                    s.borrow || "", modelPricesKey]);
+    // The cost lines under the gauge: rebuilt when the cumulative reading,
+    // the session's profile, or the price table moves (modelPricesKey is the
+    // table serialized once per read, so a poll that changed none of them
+    // costs this row nothing). Only swapped where the line exists — a row
+    // whose harness has no reading has none to replace, and the row builder
+    // hangs a fresh one the moment a reading lands.
+    const tk = li.querySelector(".rail-usage-cost");
+    if (tk && typeof railCostLines === "function") {
+      const tkKey = JSON.stringify([s.token_usage || null, s.context || null,
+                                    s.profile || "", s.borrow || "",
+                                    modelPricesKey]);
       if (tk._railKey !== tkKey) {
-        const fresh = ctxTokensLine(s);
+        const fresh = railCostLines(s);
         if (fresh) swap(tk, fresh)._railKey = tkKey;
         else tk.remove();
       }
@@ -12167,7 +12454,24 @@ function renderBriefingCard(name, entry, opts) {
     card.appendChild(el("div", "sess-brief-note", BRIEFING_OFF_HINT));
   } else if (!entry) {
     if (!summaryOnly || !String(opts.rowSummary || "").trim()) {
-      card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+      // Before anyone asks the summariser, the row's own facts can answer the
+      // question the card is there for (railStatusFallback, claunch-np69t P1).
+      // A session with no v2 run gets null and keeps the old notice: there is
+      // nothing on that row to fall back to, and an invented line would be a
+      // new way for the card to be wrong.
+      const fallback = typeof railStatusFallback === "function"
+        ? railStatusFallback(name) : null;
+      if (fallback) {
+        const note = el("div", `sess-brief-note sess-brief-fallback fb-${fallback.kind}`,
+                        fallback.text);
+        // The marker, not the class list: the rail branch below reads it to
+        // know it must not overwrite the line with the old notice.
+        note.dataset.fallback = fallback.kind;
+        note.title = fallback.text;
+        card.appendChild(note);
+      } else {
+        card.appendChild(el("div", "sess-brief-note", "No summary yet · use ⟳ to request one"));
+      }
     }
   } else if (loading && !data) {
     card.appendChild(el("div", "sess-brief-note", "summarising…"));
@@ -12223,7 +12527,11 @@ function renderBriefingCard(name, entry, opts) {
   if (summaryOnly) {
     // Empty/loading/error states share the summary's metadata line.
     const note = card.querySelector(".sess-brief-note");
-    if (note) {
+    // The fallback stays in the body of the card: it is a sentence built from
+    // the run and the board, not a state of the summariser, and the metadata
+    // line is one row of chips this width cannot wrap a sentence into.
+    const fallbackNote = note && note.dataset && note.dataset.fallback;
+    if (note && !fallbackNote) {
       note.title = note.textContent;
       if (!entry && briefingLLM) note.textContent = "No summary yet";
       if (!briefingLLM || (entry && entry.phase === "unconfigured")) {
@@ -19721,6 +20029,34 @@ $("term-archive").addEventListener("click", async () => {
   await archiveSession(currentName);
 });
 
+/* Resume one exited session by name, for a page that is not its terminal
+   (the Chart page's detail column, claunch-h82vq): the header's ▶ resume is
+   the same request, but it reattaches the terminal, which only makes sense
+   for the attached session. Resolves true when the daemon took it. */
+async function respawnSession(name) {
+  if (!name) return false;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not resume '${name}'`, info.error || `HTTP ${resp.status}`);
+      return false;
+    }
+    // The attached terminal's socket died with the old child; drop it, and
+    // opening the terminal again attaches the new one.
+    if (name === currentName && typeof detach === "function") detach();
+    return true;
+  } catch (err) {
+    await modalInfo(`Could not resume '${name}'`,
+                    err && err.message ? err.message : "request failed");
+    return false;
+  } finally {
+    await refreshSessions({ state: "current" });
+  }
+}
+
 /* Stop everything. The records stay and every one of them is resumable after,
    which is what makes this the one bulk verb that needs no mesh guard: a
    member row is *meant* to outlive its terminal, reading `exited`. */
@@ -25021,6 +25357,73 @@ function termCflowView() {
   };
 }
 
+/* One press of a gate answer (termCflowAnswers / termCflow2Answers): the
+   reason prompt or the confirm it carries, then the post. Shared by the
+   terminal's strip and the Chart page's detail column (claunch-h82vq).
+   Resolves false when the reader cancelled. Not `async`: the node
+   harnesses slice it out of this file by its `function` keyword. */
+function pressGateAnswer(a, after) {
+  let payload = a.body;
+  if (a.reason) {
+    const why = prompt(a.reason, "");
+    if (why === null) return Promise.resolve(false); // cancelled the dialog, not the refusal
+    if (a.reasonRequired && !why.trim()) return Promise.resolve(false); // the engine would refuse it
+    payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
+  } else if (a.ask && !confirm(a.ask)) {
+    return Promise.resolve(false);
+  }
+  const sent = after ? cflowAction(a.path, payload, after) : cflowAction(a.path, payload);
+  return Promise.resolve(sent).then(() => true);
+}
+
+/* Every gate a person owes one session's runs, for a page that is not that
+   session's terminal (the Chart page's detail column, claunch-h82vq). The
+   strip above draws the first of them for the attached session; this lists
+   them all, each with the presses the strip would offer: the v1 run's gate,
+   then one entry per answer the v2 run owes (cflow2RailCache's `answers`).
+   An owed answer with no press (a halt, a plan wait) still gets an entry,
+   with `answers: []`, so the reader learns it is there and where to go. */
+function sessionGateViews(name) {
+  const out = [];
+  if (!name) return out;
+  const r = typeof sessCflowRun === "function" ? sessCflowRun(name) : null;
+  if (r && sessCflowGated(r)) {
+    out.push({
+      href: "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`),
+      what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+        sessCflowLabel(r),
+      question: termCflowQuestion(r),
+      answers: termCflowAnswers(r, name),
+      after: null,
+      optional: false,
+    });
+  }
+  const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[name];
+  if (r2 && r2.gated) {
+    const optional = r2.blocking === false;
+    const href = "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`);
+    const owed = (r2.answers || []).length ? r2.answers
+      : [{ kind: "", prompt: (r2.owed || []).join(" · ") }];
+    for (const a of owed) {
+      const presses = termCflow2Answers(r2, a, name);
+      const question = termCflow2Question(a);
+      out.push({
+        href,
+        what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
+          `${a.kind || "waiting"}${optional ? " · ○ optional" : ""}`,
+        question: presses.length ? question
+          : a.kind === "plan-wait"
+            ? `${question} — decide it in the plan pane (☰ plan)`
+            : `${question} — answer it on the run page`,
+        answers: presses,
+        after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
+        optional,
+      });
+    }
+  }
+  return out;
+}
+
 function renderTermCflow() {
   const box = $("term-cflow");
   if (!box) return;
@@ -25057,19 +25460,7 @@ function renderTermCflow() {
     const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
     b.type = "button";
     if (a.title) b.title = a.title;
-    b.addEventListener("click", () => {
-      let payload = a.body;
-      if (a.reason) {
-        const why = prompt(a.reason, "");
-        if (why === null) return; // cancelled the dialog, not the refusal
-        if (a.reasonRequired && !why.trim()) return; // the engine would refuse it
-        payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
-      } else if (a.ask && !confirm(a.ask)) {
-        return;
-      }
-      if (view.after) cflowAction(a.path, payload, view.after);
-      else cflowAction(a.path, payload);
-    });
+    b.addEventListener("click", () => pressGateAnswer(a, view.after));
     btns.appendChild(b);
   }
   box.appendChild(btns);
@@ -25699,7 +26090,9 @@ syncZoomControls();
    Two choices a reader makes about a session's screen and expects to find
    again: which panel the right rail shows (the details, or the workflow run),
    and whether the run page is halved into the bottom of the terminal's
-   column — with where they left the bar between the two. Remembered per
+   column — with where they left the bar between the two, and whether that
+   pane floats over the terminal instead of being in the column
+   (claunch-xkw8o). Remembered per
    SESSION, unlike the font size: "watch s15's run under its terminal" is a
    fact about s15, not about the reader, and walking to another session must
    not drag it along. One key with a map inside rather than a key per
@@ -25709,6 +26102,11 @@ const SESSLAYOUT_KEY = `claunch_sesslayout:${BASE}`;
 const SPLIT_DEFAULT = 0.6;   // the terminal's share of the column
 const SPLIT_MIN = 0.2;       // past either end the loser is too short to read
 const SPLIT_MAX = 0.8;
+/* The floating pane's box: small enough to stay a card over the terminal,
+   never so small that its content has nothing to show. */
+const FLOAT_MIN_W = 260;
+const FLOAT_MIN_H = 160;
+const FLOAT_EDGE = 12;       // the pane never touches #main's edge
 
 /* The Details panel's sub-tabs: `all` draws every section in one column,
    grouped under the other five's names; each of the five draws its group
@@ -25817,10 +26215,29 @@ const SPLIT_PANES = {
     on: "close the plan pane — the terminal takes the column back",
     off: "this session's plan — pick its branches, check its items by hand, and see whether it may close",
   },
+  // The sub procedures this session's v2 run could call (subprocs.js,
+  // docs/cflow-v2.md 2.12.3, claunch-8t5r0.4/.5): every one listed, the ones
+  // that cannot run now greyed out with the reason, a call made here as the
+  // user, and the procedure packs with their role filter.
+  subprocs: {
+    btn: "term-subprocbtn", title: "⤷ sub",
+    on: "close the sub procedure pane — the terminal takes the column back",
+    off: "the sub procedures this session's run can call — call one, and install packs or edit their role filter",
+  },
 };
 
 function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
+  // A stored px length, or null when the reader has not moved or sized the
+  // floating pane yet (which is what lets the default follow the window).
+  // Only a number or a numeric string counts — a hand-edited `true` must
+  // read as "not set", not as one pixel from the edge.
+  const pxLen = (x) => {
+    if (typeof x !== "number" && typeof x !== "string") return null;
+    if (typeof x === "string" && x.trim() === "") return null;
+    const n = Number(x);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+  };
   return {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
@@ -25829,13 +26246,23 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), the session's own shell (❯),
     // or the conversation pane (talk-pane.js) on the session's questions
     // (?), its threads (🗪) or both side by side.
-    pane: ["sims", "category", "chart", "packs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "packs", "subprocs", "cli", "vm", "wrapup", "plan", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
     // claunch-qkvb1): the terminal and the bar step aside until it is
     // pressed again or the pane closes. Only a conversation pane enlarges.
     max: !!raw.max,
+    // Floats over the terminal instead of taking a share of the column
+    // (the frame's float checkbox, claunch-xkw8o): the pane is a box in
+    // #main's own corner, so sizing it or closing it never resizes what is
+    // underneath. The box is in px from #main's right/bottom edges; null
+    // means the reader has not moved or sized it yet.
+    float: !!raw.float,
+    floatW: pxLen(raw.floatW),
+    floatH: pxLen(raw.floatH),
+    floatRight: pxLen(raw.floatRight),
+    floatBottom: pxLen(raw.floatBottom),
     // The session's view the reader last had up: its terminal (cli) or its
     // conversation page (html). route() writes it on every in-session page
     // and reads it back when a link brings the reader in from another
@@ -26814,6 +27241,7 @@ function refitSoon(delay = 150) {
 window.addEventListener("resize", () => {
   refitSoon();
   if (currentPage === "cli") cliRefit(150);
+  clampFloatPane();   // a shrinking window pulls the floating pane back in
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
@@ -27775,6 +28203,12 @@ function syncLayout() {
   document.querySelectorAll("#rail-nav a").forEach((a) =>
     a.classList.toggle("active", a.dataset.page === page)
   );
+  // The phone's bottom tabs: a page without a tab of its own is reached
+  // through 더보기, so that tab is the one lit for it.
+  const tabs = [...document.querySelectorAll("#mobile-tabs a")];
+  const tabbed = tabs.some((a) => a.dataset.page === page);
+  tabs.forEach((a) => a.classList.toggle("active",
+    tabbed ? a.dataset.page === page : a.dataset.page === "menu"));
   // On a phone home IS the menu: the rail is the whole of that page, so
   // there is nothing to lay over it. Above the breakpoint the rail is docked
   // beside the page and is never a mode.
@@ -27830,10 +28264,60 @@ function setRailNavPinned(pinned) {
    across the breakpoint. */
 let detailWasUp = false;
 
+/* A page column borrowing the detail (claunch-h82vq): the Chart page's
+   Detail tab shows this same panel inside its right column instead of the
+   docked rail. { slot, name, onClose } while borrowed, null otherwise.
+   The address's `?detail=` still owns the rail: a page hosts the panel only
+   while the address names no detail (hostSessDetail refuses otherwise), and
+   an address that names one takes the panel back (route). */
+let sessDetailGuest = null;
+
+/* The borrow, read through typeof: the node harnesses slice the functions
+   that consult it out of this file without its declaration. */
+function detailGuest() {
+  return typeof sessDetailGuest === "undefined" ? null : sessDetailGuest;
+}
+
+function hostSessDetail(slot, name, onClose) {
+  const view = $("sess-view");
+  if (!view || !slot || !name) return false;
+  if (hashDetail(location.hash)) return false;
+  sessDetailGuest = { slot, name, onClose: onClose || null };
+  if (view.parentNode !== slot) slot.appendChild(view);
+  view.classList.add("guest");
+  if (sessName !== name) repointDetail(name);
+  syncDetailPanel();
+  return true;
+}
+
+/* Give the borrowed panel back: its subject goes back to whatever the
+   address names (nothing, usually), and the node to its home. */
+function releaseSessDetail() {
+  if (!sessDetailGuest) return;
+  sessDetailGuest = null;
+  const view = $("sess-view");
+  if (view) view.classList.remove("guest");
+  const want = hashDetail(location.hash);
+  if (!want) { if (sessName) dropDetail(); }
+  else if (want !== sessName) repointDetail(want);
+  syncDetailPanel();
+}
+
 function syncDetailPanel() {
   const view = $("sess-view");
   const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    // Borrowed by a page column: it is that column's content, so neither
+    // docked nor hidden, and the rail's drag bar has nothing to resize.
+    if (view.parentNode !== guest.slot) guest.slot.appendChild(view);
+    view.classList.remove("docked", "hidden");
+    split.classList.add("hidden");
+    if (!narrow && detailWasUp) refitSoon(60);
+    detailWasUp = false;
+    return;
+  }
   const host = narrow ? $("main") : $("layout");
   if (view.parentNode !== host) {
     // Last in #layout is the mobile bottom bar (display:none up here), so the
@@ -27867,7 +28351,7 @@ function syncDetailPanel() {
    the same path. Wide screens only: below the breakpoint the terminal is
    already fighting a keyboard for rows, and half of that is no use to
    anybody — the choice is kept, not honoured, until the screen comes back. */
-let splitWasUp = false, splitWasMax = false;
+let splitWasCanvas = false, splitWasMax = false;
 
 function syncSplitPane() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
@@ -27886,17 +28370,23 @@ function syncSplitPane() {
         || (talkShows(remembered.pane, "qa") && !operatorQa(name)));
   const lay = talkAway ? null : remembered;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
-  $("term-split").classList.toggle("hidden", !up);
+  // Floating takes the pane out of the column: no bar to drag (the box is
+  // sized by its own grip), and the terminal keeps the whole height it had.
+  const float = up && lay.float;
+  $("term-split").classList.toggle("hidden", !up || float);
   $("term-wf").classList.toggle("hidden", !up);
   document.body.classList.toggle("term-split", up);
-  // Every kind of pane enlarges: ⤢ sits in the frame they all share.
-  const max = up && lay.max;
+  document.body.classList.toggle("split-float", float);
+  // Every kind of pane enlarges: ⤢ sits in the frame they all share. A
+  // floating pane is not in the column, so it has nothing to enlarge into.
+  const max = up && !float && lay.max;
   document.body.classList.toggle("split-max", max);
   // Pressed is the session's remembered choice, not what fits this screen:
   // the button must read "on" on a narrowed window too, or pressing it there
   // would silently write the opposite of what it appears to do.
   for (const [pane, spec] of Object.entries(SPLIT_PANES)) {
     const btn = $(spec.btn);
+    if (!btn) continue;
     const on = !!lay && lay.split && lay.pane === pane;
     btn.setAttribute("aria-pressed", String(on));
     btn.title = on ? spec.on : spec.off;
@@ -27930,16 +28420,22 @@ function syncSplitPane() {
   if ((qaOn || threadsOn) && typeof applyTalkRows === "function") applyTalkRows();
   if (up) {
     applySplitRatio(lay.ratio);
+    if (float) paintFloatBox(floatBox(name));
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
   } else if (splitFor) {
     closeSplit();
   }
   // The pane takes height off the terminal and gives it back, and no resize
   // event announces that — same deal as the detail rail docking beside it.
-  if (up !== splitWasUp || max !== splitWasMax) refitSoon(60);
-  splitWasUp = up;
+  // A floating pane takes no height at all, so opening, closing, moving or
+  // sizing it leaves the terminal's box alone (that is the point): only a
+  // change in *docked* occupancy, or in ⤢, resizes the canvas.
+  const canvasShared = up && !float;
+  if (canvasShared !== splitWasCanvas || max !== splitWasMax) refitSoon(60);
+  splitWasCanvas = canvasShared;
   splitWasMax = max;
   globalThis.SplitFrame?.setMax($("term-wf"), max);
+  globalThis.SplitFrame?.setFloat($("term-wf"), float);
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
@@ -28505,12 +29001,14 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "menu": return "더보기";
     case "plan": return "세션 진행 개요";
     case "knowledge": return "knowledge";
     case "retrospection": return "retrospection";
     case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
+    case "fleet": return "fleet";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -28598,6 +29096,34 @@ if ($("m-pause")) {
 $("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
+/* ⋯ on the phone bar (claunch-0a5nk.2): the menu holds the session's rare
+   moves (pause, kill, archive) and the link-panel chip, which together made
+   the bar wider than a 390px screen. It closes on a pick, on a tap outside,
+   on Escape and on a route change, so it never stays over a page the person
+   moved on from. */
+function setMobileMore(open) {
+  const btn = $("m-more"), menu = $("m-more-menu");
+  if (!btn || !menu) return;
+  menu.classList.toggle("hidden", !open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+if ($("m-more")) {
+  $("m-more").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMobileMore($("m-more-menu").classList.contains("hidden"));
+  });
+  $("m-more-menu").addEventListener("click", (e) => {
+    if (e.target.closest("button")) setMobileMore(false);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#m-more-menu, #m-more")) setMobileMore(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setMobileMore(false);
+  });
+  window.addEventListener("hashchange", () => setMobileMore(false));
+}
+
 $("mobile-bottom").addEventListener("click", () => {
   if (!currentName) return;
   location.hash = "#/s/" + encodeURIComponent(currentName);
@@ -28634,7 +29160,8 @@ MOBILE_MQ.addEventListener("change", () => {
   // handed back to the page the address names — routing again does exactly
   // that, and keeps the rail.
   if (MOBILE_MQ.matches) {
-    if (sessName && currentPage !== "session") {
+    if (sessName && currentPage !== "session"
+        && !(typeof detailGuest === "function" && detailGuest())) {
       history.replaceState(history.state, "", hashWithDetail(location.hash, null));
       dropDetail();
     }
@@ -28683,11 +29210,13 @@ const VIEWS = {
   threads: "threads-view",
   megathreads: "megathreads-view",
   glossary: "glossary-view",
+  menu: "menu-view",
   plan: "plan-view",
   knowledge: "knowledge-view",
   retrospection: "retrospection-view",
   sims: "sims-view",
   spec: "spec-view",
+  fleet: "fleet-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -28880,15 +29409,18 @@ function renderSplit(data) {
 }
 
 /* The frame every kind of pane sits in (split-frame.js): the head row with
-   the pane's name and the ⤢ and × all of them share, and the body the pane
-   draws into. ⤢ and × only ask; the session's layout remembers them and
-   syncSplitPane draws them back. */
+   the pane's name, the float checkbox and the ⤢ and × all of them share, and
+   the body the pane draws into. The controls only ask; the session's layout
+   remembers their answers and syncSplitPane draws them back. */
 function mountSplitFrame(name, kind) {
   const host = $("term-wf");
+  const lay = sessLayoutFor(name);
   return globalThis.SplitFrame?.mount(host, {
     kind, title: SPLIT_PANES[kind]?.title,
-    max: sessLayoutFor(name).max,
+    max: lay.max,
+    float: lay.float,
     onMax: (on) => setSessLayout(name, { max: !!on }),
+    onFloat: (on) => setSessLayout(name, { float: !!on }),
     onClose: () => setSessLayout(name, { split: false, max: false }),
   }) || { body: host, lead: null };
 }
@@ -28916,6 +29448,8 @@ function openSplit(name, kind = "run") {
   if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
   // And the briefing and prompt packs pane (packs-pane.js).
   if (kind === "packs") { globalThis.PacksPane?.mount(splitBody, name); return; }
+  // And the sub procedure picker and pack editor (subprocs.js).
+  if (kind === "subprocs") { globalThis.SubprocPane?.mount(splitBody, name); return; }
   // And the session's own shell, with the input its agent proposes
   // (cli-pane.js): a second terminal over that session's shell socket.
   if (kind === "cli") { globalThis.CliPane?.mount(splitBody, name); return; }
@@ -28957,6 +29491,7 @@ function closeSplit() {
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (splitKind === "packs") globalThis.PacksPane?.unmount();
+  if (splitKind === "subprocs") globalThis.SubprocPane?.unmount();
   if (splitKind === "cli") globalThis.CliPane?.unmount();
   if (splitKind === "vm") globalThis.VmSessionPane?.unmount();
   if (splitKind === "wrapup") globalThis.WrapupPane?.unmount();
@@ -29053,6 +29588,7 @@ $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
 $("term-rebrief").addEventListener("click", () => toggleSplitPane("packs"));
+$("term-subprocbtn").addEventListener("click", () => toggleSplitPane("subprocs"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 // The session's own shell (cli-pane.js): always available — every session
 // has one, and the daemon spawns it on the pane's first viewer.
@@ -29121,6 +29657,121 @@ const endSplitDrag = () => {
 };
 $("term-split").addEventListener("pointerup", endSplitDrag);
 $("term-split").addEventListener("pointercancel", endSplitDrag);
+
+/* ---- the floating pane's box (claunch-xkw8o) ----
+   body.split-float takes #term-wf out of #main's column (style.css), and
+   these four numbers say where it sits: px from #main's right and bottom
+   edges, and its own width and height. Read from the session's layout, with
+   a default that follows the window (about the share the docked pane would
+   have taken, as a card in the corner) until the reader moves or sizes it.
+   Everything is clamped to #main, so a window that shrinks under a remembered
+   box pulls it back in instead of leaving it half off screen. */
+function clampFloat(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, Math.round(v)));
+}
+
+/* The default corner keeps a margin from #main's bottom — and, when the
+   session's input line is showing, clears it: a card over the terminal is
+   useful, one over the box the reader types into is not. */
+function floatFloor(main) {
+  const shelf = $("term-composer");
+  const r = shelf && typeof shelf.getBoundingClientRect === "function"
+    ? shelf.getBoundingClientRect() : null;
+  if (!r || !r.height) return FLOAT_EDGE;
+  return Math.max(FLOAT_EDGE, Math.round(main.bottom - r.top + FLOAT_EDGE));
+}
+
+function floatBox(name) {
+  const main = $("main").getBoundingClientRect();
+  const lay = name ? sessLayoutFor(name) : null;
+  const maxW = Math.max(FLOAT_MIN_W, Math.round(main.width - FLOAT_EDGE * 2));
+  const maxH = Math.max(FLOAT_MIN_H, Math.round(main.height - FLOAT_EDGE * 2));
+  const wantW = lay && lay.floatW != null ? lay.floatW : main.width * 0.55;
+  const wantH = lay && lay.floatH != null ? lay.floatH : main.height * 0.5;
+  const w = clampFloat(wantW, FLOAT_MIN_W, maxW);
+  const h = clampFloat(wantH, FLOAT_MIN_H, maxH);
+  const right = clampFloat(lay && lay.floatRight != null ? lay.floatRight : FLOAT_EDGE,
+                           0, Math.max(0, Math.round(main.width - w - FLOAT_EDGE)));
+  const bottom = clampFloat(lay && lay.floatBottom != null ? lay.floatBottom : floatFloor(main),
+                            0, Math.max(0, Math.round(main.height - h - FLOAT_EDGE)));
+  return { w, h, right, bottom, main };
+}
+
+function paintFloatBox(box) {
+  const host = $("term-wf");
+  host.style.setProperty("--float-w", `${box.w}px`);
+  host.style.setProperty("--float-h", `${box.h}px`);
+  host.style.setProperty("--float-right", `${box.right}px`);
+  host.style.setProperty("--float-bottom", `${box.bottom}px`);
+}
+
+/* A window that shrinks must not leave the box outside #main. The remembered
+   numbers are untouched — this only pulls the painted box back in, so the
+   pane returns to where the reader left it when the window grows again. */
+function clampFloatPane() {
+  if (!currentName || !document.body.classList.contains("split-float")) return;
+  paintFloatBox(floatBox(currentName));
+}
+
+/* Dragging the head moves the box; dragging its corner sizes it. Both paint
+   live and write to the session's layout once at release — localStorage is
+   not a place to stream pointer events into. The head's own controls are
+   presses, not a drag of the pane. `box` is the box the drag started from and
+   stays put: every move is measured from there, so a burst of pointermoves
+   cannot compound on itself. */
+let floatDrag = null;   // non-null only mid-drag
+
+function floatDragMode(e) {
+  const t = e.target;
+  if (!t || typeof t.closest !== "function") return null;
+  if (t.closest(".split-frame-grip")) return "size";
+  if (!t.closest(".split-frame-head")) return null;
+  if (t.closest("button, input, label, select, a")) return null;
+  return "move";
+}
+
+$("term-wf").addEventListener("pointerdown", (e) => {
+  if (!currentName || !document.body.classList.contains("split-float")) return;
+  const mode = floatDragMode(e);
+  if (!mode) return;
+  const host = $("term-wf");
+  e.preventDefault();   // a drag must not start selecting the pane's text
+  host.setPointerCapture(e.pointerId);
+  host.classList.add("float-dragging");
+  floatDrag = { mode, id: e.pointerId, x: e.clientX, y: e.clientY,
+                box: floatBox(currentName), live: null };
+});
+$("term-wf").addEventListener("pointermove", (e) => {
+  if (!floatDrag || e.pointerId !== floatDrag.id) return;
+  const { mode, box } = floatDrag;
+  const dx = e.clientX - floatDrag.x;
+  const dy = e.clientY - floatDrag.y;
+  if (mode === "size") {
+    // The box grows from its corner while its right/bottom edges stay put.
+    const maxW = Math.max(FLOAT_MIN_W, box.main.width - box.right - FLOAT_EDGE);
+    const maxH = Math.max(FLOAT_MIN_H, box.main.height - box.bottom - FLOAT_EDGE);
+    floatDrag.live = { ...box, w: clampFloat(box.w + dx, FLOAT_MIN_W, maxW),
+                             h: clampFloat(box.h + dy, FLOAT_MIN_H, maxH) };
+  } else {
+    // Moving right (or down) takes that much off the offset from the edge.
+    floatDrag.live = { ...box,
+      right: clampFloat(box.right - dx, 0,
+                        Math.max(0, box.main.width - box.w - FLOAT_EDGE)),
+      bottom: clampFloat(box.bottom - dy, 0,
+                         Math.max(0, box.main.height - box.h - FLOAT_EDGE)) };
+  }
+  paintFloatBox(floatDrag.live);
+});
+const endFloatDrag = (e) => {
+  if (!floatDrag || (e && e.pointerId !== floatDrag.id)) return;
+  $("term-wf").classList.remove("float-dragging");
+  const { w, h, right, bottom } = floatDrag.live || floatDrag.box;
+  floatDrag = null;
+  if (currentName) setSessLayout(currentName, { floatW: w, floatH: h,
+                                               floatRight: right, floatBottom: bottom });
+};
+$("term-wf").addEventListener("pointerup", endFloatDrag);
+$("term-wf").addEventListener("pointercancel", endFloatDrag);
 
 /* ------------------------------------------------------------------ */
 /* the rail's width: the bar between the sidebar and #main             */
@@ -29520,6 +30171,8 @@ function parseHash(h) {
   // #/megathreads picks a cluster; one more segment names which (claunch-v5nhp).
   if (parts[0] === "megathreads") return { page: "megathreads", name: parts[1] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  // #/menu: every page as a list, the phone's 더보기 tab (claunch-0a5nk.3).
+  if (parts[0] === "menu") return { page: "menu" };
   if (parts[0] === "plan") return { page: "plan" };
   if (parts[0] === "knowledge") return { page: "knowledge" };
   // #/retrospection lists every session retrospective; #/retrospection/<id> opens one.
@@ -29530,6 +30183,8 @@ function parseHash(h) {
   }
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
+  // #/fleet launches from a preset; #/fleet/presets opens the editor.
+  if (parts[0] === "fleet") return { page: "fleet", tab: parts[1] || "" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -29613,6 +30268,7 @@ function route() {
   if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
+  if (r.page !== "fleet") globalThis.FleetPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -29703,17 +30359,23 @@ function route() {
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "megathreads": showView("megathreads"); globalThis.MegaThreadPage.open(r.name); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "menu": openMenuPage(); break;
     case "plan": showView("plan"); globalThis.PlanPage.open(); break;
     case "knowledge": showView("knowledge"); globalThis.KnowledgePage.open(); break;
     case "retrospection": showView("retrospection"); globalThis.RetrospectionPage.open(r.id); break;
     case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
+    case "fleet": showView("fleet"); globalThis.FleetPage.open(r.tab); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
   // it: the buttons that do (openDetail, closeDetail) only edit the address.
-  if (!r.detail) { if (sessName) dropDetail(); }
+  // A page column holding the panel (hostSessDetail) keeps it while the
+  // address names no detail; one that names a detail takes it back.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (r.detail && guest) releaseSessDetail();
+  if (!r.detail) { if (sessName && !guest) dropDetail(); }
   else if (r.detail !== sessName) repointDetail(r.detail);
   syncLayout();
 }
@@ -31304,6 +31966,41 @@ function openHome() {
   renderHome();
 }
 
+/* #/menu (claunch-0a5nk.3): the phone's 더보기 tab. The list is read from
+   #rail-nav each time, so a page added there is here too; the search box
+   narrows it by the label and the address. */
+function openMenuPage() {
+  showView("menu");
+  const list = $("menu-list");
+  const search = $("menu-search");
+  if (!list) return;
+  list.replaceChildren();
+  document.querySelectorAll("#rail-nav a").forEach((src) => {
+    const a = document.createElement("a");
+    a.href = src.getAttribute("href");
+    a.dataset.page = src.dataset.page;
+    const icon = src.querySelector("span");
+    a.appendChild(el("span", "menu-icon", icon ? icon.textContent : ""));
+    // The label is the link's own text, without its icon and badge spans.
+    const label = [...src.childNodes]
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent).join("").trim();
+    a.appendChild(el("span", "menu-label", label));
+    a.dataset.match = (label + " " + a.getAttribute("href")).toLowerCase();
+    list.appendChild(a);
+  });
+  if (search) { search.value = ""; filterMenuPage(""); }
+}
+function filterMenuPage(q) {
+  const needle = q.trim().toLowerCase();
+  document.querySelectorAll("#menu-list a").forEach((a) => {
+    a.hidden = !!needle && !a.dataset.match.includes(needle);
+  });
+}
+if ($("menu-search")) {
+  $("menu-search").addEventListener("input", (e) => filterMenuPage(e.target.value));
+}
+
 function homeCard(title, href, subtitle) {
   const card = el("a", "home-card");
   card.href = href;
@@ -31578,6 +32275,17 @@ const RAG_POLL_MS = 3000;
    waiting for the status refresh to draw it left the reader with no feedback
    at all (peer review of claunch-i2i95). */
 let ragBusy = false;
+/* The collections that exist on disk (/api/rag/dbs), so the card can draw the
+   ones no index has opened yet as placeholders (claunch-c7vjm). Kept off the
+   3-second status poll: /api/rag/dbs walks every collection to total its
+   files, and that walk is not worth repeating every RAG_POLL_MS. It rides a
+   minute-long clock instead, and it is read without the sizes (?sizes=0) —
+   the card draws no size. */
+let ragDisk = null;
+let ragDiskError = "";
+let ragDiskAt = 0;
+let ragDiskBusy = false;
+const RAG_DISK_POLL_MS = 60000;
 /* The GitHub CLI's state (/api/tools/gh), for its card. */
 let ghStatus = null;
 let ghError = "";
@@ -31648,6 +32356,7 @@ function openSettings(section) {
   refreshPrompterSettings();
   refreshStatusChecks();
   refreshRagStatus();
+  refreshRagDisk();
   refreshGhStatus();
   refreshRelaySettings();
   refreshWslRegStub();
@@ -31784,8 +32493,59 @@ async function refreshRagStatus() {
   } catch (err) {
     ragError = String(err);
   }
-  if (wsOpen) renderWorkspaces();
+  // The disk listing the placeholder rows come from is re-read on this same
+  // refresh, but at most once per RAG_DISK_POLL_MS: the status poll fires
+  // every 3 seconds and the listing is the expensive half (claunch-c7vjm).
+  if (wsOpen && wsSection === "" && ragDiskDue(Date.now(), ragDiskAt, RAG_DISK_POLL_MS)) {
+    refreshRagDisk();
+  }
+  ragCardRedraw();
   ragSchedulePoll();
+}
+
+/* The status poll runs every RAG_POLL_MS for as long as an index syncs —
+   minutes on a fleet this size — and what it read is drawn by this card
+   alone. Redrawing the whole Settings view for it rebuilt every other card's
+   inputs three times a second-ish: the Model prices add row lost its typed
+   model id and the rate cells their focus mid-typing (claunch-jmuvv). So
+   the card that shows the status is swapped in place; the full render stays
+   for when the card is not on the page. */
+function ragCardRedraw() {
+  if (!wsOpen) return;
+  const old = wsSection === "" && typeof document !== "undefined"
+    ? document.querySelector(".rag-card") : null;
+  if (!old) { renderWorkspaces(); return; }
+  const active = document.activeElement;
+  const inside = active && active.id && old.contains(active);
+  const focused = inside ? active.id : "";
+  const sel = inside ? settingsFieldSelection(active) : null;
+  old.replaceWith(ragCard());
+  refocusSettingsField(focused, sel);
+}
+
+/* Whether the disk listing is due. Split out so the harness can hold the
+   interval: the card must not put /api/rag/dbs on the 3-second clock
+   (claunch-c7vjm). */
+function ragDiskDue(now, last, interval) {
+  return !last || now - last >= interval;
+}
+
+async function refreshRagDisk() {
+  if (ragDiskBusy) return;
+  ragDiskBusy = true;
+  try {
+    const resp = await api("/api/rag/dbs?sizes=0");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    ragDisk = Array.isArray(data.dbs) ? data.dbs : [];
+    ragDiskAt = Date.now();
+    ragDiskError = "";
+  } catch (err) {
+    ragDiskError = String(err);
+  } finally {
+    ragDiskBusy = false;
+  }
+  ragCardRedraw();
 }
 
 /* Whether the status payload has anything left to watch. A reindex request
@@ -31962,21 +32722,65 @@ async function ragReindex(row, force) {
    collection still on a pre-preset directory carries no identity of its own —
    it is read through the legacy adoption rule — and the row says so, because
    that is the fact the two screens disagreed about (claunch-i2i95). */
-function ragDbGroups(st) {
+function ragDbGroups(st, placeholders) {
   const rows = st.indexes || [];
   const db = st.db || "(이름 없는 DB)";
   const groups = new Map();
-  for (const row of rows) {
-    const name = row.db_configured || db;
+  const add = (name, row) => {
     let g = groups.get(name);
     if (!g) {
-      g = { name, dims: 0, rows: [] };
+      g = { name, dims: [], rows: [] };
       groups.set(name, g);
     }
     g.rows.push(row);
-    if (row.dims && !g.dims) g.dims = row.dims;
-  }
+    // Every collection's width is kept: the header used to take the first
+    // row's and call it the DB's, which hid a DB whose corpora were built at
+    // different widths (claunch-rk0od).
+    if (row.dims && !g.dims.includes(row.dims)) g.dims.push(row.dims);
+  };
+  for (const row of rows) add(row.db_configured || db, row);
+  // A collection on disk that no index has opened yet sits under the DB its
+  // identity names, so the reader sees it beside the ones that are running
+  // rather than in a second list with a second heading (claunch-c7vjm).
+  for (const row of placeholders || []) add(row.identity || db, { ...row, placeholder: true });
   return [...groups.values()];
+}
+
+/* The collections on disk that no open index accounts for. Both payloads
+   name a collection by the directory it lives in, so the two are compared by
+   that path and nothing else: ``/api/rag/status`` lists what the daemon has
+   opened, ``/api/rag/dbs`` lists everything that exists (claunch-c7vjm). */
+function ragPlaceholderRows(st, diskRows) {
+  const opened = new Set();
+  for (const row of (st && st.indexes) || []) {
+    if (row && row.path) opened.add(String(row.path));
+  }
+  return (diskRows || []).filter(row => row && row.path && !opened.has(String(row.path)));
+}
+
+/* What a placeholder row calls itself. The corpus is the part the card does
+   not otherwise draw — a board corpus is keyed ``beads-<hash>`` per root, so
+   it is shown as such and the hash stays reachable in the title. */
+function ragPlaceholderLabel(row) {
+  const corpus = String((row && row.corpus) || "");
+  if (corpus === "unified" || corpus === "all") return "Search anything (통합: 이슈·코멘트·세션)";
+  if (corpus === "sessions") return "sessions (세션)";
+  if (corpus.startsWith("beads-")) return `board ${corpus}`;
+  return corpus || "(코퍼스 미상)";
+}
+
+/* A placeholder row's state line. A width that differs from the model now
+   configured means the collection cannot serve a query when it opens — the
+   same fact the DB panel's preset warning names, said here before the cost
+   is paid (claunch-c7vjm). Says nothing when either width is unknown. */
+function ragPlaceholderState(row, st) {
+  const parts = ["아직 열리지 않음"];
+  const width = Number((row && row.dims) || 0);
+  const current = Number((st && st.dimensions) || 0);
+  if (width && current && width !== current) {
+    parts.push(`열리면 실패 예상 — 지금 설정은 ${current}차원`);
+  }
+  return { state: "unopened", text: parts.join(" · ") };
 }
 
 function ragBucketLabel(row) {
@@ -32018,6 +32822,9 @@ async function ragDbAction(st, group, force) {
   const outcomes = [];
   try {
     for (const row of group.rows) {
+      // A placeholder is a disk listing, not a bucket the daemon knows: it
+      // has no kind to name and nothing opened to reindex (claunch-c7vjm).
+      if (row.placeholder) continue;
       const data = await ragReindex(row, force);
       if (!data) {
         outcomes.push(`${ragBucketLabel(row)}: 오류`);
@@ -32139,26 +32946,58 @@ function ragCard() {
   queueRow.append(" ", pause);
   card.appendChild(queueRow);
 
-  for (const group of ragDbGroups(st)) {
+  const placeholders = ragPlaceholderRows(st, ragDisk);
+  if (ragDiskError) {
+    card.appendChild(el("p", "wf-note",
+      `디스크의 컬렉션 목록을 읽지 못했습니다 — 열리지 않은 컬렉션은 표시되지 않습니다 · ${ragDiskError}`));
+  } else if (placeholders.length) {
+    card.appendChild(el("p", "wf-note",
+      "회색 행은 디스크에 있지만 아직 열리지 않은 컬렉션입니다 — 검색·색인이 한 번 닿으면 정상 행이 됩니다."));
+  }
+  for (const group of ragDbGroups(st, placeholders)) {
     const box = el("div", "rag-db-block");
     const head = el("div", "rag-db-head");
     head.appendChild(el("strong", null, `DB ${group.name}`));
-    head.appendChild(el("span", "beads-bits", group.dims ? ` · ${group.dims}차원` : ""));
-    const sync = el("button", "wf-btn clear", "Sync");
-    sync.type = "button";
-    sync.disabled = ragBusy;
-    sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
-    sync.addEventListener("click", () => ragDbAction(st, group, false));
-    const force = el("button", "wf-btn clear", "Rebuild");
-    force.type = "button";
-    force.disabled = ragBusy;
-    force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
-    force.addEventListener("click", () => ragDbAction(st, group, true));
-    head.append(sync, force);
+    head.appendChild(el("span", "beads-bits", group.dims.length ? ` · ${group.dims.join("/")}차원` : ""));
+    // Sync/Rebuild act on the DB's open collections. A group drawn only from
+    // the disk listing has none to act on, and a click there would ask the
+    // daemon to reindex a collection the card never opened (claunch-c7vjm).
+    if (group.rows.some(row => !row.placeholder)) {
+      const sync = el("button", "wf-btn clear", "Sync");
+      sync.type = "button";
+      sync.disabled = ragBusy;
+      sync.title = "이 DB가 읽는 모든 컬렉션에서 바뀐 문서만 임베딩합니다";
+      sync.addEventListener("click", () => ragDbAction(st, group, false));
+      const force = el("button", "wf-btn clear", "Rebuild");
+      force.type = "button";
+      force.disabled = ragBusy;
+      force.title = "이 DB가 읽는 모든 컬렉션을 지우고 다시 임베딩합니다";
+      force.addEventListener("click", () => ragDbAction(st, group, true));
+      head.append(sync, force);
+    }
     box.appendChild(head);
 
     const list = el("div", "rag-index-list");
     for (const row of group.rows) {
+      if (row.placeholder) {
+        const item = el("div", "rag-index-row rag-row-unopened");
+        const text = el("div", "rag-index-text");
+        const label = el("strong", null, ragPlaceholderLabel(row));
+        label.title = `corpus ${row.corpus}${row.identity ? ` · DB ${row.identity}` : ""}`;
+        text.appendChild(label);
+        const bits = [
+          row.dims ? `${row.dims}차원` : "차원 미상",
+          row.model || "모델 미상",
+          row.identity ? "이름 있음" : "이전 형식",
+        ];
+        text.appendChild(el("span", "beads-bits", bits.join(" · ")));
+        const state = ragPlaceholderState(row, st);
+        text.appendChild(el("span", "rag-badge rag-badge-unopened", "미개방"));
+        text.appendChild(el("span", `rag-state-text rag-state-${state.state}`, state.text));
+        item.appendChild(text);
+        list.appendChild(item);
+        continue;
+      }
       const item = el("div", "rag-index-row");
       const text = el("div", "rag-index-text");
       text.appendChild(el("strong", null, ragBucketLabel(row)));
@@ -32188,8 +33027,9 @@ function ragCard() {
     card.appendChild(box);
   }
   if (!(st.indexes || []).length) {
-    card.appendChild(el("p", "wf-note",
-      "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
+    card.appendChild(el("p", "wf-note", placeholders.length
+      ? "열린 색인이 아직 없습니다 — 위의 회색 행이 디스크에 있는 컬렉션입니다."
+      : "No index loaded yet — the first search builds one, or `claunch rag reindex`."));
   }
   return card;
 }
@@ -35991,7 +36831,8 @@ function statsChart(buckets, unit) {
 function statsBucketTable(buckets, unit) {
   const table = el("table", "stats-table");
   const head = el("tr");
-  for (const h of ["period", "total", "requests", "output",
+  for (const h of ["period", "total", "requests",
+                   ...USAGE_PARTS.map(([, label]) => label),
                    ...STATS_CATEGORIES.map(([, label]) => label)]) {
     head.appendChild(el("th", null, h));
   }
@@ -36002,7 +36843,9 @@ function statsBucketTable(buckets, unit) {
     row.appendChild(el("td", null, statsBucketLabel(b.start, unit)));
     row.appendChild(el("td", "num", usageShort(b.total || 0)));
     row.appendChild(el("td", "num", (b.requests || 0).toLocaleString()));
-    row.appendChild(el("td", "num", usageShort(b.output || 0)));
+    for (const [key] of USAGE_PARTS) {
+      row.appendChild(el("td", "num stats-part-cell", usageShort(b[key] || 0)));
+    }
     for (const [key] of STATS_CATEGORIES) {
       row.appendChild(el("td", "num", String((b.inputs || {})[key] || 0)));
     }
@@ -36251,6 +37094,52 @@ function statsOverviewRows(d) {
     (statsRowTotal(b) - statsRowTotal(a)) || a.session.localeCompare(b.session));
 }
 
+/* A row's estimate under the provider filter in force: the daemon priced
+   each session (statsboard._price_row) and each of its ledger provider
+   entries at Settings → Model prices. A transcript row's declared part has
+   no entry of its own, so its estimate is the row's. `basis` says the
+   transcript row was priced at the model its newest turn answered on. */
+function statsRowCost(row) {
+  const whole = { cost: row.cost, priced: row.priced_tokens || 0,
+                  unpriced: row.unpriced_tokens || 0,
+                  model: row.model || "", basis: row.model_basis || "" };
+  if (!statsProvider) return whole;
+  const hit = statsRowParts(row).find((p) => p.provider === statsProvider);
+  if (!hit) return { cost: null, priced: 0, unpriced: 0, model: "", basis: "" };
+  if (hit.declared) return whole;
+  return { cost: hit.cost, priced: hit.priced_tokens || 0,
+           unpriced: hit.unpriced_tokens || 0, model: row.model || "",
+           basis: "" };
+}
+
+/* One estimate cell: "≈ $1.23", a dash where nothing found a price, and a
+   star on a partly priced figure (the tooltip says how much was left out).
+   Empty for a row with no tokens at all. */
+function statsCostCell(c, currency) {
+  const priced = c.priced || 0;
+  const unpriced = c.unpriced || 0;
+  const td = el("td", "num stats-model-cost" +
+    (priced && unpriced ? " stats-model-cost-partial" : ""));
+  if (!priced || c.cost === null || c.cost === undefined) {
+    if (unpriced) {
+      const dash = el("span", "stats-model-unpriced", "—");
+      dash.title = c.model
+        ? `no price row in Settings → Model prices for ${c.model}`
+        : "no model recorded for these tokens, so nothing to price them at";
+      td.appendChild(dash);
+    }
+    return td;
+  }
+  td.textContent = `≈ ${currency}${usageCost(c.cost || 0)}`;
+  td.title = "estimated from Settings → Model prices" +
+    (c.basis === "last" && c.model
+      ? `: every token priced at ${c.model}, the model this session's ` +
+        "newest turn answered on (its transcript names no model per request)"
+      : ": each model's four token kinds at its row's rates") +
+    (unpriced ? `\npartial: ${unpriced.toLocaleString()} tokens unpriced` : "");
+  return td;
+}
+
 /* The four parts a session row's bar is split into, under the provider
    filter in force: the whole window's, or the picked provider's slice of it.
    They are the parts of the same quantity `statsRowTotal` sums, so the bar's
@@ -36323,8 +37212,10 @@ function statsOverviewTable(d) {
   const total = rows.reduce((n, r) => n + statsRowTotal(r), 0);
   const today = (d.until || "").slice(0, 10);
   const table = el("table", "stats-table stats-overview");
+  const currency = d.currency || "$";
   const head = el("tr");
-  for (const h of ["session", "provider", "status", "tokens", "",
+  for (const h of ["session", "provider", "status", "tokens", "model",
+                   ...USAGE_PARTS.map(([, label]) => label), "est. cost",
                    "requests", "share", "last call"]) {
     head.appendChild(el("th", null, h));
   }
@@ -36399,7 +37290,22 @@ function statsOverviewTable(d) {
       tokens.appendChild(el("span", "stats-rowvalue", "0"));
     }
     row.appendChild(tokens);
-    row.appendChild(el("td", "stats-model-cell", r.model || ""));
+    const model = el("td", "stats-model-cell", r.model || "");
+    if (r.model) {
+      model.title = r.model_basis === "last"
+        ? `${r.model} — the model this session's newest turn answered on`
+        : r.model;
+    }
+    row.appendChild(model);
+    // The four parts the bar is split into, as numbers: the cheapest part
+    // (cache read) usually dominates the total, and the bar alone cannot
+    // say by how much.
+    const measured = value || r.source !== "none";
+    for (const p of statsRowBarParts(r)) {
+      row.appendChild(el("td", "num stats-part-cell",
+        measured ? usageShort(p.tokens) : ""));
+    }
+    row.appendChild(statsCostCell(statsRowCost(r), currency));
     row.appendChild(el("td", "num", statsRowRequests(r).toLocaleString()));
     row.appendChild(el("td", "num",
       total && value ? statsPct(value / total) : ""));
@@ -36599,20 +37505,38 @@ function statsSwitchList(row) {
 }
 
 /* The opened session's window figures, per provider. */
-function statsDetailWindow(row) {
+function statsDetailWindow(row, currency = "$") {
   const box = el("div", "stats-detail-window");
   const table = el("table", "stats-table stats-detail-providers");
   const head = el("tr");
-  for (const h of ["provider", "tokens", "requests", "share"]) {
+  for (const h of ["provider", "tokens", ...USAGE_PARTS.map(([, l]) => l),
+                   "est. cost", "requests", "share"]) {
     head.appendChild(el("th", null, h));
   }
   table.appendChild(head);
-  const parts = row.providers || [];
+  // A transcript row has no ledger part; its whole window figure is filed
+  // under the provider its profile declares (statsRowParts), and its
+  // estimate is the row's own.
+  const parts = statsRowParts(row);
   const sum = parts.reduce((n, p) => n + (p.total || 0), 0);
   for (const p of parts) {
     const line = el("tr");
-    line.appendChild(el("td", null, p.provider));
+    const name = el("td", null, p.provider);
+    if (p.declared) {
+      name.title = "read from this session's transcript and filed under the " +
+        "provider its profile declares";
+    }
+    line.appendChild(name);
     line.appendChild(el("td", "num", usageShort(p.total || 0)));
+    for (const [key] of USAGE_PARTS) {
+      line.appendChild(el("td", "num stats-part-cell", usageShort(p[key] || 0)));
+    }
+    line.appendChild(statsCostCell(p.declared
+      ? { cost: row.cost, priced: row.priced_tokens || 0,
+          unpriced: row.unpriced_tokens || 0, model: row.model || "",
+          basis: row.model_basis || "" }
+      : { cost: p.cost, priced: p.priced_tokens || 0,
+          unpriced: p.unpriced_tokens || 0, model: "", basis: "" }, currency));
     line.appendChild(el("td", "num", (p.requests || 0).toLocaleString()));
     line.appendChild(el("td", "num",
       sum ? statsPct((p.total || 0) / sum) : ""));
@@ -36651,8 +37575,14 @@ function statsReadingSections(d) {
   summary.appendChild(statsCard("Tokens", usageShort(t.total || 0),
     `${(t.requests || 0).toLocaleString()} requests` +
     (t.subagent_requests ? `, ${t.subagent_requests.toLocaleString()} by subagents` : "")));
+  summary.appendChild(statsCard("Fresh input", usageShort(t.input || 0),
+    usageShare(t.input || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache read", usageShort(t.cache_read || 0),
+    usageShare(t.cache_read || 0, t.total || 0) + " of tokens"));
+  summary.appendChild(statsCard("Cache write", usageShort(t.cache_write || 0),
+    usageShare(t.cache_write || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Output", usageShort(t.output || 0),
-    `cache read ${usageShort(t.cache_read || 0)}`));
+    usageShare(t.output || 0, t.total || 0) + " of tokens"));
   summary.appendChild(statsCard("Notices + mesh", statsPct(machine.messages),
     "of inputs, by count"));
   summary.appendChild(statsCard("Triggered by them", statsPct(machine.triggered),
@@ -36731,7 +37661,8 @@ function statsDetailPanel() {
   panel.appendChild(meta);
 
   if (row) {
-    panel.appendChild(statsSection("This window", null, statsDetailWindow(row)));
+    panel.appendChild(statsSection("This window", null, statsDetailWindow(
+      row, (statsOverview && statsOverview.currency) || "$")));
     panel.appendChild(statsSection("Provider / model changes", null,
       statsSwitchList(row)));
   }
@@ -37387,10 +38318,16 @@ function renderStatsOverview(main) {
   const summary = el("div", "window-summary");
   summary.appendChild(statsCard("Tokens", usageShort(totals.total || 0),
     `${(totals.requests || 0).toLocaleString()} requests`));
+  const partOf = (key) => totals.total
+    ? `${statsPct((totals[key] || 0) / totals.total)} of tokens` : "";
   summary.appendChild(statsCard("Fresh input", usageShort(totals.input || 0),
-    `cache read ${usageShort(totals.cache_read || 0)}`));
+    partOf("input")));
+  summary.appendChild(statsCard("Cache read", usageShort(totals.cache_read || 0),
+    partOf("cache_read")));
+  summary.appendChild(statsCard("Cache write", usageShort(totals.cache_write || 0),
+    partOf("cache_write")));
   summary.appendChild(statsCard("Output", usageShort(totals.output || 0),
-    `cache write ${usageShort(totals.cache_write || 0)}`));
+    partOf("output")));
   summary.appendChild(statsCard("Cache share", statsPct(figures.cacheShare),
     "of every token sent as prompt, read from the cache"));
   const est = statsModelEstimate(d);
@@ -37399,8 +38336,10 @@ function renderStatsOverview(main) {
     summary.appendChild(statsCard("Est. cost",
       est.priced_tokens ? `≈ ${currency}${usageCost(est.cost || 0)}` : "—",
       est.unpriced_tokens
-        ? `${usageShort(est.unpriced_tokens)} tokens unpriced`
-        : "Settings → Model prices"));
+        ? `${usageShort(est.priced_tokens)} priced · ` +
+          `${usageShort(est.unpriced_tokens)} tokens unpriced`
+        : `all ${usageShort(est.priced_tokens)} tokens priced ` +
+          "(Settings → Model prices)"));
   }
   summary.appendChild(statsCard("Sessions", figures.sessions, figures.detail));
   const held = [];
@@ -38966,6 +39905,7 @@ function renderWorkspaces() {
   const own = wsSection === "workspaces";
   const view = $(own ? "workspaces-view" : "ws-view");
   const focused = document.activeElement && document.activeElement.id;
+  const sel = focused ? settingsFieldSelection(document.activeElement) : null;
   view.innerHTML = "";
 
   const head = el("div", "wf-head");
@@ -38986,12 +39926,12 @@ function renderWorkspaces() {
   }
   if (wsSection === "vscode") {
     view.appendChild(vscodePanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "providers") {
     view.appendChild(providersPanel());
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
   if (wsSection === "profiles") {
@@ -39004,7 +39944,7 @@ function renderWorkspaces() {
   }
   if (wsSection === "workspaces") {
     workspacesPanel(view);
-    refocusSettingsField(focused);
+    refocusSettingsField(focused, sel);
     return;
   }
 
@@ -39043,7 +39983,7 @@ function renderWorkspaces() {
   view.appendChild(modelTiersCard());
   view.appendChild(providerAffinityCard());
 
-  refocusSettingsField(focused);
+  refocusSettingsField(focused, sel);
 }
 
 /* ------------------------------------------------------------------ */
@@ -39413,15 +40353,29 @@ function workspacesPanel(view) {
    and on a checkbox it throws, which left the PTY host card's save half
    done with its box disabled (claunch-xnnct.5.1). selectionStart is null
    there instead of throwing. */
-function refocusSettingsField(focused) {
+function refocusSettingsField(focused, sel) {
   if (!focused) return;
   const again = $(focused);
   if (!again) return;
   again.focus();
   if (typeof again.selectionStart === "number") {
-    const end = again.value.length;
-    again.setSelectionRange(end, end);
+    // Where the caret was, when the redraw read it and the value still has
+    // room for it: a redraw in the middle of a word must not throw the next
+    // keystroke to the end (claunch-jmuvv). Else the end, as before.
+    const len = again.value.length;
+    if (sel && sel.start <= len && sel.end <= len) {
+      again.setSelectionRange(sel.start, sel.end);
+    } else {
+      again.setSelectionRange(len, len);
+    }
   }
+}
+
+/* The caret of a focused field, read before a redraw replaces it; null for a
+   control without one (selectionStart is null on a checkbox or a select). */
+function settingsFieldSelection(node) {
+  if (!node || typeof node.selectionStart !== "number") return null;
+  return { start: node.selectionStart, end: node.selectionEnd };
 }
 
 async function refreshFaq() {
@@ -41080,6 +42034,9 @@ function llmSettingsCard() {
    a row whose every rate is empty is dropped on save. The draft lives
    outside the DOM like llmDraft: this page re-renders on every poll. */
 let modelPricesDraft = null;
+/* The add row's answers, outside the DOM for the same reason: the provider
+   picked and the model id typed so far survive a redraw (claunch-jmuvv). */
+let modelPricesAdd = { provider: "", model: "" };
 let modelPricesNotice = "";
 let modelPricesBusy = false;
 
@@ -41142,6 +42099,11 @@ async function modelPricesSave() {
     modelPricesKey = JSON.stringify(data);
     modelPricesDraft = null;
     modelPricesNotice = "Saved. New readings price against this table.";
+    // The saved table is the one the card's cost lines are priced at, so the
+    // rail is drawn again from the records in hand (the rows' signature
+    // carries the key; only the price change rebuilds them). Guarded for the
+    // node harness that slices this function alone (claunch-ge1ap).
+    if (typeof refreshSessions === "function") refreshSessions({ cached: true });
   } catch (err) {
     modelPricesError = String(err);
   }
@@ -41160,6 +42122,12 @@ function modelPricesProviderOptions(draft) {
   ]);
   named.delete(any);
   return [any, ...[...named].filter(Boolean).sort()];
+}
+
+/* The id of one rate cell. Provider and model are free text; both are
+   URI-encoded (which encodes ':'), so the ':' separators are unambiguous. */
+function modelPriceRateId(provider, model, key) {
+  return `mp-rate:${encodeURIComponent(provider)}:${encodeURIComponent(model)}:${key}`;
 }
 
 function modelPricesCard() {
@@ -41224,6 +42192,9 @@ function modelPricesCard() {
       row.append(prov, name);
       for (const key of MP_RATE_KEYS) {
         const inp = document.createElement("input");
+        // An id, so refocusSettingsField can hand focus back to this cell
+        // after a redraw (claunch-jmuvv).
+        inp.id = modelPriceRateId(provider, model, key);
         inp.type = "text";
         inp.inputMode = "decimal";
         inp.className = "mp-rate";
@@ -41264,10 +42235,19 @@ function modelPricesCard() {
     opt.textContent = p === any ? `${any} (any provider)` : p;
     addProvider.appendChild(opt);
   }
+  if (modelPricesAdd.provider &&
+      [...addProvider.options].some((o) => o.value === modelPricesAdd.provider)) {
+    addProvider.value = modelPricesAdd.provider;
+  }
+  addProvider.addEventListener("change", () => {
+    modelPricesAdd.provider = addProvider.value;
+  });
   const addName = document.createElement("input");
   addName.id = "mp-add-model";
   addName.type = "text";
   addName.placeholder = "model id, e.g. claude-opus-5";
+  addName.value = modelPricesAdd.model;
+  addName.addEventListener("input", () => { modelPricesAdd.model = addName.value; });
   addName.setAttribute("list", "mp-model-options");
   const addList = document.createElement("datalist");
   addList.id = "mp-model-options";
@@ -41287,6 +42267,7 @@ function modelPricesCard() {
       rows[m] = { input: "", cache_read: "", cache_write: "", output: "" };
     }
     modelPricesDraft = draft;
+    modelPricesAdd.model = "";
     renderWorkspaces();
   };
   addBtn.addEventListener("click", addModel);
@@ -41994,7 +42975,7 @@ function sweepBatchSettingCard() {
     "Largest group of merges one sweep covers; a group this large closes at " +
     "once. Raising it means fewer sweeps (less test-window time) but a failed " +
     "sweep implicates more merges, and the failed batch has to be split " +
-    "(tools/delayed_sweep.py unbatch) to find the merge. 0 turns batching off: " +
+    "(claunch delayed-sweep unbatch) to find the merge. 0 turns batching off: " +
     "every merge is swept alone. Range 0-100."));
   card.appendChild(sweepBatchField("settle", "Settle time", "seconds",
     "How long the oldest queued merge waits for company before its group is " +
@@ -44137,9 +45118,11 @@ async function wsSyncRefresh(name, fetchFirst) {
   if (wsOpen) renderWorkspaces();
 }
 
-/* Check or uncheck one target remote. The last checked one stays checked:
-   a sync with no target has nothing to do, so the box springs back with a
-   note instead of letting the set go empty (claunch-y3tuk). */
+/* Check or uncheck one target remote. The last checked box is drawn
+   disabled (wsSyncTargetsView), so an empty set is refused here only as a
+   guard. When the basis is the one unchecked, the basis moves to a checked
+   remote that may be the basis and the panel says so in a line, rather than
+   letting the radio jump without a word (claunch-j1894). */
 function wsSyncToggleRemote(name, remote, checked) {
   const st = wsSyncSt(name);
   const names = wsSyncRemoteNames(st.doc);
@@ -44155,7 +45138,13 @@ function wsSyncToggleRemote(name, remote, checked) {
   st.remotes = next;
   if (!st.remotes.includes(st.basis)) {
     const doc = st.doc || {};
-    st.basis = doc.basis && st.remotes.includes(doc.basis) ? doc.basis : st.remotes[0];
+    const was = st.basis;
+    // a candidate of the larger set is still one of any subset that holds it
+    const pool = [doc.basis, ...(doc.basis_candidates || [])];
+    st.basis = pool.find((r) => r && st.remotes.includes(r)) || st.remotes[0];
+    if (was && st.remotes.length > 1) {
+      st.remoteNote = `Basis moved to ${st.basis}: ${was} is no longer checked.`;
+    }
   }
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
@@ -44165,6 +45154,7 @@ function wsSyncToggleBasis(name, basis) {
   const st = wsSyncSt(name);
   if (!st.remotes.includes(basis)) return;
   st.basis = basis;
+  st.remoteNote = "";
   wsSyncSave(name, st);
   wsSyncRefresh(name, false);
 }
@@ -45057,7 +46047,11 @@ function wsSyncWhyDisabled(st, kind) {
     if ((doc.incompatible || []).length) {
       return "The checked remotes are not on one line; uncheck one to continue.";
     }
-    if (doc.basis_error) return doc.basis_error;
+    if (doc.basis_error) {
+      const r = wsSyncBasisRefusal(st, doc);
+      return r ? `Basis ${r.picked} is behind ${r.newer || "another checked remote"}; ` +
+        "pick another basis under Target remotes." : doc.basis_error;
+    }
     const pending = wsSyncPending(doc);
     if (!pending.length && (doc.plan || (doc.plans || []).length)) {
       const plan = doc.plan;
@@ -45085,70 +46079,147 @@ function wsSyncButtonRow(st, button, kind) {
   return row;
 }
 
-/* The checked remotes, the basis, and the order the daemon computed
-   (claunch-y3tuk). The set is a multi-checkbox that cannot go empty; the
-   basis is the remote whose tip the local branch is brought onto first, and
-   the order shows what runs when (basis first, then pushes). */
-function wsSyncRemotePicker(st, name, doc) {
+/* The basis this page asked for, when the daemon refused it for the set
+   checked now: its tip is behind another checked remote, so syncing through
+   it would push the newer remote's commits to it. null when nothing was
+   refused, or when the answer on screen was read for another set or another
+   pick (claunch-j1894). */
+function wsSyncBasisRefusal(st, doc) {
+  if (!doc || !doc.basis_error) return null;
+  const checked = st.remotes || [];
+  if (!wsSyncOrderMatches(doc, checked)) return null;
+  const picked = checked.includes(st.basis) ? st.basis : "";
+  const asked = typeof doc.basis_requested === "string" ? doc.basis_requested : picked;
+  if (!picked || asked !== picked || picked === doc.basis) return null;
+  const newer = (doc.basis_behind || {})[picked] || doc.basis || "";
+  return { picked, newer, use: doc.basis || "", text: doc.basis_error };
+}
+
+/* One reading of the Target remotes state, from which every part of the
+   section is drawn (claunch-j1894). Before this, the basis select showed the
+   page's pick while the badge and the execution order showed the basis the
+   daemon fell back to, so the section named two bases at once. Now:
+   - each row carries both of its controls: the checkbox (is it a target?)
+     and the basis radio (is it the one brought in first?);
+   - a row whose radio cannot be chosen says why on that row: not checked,
+     or its tip is behind another checked remote;
+   - the last checked box is disabled and says it is the only target;
+   - a refused pick is named with the remote that would replace it and a
+     button that makes the change, and no execution order is drawn for a
+     basis that will not run. */
+function wsSyncTargetsView(st, doc) {
   const names = wsSyncRemoteNames(doc);
   const keys = {};
-  for (const [key, n] of Object.entries(doc.remotes || {})) keys[n] = key;
+  for (const [key, n] of Object.entries((doc && doc.remotes) || {})) keys[n] = key;
+  const checked = (st.remotes || []).filter((r) => names.includes(r));
+  const fresh = wsSyncOrderMatches(doc, checked);
+  // candidates known for the set checked now; an older daemon, or an
+  // answer read for another set, leaves every checked remote selectable
+  const known = fresh && Array.isArray(doc && doc.basis_candidates);
+  const candidates = known ? doc.basis_candidates : checked;
+  const behind = known ? (doc.basis_behind || {}) : {};
+  const refusal = wsSyncBasisRefusal(st, doc);
+  const basis = checked.includes(st.basis) ? st.basis : (checked[0] || "");
+  const rows = names.map((remote) => {
+    const on = checked.includes(remote);
+    const only = on && checked.length === 1;
+    let why = "";
+    if (only) why = "only target — check another remote to uncheck this one";
+    else if (on && behind[remote]) why = `cannot be the basis: behind ${behind[remote]}`;
+    return {
+      remote, key: keys[remote] || "", checked: on, only,
+      isBasis: on && remote === basis,
+      canBasis: on && candidates.includes(remote) && !only,
+      why,
+    };
+  });
+  const order = fresh && !refusal ? (doc.sync_order || []) : [];
+  return { names, checked, basis, rows, refusal, order, fresh };
+}
+
+function wsSyncRemotePicker(st, name, doc) {
+  const view = wsSyncTargetsView(st, doc);
   const box = el("section", "ws-sync-section ws-sync-targets");
   box.setAttribute("aria-label", "Target remotes");
   box.appendChild(el("h4", null, "Target remotes"));
   box.appendChild(el("p", "wf-note",
-    "Fetches, comparisons and Sync run against the checked remotes only. " +
-    "At least one stays checked."));
-  if (!names.length) {
+    "Check the remotes to sync with and pick one as the basis. Fetches, " +
+    "comparisons and Sync use the checked remotes only. The basis is brought " +
+    "in first (fast-forward or rebase); the other checked remotes are then " +
+    "pushed to."));
+  if (!view.names.length) {
     box.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
     return box;
   }
   const list = el("div", "ws-sync-remotes");
-  for (const remote of names) {
-    const label = el("label", "wf-note ws-sync-remote");
+  list.setAttribute("role", "group");
+  for (const row of view.rows) {
+    const line = el("div", "ws-sync-remote" + (row.checked ? "" : " ws-sync-remote-off"));
+    const target = el("label", "wf-note ws-sync-remote-target");
     const input = el("input", "ws-sync-remote-box");
     input.type = "checkbox";
-    input.checked = (st.remotes || []).includes(remote);
-    input.addEventListener("change", () => wsSyncToggleRemote(name, remote, input.checked));
-    label.appendChild(input);
-    label.appendChild(el("span", "mono", remote));
-    if (keys[remote]) label.appendChild(el("span", "wf-note", keys[remote]));
-    if (doc.basis === remote && (st.remotes || []).length > 1) {
-      label.appendChild(el("span", "badge busy", "basis"));
+    input.checked = row.checked;
+    input.disabled = row.only;
+    input.setAttribute("aria-label", `Target ${row.remote}`);
+    input.addEventListener("change", () => wsSyncToggleRemote(name, row.remote, input.checked));
+    target.appendChild(input);
+    target.appendChild(el("span", "mono", row.remote));
+    if (row.key) target.appendChild(el("span", "wf-note", row.key));
+    line.appendChild(target);
+    const pick = el("label", "wf-note ws-sync-remote-basis");
+    const radio = el("input", "ws-sync-basis-radio");
+    radio.type = "radio";
+    radio.name = `ws-sync-basis-${name}`;
+    radio.value = row.remote;
+    radio.checked = row.isBasis;
+    radio.disabled = !row.canBasis;
+    radio.setAttribute("aria-label", `Basis ${row.remote}`);
+    radio.addEventListener("change", () => { if (radio.checked) wsSyncToggleBasis(name, row.remote); });
+    pick.appendChild(radio);
+    pick.appendChild(el("span", row.isBasis ? "badge busy" : null, "basis"));
+    line.appendChild(pick);
+    if (row.why) {
+      line.appendChild(el("span", "wf-note ws-sync-remote-why" +
+        (row.isBasis && view.refusal ? " wf-warning" : ""), row.why));
     }
-    list.appendChild(label);
+    list.appendChild(line);
   }
   box.appendChild(list);
-  if (st.remoteNote) box.appendChild(el("p", "wf-note wf-warning", st.remoteNote));
-  if ((st.remotes || []).length > 1) {
-    const row = el("div", "ws-sync-form");
-    const pick = el("select");
-    pick.setAttribute("aria-label", "Basis remote");
-    for (const remote of st.remotes) pick.appendChild(new Option(remote, remote));
-    pick.value = st.basis;
-    pick.addEventListener("change", () => wsSyncToggleBasis(name, pick.value));
-    row.appendChild(pick);
-    row.appendChild(el("span", "wf-note",
-      "Basis is fast-forwarded or rebased first; the others are pushed to."));
-    box.appendChild(row);
+  if (st.remoteNote) box.appendChild(el("p", "wf-note ws-sync-remote-note", st.remoteNote));
+  if (view.refusal) {
+    const r = view.refusal;
+    const warn = el("div", "wf-note wf-warning ws-sync-basis-refused");
+    warn.appendChild(el("span", null,
+      `${r.picked} cannot be the basis: its tip is behind ${r.newer || "another checked remote"}, ` +
+      `so syncing through it would push ${r.newer || "that remote"}'s commits to it. ` +
+      "Sync stays off until the basis is changed."));
+    if (r.use) {
+      const fix = el("button", "btn ws-sync-basis-fix", `Use ${r.use} as basis`);
+      fix.type = "button";
+      fix.addEventListener("click", () => wsSyncToggleBasis(name, r.use));
+      warn.appendChild(fix);
+    }
+    box.appendChild(warn);
+  } else if (doc.basis_error && view.fresh) {
+    box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   }
-  if (doc.basis_error) box.appendChild(el("p", "wf-note wf-warning", doc.basis_error));
   if ((doc.incompatible || []).length) {
     box.appendChild(el("p", "wf-note wf-warning",
       "These remotes cannot be brought to one branch (their tips are not on one line): " +
-      doc.incompatible.map((p) => p.join(" / ")).join(", ")));
+      doc.incompatible.map((p) => p.join(" / ")).join(", ") +
+      ". Uncheck one of each pair."));
   }
-  if ((doc.sync_order || []).length && wsSyncOrderMatches(doc, st.remotes)) {
+  if (view.order.length) {
     const order = el("div", "ws-sync-order");
     order.appendChild(el("h5", null, "Execution order"));
-    (doc.sync_order || []).forEach((remote, i) => {
+    view.order.forEach((remote, i) => {
       const row = wsSyncPlanFor(doc, remote);
       const action = row && row.plan ? row.plan.action : (row && row.error ? "error" : "?");
       order.appendChild(el("div", "mono ws-sync-order-row",
         `${i + 1}. ${remote}${remote === doc.basis ? " (basis)" : ""} — ${action}`));
     });
     box.appendChild(order);
-  } else if ((doc.sync_order || []).length) {
+  } else if ((doc.sync_order || []).length && !view.fresh) {
     // the read the order came from covered another set (claunch-cj1qi)
     box.appendChild(el("p", "wf-note ws-sync-order-stale",
       st.loading
@@ -48608,6 +49679,157 @@ function cflow2Duration(seconds) {
   return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
+// The intervals the saved runs waited on a person (claunch-sbfsi.1), clipped
+// to [start, end). Each keeps its gate's callstack depth, which is the bar's
+// height in the chart, and its full wait for the tooltip and the longest-wait
+// tile. A run's gates come from its own journal, so two runs never share one.
+function cflow2GateRows(data, start, end) {
+  const rows = [];
+  for (const run of (data || {}).runs || []) {
+    const live = Date.parse(run.ended) >= Date.parse((data || {}).observed_at);
+    for (const gate of run.gates || []) {
+      const a = Date.parse(gate.opened), b = Date.parse(gate.closed);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b < a || !Number.isInteger(gate.depth)) continue;
+      const lo = Math.max(a, start), hi = Math.min(b, end);
+      if (hi < lo || (hi === lo && a !== b)) continue;
+      rows.push({gate, run: run.run, lo, hi, wait: b - a,
+        state: !gate.open ? "closed" : live ? "open" : "cut"});
+    }
+  }
+  return rows.sort((x, y) => x.lo - y.lo);
+}
+
+// A run's callstack depth over time as step lines inside the period
+// (claunch-d54gw). Each saved point holds until the next one, the last until
+// the run ended; a null depth (nothing active, or the journal read stopped)
+// breaks the line. One run may give several pieces.
+function cflow2DepthPieces(data, start, end) {
+  const pieces = [];
+  for (const run of (data || {}).runs || []) {
+    const pts = (run.depth || []).map(p => [Date.parse(p.at), Number.isInteger(p.depth) ? p.depth : null])
+      .filter(p => Number.isFinite(p[0]));
+    const stop = Date.parse(run.ended);
+    let cur = [];
+    const flush = () => { if (cur.length) pieces.push({run: run.run, steps: cur}); cur = []; };
+    pts.forEach(([at, depth], i) => {
+      const next = i + 1 < pts.length ? pts[i + 1][0] : stop;
+      if (depth === null || !Number.isFinite(next)) { flush(); return; }
+      const lo = Math.max(at, start), hi = Math.min(next, end);
+      if (hi <= lo) { if (at >= end) flush(); return; }
+      cur.push({lo, hi, depth});
+    });
+    flush();
+  }
+  return pieces;
+}
+
+const CF2_GATE_KINDS = {ask: "ask", choice: "user choice", visit_limit: "visit limit", loop_limit: "loop limit", move: "move request"};
+
+function cflow2GateChart(data, period) {
+  const box = el("div", "cf2-gates");
+  box.appendChild(el("div", "cf2-gates-title", "Human gate waits"));
+  const rows = cflow2GateRows(data, ...period);
+  const pieces = cflow2DepthPieces(data, ...period);
+  const runs = (data || {}).runs || [];
+  const saved = runs.reduce((n, r) => n + (r.gates || []).length, 0);
+  // Gates the daemon could not give an end (claunch-b6z8m): they have no
+  // interval to draw, so the panel says how many it left out.
+  const unended = runs.reduce((n, r) => n + (Number.isInteger(r.gates_unended) ? r.gates_unended : 0), 0);
+  const unendedNote = () => el("p", "wf-note cf2-gates-unended",
+    `${unended} gate wait${unended === 1 ? "" : "s"} in the saved runs ${unended === 1 ? "has" : "have"} no recorded end and ${unended === 1 ? "is" : "are"} not drawn.`);
+  if (!rows.length && !pieces.length) {
+    box.appendChild(el("p", "wf-note", saved ? "No gate waited on a person in this period." :
+      "No gate waited on a person in the saved runs."));
+    if (unended) box.appendChild(unendedNote());
+    return box;
+  }
+  const clipped = rows.reduce((n, r) => n + (r.hi - r.lo), 0);
+  const longest = rows.reduce((m, r) => Math.max(m, r.wait), 0);
+  const lineDepths = pieces.flatMap(p => p.steps.map(s => s.depth));
+  const tiles = el("div", "cf2-throughput-tiles");
+  const tile = (label, value, note) => {
+    const t = el("div", "cf2-throughput-tile");
+    t.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
+    if (note) t.appendChild(el("div", "cf2-throughput-tile-note", note));
+    return t;
+  };
+  tiles.append(tile("Gates", String(rows.length), "waited in this period"),
+    tile("Waiting time", cflow2Duration(clipped / 1000), "inside this period"),
+    tile("Longest wait", cflow2Duration(longest / 1000), "whole wait"),
+    tile("Waiting now", String(rows.filter(r => r.state === "open").length), null),
+    tile("Deepest stack", lineDepths.length ? String(Math.max(...lineDepths)) : "—", "frames in this period"));
+  box.appendChild(tiles);
+
+  // Deeper frames draw higher. The axis spans the depths present (gate bars
+  // and the depth line), so a run whose stack stays 9 to 15 frames down does
+  // not spend its height on 0..8. Past twelve levels the lanes narrow.
+  const gateDepths = rows.map(r => r.gate.depth), depths = [...gateDepths, ...lineDepths];
+  const lo = Math.min(...depths), hi = Math.max(...depths), levels = hi - lo + 1;
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  const lane = levels > 12 ? Math.max(10, Math.floor(192 / levels)) : 16, W = 640, L = 36, R = 6, T = 8, B = 22, plotW = W - L - R, plotH = levels * lane, H = T + plotH + B;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Callstack depth (line) and gates that waited on a person (bars), by depth (higher is deeper) over UTC time.");
+  const node = (tag, attrs, text) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e); return e;
+  };
+  const y = depth => T + (hi - depth) * lane;
+  // Label the depths that hold a bar; past eight of them, or with the depth
+  // line drawn (it crosses every level between its ends), every few levels.
+  const present = [...new Set(gateDepths)].sort((a, b) => a - b);
+  const every = Math.max(1, Math.ceil(levels / 6));
+  const marks = present.length && present.length <= 8 && !pieces.length ? present : [...Array(levels).keys()].map(i => lo + i).filter(d => !((d - lo) % every) || d === hi);
+  for (const d of marks) {
+    node("line", {x1: L, x2: W - R, y1: y(d) + lane / 2, y2: y(d) + lane / 2, class: "cf2-axis-grid"});
+    node("text", {x: L - 4, y: y(d) + lane / 2 + 3, "text-anchor": "end", class: "cf2-axis-label"}, String(d));
+  }
+  const span = period[1] - period[0], x = ms => L + (ms - period[0]) / span * plotW;
+  const tick = ms => {
+    const t = new Date(ms).toISOString();
+    return span > 300 * 86400000 ? t.slice(0, 10) : span > 86400000 ? `${t.slice(5, 10)} ${t.slice(11, 16)}` : t.slice(11, 16);
+  };
+  const iso = ms => new Date(ms).toISOString().slice(0, 19) + "Z";
+  // The depth line goes under the bars: a bar is the thing to hover.
+  const mid = depth => y(depth) + lane / 2;
+  for (const p of pieces) {
+    const xy = [];
+    for (const s of p.steps) {
+      xy.push(`${x(s.lo).toFixed(1)},${mid(s.depth)}`, `${x(s.hi).toFixed(1)},${mid(s.depth)}`);
+    }
+    const line = node("polyline", {points: xy.join(" "), class: "cf2-depth-line"});
+    line.dataset.run = p.run;
+    line.dataset.depths = p.steps.map(s => s.depth).join(",");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `callstack depth ${Math.min(...p.steps.map(s => s.depth))}–${Math.max(...p.steps.map(s => s.depth))}\nrun ${p.run}`;
+    line.appendChild(title);
+  }
+  for (const r of rows) {
+    const g = r.gate;
+    const rect = node("rect", {x: x(r.lo), y: y(g.depth) + 3, width: Math.max(2, x(r.hi) - x(r.lo)),
+      height: lane - 6, rx: 2, class: `cf2-gate-${r.state}`});
+    rect.dataset.node = g.node; rect.dataset.depth = g.depth;
+    const name = g.within && g.within !== g.label ? `${g.within} › ${g.label}` : (g.label || g.node);
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `${name} (${CF2_GATE_KINDS[g.kind] || g.kind}) · depth ${g.depth}\n` +
+      `${iso(Date.parse(g.opened))} – ${r.state === "open" ? "waiting now" : iso(Date.parse(g.closed))}\n` +
+      `waited ${cflow2Duration(r.wait / 1000)}` + (r.state === "cut" ? " · the run ended before an answer was recorded" : "") +
+      `\nrun ${r.run} · ${g.node}`;
+    rect.appendChild(title);
+  }
+  node("text", {x: L, y: H - 6, "text-anchor": "start", class: "cf2-axis-label"}, tick(period[0]));
+  node("text", {x: L + plotW / 2, y: H - 6, "text-anchor": "middle", class: "cf2-axis-label"}, tick(period[0] + span / 2));
+  node("text", {x: W - R, y: H - 6, "text-anchor": "end", class: "cf2-axis-label"}, tick(period[1]));
+  box.appendChild(svg);
+  const legend = el("div", "cf2-throughput-legend");
+  legend.append(el("span", "cf2-legend-depth", "Callstack depth"), el("span", "cf2-legend-gate-closed", "Answered"), el("span", "cf2-legend-gate-open", "Waiting now"),
+    el("span", "cf2-legend-gate-cut", "Run ended unanswered"), el("span", null, "Height: callstack depth · UTC"));
+  box.appendChild(legend);
+  if (unended) box.appendChild(unendedNote());
+  return box;
+}
+
 function cflow2Throughput(data, state) {
   const section = cf2Section("Throughput over time");
   section.classList.add("cf2-throughput");
@@ -48635,6 +49857,7 @@ function cflow2Throughput(data, state) {
   const controls = el("div", "cf2-throughput-controls");
   const custom = el("div", "cf2-throughput-controls cf2-throughput-custom");
   const output = el("div", "cf2-throughput-output");
+  const gates = el("div");
   const compare = el("details", "cf2-throughput-compare"); compare.dataset.cf2Key = "throughput-compare";
   compare.appendChild(el("summary", null, "Compare two periods"));
   const compareInputs = el("div", "cf2-throughput-controls");
@@ -48685,7 +49908,8 @@ function cflow2Throughput(data, state) {
   about.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
   about.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
   if (!hasMerges) about.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
-  section.append(controls, custom, output, compare, about);
+  about.appendChild(el("p", "wf-note", "Human gate waits: a bar runs from the moment a gate was put to a person (a user choice, an ask that fell to a person, a visit or loop limit, a move request) to its answer. Asks routed to agent responders such as reviewers are left out. Height is the gate's callstack depth, the number of frames the Callstack panel draws above it."));
+  section.append(controls, custom, output, gates, compare, about);
 
   const range = (a, b) => [Date.parse(state[a] + "Z"), Date.parse(state[b] + "Z")];
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
@@ -48738,7 +49962,9 @@ function cflow2Throughput(data, state) {
     const unit = state.metric === "runs" ? "completed runs" : "reported merges";
     const period = range("start", "end");
     drawComparison(unit);
+    gates.replaceChildren();
     if (!valid(period)) {output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;}
+    gates.appendChild(cflow2GateChart(data, period));
     const span = period[1] - period[0];
     for (const option of binSelect.options) {
       option.disabled = option.value !== "auto" && span / Number(option.value) > CF2_THROUGHPUT_MAX_BINS;
@@ -48895,7 +50121,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   const root = el("div", "cf2 cf2-host-" + host);
   box.appendChild(root);
 
-  // -- the head: ways out on the left, run presses on the right -------------
+  // -- the head: ways out, then the name with the run presses beside it -----
   const top = el("div", "cf2-top");
   const nav = el("div", "cf2-nav");
   if (!ui.fullLink) {
@@ -48955,19 +50181,19 @@ function renderCflow2Into(box, data, ui, force = false) {
       bar.appendChild(b);
     }
   }
-  if (bar.childNodes.length) top.appendChild(bar);
-  root.appendChild(top);
-
+  // The head is one card (claunch-jc99t): the ways out on a line of their
+  // own, then the name and status with the run presses level with them on
+  // the right, then the facts, then any warning about the run's copy.
+  const head = el("div", "cf2-head");
+  if (nav.childNodes.length) head.appendChild(top);
   const title = el("div", "cf2-title");
   title.appendChild(el("span", "cf2-badge", "v2"));
   title.appendChild(el("h2", null, run.workflow || (data.chart || {}).name || "(workflow)"));
   title.appendChild(el("span", "cf2-status " + (CFLOW2_STATUS_CLS[status] || ""),
                        status.replace("_", " ")));
-  root.appendChild(title);
-  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
-  // the harness that slices this view does not carry the helper.
-  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
-  if (drift) root.appendChild(el("p", "wf-warning cf2-drift-note", drift));
+  if (bar.childNodes.length) title.appendChild(bar);
+  head.appendChild(title);
+  root.appendChild(head);
   const meta = el("div", "cf2-meta");
   const metaItem = (k, v, cls) => {
     const s = el("span", "cf2-fact");
@@ -48984,7 +50210,11 @@ function renderCflow2Into(box, data, ui, force = false) {
     metaItem("acceptance", run.acceptance.status +
       ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : ""));
   }
-  root.appendChild(meta);
+  head.appendChild(meta);
+  // The package copy behind this run moved on disk (claunch-nzrdb). Guarded:
+  // the harness that slices this view does not carry the helper.
+  const drift = typeof cflowDriftNote === "function" ? cflowDriftNote(data) : "";
+  if (drift) head.appendChild(el("p", "wf-warning cf2-drift-note", drift));
   const scoped = data.scope && data.scope !== "default";
   if (!sessions.length && live) {
     root.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
@@ -49655,33 +50885,63 @@ function cflow2CollectionTable(name, col, post) {
 
 /* The run's start inputs (data.inputs), folded shut. An input whose
    declaration (data.input_decls) has set_by: [user] gets an editor while the
-   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f). */
+   run is live: POST /api/cflow2/input overwrites it (claunch-umq1f).
+   Laid out as one two-column table (claunch-jc99t): the names in a column as
+   wide as the longest of them, the value -- or, for an input a person may
+   set, its editor holding the value -- on the same line beside it. The
+   settable inputs come first under a heading of their own, so the rows a
+   person can act on are not scattered among the ones fixed at the start. */
 function cflow2InputsBlock(values, decls, post, options) {
   const declOf = {};
   for (const d of decls || []) declOf[d.name] = d;
   const editable = (k) => !!post && ((declOf[k] || {}).set_by || []).includes("user");
-  const nEdit = Object.keys(values).filter(editable).length;
+  const keys = Object.keys(values);
+  const nEdit = keys.filter(editable).length;
   const box = document.createElement("details");
   box.className = "cf2-run-inputs";
-  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})` +
-    (nEdit ? ` · ${nEdit} editable` : "")));
-  for (const [k, v] of Object.entries(values)) {
-    const row = el("div", "cf2-run-input");
-    row.appendChild(el("span", "mono cf2-fact-k", k));
-    let text;
+  const sum = el("summary", "cf2-run-inputs-head", "inputs");
+  sum.appendChild(el("span", "cf2-count", String(keys.length)));
+  if (nEdit) sum.appendChild(el("span", "cf2-count cf2-count-edit", `${nEdit} editable`));
+  box.appendChild(sum);
+  const shown = (v) => {
     if (Array.isArray(v)) {
-      text = v.map((x) => (x && typeof x === "object")
+      return v.map((x) => (x && typeof x === "object")
         ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
-    } else text = v == null ? "" : String(v);
-    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
-    row.appendChild(text.length > 80 || text.includes("\n")
-      ? mdInto(el("div", "md cf2-run-input-value"), text)
-      : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
-    if (editable(k)) {
-      row.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
     }
-    box.appendChild(row);
-  }
+    return v == null ? "" : String(v);
+  };
+  const valueCell = (text) => (text.length > 80 || text.includes("\n")
+    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
+    ? mdInto(el("div", "md cf2-run-input-value"), text)
+    : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
+  const grid = el("div", "cf2-run-input-grid");
+  const group = (title, list) => {
+    if (!list.length) return;
+    if (nEdit && nEdit < keys.length) {
+      const h = el("div", "cf2-run-input-group", title);
+      h.appendChild(el("span", "cf2-count", String(list.length)));
+      grid.appendChild(h);
+    }
+    for (const k of list) {
+      const v = values[k];
+      const text = shown(v);
+      const settable = editable(k);
+      const row = el("div", "cf2-run-input" + (settable ? " settable" : ""));
+      const name = el("span", "mono cf2-run-input-k", k);
+      name.title = (declOf[k] || {}).label || k;
+      row.appendChild(name);
+      const cell = el("div", "cf2-run-input-cell");
+      // a settable input's editor holds its value; long prose still reads in
+      // full above the editor, a short value would only repeat it
+      if (!settable || text.length > 80 || text.includes("\n")) cell.appendChild(valueCell(text));
+      if (settable) cell.appendChild(cflow2InputEditor(k, v, declOf[k], post, (options || {})[k]));
+      row.appendChild(cell);
+      grid.appendChild(row);
+    }
+  };
+  group("settable", keys.filter(editable));
+  group("fixed at start", keys.filter((k) => !editable(k)));
+  box.appendChild(grid);
   return box;
 }
 
@@ -49705,13 +50965,15 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     const box = el("input");
     box.type = "checkbox";
     box.checked = !!value;
+    const word = el("span", "cf2-run-input-state", String(box.checked));
     box.addEventListener("change", async () => {
       box.disabled = true;
       if (!await send(box.checked, String(box.checked))) box.checked = !box.checked;
+      word.textContent = String(box.checked);
       box.disabled = false;
     });
     const lab = el("label", "cf2-run-input-toggle");
-    lab.append(box, document.createTextNode(" on"));
+    lab.append(box, word);
     wrap.appendChild(lab);
     return wrap;
   }
@@ -49730,6 +50992,7 @@ function cflow2InputEditor(name, value, decl, post, opts) {
     field.type = decl.type === "int" ? "number" : "text";
     field.value = value == null ? "" : String(value);
   }
+  if (field.tagName !== "SELECT") field.placeholder = "empty";
   if (decl.options && opts) {
     const list = el("datalist");
     list.id = `cf2-run-opt-${name}-${++cflowOptionSeq}`;
@@ -51185,6 +52448,15 @@ function repointDetail(name) {
    back to the page the detail was opened over. Dropped first, so the router
    does not read the new entry as a terminal link to carry the rail across. */
 function closeDetail() {
+  // A page column that borrowed the panel (hostSessDetail) is closed by that
+  // page: its × hands the panel back and the page shows its own view again.
+  const guest = typeof detailGuest === "function" ? detailGuest() : null;
+  if (guest) {
+    const done = guest.onClose;
+    releaseSessDetail();
+    if (done) done();
+    return;
+  }
   dropDetail();
   go(hashWithDetail(location.hash, null));
 }
@@ -51323,8 +52595,14 @@ function sessHead(s) {
   // The same wizard, filled with what this session was itself created with
   // (spawnSameSeed), built above because the docked arrangement keeps it,
   // and the editor for this session's directory on the same line.
-  head.appendChild(same);
-  head.appendChild(code);
+  // These two and Open PR sit in one box. Wider than a phone the box is
+  // `display: contents` and the row reads as before; on a phone the box is
+  // the ⋯ menu, so the head keeps Spawn and Open terminal on one line
+  // (claunch-0a5nk.5).
+  const extra = el("span", "sess-head-extra");
+  extra.appendChild(same);
+  extra.appendChild(code);
+  head.appendChild(extra);
 
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
@@ -51334,7 +52612,7 @@ function sessHead(s) {
   const pr = el("button", "wf-btn", "Open PR");
   pr.title = "push this session's directory as a new branch and open a pull request";
   pr.addEventListener("click", () => openPrModal(s.name));
-  head.appendChild(pr);
+  extra.appendChild(pr);
 
   // Through the router, so the terminal it opens is the one the URL names.
   // On a desktop the router keeps the rail up beside it (the rail follows
@@ -51342,9 +52620,58 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
+  head.appendChild(sessHeadMoreButton(head, extra, s.name));
   head.appendChild(close);
   return head;
 }
+
+/* The phone's ⋯ on the session head (claunch-0a5nk.5). The stylesheet shows
+   it at 600px and below only. The head is rebuilt on every poll, so whether
+   the menu is open is kept here, by session name, and put back on the new
+   head; a route change, a pick, a tap outside and Escape close it. */
+let sessHeadMoreOpen = "";
+function setSessHeadMore(name) {
+  sessHeadMoreOpen = name || "";
+  for (const head of document.querySelectorAll(".sess-head")) {
+    const on = !!sessHeadMoreOpen && head.dataset.session === sessHeadMoreOpen;
+    head.classList.toggle("more-open", on);
+    const btn = head.querySelector(".sess-head-more");
+    if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
+  }
+}
+function sessHeadMoreButton(head, extra, name) {
+  head.dataset.session = name || "";
+  extra.id = "sess-head-extra";
+  extra.setAttribute("role", "menu");
+  const btn = el("button", "wf-btn sess-head-more", "⋯");
+  btn.title = "more: Spawn same setup, VS Code, Open PR";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-controls", "sess-head-extra");
+  const on = !!name && sessHeadMoreOpen === name;
+  head.classList.toggle("more-open", on);
+  btn.setAttribute("aria-expanded", on ? "true" : "false");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setSessHeadMore(sessHeadMoreOpen === name ? "" : name);
+  });
+  // A pick runs its own handler first (listeners on the button itself), then
+  // the menu closes.
+  extra.addEventListener("click", (e) => {
+    if (e.target.closest("button")) setSessHeadMore("");
+  });
+  if (!sessHeadMoreWired) {
+    sessHeadMoreWired = true;
+    document.addEventListener("click", (e) => {
+      if (sessHeadMoreOpen && !e.target.closest(".sess-head-extra, .sess-head-more")) setSessHeadMore("");
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sessHeadMoreOpen) setSessHeadMore("");
+    });
+    window.addEventListener("hashchange", () => { if (sessHeadMoreOpen) setSessHeadMore(""); });
+  }
+  return btn;
+}
+let sessHeadMoreWired = false;
 
 /* The radio under the head: which panel this column is. `Details` is the
    session's facts and the ways to speak to it; `Workflow` is its run, given
@@ -52660,6 +53987,11 @@ function renderSession(data) {
     // Under the conversation, because it is a fact about the conversation and
     // not about the process: how much of it the harness last carried.
     metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
+    // ...and what that context costs to send once, at the rates entered for
+    // its model (Settings → Model prices). Appended to the row above, so the
+    // row itself carries the estimate (claunch-wyhog). Guarded like the rows
+    // below: node harnesses slice this renderer without the late helpers.
+    if (typeof ctxCostOnRow === "function") ctxCostOnRow(dl, s);
     // Under the size, the same reading's three billed buckets and what they
     // cost at the rates entered for this model (Settings → Model prices).
     // Guarded like the usage row below: node harnesses slice this renderer
@@ -54983,13 +56315,19 @@ function sessMigrate(data) {
     const kidsOk = (doc.children || []).filter((c) => c.ok);
     const kidsFailed = (doc.children || []).filter((c) => !c.ok);
     // What travelled besides the session itself, so the operator can tell a
-    // plain directory change from one that also re-filed the session or
-    // carried its cflow runs over.
+    // plain directory change from one that also re-filed the session, carried
+    // its cflow runs over, or moved a mesh mirror it had built.
     const slots = doc.slots_moved || [];
+    const mirrors = doc.mirrors_refiled || [];
     const carried = [
       doc.project ? `project: ${doc.project}` : "",
       slots.length
         ? `${slots.length} cflow run slot${slots.length === 1 ? "" : "s"}: ${slots.join(", ")}`
+        : "",
+      mirrors.length
+        ? `${mirrors.length} mesh row${mirrors.length === 1 ? "" : "s"} re-filed: ${mirrors
+            .map((m) => `${m.mesh} (${m.was} → ${m.now})`)
+            .join(", ")}`
         : "",
     ].filter(Boolean);
     say(

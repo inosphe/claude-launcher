@@ -16,6 +16,27 @@
 목록은 기록값만 읽으므로 `gh`가 없거나 로그인되지 않아도 뜬다. 상태·제목은
 **기록 시점 값**이고, 화면이 그 사실을 목록 옆에 적는다.
 
+### 1.1 행의 날짜와 제목 — 기록, sidecar cache, cache-first 조회
+
+행은 `at`(날짜 타임라인의 기준)과 `title`(행 제목)을 쓴다. 세 출처가 있고,
+앞의 것이 이긴다.
+
+1. **기록.** v2 착지 기록(`data.landing`)이 `at`을 싣고(`improv-worker-v2`의
+   `local-landing`·`pr-or-local`·`landing-medium`·`pr-publish`), PR을 여는
+   `pr-open`이 제목을 `title`로 보고한다. 로컬 착지는 제목이 null이다.
+2. **sidecar cache** (`<런처 홈>/daemon/pr-stamps.json`, `daemon/pr_stamps.py`).
+   키는 `<host>/<owner>/<repo>#<번호>`다. 여기에는 (a) 저널 백필이 되살린
+   날짜(`tools/pr_stamp_backfill.py`가 `.cflow2/runs/*/journal.jsonl`의
+   `collection_pushed`에서 읽는다)와 (b) 제목 조회가 채운 제목이 들어간다.
+   `session_prs.for_session`이 행에 없는 값만 채우고, 이 파일은 폴링 캐시의
+   입력 목록에 들어 있어 채워진 값이 다음 폴링에 보인다.
+3. **제목 조회(gh).** cache에 제목이 없을 때만, 그리고 **요청 경로 밖에서**
+   돈다: `/api/prs`는 cache만 읽고 즉시 응답하며, 제목이 빠진 행이 있으면
+   데몬이 시작 시 연 게이트(`pr_stamps.enable`)를 통과할 때 백그라운드 스레드가
+   `gh pr view`로 채운다(성공 TTL 7일, 실패 TTL 15분). 그러므로 목록 응답이
+   forge를 기다리는 일은 없고, 테스트나 CLI가 목록을 읽는다고 `gh`가 뜨지도
+   않는다.
+
 ## 2. 브라우저는 forge에 닿지 않는다
 
 PR 탭은 릴레이 터널(`https://relay.inosphe.work/t/<backend>/`) 아래에서도 열린다.

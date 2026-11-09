@@ -55,6 +55,9 @@ function node(tag) {
     title: "", type: "", href: "",
     appendChild(c) { n.kids.push(c); return c; },
     append(...cs) { cs.forEach((c) => n.appendChild(c)); },
+    /* The panel's rows append to the dd they just wrote (ctxCostOnRow), so
+       the fake has to answer what a real element answers. */
+    get lastChild() { return n.kids.length ? n.kids[n.kids.length - 1] : null; },
     addEventListener() {},
     get textContent() { return n.text; },
     set textContent(v) { n.text = String(v); },
@@ -89,6 +92,10 @@ function el(tag, cls, text) {
 const view = node("div");
 const stubs = `
 let sessName = null, sessRunFold = null;
+/* The price table the context row's estimate reads (Settings → Model
+   prices). Null until a check sets it, which is the page's own state before
+   /api/model-prices answers: every estimate is off, the rows stay. */
+let modelPrices = null;
 function $(id) { return view; }
 function formInUse() { return false; }
 function sessLayoutFor() { return { rail: "details" }; }
@@ -145,6 +152,13 @@ new Function(
   + slice("ctxSentence") + slice("ctxBreakdown") + slice("ctxTooltip")
   + domLine[0] + "\n" + slice("ctxRailLine")
   + slice("profileHarnessLabel") + slice("localStamp") + slice("metaRow") + slice("progressBrief")
+  /* The context row's estimate (claunch-wyhog): the panel's context row is
+     rendered here for real, so the helpers it appends with come along. */
+  + slice("usageCost") + slice("priceCurrency") + slice("priceAnyProvider")
+  + slice("sessionPriceProvider") + slice("priceRateFor")
+  + slice("cacheWriteRate") + slice("readingCost") + slice("costText")
+  + slice("costBreakdown") + slice("contextCost") + slice("contextCostBreakdown")
+  + slice("ctxCostOnRow")
   + slice("selectionInUse") + slice("renderSession")
   + `
 Object.assign(exports, {
@@ -152,6 +166,7 @@ Object.assign(exports, {
   sentence: modelSentence,
   railLine: ctxRailLine,
   render: renderSession,
+  setPrices: (p) => { modelPrices = p; },
 });`)(ctx, document, el, view);
 
 let failures = 0;
@@ -343,6 +358,37 @@ check("a pi detail panel has the full model id, thinking level and context",
    an empty one — the same silence the gauge line keeps. */
 check("another harness gets no model row at all",
       "model" in rowsOf(OTHER), false);
+
+/* ---- the context row carries its own price (claunch-wyhog) -------------- */
+/* The row answers "how full is the context"; what that fill costs to send
+   once belongs on the same row, priced from the reading it already names.
+   The estimate is the context's own: the three input buckets at this
+   model's rates, with the answer left out (it is not part of the context,
+   and the row below prices it). Driven through the real renderSession so a
+   helper that stops being called leaves this red rather than silent. */
+const HAIRATES = { input: 1, cache_read: 0.1, cache_write: 1.25, output: 5 };
+// (2·1 + 154,073·0.1 + 631·1.25) / 1e6, the answer's 210 tokens left out
+const HAICOST = (2 * 1 + 154073 * 0.1 + 631 * 1.25) / 1e6;
+ctx.setPrices({
+  prices: { nc: { "claude-haiku-4-5-20251001": HAIRATES } },
+  profiles: { nc: "nc" }, any: "*", currency: "$",
+});
+const costSpan = (rowsOf(FULL).context.kids || [])
+  .find((k) => k.classes.has("ctx-row-cost"));
+check("the context row carries the estimate",
+      costSpan && costSpan.textContent,
+      ` · ≈ $${HAICOST < 1 ? HAICOST.toFixed(4) : HAICOST.toFixed(2)}`);
+check("...and the reading it prices is still the row's own text",
+      rowsOf(FULL).context.text.includes("154,706 tokens"), true);
+check("...with the multiplication on hover",
+      [rowsOf(FULL).context.title.includes("this context only"),
+       rowsOf(FULL).context.title.includes("output 0 × $5/1M")],
+      [true, true]);
+ctx.setPrices({ prices: {}, currency: "$" });
+check("an unpriced model leaves the row without an estimate",
+      (rowsOf(FULL).context.kids || [])
+        .some((k) => k.classes.has("ctx-row-cost")), false);
+ctx.setPrices(null);
 
 /* ---- the end-of-run protection is no longer a row ----------------------- */
 /* `cflow kill-on-end` ends the session driving a finished one-shot run, and

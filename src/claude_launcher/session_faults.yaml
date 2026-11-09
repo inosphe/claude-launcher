@@ -275,6 +275,20 @@ common:
       Waiting for API response
     sample: |-
       * Waiting for API response · will retry in 1m 24s · check your network
+  # Claude Code, 2026-11-06 (s6183): "✻ API error · Retrying in 0s · attempt
+  # 1/10". The spinner row the client paints between attempts after an API
+  # error; it carries no status code, so the "API Error: <code>" entries do
+  # not read it. Cause unknown. `api_status` because the line says the API
+  # answered with an error (not the transport, as the wait line above says),
+  # and `fallback` because it names no cause: a quota sentence or a status
+  # code in the same window decides by the usual rules. `common`, by the same
+  # rule as the wait line: only `claude` has been seen to paint it.
+  - kind: api_status
+    fallback: true
+    pattern: |-
+      \bAPI error\s*·\s*Retrying in\b
+    sample: |-
+      ✻ API error · Retrying in 0s · attempt 1/10
   # The generic status fallback: any "API Error: <code>", reached only when
   # nothing above matched. It lives here, last in `common`, so a provider's
   # status error is read in every harness and not only in `claude` (where it

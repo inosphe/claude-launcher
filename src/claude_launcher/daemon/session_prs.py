@@ -6,11 +6,12 @@ import copy
 import json
 import re
 import threading
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .. import atomic
 from ..cflow2.store import RunStore, StoreError, utcnow
-from . import paths
+from . import paths, pr_stamps
 
 _cache: dict = {}
 _lock = threading.RLock()
@@ -47,6 +48,17 @@ def clean(value) -> dict | None:
     at = value.get("at")
     if isinstance(at, str) and at:
         out["at"] = at
+    elif isinstance(at, (int, float)) and not isinstance(at, bool):
+        # A v2 collection stamps its push time as epoch seconds (a float), and
+        # the PR page reads `at` as a string (`at.slice(0, 10)`). Normalise the
+        # number here to the same ISO-8601 UTC form ``utcnow()`` writes, so a
+        # collection row and a wizard row sort and group together
+        # (claunch-ijkge.4.1).
+        try:
+            out["at"] = datetime.fromtimestamp(at, timezone.utc).isoformat(
+                timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            pass
     seq = value.get("seq")
     if isinstance(seq, int) and not isinstance(seq, bool):
         out["seq"] = seq
@@ -78,6 +90,14 @@ def record(name: str, result: dict, request: dict) -> None:
         with atomic.scratch(path) as tmp:
             tmp.write_text(json.dumps(rows), encoding="utf-8")
             atomic.replace(tmp, path)
+    # The wizard already holds the title and the time. Copy them into the
+    # shared cache so a poll reads them locally instead of asking ``gh`` for a
+    # value that was in hand when the PR was opened. Best effort: the record
+    # above is what this function promises.
+    try:
+        pr_stamps.record(row["url"], at=row.get("at"), title=row.get("title"))
+    except OSError:
+        pass
 
 
 def sources(cwd: str, name: str, st: RunStore | None = None) -> list:
@@ -86,7 +106,9 @@ def sources(cwd: str, name: str, st: RunStore | None = None) -> list:
     if st is None and cwd:
         st = RunStore(cwd, name)
     path = paths.session_dir(name) / "prs.json"
-    return [path] + ([st.state_path, st.checkpoint_path] if st else [])
+    # The title cache is a source too: the background fill writes titles that
+    # these rows show, and a stale copy would keep hiding them.
+    return [path, pr_stamps.path()] + ([st.state_path, st.checkpoint_path] if st else [])
 
 
 def for_session(cwd: str, name: str) -> list[dict]:
@@ -129,6 +151,12 @@ def for_session(cwd: str, name: str) -> list[dict]:
         row = clean(candidate)
         if row:
             merged[row["url"]] = {**merged.get(row["url"], {}), **row}
+    # Fill what the record does not carry from the local sidecar cache: the
+    # date a journal backfill recovered, and a title a background ``gh`` pass
+    # learned. Local read only — polling never waits on the forge for this.
+    for row in merged.values():
+        for field, value in pr_stamps.stamp(row["url"]).items():
+            row.setdefault(field, value)
     # Newest recorded first: rows that carry a collection `at` sort by it,
     # and rows written before the stamp existed keep the old reversed order
     # after them (the PR page puts those under "date unknown").

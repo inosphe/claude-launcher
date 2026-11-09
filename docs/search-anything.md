@@ -12,8 +12,9 @@ task reference alone does not qualify an issue. Unassigned issues with no live
 creator, and issues associated only with killed or archived sessions, are excluded.
 Exited, paused, archived and removed sessions are excluded. Changing the mode
 reruns the current query and cancels the previous response. Both JSON and SSE
-search endpoints accept `kind=unified&mode=active` (`all` is that corpus's
-deprecated name and is still accepted); omitted `mode` or
+search endpoints accept `kind=unified&mode=active` (`all` was that corpus's
+name before the rename and is refused now, with a 400 that lists the names
+that do answer); omitted `mode` or
 `mode=general` keeps the existing search. The server filters vector and exact
 match candidates before applying the result limit and reranking, so old
 session records cannot consume the active mode's result window. Index coverage
