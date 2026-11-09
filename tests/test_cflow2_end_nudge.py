@@ -24,6 +24,11 @@ from __future__ import annotations
 from claude_launcher.cflow2 import layers, runtime
 
 END_SITES = ("settle/end-decision.call", "settle/release-decision.call")
+# PR #950 (claunch-umf88.1) added a third question at the same place in the round:
+# the 60-second plan gate asks pause/skip/reject with a five-minute deadline, the
+# same shape as end-decision, so it raises itself on the dashboard the same way.
+CLOSURE_SITE = "settle/closure-choice.call"
+NUDGING_SITES = END_SITES + (CLOSURE_SITE,)
 
 
 def _chart():
@@ -37,7 +42,7 @@ def _scopes(chart):
 
 def test_the_end_questions_carry_a_nudge_instruction():
     scopes = _scopes(_chart())
-    for site in END_SITES:
+    for site in NUDGING_SITES:
         assert site in scopes, f"{site} is not a call scope any more"
         raw = (scopes[site].get("with_") or {}).get("nudge")
         # a plain string is stored in the explicit literal form ({lit: ...})
@@ -49,10 +54,10 @@ def test_the_end_questions_carry_a_nudge_instruction():
 
 
 def test_no_other_ask_user_call_site_nudges():
-    """The defect is these two questions; the rest stay quiet."""
+    """The defect is the round-end questions; the rest stay quiet."""
     scopes = _scopes(_chart())
     nudging = sorted(i for i, n in scopes.items() if "nudge" in (n.get("with_") or {}))
-    assert nudging == sorted(END_SITES)
+    assert nudging == sorted(NUDGING_SITES)
 
 
 def test_ask_pose_renders_the_instruction_and_nothing_when_unset():
